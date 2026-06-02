@@ -201,6 +201,13 @@ interface WmsOrderForShopify {
   oms_fulfillment_order_id: string | null;
   combined_group_id: number | null;
   combined_role: string | null;
+  // Shopify location id this order ships FROM, via its warehouse mapping
+  // (wms.orders.warehouse_id → warehouse.warehouses.shopify_location_id).
+  // Used to pin fulfillment matching to the correct warehouse's ticket in a
+  // multi-warehouse split. Null when no warehouse→location mapping exists.
+  // Stage 2 (one order across multiple warehouses) sources this per-shipment
+  // instead — see the order-load query note.
+  ship_from_location_id: string | null;
 }
 
 /**
@@ -212,6 +219,11 @@ interface WmsShipmentItemForShopify {
   order_item_id: number | null;
   oms_order_line_id: number | null;
   sku: string | null;
+  // Shopify order line-item id (bare numeric string from
+  // oms_order_lines.external_line_item_id). Used as the canonical match key
+  // when SKU is missing/UNKNOWN — e.g. wax/special products that carry no
+  // warehouse SKU but are still real, fulfillable Shopify line items.
+  external_line_item_id: string | null;
   qty: number;
 }
 
@@ -946,11 +958,17 @@ export function createFulfillmentPushService(
         : undefined;
 
     // ---- 3. Load WMS order ---------------------------------------------
+    // ship_from_location_id comes via the order's warehouse mapping. Stage 2
+    // (one order split across warehouses → one shipment per warehouse) moves
+    // this join to the shipment's own warehouse_id; the column name and the
+    // downstream resolver contract stay the same.
     const orderResult: any = await db.execute(sql`
-      SELECT id, channel_id, source, external_order_id, oms_fulfillment_order_id,
-             combined_group_id, combined_role
-      FROM wms.orders
-      WHERE id = ${shipment.order_id}
+      SELECT w.id, w.channel_id, w.source, w.external_order_id, w.oms_fulfillment_order_id,
+             w.combined_group_id, w.combined_role,
+             wh.shopify_location_id AS ship_from_location_id
+      FROM wms.orders w
+      LEFT JOIN warehouse.warehouses wh ON wh.id = w.warehouse_id
+      WHERE w.id = ${shipment.order_id}
       LIMIT 1
     `);
     const order: WmsOrderForShopify | undefined = orderResult?.rows?.[0];
@@ -1079,9 +1097,11 @@ export function createFulfillmentPushService(
         si.order_item_id AS order_item_id,
         oi.oms_order_line_id AS oms_order_line_id,
         oi.sku           AS sku,
+        ol.external_line_item_id AS external_line_item_id,
         GREATEST(0, si.qty - COALESCE(la.adjusted_qty, 0))::int AS qty
       FROM wms.outbound_shipment_items si
       LEFT JOIN wms.order_items oi ON oi.id = si.order_item_id
+      LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
       LEFT JOIN line_adjustments la ON la.order_line_id = oi.oms_order_line_id
       WHERE si.shipment_id = ${shipmentId}
         AND COALESCE(oi.status, 'pending') <> 'cancelled'
@@ -1150,18 +1170,26 @@ export function createFulfillmentPushService(
       console.log(
         `[pushShopifyFulfillment] shipment ${shipmentId} using Path B (Shopify fulfillmentOrders GQL) — reason: ${pathAReason}`,
       );
+      // Pin matching to the warehouse this shipment shipped from so a
+      // multi-warehouse split line routes to the correct location's
+      // fulfillment ticket. Sourced from the order load (no extra query).
+      // Null when no warehouse→location mapping exists (single-location
+      // stores) → location-agnostic matching.
+      const shipFromLocationId = order.ship_from_location_id ?? null;
       resolved = liveCandidates
         ? resolveFulfillmentOrderLinesFromCandidates(
             shopifyOrderGid,
             positiveItems,
             shipmentId,
             liveCandidates,
+            shipFromLocationId,
           )
         : await resolveFulfillmentOrderLines(
             _shopifyClient,
             shopifyOrderGid,
             positiveItems,
             shipmentId,
+            shipFromLocationId,
           );
 
       // Self-healing back-write (D2): now that Path B has resolved
@@ -1907,12 +1935,14 @@ export function createFulfillmentPushService(
 interface ShopifyFulfillmentOrderQueryNode {
   id: string;
   status?: string;
+  assignedLocation?: { location?: { id?: string | null } | null } | null;
   lineItems: {
     edges: Array<{
       node: {
         id: string;
         sku?: string | null;
         remainingQuantity: number;
+        lineItem?: { id?: string | null } | null;
       };
     }>;
   };
@@ -1922,6 +1952,15 @@ interface ShopifyFulfillmentOrderLineCandidate {
   fulfillmentOrderId: string;
   fulfillmentOrderLineItemId: string;
   sku: string | null;
+  // Shopify order line-item id (bare numeric, normalized from the GID) for
+  // the underlying line this FO line item fulfills. Lets us match by line id
+  // when SKU is unavailable on either side.
+  externalLineItemId: string | null;
+  // Shopify location id (numeric tail) this fulfillment order is assigned to.
+  // Used to pin a shipment to the fulfillment ticket at ITS ship-from
+  // warehouse — required once a single order line is split across multiple
+  // locations (multi-warehouse). Null if Shopify didn't report a location.
+  assignedLocationId: string | null;
   remaining: number;
   status: string;
 }
@@ -1935,12 +1974,14 @@ const FULFILLMENT_ORDERS_QUERY = `
           node {
             id
             status
+            assignedLocation { location { id } }
             lineItems(first: 100) {
               edges {
                 node {
                   id
                   sku
                   remainingQuantity
+                  lineItem { id }
                 }
               }
             }
@@ -1968,6 +2009,7 @@ async function resolveFulfillmentOrderLines(
   shopifyOrderGid: string,
   items: WmsShipmentItemForShopify[],
   shipmentId: number,
+  shipFromLocationId?: string | null,
 ): Promise<ResolvedFulfillmentOrderLine[]> {
   const candidates = await fetchFulfillmentOrderLineCandidates(
     client,
@@ -1979,6 +2021,7 @@ async function resolveFulfillmentOrderLines(
     items,
     shipmentId,
     candidates,
+    shipFromLocationId,
   );
 }
 
@@ -2006,11 +2049,18 @@ async function fetchFulfillmentOrderLineCandidates(
 
   const candidates: ShopifyFulfillmentOrderLineCandidate[] = [];
   for (const fo of fulfillmentOrders) {
+    const foLocationRaw = fo.assignedLocation?.location?.id;
+    const foLocationId =
+      typeof foLocationRaw === "string" && foLocationRaw.length > 0
+        ? normaliseShopifyLocationId(foLocationRaw)
+        : null;
     for (const edge of fo.lineItems.edges) {
       candidates.push({
         fulfillmentOrderId: fo.id,
         fulfillmentOrderLineItemId: edge.node.id,
         sku: edge.node.sku ?? null,
+        externalLineItemId: normalizeShopifyNumericId(edge.node.lineItem?.id),
+        assignedLocationId: foLocationId,
         remaining: Number.isInteger(edge.node.remainingQuantity)
           ? edge.node.remainingQuantity
           : 0,
@@ -2022,11 +2072,29 @@ async function fetchFulfillmentOrderLineCandidates(
   return candidates;
 }
 
+/**
+ * Normalize a Shopify id to its bare numeric form so a stored
+ * `external_line_item_id` ("35767315431583") compares equal to a GID
+ * returned by the Admin API ("gid://shopify/LineItem/35767315431583").
+ * Returns null for blank/non-numeric input.
+ */
+function normalizeShopifyNumericId(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const match = String(value).trim().match(/(\d+)\s*$/);
+  return match ? match[1] : null;
+}
+
 function resolveFulfillmentOrderLinesFromCandidates(
   shopifyOrderGid: string,
   items: WmsShipmentItemForShopify[],
   shipmentId: number,
   candidates: ShopifyFulfillmentOrderLineCandidate[],
+  // Shopify location id (numeric tail) this shipment shipped FROM. When set,
+  // matching prefers the fulfillment ticket at this location so a multi-
+  // warehouse split line routes to the right warehouse's FO. Null/undefined
+  // (no warehouse→location mapping configured, or single-location stores)
+  // means location is ignored and matching is location-agnostic.
+  shipFromLocationId?: string | null,
 ): ResolvedFulfillmentOrderLine[] {
   if (candidates.length === 0) {
     throw new ShopifyFulfillmentPushError(
@@ -2040,38 +2108,83 @@ function resolveFulfillmentOrderLinesFromCandidates(
     );
   }
 
+  const pinnedLocation =
+    typeof shipFromLocationId === "string" && shipFromLocationId.length > 0
+      ? normaliseShopifyLocationId(shipFromLocationId)
+      : null;
+
   const resolved: ResolvedFulfillmentOrderLine[] = [];
   for (const item of items) {
-    const sku = (item.sku ?? "").trim();
-    if (sku.length === 0) {
-      throw new ShopifyFulfillmentPushError(
-        `pushShopifyFulfillment: shipment item ${item.shipment_item_id} has no sku — cannot match to Shopify fulfillment-order line`,
-        {
-          code: SHOPIFY_PUSH_INVALID_INPUT,
-          shipmentId,
-          field: "items.sku",
-          value: item.shipment_item_id,
-        },
-      );
+    const rawSku = (item.sku ?? "").trim();
+    // "UNKNOWN" is the WMS sentinel for an order line with no mapped
+    // warehouse SKU (e.g. members-only wax/special products). Treat it the
+    // same as a blank SKU — unusable for SKU matching, fall back to line id.
+    const skuUsable = rawSku.length > 0 && rawSku.toUpperCase() !== "UNKNOWN";
+    const externalLineId = normalizeShopifyNumericId(item.external_line_item_id);
+
+    // Only allocate against fulfillment orders that can accept work.
+    // Shopify status enum: OPEN | IN_PROGRESS | CLOSED | CANCELLED |
+    // INCOMPLETE | SCHEDULED. CLOSED/CANCELLED can't take new fulfillments.
+    const isAllocatable = (c: ShopifyFulfillmentOrderLineCandidate) =>
+      c.remaining >= item.qty && c.status !== "CLOSED" && c.status !== "CANCELLED";
+    const atShipLocation = (c: ShopifyFulfillmentOrderLineCandidate) =>
+      pinnedLocation === null || c.assignedLocationId === pinnedLocation;
+    const byLineId = (c: ShopifyFulfillmentOrderLineCandidate) =>
+      externalLineId !== null &&
+      normalizeShopifyNumericId(c.externalLineItemId) === externalLineId;
+    const bySku = (c: ShopifyFulfillmentOrderLineCandidate) =>
+      skuUsable && c.sku === rawSku;
+
+    // Matching precedence — identity first, then SKU; location-pinned first,
+    // then location-agnostic. The line-item id is the canonical 1:1 identity
+    // of a Shopify order line and the ONLY workable key for no-SKU products
+    // (wax/special items carry no SKU on either side). Location pinning routes
+    // a multi-warehouse split line to the fulfillment ticket at ITS ship-from
+    // warehouse; without it, a shipment from Warehouse A could fulfill against
+    // Warehouse B's ticket and deduct the wrong location's inventory.
+    //
+    //   1. line-id  @ ship location   ← correct multi-warehouse match
+    //   2. sku      @ ship location
+    //   3. line-id  (any location)    ← single-location stores / loc not configured
+    //   4. sku      (any location)    ← legacy fallback (original behaviour)
+    //
+    // Tiers 3-4 also act as the resilient fallback when location IS known but
+    // no ticket matches at that location (genuine Shopify/warehouse mismatch);
+    // we log it rather than fail the whole order. The downstream D13 filter
+    // still strips any ticket assigned to a non-ours (3PL) location.
+    let candidate =
+      candidates.find((c) => byLineId(c) && atShipLocation(c) && isAllocatable(c)) ??
+      candidates.find((c) => bySku(c) && atShipLocation(c) && isAllocatable(c));
+
+    if (!candidate && pinnedLocation !== null) {
+      const fallback =
+        candidates.find((c) => byLineId(c) && isAllocatable(c)) ??
+        candidates.find((c) => bySku(c) && isAllocatable(c));
+      if (fallback) {
+        console.warn(
+          `[pushShopifyFulfillment] shipment ${shipmentId} item (sku=${rawSku || "(none)"}, ` +
+            `lineItemId=${externalLineId ?? "(none)"}) matched a fulfillment ticket at location ` +
+            `${fallback.assignedLocationId ?? "(none)"} but shipped from ${pinnedLocation} — ` +
+            `location mismatch, allocating anyway`,
+        );
+        candidate = fallback;
+      }
+    } else if (!candidate) {
+      candidate =
+        candidates.find((c) => byLineId(c) && isAllocatable(c)) ??
+        candidates.find((c) => bySku(c) && isAllocatable(c));
     }
-    const candidate = candidates.find(
-      (c) =>
-        c.sku === sku &&
-        c.remaining >= item.qty &&
-        // Only allocate against fulfillment orders that can accept work.
-        // Shopify status enum: OPEN | IN_PROGRESS | CLOSED | CANCELLED |
-        // INCOMPLETE | SCHEDULED. CLOSED/CANCELLED can't take new fulfillments.
-        c.status !== "CLOSED" &&
-        c.status !== "CANCELLED",
-    );
+
     if (!candidate) {
       throw new ShopifyFulfillmentPushError(
-        `pushShopifyFulfillment: no fulfillment-order line item available for sku=${sku} qty=${item.qty} on order ${shopifyOrderGid}`,
+        `pushShopifyFulfillment: no fulfillment-order line item available for ` +
+          `sku=${rawSku || "(none)"} lineItemId=${externalLineId ?? "(none)"} ` +
+          `qty=${item.qty} on order ${shopifyOrderGid}`,
         {
           code: SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
           shipmentId,
-          field: "items.sku",
-          value: { sku, qty: item.qty },
+          field: "items",
+          value: { sku: rawSku, externalLineItemId: externalLineId, qty: item.qty },
         },
       );
     }
