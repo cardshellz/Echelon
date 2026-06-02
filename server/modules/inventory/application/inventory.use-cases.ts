@@ -429,10 +429,13 @@ export class InventoryUseCases {
     cycleCountId?: number;
     userId?: string;
     allowNegative?: boolean;
-  }): Promise<{ orphanedQty: number }> {
+    unitCostCents?: number;
+  }): Promise<{ orphanedQty: number; consumedCostCents?: number; consumedQty?: number }> {
     if (params.qtyDelta === 0) throw new Error("qtyDelta must be non-zero");
 
     let orphanedQty = 0;
+    let consumedCostCents: number | undefined;
+    let consumedQty: number | undefined;
 
     await this.db.transaction(async (tx) => {
       // Cycle-count adjustments are the ONE mutation allowed on frozen bins
@@ -468,13 +471,16 @@ export class InventoryUseCases {
 
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
-        await lotSvc.adjustLots({
+        const lotResult = await lotSvc.adjustLots({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
           qtyDelta: params.qtyDelta,
           reservedQtyDelta: adjustReserved !== 0 ? adjustReserved : undefined,
+          unitCostCents: params.unitCostCents,
           notes: params.reason,
         });
+        consumedCostCents = lotResult.consumedCostCents;
+        consumedQty = lotResult.consumedQty;
       }
 
       await this.storage.createInventoryTransaction({
@@ -497,7 +503,7 @@ export class InventoryUseCases {
     });
 
     this.triggerNotifyChange(params.productVariantId, "adjustment");
-    return { orphanedQty };
+    return { orphanedQty, consumedCostCents, consumedQty };
   }
 
   // ---------------------------------------------------------------------------

@@ -456,7 +456,7 @@ export class InventoryLotService {
     reservedQtyDelta?: number;
     unitCostCents?: number;
     notes?: string;
-  }): Promise<void> {
+  }): Promise<{ consumedCostCents: number; consumedQty: number }> {
     if (params.reservedQtyDelta !== undefined && params.reservedQtyDelta > 0) {
       throw new Error("adjustLots only supports releasing reserved quantity during adjustments");
     }
@@ -475,48 +475,55 @@ export class InventoryLotService {
         costProvisional: resolved.provisional ? 1 : 0,
         notes: params.notes ?? "Manual adjustment",
       });
-    } else {
-      // Negative adjustment: consume from oldest lots first
-      const lots = await this.getLotsAtLocation(
-        params.productVariantId,
-        params.warehouseLocationId,
-      );
-
-      let remaining = Math.abs(params.qtyDelta);
-      let reservedReleaseRemaining = Math.abs(params.reservedQtyDelta ?? 0);
-      const adjustUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
-      for (const lot of lots) {
-        if (remaining <= 0) break;
-
-        const unreservedAvailable = Math.max(0, lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked);
-        const unreservedTake = Math.min(unreservedAvailable, remaining);
-        const reservedTake = Math.min(
-          Math.max(0, lot.qtyReserved),
-          remaining - unreservedTake,
-          reservedReleaseRemaining,
-        );
-        const take = unreservedTake + reservedTake;
-        if (take <= 0) continue;
-
-        adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake });
-        remaining -= take;
-        reservedReleaseRemaining -= reservedTake;
-      }
-
-      if (adjustUpdates.length > 0) {
-        await this.db.execute(sql`
-          WITH updates AS (
-            SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
-          )
-          UPDATE inventory.inventory_lots AS il
-          SET qty_on_hand = il.qty_on_hand - u.take,
-              qty_reserved = il.qty_reserved - u."reservedRelease",
-              status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedRelease") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
-          FROM updates u
-          WHERE il.id = u."lotId"
-        `);
-      }
+      return { consumedCostCents: 0, consumedQty: 0 };
     }
+
+    // Negative adjustment: consume from oldest lots first, tracking total cost
+    const lots = await this.getLotsAtLocation(
+      params.productVariantId,
+      params.warehouseLocationId,
+    );
+
+    let remaining = Math.abs(params.qtyDelta);
+    let reservedReleaseRemaining = Math.abs(params.reservedQtyDelta ?? 0);
+    let consumedCostCents = 0;
+    let consumedQty = 0;
+    const adjustUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
+    for (const lot of lots) {
+      if (remaining <= 0) break;
+
+      const unreservedAvailable = Math.max(0, lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked);
+      const unreservedTake = Math.min(unreservedAvailable, remaining);
+      const reservedTake = Math.min(
+        Math.max(0, lot.qtyReserved),
+        remaining - unreservedTake,
+        reservedReleaseRemaining,
+      );
+      const take = unreservedTake + reservedTake;
+      if (take <= 0) continue;
+
+      adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake });
+      consumedCostCents += take * lot.unitCostCents;
+      consumedQty += take;
+      remaining -= take;
+      reservedReleaseRemaining -= reservedTake;
+    }
+
+    if (adjustUpdates.length > 0) {
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_on_hand = il.qty_on_hand - u.take,
+            qty_reserved = il.qty_reserved - u."reservedRelease",
+            status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedRelease") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
+    }
+
+    return { consumedCostCents, consumedQty };
   }
 
   // ---------------------------------------------------------------------------
@@ -524,9 +531,9 @@ export class InventoryLotService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Transfer qty from lots at source to a new lot at destination.
-   * Source lots are consumed FIFO. A new lot is created at dest with
-   * a weighted average cost of consumed lots.
+   * Transfer qty from lots at source to destination, preserving individual
+   * FIFO cost layers. Each consumed source lot produces a separate destination
+   * lot with the same cost and receivedAt (FIFO identity preserved).
    */
   async transferLots(params: {
     productVariantId: number;
@@ -541,9 +548,16 @@ export class InventoryLotService {
     );
 
     let remaining = params.qty;
-    let totalCostCents = 0;
-    let totalQty = 0;
-    const transferUpdates: Array<{ lotId: number; take: number }> = [];
+    const layers: Array<{
+      lotId: number;
+      take: number;
+      unitCostCents: number;
+      receivedAt: Date;
+      purchaseOrderId: number | null;
+      receivingOrderId: number | null;
+      inboundShipmentId: number | null;
+      costProvisional: number;
+    }> = [];
 
     for (const lot of lots) {
       if (remaining <= 0) break;
@@ -552,34 +566,45 @@ export class InventoryLotService {
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);
-      transferUpdates.push({ lotId: lot.id, take });
-
-      totalCostCents += take * lot.unitCostCents;
-      totalQty += take;
+      layers.push({
+        lotId: lot.id,
+        take,
+        unitCostCents: lot.unitCostCents,
+        receivedAt: lot.receivedAt,
+        purchaseOrderId: lot.purchaseOrderId ?? null,
+        receivingOrderId: lot.receivingOrderId ?? null,
+        inboundShipmentId: lot.inboundShipmentId ?? null,
+        costProvisional: (lot as any).costProvisional ?? 0,
+      });
       remaining -= take;
     }
 
-    if (transferUpdates.length > 0) {
-      await this.db.execute(sql`
-        WITH updates AS (
-          SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
-        )
-        UPDATE inventory.inventory_lots AS il
-        SET qty_on_hand = il.qty_on_hand - u.take,
-            status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
-        FROM updates u
-        WHERE il.id = u."lotId"
-      `);
-    }
+    if (layers.length === 0) return;
 
-    // Create a new lot at the destination with weighted average cost
-    if (totalQty > 0) {
-      const avgCost = Math.round(totalCostCents / totalQty);
+    // Decrement source lots
+    const transferUpdates = layers.map(l => ({ lotId: l.lotId, take: l.take }));
+    await this.db.execute(sql`
+      WITH updates AS (
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
+      )
+      UPDATE inventory.inventory_lots AS il
+      SET qty_on_hand = il.qty_on_hand - u.take,
+          status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+      FROM updates u
+      WHERE il.id = u."lotId"
+    `);
+
+    // Create one destination lot per source layer — cost identity preserved
+    for (const layer of layers) {
       await this.createLot({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.toLocationId,
-        qty: totalQty,
-        unitCostCents: avgCost,
+        qty: layer.take,
+        unitCostCents: layer.unitCostCents,
+        purchaseOrderId: layer.purchaseOrderId ?? undefined,
+        receivingOrderId: layer.receivingOrderId ?? undefined,
+        inboundShipmentId: layer.inboundShipmentId ?? undefined,
+        costProvisional: layer.costProvisional,
         notes: params.notes ?? "Transfer",
       });
     }

@@ -119,7 +119,7 @@ describe("InventoryUseCases.withTx", () => {
         expect(activeTx).toBe(tx);
       }),
     } as any;
-    const adjustLots = vi.fn(async () => undefined);
+    const adjustLots = vi.fn(async () => ({ consumedCostCents: 0, consumedQty: 0 }));
     const lotService = {
       withTx: vi.fn((activeTx: any) => {
         expect(activeTx).toBe(tx);
@@ -136,7 +136,7 @@ describe("InventoryUseCases.withTx", () => {
       reason: "cycle count correction",
     });
 
-    expect(result).toEqual({ orphanedQty: 3 });
+    expect(result).toMatchObject({ orphanedQty: 3 });
     expect(storage.adjustInventoryLevel).toHaveBeenCalledWith(
       10,
       { variantQty: -5, reservedQty: -3 },
