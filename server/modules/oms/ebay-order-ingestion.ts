@@ -276,11 +276,18 @@ export async function pollEbayOrders(
                 console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
               }
             }
-            if ((orderData.financialStatus === "refunded" || orderData.financialStatus === "partially_refunded") 
+            if ((orderData.financialStatus === "refunded" || orderData.financialStatus === "partially_refunded")
                 && existing.financialStatus !== orderData.financialStatus) {
               console.log(`[eBay Orders] Order ${ebayOrder.orderId} ${orderData.financialStatus} on eBay — updating OMS`);
+              // eBay polls don't provide refund dollar amounts; full refund = total_cents,
+              // partial = 0 (best-effort until eBay returns API exposes amounts).
+              const refundAmountCents = orderData.financialStatus === "refunded" ? (existing.totalCents ?? 0) : 0;
               await db.execute(sql`
-                UPDATE oms_orders SET financial_status = ${orderData.financialStatus}, refunded_at = NOW(), updated_at = NOW()
+                UPDATE oms_orders
+                SET financial_status = ${orderData.financialStatus},
+                    refunded_at = NOW(),
+                    refund_amount_cents = ${refundAmountCents},
+                    updated_at = NOW()
                 WHERE id = ${result.id}
               `);
             }

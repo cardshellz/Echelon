@@ -2652,6 +2652,33 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
+  // Backfill zero-cost lots by SKU (manual CSV upload)
+  app.post("/api/cogs/backfill-costs", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const { entries } = req.body; // Array of { sku, unitCostCents }
+
+      if (!entries || !Array.isArray(entries) || entries.length === 0) {
+        return res.status(400).json({ error: "entries array required — each entry needs { sku, unitCostCents }" });
+      }
+
+      for (const entry of entries) {
+        if (typeof entry.sku !== "string" || !entry.sku.trim()) {
+          return res.status(400).json({ error: `Invalid entry: sku is required` });
+        }
+        if (typeof entry.unitCostCents !== "number" || entry.unitCostCents <= 0) {
+          return res.status(400).json({ error: `Invalid entry for SKU "${entry.sku}": unitCostCents must be a positive integer (cents)` });
+        }
+      }
+
+      const result = await cogs.backfillLotCostsBySku(entries);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error backfilling lot costs:", error);
+      res.status(500).json({ error: error.message || "Failed to backfill lot costs" });
+    }
+  });
+
   // Get manual lots
   app.get("/api/cogs/manual-lots", requirePermission("inventory", "view"), async (req, res) => {
     try {

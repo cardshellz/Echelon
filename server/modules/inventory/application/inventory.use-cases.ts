@@ -7,6 +7,7 @@ import { eq, and } from "drizzle-orm";
 import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction } from "../../../../shared/schema";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
+import { resolveCost } from "../cost-resolver";
 
 export class FreezeViolationError extends Error {
   code = "LOCATION_FROZEN";
@@ -72,6 +73,8 @@ export class InventoryUseCases {
     notes?: string;
     userId?: string;
     unitCostCents?: number;
+    productCostCents?: number;
+    packagingCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     inboundShipmentId?: number;
@@ -109,25 +112,28 @@ export class InventoryUseCases {
       // 2. Adjust Balance
       await this.storage.adjustInventoryLevel(level.id, { variantQty: params.qty }, tx);
 
-      // 3. FIFO Lot Generation
+      // 3. FIFO Lot Generation — resolve cost via waterfall when not provided
       let lotId: number | undefined;
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
+        const resolved = await resolveCost(tx, params.productVariantId, params.unitCostCents);
         const lot = await lotSvc.createLot({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
           qty: params.qty,
-          unitCostCents: params.unitCostCents ?? 0,
+          unitCostCents: resolved.costCents,
+          productCostCents: params.productCostCents,
+          packagingCostCents: params.packagingCostCents ?? 0,
           receivingOrderId: params.receivingOrderId,
           purchaseOrderId: params.purchaseOrderId,
           inboundShipmentId: params.inboundShipmentId,
-          costProvisional: params.costProvisional,
+          costProvisional: params.costProvisional ?? (resolved.provisional ? 1 : 0),
           notes: params.notes,
         });
         lotId = lot.id;
 
-        if (params.unitCostCents !== undefined && params.unitCostCents > 0) {
-          await lotSvc.updateVariantCosts(params.productVariantId, params.unitCostCents);
+        if (resolved.costCents > 0) {
+          await lotSvc.updateVariantCosts(params.productVariantId, resolved.costCents);
         }
       }
 
@@ -271,6 +277,17 @@ export class InventoryUseCases {
         pickedQty: -actualUnpick,
       }, tx);
 
+      // Reverse COGS: restore lot quantities and delete order_item_costs rows
+      if (this.lotService && params.orderItemId) {
+        const lotSvc = this.lotService.withTx(tx);
+        await lotSvc.unpickFromLots({
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          productVariantId: params.productVariantId,
+          qty: actualUnpick,
+        });
+      }
+
       await this.storage.createInventoryTransaction({
         productVariantId: params.productVariantId,
         fromLocationId: params.warehouseLocationId,
@@ -377,15 +394,12 @@ export class InventoryUseCases {
         });
       }
 
-      if (this.cogsService && params.orderId) {
-        const cogsSvc = (this.cogsService as any).withTx ? (this.cogsService as any).withTx(tx) : this.cogsService;
-        await cogsSvc.recordShipmentCOGS({
-          orderId: params.orderId,
-          orderItemId: params.orderItemId,
-          productVariantId: params.productVariantId,
-          qty: params.qty,
-        });
-      }
+      // COGS is recorded authoritatively at PICK time (pickFromLots →
+      // oms.order_item_costs), not at ship. The old recordShipmentCOGS path
+      // here wrote to the retired inventory.order_line_costs ledger AND
+      // re-decremented lot.qty_consumed — a double-consume hazard that, in
+      // practice, recorded nothing because consumeLotsFIFO only sees
+      // un-picked on-hand (already zero by ship time). Removed in COGS Phase 1.
 
       try {
         await this.storage.createInventoryTransaction({
@@ -430,10 +444,13 @@ export class InventoryUseCases {
     cycleCountId?: number;
     userId?: string;
     allowNegative?: boolean;
-  }): Promise<{ orphanedQty: number }> {
+    unitCostCents?: number;
+  }): Promise<{ orphanedQty: number; consumedCostCents?: number; consumedQty?: number }> {
     if (params.qtyDelta === 0) throw new Error("qtyDelta must be non-zero");
 
     let orphanedQty = 0;
+    let consumedCostCents: number | undefined;
+    let consumedQty: number | undefined;
 
     await this.db.transaction(async (tx) => {
       // Cycle-count adjustments are the ONE mutation allowed on frozen bins
@@ -469,13 +486,16 @@ export class InventoryUseCases {
 
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
-        await lotSvc.adjustLots({
+        const lotResult = await lotSvc.adjustLots({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
           qtyDelta: params.qtyDelta,
           reservedQtyDelta: adjustReserved !== 0 ? adjustReserved : undefined,
+          unitCostCents: params.unitCostCents,
           notes: params.reason,
         });
+        consumedCostCents = lotResult.consumedCostCents;
+        consumedQty = lotResult.consumedQty;
       }
 
       await this.storage.createInventoryTransaction({
@@ -498,7 +518,7 @@ export class InventoryUseCases {
     });
 
     this.triggerNotifyChange(params.productVariantId, "adjustment");
-    return { orphanedQty };
+    return { orphanedQty, consumedCostCents, consumedQty };
   }
 
   // ---------------------------------------------------------------------------

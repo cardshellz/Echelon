@@ -90,6 +90,7 @@ export const omsOrders = omsSchema.table("oms_orders", {
   // Cancellation / Refund
   cancelledAt: timestamp("cancelled_at"),
   refundedAt: timestamp("refunded_at"),
+  refundAmountCents: bigint("refund_amount_cents", { mode: "number" }).notNull().default(0),
 
   // ShipStation integration (legacy — use engine columns for new code)
   shipstationOrderId: integer("shipstation_order_id"),

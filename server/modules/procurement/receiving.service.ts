@@ -167,7 +167,7 @@ export class ReceivingReconciliationError extends ReceivingError {
 async function resolveReceivingLineCost(
   line: { unitCost?: number | null; unitCostMills?: number | null; purchaseOrderLineId?: number | null },
   storage: { getPurchaseOrderLineById?(id: number): Promise<any> },
-): Promise<{ cents: number | undefined; mills: number | undefined }> {
+): Promise<{ cents: number | undefined; mills: number | undefined; productCostCents?: number; packagingCostCents?: number }> {
   // 1. Explicit mills on the receiving line.
   if (
     typeof line.unitCostMills === "number" &&
@@ -187,6 +187,8 @@ async function resolveReceivingLineCost(
   }
 
   // 3. Linked PO line — pull the 4-decimal mills (authoritative) or cents.
+  //    Also extract per-unit product and packaging cost components so the
+  //    lot can store them separately for full cost breakdown visibility.
   //    Defensive: only resolve against PRODUCT PO lines. Non-product lines
   //    (discount/fee/tax/rebate/adjustment, migration 0563) cannot be
   //    physically received; if a receipt line accidentally references one
@@ -196,6 +198,14 @@ async function resolveReceivingLineCost(
     try {
       const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId);
       if (poLine && ((poLine.lineType ?? "product") === "product")) {
+        const qty = Number(poLine.orderQty) || 1;
+        const productCostCents = qty > 0
+          ? Math.round(Number(poLine.totalProductCostCents || 0) / qty)
+          : 0;
+        const packagingCostCents = qty > 0
+          ? Math.round(Number(poLine.packagingCostCents || 0) / qty)
+          : 0;
+
         if (
           typeof poLine.unitCostMills === "number" &&
           Number.isInteger(poLine.unitCostMills) &&
@@ -204,6 +214,8 @@ async function resolveReceivingLineCost(
           return {
             cents: millsToCents(poLine.unitCostMills),
             mills: poLine.unitCostMills,
+            productCostCents,
+            packagingCostCents,
           };
         }
         if (
@@ -214,6 +226,8 @@ async function resolveReceivingLineCost(
           return {
             cents: poLine.unitCostCents,
             mills: centsToMills(poLine.unitCostCents),
+            productCostCents,
+            packagingCostCents,
           };
         }
       }
@@ -487,6 +501,8 @@ export class ReceivingService {
         const resolved = await resolveReceivingLineCost(line, this.storage as any);
         let unitCostCents = resolved.cents;
         let unitCostMills = resolved.mills;
+        const packagingCostCents = resolved.packagingCostCents ?? 0;
+        const productCostCents = resolved.productCostCents;
         let costProvisional = 0;
         const parsedInboundShipmentId = Number(order.inboundShipmentId);
         const inboundShipmentId =
@@ -583,6 +599,8 @@ export class ReceivingService {
           notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,
           userId: userId || undefined,
           unitCostCents,
+          packagingCostCents,
+          productCostCents,
           receivingOrderId: orderId,
           purchaseOrderId: order.purchaseOrderId || undefined,
           inboundShipmentId,

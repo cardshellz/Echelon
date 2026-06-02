@@ -1582,8 +1582,8 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         const poUnitCost = finalizedCost.poUnitCostCents || (lot as any).po_unit_cost_cents || (lot as any).unitCostCents || 0;
         const landedPerPiece = finalizedCost.landedUnitCostCents - Number(poUnitCost);
         const landedCostCents = Math.max(0, landedPerPiece);
-        
-        // Use raw SQL to update COGS columns that may not be in the ORM yet
+
+        // Use raw SQL to update COGS columns
         await (storage as any).db?.execute?.(sqlTag`
           UPDATE inventory_lots SET
             landed_cost_cents = ${landedCostCents},
@@ -1596,6 +1596,20 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         `) || await storage.updateInventoryLot(lot.id, {});
       } catch (e: any) {
         console.warn(`[ShipmentTracking] COGS column update for lot ${lot.id} failed (non-fatal): ${e.message}`);
+      }
+
+      // Cascade: update any order_item_costs rows that were written from
+      // this lot at the old cost so shipped order COGS reflect landed truth.
+      try {
+        await db.execute(sqlTag`
+          UPDATE oms.order_item_costs
+          SET unit_cost_cents = ${finalizedCost.landedUnitCostCents},
+              total_cost_cents = qty * ${finalizedCost.landedUnitCostCents}
+          WHERE inventory_lot_id = ${lot.id}
+            AND unit_cost_cents != ${finalizedCost.landedUnitCostCents}
+        `);
+      } catch (e: any) {
+        console.warn(`[ShipmentTracking] COGS cascade for lot ${lot.id} failed (non-fatal): ${e.message}`);
       }
 
       updated++;

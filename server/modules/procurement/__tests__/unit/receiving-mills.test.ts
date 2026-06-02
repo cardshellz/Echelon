@@ -54,7 +54,7 @@ describe("resolveReceivingLineCost — priority", () => {
     const storage = {
       getPurchaseOrderLineById: vi
         .fn()
-        .mockResolvedValue({ unitCostMills: 375, unitCostCents: 5 }),
+        .mockResolvedValue({ unitCostMills: 375, unitCostCents: 5, orderQty: 1, totalProductCostCents: 0, packagingCostCents: 0 }),
     };
     const out = await resolveReceivingLineCost(
       { purchaseOrderLineId: 42 },
@@ -62,7 +62,9 @@ describe("resolveReceivingLineCost — priority", () => {
     );
     // PO mills is authoritative — cents is re-derived (5 in storage would
     // be wrong; we return millsToCents(375) = 4).
-    expect(out).toEqual({ cents: 4, mills: 375 });
+    expect(out).toMatchObject({ cents: 4, mills: 375 });
+    expect(out.productCostCents).toBe(0);
+    expect(out.packagingCostCents).toBe(0);
     expect(storage.getPurchaseOrderLineById).toHaveBeenCalledWith(42);
   });
 
@@ -70,13 +72,15 @@ describe("resolveReceivingLineCost — priority", () => {
     const storage = {
       getPurchaseOrderLineById: vi
         .fn()
-        .mockResolvedValue({ unitCostMills: null, unitCostCents: 750 }),
+        .mockResolvedValue({ unitCostMills: null, unitCostCents: 750, orderQty: 10, totalProductCostCents: 6000, packagingCostCents: 1500 }),
     };
     const out = await resolveReceivingLineCost(
       { purchaseOrderLineId: 99 },
       storage as any,
     );
-    expect(out).toEqual({ cents: 750, mills: 75000 });
+    expect(out).toMatchObject({ cents: 750, mills: 75000 });
+    expect(out.productCostCents).toBe(600);
+    expect(out.packagingCostCents).toBe(150);
   });
 
   it("returns undefined/undefined when no source is available", async () => {

@@ -2071,12 +2071,22 @@ export function registerOmsWebhooks(
       const refundedQty = refundLineItems.reduce((s: number, l: any) => s + (l.quantity || 0), 0);
       const financialStatus = refundedQty >= totalOrderQty ? "refunded" : "partially_refunded";
 
+      // Compute refund amount from Shopify transactions (authoritative source)
+      const transactions: any[] = Array.isArray(refundPayload.transactions) ? refundPayload.transactions : [];
+      const thisRefundCents = transactions.reduce(
+        (sum: number, t: any) => sum + dollarsToCents(t.amount),
+        0,
+      );
+      const priorRefundCents = existing.refundAmountCents ?? 0;
+      const newRefundAmountCents = priorRefundCents + thisRefundCents;
+
       // Update OMS order
       await db
         .update(omsOrders)
         .set({
           financialStatus,
           refundedAt: now,
+          refundAmountCents: newRefundAmountCents,
           updatedAt: now,
         })
         .where(eq(omsOrders.id, existing.id));

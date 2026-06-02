@@ -142,9 +142,10 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
       expect(row.packagingCostCents).toBe(117000);
       // Line total = goods + packaging (exact)
       expect(row.lineTotalCents).toBe(1277000);
-      // Derived unit cost: 1160000 * 100 / 200000 = 580 mills = $0.0580
-      expect(row.unitCostMills).toBe(580);
-      // Derived cents: 1160000 / 200000 = 5.8 → 6 cents (half-up)
+      // Derived unit cost from subtotal (product + packaging):
+      // 1277000 * 100 / 200000 = 638.5 → 639 mills (half-up)
+      expect(row.unitCostMills).toBe(639);
+      // Derived cents: 1277000 / 200000 = 6.385 → 6 cents (half-up)
       expect(row.unitCostCents).toBe(6);
     });
 
@@ -273,9 +274,9 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
       expect(row.totalProductCostCents).toBe(500);
       expect(row.packagingCostCents).toBe(50);
       expect(row.lineTotalCents).toBe(550);
-      // Derived from new shape, NOT from old 375 mills
-      // 500 * 100 / 100 = 500 mills
-      expect(row.unitCostMills).toBe(500);
+      // Derived from subtotal (product + packaging), NOT from old 375 mills
+      // (500 + 50) * 100 / 100 = 550 mills
+      expect(row.unitCostMills).toBe(550);
     });
   });
 

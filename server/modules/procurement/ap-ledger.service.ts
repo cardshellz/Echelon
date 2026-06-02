@@ -25,6 +25,7 @@ import {
   detectOverpaid,
   detectPastDue,
 } from "./po-exceptions.service";
+import { COGSService } from "../inventory/cogs.service";
 
 // ── Error class ─────────────────────────────────────────────────────
 
@@ -661,6 +662,44 @@ export async function approveInvoice(id: number, userId?: string) {
   });
 
   await runPoFinancialDetectionHooksForMany(affectedPoIds);
+
+  // Reconcile invoice variance → lot cost → COGS cascade.
+  // Non-blocking: if reconciliation fails, the approval still stands.
+  try {
+    const invoiceLines = await db
+      .select()
+      .from(vendorInvoiceLines)
+      .where(eq(vendorInvoiceLines.vendorInvoiceId, id));
+
+    const [invoice] = await db
+      .select({ invoiceNumber: vendorInvoices.invoiceNumber })
+      .from(vendorInvoices)
+      .where(eq(vendorInvoices.id, id))
+      .limit(1);
+
+    const cogsSvc = new COGSService(db);
+
+    for (const line of invoiceLines) {
+      if (!line.purchaseOrderLineId || !line.productVariantId) continue;
+      if (line.matchStatus !== "price_discrepancy") continue;
+
+      const [poLine] = await db
+        .select({ purchaseOrderId: purchaseOrderLines.purchaseOrderId })
+        .from(purchaseOrderLines)
+        .where(eq(purchaseOrderLines.id, line.purchaseOrderLineId))
+        .limit(1);
+      if (!poLine?.purchaseOrderId) continue;
+
+      await cogsSvc.reconcileInvoiceVariance({
+        purchaseOrderId: poLine.purchaseOrderId,
+        productVariantId: line.productVariantId,
+        invoiceUnitCostCents: line.unitCostCents,
+        invoiceNumber: invoice?.invoiceNumber ?? undefined,
+      });
+    }
+  } catch (err: any) {
+    console.warn(`[ApLedger] Invoice variance→lot reconciliation failed (non-fatal): ${err.message}`);
+  }
 
   return updated;
 }

@@ -272,12 +272,12 @@ async function getFinancialKpis(from: Date, to: Date): Promise<FinancialKpis> {
     `),
     db.execute(sql`
       SELECT
-        COALESCE(SUM(amount_paid_cents), 0)::bigint AS revenue_cents,
+        COALESCE(SUM(total_cents), 0)::bigint AS revenue_cents,
         COUNT(*)::int AS order_count
-      FROM wms.orders
+      FROM oms.oms_orders
       WHERE cancelled_at IS NULL
-        AND COALESCE(order_placed_at, created_at) >= ${from}
-        AND COALESCE(order_placed_at, created_at) < ${to}
+        AND ordered_at >= ${from}
+        AND ordered_at < ${to}
     `),
   ]);
 

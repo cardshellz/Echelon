@@ -21,6 +21,7 @@ import {
   inventoryLevels,
 } from "@shared/schema";
 import type { InventoryLot, InsertInventoryLot } from "@shared/schema";
+import { resolveCost } from "./cost-resolver";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -70,6 +71,8 @@ export class InventoryLotService {
     warehouseLocationId: number;
     qty: number;
     unitCostCents: number;
+    productCostCents?: number;
+    packagingCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     inboundShipmentId?: number;
@@ -85,6 +88,7 @@ export class InventoryLotService {
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
         unitCostCents: params.unitCostCents,
+        packagingCostCents: params.packagingCostCents ?? 0,
         qtyOnHand: params.qty,
         qtyReserved: 0,
         qtyPicked: 0,
@@ -277,6 +281,32 @@ export class InventoryLotService {
     orderId: number;
     orderItemId?: number;
   }): Promise<Array<{ lotId: number; qty: number; unitCostCents: number }>> {
+    // Idempotency: if COGS rows already exist for this order item, this is a
+    // retry — return the existing allocations without double-writing.
+    if (params.orderItemId) {
+      const existing = await this.db
+        .select({
+          inventoryLotId: orderItemCosts.inventoryLotId,
+          qty: orderItemCosts.qty,
+          unitCostCents: orderItemCosts.unitCostCents,
+        })
+        .from(orderItemCosts)
+        .where(
+          and(
+            eq(orderItemCosts.orderId, params.orderId),
+            eq(orderItemCosts.orderItemId, params.orderItemId),
+          ),
+        );
+
+      if (existing.length > 0) {
+        return existing.map((e: any) => ({
+          lotId: e.inventoryLotId,
+          qty: e.qty,
+          unitCostCents: e.unitCostCents,
+        }));
+      }
+    }
+
     const lots = await this.db
       .select()
       .from(inventoryLots)
@@ -344,6 +374,97 @@ export class InventoryLotService {
     }
 
     return costAllocations;
+  }
+
+  // ---------------------------------------------------------------------------
+  // UNPICK (reverse a pick — restore lot qty, delete COGS rows)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reverse a pick for an order item. Restores qtyOnHand / qtyPicked on the
+   * lots that were consumed, and deletes the corresponding order_item_costs
+   * rows so COGS is not double-counted.
+   *
+   * Returns the total cost cents that were reversed (for audit).
+   */
+  async unpickFromLots(params: {
+    orderId: number;
+    orderItemId: number;
+    productVariantId: number;
+    qty: number;
+  }): Promise<{ reversedCostCents: number }> {
+    // Find the COGS rows written by the original pick
+    const cogsRows = await this.db
+      .select()
+      .from(orderItemCosts)
+      .where(
+        and(
+          eq(orderItemCosts.orderId, params.orderId),
+          eq(orderItemCosts.orderItemId, params.orderItemId),
+        ),
+      );
+
+    if (cogsRows.length === 0) {
+      return { reversedCostCents: 0 };
+    }
+
+    let reversedCostCents = 0;
+    const restoreUpdates: Array<{ lotId: number; restore: number }> = [];
+
+    // Figure out how much to reverse from each lot (may be partial unpick)
+    let remaining = params.qty;
+    for (const row of cogsRows) {
+      if (remaining <= 0) break;
+      const restore = Math.min(row.qty, remaining);
+      restoreUpdates.push({ lotId: row.inventoryLotId, restore });
+      reversedCostCents += restore * row.unitCostCents;
+      remaining -= restore;
+    }
+
+    // Restore lot quantities: move units from picked back to on-hand
+    if (restoreUpdates.length > 0) {
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(restoreUpdates)}::jsonb) AS x("lotId" int, restore int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_on_hand = il.qty_on_hand + u.restore,
+            qty_picked = GREATEST(il.qty_picked - u.restore, 0),
+            status = 'active'
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
+    }
+
+    // Delete COGS rows. For a full unpick, delete all; for partial, delete
+    // proportionally (simplification: delete all and re-pick will re-create).
+    if (remaining <= 0) {
+      // Full unpick — delete all COGS rows for this order item
+      await this.db
+        .delete(orderItemCosts)
+        .where(
+          and(
+            eq(orderItemCosts.orderId, params.orderId),
+            eq(orderItemCosts.orderItemId, params.orderItemId),
+          ),
+        );
+    } else {
+      // Partial unpick — delete the rows we restored from
+      const restoredLotIds = restoreUpdates.map(u => u.lotId);
+      if (restoredLotIds.length > 0) {
+        await this.db
+          .delete(orderItemCosts)
+          .where(
+            and(
+              eq(orderItemCosts.orderId, params.orderId),
+              eq(orderItemCosts.orderItemId, params.orderItemId),
+              inArray(orderItemCosts.inventoryLotId, restoredLotIds),
+            ),
+          );
+      }
+    }
+
+    return { reversedCostCents };
   }
 
   // ---------------------------------------------------------------------------
@@ -453,63 +574,76 @@ export class InventoryLotService {
     warehouseLocationId: number;
     qtyDelta: number;
     reservedQtyDelta?: number;
+    unitCostCents?: number;
     notes?: string;
-  }): Promise<void> {
+  }): Promise<{ consumedCostCents: number; consumedQty: number }> {
     if (params.reservedQtyDelta !== undefined && params.reservedQtyDelta > 0) {
       throw new Error("adjustLots only supports releasing reserved quantity during adjustments");
     }
 
     if (params.qtyDelta > 0) {
-      // Positive adjustment: create a new lot with zero cost (unknown source)
+      const resolved = await resolveCost(
+        this.db,
+        params.productVariantId,
+        params.unitCostCents,
+      );
       await this.createLot({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
         qty: params.qtyDelta,
-        unitCostCents: 0,
+        unitCostCents: resolved.costCents,
+        costProvisional: resolved.provisional ? 1 : 0,
         notes: params.notes ?? "Manual adjustment",
       });
-    } else {
-      // Negative adjustment: consume from oldest lots first
-      const lots = await this.getLotsAtLocation(
-        params.productVariantId,
-        params.warehouseLocationId,
-      );
-
-      let remaining = Math.abs(params.qtyDelta);
-      let reservedReleaseRemaining = Math.abs(params.reservedQtyDelta ?? 0);
-      const adjustUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
-      for (const lot of lots) {
-        if (remaining <= 0) break;
-
-        const unreservedAvailable = Math.max(0, lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked);
-        const unreservedTake = Math.min(unreservedAvailable, remaining);
-        const reservedTake = Math.min(
-          Math.max(0, lot.qtyReserved),
-          remaining - unreservedTake,
-          reservedReleaseRemaining,
-        );
-        const take = unreservedTake + reservedTake;
-        if (take <= 0) continue;
-
-        adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake });
-        remaining -= take;
-        reservedReleaseRemaining -= reservedTake;
-      }
-
-      if (adjustUpdates.length > 0) {
-        await this.db.execute(sql`
-          WITH updates AS (
-            SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
-          )
-          UPDATE inventory.inventory_lots AS il
-          SET qty_on_hand = il.qty_on_hand - u.take,
-              qty_reserved = il.qty_reserved - u."reservedRelease",
-              status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedRelease") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
-          FROM updates u
-          WHERE il.id = u."lotId"
-        `);
-      }
+      return { consumedCostCents: 0, consumedQty: 0 };
     }
+
+    // Negative adjustment: consume from oldest lots first, tracking total cost
+    const lots = await this.getLotsAtLocation(
+      params.productVariantId,
+      params.warehouseLocationId,
+    );
+
+    let remaining = Math.abs(params.qtyDelta);
+    let reservedReleaseRemaining = Math.abs(params.reservedQtyDelta ?? 0);
+    let consumedCostCents = 0;
+    let consumedQty = 0;
+    const adjustUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
+    for (const lot of lots) {
+      if (remaining <= 0) break;
+
+      const unreservedAvailable = Math.max(0, lot.qtyOnHand - lot.qtyReserved - lot.qtyPicked);
+      const unreservedTake = Math.min(unreservedAvailable, remaining);
+      const reservedTake = Math.min(
+        Math.max(0, lot.qtyReserved),
+        remaining - unreservedTake,
+        reservedReleaseRemaining,
+      );
+      const take = unreservedTake + reservedTake;
+      if (take <= 0) continue;
+
+      adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake });
+      consumedCostCents += take * lot.unitCostCents;
+      consumedQty += take;
+      remaining -= take;
+      reservedReleaseRemaining -= reservedTake;
+    }
+
+    if (adjustUpdates.length > 0) {
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_on_hand = il.qty_on_hand - u.take,
+            qty_reserved = il.qty_reserved - u."reservedRelease",
+            status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedRelease") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
+    }
+
+    return { consumedCostCents, consumedQty };
   }
 
   // ---------------------------------------------------------------------------
@@ -517,9 +651,9 @@ export class InventoryLotService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Transfer qty from lots at source to a new lot at destination.
-   * Source lots are consumed FIFO. A new lot is created at dest with
-   * a weighted average cost of consumed lots.
+   * Transfer qty from lots at source to destination, preserving individual
+   * FIFO cost layers. Each consumed source lot produces a separate destination
+   * lot with the same cost and receivedAt (FIFO identity preserved).
    */
   async transferLots(params: {
     productVariantId: number;
@@ -534,9 +668,16 @@ export class InventoryLotService {
     );
 
     let remaining = params.qty;
-    let totalCostCents = 0;
-    let totalQty = 0;
-    const transferUpdates: Array<{ lotId: number; take: number }> = [];
+    const layers: Array<{
+      lotId: number;
+      take: number;
+      unitCostCents: number;
+      receivedAt: Date;
+      purchaseOrderId: number | null;
+      receivingOrderId: number | null;
+      inboundShipmentId: number | null;
+      costProvisional: number;
+    }> = [];
 
     for (const lot of lots) {
       if (remaining <= 0) break;
@@ -545,34 +686,45 @@ export class InventoryLotService {
       if (available <= 0) continue;
 
       const take = Math.min(available, remaining);
-      transferUpdates.push({ lotId: lot.id, take });
-
-      totalCostCents += take * lot.unitCostCents;
-      totalQty += take;
+      layers.push({
+        lotId: lot.id,
+        take,
+        unitCostCents: lot.unitCostCents,
+        receivedAt: lot.receivedAt,
+        purchaseOrderId: lot.purchaseOrderId ?? null,
+        receivingOrderId: lot.receivingOrderId ?? null,
+        inboundShipmentId: lot.inboundShipmentId ?? null,
+        costProvisional: (lot as any).costProvisional ?? 0,
+      });
       remaining -= take;
     }
 
-    if (transferUpdates.length > 0) {
-      await this.db.execute(sql`
-        WITH updates AS (
-          SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
-        )
-        UPDATE inventory.inventory_lots AS il
-        SET qty_on_hand = il.qty_on_hand - u.take,
-            status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
-        FROM updates u
-        WHERE il.id = u."lotId"
-      `);
-    }
+    if (layers.length === 0) return;
 
-    // Create a new lot at the destination with weighted average cost
-    if (totalQty > 0) {
-      const avgCost = Math.round(totalCostCents / totalQty);
+    // Decrement source lots
+    const transferUpdates = layers.map(l => ({ lotId: l.lotId, take: l.take }));
+    await this.db.execute(sql`
+      WITH updates AS (
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
+      )
+      UPDATE inventory.inventory_lots AS il
+      SET qty_on_hand = il.qty_on_hand - u.take,
+          status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND il.qty_reserved = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
+      FROM updates u
+      WHERE il.id = u."lotId"
+    `);
+
+    // Create one destination lot per source layer — cost identity preserved
+    for (const layer of layers) {
       await this.createLot({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.toLocationId,
-        qty: totalQty,
-        unitCostCents: avgCost,
+        qty: layer.take,
+        unitCostCents: layer.unitCostCents,
+        purchaseOrderId: layer.purchaseOrderId ?? undefined,
+        receivingOrderId: layer.receivingOrderId ?? undefined,
+        inboundShipmentId: layer.inboundShipmentId ?? undefined,
+        costProvisional: layer.costProvisional,
         notes: params.notes ?? "Transfer",
       });
     }
@@ -626,13 +778,15 @@ export class InventoryLotService {
    * Returns per-variant totals and grand total.
    */
   async getInventoryValuation(): Promise<{
-    total: { qty: number; valueCents: number };
+    total: { qty: number; valueCents: number; zeroCostQty: number; provisionalQty: number };
     byVariant: Array<{
       productVariantId: number;
       sku: string | null;
       qty: number;
       avgCostCents: number;
       valueCents: number;
+      zeroCostQty: number;
+      provisionalQty: number;
     }>;
   }> {
     const rows = await this.db
@@ -640,32 +794,42 @@ export class InventoryLotService {
         productVariantId: inventoryLots.productVariantId,
         sku: productVariants.sku,
         qty: sql<number>`SUM(${inventoryLots.qtyOnHand})`,
-        totalCost: sql<number>`SUM(${inventoryLots.qtyOnHand} * ${inventoryLots.unitCostCents})`,
+        totalCost: sql<number>`SUM(${inventoryLots.qtyOnHand} * COALESCE(${inventoryLots.totalUnitCostCents}, ${inventoryLots.unitCostCents}, 0))`,
+        zeroCostQty: sql<number>`SUM(CASE WHEN COALESCE(${inventoryLots.totalUnitCostCents}, ${inventoryLots.unitCostCents}, 0) = 0 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
+        provisionalQty: sql<number>`SUM(CASE WHEN ${inventoryLots.costProvisional} = 1 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
       })
       .from(inventoryLots)
       .innerJoin(productVariants, eq(productVariants.id, inventoryLots.productVariantId))
-      .where(eq(inventoryLots.status, "active"))
+      .where(and(eq(inventoryLots.status, "active"), gt(inventoryLots.qtyOnHand, 0)))
       .groupBy(inventoryLots.productVariantId, productVariants.sku);
 
     let totalQty = 0;
     let totalValue = 0;
+    let totalZeroCostQty = 0;
+    let totalProvisionalQty = 0;
 
     const byVariant = rows.map((r: any) => {
       const qty = Number(r.qty) || 0;
       const valueCents = Number(r.totalCost) || 0;
+      const zeroCostQty = Number(r.zeroCostQty) || 0;
+      const provisionalQty = Number(r.provisionalQty) || 0;
       totalQty += qty;
       totalValue += valueCents;
+      totalZeroCostQty += zeroCostQty;
+      totalProvisionalQty += provisionalQty;
       return {
         productVariantId: r.productVariantId,
         sku: r.sku,
         qty,
         avgCostCents: qty > 0 ? Math.round(valueCents / qty) : 0,
         valueCents,
+        zeroCostQty,
+        provisionalQty,
       };
     });
 
     return {
-      total: { qty: totalQty, valueCents: totalValue },
+      total: { qty: totalQty, valueCents: totalValue, zeroCostQty: totalZeroCostQty, provisionalQty: totalProvisionalQty },
       byVariant,
     };
   }

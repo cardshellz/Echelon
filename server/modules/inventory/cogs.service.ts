@@ -5,7 +5,9 @@
  * which updates when landed costs arrive. FIFO is strict: oldest lot
  * consumed first, always. All cost operations are atomic (transactions).
  *
- * Tables: inventory_lots (modified), order_line_costs (new)
+ * Tables: inventory.inventory_lots (cost layers), oms.order_item_costs
+ * (the single live COGS ledger, written at pick time by pickFromLots).
+ * The legacy inventory.order_line_costs ledger is retired (COGS Phase 1).
  */
 
 import { eq, and, sql, asc, gt, desc, isNull, isNotNull } from "drizzle-orm";
@@ -68,6 +70,8 @@ export interface OrderLineCOGS {
 export interface InventoryValuationResult {
   totalValueCents: number;
   totalQty: number;
+  zeroCostQty: number;
+  provisionalQty: number;
   landedPendingLots: number;
   landedPendingValueCents: number;
   byProduct: Array<{
@@ -78,6 +82,7 @@ export interface InventoryValuationResult {
     avgCostPerPiece: number;
     totalValueCents: number;
     activeLots: number;
+    zeroCostQty: number;
     hasLandedPending: boolean;
   }>;
 }
@@ -108,6 +113,7 @@ export class COGSService {
     warehouseLocationId: number;
     qtyPieces: number;
     poUnitCostCents?: number;
+    packagingCostCents?: number;
     landedCostCents?: number;
     poLineId?: number;
     inboundShipmentId?: number;
@@ -119,8 +125,9 @@ export class COGSService {
     notes?: string;
   }): Promise<InventoryLot> {
     const poUnitCost = params.poUnitCostCents ?? 0;
+    const packagingCost = params.packagingCostCents ?? 0;
     const landedCost = params.landedCostCents ?? 0;
-    const totalUnitCost = poUnitCost + landedCost;
+    const totalUnitCost = poUnitCost + packagingCost + landedCost;
     const costSource = params.costSource ?? 'manual';
 
     const lotNumber = await this.generateLotNumber();
@@ -140,17 +147,19 @@ export class COGSService {
         inboundShipmentId: params.inboundShipmentId ?? null,
         // COGS columns
         unitCostCents: totalUnitCost,
+        packagingCostCents: packagingCost,
         costProvisional: landedCost === 0 && costSource !== 'manual' ? 1 : 0,
         status: "active",
         notes: params.notes ?? null,
       } as any)
       .returning();
 
-    // Update COGS-specific columns via raw SQL (new columns not in drizzle schema yet)
+    // Update COGS-specific columns via raw SQL
     await this.db.execute(sql`
       UPDATE inventory_lots SET
         po_line_id = ${params.poLineId ?? null},
         po_unit_cost_cents = ${poUnitCost},
+        packaging_cost_cents = ${packagingCost},
         landed_cost_cents = ${landedCost},
         total_unit_cost_cents = ${totalUnitCost},
         qty_received = ${params.qtyPieces},
@@ -224,43 +233,12 @@ export class COGSService {
     return consumptions;
   }
 
-  // ---------------------------------------------------------------------------
-  // RECORD SHIPMENT COGS
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Called when an order ships. Consumes from FIFO lots and records
-   * order_line_costs entries. All within a transaction.
-   */
-  async recordShipmentCOGS(params: {
-    orderId: number;
-    orderItemId?: number;
-    productVariantId: number;
-    qty: number;
-  }): Promise<CostLotConsumption[]> {
-    return this.db.transaction(async (tx: any) => {
-      const consumptions = await this.consumeLotsFIFO(
-        params.productVariantId,
-        params.qty,
-        tx,
-      );
-
-      // Record each consumption as an order_line_cost
-      for (const c of consumptions) {
-        await tx.execute(sql`
-          INSERT INTO order_line_costs (order_id, order_item_id, product_variant_id, lot_id, qty_consumed, unit_cost_cents, total_cost_cents, shipped_at, created_at)
-          VALUES (${params.orderId}, ${params.orderItemId ?? null}, ${params.productVariantId}, ${c.lotId}, ${c.qty}, ${c.unitCostCents}, ${c.totalCostCents}, NOW(), NOW())
-        `);
-
-        // Update lot qty_consumed
-        await tx.execute(sql`
-          UPDATE inventory_lots SET qty_consumed = COALESCE(qty_consumed, 0) + ${c.qty} WHERE id = ${c.lotId}
-        `);
-      }
-
-      return consumptions;
-    });
-  }
+  // NOTE (COGS Phase 1): recordShipmentCOGS was removed. It wrote to the
+  // retired inventory.order_line_costs ledger at ship time and re-decremented
+  // lot.qty_consumed, duplicating the consumption already booked at pick time
+  // by InventoryLotService.pickFromLots → oms.order_item_costs (the single
+  // live COGS ledger). consumeLotsFIFO below remains as a read-only FIFO cost
+  // simulation for valuation/preview use.
 
   // ---------------------------------------------------------------------------
   // UPDATE LOT LANDED COST
@@ -299,6 +277,9 @@ export class COGSService {
       WHERE id = ${lotId}
     `);
 
+    // Cascade the new cost to any COGS rows written from this lot
+    await this.cascadeRecostForLot(lotId, newTotal);
+
     // Log the adjustment
     await this.db.execute(sql`
       INSERT INTO inventory.cost_adjustment_log (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
@@ -316,6 +297,138 @@ export class COGSService {
       adjustedAt: new Date(),
       reason: 'landed_cost_finalized',
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // CASCADE RECOST — update COGS rows when a lot's cost changes
+  // ---------------------------------------------------------------------------
+
+  /**
+   * After a lot's unit cost is updated (e.g. landed cost finalization), cascade
+   * the new cost to all order_item_costs rows that reference that lot. This
+   * ensures shipped orders reflect the true cost even when freight arrives late.
+   *
+   * Returns the number of COGS rows updated and the total delta in cents.
+   */
+  async cascadeRecostForLot(
+    lotId: number,
+    newUnitCostCents: number,
+  ): Promise<{ rowsUpdated: number; totalDeltaCents: number }> {
+    // Find all COGS rows referencing this lot with a different cost
+    const affected = await this.db.execute(sql`
+      SELECT id, qty, unit_cost_cents
+      FROM oms.order_item_costs
+      WHERE inventory_lot_id = ${lotId}
+        AND unit_cost_cents != ${newUnitCostCents}
+    `);
+
+    const rows = affected.rows || [];
+    if (rows.length === 0) {
+      return { rowsUpdated: 0, totalDeltaCents: 0 };
+    }
+
+    let totalDeltaCents = 0;
+    for (const row of rows) {
+      const oldCost = Number(row.unit_cost_cents) || 0;
+      const qty = Number(row.qty) || 0;
+      totalDeltaCents += (newUnitCostCents - oldCost) * qty;
+    }
+
+    // Bulk update: set new unit cost and recalculate total
+    await this.db.execute(sql`
+      UPDATE oms.order_item_costs
+      SET unit_cost_cents = ${newUnitCostCents},
+          total_cost_cents = qty * ${newUnitCostCents}
+      WHERE inventory_lot_id = ${lotId}
+        AND unit_cost_cents != ${newUnitCostCents}
+    `);
+
+    return { rowsUpdated: rows.length, totalDeltaCents };
+  }
+
+  // ---------------------------------------------------------------------------
+  // INVOICE VARIANCE → LOT COST RECONCILIATION
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When an approved invoice line has a different unit cost than what was
+   * originally recorded on the PO, update the affected lots and cascade the
+   * corrected cost to COGS rows.
+   *
+   * Finds lots by (purchaseOrderId, productVariantId) and updates their
+   * unitCostCents + total_unit_cost_cents to reflect the invoice-actual cost.
+   * Logs each adjustment to cost_adjustment_log.
+   *
+   * Returns summary of lots updated and total COGS delta.
+   */
+  async reconcileInvoiceVariance(params: {
+    purchaseOrderId: number;
+    productVariantId: number;
+    invoiceUnitCostCents: number;
+    invoiceNumber?: string;
+  }): Promise<{ lotsUpdated: number; cogsRowsUpdated: number; totalCogsDeltaCents: number }> {
+    const { purchaseOrderId, productVariantId, invoiceUnitCostCents } = params;
+
+    // Find lots linked to this PO + variant
+    const affectedLots = await this.db.execute(sql`
+      SELECT id, lot_number, unit_cost_cents,
+             COALESCE(landed_cost_cents, 0) AS landed_cost_cents,
+             COALESCE(total_unit_cost_cents, unit_cost_cents) AS total_unit_cost_cents
+      FROM inventory.inventory_lots
+      WHERE purchase_order_id = ${purchaseOrderId}
+        AND product_variant_id = ${productVariantId}
+    `);
+
+    const lots = affectedLots.rows || [];
+    if (lots.length === 0) {
+      return { lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0 };
+    }
+
+    let lotsUpdated = 0;
+    let cogsRowsUpdated = 0;
+    let totalCogsDeltaCents = 0;
+
+    for (const lot of lots) {
+      const oldCost = Number(lot.unit_cost_cents) || 0;
+      const landedAddon = Number(lot.landed_cost_cents) || 0;
+      // New total = invoice base cost + existing landed addon
+      const newTotal = invoiceUnitCostCents + landedAddon;
+
+      if (oldCost === invoiceUnitCostCents && Number(lot.total_unit_cost_cents) === newTotal) {
+        continue; // Already at the right cost
+      }
+
+      // Update the lot
+      await this.db.execute(sql`
+        UPDATE inventory.inventory_lots
+        SET unit_cost_cents = ${invoiceUnitCostCents},
+            po_unit_cost_cents = ${invoiceUnitCostCents},
+            total_unit_cost_cents = ${newTotal},
+            cost_source = 'invoice'
+        WHERE id = ${lot.id}
+      `);
+
+      // Log the adjustment
+      const reason = params.invoiceNumber
+        ? `invoice_variance:${params.invoiceNumber}`
+        : "invoice_variance";
+      await this.db.execute(sql`
+        INSERT INTO inventory.cost_adjustment_log
+          (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
+        SELECT ${lot.id}, ${lot.lot_number}, ${productVariantId}, COALESCE(pv.sku, ''),
+               ${Number(lot.total_unit_cost_cents)}, ${newTotal}, ${newTotal - Number(lot.total_unit_cost_cents)},
+               ${reason}, NOW()
+        FROM catalog.product_variants pv WHERE pv.id = ${productVariantId}
+      `);
+
+      // Cascade to COGS
+      const cascadeResult = await this.cascadeRecostForLot(lot.id, newTotal);
+      cogsRowsUpdated += cascadeResult.rowsUpdated;
+      totalCogsDeltaCents += cascadeResult.totalDeltaCents;
+      lotsUpdated++;
+    }
+
+    return { lotsUpdated, cogsRowsUpdated, totalCogsDeltaCents };
   }
 
   // ---------------------------------------------------------------------------
@@ -367,13 +480,19 @@ export class COGSService {
       .from(orderItems)
       .where(eq(orderItems.orderId, orderId));
 
-    // Get COGS entries from order_line_costs
+    // Get COGS entries from the live ledger (oms.order_item_costs, written at
+    // pick time by pickFromLots). The legacy inventory.order_line_costs ledger
+    // is retired — see recordShipmentCOGS note. Alias columns to the legacy
+    // shape (lot_id, qty_consumed) so downstream mapping is unchanged.
     const cogsResult = await this.db.execute(sql`
-      SELECT olc.*, pv.sku, p.name as product_name, il.lot_number
-      FROM order_line_costs olc
+      SELECT olc.order_id, olc.order_item_id, olc.product_variant_id,
+             olc.inventory_lot_id AS lot_id, olc.qty AS qty_consumed,
+             olc.unit_cost_cents, olc.total_cost_cents,
+             pv.sku, p.name as product_name, il.lot_number
+      FROM oms.order_item_costs olc
       LEFT JOIN catalog.product_variants pv ON pv.id = olc.product_variant_id
       LEFT JOIN catalog.products p ON p.id = pv.product_id
-      LEFT JOIN inventory.inventory_lots il ON il.id = olc.lot_id
+      LEFT JOIN inventory.inventory_lots il ON il.id = olc.inventory_lot_id
       WHERE olc.order_id = ${orderId}
       ORDER BY olc.id ASC
     `);
@@ -456,6 +575,7 @@ export class COGSService {
         END as avg_cost_per_piece,
         SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)) as total_value_cents,
         COUNT(il.id) as active_lots,
+        SUM(CASE WHEN COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0) = 0 THEN il.qty_on_hand ELSE 0 END) as zero_cost_qty,
         BOOL_OR(COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
       FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
@@ -473,29 +593,34 @@ export class COGSService {
       avgCostPerPiece: Number(r.avg_cost_per_piece) || 0,
       totalValueCents: Number(r.total_value_cents) || 0,
       activeLots: Number(r.active_lots) || 0,
+      zeroCostQty: Number(r.zero_cost_qty) || 0,
       hasLandedPending: r.has_landed_pending || false,
     }));
 
     const totalValueCents = byProduct.reduce((s: number, p: any) => s + p.totalValueCents, 0);
     const totalQty = byProduct.reduce((s: number, p: any) => s + p.totalQty, 0);
+    const zeroCostQty = byProduct.reduce((s: number, p: any) => s + p.zeroCostQty, 0);
 
-    // Landed cost pending summary
+    // Provisional + landed pending summary
     const pendingResult = await this.db.execute(sql`
-      SELECT COUNT(*) as lot_count,
-             SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)) as pending_value
+      SELECT
+        COUNT(*) FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as landed_pending_count,
+        COALESCE(SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0))
+          FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL), 0) as landed_pending_value,
+        COALESCE(SUM(il.qty_on_hand) FILTER (WHERE il.cost_provisional = 1), 0) as provisional_qty
       FROM inventory.inventory_lots il
       WHERE il.status = 'active'
         AND il.qty_on_hand > 0
-        AND COALESCE(il.landed_cost_cents, 0) = 0
-        AND il.inbound_shipment_id IS NOT NULL
     `);
-    const pending = pendingResult.rows?.[0] || {};
+    const pending = pendingResult.rows?.[0] as any || {};
 
     return {
       totalValueCents,
       totalQty,
-      landedPendingLots: Number(pending.lot_count) || 0,
-      landedPendingValueCents: Number(pending.pending_value) || 0,
+      zeroCostQty,
+      provisionalQty: Number(pending.provisional_qty) || 0,
+      landedPendingLots: Number(pending.landed_pending_count) || 0,
+      landedPendingValueCents: Number(pending.landed_pending_value) || 0,
       byProduct,
     };
   }
@@ -614,10 +739,11 @@ export class COGSService {
 
   async getAffectedOrdersForLot(lotId: number): Promise<any[]> {
     const result = await this.db.execute(sql`
-      SELECT DISTINCT o.id, o.order_number, olc.unit_cost_cents, olc.qty_consumed, olc.total_cost_cents
-      FROM order_line_costs olc
+      SELECT DISTINCT o.id, o.order_number, olc.unit_cost_cents,
+             olc.qty AS qty_consumed, olc.total_cost_cents
+      FROM oms.order_item_costs olc
       JOIN wms.orders o ON o.id = olc.order_id
-      WHERE olc.lot_id = ${lotId}
+      WHERE olc.inventory_lot_id = ${lotId}
       ORDER BY o.id DESC
     `);
     return result.rows || [];
@@ -801,6 +927,102 @@ export class COGSService {
     }
 
     return `${prefix}${String(seq).padStart(3, "0")}`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // BACKFILL LOT COSTS BY SKU (manual upload)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Backfill zero-cost lots from a user-provided SKU→cost mapping.
+   * For each entry, finds all lots where unitCostCents = 0 for that variant
+   * and stamps the provided cost. Cascades to COGS rows.
+   *
+   * Designed for one-time historical backfill where most inventory was loaded
+   * without POs.
+   */
+  async backfillLotCostsBySku(
+    entries: Array<{ sku: string; unitCostCents: number }>,
+  ): Promise<{
+    processed: number;
+    lotsUpdated: number;
+    cogsRowsUpdated: number;
+    skipped: Array<{ sku: string; reason: string }>;
+  }> {
+    let processed = 0;
+    let lotsUpdated = 0;
+    let cogsRowsUpdated = 0;
+    const skipped: Array<{ sku: string; reason: string }> = [];
+
+    for (const entry of entries) {
+      if (!entry.sku || entry.unitCostCents <= 0) {
+        skipped.push({ sku: entry.sku || "(empty)", reason: "invalid_entry" });
+        continue;
+      }
+
+      const variantResult = await this.db.execute(sql`
+        SELECT id FROM catalog.product_variants
+        WHERE UPPER(sku) = UPPER(${entry.sku})
+        LIMIT 1
+      `);
+      const variant = variantResult.rows?.[0];
+      if (!variant) {
+        skipped.push({ sku: entry.sku, reason: "sku_not_found" });
+        continue;
+      }
+
+      const variantId = variant.id;
+
+      const lotsResult = await this.db.execute(sql`
+        SELECT id, lot_number, COALESCE(landed_cost_cents, 0) AS landed_cost_cents
+        FROM inventory.inventory_lots
+        WHERE product_variant_id = ${variantId}
+          AND (unit_cost_cents = 0 OR unit_cost_cents IS NULL)
+      `);
+      const lots = lotsResult.rows || [];
+
+      if (lots.length === 0) {
+        skipped.push({ sku: entry.sku, reason: "no_zero_cost_lots" });
+        processed++;
+        continue;
+      }
+
+      for (const lot of lots) {
+        const landedAddon = Number(lot.landed_cost_cents) || 0;
+        const newTotal = entry.unitCostCents + landedAddon;
+
+        await this.db.execute(sql`
+          UPDATE inventory.inventory_lots
+          SET unit_cost_cents = ${entry.unitCostCents},
+              po_unit_cost_cents = ${entry.unitCostCents},
+              total_unit_cost_cents = ${newTotal},
+              cost_provisional = 0,
+              cost_source = 'backfill'
+          WHERE id = ${lot.id}
+        `);
+
+        const cascade = await this.cascadeRecostForLot(lot.id, newTotal);
+        cogsRowsUpdated += cascade.rowsUpdated;
+        lotsUpdated++;
+      }
+
+      // Update variant catalog costs so future lots pick this up via the resolver
+      await this.db.execute(sql`
+        UPDATE catalog.product_variants
+        SET last_cost_cents = ${entry.unitCostCents},
+            standard_cost_cents = CASE
+              WHEN standard_cost_cents IS NULL OR standard_cost_cents = 0
+              THEN ${entry.unitCostCents}
+              ELSE standard_cost_cents
+            END,
+            updated_at = NOW()
+        WHERE id = ${variantId}
+      `);
+
+      processed++;
+    }
+
+    return { processed, lotsUpdated, cogsRowsUpdated, skipped };
   }
 
   withTx(tx: any): COGSService {

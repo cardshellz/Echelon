@@ -4,12 +4,14 @@ import {
   inventoryLevels,
   inventoryTransactions,
 } from "@shared/schema";
+import { resolveReturnCost } from "../inventory/cost-resolver";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
+  execute: (query: any) => Promise<any>;
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
@@ -118,6 +120,13 @@ class ReturnsService {
 
         if (item.condition === "sellable") {
           // ---- SELLABLE: receive back into on-hand inventory ----
+          // Look up the original COGS so the returned lot carries the cost
+          // the unit was sold at, not $0 (COGS Phase 2).
+          const returnCost = await resolveReturnCost(
+            this.db,
+            item.productVariantId,
+            params.orderId,
+          );
           await this.inventoryCore.receiveInventory({
             productVariantId: item.productVariantId,
             warehouseLocationId: params.warehouseLocationId,
@@ -127,6 +136,7 @@ class ReturnsService {
               ? `Return (sellable): ${params.notes}`
               : `Return (sellable) for order ${params.orderId}`,
             userId: params.userId,
+            unitCostCents: returnCost.costCents,
           });
 
           // Log the return-specific transaction for traceability.
@@ -157,6 +167,12 @@ class ReturnsService {
           // ---- DAMAGED / DEFECTIVE: receive then immediately adjust out ----
           // Both operations MUST be atomic — if the adjust fails after
           // receiving, damaged stock would sit in sellable inventory.
+          // Even damaged returns carry original COGS for write-off valuation.
+          const damagedCost = await resolveReturnCost(
+            this.db,
+            item.productVariantId,
+            params.orderId,
+          );
           await this.db.transaction(async (tx: any) => {
             const txCore = this.inventoryCore.withTx
               ? this.inventoryCore.withTx(tx)
@@ -170,6 +186,7 @@ class ReturnsService {
               referenceId: String(params.orderId),
               notes: `Return (${item.condition}) for order ${params.orderId}`,
               userId: params.userId,
+              unitCostCents: damagedCost.costCents,
             });
 
             // Step 2: Immediately adjust out as damaged -- this removes the
