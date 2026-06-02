@@ -3063,6 +3063,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       });
     }
 
+    // Serialize concurrent pushes for the SAME shipment. Without this, two
+    // near-simultaneous pushes (multiple Shopify webhooks, or create+edit,
+    // firing within milliseconds) both read shipstation_order_id = null before
+    // either writes it back, so both take the CREATE path. ShipStation's
+    // orderKey upsert is NOT atomic under that race, so it ends up with TWO
+    // orders for the same shipment (see #58408). The advisory lock makes the
+    // second push wait for the first to finish and persist its order id — it
+    // then sees the id and UPDATES the existing SS order instead of creating a
+    // duplicate. (Matches the pg_advisory_lock idiom used elsewhere in this
+    // file; the namespace key differs so it never collides with the
+    // order-level lock 918406.)
+    const SHIPMENT_PUSH_LOCK_NS = 918407;
+    await db.execute(sql`SELECT pg_advisory_lock(${SHIPMENT_PUSH_LOCK_NS}, ${shipmentId})`);
+    try {
+
     // ─── 1. Load shipment header (WMS only) ─────────────────────────
     const shipmentRows = await db.select({
       id: outboundShipments.id,
@@ -3420,6 +3435,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     return { shipstationOrderId: result.orderId, orderKey };
+    } finally {
+      await db.execute(sql`SELECT pg_advisory_unlock(${SHIPMENT_PUSH_LOCK_NS}, ${shipmentId})`);
+    }
   }
 
   return {
