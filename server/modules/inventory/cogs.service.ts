@@ -5,7 +5,9 @@
  * which updates when landed costs arrive. FIFO is strict: oldest lot
  * consumed first, always. All cost operations are atomic (transactions).
  *
- * Tables: inventory_lots (modified), order_line_costs (new)
+ * Tables: inventory.inventory_lots (cost layers), oms.order_item_costs
+ * (the single live COGS ledger, written at pick time by pickFromLots).
+ * The legacy inventory.order_line_costs ledger is retired (COGS Phase 1).
  */
 
 import { eq, and, sql, asc, gt, desc, isNull, isNotNull } from "drizzle-orm";
@@ -224,43 +226,12 @@ export class COGSService {
     return consumptions;
   }
 
-  // ---------------------------------------------------------------------------
-  // RECORD SHIPMENT COGS
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Called when an order ships. Consumes from FIFO lots and records
-   * order_line_costs entries. All within a transaction.
-   */
-  async recordShipmentCOGS(params: {
-    orderId: number;
-    orderItemId?: number;
-    productVariantId: number;
-    qty: number;
-  }): Promise<CostLotConsumption[]> {
-    return this.db.transaction(async (tx: any) => {
-      const consumptions = await this.consumeLotsFIFO(
-        params.productVariantId,
-        params.qty,
-        tx,
-      );
-
-      // Record each consumption as an order_line_cost
-      for (const c of consumptions) {
-        await tx.execute(sql`
-          INSERT INTO order_line_costs (order_id, order_item_id, product_variant_id, lot_id, qty_consumed, unit_cost_cents, total_cost_cents, shipped_at, created_at)
-          VALUES (${params.orderId}, ${params.orderItemId ?? null}, ${params.productVariantId}, ${c.lotId}, ${c.qty}, ${c.unitCostCents}, ${c.totalCostCents}, NOW(), NOW())
-        `);
-
-        // Update lot qty_consumed
-        await tx.execute(sql`
-          UPDATE inventory_lots SET qty_consumed = COALESCE(qty_consumed, 0) + ${c.qty} WHERE id = ${c.lotId}
-        `);
-      }
-
-      return consumptions;
-    });
-  }
+  // NOTE (COGS Phase 1): recordShipmentCOGS was removed. It wrote to the
+  // retired inventory.order_line_costs ledger at ship time and re-decremented
+  // lot.qty_consumed, duplicating the consumption already booked at pick time
+  // by InventoryLotService.pickFromLots → oms.order_item_costs (the single
+  // live COGS ledger). consumeLotsFIFO below remains as a read-only FIFO cost
+  // simulation for valuation/preview use.
 
   // ---------------------------------------------------------------------------
   // UPDATE LOT LANDED COST
@@ -367,13 +338,19 @@ export class COGSService {
       .from(orderItems)
       .where(eq(orderItems.orderId, orderId));
 
-    // Get COGS entries from order_line_costs
+    // Get COGS entries from the live ledger (oms.order_item_costs, written at
+    // pick time by pickFromLots). The legacy inventory.order_line_costs ledger
+    // is retired — see recordShipmentCOGS note. Alias columns to the legacy
+    // shape (lot_id, qty_consumed) so downstream mapping is unchanged.
     const cogsResult = await this.db.execute(sql`
-      SELECT olc.*, pv.sku, p.name as product_name, il.lot_number
-      FROM order_line_costs olc
+      SELECT olc.order_id, olc.order_item_id, olc.product_variant_id,
+             olc.inventory_lot_id AS lot_id, olc.qty AS qty_consumed,
+             olc.unit_cost_cents, olc.total_cost_cents,
+             pv.sku, p.name as product_name, il.lot_number
+      FROM oms.order_item_costs olc
       LEFT JOIN catalog.product_variants pv ON pv.id = olc.product_variant_id
       LEFT JOIN catalog.products p ON p.id = pv.product_id
-      LEFT JOIN inventory.inventory_lots il ON il.id = olc.lot_id
+      LEFT JOIN inventory.inventory_lots il ON il.id = olc.inventory_lot_id
       WHERE olc.order_id = ${orderId}
       ORDER BY olc.id ASC
     `);
@@ -614,10 +591,11 @@ export class COGSService {
 
   async getAffectedOrdersForLot(lotId: number): Promise<any[]> {
     const result = await this.db.execute(sql`
-      SELECT DISTINCT o.id, o.order_number, olc.unit_cost_cents, olc.qty_consumed, olc.total_cost_cents
-      FROM order_line_costs olc
+      SELECT DISTINCT o.id, o.order_number, olc.unit_cost_cents,
+             olc.qty AS qty_consumed, olc.total_cost_cents
+      FROM oms.order_item_costs olc
       JOIN wms.orders o ON o.id = olc.order_id
-      WHERE olc.lot_id = ${lotId}
+      WHERE olc.inventory_lot_id = ${lotId}
       ORDER BY o.id DESC
     `);
     return result.rows || [];

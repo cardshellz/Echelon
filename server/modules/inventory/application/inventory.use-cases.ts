@@ -377,15 +377,12 @@ export class InventoryUseCases {
         });
       }
 
-      if (this.cogsService && params.orderId) {
-        const cogsSvc = (this.cogsService as any).withTx ? (this.cogsService as any).withTx(tx) : this.cogsService;
-        await cogsSvc.recordShipmentCOGS({
-          orderId: params.orderId,
-          orderItemId: params.orderItemId,
-          productVariantId: params.productVariantId,
-          qty: params.qty,
-        });
-      }
+      // COGS is recorded authoritatively at PICK time (pickFromLots →
+      // oms.order_item_costs), not at ship. The old recordShipmentCOGS path
+      // here wrote to the retired inventory.order_line_costs ledger AND
+      // re-decremented lot.qty_consumed — a double-consume hazard that, in
+      // practice, recorded nothing because consumeLotsFIFO only sees
+      // un-picked on-hand (already zero by ship time). Removed in COGS Phase 1.
 
       try {
         await this.storage.createInventoryTransaction({

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, check } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, check, numeric } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -559,6 +559,20 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   status: varchar("status", { length: 20 }).default("active"), // active, depleted, expired
   inboundShipmentId: integer("inbound_shipment_id").references(() => inboundShipments.id, { onDelete: "set null" }), // FK to inbound_shipments (added post-definition)
   costProvisional: integer("cost_provisional").notNull().default(0), // 1 = landed cost not yet finalized
+  // --- COGS cost layers (migration 051 / server/db.ts startup DDL) ---------
+  // These were historically raw-SQL-only columns. Surfaced in Drizzle here so
+  // the ORM is the single source of truth for lot cost. NUMERIC(10,4) carries
+  // sub-cent precision for landed-cost allocation (decimal, never float).
+  // `unitCostCents` (above) = PO unit cost used by the pick path; FIFO
+  // valuation prefers `totalUnitCostCents` (PO + allocated landed) when set.
+  poLineId: integer("po_line_id"),
+  poUnitCostCents: numeric("po_unit_cost_cents", { precision: 10, scale: 4 }).default("0"),
+  landedCostCents: numeric("landed_cost_cents", { precision: 10, scale: 4 }).default("0"),
+  totalUnitCostCents: numeric("total_unit_cost_cents", { precision: 10, scale: 4 }).default("0"),
+  qtyReceived: integer("qty_received").default(0),
+  qtyConsumed: integer("qty_consumed").default(0),
+  costSource: varchar("cost_source", { length: 20 }).default("manual"), // 'po' | 'manual' | 'landed' | 'legacy'
+  batchNumber: varchar("batch_number", { length: 100 }),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
