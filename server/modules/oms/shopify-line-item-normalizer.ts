@@ -19,6 +19,7 @@ export interface NormalizedLineItem {
   vendor: string | null;
   quantity: number;
   paidPriceCents: number;
+  retailPriceCents: number; // pre-discount unit price (Shopify line_items[].price)
   totalCents: number;
   discountCents: number;
   planDiscountCents: number;
@@ -145,6 +146,7 @@ function buildNormalizedLineItem(
     vendor: item.vendor || null,
     quantity,
     paidPriceCents,
+    retailPriceCents, // pre-discount unit price (Shopify line_items[].price)
     totalCents,
     discountCents: totalDiscountCents,
     planDiscountCents,

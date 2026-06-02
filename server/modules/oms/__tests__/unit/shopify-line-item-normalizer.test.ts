@@ -76,6 +76,36 @@ describe("normalizeShopifyLineItems", () => {
     });
 
     expect(lines.reduce((sum, line) => sum + line.totalCents, 0)).toBe(47378);
+
+    // retail_price_cents is the PRE-discount unit price (Shopify line price),
+    // independent of any discount allocation. $99.99 → 9999, $1.00 → 100.
+    expect(product?.retailPriceCents).toBe(9999);
+    expect(donation?.retailPriceCents).toBe(100);
+  });
+
+  it("surfaces retail_price_cents (pre-discount unit price) even on free items", () => {
+    // 100%-discount free item: paid/net is $0 but retail stays the list price.
+    const lines = normalizeShopifyLineItems(
+      [
+        {
+          id: 1,
+          product_id: 1,
+          sku: "FREE-ITEM",
+          title: "Free Item",
+          quantity: 1,
+          price: "19.99",
+          requires_shipping: true,
+          discount_allocations: [{ amount: "19.99", discount_application_index: 0 }],
+        },
+      ],
+      [{ type: "manual", title: "Shellz Club Member Discount" }],
+    );
+    expect(lines[0]).toMatchObject({
+      retailPriceCents: 1999, // pre-discount
+      paidPriceCents: 0, // net
+      totalCents: 0,
+      discountCents: 1999,
+    });
   });
 
   it("does not discount gift cards when Shopify sends an allocation on them", () => {
