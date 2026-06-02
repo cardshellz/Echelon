@@ -38,6 +38,8 @@ interface InventoryCore {
     notes?: string;
     userId?: string;
     unitCostCents?: number;
+    productCostCents?: number;
+    packagingCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     inboundShipmentId?: number;
