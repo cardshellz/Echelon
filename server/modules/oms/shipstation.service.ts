@@ -13,7 +13,6 @@
 import { eq, and, sql } from "drizzle-orm";
 import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels, outboundShipments, wmsOrders, outboundShipmentItems, wmsOrderItems } from "@shared/schema";
 import { buildTrackingUrl } from "./tracking-url.util";
-import { isLineSumWithinTolerance } from "@shared/validation/currency";
 import {
   cancelStaleShipmentsIfFullyCovered,
   dispatchShipmentEvent,
@@ -444,41 +443,16 @@ export function validateShipmentForPush(
     });
   }
 
-  const linesSumCents = items.reduce(
-    (sum, line) => sum + line.unit_price_cents * line.qty,
-    0,
-  );
-  const shippedUnitCount = items.reduce((sum, line) => sum + line.qty, 0);
-  const roundingToleranceUnits = Math.max(items.length, shippedUnitCount);
-  const parsedNonShippingTotalCents = Number(order.non_shipping_total_cents ?? 0);
-  const nonShippingTotalCents = Number.isInteger(parsedNonShippingTotalCents)
-    ? parsedNonShippingTotalCents
-    : 0;
-  
-  const discountCents = Number.isInteger(order.discount_cents) ? order.discount_cents : 0;
-  const expectedTotalExclusive = linesSumCents + nonShippingTotalCents + order.tax_cents + order.shipping_cents - discountCents;
-  const expectedTotalInclusive = linesSumCents + nonShippingTotalCents + order.shipping_cents - discountCents;
-  const totalMismatchContext = {
-    linesSumCents,
-    nonShippingTotalCents,
-    shippedUnitCount,
-    tax: order.tax_cents,
-    shipping: order.shipping_cents,
-    discount: discountCents,
-    expectedTotalExclusive,
-    expectedTotalInclusive,
-    actualTotalCents: order.total_cents,
-  };
-
-  const isPartialShipment = order.is_partial_shipment === true;
-  const matchesExclusive = isPartialShipment || isLineSumWithinTolerance(order.total_cents, expectedTotalExclusive, roundingToleranceUnits, 5);
-  const matchesInclusive = isPartialShipment || isLineSumWithinTolerance(order.total_cents, expectedTotalInclusive, roundingToleranceUnits, 5);
-
-  if (!matchesExclusive && !matchesInclusive) {
-    console.warn(
-      `[ShipStation Push] Shipment ${shipmentId}: total_cents mismatch (proceeding anyway) ${JSON.stringify(totalMismatchContext)}`,
-    );
-  }
+  // NOTE: a line-sum vs total_cents reconciliation check used to live here.
+  // It was removed (see #58276): it was warn-only (logged "proceeding anyway"
+  // and never blocked), structurally wrong (it added linesSum + the line
+  // subtotal again, double-counting, so it mismatched on essentially every
+  // order), AND it hard-threw on free / 100%-discount orders because the
+  // computed total went negative and ensureCents() rejects negative cents —
+  // which silently stranded those orders, never pushing them to ShipStation.
+  // The hard validations that actually protect the push remain: integer
+  // amount_paid_cents >= 0, integer total_cents >= 0, per-line unit prices,
+  // and a present shipping address.
 
   // 5. Shipping address — at least the single-line shipping_address must
   //    be present. We don't validate per-field granularity here because

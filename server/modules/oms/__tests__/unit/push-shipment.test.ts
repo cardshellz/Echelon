@@ -6,10 +6,11 @@
  * DB. The whole point of these tests is to protect the two invariants
  * that motivated the refactor:
  *
- *   1. No silent $0 push (audit B1 / issue #56430).
- *      validateShipmentForPush rejects any line with unit_price_cents <= 0,
- *      rejects amount_paid_cents <= 0, and rejects line-sum mismatches
- *      beyond the per-line tolerance.
+ *   1. No silent bad-data push (audit B1 / issue #56430).
+ *      validateShipmentForPush rejects negative/float line unit_price_cents
+ *      (0 is allowed — free items), negative amount_paid_cents, negative
+ *      total_cents, and a missing shipping address. (The old line-sum vs
+ *      total reconciliation was removed in #58276 — see that test.)
  *
  *   2. No re-push of already-terminal shipments.
  *      pushShipment throws on status NOT IN ('planned','queued','voided').
@@ -265,11 +266,10 @@ describe("validateShipmentForPush :: header-level violations", () => {
     expect(err?.context.value).toBe(-1);
   });
 
-  it("warns but does not throw on total_cents mismatch (ShipStation accepts any totals)", () => {
-    // Mismatch of 11¢ beyond the tolerance window. Previously this hard-
-    // blocked the push; now it logs a warning and proceeds — blocking a
-    // shippable order over a totals rounding difference is worse than
-    // sending a slightly imprecise total to ShipStation.
+  it("does not reconcile line totals — proceeds on any totals", () => {
+    // The line-sum vs total_cents reconciliation was removed (#58276): it was
+    // warn-only and structurally wrong. A totals mismatch must neither throw
+    // nor warn now — ShipStation accepts whatever totals we send.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(() =>
       validateShipmentForPush(
@@ -278,10 +278,35 @@ describe("validateShipmentForPush :: header-level violations", () => {
         [okItem({ unit_price_cents: 2500, qty: 2 })],
       ),
     ).not.toThrow();
-    expect(warn).toHaveBeenCalledWith(
+    expect(warn).not.toHaveBeenCalledWith(
       expect.stringContaining("total_cents mismatch"),
     );
     warn.mockRestore();
+  });
+
+  it("does not throw on a free / 100%-discount order (regression #58276)", () => {
+    // Free items via a 100% discount: line prices are $0 and the discount
+    // ($32.97) exceeds the line sum, so the old reconciliation computed a
+    // NEGATIVE total (-2552) and ensureCents() hard-threw, stranding the
+    // order — it never reached ShipStation. With the check removed it
+    // validates cleanly (customer still paid $7.45 shipping+tax).
+    expect(() =>
+      validateShipmentForPush(
+        okShipment(),
+        okOrder({
+          amount_paid_cents: 745,
+          tax_cents: 46,
+          shipping_cents: 699,
+          discount_cents: 3297,
+          total_cents: 745,
+        }),
+        [
+          okItem({ id: 1, unit_price_cents: 0, qty: 1 }),
+          okItem({ id: 2, unit_price_cents: 0, qty: 1 }),
+          okItem({ id: 3, unit_price_cents: 0, qty: 1 }),
+        ],
+      ),
+    ).not.toThrow();
   });
 
   it("throws when shipping_address is missing", () => {
