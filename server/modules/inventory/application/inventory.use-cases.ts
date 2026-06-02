@@ -7,6 +7,7 @@ import { eq, and } from "drizzle-orm";
 import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction } from "../../../../shared/schema";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
+import { resolveCost } from "../cost-resolver";
 
 export class FreezeViolationError extends Error {
   code = "LOCATION_FROZEN";
@@ -109,25 +110,26 @@ export class InventoryUseCases {
       // 2. Adjust Balance
       await this.storage.adjustInventoryLevel(level.id, { variantQty: params.qty }, tx);
 
-      // 3. FIFO Lot Generation
+      // 3. FIFO Lot Generation — resolve cost via waterfall when not provided
       let lotId: number | undefined;
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
+        const resolved = await resolveCost(tx, params.productVariantId, params.unitCostCents);
         const lot = await lotSvc.createLot({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
           qty: params.qty,
-          unitCostCents: params.unitCostCents ?? 0,
+          unitCostCents: resolved.costCents,
           receivingOrderId: params.receivingOrderId,
           purchaseOrderId: params.purchaseOrderId,
           inboundShipmentId: params.inboundShipmentId,
-          costProvisional: params.costProvisional,
+          costProvisional: params.costProvisional ?? (resolved.provisional ? 1 : 0),
           notes: params.notes,
         });
         lotId = lot.id;
 
-        if (params.unitCostCents !== undefined && params.unitCostCents > 0) {
-          await lotSvc.updateVariantCosts(params.productVariantId, params.unitCostCents);
+        if (resolved.costCents > 0) {
+          await lotSvc.updateVariantCosts(params.productVariantId, resolved.costCents);
         }
       }
 

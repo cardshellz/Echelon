@@ -21,6 +21,7 @@ import {
   inventoryLevels,
 } from "@shared/schema";
 import type { InventoryLot, InsertInventoryLot } from "@shared/schema";
+import { resolveCost } from "./cost-resolver";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -453,6 +454,7 @@ export class InventoryLotService {
     warehouseLocationId: number;
     qtyDelta: number;
     reservedQtyDelta?: number;
+    unitCostCents?: number;
     notes?: string;
   }): Promise<void> {
     if (params.reservedQtyDelta !== undefined && params.reservedQtyDelta > 0) {
@@ -460,12 +462,17 @@ export class InventoryLotService {
     }
 
     if (params.qtyDelta > 0) {
-      // Positive adjustment: create a new lot with zero cost (unknown source)
+      const resolved = await resolveCost(
+        this.db,
+        params.productVariantId,
+        params.unitCostCents,
+      );
       await this.createLot({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
         qty: params.qtyDelta,
-        unitCostCents: 0,
+        unitCostCents: resolved.costCents,
+        costProvisional: resolved.provisional ? 1 : 0,
         notes: params.notes ?? "Manual adjustment",
       });
     } else {
