@@ -270,6 +270,9 @@ export class COGSService {
       WHERE id = ${lotId}
     `);
 
+    // Cascade the new cost to any COGS rows written from this lot
+    await this.cascadeRecostForLot(lotId, newTotal);
+
     // Log the adjustment
     await this.db.execute(sql`
       INSERT INTO inventory.cost_adjustment_log (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
@@ -287,6 +290,53 @@ export class COGSService {
       adjustedAt: new Date(),
       reason: 'landed_cost_finalized',
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // CASCADE RECOST — update COGS rows when a lot's cost changes
+  // ---------------------------------------------------------------------------
+
+  /**
+   * After a lot's unit cost is updated (e.g. landed cost finalization), cascade
+   * the new cost to all order_item_costs rows that reference that lot. This
+   * ensures shipped orders reflect the true cost even when freight arrives late.
+   *
+   * Returns the number of COGS rows updated and the total delta in cents.
+   */
+  async cascadeRecostForLot(
+    lotId: number,
+    newUnitCostCents: number,
+  ): Promise<{ rowsUpdated: number; totalDeltaCents: number }> {
+    // Find all COGS rows referencing this lot with a different cost
+    const affected = await this.db.execute(sql`
+      SELECT id, qty, unit_cost_cents
+      FROM oms.order_item_costs
+      WHERE inventory_lot_id = ${lotId}
+        AND unit_cost_cents != ${newUnitCostCents}
+    `);
+
+    const rows = affected.rows || [];
+    if (rows.length === 0) {
+      return { rowsUpdated: 0, totalDeltaCents: 0 };
+    }
+
+    let totalDeltaCents = 0;
+    for (const row of rows) {
+      const oldCost = Number(row.unit_cost_cents) || 0;
+      const qty = Number(row.qty) || 0;
+      totalDeltaCents += (newUnitCostCents - oldCost) * qty;
+    }
+
+    // Bulk update: set new unit cost and recalculate total
+    await this.db.execute(sql`
+      UPDATE oms.order_item_costs
+      SET unit_cost_cents = ${newUnitCostCents},
+          total_cost_cents = qty * ${newUnitCostCents}
+      WHERE inventory_lot_id = ${lotId}
+        AND unit_cost_cents != ${newUnitCostCents}
+    `);
+
+    return { rowsUpdated: rows.length, totalDeltaCents };
   }
 
   // ---------------------------------------------------------------------------
