@@ -2562,7 +2562,7 @@ export function createPurchasingService(db: any, storage: Storage) {
           productId: isProduct ? r.product.id : null,
           productVariantId: isProduct ? (r.variant?.id ?? null) : null,
           vendorProductId: isProduct ? (r.line.vendorProductId ?? null) : null,
-          sku: isProduct ? (r.variant?.sku ?? null) : null,
+          sku: isProduct ? (r.variant?.sku || r.product.sku || null) : null,
           productName: isProduct ? r.product.name : null,
           description: r.line.description ?? null,
           unitOfMeasure: isProduct
