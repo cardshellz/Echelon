@@ -1050,9 +1050,23 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     }
   }, 12_000);
 
-  // One-time duplicate shipment cleanup: for each order with multiple
-  // active shipments, keep the one furthest along and cancel the rest.
-  // Also cancels the duplicate in ShipStation if it has a SS order ID.
+  // Duplicate shipment cleanup: for each order with multiple active
+  // shipments, keep the one furthest along and cancel genuine DUPLICATES
+  // (double-created shipments covering the same items). Also cancels the
+  // duplicate in ShipStation if it has a SS order ID.
+  //
+  // GUARDS (added after #58168) — this previously partitioned by order_id
+  // and cancelled every shipment except rank 1, which destroyed legitimate
+  // ShipStation SPLIT shipments (same order, DIFFERENT items) and even
+  // already-shipped shipments. That left split-off items unfulfilled in
+  // Shopify (cancelled WMS shipments never push). Two guards:
+  //   1. Never cancel a shipment whose status is 'shipped' — it physically
+  //      left the building; cancelling it only corrupts records and blocks
+  //      its Shopify fulfillment.
+  //   2. Only cancel a candidate if EVERY item it carries is also covered by
+  //      the kept (rank-1) shipment — i.e. a true duplicate. A split
+  //      shipment carries at least one line the kept one doesn't, so it is
+  //      never treated as a duplicate.
   setTimeout(async () => {
     try {
       const dupes = await db.execute(sql`
@@ -1061,6 +1075,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             os.id,
             os.order_id,
             os.status,
+            os.source,
             os.shipstation_order_id,
             os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
             os.shipstation_order_key,
@@ -1075,15 +1090,51 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 ELSE 5
               END,
               os.created_at ASC
-            ) AS rn
+            ) AS rn,
+            FIRST_VALUE(os.id) OVER (
+              PARTITION BY os.order_id
+              ORDER BY CASE os.status
+                WHEN 'shipped'  THEN 0
+                WHEN 'labeled'  THEN 1
+                WHEN 'queued'   THEN 2
+                WHEN 'on_hold'  THEN 3
+                WHEN 'planned'  THEN 4
+                ELSE 5
+              END,
+              os.created_at ASC
+            ) AS kept_shipment_id
           FROM wms.outbound_shipments os
           WHERE os.status NOT IN ('voided', 'cancelled')
         )
-        SELECT id, order_id, status,
+        SELECT id, order_id, status, source,
                shipping_engine, engine_order_ref, engine_shipment_ref,
                shipstation_order_id, shipstation_order_key
-        FROM ranked
+        FROM ranked r
         WHERE rn > 1
+          -- Guard 1: never cancel a physically-shipped shipment.
+          AND status <> 'shipped'
+          -- Guard 2: only true duplicates — for every item this candidate
+          -- actually ships (qty > 0), the kept shipment must ship at LEAST
+          -- the same quantity of that same line. A split shipment carries
+          -- a line the kept one doesn't ship (the kept lists it at qty 0
+          -- because the quantity was moved to the split), so the quantity
+          -- check below — not mere line presence — keeps splits alive.
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items sic
+            JOIN wms.order_items oic ON oic.id = sic.order_item_id
+            WHERE sic.shipment_id = r.id
+              AND COALESCE(sic.qty, 0) > 0
+              AND NOT EXISTS (
+                SELECT 1
+                FROM wms.outbound_shipment_items sik
+                JOIN wms.order_items oik ON oik.id = sik.order_item_id
+                WHERE sik.shipment_id = r.kept_shipment_id
+                  AND oik.oms_order_line_id IS NOT NULL
+                  AND oik.oms_order_line_id = oic.oms_order_line_id
+                  AND COALESCE(sik.qty, 0) >= COALESCE(sic.qty, 0)
+              )
+          )
       `);
       if (dupes.rows.length > 0) {
         const engine = services.shippingEngine;
