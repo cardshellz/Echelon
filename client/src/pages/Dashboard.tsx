@@ -195,9 +195,11 @@ export default function Dashboard() {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [alertDismissed, setAlertDismissed] = React.useState(false);
-  const [dateRange, setDateRange] = React.useState<DateRangeValue>({
-    from: new Date(),
-    to: new Date(),
+  const [dateRange, setDateRange] = React.useState<DateRangeValue>(() => {
+    const to = new Date();
+    const from = new Date();
+    from.setDate(from.getDate() - 29); // Last 30 days (inclusive of today)
+    return { from, to };
   });
 
   const fromStr = format(dateRange.from, "yyyy-MM-dd");
