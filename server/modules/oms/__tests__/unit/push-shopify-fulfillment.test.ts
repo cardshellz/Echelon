@@ -1425,6 +1425,7 @@ describe("resolveFulfillmentOrderLinesFromCandidates :: no-SKU line fallback", (
     fulfillmentOrderLineItemId: "gid://shopify/FulfillmentOrderLineItem/FOLI",
     sku: null,
     externalLineItemId: null,
+    assignedLocationId: null,
     remaining: 5,
     status: "OPEN",
     ...over,
@@ -1465,13 +1466,30 @@ describe("resolveFulfillmentOrderLinesFromCandidates :: no-SKU line fallback", (
     expect(resolved).toHaveLength(1);
   });
 
-  it("still prefers SKU match when a usable SKU is present", () => {
+  it("prefers the line-id match over SKU — line id is the canonical identity", () => {
+    // Item maps to Shopify line 111. One candidate matches by line id (but
+    // shows a drifted SKU), another matches by SKU (but is a different line).
+    // The line id is authoritative, so the line-id candidate wins.
     const items = [
       { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
         sku: "ABC-1", external_line_item_id: "111", qty: 1 },
     ];
     const candidates = [
-      candidate({ fulfillmentOrderLineItemId: "by-line", sku: "WRONG", externalLineItemId: "111" }),
+      candidate({ fulfillmentOrderLineItemId: "by-line", sku: "DRIFTED", externalLineItemId: "111" }),
+      candidate({ fulfillmentOrderLineItemId: "by-sku", sku: "ABC-1", externalLineItemId: "222" }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe("by-line");
+  });
+
+  it("falls back to SKU when the item has no line id (legacy rows)", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: null, qty: 1 },
+    ];
+    const candidates = [
       candidate({ fulfillmentOrderLineItemId: "by-sku", sku: "ABC-1", externalLineItemId: "222" }),
     ];
     const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
@@ -1506,6 +1524,89 @@ describe("resolveFulfillmentOrderLinesFromCandidates :: no-SKU line fallback", (
     expect(() =>
       __test__.resolveFulfillmentOrderLinesFromCandidates(ORDER, items as any, SHIPMENT, candidates as any),
     ).toThrow(/no fulfillment-order line item available/);
+  });
+});
+
+// Multi-warehouse: a single order line split across two locations appears as
+// two fulfillment tickets sharing the same line id. The shipment must fulfill
+// against the ticket at the location it actually shipped FROM.
+describe("resolveFulfillmentOrderLinesFromCandidates :: location pinning", () => {
+  const ORDER = "gid://shopify/Order/999";
+  const SHIPMENT = 5000;
+  const LOC_A = "111111";
+  const LOC_B = "222222";
+
+  const candidate = (over: Partial<any>) => ({
+    fulfillmentOrderId: "gid://shopify/FulfillmentOrder/FO",
+    fulfillmentOrderLineItemId: "gid://shopify/FulfillmentOrderLineItem/FOLI",
+    sku: "ABC-1",
+    externalLineItemId: "777",
+    assignedLocationId: null,
+    remaining: 5,
+    status: "OPEN",
+    ...over,
+  });
+
+  const splitItem = [
+    { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+      sku: "ABC-1", external_line_item_id: "777", qty: 1 },
+  ];
+
+  it("pins a Warehouse-A shipment to the Warehouse-A ticket (same line at both)", () => {
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "at-A", assignedLocationId: LOC_A, remaining: 3 }),
+      candidate({ fulfillmentOrderLineItemId: "at-B", assignedLocationId: LOC_B, remaining: 2 }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, splitItem as any, SHIPMENT, candidates as any, LOC_A,
+    );
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe("at-A");
+  });
+
+  it("pins the same shipment to Warehouse-B when it shipped from B", () => {
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "at-A", assignedLocationId: LOC_A, remaining: 3 }),
+      candidate({ fulfillmentOrderLineItemId: "at-B", assignedLocationId: LOC_B, remaining: 2 }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, splitItem as any, SHIPMENT, candidates as any, LOC_B,
+    );
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe("at-B");
+  });
+
+  it("normalises gid location ids when pinning (gid pin vs numeric candidate)", () => {
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "at-A", assignedLocationId: LOC_A, remaining: 3 }),
+      candidate({ fulfillmentOrderLineItemId: "at-B", assignedLocationId: LOC_B, remaining: 2 }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, splitItem as any, SHIPMENT, candidates as any,
+      `gid://shopify/Location/${LOC_B}`,
+    );
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe("at-B");
+  });
+
+  it("falls back to any-location match (with a warning) when nothing is at the ship location", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "at-B", assignedLocationId: LOC_B, remaining: 2 }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, splitItem as any, SHIPMENT, candidates as any, LOC_A,
+    );
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe("at-B");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("location mismatch"));
+    warn.mockRestore();
+  });
+
+  it("is location-agnostic when no ship-from location is provided (single-location stores)", () => {
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "only", assignedLocationId: LOC_A, remaining: 3 }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, splitItem as any, SHIPMENT, candidates as any, null,
+    );
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe("only");
   });
 });
 
