@@ -340,6 +340,91 @@ export class COGSService {
   }
 
   // ---------------------------------------------------------------------------
+  // INVOICE VARIANCE → LOT COST RECONCILIATION
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When an approved invoice line has a different unit cost than what was
+   * originally recorded on the PO, update the affected lots and cascade the
+   * corrected cost to COGS rows.
+   *
+   * Finds lots by (purchaseOrderId, productVariantId) and updates their
+   * unitCostCents + total_unit_cost_cents to reflect the invoice-actual cost.
+   * Logs each adjustment to cost_adjustment_log.
+   *
+   * Returns summary of lots updated and total COGS delta.
+   */
+  async reconcileInvoiceVariance(params: {
+    purchaseOrderId: number;
+    productVariantId: number;
+    invoiceUnitCostCents: number;
+    invoiceNumber?: string;
+  }): Promise<{ lotsUpdated: number; cogsRowsUpdated: number; totalCogsDeltaCents: number }> {
+    const { purchaseOrderId, productVariantId, invoiceUnitCostCents } = params;
+
+    // Find lots linked to this PO + variant
+    const affectedLots = await this.db.execute(sql`
+      SELECT id, lot_number, unit_cost_cents,
+             COALESCE(landed_cost_cents, 0) AS landed_cost_cents,
+             COALESCE(total_unit_cost_cents, unit_cost_cents) AS total_unit_cost_cents
+      FROM inventory.inventory_lots
+      WHERE purchase_order_id = ${purchaseOrderId}
+        AND product_variant_id = ${productVariantId}
+    `);
+
+    const lots = affectedLots.rows || [];
+    if (lots.length === 0) {
+      return { lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0 };
+    }
+
+    let lotsUpdated = 0;
+    let cogsRowsUpdated = 0;
+    let totalCogsDeltaCents = 0;
+
+    for (const lot of lots) {
+      const oldCost = Number(lot.unit_cost_cents) || 0;
+      const landedAddon = Number(lot.landed_cost_cents) || 0;
+      // New total = invoice base cost + existing landed addon
+      const newTotal = invoiceUnitCostCents + landedAddon;
+
+      if (oldCost === invoiceUnitCostCents && Number(lot.total_unit_cost_cents) === newTotal) {
+        continue; // Already at the right cost
+      }
+
+      // Update the lot
+      await this.db.execute(sql`
+        UPDATE inventory.inventory_lots
+        SET unit_cost_cents = ${invoiceUnitCostCents},
+            po_unit_cost_cents = ${invoiceUnitCostCents},
+            total_unit_cost_cents = ${newTotal},
+            cost_source = 'invoice'
+        WHERE id = ${lot.id}
+      `);
+
+      // Log the adjustment
+      const reason = params.invoiceNumber
+        ? `invoice_variance:${params.invoiceNumber}`
+        : "invoice_variance";
+      await this.db.execute(sql`
+        INSERT INTO inventory.cost_adjustment_log
+          (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
+        SELECT ${lot.id}, ${lot.lot_number}, ${productVariantId}, COALESCE(pv.sku, ''),
+               ${Number(lot.total_unit_cost_cents)}, ${newTotal}, ${newTotal - Number(lot.total_unit_cost_cents)},
+               ${reason}, NOW()
+        FROM catalog.product_variants pv WHERE pv.id = ${productVariantId}
+      `);
+
+      // Cascade to COGS
+      const cascadeResult = await this.cascadeRecostForLot(lot.id, newTotal);
+      cogsRowsUpdated += cascadeResult.rowsUpdated;
+      totalCogsDeltaCents += cascadeResult.totalDeltaCents;
+      lotsUpdated++;
+    }
+
+    return { lotsUpdated, cogsRowsUpdated, totalCogsDeltaCents };
+  }
+
+  // ---------------------------------------------------------------------------
   // GET PRODUCT COST LOTS
   // ---------------------------------------------------------------------------
 
