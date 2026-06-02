@@ -67,7 +67,13 @@ export const omsOrders = omsSchema.table("oms_orders", {
   channelShipByDate: timestamp("channel_ship_by_date"), // platform-provided ship-by deadline (eBay shipByDate, etc.)
 
   // Totals (cents)
+  // subtotal_cents is the POST-discount merchandise subtotal (mirrors
+  // Shopify's subtotal_price). gross_subtotal_cents is the PRE-discount
+  // merchandise subtotal (= sum of line retail_price_cents × quantity).
+  // Stored explicitly so consumers don't have to derive it as
+  // subtotal_cents + discount_cents (migration 093 / #58276).
   subtotalCents: bigint("subtotal_cents", { mode: "number" }).notNull().default(0),
+  grossSubtotalCents: bigint("gross_subtotal_cents", { mode: "number" }).notNull().default(0),
   shippingCents: bigint("shipping_cents", { mode: "number" }).notNull().default(0),
   taxCents: bigint("tax_cents", { mode: "number" }).notNull().default(0),
   taxExempt: boolean("tax_exempt").default(false),
@@ -145,7 +151,13 @@ export const omsOrderLines = omsSchema.table("oms_order_lines", {
   name: text("name"),
   vendor: varchar("vendor", { length: 200 }),
   quantity: integer("quantity").notNull(),
+  // paid_price_cents / total_price_cents are POST-discount (net) — what the
+  // customer paid. retail_price_cents is the PRE-discount UNIT price (mirrors
+  // Shopify line_items[].price); gross line total = retail_price_cents × qty.
+  // Stored explicitly so pre-discount value isn't derived as
+  // total_price_cents + total_discount_cents (migration 093 / #58276).
   paidPriceCents: bigint("paid_price_cents", { mode: "number" }).notNull().default(0),
+  retailPriceCents: bigint("retail_price_cents", { mode: "number" }).notNull().default(0),
   totalPriceCents: bigint("total_price_cents", { mode: "number" }).notNull().default(0),
   totalDiscountCents: bigint("total_discount_cents", { mode: "number" }).notNull().default(0),
   planDiscountCents: bigint("plan_discount_cents", { mode: "number" }).notNull().default(0),

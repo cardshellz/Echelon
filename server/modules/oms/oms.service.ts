@@ -39,6 +39,7 @@ export interface OrderData {
   shippingServiceLevel?: "standard" | "expedited" | "overnight";
   channelShipByDate?: Date | string | null;
   subtotalCents?: number;
+  grossSubtotalCents?: number; // pre-discount merchandise subtotal
   shippingCents?: number;
   taxCents?: number;
   discountCents?: number;
@@ -69,6 +70,7 @@ export interface LineItemData {
   variantTitle?: string | null;
   quantity: number;
   paidPriceCents?: number;
+  retailPriceCents?: number; // pre-discount unit price (Shopify line price)
   totalCents?: number;
   taxCents?: number;
   discountCents?: number;
@@ -153,6 +155,7 @@ export function createOmsService(db: any, reservationService?: any) {
         shipToZip: data.shipToZip,
         shipToCountry: data.shipToCountry,
         subtotalCents: data.subtotalCents || 0,
+        grossSubtotalCents: data.grossSubtotalCents || 0,
         shippingCents: data.shippingCents || 0,
         taxCents: data.taxCents || 0,
         discountCents: data.discountCents || 0,
@@ -262,6 +265,7 @@ export function createOmsService(db: any, reservationService?: any) {
             variantTitle: item.variantTitle,
             quantity: item.quantity,
             paidPriceCents: item.paidPriceCents || 0,
+            retailPriceCents: item.retailPriceCents || 0,
             totalPriceCents: item.totalCents || 0,
             totalDiscountCents: item.discountCents || 0,
             planDiscountCents: item.planDiscountCents || 0,
@@ -310,6 +314,7 @@ export function createOmsService(db: any, reservationService?: any) {
         variantTitle: item.variantTitle,
         quantity: item.quantity,
         paidPriceCents: item.paidPriceCents || 0,
+        retailPriceCents: item.retailPriceCents || 0,
         totalPriceCents: item.totalCents || 0,
         totalDiscountCents: item.discountCents || 0,
         planDiscountCents: item.planDiscountCents || 0,

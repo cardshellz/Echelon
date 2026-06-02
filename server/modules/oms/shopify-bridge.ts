@@ -119,6 +119,7 @@ export async function bridgeShopifyOrderToOms(
         title: item.title,
         quantity: qty,
         paidPriceCents,
+        retailPriceCents,
         totalCents,
         discountCents: totalDiscountCents,
         planDiscountCents,
@@ -161,6 +162,11 @@ export async function bridgeShopifyOrderToOms(
       shipToZip: raw.shipping_postal_code,
       shipToCountry: raw.shipping_country,
       subtotalCents: raw.subtotal_price_cents || 0,
+      // Pre-discount merchandise subtotal = sum of line gross (retail × qty).
+      grossSubtotalCents: lineItems.reduce(
+        (s, li) => s + (li.retailPriceCents || 0) * (li.quantity || 0),
+        0,
+      ),
       shippingCents: raw.total_shipping_cents || 0,
       taxCents: raw.total_tax_cents || 0,
       discountCents: raw.total_discounts_cents || 0,
