@@ -775,13 +775,15 @@ export class InventoryLotService {
    * Returns per-variant totals and grand total.
    */
   async getInventoryValuation(): Promise<{
-    total: { qty: number; valueCents: number };
+    total: { qty: number; valueCents: number; zeroCostQty: number; provisionalQty: number };
     byVariant: Array<{
       productVariantId: number;
       sku: string | null;
       qty: number;
       avgCostCents: number;
       valueCents: number;
+      zeroCostQty: number;
+      provisionalQty: number;
     }>;
   }> {
     const rows = await this.db
@@ -789,32 +791,42 @@ export class InventoryLotService {
         productVariantId: inventoryLots.productVariantId,
         sku: productVariants.sku,
         qty: sql<number>`SUM(${inventoryLots.qtyOnHand})`,
-        totalCost: sql<number>`SUM(${inventoryLots.qtyOnHand} * ${inventoryLots.unitCostCents})`,
+        totalCost: sql<number>`SUM(${inventoryLots.qtyOnHand} * COALESCE(${inventoryLots.totalUnitCostCents}, ${inventoryLots.unitCostCents}, 0))`,
+        zeroCostQty: sql<number>`SUM(CASE WHEN COALESCE(${inventoryLots.totalUnitCostCents}, ${inventoryLots.unitCostCents}, 0) = 0 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
+        provisionalQty: sql<number>`SUM(CASE WHEN ${inventoryLots.costProvisional} = 1 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
       })
       .from(inventoryLots)
       .innerJoin(productVariants, eq(productVariants.id, inventoryLots.productVariantId))
-      .where(eq(inventoryLots.status, "active"))
+      .where(and(eq(inventoryLots.status, "active"), gt(inventoryLots.qtyOnHand, 0)))
       .groupBy(inventoryLots.productVariantId, productVariants.sku);
 
     let totalQty = 0;
     let totalValue = 0;
+    let totalZeroCostQty = 0;
+    let totalProvisionalQty = 0;
 
     const byVariant = rows.map((r: any) => {
       const qty = Number(r.qty) || 0;
       const valueCents = Number(r.totalCost) || 0;
+      const zeroCostQty = Number(r.zeroCostQty) || 0;
+      const provisionalQty = Number(r.provisionalQty) || 0;
       totalQty += qty;
       totalValue += valueCents;
+      totalZeroCostQty += zeroCostQty;
+      totalProvisionalQty += provisionalQty;
       return {
         productVariantId: r.productVariantId,
         sku: r.sku,
         qty,
         avgCostCents: qty > 0 ? Math.round(valueCents / qty) : 0,
         valueCents,
+        zeroCostQty,
+        provisionalQty,
       };
     });
 
     return {
-      total: { qty: totalQty, valueCents: totalValue },
+      total: { qty: totalQty, valueCents: totalValue, zeroCostQty: totalZeroCostQty, provisionalQty: totalProvisionalQty },
       byVariant,
     };
   }

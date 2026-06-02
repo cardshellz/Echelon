@@ -70,6 +70,8 @@ export interface OrderLineCOGS {
 export interface InventoryValuationResult {
   totalValueCents: number;
   totalQty: number;
+  zeroCostQty: number;
+  provisionalQty: number;
   landedPendingLots: number;
   landedPendingValueCents: number;
   byProduct: Array<{
@@ -80,6 +82,7 @@ export interface InventoryValuationResult {
     avgCostPerPiece: number;
     totalValueCents: number;
     activeLots: number;
+    zeroCostQty: number;
     hasLandedPending: boolean;
   }>;
 }
@@ -568,6 +571,7 @@ export class COGSService {
         END as avg_cost_per_piece,
         SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)) as total_value_cents,
         COUNT(il.id) as active_lots,
+        SUM(CASE WHEN COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0) = 0 THEN il.qty_on_hand ELSE 0 END) as zero_cost_qty,
         BOOL_OR(COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
       FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
@@ -585,29 +589,34 @@ export class COGSService {
       avgCostPerPiece: Number(r.avg_cost_per_piece) || 0,
       totalValueCents: Number(r.total_value_cents) || 0,
       activeLots: Number(r.active_lots) || 0,
+      zeroCostQty: Number(r.zero_cost_qty) || 0,
       hasLandedPending: r.has_landed_pending || false,
     }));
 
     const totalValueCents = byProduct.reduce((s: number, p: any) => s + p.totalValueCents, 0);
     const totalQty = byProduct.reduce((s: number, p: any) => s + p.totalQty, 0);
+    const zeroCostQty = byProduct.reduce((s: number, p: any) => s + p.zeroCostQty, 0);
 
-    // Landed cost pending summary
+    // Provisional + landed pending summary
     const pendingResult = await this.db.execute(sql`
-      SELECT COUNT(*) as lot_count,
-             SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)) as pending_value
+      SELECT
+        COUNT(*) FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as landed_pending_count,
+        COALESCE(SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0))
+          FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL), 0) as landed_pending_value,
+        COALESCE(SUM(il.qty_on_hand) FILTER (WHERE il.cost_provisional = 1), 0) as provisional_qty
       FROM inventory.inventory_lots il
       WHERE il.status = 'active'
         AND il.qty_on_hand > 0
-        AND COALESCE(il.landed_cost_cents, 0) = 0
-        AND il.inbound_shipment_id IS NOT NULL
     `);
-    const pending = pendingResult.rows?.[0] || {};
+    const pending = pendingResult.rows?.[0] as any || {};
 
     return {
       totalValueCents,
       totalQty,
-      landedPendingLots: Number(pending.lot_count) || 0,
-      landedPendingValueCents: Number(pending.pending_value) || 0,
+      zeroCostQty,
+      provisionalQty: Number(pending.provisional_qty) || 0,
+      landedPendingLots: Number(pending.landed_pending_count) || 0,
+      landedPendingValueCents: Number(pending.landed_pending_value) || 0,
       byProduct,
     };
   }
