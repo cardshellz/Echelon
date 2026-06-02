@@ -1413,6 +1413,102 @@ describe("normaliseShopifyLocationId", () => {
   });
 });
 
+// Regression: order #58197 — a no-SKU wax line ("sku=UNKNOWN") failed the
+// whole order's fulfillment push because the resolver matched by SKU only.
+// It now falls back to the Shopify order line-item id.
+describe("resolveFulfillmentOrderLinesFromCandidates :: no-SKU line fallback", () => {
+  const ORDER = "gid://shopify/Order/12095128600735";
+  const SHIPMENT = 2147;
+
+  const candidate = (over: Partial<any>) => ({
+    fulfillmentOrderId: "gid://shopify/FulfillmentOrder/FO1",
+    fulfillmentOrderLineItemId: "gid://shopify/FulfillmentOrderLineItem/FOLI",
+    sku: null,
+    externalLineItemId: null,
+    remaining: 5,
+    status: "OPEN",
+    ...over,
+  });
+
+  it("resolves an UNKNOWN-sku item via its external line-item id (gid candidate)", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "UNKNOWN", external_line_item_id: "35767315431583", qty: 2 },
+    ];
+    const candidates = [
+      candidate({
+        fulfillmentOrderLineItemId: "gid://shopify/FulfillmentOrderLineItem/WAX",
+        sku: null,
+        externalLineItemId: "gid://shopify/LineItem/35767315431583",
+        remaining: 2,
+      }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe(
+      "gid://shopify/FulfillmentOrderLineItem/WAX",
+    );
+    expect(resolved[0].quantity).toBe(2);
+  });
+
+  it("treats a blank sku the same as UNKNOWN and falls back to line id", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "", external_line_item_id: "999", qty: 1 },
+    ];
+    const candidates = [candidate({ sku: null, externalLineItemId: "999", remaining: 1 })];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+    expect(resolved).toHaveLength(1);
+  });
+
+  it("still prefers SKU match when a usable SKU is present", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 1 },
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "by-line", sku: "WRONG", externalLineItemId: "111" }),
+      candidate({ fulfillmentOrderLineItemId: "by-sku", sku: "ABC-1", externalLineItemId: "222" }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe("by-sku");
+  });
+
+  it("resolves a mixed shipment (mapped SKUs + one no-SKU line) without throwing", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "SHLZ-TOP-55PT-BLU-P25", external_line_item_id: "35767315464351", qty: 1 },
+      { shipment_item_id: 2, order_item_id: 11, oms_order_line_id: 101,
+        sku: "UNKNOWN", external_line_item_id: "35767315431583", qty: 2 },
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "toploader", sku: "SHLZ-TOP-55PT-BLU-P25", externalLineItemId: "35767315464351", remaining: 1 }),
+      candidate({ fulfillmentOrderLineItemId: "wax", sku: null, externalLineItemId: "35767315431583", remaining: 2 }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+    expect(resolved.map((r) => r.fulfillmentOrderLineItemId).sort()).toEqual(["toploader", "wax"]);
+  });
+
+  it("throws when neither sku nor line id can match", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "UNKNOWN", external_line_item_id: "does-not-exist", qty: 1 },
+    ];
+    const candidates = [candidate({ sku: "ABC-1", externalLineItemId: "111" })];
+    expect(() =>
+      __test__.resolveFulfillmentOrderLinesFromCandidates(ORDER, items as any, SHIPMENT, candidates as any),
+    ).toThrow(/no fulfillment-order line item available/);
+  });
+});
+
 describe("setShopifyClient", () => {
   it("is exposed on the service", () => {
     const db = makeDb([]);

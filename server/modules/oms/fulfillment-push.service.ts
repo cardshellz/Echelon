@@ -212,6 +212,11 @@ interface WmsShipmentItemForShopify {
   order_item_id: number | null;
   oms_order_line_id: number | null;
   sku: string | null;
+  // Shopify order line-item id (bare numeric string from
+  // oms_order_lines.external_line_item_id). Used as the canonical match key
+  // when SKU is missing/UNKNOWN — e.g. wax/special products that carry no
+  // warehouse SKU but are still real, fulfillable Shopify line items.
+  external_line_item_id: string | null;
   qty: number;
 }
 
@@ -1079,9 +1084,11 @@ export function createFulfillmentPushService(
         si.order_item_id AS order_item_id,
         oi.oms_order_line_id AS oms_order_line_id,
         oi.sku           AS sku,
+        ol.external_line_item_id AS external_line_item_id,
         GREATEST(0, si.qty - COALESCE(la.adjusted_qty, 0))::int AS qty
       FROM wms.outbound_shipment_items si
       LEFT JOIN wms.order_items oi ON oi.id = si.order_item_id
+      LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
       LEFT JOIN line_adjustments la ON la.order_line_id = oi.oms_order_line_id
       WHERE si.shipment_id = ${shipmentId}
         AND COALESCE(oi.status, 'pending') <> 'cancelled'
@@ -1913,6 +1920,7 @@ interface ShopifyFulfillmentOrderQueryNode {
         id: string;
         sku?: string | null;
         remainingQuantity: number;
+        lineItem?: { id?: string | null } | null;
       };
     }>;
   };
@@ -1922,6 +1930,10 @@ interface ShopifyFulfillmentOrderLineCandidate {
   fulfillmentOrderId: string;
   fulfillmentOrderLineItemId: string;
   sku: string | null;
+  // Shopify order line-item id (bare numeric, normalized from the GID) for
+  // the underlying line this FO line item fulfills. Lets us match by line id
+  // when SKU is unavailable on either side.
+  externalLineItemId: string | null;
   remaining: number;
   status: string;
 }
@@ -1941,6 +1953,7 @@ const FULFILLMENT_ORDERS_QUERY = `
                   id
                   sku
                   remainingQuantity
+                  lineItem { id }
                 }
               }
             }
@@ -2011,6 +2024,7 @@ async function fetchFulfillmentOrderLineCandidates(
         fulfillmentOrderId: fo.id,
         fulfillmentOrderLineItemId: edge.node.id,
         sku: edge.node.sku ?? null,
+        externalLineItemId: normalizeShopifyNumericId(edge.node.lineItem?.id),
         remaining: Number.isInteger(edge.node.remainingQuantity)
           ? edge.node.remainingQuantity
           : 0,
@@ -2020,6 +2034,18 @@ async function fetchFulfillmentOrderLineCandidates(
   }
 
   return candidates;
+}
+
+/**
+ * Normalize a Shopify id to its bare numeric form so a stored
+ * `external_line_item_id` ("35767315431583") compares equal to a GID
+ * returned by the Admin API ("gid://shopify/LineItem/35767315431583").
+ * Returns null for blank/non-numeric input.
+ */
+function normalizeShopifyNumericId(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const match = String(value).trim().match(/(\d+)\s*$/);
+  return match ? match[1] : null;
 }
 
 function resolveFulfillmentOrderLinesFromCandidates(
@@ -2042,36 +2068,49 @@ function resolveFulfillmentOrderLinesFromCandidates(
 
   const resolved: ResolvedFulfillmentOrderLine[] = [];
   for (const item of items) {
-    const sku = (item.sku ?? "").trim();
-    if (sku.length === 0) {
-      throw new ShopifyFulfillmentPushError(
-        `pushShopifyFulfillment: shipment item ${item.shipment_item_id} has no sku — cannot match to Shopify fulfillment-order line`,
-        {
-          code: SHOPIFY_PUSH_INVALID_INPUT,
-          shipmentId,
-          field: "items.sku",
-          value: item.shipment_item_id,
-        },
+    const rawSku = (item.sku ?? "").trim();
+    // "UNKNOWN" is the WMS sentinel for an order line with no mapped
+    // warehouse SKU (e.g. members-only wax/special products). Treat it the
+    // same as a blank SKU — unusable for SKU matching, fall back to line id.
+    const skuUsable = rawSku.length > 0 && rawSku.toUpperCase() !== "UNKNOWN";
+    const externalLineId = normalizeShopifyNumericId(item.external_line_item_id);
+
+    // Only allocate against fulfillment orders that can accept work.
+    // Shopify status enum: OPEN | IN_PROGRESS | CLOSED | CANCELLED |
+    // INCOMPLETE | SCHEDULED. CLOSED/CANCELLED can't take new fulfillments.
+    const isAllocatable = (c: ShopifyFulfillmentOrderLineCandidate) =>
+      c.remaining >= item.qty && c.status !== "CLOSED" && c.status !== "CANCELLED";
+
+    // 1. Prefer SKU match when the item carries a usable SKU.
+    let candidate: ShopifyFulfillmentOrderLineCandidate | undefined = skuUsable
+      ? candidates.find((c) => c.sku === rawSku && isAllocatable(c))
+      : undefined;
+
+    // 2. Fall back to the Shopify order line-item id. This is the canonical
+    //    line identity and the ONLY workable key for no-SKU products: the
+    //    wax/special line has no SKU on either side but still maps 1:1 to a
+    //    real, fulfillable Shopify line item. Without this, one unmapped line
+    //    threw and failed the WHOLE order's fulfillment push (all-or-nothing),
+    //    leaving fully-shipped multi-item orders showing unfulfilled in
+    //    Shopify. Also a safety net when a present SKU drifts from Shopify's.
+    if (!candidate && externalLineId) {
+      candidate = candidates.find(
+        (c) =>
+          normalizeShopifyNumericId(c.externalLineItemId) === externalLineId &&
+          isAllocatable(c),
       );
     }
-    const candidate = candidates.find(
-      (c) =>
-        c.sku === sku &&
-        c.remaining >= item.qty &&
-        // Only allocate against fulfillment orders that can accept work.
-        // Shopify status enum: OPEN | IN_PROGRESS | CLOSED | CANCELLED |
-        // INCOMPLETE | SCHEDULED. CLOSED/CANCELLED can't take new fulfillments.
-        c.status !== "CLOSED" &&
-        c.status !== "CANCELLED",
-    );
+
     if (!candidate) {
       throw new ShopifyFulfillmentPushError(
-        `pushShopifyFulfillment: no fulfillment-order line item available for sku=${sku} qty=${item.qty} on order ${shopifyOrderGid}`,
+        `pushShopifyFulfillment: no fulfillment-order line item available for ` +
+          `sku=${rawSku || "(none)"} lineItemId=${externalLineId ?? "(none)"} ` +
+          `qty=${item.qty} on order ${shopifyOrderGid}`,
         {
           code: SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
           shipmentId,
-          field: "items.sku",
-          value: { sku, qty: item.qty },
+          field: "items",
+          value: { sku: rawSku, externalLineItemId: externalLineId, qty: item.qty },
         },
       );
     }
