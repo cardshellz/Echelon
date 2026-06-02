@@ -273,6 +273,17 @@ export class InventoryUseCases {
         pickedQty: -actualUnpick,
       }, tx);
 
+      // Reverse COGS: restore lot quantities and delete order_item_costs rows
+      if (this.lotService && params.orderItemId) {
+        const lotSvc = this.lotService.withTx(tx);
+        await lotSvc.unpickFromLots({
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          productVariantId: params.productVariantId,
+          qty: actualUnpick,
+        });
+      }
+
       await this.storage.createInventoryTransaction({
         productVariantId: params.productVariantId,
         fromLocationId: params.warehouseLocationId,

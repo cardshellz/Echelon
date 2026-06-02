@@ -278,6 +278,32 @@ export class InventoryLotService {
     orderId: number;
     orderItemId?: number;
   }): Promise<Array<{ lotId: number; qty: number; unitCostCents: number }>> {
+    // Idempotency: if COGS rows already exist for this order item, this is a
+    // retry — return the existing allocations without double-writing.
+    if (params.orderItemId) {
+      const existing = await this.db
+        .select({
+          inventoryLotId: orderItemCosts.inventoryLotId,
+          qty: orderItemCosts.qty,
+          unitCostCents: orderItemCosts.unitCostCents,
+        })
+        .from(orderItemCosts)
+        .where(
+          and(
+            eq(orderItemCosts.orderId, params.orderId),
+            eq(orderItemCosts.orderItemId, params.orderItemId),
+          ),
+        );
+
+      if (existing.length > 0) {
+        return existing.map((e: any) => ({
+          lotId: e.inventoryLotId,
+          qty: e.qty,
+          unitCostCents: e.unitCostCents,
+        }));
+      }
+    }
+
     const lots = await this.db
       .select()
       .from(inventoryLots)
@@ -345,6 +371,97 @@ export class InventoryLotService {
     }
 
     return costAllocations;
+  }
+
+  // ---------------------------------------------------------------------------
+  // UNPICK (reverse a pick — restore lot qty, delete COGS rows)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reverse a pick for an order item. Restores qtyOnHand / qtyPicked on the
+   * lots that were consumed, and deletes the corresponding order_item_costs
+   * rows so COGS is not double-counted.
+   *
+   * Returns the total cost cents that were reversed (for audit).
+   */
+  async unpickFromLots(params: {
+    orderId: number;
+    orderItemId: number;
+    productVariantId: number;
+    qty: number;
+  }): Promise<{ reversedCostCents: number }> {
+    // Find the COGS rows written by the original pick
+    const cogsRows = await this.db
+      .select()
+      .from(orderItemCosts)
+      .where(
+        and(
+          eq(orderItemCosts.orderId, params.orderId),
+          eq(orderItemCosts.orderItemId, params.orderItemId),
+        ),
+      );
+
+    if (cogsRows.length === 0) {
+      return { reversedCostCents: 0 };
+    }
+
+    let reversedCostCents = 0;
+    const restoreUpdates: Array<{ lotId: number; restore: number }> = [];
+
+    // Figure out how much to reverse from each lot (may be partial unpick)
+    let remaining = params.qty;
+    for (const row of cogsRows) {
+      if (remaining <= 0) break;
+      const restore = Math.min(row.qty, remaining);
+      restoreUpdates.push({ lotId: row.inventoryLotId, restore });
+      reversedCostCents += restore * row.unitCostCents;
+      remaining -= restore;
+    }
+
+    // Restore lot quantities: move units from picked back to on-hand
+    if (restoreUpdates.length > 0) {
+      await this.db.execute(sql`
+        WITH updates AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(restoreUpdates)}::jsonb) AS x("lotId" int, restore int)
+        )
+        UPDATE inventory.inventory_lots AS il
+        SET qty_on_hand = il.qty_on_hand + u.restore,
+            qty_picked = GREATEST(il.qty_picked - u.restore, 0),
+            status = 'active'
+        FROM updates u
+        WHERE il.id = u."lotId"
+      `);
+    }
+
+    // Delete COGS rows. For a full unpick, delete all; for partial, delete
+    // proportionally (simplification: delete all and re-pick will re-create).
+    if (remaining <= 0) {
+      // Full unpick — delete all COGS rows for this order item
+      await this.db
+        .delete(orderItemCosts)
+        .where(
+          and(
+            eq(orderItemCosts.orderId, params.orderId),
+            eq(orderItemCosts.orderItemId, params.orderItemId),
+          ),
+        );
+    } else {
+      // Partial unpick — delete the rows we restored from
+      const restoredLotIds = restoreUpdates.map(u => u.lotId);
+      if (restoredLotIds.length > 0) {
+        await this.db
+          .delete(orderItemCosts)
+          .where(
+            and(
+              eq(orderItemCosts.orderId, params.orderId),
+              eq(orderItemCosts.orderItemId, params.orderItemId),
+              inArray(orderItemCosts.inventoryLotId, restoredLotIds),
+            ),
+          );
+      }
+    }
+
+    return { reversedCostCents };
   }
 
   // ---------------------------------------------------------------------------
