@@ -160,6 +160,23 @@ export interface FullSyncResult {
   errors: string[];
 }
 
+interface NonShopifyInventorySyncState {
+  productVariantId: number;
+  feedId: number | null;
+  feedLastSyncedQty: number | null;
+  channelVariantId: string | null;
+  channelSku: string | null;
+  channelInventoryItemId: string | null;
+  listingId: number | null;
+  listingExternalVariantId: string | null;
+  listingExternalSku: string | null;
+}
+
+interface NonShopifyInventoryPushItem extends InventoryPushItem {
+  previousQty: number | null;
+  listingId: number | null;
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -250,15 +267,7 @@ class EchelonSyncOrchestrator {
   ): Promise<InventorySyncResult[]> {
     const allResults: InventorySyncResult[] = [];
 
-    // Get all products that have active channel feeds
-    const feedRows = await this.db
-      .select({ productId: productVariants.productId })
-      .from(channelFeeds)
-      .innerJoin(productVariants, eq(channelFeeds.productVariantId, productVariants.id))
-      .where(eq(channelFeeds.isActive, 1))
-      .groupBy(productVariants.productId);
-
-    const productIds: number[] = Array.from(new Set(feedRows.map((r: any) => r.productId as number)));
+    const productIds = await this.getInventorySyncProductIds();
     console.log(`[SyncOrchestrator] Syncing inventory for ${productIds.length} products`);
 
     // Clear velocity cache at start of full sync cycle — each product will query fresh
@@ -355,16 +364,20 @@ class EchelonSyncOrchestrator {
 
     // For non-Shopify channels (eBay), use allocation engine results directly
     if (channel.provider !== "shopify") {
-      // Use the allocation results that were already computed by the caller
-      const pushItems: any[] = [];
+      const syncStates = await this.getNonShopifyInventorySyncStates(
+        channelId,
+        allocations.map((a) => a.productVariantId),
+      );
+      const pushItems: NonShopifyInventoryPushItem[] = [];
       for (const a of allocations) {
-        const feedRow = await this.db.execute(sql`
-          SELECT last_synced_qty FROM channels.channel_feeds 
-          WHERE product_variant_id = ${a.productVariantId} AND channel_id = ${channelId}
-          LIMIT 1
-        `).then((r: any) => r.rows[0]);
-        
-        const previousQty = feedRow?.last_synced_qty ?? null;
+        const syncState = syncStates.get(a.productVariantId);
+        const previousQty = syncState?.feedLastSyncedQty ?? null;
+        const externalVariantId = syncState?.listingExternalVariantId
+          ?? syncState?.channelVariantId
+          ?? null;
+        const externalSku = syncState?.listingExternalSku
+          ?? syncState?.channelSku
+          ?? a.sku;
         
         // Skip if unchanged
         if (previousQty !== null && previousQty === a.allocatedUnits) {
@@ -380,19 +393,28 @@ class EchelonSyncOrchestrator {
           continue;
         }
 
+        if (!syncState?.listingId && !syncState?.feedId) {
+          result.variantsSkipped++;
+          result.details.push({
+            productId,
+            variantId: a.productVariantId,
+            sku: a.sku,
+            previousQty,
+            allocatedQty: a.allocatedUnits,
+            status: "skipped",
+            error: "No channel listing or feed target exists for inventory sync",
+          });
+          continue;
+        }
+
         pushItems.push({
           variantId: a.productVariantId,
-          sku: a.sku,
+          sku: externalSku,
+          externalVariantId,
+          externalInventoryItemId: syncState?.channelInventoryItemId ?? null,
           allocatedQty: a.allocatedUnits,
           previousQty,
-        });
-        result.details.push({
-          productId,
-          variantId: a.productVariantId,
-          sku: a.sku,
-          previousQty,
-          allocatedQty: a.allocatedUnits,
-          status: "pushed" as const,
+          listingId: syncState?.listingId ?? null,
         });
       }
 
@@ -400,22 +422,83 @@ class EchelonSyncOrchestrator {
         try {
           const adapter = this.adapterRegistry.get(channel.provider);
           if (adapter) {
-            await adapter.pushInventory(channelId, pushItems);
-            result.variantsPushed = pushItems.length;
-            
-            // Update channel_feeds
+            const pushResults = await adapter.pushInventory(channelId, pushItems);
+            const pushResultsByVariant = new Map<number, InventoryPushResult>();
+            for (const pushResult of pushResults) {
+              pushResultsByVariant.set(pushResult.variantId, pushResult);
+            }
+
             for (const item of pushItems) {
-              await this.db.execute(sql`
-                INSERT INTO channel_feeds (product_variant_id, channel_id, last_synced_qty, last_synced_at)
-                VALUES (${item.variantId}, ${channelId}, ${item.allocatedQty}, NOW())
-                ON CONFLICT (product_variant_id, channel_id) 
-                DO UPDATE SET last_synced_qty = ${item.allocatedQty}, last_synced_at = NOW()
-              `);
+              const pushResult = pushResultsByVariant.get(item.variantId);
+              const status = pushResult?.status ?? "error";
+              const error = pushResult?.error ?? (pushResult ? undefined : "Adapter returned no result for inventory push");
+
+              if (status === "success" || status === "skipped") {
+                if (status === "success") {
+                  result.variantsPushed++;
+                } else {
+                  result.variantsSkipped++;
+                }
+                await this.recordNonShopifyInventorySyncSuccess(channel, item);
+              } else {
+                result.variantsErrored++;
+                await this.recordChannelListingSyncError(channelId, item.variantId, error ?? "Inventory push failed");
+              }
+
+              await this.logSync({
+                productVariantId: item.variantId,
+                channelId,
+                pushedQty: status === "success" || status === "skipped" ? item.allocatedQty : 0,
+                status,
+                errorMessage: error,
+                triggeredBy: triggeredBy ?? "orchestrator",
+              });
+
+              result.details.push({
+                productId,
+                variantId: item.variantId,
+                sku: item.sku,
+                previousQty: item.previousQty,
+                allocatedQty: item.allocatedQty,
+                status,
+                error,
+              });
             }
           }
         } catch (err: any) {
           console.error(`[SyncOrchestrator] ${channel.provider} push failed: ${err.message}`);
           result.variantsErrored = pushItems.length;
+          for (const item of pushItems) {
+            await this.recordChannelListingSyncError(channelId, item.variantId, err.message);
+            await this.logSync({
+              productVariantId: item.variantId,
+              channelId,
+              pushedQty: 0,
+              status: "error",
+              errorMessage: err.message,
+              triggeredBy: triggeredBy ?? "orchestrator",
+            });
+            result.details.push({
+              productId,
+              variantId: item.variantId,
+              sku: item.sku,
+              previousQty: item.previousQty,
+              allocatedQty: item.allocatedQty,
+              status: "error",
+              error: err.message,
+            });
+          }
+        }
+      } else if (config.dryRun) {
+        for (const item of pushItems) {
+          result.details.push({
+            productId,
+            variantId: item.variantId,
+            sku: item.sku,
+            previousQty: item.previousQty,
+            allocatedQty: item.allocatedQty,
+            status: "pushed",
+          });
         }
       }
 
@@ -1244,6 +1327,155 @@ class EchelonSyncOrchestrator {
   // =========================================================================
   // PRIVATE HELPERS
   // =========================================================================
+
+  private async getInventorySyncProductIds(): Promise<number[]> {
+    const feedRows = await this.db
+      .select({ productId: productVariants.productId })
+      .from(channelFeeds)
+      .innerJoin(productVariants, eq(channelFeeds.productVariantId, productVariants.id))
+      .where(eq(channelFeeds.isActive, 1))
+      .groupBy(productVariants.productId);
+
+    const listingRows = await this.db
+      .select({ productId: productVariants.productId })
+      .from(channelListings)
+      .innerJoin(productVariants, eq(channelListings.productVariantId, productVariants.id))
+      .innerJoin(channels, eq(channelListings.channelId, channels.id))
+      .where(
+        and(
+          eq(channels.status, "active"),
+          eq(channels.syncEnabled, true),
+        ),
+      )
+      .groupBy(productVariants.productId);
+
+    return Array.from(new Set([
+      ...feedRows.map((r: any) => r.productId as number),
+      ...listingRows.map((r: any) => r.productId as number),
+    ]));
+  }
+
+  private async getNonShopifyInventorySyncStates(
+    channelId: number,
+    productVariantIds: number[],
+  ): Promise<Map<number, NonShopifyInventorySyncState>> {
+    if (productVariantIds.length === 0) return new Map();
+
+    const rows = await this.db
+      .select({
+        productVariantId: productVariants.id,
+        feedId: channelFeeds.id,
+        feedLastSyncedQty: channelFeeds.lastSyncedQty,
+        channelVariantId: channelFeeds.channelVariantId,
+        channelSku: channelFeeds.channelSku,
+        channelInventoryItemId: channelFeeds.channelInventoryItemId,
+        listingId: channelListings.id,
+        listingExternalVariantId: channelListings.externalVariantId,
+        listingExternalSku: channelListings.externalSku,
+        listingLastSyncedQty: channelListings.lastSyncedQty,
+      })
+      .from(productVariants)
+      .leftJoin(
+        channelFeeds,
+        and(
+          eq(channelFeeds.channelId, channelId),
+          eq(channelFeeds.productVariantId, productVariants.id),
+        ),
+      )
+      .leftJoin(
+        channelListings,
+        and(
+          eq(channelListings.channelId, channelId),
+          eq(channelListings.productVariantId, productVariants.id),
+        ),
+      )
+      .where(inArray(productVariants.id, productVariantIds));
+
+    const byVariant = new Map<number, NonShopifyInventorySyncState>();
+    for (const row of rows as NonShopifyInventorySyncState[]) {
+      byVariant.set(row.productVariantId, row);
+    }
+    return byVariant;
+  }
+
+  private async recordNonShopifyInventorySyncSuccess(
+    channel: { id: number; provider: string },
+    item: NonShopifyInventoryPushItem,
+  ): Promise<void> {
+    const now = new Date();
+    const channelVariantId = item.externalVariantId ?? item.sku ?? String(item.variantId);
+    const [existingFeed] = await this.db
+      .select({ id: channelFeeds.id })
+      .from(channelFeeds)
+      .where(
+        and(
+          eq(channelFeeds.channelId, channel.id),
+          eq(channelFeeds.productVariantId, item.variantId),
+        ),
+      )
+      .limit(1);
+
+    const feedValues = {
+      channelType: channel.provider,
+      channelVariantId,
+      channelProductId: null,
+      channelSku: item.sku,
+      channelInventoryItemId: item.externalInventoryItemId,
+      isActive: 1,
+      lastSyncedQty: item.allocatedQty,
+      lastSyncedAt: now,
+      updatedAt: now,
+    };
+
+    if (existingFeed) {
+      await this.db
+        .update(channelFeeds)
+        .set(feedValues)
+        .where(eq(channelFeeds.id, existingFeed.id));
+    } else {
+      await this.db.insert(channelFeeds).values({
+        channelId: channel.id,
+        productVariantId: item.variantId,
+        ...feedValues,
+      });
+    }
+
+    await this.db
+      .update(channelListings)
+      .set({
+        lastSyncedQty: item.allocatedQty,
+        lastSyncedAt: now,
+        syncStatus: "synced",
+        syncError: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(channelListings.channelId, channel.id),
+          eq(channelListings.productVariantId, item.variantId),
+        ),
+      );
+  }
+
+  private async recordChannelListingSyncError(
+    channelId: number,
+    productVariantId: number,
+    error: string,
+  ): Promise<void> {
+    await this.db
+      .update(channelListings)
+      .set({
+        syncStatus: "error",
+        syncError: error,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(channelListings.channelId, channelId),
+          eq(channelListings.productVariantId, productVariantId),
+        ),
+      );
+  }
 
   /**
    * Fetch a single product from Shopify for pulling unlocked fields.

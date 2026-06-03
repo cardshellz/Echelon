@@ -127,7 +127,9 @@ export const channelFeeds = channelsSchema.table("channel_feeds", {
   lastSyncedQty: integer("last_synced_qty"), // Last quantity pushed to channel
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("channel_feeds_channel_pv_idx").on(table.channelId, table.productVariantId),
+]);
 
 export const insertChannelFeedSchema = createInsertSchema(channelFeeds).omit({
   id: true,
