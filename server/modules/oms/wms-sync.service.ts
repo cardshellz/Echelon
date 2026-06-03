@@ -24,6 +24,7 @@ import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
 import { computeSortRank, getShippingBase, resolveSlaDueAt, type ShippingServiceLevel } from "../orders/sort-rank";
+import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
 import {
   validateOmsOrderFinancials,
   buildWmsOrderFinancialSnapshot,
@@ -236,12 +237,17 @@ export class WmsSyncService {
       // from the start. Priority: platform ship-by-date -> channel SLA ->
       // partner-profile SLA -> global default.
       const channelShipBy = (omsOrder as any).channelShipByDate as Date | string | null | undefined;
+      // No warehouse is assigned at sync time, so this resolves the DEFAULT-row
+      // cutoff/tz. Reassignment later triggers a recompute with the real one.
+      const syncCutoffConfig = await getSlaCutoffConfig((omsOrder as any).warehouseId ?? null, db);
       const slaDueAt = await resolveSlaDueAt({
         channelId: omsOrder.channelId,
         channelShipByDate: channelShipBy,
         explicitSlaDueAt: (omsOrder as any).slaDueAt ?? null,
         orderPlacedAt: omsOrder.orderedAt,
         createdAt: (omsOrder as any).createdAt,
+        timezone: syncCutoffConfig.timezone,
+        cutoffLocal: syncCutoffConfig.cutoffLocal,
       }, db);
       const sortRank = computeSortRank({
         priority,
@@ -712,12 +718,15 @@ export class WmsSyncService {
       wmsOrder.warehouseStatus === "pending" && nextWarehouseStatus === "ready";
 
     const channelShipByDate = (omsOrder as any).channelShipByDate as Date | string | null | undefined;
+    const reconcileCutoffConfig = await getSlaCutoffConfig((wmsOrder as any).warehouseId ?? null, db);
     const nextSlaDueAt = await resolveSlaDueAt({
       channelId: omsOrder.channelId,
       channelShipByDate,
       explicitSlaDueAt: null,
       orderPlacedAt: wmsOrder.orderPlacedAt ?? omsOrder.orderedAt,
       createdAt: wmsOrder.createdAt,
+      timezone: reconcileCutoffConfig.timezone,
+      cutoffLocal: reconcileCutoffConfig.cutoffLocal,
     }, db);
     const nextSortRank = computeSortRank({
       priority: wmsOrder.priority,

@@ -65,6 +65,29 @@ export async function getSettingsForWarehouse(
 }
 
 /**
+ * SLA cutoff config for a warehouse, via the same fallback hierarchy. Used by
+ * the pick-priority / SLA layer (sort-rank.ts) to bucket an order into its
+ * fulfillment day in the warehouse's own timezone. Either field may be null:
+ *   timezone null   → caller falls back to global default_timezone.
+ *   cutoffLocal null → no cutoff (SLA from the raw placed day).
+ */
+export interface SlaCutoffConfig {
+  timezone: string | null;
+  cutoffLocal: string | null;
+}
+
+export async function getSlaCutoffConfig(
+  warehouseId?: number | null,
+  tx: DbLike = defaultDb,
+): Promise<SlaCutoffConfig> {
+  const row = await getSettingsForWarehouse(warehouseId, tx);
+  return {
+    timezone: (row?.timezone ?? null) as string | null,
+    cutoffLocal: (row?.orderCutoffLocal ?? null) as string | null,
+  };
+}
+
+/**
  * Single-field lookup with the same fallback hierarchy. Returns the field
  * value from whichever row wins, or `fallback` if no row or field is null.
  *

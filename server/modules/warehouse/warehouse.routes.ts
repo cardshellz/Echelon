@@ -6,8 +6,31 @@ import { inventoryStorage } from "../inventory";
 import { db } from "../../storage/base";
 const storage = { ...warehouseStorage, ...catalogStorage, ...inventoryStorage };
 import { requirePermission } from "../../routes/middleware";
+import { coerceTimeZone, parseCutoffMinutes } from "../orders/sort-rank";
 
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
+
+/**
+ * Validate the SLA cutoff fields on a warehouse-settings write. Returns an
+ * error string, or null if OK. Uses the SAME validators the SLA engine
+ * (sort-rank.ts) applies, so a value the API accepts is a value the engine can
+ * compute against — a malformed cutoff/tz must never silently poison SLA math.
+ * Both fields are optional; an explicit null clears them.
+ */
+function validateSlaCutoffFields(body: any): string | null {
+  if (body == null || typeof body !== "object") return null;
+  if ("orderCutoffLocal" in body && body.orderCutoffLocal != null) {
+    if (typeof body.orderCutoffLocal !== "string" || parseCutoffMinutes(body.orderCutoffLocal) == null) {
+      return "order_cutoff_local must be 'HH:MM' 24-hour, e.g. '14:00'";
+    }
+  }
+  if ("timezone" in body && body.timezone != null) {
+    if (typeof body.timezone !== "string" || coerceTimeZone(body.timezone) == null) {
+      return "timezone must be a valid IANA timezone, e.g. 'America/New_York'";
+    }
+  }
+  return null;
+}
 
 function getLocationDeleteConflictMessage(error: any) {
   const constraint = String(error?.constraint || "");
@@ -284,9 +307,15 @@ export function registerWarehouseRoutes(app: Express) {
   
   app.post("/api/warehouse-settings", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
+      const cutoffError = validateSlaCutoffFields(req.body);
+      if (cutoffError) {
+        return res.status(400).json({ error: cutoffError });
+      }
       const data = req.body;
       const settings = await storage.createWarehouseSettings({
         warehouseId: data.warehouseId || null,
+        orderCutoffLocal: data.orderCutoffLocal ?? null,
+        timezone: data.timezone ?? null,
         warehouseCode: data.warehouseCode || "DEFAULT",
         warehouseName: data.warehouseName || "Main Warehouse",
         replenMode: data.replenMode || "queue",
@@ -327,6 +356,10 @@ export function registerWarehouseRoutes(app: Express) {
   
   app.patch("/api/warehouse-settings/:id", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
+      const cutoffError = validateSlaCutoffFields(req.body);
+      if (cutoffError) {
+        return res.status(400).json({ error: cutoffError });
+      }
       const id = parseInt(req.params.id);
       const settings = await storage.updateWarehouseSettings(id, req.body);
       if (!settings) {
