@@ -1942,6 +1942,24 @@ export function registerInventoryRoutes(app: Express) {
    * creates the WMS order for each. This is the recovery path after a
    * downtime window where the webhook → wms bridge didn't run.
    */
+  app.post("/api/sync/reconcile-cancellations", requireAuth, async (req, res) => {
+    try {
+      const wmsSync = (req.app.locals.services as any)?.wmsSync;
+      if (!wmsSync?.reconcileCancellations) {
+        return res.status(500).json({ error: "wmsSync service unavailable" });
+      }
+      const limit = Math.min(
+        Math.max(parseInt(String(req.body?.limit || req.query?.limit || "200"), 10) || 200, 1),
+        1000
+      );
+      const result = await wmsSync.reconcileCancellations(limit);
+      res.json(result);
+    } catch (error: any) {
+      console.error("[Reconcile] Cancel reconciliation failed:", error);
+      res.status(500).json({ error: error?.message || "Failed to reconcile cancellations" });
+    }
+  });
+
   app.post("/api/sync/backfill-oms-to-wms", requireAuth, async (req, res) => {
     try {
       const wmsSync = (req.app.locals.services as any)?.wmsSync;

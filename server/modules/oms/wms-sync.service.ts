@@ -1635,6 +1635,88 @@ export class WmsSyncService {
   }
 
   /**
+   * Reconcile cancellations: find OMS orders that are still active but
+   * cancelled in shopify_orders, then cascade the cancellation through
+   * OMS → WMS → shipments → ShipStation.
+   *
+   * This catches orders where the Shopify orders/cancelled webhook was
+   * never delivered, was dropped, or failed silently.
+   */
+  async reconcileCancellations(limit: number = 100): Promise<{ cancelled: number; failed: number }> {
+    const stale = await db.execute<{
+      oms_id: number;
+      external_order_number: string;
+      wms_id: number | null;
+    }>(sql`
+      SELECT oo.id AS oms_id,
+             oo.external_order_number,
+             o.id AS wms_id
+      FROM oms.oms_orders oo
+      LEFT JOIN wms.orders o
+        ON (o.source = 'oms' AND o.oms_fulfillment_order_id = oo.id::text)
+        OR (o.source = 'shopify' AND o.source_table_id = oo.id::text)
+      WHERE oo.status NOT IN ('cancelled', 'refunded')
+        AND EXISTS (
+          SELECT 1 FROM shopify_orders so
+          WHERE so.id = oo.external_order_id
+            AND so.cancelled_at IS NOT NULL
+        )
+      ORDER BY oo.ordered_at ASC
+      LIMIT ${limit}
+    `);
+
+    const rows = stale.rows ?? [];
+    if (rows.length === 0) {
+      console.log(`[WMS Sync] Cancel reconcile: no stale cancellations found`);
+      return { cancelled: 0, failed: 0 };
+    }
+
+    console.log(`[WMS Sync] Cancel reconcile: found ${rows.length} orders cancelled in Shopify but active in OMS`);
+
+    const { cancelOrderCascade } = await import("./oms-webhooks");
+
+    let ssService: any = null;
+    try {
+      const { createShipStationService } = await import("./shipstation.service");
+      ssService = createShipStationService(db);
+    } catch (_) {}
+
+    let cancelled = 0;
+    let failed = 0;
+    const now = new Date();
+
+    for (const row of rows) {
+      try {
+        await db.execute(sql`
+          UPDATE oms.oms_orders SET
+            status = 'cancelled',
+            cancelled_at = ${now},
+            updated_at = ${now}
+          WHERE id = ${row.oms_id}
+            AND status NOT IN ('cancelled', 'refunded')
+        `);
+
+        await cancelOrderCascade(db, row.oms_id, {
+          wmsServices: this.services,
+          shipStationService: ssService,
+          source: "cancel_reconciliation",
+          reason: "shopify_cancelled_at present, webhook missed",
+          logPrefix: "[Cancel Reconcile]",
+        });
+
+        console.log(`[WMS Sync] Cancel reconcile: cancelled ${row.external_order_number} (OMS ${row.oms_id}, WMS ${row.wms_id ?? "none"})`);
+        cancelled++;
+      } catch (err: any) {
+        console.error(`[WMS Sync] Cancel reconcile: failed for OMS ${row.oms_id} (${row.external_order_number}): ${err.message}`);
+        failed++;
+      }
+    }
+
+    console.log(`[WMS Sync] Cancel reconcile: ${cancelled} cancelled, ${failed} failed`);
+    return { cancelled, failed };
+  }
+
+  /**
    * Resync items for an existing WMS order from its OMS source.
    * Use when a WMS order has 0 items or stale/wrong items.
    * WARNING: deletes all existing order_items for the WMS order, re-creates from OMS.

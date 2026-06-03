@@ -333,6 +333,116 @@ export async function cascadeShopifyCancelToShipments(
 }
 
 /**
+ * Full order cancellation cascade — single path used by orders/cancelled,
+ * orders/updated (with cancelled_at), and the reconciliation sweep.
+ *
+ * Steps: release inventory reservations → cancel shipments (+ SS) →
+ * cancel WMS order → log OMS event.
+ */
+export async function cancelOrderCascade(
+  db: any,
+  omsOrderId: number,
+  opts: {
+    wmsServices: WmsServices | null;
+    shipStationService: ShipStationService | null;
+    source: string;
+    reason: string;
+    logPrefix?: string;
+  },
+): Promise<{ cascadeDetails: Record<string, any> | undefined }> {
+  const LOG = opts.logPrefix ?? "[CancelCascade]";
+  const now = new Date();
+  let cancelCascadeDetails: Record<string, any> | undefined;
+
+  const wmsOrderResult = await db.execute<{ id: number }>(sql`
+    SELECT id FROM wms.orders
+    WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrderId)})
+       OR (source = 'shopify' AND source_table_id = ${String(omsOrderId)})
+  `);
+  const wmsOrderRows = wmsOrderResult.rows ?? [];
+
+  if (wmsOrderRows.length === 0) {
+    return { cascadeDetails: { noWmsOrder: true } };
+  }
+
+  const rollupModule = await import("../orders/shipment-rollup");
+  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+
+  const ssAdapter = opts.shipStationService
+    ? {
+        removeFromList: async (ssOrderId: number) => {
+          try {
+            await opts.shipStationService!.cancelOrder(ssOrderId);
+          } catch (e: any) {
+            console.error(`${LOG} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}`);
+            throw e;
+          }
+        },
+      }
+    : undefined;
+
+  for (const wmsRow of wmsOrderRows) {
+    if (opts.wmsServices) {
+      try {
+        await opts.wmsServices.reservation.releaseOrderReservation(
+          wmsRow.id,
+          opts.source,
+        );
+        console.log(`${LOG} Released reservations for WMS order ${wmsRow.id}`);
+      } catch (e: any) {
+        console.error(`${LOG} Failed to release reservations for WMS ${wmsRow.id}: ${e.message}`);
+        try {
+          await db.insert(omsOrderEvents).values({
+            orderId: omsOrderId,
+            eventType: "cancel_release_failed",
+            details: {
+              wmsOrderId: wmsRow.id,
+              error: e?.message ?? String(e),
+              requiresReview: true,
+            },
+          });
+        } catch (_dlErr) {}
+      }
+    }
+
+    const cascade = await cascadeShopifyCancelToShipments(
+      db,
+      wmsRow.id,
+      {
+        handleCustomerCancelOnShipment: rollupModule.handleCustomerCancelOnShipment,
+        recomputeOrderStatusFromShipments: rollupModule.recomputeOrderStatusFromShipments,
+      },
+      { now, shipstation: ssAdapter, logPrefix: LOG },
+    );
+
+    if (cascade.hadShipments) {
+      cancelCascadeDetails = {
+        wmsOrderId: wmsRow.id,
+        shipmentOutcomes: cascade.cascadeResults,
+        rollupChanged: cascade.rollupChanged,
+      };
+      console.log(`${LOG} cancel cascade for WMS ${wmsRow.id}: ${JSON.stringify(cascade.cascadeResults)}`);
+    } else {
+      await cancelWmsOrder(db, wmsRow.id, opts.source);
+      cancelCascadeDetails = { wmsOrderId: wmsRow.id, noShipments: true };
+    }
+  }
+
+  await db.insert(omsOrderEvents).values({
+    orderId: omsOrderId,
+    eventType: "cancelled",
+    details: {
+      source: opts.source,
+      reason: opts.reason,
+      cancelledAt: now.toISOString(),
+      ...cancelCascadeDetails,
+    },
+  });
+
+  return { cascadeDetails: cancelCascadeDetails };
+}
+
+/**
  * Apply a Shopify `refunds/create` payload as a return-record + optional
  * restock against the WMS side. C29 (Group F).
  *
@@ -1493,12 +1603,14 @@ export function registerOmsWebhooks(
              OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
         `);
 
-        // Status transition through C4 (guarded)
         if (isFinalOmsState) {
-          const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
-          for (const wmsRow of wmsOrderRows) {
-            await cancelWmsOrder(db, wmsRow.id, "shopify_order_update_final");
-          }
+          await cancelOrderCascade(db, existing.id, {
+            wmsServices,
+            shipStationService,
+            source: "shopify_order_update_final",
+            reason: shopifyOrder.cancel_reason || "order_updated_final_state",
+            logPrefix: LOG_PREFIX,
+          });
         }
       }
 
@@ -1746,7 +1858,6 @@ export function registerOmsWebhooks(
       }
 
       const now = new Date();
-      let cancelCascadeDetails: Record<string, any> | undefined;
 
       // Update OMS order
       await db
@@ -1759,104 +1870,12 @@ export function registerOmsWebhooks(
         })
         .where(eq(omsOrders.id, existing.id));
 
-      // Release inventory reservation via WMS
-      if (wmsServices) {
-        // Find WMS order. wms-sync.service creates rows with source='oms' and
-        // links via oms_fulfillment_order_id; legacy direct-write path used
-        // source='shopify' with source_table_id. Match either.
-        const wmsOrder = await db.execute<{ id: number }>(sql`
-          SELECT id FROM wms.orders
-          WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
-             OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
-          LIMIT 1
-        `);
-        if (wmsOrder.rows.length > 0) {
-          const wmsOrderId = wmsOrder.rows[0].id;
-          try {
-            await wmsServices.reservation.releaseOrderReservation(wmsOrderId, "Order cancelled in Shopify");
-            console.log(`${LOG_PREFIX} Released reservations for cancelled order ${shopifyOrder.name}`);
-          } catch (e: any) {
-            // D-CANCELREL: Release failed — persist dead-letter so ops can find and remediate.
-            console.error(`${LOG_PREFIX} Failed to release reservations for ${shopifyOrder.name}: ${e.message}`);
-            try {
-              await db.insert(omsOrderEvents).values({
-                orderId: existing.id,
-                eventType: "cancel_release_failed",
-                details: {
-                  wmsOrderId,
-                  error: e?.message ?? String(e),
-                  orderName: shopifyOrder.name,
-                  requiresReview: true,
-                },
-              });
-            } catch (_dlErr) {
-              // Structured log above is our trace
-            }
-          }
-
-          // Per Plan §6 Commit 28: cascade through the C19 per-shipment
-          // helper so post-label shipments are flagged for operator review
-          // (Overlord's "Option B") rather than force-cancelled. Pre-label
-          // shipments cancel cleanly via markShipmentCancelled (which calls
-          // SS removeFromList if pushed).
-          const rollupModule = await import("../orders/shipment-rollup");
-
-          // Build SS adapter for the helper
-          const ssAdapter = shipStationService
-            ? {
-                removeFromList: async (ssOrderId: number) => {
-                  try {
-                    await shipStationService.cancelOrder(ssOrderId);
-                  } catch (e: any) {
-                    console.error(
-                      `${LOG_PREFIX} SS removeFromList failed for ssOrderId=${ssOrderId}: ${e.message}`,
-                    );
-                    throw e;
-                  }
-                },
-              }
-            : undefined;
-
-          const cascade = await cascadeShopifyCancelToShipments(
-            db,
-            wmsOrderId,
-            {
-              handleCustomerCancelOnShipment: rollupModule.handleCustomerCancelOnShipment,
-              recomputeOrderStatusFromShipments: rollupModule.recomputeOrderStatusFromShipments,
-            },
-            { now, shipstation: ssAdapter, logPrefix: LOG_PREFIX },
-          );
-
-          if (cascade.hadShipments) {
-            cancelCascadeDetails = {
-              wmsOrderId,
-              shipmentOutcomes: cascade.cascadeResults,
-              rollupChanged: cascade.rollupChanged,
-            };
-            console.log(
-              `${LOG_PREFIX} cancel cascade for order ${shopifyOrder.name}: ${JSON.stringify(cascade.cascadeResults)}`,
-            );
-          } else {
-            // No shipments — order cancelled before any shipment was created.
-            // Direct-write the WMS order to cancelled. Only skip if already
-            // shipped (fulfillment is a fact) or already cancelled (idempotent).
-            const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
-            await cancelWmsOrder(db, wmsOrderId, "shopify_cancel_webhook");
-            cancelCascadeDetails = { wmsOrderId, noShipments: true };
-          }
-        }
-      }
-
-      // D-CANCELEVENT: Log event with cascade outcome details.
-      await db.insert(omsOrderEvents).values({
-        orderId: existing.id,
-        eventType: "cancelled",
-        details: {
-          source: "shopify_webhook",
-          reason: shopifyOrder.cancel_reason || "cancelled_by_shopify",
-          cancelledAt: now.toISOString(),
-          ...cancelCascadeDetails,
-        },
+      await cancelOrderCascade(db, existing.id, {
+        wmsServices,
+        shipStationService,
+        source: "shopify_cancel_webhook",
+        reason: shopifyOrder.cancel_reason || "cancelled_by_shopify",
+        logPrefix: LOG_PREFIX,
       });
 
       console.log(`${LOG_PREFIX} ✅ Cancelled order ${shopifyOrder.name} (OMS id=${existing.id})`);
