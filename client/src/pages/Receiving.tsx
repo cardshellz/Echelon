@@ -923,10 +923,17 @@ DEF-456,25,,,5.00,,Location TBD`;
   const openResolve = (line: ReceivingLine, mode: 'sku' | 'location') => {
     setResolvingLine(line);
     setResolveMode(mode);
-    setResolveSkuSearch(line.sku || "");
+    const sku = line.sku || "";
+    setResolveSkuSearch(sku);
     setResolveSkuResults([]);
     setResolveLocSearch("");
     setShowResolveDialog(true);
+    if (mode === 'sku' && sku.length >= 2) {
+      fetch(`/api/inventory/skus/search?q=${encodeURIComponent(sku)}&limit=10`)
+        .then(res => res.ok ? res.json() : [])
+        .then(data => setResolveSkuResults(data))
+        .catch(() => {});
+    }
   };
 
   // Debounced SKU search for resolution dialog
