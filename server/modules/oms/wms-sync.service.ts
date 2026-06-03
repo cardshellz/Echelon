@@ -531,20 +531,29 @@ export class WmsSyncService {
           }
         }
 
-        // 6. Reserve inventory
-        if (warehouseStatus === "ready") {
+        return { newWmsOrder, shipmentIdForPush, warehouseStatus };
+      });
+
+      // 6. Reserve inventory — OUTSIDE the transaction.
+      // A check-constraint violation (chk_reserved_lte_onhand) puts the
+      // Postgres transaction into an aborted state. Even though JS catches
+      // the error, every subsequent SQL on that tx fails with "current
+      // transaction is aborted", and COMMIT silently becomes ROLLBACK —
+      // rolling back the WMS order and shipment we just created. Running
+      // reservation after the tx commits isolates that blast radius.
+      if ((txResult as any).warehouseStatus === "ready" && !(txResult as any).racedExistingWmsOrderId) {
+        const wmsOrderId = (txResult as any).newWmsOrder?.id;
+        if (wmsOrderId) {
           try {
-            const reserveResult = await this.services.reservation.reserveOrder(newWmsOrder.id, undefined, tx);
+            const reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
             if (reserveResult.failed.length > 0) {
-              console.warn(`[WMS Sync] Inventory reservation partial failure for order ${newWmsOrder.id}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
+              console.warn(`[WMS Sync] Inventory reservation partial failure for order ${wmsOrderId}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
             }
           } catch (err: any) {
-            console.error(`[WMS Sync] Inventory reservation error for order ${newWmsOrder.id}: ${err.message}`);
+            console.error(`[WMS Sync] Inventory reservation error for order ${wmsOrderId}: ${err.message}`);
           }
         }
-
-        return { newWmsOrder, shipmentIdForPush };
-      });
+      }
 
       // Concurrency guard tripped: another sync of this same OMS order
       // won the race and already created the WMS order. Reconcile any
@@ -569,6 +578,7 @@ export class WmsSyncService {
       const { newWmsOrder, shipmentIdForPush } = txResult as {
         newWmsOrder: { id: number };
         shipmentIdForPush: number | null;
+        warehouseStatus: string;
       };
 
       // 7. Route to warehouse (if routing service exists)

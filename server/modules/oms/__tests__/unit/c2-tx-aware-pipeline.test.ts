@@ -62,8 +62,14 @@ describe("C2 Phase 2: tx-aware pipeline structural checks", () => {
     expect(WMS_SYNC_SRC).toContain("{ useXactLock: true }");
   });
 
-  it("syncOmsOrderToWms passes tx to reservation.reserveOrder", () => {
+  it("syncOmsOrderToWms runs reservation OUTSIDE the create transaction to avoid poisoning it", () => {
+    // A check-constraint violation (chk_reserved_lte_onhand) inside a PG
+    // transaction puts it into an aborted state, silently rolling back the
+    // WMS order + shipment on COMMIT. Reservation must run after tx commits.
     expect(WMS_SYNC_SRC).toContain(
+      "this.services.reservation.reserveOrder(wmsOrderId)",
+    );
+    expect(WMS_SYNC_SRC).not.toContain(
       "this.services.reservation.reserveOrder(newWmsOrder.id, undefined, tx)",
     );
   });
