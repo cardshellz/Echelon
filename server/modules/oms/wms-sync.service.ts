@@ -1673,23 +1673,13 @@ export class WmsSyncService {
 
     console.log(`[WMS Sync] Cancel reconcile: found ${rows.length} orders cancelled in Shopify but active in OMS`);
 
-    const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
-    const rollupModule = await import("../orders/shipment-rollup");
-    const { cascadeShopifyCancelToShipments } = await import("./oms-webhooks");
+    const { cancelOrderCascade } = await import("./oms-webhooks");
 
     let ssService: any = null;
     try {
       const { createShipStationService } = await import("./shipstation.service");
       ssService = createShipStationService(db);
     } catch (_) {}
-
-    const ssAdapter = ssService
-      ? {
-          removeFromList: async (ssOrderId: number) => {
-            await ssService.cancelOrder(ssOrderId);
-          },
-        }
-      : undefined;
 
     let cancelled = 0;
     let failed = 0;
@@ -1706,40 +1696,12 @@ export class WmsSyncService {
             AND status NOT IN ('cancelled', 'refunded')
         `);
 
-        if (row.wms_id) {
-          try {
-            await this.services.reservation.releaseOrderReservation(
-              row.wms_id,
-              "cancel_reconciliation",
-            );
-          } catch (relErr: any) {
-            console.error(`[WMS Sync] Cancel reconcile: release reservation failed for WMS ${row.wms_id}: ${relErr.message}`);
-          }
-
-          const cascade = await cascadeShopifyCancelToShipments(
-            db,
-            row.wms_id,
-            {
-              handleCustomerCancelOnShipment: rollupModule.handleCustomerCancelOnShipment,
-              recomputeOrderStatusFromShipments: rollupModule.recomputeOrderStatusFromShipments,
-            },
-            { now, shipstation: ssAdapter, logPrefix: "[Cancel Reconcile]" },
-          );
-
-          if (!cascade.hadShipments) {
-            await cancelWmsOrder(db, row.wms_id, "cancel_reconciliation");
-          }
-        }
-
-        await db.insert(omsOrderEvents).values({
-          orderId: row.oms_id,
-          eventType: "cancelled",
-          details: {
-            source: "cancel_reconciliation",
-            reason: "shopify_cancelled_at present, webhook missed",
-            cancelledAt: now.toISOString(),
-            wmsOrderId: row.wms_id,
-          },
+        await cancelOrderCascade(db, row.oms_id, {
+          wmsServices: this.services,
+          shipStationService: ssService,
+          source: "cancel_reconciliation",
+          reason: "shopify_cancelled_at present, webhook missed",
+          logPrefix: "[Cancel Reconcile]",
         });
 
         console.log(`[WMS Sync] Cancel reconcile: cancelled ${row.external_order_number} (OMS ${row.oms_id}, WMS ${row.wms_id ?? "none"})`);

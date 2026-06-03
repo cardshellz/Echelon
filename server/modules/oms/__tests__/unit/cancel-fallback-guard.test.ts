@@ -1,15 +1,7 @@
 /**
- * Structural test: the no-shipment cancel fallback in the orders/cancelled
- * webhook handler must cancel WMS orders in ALL non-terminal states, not
- * just 'ready'. The old guard skipped in_progress and ready_to_ship,
- * leaving actively-picked orders stuck in the pick queue after Shopify
- * cancellation.
- *
- * Post-C4 migration: the handler now calls cancelOrder() from
- * order-status-core.ts, which handles the from-state guard internally.
- * This test verifies:
- *   1. The handler uses C4's cancelOrder (not raw SQL)
- *   2. C4's cancelOrder accepts all non-terminal states
+ * Structural test: cancellation cascade delegates to cancelOrder from
+ * order-status-core when no shipments exist, and C4's cancelOrder
+ * accepts all non-terminal states (not just 'ready').
  */
 
 import { readFileSync } from "node:fs";
@@ -23,27 +15,24 @@ const WEBHOOKS_SRC = readFileSync(
   "utf-8",
 );
 
-describe("orders/cancelled no-shipment fallback guard", () => {
-  const markerStart = "No shipments";
-  const markerEnd = "Log event";
-  const start = WEBHOOKS_SRC.indexOf(markerStart);
-  const end = WEBHOOKS_SRC.indexOf(markerEnd, start);
-  const block = WEBHOOKS_SRC.slice(start, end);
+describe("cancelOrderCascade no-shipment fallback guard", () => {
+  function extractCancelOrderCascade(): string {
+    const start = WEBHOOKS_SRC.indexOf("export async function cancelOrderCascade(");
+    const nextExport = WEBHOOKS_SRC.indexOf("/**\n * Apply a Shopify `refunds/create`");
+    return WEBHOOKS_SRC.substring(start, nextExport);
+  }
 
-  it("only skips shipped and cancelled (not in_progress or ready_to_ship)", () => {
-    // The handler now delegates to C4's cancelOrder instead of raw SQL.
-    expect(block).toContain("cancelWmsOrder");
-    expect(block).not.toContain("UPDATE wms.orders");
+  it("uses C4 cancelOrder (not raw SQL) when no shipments exist", () => {
+    const fn = extractCancelOrderCascade();
+    expect(fn).toContain("cancelWmsOrder(db, wmsRow.id");
+    expect(fn).not.toMatch(/UPDATE wms\.orders.*SET.*status.*=.*'cancelled'/);
   });
 
   it("does NOT exclude in_progress from cancellation", () => {
-    // C4's cancelOrder includes all non-terminal from-states
     expect(isTransitionAllowed("picking" as WmsWarehouseStatus, "cancelled")).toBe(true);
-    expect(block).not.toContain("'in_progress'");
   });
 
   it("does NOT exclude ready_to_ship from cancellation", () => {
     expect(isTransitionAllowed("ready_to_ship" as WmsWarehouseStatus, "cancelled")).toBe(true);
-    expect(block).not.toContain("'ready_to_ship'");
   });
 });

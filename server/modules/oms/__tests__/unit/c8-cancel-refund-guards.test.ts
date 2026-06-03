@@ -3,9 +3,10 @@
  *
  * Tests for:
  * - D-SYNCANCEL: OMS→WMS sync cancel path releases inventory
- * - D-CANCELREL: Shopify cancel webhook persists dead-letter on release failure
+ * - D-CANCELREL: cancelOrderCascade persists dead-letter on release failure
  * - D-CANCELEVENT: Cancel event includes cascade outcome details
  * - D-REFUNDREL: Refund restock failure persists dead-letter event
+ * - Single-path: all cancel callers use cancelOrderCascade
  */
 
 import { describe, it, expect } from "vitest";
@@ -57,51 +58,59 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
   });
 });
 
-// ─── D-CANCELREL structural checks ────────────────────────────────
+// ─── cancelOrderCascade: shared cancel path ──────────────────────
 
-describe("D-CANCELREL: Shopify cancel dead-letter on release failure", () => {
+function extractCancelOrderCascade(): string {
+  const start = OMS_WEBHOOKS_SRC.indexOf("export async function cancelOrderCascade(");
+  const nextExport = OMS_WEBHOOKS_SRC.indexOf("/**\n * Apply a Shopify `refunds/create`");
+  return OMS_WEBHOOKS_SRC.substring(start, nextExport);
+}
+
+describe("D-CANCELREL: cancelOrderCascade dead-letter on release failure", () => {
   it("persists cancel_release_failed event when releaseOrderReservation throws", () => {
-    const cancelBlock = OMS_WEBHOOKS_SRC.substring(
-      OMS_WEBHOOKS_SRC.indexOf("Release inventory reservation via WMS"),
-      OMS_WEBHOOKS_SRC.indexOf("Per Plan §6 Commit 28"),
-    );
-    expect(cancelBlock).toContain("cancel_release_failed");
-    expect(cancelBlock).toContain("requiresReview: true");
+    const fn = extractCancelOrderCascade();
+    expect(fn).toContain("cancel_release_failed");
+    expect(fn).toContain("requiresReview: true");
   });
 
   it("includes wmsOrderId and error in the dead-letter details", () => {
-    const cancelBlock = OMS_WEBHOOKS_SRC.substring(
-      OMS_WEBHOOKS_SRC.indexOf("D-CANCELREL"),
-      OMS_WEBHOOKS_SRC.indexOf("Per Plan §6 Commit 28"),
-    );
-    expect(cancelBlock).toContain("wmsOrderId");
-    expect(cancelBlock).toContain("error:");
+    const fn = extractCancelOrderCascade();
+    expect(fn).toContain("wmsOrderId: wmsRow.id");
+    expect(fn).toContain("error:");
   });
 });
 
-// ─── D-CANCELEVENT structural checks ──────────────────────────────
-
-describe("D-CANCELEVENT: Cancel event includes cascade details", () => {
-  function extractCancelHandler(): string {
-    const start = OMS_WEBHOOKS_SRC.indexOf('app.post("/api/oms/webhooks/orders/cancelled"');
-    const end = OMS_WEBHOOKS_SRC.indexOf('app.post("/api/oms/webhooks/orders/fulfilled"');
-    return OMS_WEBHOOKS_SRC.substring(start, end);
-  }
-
-  it("declares cancelCascadeDetails variable before cascade", () => {
-    const handlerBlock = extractCancelHandler();
-    expect(handlerBlock).toContain("cancelCascadeDetails");
+describe("D-CANCELEVENT: cancelOrderCascade logs cascade details in event", () => {
+  it("records cancelled event with cascade details", () => {
+    const fn = extractCancelOrderCascade();
+    expect(fn).toContain('eventType: "cancelled"');
+    expect(fn).toContain("cascadeDetails");
   });
 
   it("includes shipment outcomes in cascade details", () => {
-    const handlerBlock = extractCancelHandler();
-    expect(handlerBlock).toContain("shipmentOutcomes");
-    expect(handlerBlock).toContain("cascade.cascadeResults");
+    const fn = extractCancelOrderCascade();
+    expect(fn).toContain("shipmentOutcomes");
+    expect(fn).toContain("cascade.cascadeResults");
+  });
+});
+
+describe("Single cancel path: all handlers use cancelOrderCascade", () => {
+  it("orders/cancelled handler calls cancelOrderCascade", () => {
+    const start = OMS_WEBHOOKS_SRC.indexOf('app.post("/api/oms/webhooks/orders/cancelled"');
+    const end = OMS_WEBHOOKS_SRC.indexOf('app.post("/api/oms/webhooks/orders/fulfilled"');
+    const handler = OMS_WEBHOOKS_SRC.substring(start, end);
+    expect(handler).toContain("cancelOrderCascade(db, existing.id");
   });
 
-  it("spreads cascade details into the cancelled event", () => {
-    const handlerBlock = extractCancelHandler();
-    expect(handlerBlock).toContain("...cancelCascadeDetails");
+  it("orders/updated handler calls cancelOrderCascade for final states", () => {
+    const start = OMS_WEBHOOKS_SRC.indexOf('app.post("/api/oms/webhooks/orders/updated"');
+    const end = OMS_WEBHOOKS_SRC.indexOf('app.post("/api/oms/webhooks/orders/cancelled"');
+    const handler = OMS_WEBHOOKS_SRC.substring(start, end);
+    expect(handler).toContain("cancelOrderCascade(db, existing.id");
+  });
+
+  it("reconcileCancellations calls cancelOrderCascade", () => {
+    expect(WMS_SYNC_SRC).toContain("cancelOrderCascade(db, row.oms_id");
   });
 });
 
