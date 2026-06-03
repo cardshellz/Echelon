@@ -16,6 +16,7 @@ import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 
 
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
+import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 
 let notificationBackfillRunning = false;
 let lastNotificationBackfillStartedAt = 0;
@@ -176,7 +177,35 @@ export async function bridgeShopifyOrderToOms(
       lineItems,
     };
 
-    await omsService.ingestOrder(channelId, shopifyOrderId, orderData);
+    const omsOrder = await omsService.ingestOrder(channelId, shopifyOrderId, orderData);
+
+    // Trigger OMS→WMS sync. The bridge paths (reconciliation poller +
+    // LISTEN/NOTIFY) previously ended at ingestOrder and relied on
+    // backfillUnsynced to push OMS→WMS — but that safety net was broken
+    // (wrong link column), so any order that arrived via the bridge instead
+    // of the orders/paid webhook got stuck in OMS with no WMS order and no
+    // retry handle. Enqueue a durable retry row (idempotent; deduped by
+    // pending scope) so the retry worker performs the sync exactly once.
+    //
+    // Skip terminal/externally-fulfilled orders: a cancelled order must not be
+    // synced, and a shipped/fulfilled order with no WMS row was fulfilled
+    // out-of-band — syncing it would push a duplicate to the shipping engine.
+    if (
+      omsOrder?.id &&
+      status !== "cancelled" &&
+      status !== "shipped" &&
+      fulfillmentStatus !== "fulfilled"
+    ) {
+      try {
+        await enqueueOmsWmsSyncRetry(db, omsOrder.id);
+      } catch (syncErr: any) {
+        // Non-fatal: the order is safely in OMS. Log loudly so the missed
+        // sync is diagnosable; backfillUnsynced is the secondary net.
+        console.error(
+          `[Shopify Bridge] Failed to enqueue OMS→WMS sync for OMS order ${omsOrder.id} (shopify ${shopifyOrderId}): ${syncErr?.message ?? String(syncErr)}`,
+        );
+      }
+    }
   } catch (err: any) {
     console.error(err);
     console.error(`[Shopify Bridge] Failed to bridge order ${shopifyOrderId} to OMS: ${err.message}`);

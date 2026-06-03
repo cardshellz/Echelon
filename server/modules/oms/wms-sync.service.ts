@@ -184,6 +184,25 @@ export class WmsSyncService {
         return wmsOrderId;
       }
 
+      // Defense-in-depth: no WMS order exists for this OMS order. If the OMS
+      // order is ALREADY shipped/fulfilled, it was fulfilled outside this WMS
+      // (manual/Shopify fulfillment or pre-WMS history). Creating a WMS order
+      // now would create a planned shipment and push a DUPLICATE order to the
+      // shipping engine for something already shipped. `isFinalOrCancelledOmsOrder`
+      // deliberately does NOT include `shipped` (shipped is a success state and
+      // must not cancel a legitimately-synced WMS order), so this guard lives
+      // only on the create path. Callers (bridge enqueue, backfillUnsynced)
+      // already exclude shipped orders; this is the last line of defense if one
+      // slips through.
+      const omsStatusLower = String(omsOrder.status ?? "").toLowerCase();
+      const omsFulfillmentLower = String(omsOrder.fulfillmentStatus ?? "").toLowerCase();
+      if (omsStatusLower === "shipped" || omsFulfillmentLower === "fulfilled") {
+        console.warn(
+          `[WMS Sync] OMS order ${omsOrderId} is ${omsStatusLower}/${omsFulfillmentLower} with no existing WMS order — fulfilled out-of-band; skipping WMS create to avoid a duplicate shipping-engine push`,
+        );
+        return null;
+      }
+
       // 2. Fetch OMS line items
       const omsLines = await db
         .select()
@@ -1555,16 +1574,34 @@ export class WmsSyncService {
    * Backfill: Find OMS orders not yet synced to WMS and sync them
    */
   async backfillUnsynced(limit: number = 100): Promise<number> {
+    // Existence check MUST mirror the canonical OMS→WMS link used everywhere
+    // else (syncOmsOrderToWms:142-162, cancelExistingWmsOrderForFinalOmsOrder:650-651,
+    // propagateOmsEditsToWms:1137-1138): the live link is
+    // `source='oms' AND oms_fulfillment_order_id = <oms id>`, with the
+    // `source='shopify' AND source_table_id = <oms id>` legacy fallback.
+    //
+    // The previous query checked ONLY `source_table_id = oms id AND source='oms'`,
+    // but source_table_id is always NULL for source='oms' rows — so NOT EXISTS
+    // was always true, every order looked "unsynced", and `ORDER BY ordered_at
+    // DESC LIMIT 100` only ever re-touched the 100 newest (already-synced, no-op).
+    // Genuinely-stuck older orders were never reached. (Bug: dead safety net.)
+    //
+    // Terminal/externally-fulfilled orders are excluded: an order that is
+    // already shipped/fulfilled but has NO WMS order was fulfilled outside this
+    // WMS (manual/Shopify fulfillment or pre-WMS history). Creating a WMS order
+    // for it now would push a DUPLICATE order to the shipping engine.
     const unsynced = await db.execute<{ id: number }>(sql`
-      SELECT oo.id 
+      SELECT oo.id
       FROM oms.oms_orders oo
       WHERE NOT EXISTS (
         SELECT 1 FROM wms.orders o
-        WHERE o.source_table_id = oo.id::text
-          AND o.source = 'oms'
+        WHERE (o.source = 'oms'     AND o.oms_fulfillment_order_id = oo.id::text)
+           OR (o.source = 'shopify' AND o.source_table_id          = oo.id::text)
       )
-      AND oo.status NOT IN ('cancelled')
-      ORDER BY oo.ordered_at DESC
+      AND oo.status            NOT IN ('cancelled', 'refunded', 'shipped')
+      AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
+      AND COALESCE(oo.financial_status, '')   NOT IN ('refunded', 'voided')
+      ORDER BY oo.ordered_at ASC
       LIMIT ${limit}
     `);
 
