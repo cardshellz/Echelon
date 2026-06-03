@@ -133,57 +133,113 @@ export function createOmsService(db: any, reservationService?: any) {
     externalOrderId: string,
     data: OrderData,
   ): Promise<OmsOrder> {
-    // App-layer race protection (P1-1 / P1-2): Insert natively resolving any potential conflict seamlessly
-    const [order] = await db
-      .insert(omsOrders)
-      .values({
-        channelId,
-        externalOrderId,
-        externalOrderNumber: data.externalOrderNumber || externalOrderId,
-        status: data.status || "pending",
-        financialStatus: data.financialStatus || "paid",
-        fulfillmentStatus: data.fulfillmentStatus || "unfulfilled",
-        customerName: data.customerName,
-        customerEmail: data.customerEmail,
-        customerPhone: data.customerPhone,
-        shipToName: data.shipToName,
-        shipToCompany: data.shipToCompany ?? null,
-        shipToAddress1: data.shipToAddress1,
-        shipToAddress2: data.shipToAddress2,
-        shipToCity: data.shipToCity,
-        shipToState: data.shipToState,
-        shipToZip: data.shipToZip,
-        shipToCountry: data.shipToCountry,
-        subtotalCents: data.subtotalCents || 0,
-        grossSubtotalCents: data.grossSubtotalCents || 0,
-        shippingCents: data.shippingCents || 0,
-        taxCents: data.taxCents || 0,
-        discountCents: data.discountCents || 0,
-        totalCents: data.totalCents || 0,
-        currency: data.currency || "USD",
-        taxExempt: data.taxExempt || false,
-        rawPayload: data.rawPayload as any,
-        notes: data.notes,
-        tags: data.tags ? JSON.stringify(data.tags) : null,
-        // C22b — risk fields populated at ingest from Shopify webhook payload.
-        riskLevel: data.riskLevel ?? null,
-        riskScore: data.riskScore ?? null,
-        riskRecommendation: data.riskRecommendation ?? null,
-        riskFacts: (data.riskFacts ?? null) as any,
-        shippingMethod: data.shippingMethod || null,
-        shippingMethodCode: data.shippingMethodCode || null,
-        shippingServiceLevel: data.shippingServiceLevel || "standard",
-        channelShipByDate: data.channelShipByDate
-          ? (data.channelShipByDate instanceof Date
-              ? data.channelShipByDate
-              : new Date(data.channelShipByDate))
-          : null,
-        orderedAt: data.orderedAt,
-      } satisfies InsertOmsOrder)
-      .onConflictDoNothing({ target: [omsOrders.channelId, omsOrders.externalOrderId] })
-      .returning();
+    // Atomic ingestion: order row + line items + created event in one transaction.
+    // Without this, a concurrent webhook can see the order row before lines exist
+    // and trigger a WMS sync against an incomplete order (zero line items).
+    const order = await db.transaction(async (tx: any) => {
+      const [inserted] = await tx
+        .insert(omsOrders)
+        .values({
+          channelId,
+          externalOrderId,
+          externalOrderNumber: data.externalOrderNumber || externalOrderId,
+          status: data.status || "pending",
+          financialStatus: data.financialStatus || "paid",
+          fulfillmentStatus: data.fulfillmentStatus || "unfulfilled",
+          customerName: data.customerName,
+          customerEmail: data.customerEmail,
+          customerPhone: data.customerPhone,
+          shipToName: data.shipToName,
+          shipToCompany: data.shipToCompany ?? null,
+          shipToAddress1: data.shipToAddress1,
+          shipToAddress2: data.shipToAddress2,
+          shipToCity: data.shipToCity,
+          shipToState: data.shipToState,
+          shipToZip: data.shipToZip,
+          shipToCountry: data.shipToCountry,
+          subtotalCents: data.subtotalCents || 0,
+          grossSubtotalCents: data.grossSubtotalCents || 0,
+          shippingCents: data.shippingCents || 0,
+          taxCents: data.taxCents || 0,
+          discountCents: data.discountCents || 0,
+          totalCents: data.totalCents || 0,
+          currency: data.currency || "USD",
+          taxExempt: data.taxExempt || false,
+          rawPayload: data.rawPayload as any,
+          notes: data.notes,
+          tags: data.tags ? JSON.stringify(data.tags) : null,
+          riskLevel: data.riskLevel ?? null,
+          riskScore: data.riskScore ?? null,
+          riskRecommendation: data.riskRecommendation ?? null,
+          riskFacts: (data.riskFacts ?? null) as any,
+          shippingMethod: data.shippingMethod || null,
+          shippingMethodCode: data.shippingMethodCode || null,
+          shippingServiceLevel: data.shippingServiceLevel || "standard",
+          channelShipByDate: data.channelShipByDate
+            ? (data.channelShipByDate instanceof Date
+                ? data.channelShipByDate
+                : new Date(data.channelShipByDate))
+            : null,
+          orderedAt: data.orderedAt,
+        } satisfies InsertOmsOrder)
+        .onConflictDoNothing({ target: [omsOrders.channelId, omsOrders.externalOrderId] })
+        .returning();
 
-    // Conflict hit - ingestion avoided (double ingestion dedup guard). Safely route dynamically back to retrieving existing.
+      if (!inserted) return null;
+
+      for (const item of data.lineItems) {
+        let productVariantId: number | null = null;
+        let variantCompareAtPrice = null;
+
+        if (item.sku) {
+          const [variant] = await tx
+            .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
+            .from(productVariants)
+            .where(eq(productVariants.sku, item.sku.toUpperCase()))
+            .limit(1);
+          if (variant) {
+            productVariantId = variant.id;
+            variantCompareAtPrice = variant.compareAtPriceCents;
+          }
+        }
+
+        await tx.insert(omsOrderLines).values({
+          orderId: inserted.id,
+          productVariantId,
+          externalLineItemId: item.externalLineItemId,
+          externalProductId: item.externalProductId || null,
+          sku: item.sku,
+          title: item.title,
+          variantTitle: item.variantTitle,
+          quantity: item.quantity,
+          paidPriceCents: item.paidPriceCents || 0,
+          retailPriceCents: item.retailPriceCents || 0,
+          totalPriceCents: item.totalCents || 0,
+          totalDiscountCents: item.discountCents || 0,
+          planDiscountCents: item.planDiscountCents || 0,
+          couponDiscountCents: item.couponDiscountCents || 0,
+          taxable: item.taxable ?? true,
+          requiresShipping: item.requiresShipping ?? true,
+          fulfillableQuantity: item.fulfillableQuantity ?? null,
+          fulfillmentService: item.fulfillmentService ?? null,
+          properties: item.properties ?? null,
+          compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,
+          taxLines: item.taxLines ?? null,
+          discountAllocations: item.discountAllocations ?? null,
+          orderNumber: data.externalOrderNumber || null,
+        } satisfies InsertOmsOrderLine).onConflictDoNothing();
+      }
+
+      await tx.insert(omsOrderEvents).values({
+        orderId: inserted.id,
+        eventType: "created",
+        details: { channelId, externalOrderId, lineItemCount: data.lineItems.length },
+      });
+
+      console.log(`[OMS] Ingested order ${data.externalOrderNumber || externalOrderId} from channel ${channelId}`);
+      return inserted;
+    });
+
     if (!order) {
       console.log(`[METRIC] oms.duplicate_ingest_avoided_total=1 (channel_id=${channelId}, external_order_id=${externalOrderId})`);
 
@@ -287,58 +343,6 @@ export function createOmsService(db: any, reservationService?: any) {
       return existingOrder;
     }
 
-    // Insert line items with SKU → product_variant lookup
-    for (const item of data.lineItems) {
-      let productVariantId: number | null = null;
-      let variantCompareAtPrice = null;
-
-      if (item.sku) {
-        const [variant] = await db
-          .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
-          .from(productVariants)
-          .where(eq(productVariants.sku, item.sku.toUpperCase()))
-          .limit(1);
-        if (variant) {
-          productVariantId = variant.id;
-          variantCompareAtPrice = variant.compareAtPriceCents;
-        }
-      }
-
-      await db.insert(omsOrderLines).values({
-        orderId: order.id,
-        productVariantId,
-        externalLineItemId: item.externalLineItemId,
-        externalProductId: item.externalProductId || null,
-        sku: item.sku,
-        title: item.title,
-        variantTitle: item.variantTitle,
-        quantity: item.quantity,
-        paidPriceCents: item.paidPriceCents || 0,
-        retailPriceCents: item.retailPriceCents || 0,
-        totalPriceCents: item.totalCents || 0,
-        totalDiscountCents: item.discountCents || 0,
-        planDiscountCents: item.planDiscountCents || 0,
-        couponDiscountCents: item.couponDiscountCents || 0,
-        taxable: item.taxable ?? true,
-        requiresShipping: item.requiresShipping ?? true,
-        fulfillableQuantity: item.fulfillableQuantity ?? null,
-        fulfillmentService: item.fulfillmentService ?? null,
-        properties: item.properties ?? null,
-        compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,            
-        taxLines: item.taxLines ?? null,
-        discountAllocations: item.discountAllocations ?? null,
-        orderNumber: data.externalOrderNumber || null,
-      } satisfies InsertOmsOrderLine).onConflictDoNothing();
-    }
-
-    // Record created event
-    await db.insert(omsOrderEvents).values({
-      orderId: order.id,
-      eventType: "created",
-      details: { channelId, externalOrderId, lineItemCount: data.lineItems.length },
-    });
-
-    console.log(`[OMS] Ingested order ${data.externalOrderNumber || externalOrderId} from channel ${channelId}`);
     return order;
   }
 
