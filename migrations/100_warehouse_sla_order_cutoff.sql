@@ -1,4 +1,4 @@
--- Migration 100: Per-warehouse SLA order cutoff + timezone
+-- Migration 099: Per-warehouse SLA order cutoff + timezone
 --
 -- Adds two columns to inventory.warehouse_settings so each warehouse carries
 -- its own fulfillment-day cutoff and the timezone that cutoff is expressed in.
