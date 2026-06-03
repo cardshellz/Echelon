@@ -458,13 +458,13 @@ export const procurementMethods: IProcurementStorage = {
       is_preferred: number | null;
     }>(sql`
       SELECT * FROM (
-        SELECT DISTINCT ON (p.id)
+        SELECT DISTINCT ON (vp.product_id, COALESCE(vp.product_variant_id, 0))
           vp.id              AS vendor_product_id,
           vp.product_id      AS product_id,
-          NULL               AS product_variant_id,
-          p.sku              AS sku,
+          vp.product_variant_id AS product_variant_id,
+          COALESCE(pv.sku, p.sku) AS sku,
           p.name             AS product_name,
-          NULL               AS variant_name,
+          pv.name            AS variant_name,
           vp.vendor_sku      AS vendor_sku,
           vp.vendor_product_name AS vendor_product_name,
           vp.unit_cost_cents AS unit_cost_cents,
@@ -475,8 +475,8 @@ export const procurementMethods: IProcurementStorage = {
           vp.is_preferred    AS is_preferred,
           (
             CASE
-              WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(p.sku, '')) LIKE ${prefix}`} THEN 0
-              WHEN LOWER(COALESCE(p.sku, '')) LIKE ${like} THEN 1
+              WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${prefix}`} THEN 0
+              WHEN LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like} THEN 1
               WHEN LOWER(COALESCE(vp.vendor_sku, '')) LIKE ${like} THEN 1
               WHEN LOWER(p.name) LIKE ${like} THEN 2
               WHEN LOWER(COALESCE(vp.vendor_product_name, '')) LIKE ${like} THEN 2
@@ -485,16 +485,17 @@ export const procurementMethods: IProcurementStorage = {
           ) AS rank
         FROM procurement.vendor_products vp
         JOIN catalog.products p ON p.id = vp.product_id
+        LEFT JOIN catalog.product_variants pv ON pv.id = vp.product_variant_id
         WHERE vp.vendor_id = ${vendorId}
           AND vp.is_active = 1
           ${qTrim.length === 0 ? sql`` : sql`AND (
-            LOWER(COALESCE(p.sku, '')) LIKE ${like}
-            OR LOWER(COALESCE(p.sku, '')) LIKE ${like}
+            LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like}
             OR LOWER(COALESCE(vp.vendor_sku, '')) LIKE ${like}
             OR LOWER(p.name) LIKE ${like}
+            OR LOWER(COALESCE(pv.name, '')) LIKE ${like}
             OR LOWER(COALESCE(vp.vendor_product_name, '')) LIKE ${like}
           )`}
-        ORDER BY p.id, vp.is_preferred DESC NULLS LAST, vp.id ASC
+        ORDER BY vp.product_id, COALESCE(vp.product_variant_id, 0), vp.is_preferred DESC NULLS LAST, vp.id ASC
       ) AS distinct_products
       ORDER BY rank ASC, is_preferred DESC NULLS LAST, product_name ASC
       LIMIT ${combined}
@@ -562,25 +563,28 @@ export const procurementMethods: IProcurementStorage = {
     }>(sql`
       SELECT
         p.id AS product_id,
-        NULL AS product_variant_id,
-        p.sku AS sku,
+        pv.id AS product_variant_id,
+        COALESCE(pv.sku, p.sku) AS sku,
         p.name AS product_name,
-        NULL AS variant_name,
+        pv.name AS variant_name,
         MIN(
           CASE
-            WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(p.sku, '')) LIKE ${prefix}`} THEN 0
-            WHEN LOWER(COALESCE(p.sku, '')) LIKE ${like} THEN 1
+            WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${prefix}`} THEN 0
+            WHEN LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like} THEN 1
             WHEN LOWER(p.name) LIKE ${like} THEN 2
+            WHEN LOWER(COALESCE(pv.name, '')) LIKE ${like} THEN 2
             ELSE 3
           END
         ) AS rank
       FROM catalog.products p
+      LEFT JOIN catalog.product_variants pv ON pv.product_id = p.id AND pv.is_active = true
       WHERE p.is_active = true
         ${qTrim.length === 0 ? sql`` : sql`AND (
-          LOWER(COALESCE(p.sku, '')) LIKE ${like}
+          LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like}
           OR LOWER(p.name) LIKE ${like}
+          OR LOWER(COALESCE(pv.name, '')) LIKE ${like}
         )`}
-      GROUP BY p.id, p.sku, p.name
+      GROUP BY p.id, p.sku, p.name, pv.id, pv.sku, pv.name
       ORDER BY rank ASC, p.name ASC
       LIMIT ${remaining * 3}
     `);

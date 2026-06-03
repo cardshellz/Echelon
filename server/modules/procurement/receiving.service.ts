@@ -20,7 +20,6 @@ import {
   millsToCents,
   centsToMills,
   dollarsToMills,
-  perUnitMills,
 } from "@shared/utils/money";
 import {
   type ReceivingCloseReconciliation,
@@ -38,6 +37,8 @@ interface InventoryCore {
     notes?: string;
     userId?: string;
     unitCostCents?: number;
+    productCostCents?: number;
+    packagingCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     inboundShipmentId?: number;
@@ -630,63 +631,17 @@ export class ReceivingService {
       }
     }
 
-    // Auto-break cases into base units for child variant ATP
-    for (const line of lines) {
-      if (line.receivedQty > 0 && line.productVariantId) {
-        const variant = await this.storage.getProductVariantById(line.productVariantId);
-        if (variant && (variant as any).hierarchyLevel > 1) {
-          // Find the base unit variant (hierarchy_level = 1) for this product
-          const allVariants = await this.storage.getProductVariantsByProductId((variant as any).productId);
-          const baseVariant = allVariants.find((v: any) => v.hierarchyLevel === 1);
-          if (baseVariant && baseVariant.id !== line.productVariantId) {
-            const unitsPerVariant = (variant as any).unitsPerVariant;
-            const totalUnits = line.receivedQty * unitsPerVariant;
-            // Auto-break: child (base) units inherit the PER-UNIT cost, not
-            // the whole-case cost. `resolveReceivingLineCost` returns the
-            // cost of one case-variant unit (the receiving UOM), so we must
-            // divide by unitsPerVariant to get the per-base-unit cost.
-            // Stamping the case cost on every base unit overstated base-unit
-            // COGS by a factor of unitsPerVariant (a $10 case of 100 sleeves
-            // made each sleeve cost $10 instead of $0.10).
-            //
-            // We divide on a mills basis (4-decimal) for precision, then
-            // collapse to cents because inventory_lots is cents-only today.
-            const breakCost = await resolveReceivingLineCost(line, this.storage as any);
-            let baseUnitCostCents: number | undefined;
-            if (typeof breakCost.mills === "number") {
-              baseUnitCostCents = millsToCents(perUnitMills(breakCost.mills, unitsPerVariant));
-            } else if (typeof breakCost.cents === "number") {
-              // No mills available — divide cents via mills to preserve sub-cent
-              // accuracy before the final half-up to cents.
-              baseUnitCostCents = millsToCents(perUnitMills(centsToMills(breakCost.cents), unitsPerVariant));
-            }
-            await this.inventoryCore.receiveInventory({
-              productVariantId: baseVariant.id,
-              warehouseLocationId: line.putawayLocationId,
-              qty: totalUnits,
-              referenceId: `BREAK-${batchId}-${line.id}`,
-              notes: `Auto-break: ${line.receivedQty}× ${variant.sku} → ${totalUnits}× ${baseVariant.sku}`,
-              userId: userId || undefined,
-              unitCostCents: baseUnitCostCents,
-              receivingOrderId: orderId,
-            }, tx);
-
-            // Deduct the case variant inventory to avoid double-counting in ATP.
-            // Uses the guarded adjustInventory path so the deduction is ledgered
-            // (fixes C4: unledgered case-break was the largest source of drift).
-            const txCore = this.inventoryCore.withTx(tx);
-            await txCore.adjustInventory({
-              productVariantId: line.productVariantId,
-              warehouseLocationId: line.putawayLocationId,
-              qtyDelta: -line.receivedQty,
-              reason: `Case-break deduction: ${line.receivedQty}× ${variant.sku} → ${totalUnits}× ${baseVariant.sku}`,
-              userId: userId || undefined,
-            });
-            receivedVariantIds.add(baseVariant.id);
-          }
-        }
-      }
-    }
+    // NOTE: cases are intentionally NOT auto-broken into base units on receipt.
+    // ATP already pools every variant of a product into one fungible base-unit
+    // quantity at query time (atp.service.ts getTotalBaseUnits:
+    // SUM(variant_qty * units_per_variant)), then derives each variant's
+    // sellable qty as floor(atpBase / unitsPerVariant). So receiving 10 cases
+    // makes both 10 cases AND 100 eaches sellable from the same pool without
+    // any physical break. Auto-breaking would zero the case level (destroying
+    // case-level granularity we actually use), churn extra ledger rows, and
+    // smear case cost to per-each at receive time. Real breaks are deliberate
+    // physical events driven through break-assembly.use-cases.ts, not a side
+    // effect of receiving.
 
     // Fire channel sync for all received variants (fire-and-forget)
     for (const variantId of Array.from(receivedVariantIds)) {
