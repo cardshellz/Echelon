@@ -851,7 +851,9 @@ export const channelMethods: IChannelStorage = {
         shipping_cents,
         discount_cents
       FROM oms.oms_orders
-      WHERE external_order_id = ${sourceTableId}
+      -- Tolerate both GID and numeric external_order_id formats (legacy bridge
+      -- stored GIDs, webhook stores numeric; ingestOrder now normalizes to numeric).
+      WHERE split_part(external_order_id, '/', -1) = split_part(${sourceTableId}, '/', -1)
       LIMIT 1
     `);
     if (result.rows.length === 0) return null;

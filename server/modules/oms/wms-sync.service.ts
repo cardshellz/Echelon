@@ -1658,7 +1658,7 @@ export class WmsSyncService {
       WHERE oo.status NOT IN ('cancelled', 'refunded')
         AND EXISTS (
           SELECT 1 FROM shopify_orders so
-          WHERE so.id = oo.external_order_id
+          WHERE split_part(so.id, '/', -1) = split_part(oo.external_order_id, '/', -1)
             AND so.cancelled_at IS NOT NULL
         )
       ORDER BY oo.ordered_at ASC
