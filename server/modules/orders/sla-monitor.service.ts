@@ -4,6 +4,7 @@ import {
   warehouses,
 } from "@shared/schema";
 import { resolveSlaDueAt } from "./sort-rank";
+import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -83,12 +84,15 @@ class SLAMonitorService {
     //   3. partner_profiles.sla_days — back-compat for partner (dropship/
     //      wholesale) channels that set SLA there before channels.sla_days existed.
     //   4. priority.sla_default_days (admin global) → DEFAULT_SLA_DAYS hardcode.
+    const slaCutoffConfig = await getSlaCutoffConfig((order as any).warehouseId ?? null, this.db as any);
     const dueAt = await resolveSlaDueAt({
       channelId: order.channelId,
       channelShipByDate: (order as any).channelShipByDate as Date | string | null,
       explicitSlaDueAt: null,
       orderPlacedAt: order.orderPlacedAt,
       createdAt: order.createdAt,
+      timezone: slaCutoffConfig.timezone,
+      cutoffLocal: slaCutoffConfig.cutoffLocal,
     }, this.db as any);
 
     if (!dueAt) return;

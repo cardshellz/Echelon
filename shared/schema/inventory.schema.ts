@@ -286,6 +286,19 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   // full-page editor instead of opening the legacy create-PO dialog.
   useNewPoEditor: boolean("use_new_po_editor").notNull().default(false),
 
+  // ── Fulfillment SLA cutoff ───────────────────────────────────────────────
+  // The daily order cutoff after which an order rolls to the next business
+  // day's pick wave, expressed in THIS warehouse's local timezone. Drives
+  // sla_due_at / sort_rank (see server/modules/orders/sort-rank.ts). A cutoff
+  // is meaningless without the timezone it's expressed in, so the two travel
+  // together and belong to the building (the carrier truck leaves the
+  // building's local clock, not the server's).
+  //   orderCutoffLocal null → no cutoff (legacy: SLA measured from the raw
+  //                          placed day, just timezone-explicit).
+  //   timezone null        → fall back to the global default_timezone setting.
+  orderCutoffLocal: varchar("order_cutoff_local", { length: 5 }), // "HH:MM" 24h, e.g. "14:00"
+  timezone: varchar("timezone", { length: 64 }), // IANA tz, e.g. "America/New_York"
+
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -12,6 +12,7 @@ import {
 import { db } from "../../db";
 import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
+import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import { transitionOrderStatus, completeOrder } from "./order-status-core";
@@ -139,18 +140,24 @@ async function recomputeSortRank(orderId: number): Promise<string | null> {
       channelShipByDate: orders.channelShipByDate,
       orderPlacedAt: orders.orderPlacedAt,
       createdAt: orders.createdAt,
+      warehouseId: orders.warehouseId,
     })
     .from(orders)
     .where(eq(orders.id, orderId))
     .limit(1);
   if (rows.length === 0) return null;
   const row = rows[0];
+  // Bucket SLA into the fulfilling warehouse's local day + cutoff. When no
+  // warehouse is assigned yet, getSlaCutoffConfig falls back to the DEFAULT row.
+  const cutoffConfig = await getSlaCutoffConfig(row.warehouseId as number | null, db);
   const slaDueAt = await resolveSlaDueAt({
     channelId: row.channelId,
     channelShipByDate: row.channelShipByDate as any,
     explicitSlaDueAt: null,
     orderPlacedAt: row.orderPlacedAt as any,
     createdAt: row.createdAt as any,
+    timezone: cutoffConfig.timezone,
+    cutoffLocal: cutoffConfig.cutoffLocal,
   }, db as any);
   const rank = computeSortRank({
     priority: row.priority,
@@ -179,6 +186,7 @@ export async function recomputeAllActiveSortRanksDetailed(): Promise<SortRankRec
       orderPlacedAt: orders.orderPlacedAt,
       createdAt: orders.createdAt,
       sortRank: orders.sortRank,
+      warehouseId: orders.warehouseId,
     })
     .from(orders)
     .where(
@@ -189,14 +197,28 @@ export async function recomputeAllActiveSortRanksDetailed(): Promise<SortRankRec
         "ready_to_ship",
       ]),
     );
+  // Resolve warehouse cutoff/tz at most once per distinct warehouse across the
+  // whole loop (the set is tiny — typically just null/DEFAULT + one warehouse).
+  const cutoffCache = new Map<number, SlaCutoffConfig>();
+  const resolveCutoff = async (warehouseId: number | null): Promise<SlaCutoffConfig> => {
+    const key = warehouseId ?? -1;
+    const cached = cutoffCache.get(key);
+    if (cached) return cached;
+    const cfg = await getSlaCutoffConfig(warehouseId, db);
+    cutoffCache.set(key, cfg);
+    return cfg;
+  };
   const orderIds: number[] = [];
   for (const row of activeOrders) {
+    const cutoffConfig = await resolveCutoff(row.warehouseId as number | null);
     const slaDueAt = await resolveSlaDueAt({
       channelId: row.channelId,
       channelShipByDate: row.channelShipByDate as any,
       explicitSlaDueAt: null,
       orderPlacedAt: row.orderPlacedAt as any,
       createdAt: row.createdAt as any,
+      timezone: cutoffConfig.timezone,
+      cutoffLocal: cutoffConfig.cutoffLocal,
     }, db as any);
     const rank = computeSortRank({
       priority: row.priority,

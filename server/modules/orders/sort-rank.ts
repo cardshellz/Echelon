@@ -99,9 +99,15 @@ export const DEFAULT_SHIPPING_BASE: Record<ShippingServiceLevel, number> = {
 
 export const DEFAULT_SLA_DAYS = 3;
 
+// Hardcoded last-resort business timezone. Used only when neither the order's
+// warehouse nor the global default_timezone setting supplies one. The Leonberg
+// warehouse + the dyno both run Eastern, so this matches historical behavior.
+export const DEFAULT_BUSINESS_TZ = "America/New_York";
+
 interface PickPrioritySettingsCache {
   shippingBase: Record<ShippingServiceLevel, number>;
   slaDefaultDays: number;
+  defaultTimezone: string | null;
   expiresAt: number;
 }
 
@@ -130,17 +136,150 @@ function coerceSlaDays(value: unknown): number | null {
 }
 
 /**
- * Add business days (Mon-Fri) and normalize to 5 PM.
+ * Validate that a string is a real IANA timezone. Returns it if so, else null.
+ * A bad tz must never silently poison SLA math — callers fall back when null.
  */
-export function addBusinessDays(date: Date, days: number): Date {
-  const result = new Date(date);
+export function coerceTimeZone(tz: string | null | undefined): string | null {
+  if (!tz || typeof tz !== "string") return null;
+  try {
+    // Throws RangeError for an unknown zone.
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return tz;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse an "HH:MM" 24h cutoff into minutes-since-midnight, or null if unset /
+ * malformed (null = no cutoff = legacy behavior, SLA from the raw placed day).
+ */
+export function parseCutoffMinutes(cutoff: string | null | undefined): number | null {
+  if (!cutoff || typeof cutoff !== "string") return null;
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(cutoff.trim());
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+// ---------------------------------------------------------------------------
+// Timezone-aware date math. We deliberately avoid a date library: Intl gives us
+// everything needed to (a) read an instant's wall-clock parts in a given zone
+// and (b) convert a wall-clock back to a UTC instant, DST included. All calendar
+// arithmetic (advance days, skip weekends) runs on a pure proleptic UTC ladder
+// so it's independent of any ambient/server timezone.
+// ---------------------------------------------------------------------------
+
+interface ZonedParts { year: number; month: number; day: number; hour: number; minute: number; weekday: number }
+
+const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+/** Read an instant's wall-clock Y/M/D/H/M + weekday in the given timezone. */
+function getZonedParts(date: Date, timeZone: string): ZonedParts {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", weekday: "short",
+  });
+  const map: Record<string, string> = {};
+  for (const p of dtf.formatToParts(date)) map[p.type] = p.value;
+  let hour = Number(map.hour);
+  if (hour === 24) hour = 0; // some engines emit "24" at midnight under h23
+  return {
+    year: Number(map.year),
+    month: Number(map.month),
+    day: Number(map.day),
+    hour,
+    minute: Number(map.minute),
+    weekday: WEEKDAY_INDEX[map.weekday] ?? 0,
+  };
+}
+
+/** Offset (ms) such that wallclock = utc + offset, for `timeZone` at `date`. */
+function tzOffsetMs(date: Date, timeZone: string): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const map: Record<string, string> = {};
+  for (const p of dtf.formatToParts(date)) map[p.type] = p.value;
+  let hour = Number(map.hour);
+  if (hour === 24) hour = 0;
+  const asUTC = Date.UTC(Number(map.year), Number(map.month) - 1, Number(map.day), hour, Number(map.minute), Number(map.second));
+  return asUTC - date.getTime();
+}
+
+/** The UTC instant whose wall-clock in `timeZone` is the given Y/M/D H:M. */
+function utcFromZonedWall(year: number, month: number, day: number, hour: number, minute: number, timeZone: string): Date {
+  const naiveUTC = Date.UTC(year, month - 1, day, hour, minute, 0);
+  // Two-pass solve: the offset depends on the instant, which depends on the
+  // offset. One refinement resolves all but the rare DST-gap/overlap hour,
+  // which our 12:00/17:00 anchors never land on.
+  const off1 = tzOffsetMs(new Date(naiveUTC), timeZone);
+  let utc = naiveUTC - off1;
+  const off2 = tzOffsetMs(new Date(utc), timeZone);
+  if (off2 !== off1) utc = naiveUTC - off2;
+  return new Date(utc);
+}
+
+const DAY_MS = 86_400_000;
+const isWeekendDow = (dow: number) => dow === 0 || dow === 6;
+
+/** Next Mon–Fri strictly after the given calendar date (pure, UTC ladder). */
+function nextBusinessDayCal(year: number, month: number, day: number): { year: number; month: number; day: number } {
+  let ms = Date.UTC(year, month - 1, day) + DAY_MS;
+  while (isWeekendDow(new Date(ms).getUTCDay())) ms += DAY_MS;
+  const d = new Date(ms);
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+}
+
+/** Advance `days` business days from a calendar date (pure, UTC ladder). */
+function addBusinessDaysCal(year: number, month: number, day: number, days: number): { year: number; month: number; day: number } {
+  let ms = Date.UTC(year, month - 1, day);
   let added = 0;
   while (added < days) {
-    result.setDate(result.getDate() + 1);
-    if (result.getDay() !== 0 && result.getDay() !== 6) added++;
+    ms += DAY_MS;
+    if (!isWeekendDow(new Date(ms).getUTCDay())) added += 1;
   }
-  result.setHours(17, 0, 0, 0);
-  return result;
+  const d = new Date(ms);
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+}
+
+/**
+ * Add business days (Mon–Fri) and normalize to 5 PM in `timeZone`. The day-of
+ * arithmetic is anchored to the order's calendar day *in that timezone*, so the
+ * result no longer depends on the server's ambient timezone.
+ */
+export function addBusinessDays(date: Date, days: number, timeZone: string = DEFAULT_BUSINESS_TZ): Date {
+  const tz = coerceTimeZone(timeZone) ?? DEFAULT_BUSINESS_TZ;
+  const p = getZonedParts(date, tz);
+  const due = addBusinessDaysCal(p.year, p.month, p.day, days);
+  return utcFromZonedWall(due.year, due.month, due.day, 17, 0, tz);
+}
+
+/**
+ * The fulfillment day an order's SLA clock starts from — the pick wave it makes.
+ * If the order was placed after the daily cutoff (or on a weekend), it can't
+ * make today's truck, so it rolls to the next business day. This replaces the
+ * implicit midnight boundary (which silently depended on the server's timezone)
+ * with a deliberate, configurable threshold evaluated in the warehouse's zone.
+ *
+ * Returns a UTC instant at local noon of the effective day (noon is DST-stable,
+ * so downstream date extraction always lands on the intended calendar day).
+ */
+export function effectiveFulfillmentDate(placedAt: Date, timeZone: string, cutoffMinutes: number | null): Date {
+  const tz = coerceTimeZone(timeZone) ?? DEFAULT_BUSINESS_TZ;
+  const p = getZonedParts(placedAt, tz);
+  let { year, month, day } = p;
+  const minutesOfDay = p.hour * 60 + p.minute;
+  const rolls = isWeekendDow(p.weekday) || (cutoffMinutes != null && minutesOfDay >= cutoffMinutes);
+  if (rolls) {
+    const next = nextBusinessDayCal(year, month, day);
+    year = next.year; month = next.month; day = next.day;
+  }
+  return utcFromZonedWall(year, month, day, 12, 0, tz);
 }
 
 export interface ResolveSlaDueAtInput {
@@ -149,6 +288,16 @@ export interface ResolveSlaDueAtInput {
   explicitSlaDueAt?: Date | string | null;
   orderPlacedAt?: Date | string | null;
   createdAt?: Date | string | null;
+  /**
+   * The fulfilling warehouse's local timezone (from warehouse_settings).
+   * Falls back to the global default_timezone, then DEFAULT_BUSINESS_TZ.
+   */
+  timezone?: string | null;
+  /**
+   * The fulfilling warehouse's daily order cutoff ("HH:MM" 24h, from
+   * warehouse_settings). null/absent → no cutoff (SLA from the raw placed day).
+   */
+  cutoffLocal?: string | null;
 }
 
 /**
@@ -199,7 +348,20 @@ export async function resolveSlaDueAt(
     }
   }
 
-  return addBusinessDays(baseDate, slaDays);
+  // Resolve the business timezone + daily cutoff. Timezone precedence:
+  // order's warehouse → global default_timezone → hardcoded Eastern. The cutoff
+  // is opt-in: when unset, behavior is the legacy "SLA from the placed day",
+  // just made timezone-explicit (no longer riding the server's ambient zone).
+  const settings = await loadSettings(dbHandle).catch(() => null);
+  const timeZone =
+    coerceTimeZone(input.timezone) ??
+    coerceTimeZone(settings?.defaultTimezone) ??
+    DEFAULT_BUSINESS_TZ;
+  const cutoffMinutes = parseCutoffMinutes(input.cutoffLocal);
+  const fulfillmentBase =
+    cutoffMinutes == null ? baseDate : effectiveFulfillmentDate(baseDate, timeZone, cutoffMinutes);
+
+  return addBusinessDays(fulfillmentBase, slaDays, timeZone);
 }
 
 async function loadSettings(dbHandle: PickPrioritySettingsDb): Promise<PickPrioritySettingsCache> {
@@ -210,6 +372,7 @@ async function loadSettings(dbHandle: PickPrioritySettingsDb): Promise<PickPrior
 
   const shippingBase: Record<ShippingServiceLevel, number> = { ...DEFAULT_SHIPPING_BASE };
   let slaDefaultDays = DEFAULT_SLA_DAYS;
+  let defaultTimezone: string | null = null;
 
   try {
     // Lazy import to avoid circular imports / allow callers to pass their own db.
@@ -221,11 +384,17 @@ async function loadSettings(dbHandle: PickPrioritySettingsDb): Promise<PickPrior
         'priority.shipping_base.standard',
         'priority.shipping_base.expedited',
         'priority.shipping_base.overnight',
-        'priority.sla_default_days'
+        'priority.sla_default_days',
+        'default_timezone'
       )
     `);
     for (const raw of result.rows as SettingsRow[]) {
       const row = raw;
+      // default_timezone is a string, not numeric — handle before coercion.
+      if (row.key === "default_timezone") {
+        defaultTimezone = coerceTimeZone(row.value);
+        continue;
+      }
       const n = row.value == null ? NaN : Number(row.value);
       if (!Number.isFinite(n)) continue;
       switch (row.key) {
@@ -244,6 +413,7 @@ async function loadSettings(dbHandle: PickPrioritySettingsDb): Promise<PickPrior
   settingsCache = {
     shippingBase,
     slaDefaultDays,
+    defaultTimezone,
     expiresAt: now + SETTINGS_CACHE_TTL_MS,
   };
   return settingsCache;
