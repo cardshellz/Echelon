@@ -10,7 +10,7 @@ const WMS_SYNC_SRC = readFileSync(
 describe("wms-sync.service :: inventory reservation call", () => {
   it("calls reserveOrder (order-level) not reserveForOrder (per-item 5-arg)", () => {
     const reserveReadyBlock = WMS_SYNC_SRC.match(
-      /if \(warehouseStatus === "ready"\)[\s\S]{0,500}?reservation\.(reserveOrder|reserveForOrder)\(/,
+      /warehouseStatus === "ready"[\s\S]{0,500}?reservation\.(reserveOrder|reserveForOrder)\(/,
     );
     expect(reserveReadyBlock).not.toBeNull();
     expect(reserveReadyBlock![1]).toBe("reserveOrder");
