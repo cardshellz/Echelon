@@ -231,7 +231,11 @@ export async function backfillShopifyOrders(
     SELECT so.id FROM shopify_orders so
     WHERE NOT EXISTS (
       SELECT 1 FROM oms.oms_orders oo
-      WHERE oo.external_order_id = so.id
+      -- Match on the bare numeric id so legacy GID-format external_order_id
+      -- rows and new numeric rows both dedup (ingestOrder now normalizes to
+      -- numeric; shopify_orders.id is a GID). Without split_part this re-bridges
+      -- every already-ingested order on each run.
+      WHERE split_part(oo.external_order_id, '/', -1) = split_part(so.id, '/', -1)
         AND oo.channel_id IN (SELECT id FROM channels.channels WHERE provider = 'shopify')
     )
     ORDER BY so.created_at DESC

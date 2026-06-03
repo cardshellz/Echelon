@@ -120,6 +120,35 @@ function sameDateTime(
 }
 
 // ---------------------------------------------------------------------------
+// External order id normalization
+// ---------------------------------------------------------------------------
+
+const SHOPIFY_ORDER_GID_PREFIX = "gid://shopify/Order/";
+
+/**
+ * Canonicalize a Shopify external order id to its bare numeric form.
+ *
+ * Two ingestion paths historically stored different formats in
+ * oms_orders.external_order_id for the SAME Shopify order:
+ *   - webhook path (getExternalOrderId): numeric "12011890671775"
+ *   - bridge path  (shopify_orders.id):  GID "gid://shopify/Order/12011890671775"
+ *
+ * Because the OMS dedup key is (channel_id, external_order_id), the two
+ * formats never collided — so a bridged order + a later webhook for the
+ * same order produced TWO oms_orders rows, and a cancel webhook (numeric)
+ * could cancel an empty duplicate while the real order (GID, with the WMS
+ * order + shipment) stayed active. Normalizing at the chokepoint makes both
+ * paths converge on the numeric form. Non-Shopify ids pass through unchanged.
+ */
+export function normalizeExternalOrderId(externalOrderId: string): string {
+  const s = String(externalOrderId).trim();
+  if (s.startsWith(SHOPIFY_ORDER_GID_PREFIX)) {
+    return s.substring(SHOPIFY_ORDER_GID_PREFIX.length);
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------------------
 // Service Factory
 // ---------------------------------------------------------------------------
 
@@ -130,9 +159,12 @@ export function createOmsService(db: any, reservationService?: any) {
    */
   async function ingestOrder(
     channelId: number,
-    externalOrderId: string,
+    externalOrderIdRaw: string,
     data: OrderData,
   ): Promise<OmsOrder> {
+    // Canonicalize the external id so the bridge (GID) and webhook (numeric)
+    // paths converge on a single dedup key. See normalizeExternalOrderId.
+    const externalOrderId = normalizeExternalOrderId(externalOrderIdRaw);
     // Atomic ingestion: order row + line items + created event in one transaction.
     // Without this, a concurrent webhook can see the order row before lines exist
     // and trigger a WMS sync against an incomplete order (zero line items).
