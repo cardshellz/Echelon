@@ -15,6 +15,7 @@ import { createInventoryAtpService } from "../server/modules/inventory/atp.servi
 import { createAllocationEngine } from "../server/modules/channels/allocation-engine.service";
 import { createSourceLockService } from "../server/modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../server/modules/channels/adapters/shopify.adapter";
+import { createEbayAdapter } from "../server/modules/channels/adapters/ebay.adapter";
 import { ChannelAdapterRegistry } from "../server/modules/channels/channel-adapter.interface";
 import { createChannelProductPushService } from "../server/modules/channels/product-push.service";
 import { createEchelonSyncOrchestrator } from "../server/modules/channels/echelon-sync-orchestrator.service";
@@ -52,7 +53,9 @@ async function main() {
   const atpService = createInventoryAtpService(db);
   const allocationEngine = createAllocationEngine(db, atpService);
   const sourceLockService = createSourceLockService(db);
-  const realAdapter = createShopifyAdapter(db);
+  const realAdapter = channel.provider === "ebay"
+    ? createEbayAdapter(db)
+    : createShopifyAdapter(db);
   const productPushService = createChannelProductPushService(db);
 
   // Create a channel-gating proxy: only pushes to target channel, blocks all others

@@ -33,10 +33,11 @@ function createMockDb() {
 
   return {
     _selectResult: [] as any[],
+    _selectQueue: [] as any[][],
     _insertResult: [] as any[],
     _updateResult: [] as any[],
     select: vi.fn(function (this: any) {
-      return thenableChain(this._selectResult);
+      return thenableChain(this._selectQueue.length > 0 ? this._selectQueue.shift() : this._selectResult);
     }),
     insert: vi.fn(function (this: any) {
       return thenableChain(this._insertResult);
@@ -234,6 +235,70 @@ describe("EchelonSyncOrchestrator", () => {
       expect(results).toEqual([]);
     });
 
+    it("should push computed eBay allocation through listing offer ids", async () => {
+      const ebayAdapter: IChannelAdapter = {
+        ...createMockAdapter(),
+        adapterName: "MockEbay",
+        providerKey: "ebay",
+        pushInventory: vi.fn().mockResolvedValue([
+          { variantId: 67, pushedQty: 292, status: "success" },
+        ]),
+      };
+      adapterRegistry.register(ebayAdapter);
+      allocationEngine.allocateProduct.mockResolvedValue({
+        productId: 33,
+        totalAtpBase: 204400,
+        allocations: [
+          {
+            channelId: 67,
+            channelName: "Ebay",
+            channelProvider: "ebay",
+            channelPriority: 0,
+            productVariantId: 67,
+            sku: "ARM-ENV-SGL-C700",
+            unitsPerVariant: 700,
+            allocatedUnits: 292,
+            allocatedBase: 204400,
+            method: "mirror",
+            reason: "Mirror ATP",
+          },
+        ],
+        blocked: [],
+      });
+      db._selectQueue = [
+        [],
+        [{
+          productVariantId: 67,
+          feedId: null,
+          feedLastSyncedQty: null,
+          channelVariantId: null,
+          channelSku: null,
+          channelInventoryItemId: null,
+          listingId: 663,
+          listingExternalVariantId: "136412217011",
+          listingExternalSku: "ARM-ENV-SGL-C700",
+          listingLastSyncedQty: null,
+        }],
+        [],
+        [{ productId: 33 }],
+        [],
+      ];
+
+      const results = await orchestrator.syncInventoryForProduct(33, { dryRun: false }, "test");
+
+      expect(ebayAdapter.pushInventory).toHaveBeenCalledWith(67, [
+        expect.objectContaining({
+          variantId: 67,
+          sku: "ARM-ENV-SGL-C700",
+          externalVariantId: "136412217011",
+          allocatedQty: 292,
+        }),
+      ]);
+      expect(results[0].variantsPushed).toBe(1);
+      expect(results[0].variantsErrored).toBe(0);
+      expect(db.insert).toHaveBeenCalled();
+    });
+
     it("should skip variants without shopifyInventoryItemId", async () => {
       db._selectResult = [
         { warehouseId: 1, shopifyLocationId: "loc-1", id: 100, sku: "TEST-P50", shopifyVariantId: "ext-100", shopifyInventoryItemId: null },
@@ -329,6 +394,25 @@ describe("EchelonSyncOrchestrator", () => {
       expect(result.dryRun).toBe(true);
       expect(result.startedAt).toBeInstanceOf(Date);
       expect(result.completedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe("syncInventoryForAllProducts", () => {
+    it("should include products with channel listings even when channel feeds are missing", async () => {
+      allocationEngine.allocateProduct.mockResolvedValue({
+        productId: 33,
+        totalAtpBase: 0,
+        allocations: [],
+        blocked: [],
+      });
+      db._selectQueue = [
+        [],
+        [{ productId: 33 }],
+      ];
+
+      await orchestrator.syncInventoryForAllProducts({ dryRun: true }, "test");
+
+      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(33, "test");
     });
   });
 });
