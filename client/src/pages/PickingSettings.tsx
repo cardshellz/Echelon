@@ -122,13 +122,18 @@ export default function PickingSettings() {
     mutationFn: async (data: { postPickStatus: string; pickMode: string; requireScanConfirm: number; pickingBatchSize: number; autoReleaseDelayMinutes: number; orderCutoffLocal: string | null; timezone: string | null }) => {
       if (!selectedWarehouseData) throw new Error("No warehouse selected");
 
+      // SLA cutoff is written through its own dedicated, warehouse-keyed endpoint
+      // (PUT /api/warehouse-settings/:warehouseId/sla-cutoff); the rest go through
+      // the pick-settings row.
+      const { orderCutoffLocal, timezone, ...pickSettings } = data;
+
       if (selectedWarehouse?.id) {
         const res = await fetch(`/api/warehouse-settings/${selectedWarehouse.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify({
-            ...data,
+            ...pickSettings,
             warehouseId: selectedWarehouseData.id,
           }),
         });
@@ -136,7 +141,6 @@ export default function PickingSettings() {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.error || "Failed to save settings");
         }
-        return res.json();
       } else {
         const res = await fetch("/api/warehouse-settings", {
           method: "POST",
@@ -146,15 +150,27 @@ export default function PickingSettings() {
             warehouseId: selectedWarehouseData.id,
             warehouseCode: selectedWarehouseData.code,
             warehouseName: selectedWarehouseData.name,
-            ...data,
+            ...pickSettings,
           }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.error || "Failed to create settings");
         }
-        return res.json();
       }
+
+      // SLA cutoff via the dedicated per-warehouse endpoint (upserts the row).
+      const cutoffRes = await fetch(`/api/warehouse-settings/${selectedWarehouseData.id}/sla-cutoff`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ orderCutoffLocal, timezone }),
+      });
+      if (!cutoffRes.ok) {
+        const body = await cutoffRes.json().catch(() => ({}));
+        throw new Error(body.error || "Failed to save SLA cutoff");
+      }
+      return cutoffRes.json();
     },
     onSuccess: () => {
       toast({ title: "Pick settings saved" });
