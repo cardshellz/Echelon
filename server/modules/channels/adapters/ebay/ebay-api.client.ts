@@ -39,6 +39,8 @@ const MAX_RETRIES = 3;
 const BASE_RETRY_DELAY_MS = 1000;
 const MAX_RETRY_DELAY_MS = 15000;
 const FULFILLMENT_VERIFY_DELAYS_MS = [0, 500, 1500, 3000] as const;
+const EBAY_US_MARKETPLACE_ID = "EBAY_US";
+const EBAY_US_LOCALE = "en-US";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -370,7 +372,8 @@ export class EbayApiClient {
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
             Accept: "application/json",
-            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+            "Accept-Language": EBAY_US_LOCALE,
+            "X-EBAY-C-MARKETPLACE-ID": EBAY_US_MARKETPLACE_ID,
           },
           body: JSON.stringify(fulfillment),
         });
@@ -463,7 +466,8 @@ export class EbayApiClient {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
-          "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+          "Accept-Language": EBAY_US_LOCALE,
+          "X-EBAY-C-MARKETPLACE-ID": EBAY_US_MARKETPLACE_ID,
         },
       });
 
@@ -540,7 +544,8 @@ export class EbayApiClient {
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
             Accept: "application/json",
-            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+            "Accept-Language": EBAY_US_LOCALE,
+            "X-EBAY-C-MARKETPLACE-ID": EBAY_US_MARKETPLACE_ID,
             ...extraHeaders,
           },
           body: body ? JSON.stringify(body) : undefined,

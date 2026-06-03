@@ -11,6 +11,10 @@ function makeClient() {
   );
 }
 
+function getFetchHeaders(fetchMock: any, callIndex: number): Record<string, string> {
+  return (fetchMock.mock.calls[callIndex][1] as RequestInit).headers as Record<string, string>;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -52,6 +56,8 @@ describe("EbayApiClient.createShippingFulfillment", () => {
 
     expect(result.fulfillmentId).toBe("track-1");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(getFetchHeaders(fetchMock, 0)["Accept-Language"]).toBe("en-US");
+    expect(getFetchHeaders(fetchMock, 1)["Accept-Language"]).toBe("en-US");
     expect(fetchMock.mock.calls[1][0]).toBe(
       "https://api.ebay.com/sell/fulfillment/v1/order/22-14563-95067/shipping_fulfillment",
     );
@@ -99,6 +105,7 @@ describe("EbayApiClient listing lifecycle", () => {
       "https://api.ebay.com/sell/inventory/v1/offer/offer-123/withdraw",
     );
     expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("POST");
+    expect(getFetchHeaders(fetchMock, 0)["Accept-Language"]).toBe("en-US");
   });
 
   it("withdraws a multi-variation listing by inventory item group", async () => {
@@ -116,5 +123,42 @@ describe("EbayApiClient listing lifecycle", () => {
       inventoryItemGroupKey: "SHLZ-SEMI-OVR-DH",
       marketplaceId: "EBAY_US",
     });
+    expect(getFetchHeaders(fetchMock, 0)["Accept-Language"]).toBe("en-US");
+  });
+
+  it("sets a concrete eBay locale header on inventory offer reads", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ offers: [] }));
+
+    await makeClient().getOffers("ARM-ENV-SGL-C700");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://api.ebay.com/sell/inventory/v1/offer?sku=ARM-ENV-SGL-C700&marketplace_id=EBAY_US",
+    );
+    expect(getFetchHeaders(fetchMock, 0)["Accept-Language"]).toBe("en-US");
+  });
+
+  it("sets a concrete eBay locale header on bulk inventory updates", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ responses: [] }));
+
+    await makeClient().bulkUpdatePriceQuantity({
+      requests: [
+        {
+          sku: "ARM-ENV-SGL-C700",
+          shipToLocationAvailability: { quantity: 0 },
+          offers: [{ offerId: "136412217011", availableQuantity: 0 }],
+        },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://api.ebay.com/sell/inventory/v1/bulk_update_price_quantity",
+    );
+    expect(getFetchHeaders(fetchMock, 0)["Accept-Language"]).toBe("en-US");
   });
 });
