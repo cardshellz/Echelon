@@ -1493,11 +1493,53 @@ export function registerOmsWebhooks(
              OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
         `);
 
-        // Status transition through C4 (guarded)
+        // Full cancellation cascade: release reservations → cancel
+        // shipments (+ ShipStation) → cancel WMS order. Mirrors the
+        // orders/cancelled handler logic. The previous code only called
+        // cancelWmsOrder which left reservations leaked and shipments
+        // (+ their ShipStation orders) alive.
         if (isFinalOmsState) {
+          const rollupModule = await import("../orders/shipment-rollup");
           const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+
+          const ssAdapter = shipStationService
+            ? {
+                removeFromList: async (ssOrderId: number) => {
+                  try {
+                    await shipStationService.cancelOrder(ssOrderId);
+                  } catch (e: any) {
+                    console.error(`${LOG_PREFIX} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}`);
+                    throw e;
+                  }
+                },
+              }
+            : undefined;
+
           for (const wmsRow of wmsOrderRows) {
-            await cancelWmsOrder(db, wmsRow.id, "shopify_order_update_final");
+            if (wmsServices) {
+              try {
+                await wmsServices.reservation.releaseOrderReservation(
+                  wmsRow.id,
+                  "shopify_order_update_final",
+                );
+              } catch (relErr: any) {
+                console.error(`${LOG_PREFIX} Failed to release reservation for WMS ${wmsRow.id}: ${relErr.message}`);
+              }
+            }
+
+            const cascade = await cascadeShopifyCancelToShipments(
+              db,
+              wmsRow.id,
+              {
+                handleCustomerCancelOnShipment: rollupModule.handleCustomerCancelOnShipment,
+                recomputeOrderStatusFromShipments: rollupModule.recomputeOrderStatusFromShipments,
+              },
+              { now, shipstation: ssAdapter, logPrefix: LOG_PREFIX },
+            );
+
+            if (!cascade.hadShipments) {
+              await cancelWmsOrder(db, wmsRow.id, "shopify_order_update_final");
+            }
           }
         }
       }
