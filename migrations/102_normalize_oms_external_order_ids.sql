@@ -48,7 +48,7 @@ JOIN oms.oms_orders oo ON o.oms_fulfillment_order_id = oo.id::text AND o.source 
 WHERE s.order_id = o.id
   AND oo.status = 'cancelled'
   AND oo.external_order_id LIKE 'gid://shopify/Order/%'
-  AND s.status NOT IN ('cancelled', 'voided', 'shipped', 'delivered');
+  AND s.status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost');
 
 -- Step 4: Normalize GID-only rows that have NO numeric twin.
 -- These are orders ingested only via the bridge — safe to strip the prefix
