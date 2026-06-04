@@ -95,6 +95,10 @@ export function registerWarehouseRoutes(app: Express) {
       if (!parsed.success) {
         return res.status(400).json({ error: "Invalid request data", details: parsed.error });
       }
+      const cutoffError = validateSlaCutoffFields(req.body);
+      if (cutoffError) {
+        return res.status(400).json({ error: cutoffError });
+      }
       const warehouse = await storage.createWarehouse(parsed.data as any);
       res.status(201).json(warehouse);
     } catch (error: any) {
@@ -112,6 +116,10 @@ export function registerWarehouseRoutes(app: Express) {
       const parsed = insertWarehouseSchema.partial().safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ error: "Invalid request data", details: parsed.error });
+      }
+      const cutoffError = validateSlaCutoffFields(req.body);
+      if (cutoffError) {
+        return res.status(400).json({ error: cutoffError });
       }
       const warehouse = await storage.updateWarehouse(id, parsed.data as any);
       if (!warehouse) {
@@ -309,15 +317,9 @@ export function registerWarehouseRoutes(app: Express) {
   
   app.post("/api/warehouse-settings", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
-      const cutoffError = validateSlaCutoffFields(req.body);
-      if (cutoffError) {
-        return res.status(400).json({ error: cutoffError });
-      }
       const data = req.body;
       const settings = await storage.createWarehouseSettings({
         warehouseId: data.warehouseId || null,
-        orderCutoffLocal: data.orderCutoffLocal ?? null,
-        timezone: data.timezone ?? null,
         warehouseCode: data.warehouseCode || "DEFAULT",
         warehouseName: data.warehouseName || "Main Warehouse",
         replenMode: data.replenMode || "queue",
@@ -358,10 +360,6 @@ export function registerWarehouseRoutes(app: Express) {
   
   app.patch("/api/warehouse-settings/:id", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
-      const cutoffError = validateSlaCutoffFields(req.body);
-      if (cutoffError) {
-        return res.status(400).json({ error: cutoffError });
-      }
       const id = parseInt(req.params.id);
       const settings = await storage.updateWarehouseSettings(id, req.body);
       if (!settings) {
@@ -389,37 +387,31 @@ export function registerWarehouseRoutes(app: Express) {
   });
 
   // ===== SLA ORDER CUTOFF (per warehouse) =====
-  // Dedicated, warehouse-keyed endpoint for the fulfillment SLA cutoff + the
-  // timezone it's evaluated in. Keyed by warehouse_id (not the settings-row id)
-  // so callers set "the cutoff for warehouse N" directly. Drives sla_due_at /
-  // pick priority (see server/modules/orders/sort-rank.ts).
+  // Dedicated endpoint to read/set a warehouse's fulfillment SLA cutoff. The
+  // cutoff + timezone live on the warehouse row (warehouse.warehouses) — they
+  // describe one building's fulfillment clock. This is a focused alias for
+  // setting just those two fields without sending the whole warehouse; the
+  // Edit Warehouse form (PATCH /api/warehouses/:id) sets them too. Drives
+  // sla_due_at / pick priority (see server/modules/orders/sort-rank.ts).
 
-  // GET the effective cutoff for a warehouse (per-warehouse value if set, else
-  // the inherited DEFAULT-row / global fallback).
-  app.get("/api/warehouse-settings/:warehouseId/sla-cutoff", requirePermission("warehouse", "read"), async (req, res) => {
+  app.get("/api/warehouses/:id/sla-cutoff", requirePermission("warehouse", "read"), async (req, res) => {
     try {
-      const warehouseId = parseInt(req.params.warehouseId);
-      if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
-        return res.status(400).json({ error: "warehouseId must be a positive integer" });
+      const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "warehouse id must be a positive integer" });
       }
-      const warehouse = await getWarehouseById(warehouseId);
+      const warehouse = await getWarehouseById(id);
       if (!warehouse) {
         return res.status(404).json({ error: "Warehouse not found" });
       }
-      const all = await storage.getAllWarehouseSettings();
-      const own = all.find((s: any) => s.warehouseId === warehouseId);
-      const effective = await getSlaCutoffConfig(warehouseId);
+      // `effective` applies the null-warehouse → default-warehouse fallback used
+      // for unassigned orders; the top-level fields are this warehouse's own.
+      const effective = await getSlaCutoffConfig(id);
       res.json({
-        warehouseId,
-        // Effective values after the warehouse -> DEFAULT -> global fallback chain.
-        orderCutoffLocal: effective.cutoffLocal,
-        timezone: effective.timezone,
-        // Whether the warehouse carries its OWN cutoff/tz, or is inheriting the
-        // DEFAULT row. Lets the UI show "inherited" vs an explicit override.
-        inherited: !own || (own.orderCutoffLocal == null && own.timezone == null),
-        explicit: own
-          ? { orderCutoffLocal: own.orderCutoffLocal ?? null, timezone: own.timezone ?? null }
-          : null,
+        warehouseId: id,
+        orderCutoffLocal: (warehouse as any).orderCutoffLocal ?? null,
+        timezone: (warehouse as any).timezone ?? null,
+        effective: { orderCutoffLocal: effective.cutoffLocal, timezone: effective.timezone },
       });
     } catch (error) {
       console.error("Error fetching warehouse SLA cutoff:", error);
@@ -427,44 +419,29 @@ export function registerWarehouseRoutes(app: Express) {
     }
   });
 
-  // PUT (upsert) the cutoff for a warehouse. Body: { orderCutoffLocal, timezone }.
+  // PUT the cutoff for a warehouse. Body: { orderCutoffLocal, timezone }.
   // Either field may be null (orderCutoffLocal null = no cutoff; timezone null =
-  // inherit global default_timezone). Creates the warehouse's settings row if it
-  // doesn't exist yet (so a warehouse never has to be pre-seeded).
-  app.put("/api/warehouse-settings/:warehouseId/sla-cutoff", requirePermission("warehouse", "manage"), async (req, res) => {
+  // inherit global default_timezone). Writes directly to the warehouse row.
+  app.put("/api/warehouses/:id/sla-cutoff", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
-      const warehouseId = parseInt(req.params.warehouseId);
-      if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
-        return res.status(400).json({ error: "warehouseId must be a positive integer" });
+      const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "warehouse id must be a positive integer" });
       }
       const cutoffError = validateSlaCutoffFields(req.body);
       if (cutoffError) {
         return res.status(400).json({ error: cutoffError });
       }
-      const warehouse = await getWarehouseById(warehouseId);
-      if (!warehouse) {
+      const updates: Record<string, any> = {};
+      if ("orderCutoffLocal" in req.body) updates.orderCutoffLocal = req.body.orderCutoffLocal ?? null;
+      if ("timezone" in req.body) updates.timezone = req.body.timezone ?? null;
+
+      const saved = await storage.updateWarehouse(id, updates);
+      if (!saved) {
         return res.status(404).json({ error: "Warehouse not found" });
       }
-
-      const orderCutoffLocal = (req.body?.orderCutoffLocal ?? null) as string | null;
-      const timezone = (req.body?.timezone ?? null) as string | null;
-
-      // Upsert the row tied to THIS warehouse (no DEFAULT-row fallback — we must
-      // never write the global default when setting a per-warehouse override).
-      const all = await storage.getAllWarehouseSettings();
-      const own = all.find((s: any) => s.warehouseId === warehouseId);
-      const saved = own
-        ? await storage.updateWarehouseSettings(own.id, { orderCutoffLocal, timezone })
-        : await storage.createWarehouseSettings({
-            warehouseId,
-            warehouseCode: (warehouse as any).code,
-            warehouseName: (warehouse as any).name,
-            orderCutoffLocal,
-            timezone,
-          } as any);
-
       res.json({
-        warehouseId,
+        warehouseId: id,
         orderCutoffLocal: (saved as any)?.orderCutoffLocal ?? null,
         timezone: (saved as any)?.timezone ?? null,
       });

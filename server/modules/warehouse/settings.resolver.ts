@@ -65,9 +65,16 @@ export async function getSettingsForWarehouse(
 }
 
 /**
- * SLA cutoff config for a warehouse, via the same fallback hierarchy. Used by
- * the pick-priority / SLA layer (sort-rank.ts) to bucket an order into its
- * fulfillment day in the warehouse's own timezone. Either field may be null:
+ * SLA cutoff config for a warehouse. Used by the pick-priority / SLA layer
+ * (sort-rank.ts) to bucket an order into its fulfillment day in the warehouse's
+ * own timezone. Both the timezone and the cutoff live on the WAREHOUSE row
+ * (warehouse.warehouses) — they describe one building's fulfillment clock.
+ *
+ * Resolution:
+ *   - warehouseId given → that warehouse's timezone + order_cutoff_local.
+ *   - warehouseId null (order not yet routed) → the DEFAULT warehouse, so new
+ *     orders bucket by the default building's clock until assignment.
+ * Either field may be null:
  *   timezone null   → caller falls back to global default_timezone.
  *   cutoffLocal null → no cutoff (SLA from the raw placed day).
  */
@@ -80,10 +87,27 @@ export async function getSlaCutoffConfig(
   warehouseId?: number | null,
   tx: DbLike = defaultDb,
 ): Promise<SlaCutoffConfig> {
-  const row = await getSettingsForWarehouse(warehouseId, tx);
+  let wh: { timezone: string | null; orderCutoffLocal: string | null } | undefined;
+
+  if (warehouseId != null) {
+    [wh] = await tx
+      .select({ timezone: warehouses.timezone, orderCutoffLocal: warehouses.orderCutoffLocal })
+      .from(warehouses)
+      .where(eq(warehouses.id, warehouseId))
+      .limit(1);
+  }
+  if (!wh) {
+    // Unassigned order → default warehouse (the building new orders flow to).
+    [wh] = await tx
+      .select({ timezone: warehouses.timezone, orderCutoffLocal: warehouses.orderCutoffLocal })
+      .from(warehouses)
+      .where(eq(warehouses.isDefault, 1))
+      .limit(1);
+  }
+
   return {
-    timezone: (row?.timezone ?? null) as string | null,
-    cutoffLocal: (row?.orderCutoffLocal ?? null) as string | null,
+    timezone: (wh?.timezone ?? null) as string | null,
+    cutoffLocal: (wh?.orderCutoffLocal ?? null) as string | null,
   };
 }
 

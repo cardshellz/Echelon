@@ -100,7 +100,11 @@ export const warehouses = warehouseSchema.table("warehouses", {
   state: varchar("state", { length: 50 }),
   postalCode: varchar("postal_code", { length: 20 }),
   country: varchar("country", { length: 50 }).default("US"),
-  timezone: varchar("timezone", { length: 50 }).default("America/New_York"),
+  timezone: varchar("timezone", { length: 50 }).default("America/New_York"), // The building's local clock — drives SLA cutoff bucketing
+  // Daily order cutoff ("HH:MM" 24h, in this warehouse's `timezone`) after which
+  // an order rolls to the next business day's pick wave. Drives sla_due_at /
+  // pick priority (server/modules/orders/sort-rank.ts). null = no cutoff.
+  orderCutoffLocal: varchar("order_cutoff_local", { length: 5 }),
   isActive: integer("is_active").notNull().default(1),
   isDefault: integer("is_default").notNull().default(0), // Default warehouse for new orders
   shopifyLocationId: varchar("shopify_location_id", { length: 50 }), // Maps to Shopify location_id for inventory sync

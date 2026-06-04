@@ -246,7 +246,7 @@ export default function Settings() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="default_timezone" className="text-sm">Default Timezone</Label>
+                  <Label htmlFor="default_timezone" className="text-sm">Default Display Timezone</Label>
                   <Select
                     value={formData.default_timezone || "America/New_York"}
                     onValueChange={(val) => setFormData({ ...formData, default_timezone: val })}
@@ -261,6 +261,10 @@ export default function Settings() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Used to display times consistently across the pick queue &amp; reports. Each
+                    warehouse's own timezone (set per warehouse) drives its SLA cutoff math.
+                  </p>
                 </div>
               </div>
 

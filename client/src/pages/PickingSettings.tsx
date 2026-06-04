@@ -17,20 +17,7 @@ import {
   Layers,
   Scan,
   Info,
-  Clock,
 } from "lucide-react";
-
-// IANA zones offered for the warehouse cutoff. Mirrors the org-level list in
-// Settings.tsx; the cutoff is evaluated in the warehouse's own clock.
-const TIMEZONES = [
-  "America/New_York",
-  "America/Chicago",
-  "America/Denver",
-  "America/Los_Angeles",
-  "America/Phoenix",
-  "America/Anchorage",
-  "Pacific/Honolulu",
-];
 
 interface WarehouseType {
   id: number;
@@ -48,8 +35,6 @@ interface WarehouseSettings {
   requireScanConfirm: number;
   pickingBatchSize: number;
   autoReleaseDelayMinutes: number;
-  orderCutoffLocal: string | null;
-  timezone: string | null;
   isActive: number;
   [key: string]: any;
 }
@@ -92,8 +77,6 @@ export default function PickingSettings() {
     requireScanConfirm: "0",
     pickingBatchSize: "20",
     autoReleaseDelayMinutes: "30",
-    orderCutoffLocal: "",
-    timezone: "",
   });
 
   // Auto-select first warehouse
@@ -112,20 +95,13 @@ export default function PickingSettings() {
         requireScanConfirm: (selectedWarehouse.requireScanConfirm ?? 0).toString(),
         pickingBatchSize: (selectedWarehouse.pickingBatchSize ?? 20).toString(),
         autoReleaseDelayMinutes: (selectedWarehouse.autoReleaseDelayMinutes ?? 30).toString(),
-        orderCutoffLocal: selectedWarehouse.orderCutoffLocal || "",
-        timezone: selectedWarehouse.timezone || "",
       });
     }
   }, [selectedWarehouse]);
 
   const saveMutation = useMutation({
-    mutationFn: async (data: { postPickStatus: string; pickMode: string; requireScanConfirm: number; pickingBatchSize: number; autoReleaseDelayMinutes: number; orderCutoffLocal: string | null; timezone: string | null }) => {
+    mutationFn: async (data: { postPickStatus: string; pickMode: string; requireScanConfirm: number; pickingBatchSize: number; autoReleaseDelayMinutes: number }) => {
       if (!selectedWarehouseData) throw new Error("No warehouse selected");
-
-      // SLA cutoff is written through its own dedicated, warehouse-keyed endpoint
-      // (PUT /api/warehouse-settings/:warehouseId/sla-cutoff); the rest go through
-      // the pick-settings row.
-      const { orderCutoffLocal, timezone, ...pickSettings } = data;
 
       if (selectedWarehouse?.id) {
         const res = await fetch(`/api/warehouse-settings/${selectedWarehouse.id}`, {
@@ -133,7 +109,7 @@ export default function PickingSettings() {
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify({
-            ...pickSettings,
+            ...data,
             warehouseId: selectedWarehouseData.id,
           }),
         });
@@ -141,6 +117,7 @@ export default function PickingSettings() {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.error || "Failed to save settings");
         }
+        return res.json();
       } else {
         const res = await fetch("/api/warehouse-settings", {
           method: "POST",
@@ -150,27 +127,15 @@ export default function PickingSettings() {
             warehouseId: selectedWarehouseData.id,
             warehouseCode: selectedWarehouseData.code,
             warehouseName: selectedWarehouseData.name,
-            ...pickSettings,
+            ...data,
           }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.error || "Failed to create settings");
         }
+        return res.json();
       }
-
-      // SLA cutoff via the dedicated per-warehouse endpoint (upserts the row).
-      const cutoffRes = await fetch(`/api/warehouse-settings/${selectedWarehouseData.id}/sla-cutoff`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ orderCutoffLocal, timezone }),
-      });
-      if (!cutoffRes.ok) {
-        const body = await cutoffRes.json().catch(() => ({}));
-        throw new Error(body.error || "Failed to save SLA cutoff");
-      }
-      return cutoffRes.json();
     },
     onSuccess: () => {
       toast({ title: "Pick settings saved" });
@@ -420,50 +385,6 @@ export default function PickingSettings() {
                 </div>
               </div>
 
-              {/* Fulfillment SLA Cutoff */}
-              <div className="pt-4 border-t">
-                <Label className="text-sm md:text-base font-semibold flex items-center gap-2">
-                  <Clock className="w-4 h-4" />
-                  Fulfillment SLA Cutoff
-                </Label>
-                <p className="text-xs md:text-sm text-muted-foreground mb-3">
-                  Orders placed after the cutoff (in this warehouse's timezone) roll to the
-                  next business day's pick wave — which sets their SLA deadline and queue
-                  priority. Leave the cutoff blank to disable it (SLA is measured from the
-                  raw order time). Weekends always roll to the next business day.
-                </p>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="orderCutoffLocal" className="text-xs md:text-sm">Order Cutoff (warehouse-local)</Label>
-                    <Input
-                      id="orderCutoffLocal"
-                      type="time"
-                      className="w-full h-10"
-                      value={form.orderCutoffLocal}
-                      onChange={(e) => setForm({ ...form, orderCutoffLocal: e.target.value })}
-                    />
-                    <p className="text-xs text-muted-foreground">e.g. 2:00 PM — last pickup the order can still make that day</p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="timezone" className="text-xs md:text-sm">Timezone</Label>
-                    <Select
-                      value={form.timezone || undefined}
-                      onValueChange={(v) => setForm({ ...form, timezone: v })}
-                    >
-                      <SelectTrigger id="timezone" className="w-full h-10">
-                        <SelectValue placeholder="Use org default" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {TIMEZONES.map((tz) => (
-                          <SelectItem key={tz} value={tz}>{tz}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-muted-foreground">The building's own clock — where the carrier pickup happens. Blank = org default.</p>
-                  </div>
-                </div>
-              </div>
-
               {/* Info callout */}
               <div className="flex items-start gap-3 p-3 md:p-4 bg-blue-50 dark:bg-blue-950/30 rounded-lg border border-blue-200 dark:border-blue-800">
                 <Info className="w-5 h-5 text-blue-500 mt-0.5 shrink-0" />
@@ -485,8 +406,6 @@ export default function PickingSettings() {
                     requireScanConfirm: parseInt(form.requireScanConfirm) || 0,
                     pickingBatchSize: parseInt(form.pickingBatchSize) || 20,
                     autoReleaseDelayMinutes: parseInt(form.autoReleaseDelayMinutes) || 30,
-                    orderCutoffLocal: form.orderCutoffLocal || null,
-                    timezone: form.timezone || null,
                   })}
                   disabled={saveMutation.isPending}
                 >
