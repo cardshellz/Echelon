@@ -27,6 +27,7 @@ interface WarehouseRecord {
   postalCode: string | null;
   country: string | null;
   timezone: string | null;
+  orderCutoffLocal: string | null;
   isActive: number;
   isDefault: number;
   shopifyLocationId: string | null;
@@ -119,6 +120,7 @@ export default function Warehouses() {
     postalCode: "",
     country: "US",
     timezone: "America/New_York",
+    orderCutoffLocal: "" as string,
     isActive: 1,
     isDefault: 0,
     shopifyLocationId: "",
@@ -147,6 +149,7 @@ export default function Warehouses() {
         shopifyLocationId: data.shopifyLocationId || null,
         inventorySourceConfig: data.inventorySourceConfig || null,
         hubWarehouseId: data.hubWarehouseId || null,
+        orderCutoffLocal: data.orderCutoffLocal || null, // "" → null (no cutoff)
       };
       const res = await fetch("/api/warehouses", {
         method: "POST",
@@ -177,6 +180,7 @@ export default function Warehouses() {
         shopifyLocationId: data.shopifyLocationId || null,
         inventorySourceConfig: data.inventorySourceConfig || null,
         hubWarehouseId: data.hubWarehouseId || null,
+        orderCutoffLocal: data.orderCutoffLocal || null, // "" → null (no cutoff)
       };
       const res = await fetch(`/api/warehouses/${id}`, {
         method: "PATCH",
@@ -230,6 +234,7 @@ export default function Warehouses() {
       postalCode: "",
       country: "US",
       timezone: "America/New_York",
+      orderCutoffLocal: "",
       isActive: 1,
       isDefault: 0,
       shopifyLocationId: "",
@@ -251,6 +256,7 @@ export default function Warehouses() {
       postalCode: warehouse.postalCode || "",
       country: warehouse.country || "US",
       timezone: warehouse.timezone || "America/New_York",
+      orderCutoffLocal: warehouse.orderCutoffLocal || "",
       isActive: warehouse.isActive,
       isDefault: warehouse.isDefault,
       shopifyLocationId: warehouse.shopifyLocationId || "",
@@ -841,6 +847,21 @@ export default function Warehouses() {
                         <SelectItem value="Australia/Sydney">Australia (Sydney)</SelectItem>
                       </SelectContent>
                     </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="orderCutoffLocal" className="text-xs md:text-sm">Order Cutoff (SLA)</Label>
+                    <Input
+                      id="orderCutoffLocal"
+                      type="time"
+                      className="h-11"
+                      value={formData.orderCutoffLocal}
+                      onChange={(e) => setFormData({ ...formData, orderCutoffLocal: e.target.value })}
+                      data-testid="input-warehouse-cutoff"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Orders placed after this time (in the warehouse's timezone above) roll to the
+                      next business day's pick wave, setting their SLA + queue priority. Blank = no cutoff.
+                    </p>
                   </div>
                 </div>
               </div>
