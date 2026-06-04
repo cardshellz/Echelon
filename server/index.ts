@@ -748,7 +748,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       // Now using: Echelon OMS webhooks → oms_orders → wmsSync → orders
 
       // Start Shopify order reconciliation (catches TikTok, POS, missed webhooks)
-      initReconciliation(services.oms);
+      initReconciliation(services.oms, services.wmsSync);
       if (!schedulersDisabled("SHOPIFY_RECONCILIATION_SCHEDULER_DISABLED")) {
         startShopifyReconciliation();
       } else {
