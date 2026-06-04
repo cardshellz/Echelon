@@ -1717,6 +1717,79 @@ export class WmsSyncService {
   }
 
   /**
+   * One-time cleanup: find OMS orders that were cancelled by the GID
+   * normalization migration (101) but still have active ShipStation orders.
+   * Cascades the cancellation through WMS → shipments → ShipStation.
+   */
+  async cleanupGidDuplicateShipments(limit: number = 200): Promise<{ cancelled: number; failed: number }> {
+    const dupes = await db.execute<{
+      oms_id: number;
+      external_order_number: string;
+      wms_id: number | null;
+    }>(sql`
+      SELECT oo.id AS oms_id,
+             oo.external_order_number,
+             o.id AS wms_id
+      FROM oms.oms_orders oo
+      LEFT JOIN wms.orders o
+        ON o.source = 'oms' AND o.oms_fulfillment_order_id = oo.id::text
+      WHERE oo.status = 'cancelled'
+        AND EXISTS (
+          SELECT 1 FROM wms.outbound_shipments s
+          WHERE s.order_id = o.id
+            AND s.shipstation_order_id IS NOT NULL
+            AND s.status NOT IN ('cancelled', 'voided')
+        )
+        AND EXISTS (
+          SELECT 1 FROM oms.oms_orders twin
+          WHERE twin.channel_id = oo.channel_id
+            AND twin.external_order_id = oo.external_order_id
+            AND twin.id <> oo.id
+            AND twin.status NOT IN ('cancelled', 'refunded')
+        )
+      LIMIT ${limit}
+    `);
+
+    const rows = dupes.rows ?? [];
+    if (rows.length === 0) {
+      console.log(`[WMS Sync] GID cleanup: no duplicate shipments to cancel`);
+      return { cancelled: 0, failed: 0 };
+    }
+
+    console.log(`[WMS Sync] GID cleanup: found ${rows.length} cancelled OMS orders with active SS shipments`);
+
+    const { cancelOrderCascade } = await import("./oms-webhooks");
+
+    let ssService: any = null;
+    try {
+      const { createShipStationService } = await import("./shipstation.service");
+      ssService = createShipStationService(db);
+    } catch (_) {}
+
+    let cancelled = 0;
+    let failed = 0;
+
+    for (const row of rows) {
+      try {
+        await cancelOrderCascade(db, row.oms_id, {
+          wmsServices: this.services,
+          shipStationService: ssService,
+          source: "gid_duplicate_cleanup",
+          reason: "duplicate OMS order from GID/numeric mismatch",
+          logPrefix: "[GID Cleanup]",
+        });
+        console.log(`[WMS Sync] GID cleanup: cascaded cancel for ${row.external_order_number} (OMS ${row.oms_id})`);
+        cancelled++;
+      } catch (err: any) {
+        console.error(`[WMS Sync] GID cleanup: failed for OMS ${row.oms_id}: ${err.message}`);
+        failed++;
+      }
+    }
+
+    return { cancelled, failed };
+  }
+
+  /**
    * Resync items for an existing WMS order from its OMS source.
    * Use when a WMS order has 0 items or stale/wrong items.
    * WARNING: deletes all existing order_items for the WMS order, re-creates from OMS.
