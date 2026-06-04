@@ -1942,6 +1942,20 @@ export function registerInventoryRoutes(app: Express) {
    * creates the WMS order for each. This is the recovery path after a
    * downtime window where the webhook → wms bridge didn't run.
    */
+  app.post("/api/sync/cleanup-gid-duplicates", requireAuth, async (req, res) => {
+    try {
+      const wmsSync = (req.app.locals.services as any)?.wmsSync;
+      if (!wmsSync?.cleanupGidDuplicateShipments) {
+        return res.status(500).json({ error: "wmsSync service unavailable" });
+      }
+      const result = await wmsSync.cleanupGidDuplicateShipments();
+      res.json(result);
+    } catch (error: any) {
+      console.error("[GID Cleanup] Failed:", error);
+      res.status(500).json({ error: error?.message || "Failed to cleanup GID duplicates" });
+    }
+  });
+
   app.post("/api/sync/reconcile-cancellations", requireAuth, async (req, res) => {
     try {
       const wmsSync = (req.app.locals.services as any)?.wmsSync;

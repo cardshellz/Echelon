@@ -24,6 +24,7 @@ import { channelConnections } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
 import type { OmsService } from "../oms/oms.service";
+import type { WmsSyncService } from "../oms/wms-sync.service";
 import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
 
 // Re-export for registration in index.ts
@@ -114,6 +115,7 @@ let isRunning = false;
 
 // Services injected at startup
 let omsService: OmsService | null = null;
+let wmsSyncService: WmsSyncService | null = null;
 
 // ---------------------------------------------------------------------------
 // Shopify API helpers (direct fetch, uses channel_connections creds)
@@ -466,14 +468,28 @@ async function runReconciliation(): Promise<ReconciliationResult> {
  */
 export function initReconciliation(
   oms?: OmsService,
+  wmsSync?: WmsSyncService,
 ) {
   omsService = oms || null;
+  wmsSyncService = wmsSync || null;
 }
 
 /**
  * Start the periodic reconciliation job.
  * Runs first check after 3 minutes (let server settle), then every 15 minutes.
  */
+async function runCancellationReconciliation(): Promise<void> {
+  if (!wmsSyncService) return;
+  try {
+    const result = await wmsSyncService.reconcileCancellations();
+    if (result.cancelled > 0) {
+      console.log(`[RECONCILE] Cancellation sweep: ${result.cancelled} cancelled, ${result.failed} failed`);
+    }
+  } catch (err: any) {
+    console.error(`[RECONCILE] Cancellation sweep failed: ${err.message}`);
+  }
+}
+
 function startShopifyReconciliation() {
   if (reconciliationInterval) {
     clearInterval(reconciliationInterval);
@@ -487,6 +503,8 @@ function startShopifyReconciliation() {
       console.error(`[RECONCILE] Initial run failed: ${err.message}`);
     }
 
+    await runCancellationReconciliation();
+
     // Then every 15 minutes
     reconciliationInterval = setInterval(async () => {
       try {
@@ -494,6 +512,8 @@ function startShopifyReconciliation() {
       } catch (err: any) {
         console.error(`[RECONCILE] Scheduled run failed: ${err.message}`);
       }
+
+      await runCancellationReconciliation();
     }, RECONCILIATION_INTERVAL_MS);
   }, 3 * 60 * 1000);
 
