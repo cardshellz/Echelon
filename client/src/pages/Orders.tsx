@@ -145,6 +145,19 @@ interface OrdersResponse {
   total: number;
   limit: number;
   offset: number;
+  buckets?: WmsOrderBucketCounts;
+}
+
+type WmsOrderBucket = "needs_pick" | "picked" | "issues" | "shipped" | "cancelled" | "all";
+type WmsOrderTab = WmsOrderBucket | "combined";
+
+interface WmsOrderBucketCounts {
+  needsPick: number;
+  picked: number;
+  issues: number;
+  shipped: number;
+  cancelled: number;
+  all: number;
 }
 
 interface CombinableOrder {
@@ -184,12 +197,83 @@ const sourceIcons: Record<string, string> = {
 const statusColors: Record<string, string> = {
   ready: "bg-blue-50 text-blue-700 border-blue-200",
   in_progress: "bg-amber-50 text-amber-700 border-amber-200",
+  partially_shipped: "bg-amber-50 text-amber-700 border-amber-200",
   completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  ready_to_ship: "bg-emerald-50 text-emerald-700 border-emerald-200",
   exception: "bg-red-50 text-red-700 border-red-200",
+  on_hold: "bg-red-50 text-red-700 border-red-200",
   shipped: "bg-purple-50 text-purple-700 border-purple-200",
   awaiting_3pl: "bg-violet-50 text-violet-700 border-violet-200",
   cancelled: "bg-gray-50 text-gray-700 border-gray-200",
 };
+
+const emptyBucketCounts: WmsOrderBucketCounts = {
+  needsPick: 0,
+  picked: 0,
+  issues: 0,
+  shipped: 0,
+  cancelled: 0,
+  all: 0,
+};
+
+const orderTabs: Array<{ value: WmsOrderTab; label: string; countKey?: keyof WmsOrderBucketCounts; className?: string; testId: string }> = [
+  { value: "needs_pick", label: "Needs Pick", countKey: "needsPick", testId: "tab-needs-pick" },
+  { value: "picked", label: "Picked", countKey: "picked", testId: "tab-picked" },
+  { value: "issues", label: "Issues", countKey: "issues", className: "text-amber-600", testId: "tab-issues" },
+  { value: "shipped", label: "Shipped", countKey: "shipped", testId: "tab-shipped" },
+  { value: "cancelled", label: "Cancelled", countKey: "cancelled", testId: "tab-cancelled" },
+  { value: "all", label: "All", countKey: "all", testId: "tab-all" },
+];
+
+function getWmsStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    ready: "Needs pick",
+    in_progress: "Picking",
+    partially_shipped: "Partially shipped",
+    completed: "Picked",
+    ready_to_ship: "Ready to ship",
+    exception: "Exception",
+    on_hold: "On hold",
+    shipped: "Shipped",
+    awaiting_3pl: "3PL",
+    cancelled: "Cancelled",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function getEmptyState(tab: WmsOrderTab): { title: string; description: string } {
+  const emptyStates: Record<WmsOrderTab, { title: string; description: string }> = {
+    needs_pick: {
+      title: "No orders need picking",
+      description: "Ready and in-progress orders will appear here.",
+    },
+    picked: {
+      title: "No picked orders",
+      description: "Picked orders waiting for shipment will appear here.",
+    },
+    issues: {
+      title: "No order issues",
+      description: "Held and exception orders will appear here.",
+    },
+    shipped: {
+      title: "No shipped orders",
+      description: "Completed shipments will appear here.",
+    },
+    cancelled: {
+      title: "No cancelled orders",
+      description: "Cancelled WMS orders will appear here.",
+    },
+    combined: {
+      title: "No combined orders",
+      description: "Combined order groups will appear here when orders are grouped.",
+    },
+    all: {
+      title: "No orders found",
+      description: "Orders from your connected channels will appear here.",
+    },
+  };
+  return emptyStates[tab];
+}
 
 const priorityColors: Record<string, string> = {
   rush: "bg-red-500 text-white",
@@ -428,7 +512,7 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
           {/* Status badges */}
           <div className="flex flex-wrap gap-1.5 mb-3">
             <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
-              {order.warehouseStatus.replace("_", " ")}
+              {getWmsStatusLabel(order.warehouseStatus)}
             </Badge>
             {order.financialStatus && (
               <Badge variant="outline" className={cn("text-xs", financialStatusColors[order.financialStatus] || "")}>
@@ -733,7 +817,7 @@ export default function Orders() {
   const [searchTerm, setSearchTerm] = useState("");
   const [channelFilter, setChannelFilter] = useState<string>("all");
   const [warehouseFilter, setWarehouseFilter] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<string>("active");
+  const [statusFilter, setStatusFilter] = useState<WmsOrderTab>("needs_pick");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCombineOpen, setIsCombineOpen] = useState(false);
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(() => {
@@ -760,20 +844,17 @@ export default function Orders() {
     items: [{ sku: "", name: "", quantity: 1 }],
   });
 
+  const trimmedSearchTerm = searchTerm.trim();
+  const requestBucket: WmsOrderBucket = statusFilter === "combined" ? "needs_pick" : statusFilter;
+
   const { data: ordersData, isLoading: ordersLoading, refetch: refetchOrders } = useQuery<OrdersResponse>({
-    queryKey: ["/api/wms/orders", channelFilter, statusFilter],
+    queryKey: ["/api/wms/orders", channelFilter, warehouseFilter, statusFilter, trimmedSearchTerm],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (channelFilter !== "all") params.append("channelId", channelFilter);
-      if (statusFilter === "active" || statusFilter === "combined") {
-        params.append("status", "ready");
-        params.append("status", "in_progress");
-      } else if (statusFilter === "completed") {
-        params.append("status", "shipped");
-        params.append("status", "packed");
-      } else if (statusFilter !== "all") {
-        params.append("status", statusFilter);
-      }
+      if (warehouseFilter !== "all") params.append("warehouseId", warehouseFilter);
+      if (trimmedSearchTerm) params.append("search", trimmedSearchTerm);
+      params.append("bucket", requestBucket);
       params.append("limit", "100");
       const res = await fetch(`/api/wms/orders?${params}`);
       if (!res.ok) throw new Error("Failed to fetch orders");
@@ -930,18 +1011,8 @@ export default function Orders() {
   };
 
   const orders = ordersData?.orders || [];
-  const filteredOrders = orders.filter(order => {
-    // Warehouse filter
-    if (warehouseFilter !== "all" && String(order.warehouseId || "") !== warehouseFilter) return false;
-    // Search filter
-    if (!searchTerm) return true;
-    const search = searchTerm.toLowerCase();
-    return (
-      order.orderNumber.toLowerCase().includes(search) ||
-      order.customerName.toLowerCase().includes(search) ||
-      (order.customerEmail?.toLowerCase().includes(search))
-    );
-  });
+  const bucketCounts = ordersData?.buckets ?? emptyBucketCounts;
+  const filteredOrders = orders;
 
   // Group combined orders into single display entries
   interface DisplayOrder extends Order {
@@ -993,9 +1064,9 @@ export default function Orders() {
     return result;
   })();
 
-  const activeCount = orders.filter(o => o.warehouseStatus === "ready" || o.warehouseStatus === "in_progress").length;
-  const exceptionCount = orders.filter(o => o.warehouseStatus === "exception").length;
-  const completedCount = orders.filter(o => o.warehouseStatus === "shipped" || o.warehouseStatus === "packed").length;
+  const needsPickCount = bucketCounts.needsPick;
+  const issueCount = bucketCounts.issues;
+  const pickedCount = bucketCounts.picked;
   const combinedCount = groupedOrders.filter(o => o.isCombinedGroup).length;
 
   // Apply combined filter if active
@@ -1116,29 +1187,21 @@ export default function Orders() {
         </div>
 
         <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
-          <Tabs value={statusFilter} onValueChange={setStatusFilter} className="w-full">
+          <Tabs value={statusFilter} onValueChange={(value) => setStatusFilter(value as WmsOrderTab)} className="w-full">
             <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent whitespace-nowrap">
-              <TabsTrigger 
-                value="active" 
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm"
-                data-testid="tab-active"
-              >
-                Active ({activeCount})
-              </TabsTrigger>
-              <TabsTrigger 
-                value="exception" 
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm text-amber-600"
-                data-testid="tab-exceptions"
-              >
-                Exceptions ({exceptionCount})
-              </TabsTrigger>
-              <TabsTrigger
-                value="completed"
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm"
-                data-testid="tab-completed"
-              >
-                Completed ({completedCount})
-              </TabsTrigger>
+              {orderTabs.map((tab) => (
+                <TabsTrigger
+                  key={tab.value}
+                  value={tab.value}
+                  className={cn(
+                    "rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm",
+                    tab.className
+                  )}
+                  data-testid={tab.testId}
+                >
+                  {tab.label} ({tab.countKey ? bucketCounts[tab.countKey] : 0})
+                </TabsTrigger>
+              ))}
               {combinedCount > 0 && (
                 <TabsTrigger
                   value="combined"
@@ -1148,13 +1211,6 @@ export default function Orders() {
                   Combined ({combinedCount})
                 </TabsTrigger>
               )}
-              <TabsTrigger
-                value="all"
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm"
-                data-testid="tab-all"
-              >
-                All
-              </TabsTrigger>
             </TabsList>
           </Tabs>
         </div>
@@ -1165,8 +1221,8 @@ export default function Orders() {
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mb-4">
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
-              <Input 
-                placeholder="Search orders..." 
+              <Input
+                placeholder="Search orders, customers, SKUs..."
                 className="pl-9 bg-card h-11" 
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
@@ -1218,8 +1274,8 @@ export default function Orders() {
             <Card>
               <CardContent className="py-12 text-center text-muted-foreground">
                 <ShoppingCart className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p className="text-lg font-medium">{statusFilter === "combined" ? "No combined orders" : "No orders found"}</p>
-                <p className="text-sm">{statusFilter === "combined" ? "Combined order groups will appear here when orders are grouped." : "Orders from your connected channels will appear here."}</p>
+                <p className="text-lg font-medium">{getEmptyState(statusFilter).title}</p>
+                <p className="text-sm">{getEmptyState(statusFilter).description}</p>
               </CardContent>
             </Card>
           ) : (
@@ -1265,7 +1321,7 @@ export default function Orders() {
                                 {order.priority < 0 && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
                                 {order.priority >= 300 && order.priority < 9999 && <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
-                                  {order.warehouseStatus.replace("_", " ")}
+                                  {getWmsStatusLabel(order.warehouseStatus)}
                                 </Badge>
                               </div>
                               <div className="text-sm text-muted-foreground mt-1 space-y-0.5">
@@ -1294,7 +1350,7 @@ export default function Orders() {
                                 {order.priority < 0 && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
                                 {order.priority >= 300 && order.priority < 9999 && <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
-                                  {order.warehouseStatus === "awaiting_3pl" ? "3PL" : order.warehouseStatus.replace("_", " ")}
+                                  {getWmsStatusLabel(order.warehouseStatus)}
                                 </Badge>
                                 {order.warehouseId && allWarehouses.length > 1 && (() => {
                                   const wh = allWarehouses.find(w => w.id === order.warehouseId);
@@ -1375,17 +1431,17 @@ export default function Orders() {
               <CardContent>
                 <div className="space-y-4">
                   <div className="flex justify-between items-center">
-                    <span className="text-primary-foreground/80 text-sm">Active Orders</span>
-                    <span className="font-bold">{activeCount}</span>
+                    <span className="text-primary-foreground/80 text-sm">Needs Pick</span>
+                    <span className="font-bold">{needsPickCount}</span>
                   </div>
                   <div className="flex justify-between items-center">
-                    <span className="text-primary-foreground/80 text-sm">Completed Today</span>
-                    <span className="font-bold">{completedCount}</span>
+                    <span className="text-primary-foreground/80 text-sm">Picked / Needs Ship</span>
+                    <span className="font-bold">{pickedCount}</span>
                   </div>
                   <div className="pt-2 border-t border-primary-foreground/20 mt-2">
                     <div className="flex justify-between items-center text-amber-200">
-                      <span className="text-sm flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Exceptions</span>
-                      <span className="font-bold">{exceptionCount}</span>
+                      <span className="text-sm flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Issues</span>
+                      <span className="font-bold">{issueCount}</span>
                     </div>
                   </div>
                 </div>
