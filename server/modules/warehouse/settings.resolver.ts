@@ -23,6 +23,7 @@ import { eq } from "drizzle-orm";
 import { db as defaultDb } from "../../db";
 import { warehouseSettings, warehouses } from "@shared/schema";
 import type { WarehouseSettings } from "@shared/schema";
+import { getDefaultFulfillmentWarehouse } from "./infrastructure/warehouse.repository";
 
 type DbLike = typeof defaultDb;
 
@@ -97,12 +98,9 @@ export async function getSlaCutoffConfig(
       .limit(1);
   }
   if (!wh) {
-    // Unassigned order → default warehouse (the building new orders flow to).
-    [wh] = await tx
-      .select({ timezone: warehouses.timezone, orderCutoffLocal: warehouses.orderCutoffLocal })
-      .from(warehouses)
-      .where(eq(warehouses.isDefault, 1))
-      .limit(1);
+    // Unassigned order → the default FULFILLMENT warehouse (same resolver the
+    // router uses, so the fallback can't disagree with where routing sends it).
+    wh = await getDefaultFulfillmentWarehouse(tx);
   }
 
   return {
