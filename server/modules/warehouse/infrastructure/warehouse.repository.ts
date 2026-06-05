@@ -81,6 +81,30 @@ export async function getWarehouseByCode(code: string, tx: Tx = db): Promise<War
   return result[0];
 }
 
+/**
+ * The default FULFILLMENT warehouse — the catch-all an order routes to when no
+ * routing rule matches, and the fallback the SLA cutoff uses for an order not
+ * yet assigned a warehouse.
+ *
+ * Excludes `bulk_storage` (a storage hub never ships customer orders, so its
+ * cutoff is meaningless), and is deterministic (lowest id) even if more than
+ * one warehouse is flagged `is_default`. Single source of truth shared by the
+ * fulfillment router and the SLA cutoff resolver so they can never disagree.
+ */
+export async function getDefaultFulfillmentWarehouse(tx: Tx = db): Promise<Warehouse | undefined> {
+  const result = await tx
+    .select()
+    .from(warehouses)
+    .where(and(
+      eq(warehouses.isDefault, 1),
+      eq(warehouses.isActive, 1),
+      inArray(warehouses.warehouseType, ["operations", "3pl"]),
+    ))
+    .orderBy(asc(warehouses.id))
+    .limit(1);
+  return result[0];
+}
+
 export async function createWarehouse(warehouse: InsertWarehouse, tx: Tx = db): Promise<Warehouse> {
   const result = await tx.insert(warehouses).values({ ...warehouse, code: warehouse.code.toUpperCase() }).returning();
   return result[0];

@@ -247,18 +247,37 @@ export class WmsSyncService {
       // 3. Check if order has any shippable items
       const hasShippableItems = omsLines.some(line => line.requiresShipping !== false);
 
+      // 3b. Route to a fulfillment warehouse UP FRONT, so the order carries its
+      // warehouse through picking and its SLA cutoff is bucketed in that
+      // warehouse's clock (not just the default fallback). No routing rules
+      // configured today → the default fulfillment warehouse. Routing never
+      // blocks the sync.
+      let routing: { warehouseId: number; warehouseType: string } | null = null;
+      try {
+        routing = await this.services.fulfillmentRouter.routeOrder({
+          channelId: omsOrder.channelId,
+          country: (omsOrder as any).shipToCountry ?? null,
+          skus: omsLines.map((l: any) => l.sku).filter(Boolean),
+        });
+      } catch (err: any) {
+        console.warn(`[WMS Sync] Warehouse routing failed for OMS order ${omsOrderId}: ${err?.message ?? err}`);
+      }
+      const routedWarehouseId = routing?.warehouseId ?? null;
+
       // 4. Map OMS → WMS order fields
-      const warehouseStatus = hasShippableItems
-        ? this.determineWarehouseStatus(omsOrder)
-        : "completed"; // Pure digital/donation/membership → skip pick queue
+      const warehouseStatus = !hasShippableItems
+        ? "completed" // Pure digital/donation/membership → skip pick queue
+        : routing?.warehouseType === "3pl"
+          ? "awaiting_3pl" // 3PL fulfills externally — no internal pick/pack
+          : this.determineWarehouseStatus(omsOrder);
       const { priority, memberPlanName, memberPlanColor } = await this.determinePriority(omsOrder);
       // Compute SLA due date at sync time so sort_rank includes urgency
       // from the start. Priority: platform ship-by-date -> channel SLA ->
       // partner-profile SLA -> global default.
       const channelShipBy = (omsOrder as any).channelShipByDate as Date | string | null | undefined;
-      // No warehouse is assigned at sync time, so this resolves the DEFAULT-row
-      // cutoff/tz. Reassignment later triggers a recompute with the real one.
-      const syncCutoffConfig = await getSlaCutoffConfig((omsOrder as any).warehouseId ?? null, db);
+      // Bucket the SLA cutoff in the ROUTED warehouse's clock (falls back to the
+      // default fulfillment warehouse when routing yields nothing).
+      const syncCutoffConfig = await getSlaCutoffConfig(routedWarehouseId, db);
       const slaDueAt = await resolveSlaDueAt({
         channelId: omsOrder.channelId,
         channelShipByDate: channelShipBy,
@@ -277,6 +296,7 @@ export class WmsSyncService {
 
       const wmsOrderData: InsertWmsOrder = {
         channelId: omsOrder.channelId,
+        warehouseId: routedWarehouseId, // assigned up front by the router (4)
         source: "oms", // Mark as coming from OMS layer
         omsFulfillmentOrderId: String(omsOrderId), // Link back to oms_orders for dedup
         externalOrderId: omsOrder.externalOrderId,
@@ -581,12 +601,9 @@ export class WmsSyncService {
         warehouseStatus: string;
       };
 
-      // 7. Route to warehouse (if routing service exists)
-      try {
-        await this.services.fulfillmentRouter.routeOrder(newWmsOrder.id);
-      } catch (err: any) {
-        console.warn(`[WMS Sync] Warehouse routing skipped for order ${newWmsOrder.id}: ${err.message}`);
-      }
+      // (Warehouse routing now happens BEFORE order creation — see step 3b —
+      // so the row is inserted with its warehouse_id and a warehouse-correct
+      // SLA, instead of being patched afterward.)
 
       // 8. Push to ShipStation via WMS-owned pushShipment path.
       // Push failures never block the sync — reconcile retries.

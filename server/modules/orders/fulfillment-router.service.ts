@@ -4,6 +4,7 @@ import {
   warehouses,
   orders,
 } from "@shared/schema";
+import { getDefaultFulfillmentWarehouse } from "../warehouse/infrastructure/warehouse.repository";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -119,13 +120,11 @@ class FulfillmentRouterService {
 
   /**
    * Get the default warehouse as a routing result (fallback when no rules match).
+   * Uses the shared default-FULFILLMENT-warehouse resolver (excludes storage
+   * hubs, deterministic) so routing and the SLA cutoff agree on the fallback.
    */
   private async getDefaultWarehouseResult(): Promise<RoutingResult | null> {
-    const [warehouse] = await this.db
-      .select()
-      .from(warehouses)
-      .where(and(eq(warehouses.isDefault, 1), eq(warehouses.isActive, 1)))
-      .limit(1);
+    const warehouse = await getDefaultFulfillmentWarehouse(this.db as any);
 
     if (!warehouse) return null;
 
