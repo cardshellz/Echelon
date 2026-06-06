@@ -84,6 +84,14 @@ describe("PUT /api/warehouses/:id/sla-cutoff", () => {
     expect(h.updateWarehouse).toHaveBeenCalledWith(1, { orderCutoffLocal: "15:00" });
   });
 
+  it("rejects a cutoff on a bulk_storage hub (400, no write)", async () => {
+    h.getWarehouseById.mockResolvedValueOnce({ id: 2, code: "RTE-19", warehouseType: "bulk_storage" });
+    const res = await req(base, "PUT", "/api/warehouses/2/sla-cutoff", { orderCutoffLocal: "14:00" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/storage hub|bulk_storage/i);
+    expect(h.updateWarehouse).not.toHaveBeenCalled();
+  });
+
   it("rejects a malformed cutoff with 400 (no write)", async () => {
     const res = await req(base, "PUT", "/api/warehouses/1/sla-cutoff", { orderCutoffLocal: "25:00" });
     expect(res.status).toBe(400);

@@ -99,6 +99,10 @@ export function registerWarehouseRoutes(app: Express) {
       if (cutoffError) {
         return res.status(400).json({ error: cutoffError });
       }
+      // A storage hub (bulk_storage) never ships customer orders → no cutoff.
+      if ((parsed.data as any).warehouseType === "bulk_storage") {
+        (parsed.data as any).orderCutoffLocal = null;
+      }
       const warehouse = await storage.createWarehouse(parsed.data as any);
       res.status(201).json(warehouse);
     } catch (error: any) {
@@ -120,6 +124,13 @@ export function registerWarehouseRoutes(app: Express) {
       const cutoffError = validateSlaCutoffFields(req.body);
       if (cutoffError) {
         return res.status(400).json({ error: cutoffError });
+      }
+      // A storage hub never ships customer orders → no cutoff. Clear it if this
+      // warehouse is (or is becoming) bulk_storage.
+      const effectiveType = (parsed.data as any).warehouseType
+        ?? (await getWarehouseById(id))?.warehouseType;
+      if (effectiveType === "bulk_storage") {
+        (parsed.data as any).orderCutoffLocal = null;
       }
       const warehouse = await storage.updateWarehouse(id, parsed.data as any);
       if (!warehouse) {
@@ -431,6 +442,13 @@ export function registerWarehouseRoutes(app: Express) {
       const cutoffError = validateSlaCutoffFields(req.body);
       if (cutoffError) {
         return res.status(400).json({ error: cutoffError });
+      }
+      // A storage hub never ships customer orders, so it can't carry a cutoff.
+      if ("orderCutoffLocal" in req.body && req.body.orderCutoffLocal != null) {
+        const wh = await getWarehouseById(id);
+        if (wh && (wh as any).warehouseType === "bulk_storage") {
+          return res.status(400).json({ error: "A storage hub (bulk_storage) doesn't fulfill orders, so it can't have an SLA cutoff." });
+        }
       }
       const updates: Record<string, any> = {};
       if ("orderCutoffLocal" in req.body) updates.orderCutoffLocal = req.body.orderCutoffLocal ?? null;
