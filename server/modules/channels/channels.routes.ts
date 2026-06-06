@@ -26,6 +26,17 @@ import { rowToListingDto } from "./channel-listings.transform";
 import { createOmsService } from "../oms/oms.service";
 import { WmsOrderInvariantError } from "../wms/insert-order";
 import { randomBytes } from "crypto";
+import {
+  buildWmsOrderBucketCounts,
+  compareWmsOrdersNewestFirst,
+  isWmsOrderBucket,
+  normalizeSearchTerm,
+  orderMatchesBucket,
+  orderMatchesScope,
+  parsePagination,
+  parsePositiveInteger,
+  parseWmsOrderBucket,
+} from "./wms-order-listing";
 
 export function registerChannelRoutes(app: Express) {
 
@@ -113,14 +124,49 @@ export function registerChannelRoutes(app: Express) {
   // ORDER MANAGEMENT SYSTEM (OMS) API
   // ============================================
 
-  // Get all orders with channel info (for OMS page)
+  // Get WMS orders with channel info. Filtering happens before pagination so
+  // exact searches and operational bucket counts cannot be hidden by page size.
   app.get("/api/wms/orders", requirePermission("orders", "view"), async (req, res) => {
     try {
-      const { status, channelId, source, limit = "50", offset = "0" } = req.query;
+      const {
+        bucket: bucketQuery,
+        status,
+        channelId,
+        source,
+        warehouseId,
+        search,
+        limit = "100",
+        offset = "0",
+      } = req.query;
+
+      const bucketValue = firstQueryValue(bucketQuery);
+      if (bucketValue && !isWmsOrderBucket(bucketValue)) {
+        return res.status(400).json({ error: `Invalid WMS order bucket: ${bucketValue}` });
+      }
+
+      const channelIdValue = firstQueryValue(channelId);
+      const parsedChannelId = parsePositiveInteger(channelIdValue);
+      if (channelIdValue && parsedChannelId === undefined) {
+        return res.status(400).json({ error: "channelId must be a positive integer" });
+      }
+
+      const warehouseIdValue = firstQueryValue(warehouseId);
+      const parsedWarehouseId = parsePositiveInteger(warehouseIdValue);
+      if (warehouseIdValue && parsedWarehouseId === undefined) {
+        return res.status(400).json({ error: "warehouseId must be a positive integer" });
+      }
+
+      const limitNum = parsePagination(firstQueryValue(limit), 100, 250);
+      const offsetNum = parsePagination(firstQueryValue(offset), 0, 100_000);
+      const sourceValue = firstQueryValue(source);
+      const normalizedSearch = normalizeSearchTerm(firstQueryValue(search));
+      const bucket = parseWmsOrderBucket(bucketValue);
+      const legacyStatusFilter = status
+        ? (Array.isArray(status) ? status : [status]).map(String).filter(Boolean)
+        : [];
 
       // Get all orders with items
-      const statusFilter = status ? (Array.isArray(status) ? status : [status]) as string[] : undefined;
-      const allOrders = await storage.getOrdersWithItems(statusFilter as any);
+      const allOrders = await storage.getOrdersWithItems();
 
       // Get all channels for enrichment
       const allChannels = await storage.getAllChannels();
@@ -132,32 +178,31 @@ export function registerChannelRoutes(app: Express) {
         channel: order.channelId ? channelMap.get(order.channelId) : null
       }));
 
-      // Filter by channelId if specified
-      if (channelId) {
-        const cid = parseInt(channelId as string);
-        enrichedOrders = enrichedOrders.filter(o => o.channelId === cid);
-      }
+      enrichedOrders = enrichedOrders.filter(order => orderMatchesScope(order, {
+        channelId: parsedChannelId,
+        warehouseId: parsedWarehouseId,
+        source: sourceValue,
+        search: normalizedSearch,
+      }));
 
-      // Filter by source if specified
-      if (source) {
-        enrichedOrders = enrichedOrders.filter(o => o.source === source);
-      }
+      const buckets = buildWmsOrderBucketCounts(enrichedOrders);
+
+      const filteredOrders = legacyStatusFilter.length > 0 && !bucketValue
+        ? enrichedOrders.filter(order => legacyStatusFilter.includes(String(order.warehouseStatus)))
+        : enrichedOrders.filter(order => orderMatchesBucket(order, bucket));
 
       // Sort by creation date descending (newest first)
-      enrichedOrders.sort((a, b) =>
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      );
+      filteredOrders.sort(compareWmsOrdersNewestFirst);
 
       // Apply pagination
-      const limitNum = parseInt(limit as string);
-      const offsetNum = parseInt(offset as string);
-      const paginatedOrders = enrichedOrders.slice(offsetNum, offsetNum + limitNum);
+      const paginatedOrders = filteredOrders.slice(offsetNum, offsetNum + limitNum);
 
       res.json({
         orders: paginatedOrders,
-        total: enrichedOrders.length,
+        total: filteredOrders.length,
         limit: limitNum,
-        offset: offsetNum
+        offset: offsetNum,
+        buckets,
       });
     } catch (error) {
       console.error("Error fetching OMS orders:", error);
@@ -2508,4 +2553,9 @@ export function registerChannelRoutes(app: Express) {
       res.status(500).json({ error: error.message || "Failed to fetch velocity" });
     }
   });
+}
+
+function firstQueryValue(value: unknown): string | undefined {
+  if (Array.isArray(value)) return value.length > 0 ? String(value[0]) : undefined;
+  return typeof value === "string" ? value : undefined;
 }
