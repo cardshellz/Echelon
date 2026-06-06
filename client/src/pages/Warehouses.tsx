@@ -278,6 +278,10 @@ export default function Warehouses() {
     if (type !== "bulk_storage") {
       updates.hubWarehouseId = null;
     }
+    // A storage hub doesn't fulfill orders → it can't carry an SLA cutoff.
+    if (type === "bulk_storage") {
+      updates.orderCutoffLocal = "";
+    }
     setFormData({ ...formData, ...updates });
   };
 
@@ -850,18 +854,27 @@ export default function Warehouses() {
                   </div>
                   <div className="space-y-1">
                     <Label htmlFor="orderCutoffLocal" className="text-xs md:text-sm">Order Cutoff (SLA)</Label>
-                    <Input
-                      id="orderCutoffLocal"
-                      type="time"
-                      className="h-11"
-                      value={formData.orderCutoffLocal}
-                      onChange={(e) => setFormData({ ...formData, orderCutoffLocal: e.target.value })}
-                      data-testid="input-warehouse-cutoff"
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Orders placed after this time (in the warehouse's timezone above) roll to the
-                      next business day's pick wave, setting their SLA + queue priority. Blank = no cutoff.
-                    </p>
+                    {formData.warehouseType === "bulk_storage" ? (
+                      <p className="text-[11px] text-muted-foreground pt-2.5">
+                        N/A — a storage hub doesn't ship customer orders directly, so it has no
+                        fulfillment cutoff.
+                      </p>
+                    ) : (
+                      <>
+                        <Input
+                          id="orderCutoffLocal"
+                          type="time"
+                          className="h-11"
+                          value={formData.orderCutoffLocal}
+                          onChange={(e) => setFormData({ ...formData, orderCutoffLocal: e.target.value })}
+                          data-testid="input-warehouse-cutoff"
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                          Orders placed after this time (in the warehouse's timezone above) roll to the
+                          next business day's pick wave, setting their SLA + queue priority. Blank = no cutoff.
+                        </p>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
