@@ -147,6 +147,7 @@ const navStructure: NavEntry[] = [
     icon: ShoppingCart,
     children: [
       { label: "Orders (OMS)", icon: Globe, href: "/oms/orders", roles: ["admin", "lead"] },
+      { label: "Flow Monitor", icon: BarChart3, href: "/oms/flow-monitor", roles: ["admin", "lead"] },
       { label: "WMS Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
       { label: "Picking", icon: ClipboardList, href: "/picking" },
       { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", roles: ["admin", "lead"] },

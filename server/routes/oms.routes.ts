@@ -12,6 +12,8 @@ import type { ShipStationService } from "../modules/oms/shipstation.service";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { getOmsOpsHealth } from "../modules/oms/ops-health.service";
+import { getFlowWaterfall } from "../modules/oms/flow-waterfall.service";
+import { getFlowTrace } from "../modules/oms/flow-trace.service";
 import { remediateOmsFlowIssue } from "../modules/oms/oms-flow-reconciliation.service";
 import { enqueueWebhookInboxReplay } from "../modules/oms/webhook-inbox.service";
 import { requeueDeadWebhookRetry } from "../modules/oms/webhook-retry.worker";
@@ -44,6 +46,42 @@ export function registerOmsRoutes(app: Express) {
       res.json(await getOmsOpsHealth(db));
     } catch (err: any) {
       console.error("[OMS Routes] Ops health error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/oms/ops/flow-waterfall — funnel view of where orders diverge
+  // (read-only: throughput + open-exception buckets, tagged by funnel stage)
+  // -----------------------------------------------------------------------
+  app.get("/api/oms/ops/flow-waterfall", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const requested = Number(req.query.windowDays);
+      const windowDays =
+        Number.isFinite(requested) && requested > 0 && requested <= 90
+          ? Math.floor(requested)
+          : undefined;
+      res.json(await getFlowWaterfall(db, { windowDays }));
+    } catch (err: any) {
+      console.error("[OMS Routes] Flow waterfall error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/oms/ops/flow-trace?ref=<order number|id> — per-order life story
+  // (read-only: cross-system trace + computed stage ladder + raw timeline)
+  // -----------------------------------------------------------------------
+  app.get("/api/oms/ops/flow-trace/:ref", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const ref = String(req.params.ref ?? "").trim();
+      if (!ref) {
+        res.status(400).json({ error: "ref path param required" });
+        return;
+      }
+      res.json(await getFlowTrace(db, ref));
+    } catch (err: any) {
+      console.error("[OMS Routes] Flow trace error:", err);
       res.status(500).json({ error: err.message });
     }
   });
