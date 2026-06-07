@@ -1073,9 +1073,14 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot add lines to PO in '${po.status}' status`, 400);
     }
 
-    // Cache product info
-    const variant = data.productVariantId ? await storage.getProductVariantById(data.productVariantId) : null;
-    if (data.productVariantId && !variant) throw new PurchasingError("Product variant not found", 404);
+    // Cache product info. Product lines must bind to a real catalog variant
+    // (BUG-6): without it, receiving guesses the variant/pack size and both
+    // qty reconciliation and cost attribution break.
+    if (!data.productVariantId || !Number.isInteger(data.productVariantId) || data.productVariantId <= 0) {
+      throw new PurchasingError("product_variant_id is required", 400);
+    }
+    const variant = await storage.getProductVariantById(data.productVariantId);
+    if (!variant) throw new PurchasingError("Product variant not found", 404);
     const product = await storage.getProductById(data.productId);
     if (!product) throw new PurchasingError("Product not found", 404);
 
@@ -2263,6 +2268,18 @@ export function createPurchasingService(db: any, storage: Storage) {
           (line.productId as number) <= 0
         ) {
           throw new PurchasingError(`${label}.product_id is required`, 400);
+        }
+        // Product lines must bind to a real catalog variant. Without it,
+        // receiving has to guess the variant + pack size, which corrupts qty
+        // reconciliation and cost attribution (BUG-6).
+        if (
+          !Number.isInteger(line.productVariantId) ||
+          (line.productVariantId as number) <= 0
+        ) {
+          throw new PurchasingError(
+            `${label}.product_variant_id is required for product lines`,
+            400,
+          );
         }
       } else {
         if (

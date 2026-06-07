@@ -77,6 +77,7 @@ export class InventoryUseCases {
     packagingCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
+    purchaseOrderLineId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
   }, externalTx?: any): Promise<void> {
@@ -126,6 +127,7 @@ export class InventoryUseCases {
           packagingCostCents: params.packagingCostCents ?? 0,
           receivingOrderId: params.receivingOrderId,
           purchaseOrderId: params.purchaseOrderId,
+          poLineId: params.purchaseOrderLineId,
           inboundShipmentId: params.inboundShipmentId,
           costProvisional: params.costProvisional ?? (resolved.provisional ? 1 : 0),
           notes: params.notes,
