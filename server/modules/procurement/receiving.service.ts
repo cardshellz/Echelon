@@ -41,6 +41,7 @@ interface InventoryCore {
     packagingCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
+    purchaseOrderLineId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
   }, tx?: any): Promise<void>;
@@ -604,6 +605,7 @@ export class ReceivingService {
           productCostCents,
           receivingOrderId: orderId,
           purchaseOrderId: order.purchaseOrderId || undefined,
+          purchaseOrderLineId: line.purchaseOrderLineId || undefined,
           inboundShipmentId,
           costProvisional,
         }, tx);

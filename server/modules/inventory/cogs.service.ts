@@ -217,7 +217,10 @@ export class COGSService {
       const lotCost = await db.execute(sql`
         SELECT total_unit_cost_cents FROM inventory.inventory_lots WHERE id = ${lot.id}
       `);
-      const unitCost = lotCost?.rows?.[0]?.total_unit_cost_cents ?? lot.unitCostCents ?? 0;
+      // Fall back to unit_cost_cents when total_unit_cost_cents is 0/null (BUG-2:
+      // total defaulted to 0 and `?? ` does not treat 0 as missing).
+      const totalUnitCost = Number(lotCost?.rows?.[0]?.total_unit_cost_cents) || 0;
+      const unitCost = totalUnitCost > 0 ? totalUnitCost : (lot.unitCostCents ?? 0);
 
       consumptions.push({
         lotId: lot.id,
@@ -570,12 +573,12 @@ export class COGSService {
         p.base_sku,
         SUM(il.qty_on_hand) as total_qty,
         CASE WHEN SUM(il.qty_on_hand) > 0
-          THEN SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)) / SUM(il.qty_on_hand)
+          THEN SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0)) / SUM(il.qty_on_hand)
           ELSE 0
         END as avg_cost_per_piece,
-        SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0)) as total_value_cents,
+        SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0)) as total_value_cents,
         COUNT(il.id) as active_lots,
-        SUM(CASE WHEN COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0) = 0 THEN il.qty_on_hand ELSE 0 END) as zero_cost_qty,
+        SUM(CASE WHEN COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0) = 0 THEN il.qty_on_hand ELSE 0 END) as zero_cost_qty,
         BOOL_OR(COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
       FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
@@ -605,7 +608,7 @@ export class COGSService {
     const pendingResult = await this.db.execute(sql`
       SELECT
         COUNT(*) FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as landed_pending_count,
-        COALESCE(SUM(il.qty_on_hand * COALESCE(il.total_unit_cost_cents, il.unit_cost_cents, 0))
+        COALESCE(SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0))
           FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL), 0) as landed_pending_value,
         COALESCE(SUM(il.qty_on_hand) FILTER (WHERE il.cost_provisional = 1), 0) as provisional_qty
       FROM inventory.inventory_lots il

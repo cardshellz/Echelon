@@ -77,6 +77,8 @@ export class InventoryLotService {
     purchaseOrderId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
+    poLineId?: number;
+    costSource?: string;
     notes?: string;
   }): Promise<InventoryLot> {
     const lotNumber = await this.generateLotNumber();
@@ -88,7 +90,16 @@ export class InventoryLotService {
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
         unitCostCents: params.unitCostCents,
+        // Cost-layer breakdown. Keep total == unitCostCents (the value the FIFO
+        // pick path books into oms.order_item_costs) so valuation/reporting reads
+        // the same cost that COGS is booked at (fixes the $0-valuation bug where
+        // total_unit_cost_cents defaulted to 0 and COALESCE(total, unit, 0) → 0).
+        poUnitCostCents: params.productCostCents ?? Math.max(0, params.unitCostCents - (params.packagingCostCents ?? 0)),
         packagingCostCents: params.packagingCostCents ?? 0,
+        totalUnitCostCents: params.unitCostCents,
+        qtyReceived: params.qty,
+        costSource: params.costSource ?? ((params.poLineId || params.purchaseOrderId) ? "po" : "manual"),
+        poLineId: params.poLineId ?? null,
         qtyOnHand: params.qty,
         qtyReserved: 0,
         qtyPicked: 0,
@@ -794,8 +805,8 @@ export class InventoryLotService {
         productVariantId: inventoryLots.productVariantId,
         sku: productVariants.sku,
         qty: sql<number>`SUM(${inventoryLots.qtyOnHand})`,
-        totalCost: sql<number>`SUM(${inventoryLots.qtyOnHand} * COALESCE(${inventoryLots.totalUnitCostCents}, ${inventoryLots.unitCostCents}, 0))`,
-        zeroCostQty: sql<number>`SUM(CASE WHEN COALESCE(${inventoryLots.totalUnitCostCents}, ${inventoryLots.unitCostCents}, 0) = 0 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
+        totalCost: sql<number>`SUM(${inventoryLots.qtyOnHand} * COALESCE(NULLIF(${inventoryLots.totalUnitCostCents}, 0), ${inventoryLots.unitCostCents}, 0))`,
+        zeroCostQty: sql<number>`SUM(CASE WHEN COALESCE(NULLIF(${inventoryLots.totalUnitCostCents}, 0), ${inventoryLots.unitCostCents}, 0) = 0 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
         provisionalQty: sql<number>`SUM(CASE WHEN ${inventoryLots.costProvisional} = 1 THEN ${inventoryLots.qtyOnHand} ELSE 0 END)`,
       })
       .from(inventoryLots)
