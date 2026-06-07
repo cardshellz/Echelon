@@ -115,8 +115,11 @@ export async function getFlowWaterfall(
   // OMS↔WMS link is soft (no FK): match on oms_fulfillment_order_id or source_table_id.
   const link = sql`((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`;
 
+  // Run the (already heavy) ops-health check first, THEN our queries in bounded
+  // groups. Firing everything in one big Promise.all stacks ~35 concurrent queries
+  // and exhausts the small Heroku Postgres pool ("timeout when trying to connect").
+  const health = await getOmsOpsHealth(db);
   const [
-    health,
     entered,
     reachedWms,
     hasShipment,
@@ -127,7 +130,6 @@ export async function getFlowWaterfall(
     wmsRows,
     eventRows,
   ] = await Promise.all([
-    getOmsOpsHealth(db),
     db.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.created_at > ${win}`),
     db.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} WHERE oo.created_at > ${win}`),
     db.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} JOIN wms.outbound_shipments os ON os.order_id = wo.id AND os.status <> 'voided' WHERE oo.created_at > ${win}`),

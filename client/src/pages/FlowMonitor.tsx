@@ -107,8 +107,8 @@ export default function FlowMonitor() {
     queryKey: ["/api/oms/ops/flow-waterfall"],
   });
   const [selected, setSelected] = useState<FlowIssue | null>(null);
-  const [refInput, setRefInput] = useState("#57842");
-  const [submittedRef, setSubmittedRef] = useState("#57842");
+  const [refInput, setRefInput] = useState("");
+  const [submittedRef, setSubmittedRef] = useState("");
   const trace = useQuery<FlowTrace>({
     queryKey: ["/api/oms/ops/flow-trace", encodeURIComponent(submittedRef)],
     enabled: submittedRef.length > 0,
