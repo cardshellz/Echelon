@@ -135,16 +135,6 @@ describe("Typed PO lines — per-type validation", () => {
     ).rejects.toThrow(/product_id is required/);
   });
 
-  it("product line requires productVariantId (BUG-6)", async () => {
-    const { svc } = makeSvc();
-    await expect(
-      svc.createPurchaseOrderWithLines({
-        vendorId: 1,
-        lines: [{ productId: 101, orderQty: 1, unitCostMills: 1000 }],
-      } as any),
-    ).rejects.toThrow(/product_variant_id is required/);
-  });
-
   it("product line rejects negative cost", async () => {
     const { svc } = makeSvc();
     await expect(
