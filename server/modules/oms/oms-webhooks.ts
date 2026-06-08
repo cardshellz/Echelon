@@ -869,17 +869,43 @@ export async function applyShopifyRefundCascade(
     : now;
   const source = "shopify_webhook";
 
-  await db.execute(sql`
+  const returnInsertRes: any = await db.execute(sql`
     INSERT INTO wms.returns (
       shipment_id, order_id, source, reason,
-      refund_external_id, restocked,
+      refund_external_id, restocked, status,
       received_at, refunded_at, notes
     ) VALUES (
       ${shipmentId}, ${wmsOrderId}, ${source}, ${reason},
-      ${refundExternalId}, ${anyRestock},
+      ${refundExternalId}, ${anyRestock}, ${anyRestock ? "expected" : "closed"},
       NULL, ${refundedAt}, ${notes}
     )
+    RETURNING id
   `);
+  const returnId: number | undefined = returnInsertRes?.rows?.[0]?.id;
+
+  // Open per-line "expected" return rows for lines the channel flagged for restock
+  // (restock_type=return/restock). These await physical receipt; the return-to-stock
+  // path (ReturnsService.processReturn) reconciles received_qty and restocks on-hand.
+  // cancel/no_restock lines get no return_items (no physical return expected).
+  const returnAdjustments = lineAdjustments.filter(
+    (a) => a.restockPolicy === "return" || a.restockPolicy === "restock",
+  );
+  if (returnId != null && returnAdjustments.length > 0) {
+    const returnItemRows = returnAdjustments.map((a) => ({
+      ext_id: a.externalLineItemId,
+      qty: a.quantity,
+      policy: a.restockPolicy,
+      loc: a.raw?.location_id != null ? String(a.raw.location_id) : null,
+    }));
+    await db.execute(sql`
+      INSERT INTO wms.return_items
+        (return_id, order_item_id, oms_order_line_id, external_line_item_id, sku, expected_qty, restock_policy, location_id, status)
+      SELECT ${returnId}, wi.id, wi.oms_order_line_id, x.ext_id, wi.sku, x.qty, x.policy, x.loc, 'expected'
+      FROM jsonb_to_recordset(${JSON.stringify(returnItemRows)}::jsonb) AS x(ext_id text, qty int, policy text, loc text)
+      LEFT JOIN oms.oms_order_lines ol ON ol.external_line_item_id = x.ext_id AND ol.order_id = ${omsOrderId}
+      LEFT JOIN wms.order_items wi ON wi.oms_order_line_id = ol.id AND wi.order_id = ${wmsOrderId}
+    `);
+  }
 
   // ── 7. Conditional restock ────────────────────────────────────────
   let restockInvoked = false;

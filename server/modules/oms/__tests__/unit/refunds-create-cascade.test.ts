@@ -130,7 +130,8 @@ describe("applyShopifyRefundCascade (C29)", () => {
       { rows: [] }, // held shipment lookup
       { rows: [] }, // idempotency
       { rows: [{ id: 7002 }] }, // most-recent shipment
-      { rows: [] }, // INSERT
+      { rows: [{ id: 800 }] }, // INSERT wms.returns RETURNING id
+      { rows: [{ id: 1 }] }, // INSERT wms.return_items (the restock line)
     ]);
 
     const restock = vi.fn(async () => undefined);
@@ -156,6 +157,9 @@ describe("applyShopifyRefundCascade (C29)", () => {
     expect(ctx.omsOrderId).toBe(99);
     expect(ctx.refundLineItems).toHaveLength(1);
     expect(ctx.refundLineItems[0].restock_type).toBe("return");
+    // Phase 3: an "expected" return_items row is opened for the restock line.
+    const returnItemsCall = mock.calls.find((q) => JSON.stringify(q).includes("return_items"));
+    expect(returnItemsCall).toBeDefined();
   });
 
   it("refund with restock=true line → restocked=true (treats boolean restock as restock signal)", async () => {
@@ -165,8 +169,9 @@ describe("applyShopifyRefundCascade (C29)", () => {
       { rows: [{ id: 501 }] },
       { rows: [] },
       { rows: [] },
-      { rows: [{ id: 7003 }] },
-      { rows: [] },
+      { rows: [{ id: 7003 }] }, // most-recent shipment
+      { rows: [{ id: 801 }] }, // INSERT wms.returns RETURNING id
+      { rows: [{ id: 1 }] }, // INSERT wms.return_items
     ]);
 
     const restock = vi.fn(async () => undefined);
