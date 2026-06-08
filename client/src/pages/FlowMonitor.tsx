@@ -99,12 +99,18 @@ const channelIcon = (provider: string) => {
 const cadenceLabel = (seconds: number) =>
   seconds % 60 === 0 ? `every ${seconds / 60} min` : `every ${seconds}s`;
 
+// Lookback presets. 30d is the cheap default; larger ranges are opt-in and scan
+// more (the endpoint is hard-capped by a statement_timeout, so they can't run away).
+const WINDOWS = [30, 60, 90, 180, 365];
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 export default function FlowMonitor() {
+  const [windowDays, setWindowDays] = useState(30);
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery<FlowWaterfall>({
-    queryKey: ["/api/oms/ops/flow-waterfall"],
+    queryKey: ["/api/oms/ops/flow-waterfall?windowDays=" + windowDays],
+    placeholderData: (prev) => prev,
   });
   const [selected, setSelected] = useState<FlowIssue | null>(null);
   const [refInput, setRefInput] = useState("");
@@ -184,7 +190,22 @@ export default function FlowMonitor() {
             Channel → OMS → WMS → shipping engine. Where orders fall off the happy path, drillable to the webhook.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex items-center rounded-md border bg-card p-0.5 text-xs" title="Lookback window — 30d is the cheap default; larger ranges scan more and are opt-in">
+            {WINDOWS.map((w) => (
+              <button
+                key={w}
+                onClick={() => setWindowDays(w)}
+                className={cn(
+                  "rounded px-2 py-1 font-medium transition",
+                  windowDays === w ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {w >= 365 ? "1yr" : `${w}d`}
+              </button>
+            ))}
+          </div>
+          {isFetching && <RotateCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
           <Badge variant="outline" className="font-normal text-muted-foreground">read-only</Badge>
           <Badge variant={d.health.status === "healthy" ? "outline" : "destructive"} className="capitalize">{d.health.status}</Badge>
           <Button variant="outline" size="sm" className="gap-1.5" onClick={() => refetch()} disabled={isFetching}>
@@ -400,7 +421,7 @@ export default function FlowMonitor() {
           </Card>
 
           <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Live WMS buckets <span className="font-normal text-muted-foreground">· 30d</span></CardTitle></CardHeader>
+            <CardHeader className="pb-2"><CardTitle className="text-sm">Live WMS buckets <span className="font-normal text-muted-foreground">· {d.windowDays}d</span></CardTitle></CardHeader>
             <CardContent className="pt-0">
               {d.wmsBuckets.map((w) => (
                 <div key={w.status} className="flex items-center justify-between border-b py-1.5 text-sm last:border-0">
@@ -427,7 +448,7 @@ export default function FlowMonitor() {
 
       {/* Divergence checks */}
       <div>
-        <h2 className="mb-3 text-sm font-semibold">Divergence checks <span className="font-normal text-muted-foreground">· last 90 days</span></h2>
+        <h2 className="mb-3 text-sm font-semibold">Divergence checks <span className="font-normal text-muted-foreground">· last {d.windowDays} days</span></h2>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <Card>
             <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-sm"><Copy className="h-4 w-4 text-muted-foreground" />Duplicates · over-processing</CardTitle></CardHeader>

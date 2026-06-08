@@ -1,80 +1,34 @@
 /**
  * Order-Flow Waterfall — read-only feed for the Flow Monitor page.
  *
- * Composes a single funnel view of where orders diverge from the happy path:
- *   channel → OMS → WMS → shipping engine → channel write-back.
- *
- * READ-ONLY: every query is a SELECT; this service performs no writes and has
- * no side effects. It reuses getOmsOpsHealth() for the open-exception buckets
- * and adds 14-day throughput, channel mix, daily volume, live WMS state, and
- * the oms_order_events spine.
- *
- * NOTE on the top of the funnel: "did a channel order never reach OMS?" cannot
- * be derived from oms.* alone (a never-ingested order has no row anywhere). That
- * check belongs to the per-channel intake reconcilers; `intakeModel` records HOW
- * each channel is reconciled against its own order list rather than a count.
+ * ECONOMICAL / POOL-SAFE: the app Postgres pool is tiny (max 3, see db.ts), so a
+ * burst of concurrent queries here starves every other endpoint (webhooks, orders).
+ * This runs entirely inside ONE read-only transaction — a single pooled connection,
+ * queried SEQUENTIALLY — with a hard statement_timeout. It therefore uses at most
+ * one of the three connections and can never run away. Windowing is on the INDEXED
+ * `oms_orders.ordered_at` column and defaults to 30 days; larger ranges are opt-in
+ * from the UI. Counts only (no per-row sample fan-out) to keep the query set small.
  */
 
 import { sql } from "drizzle-orm";
-import { getOmsOpsHealth, type OmsOpsHealthSummary, type OmsOpsIssue } from "./ops-health.service";
 
-const DEFAULT_WINDOW_DAYS = 14;
-const STATE_WINDOW_DAYS = 30;
-const DIVERGENCE_WINDOW_DAYS = 90;
-const EVENT_SPINE_LIMIT = 12;
+const DEFAULT_WINDOW_DAYS = 30;
+const MAX_WINDOW_DAYS = 365;
+const STATEMENT_TIMEOUT = "8s";
 
 export type FunnelStageKey =
-  | "intake"
-  | "oms_to_wms"
-  | "wms_fulfill"
-  | "engine_push"
-  | "shipped"
-  | "writeback";
-
-/** Which funnel stage each ops-health issue code drops out of. */
-const STAGE_FOR_CODE: Record<string, FunnelStageKey> = {
-  WEBHOOK_INBOX_FAILED: "intake",
-  WEBHOOK_INBOX_STALE_PROCESSING: "intake",
-  WEBHOOK_RETRY_DEAD: "intake",
-  WEBHOOK_RETRY_STALE_DUE: "intake",
-  WEBHOOK_RETRY_DUE: "intake",
-  OMS_PAID_WITHOUT_WMS: "oms_to_wms",
-  WMS_READY_WITHOUT_SHIPMENT: "wms_fulfill",
-  WMS_PENDING_ITEM_WITHOUT_SHIPMENT: "wms_fulfill",
-  SHIPMENT_REQUIRES_REVIEW: "wms_fulfill",
-  SHIPMENT_ON_HOLD: "wms_fulfill",
-  SHIPMENT_NOT_PUSHED_TO_SHIPSTATION: "engine_push",
-  SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: "writeback",
-};
-
-export interface FlowFunnel {
-  entered: number;
-  reachedWms: number;
-  hasShipment: number;
-  shipped: number;
-  trackingConfirmed: number;
-}
-
-export interface FlowIntakeModel {
-  provider: string;
-  model: "poll-primary" | "webhook-primary";
-  cadenceSeconds: number;
-  note: string;
-}
+  | "intake" | "oms_to_wms" | "wms_fulfill" | "engine_push" | "shipped" | "writeback";
 
 export interface FlowDuplicates {
-  // (1) OMS pushed duplicate work into picking — 2+ active (non-cancelled) WMS orders for one OMS order
   omsToPicking: number;
-  // (2+3) An engine duplicated a shipment (WMS double-push OR engine-created extra): an order-item shipped
-  //       beyond its ordered qty — Σ(outbound_shipment_items.qty) per order_item_id > order_items.quantity.
-  //       Engine-agnostic (reads only the canonical shipment-item mapping) and split/combine-safe by construction.
   overShippedItems: number;
-  // engine split items the adapter could not reconcile (requires_review = *_split_items_unmapped)
   unmappedEngineSplits: number;
-  // duplicate OMS-order ingest attempts blocked by the unique index
   blockedDupOrders: number;
   sample: any[];
 }
+export interface FlowIntakeModel { provider: string; model: "poll-primary" | "webhook-primary"; cadenceSeconds: number; note: string }
+export interface FlowFunnel { entered: number; reachedWms: number; hasShipment: number; shipped: number; trackingConfirmed: number }
+export interface FlowIssue { code: string; severity: "critical" | "warning" | "info"; count: number; message: string; sample: any[]; stage: FunnelStageKey | "other" }
 
 export interface FlowWaterfall {
   generatedAt: string;
@@ -85,85 +39,94 @@ export interface FlowWaterfall {
   wmsBuckets: Array<{ status: string; count: number }>;
   eventSpine: Array<{ eventType: string; count: number }>;
   intakeModel: FlowIntakeModel[];
-  // Over-processing (an order handled 2+ times) — the funnel can't see this.
   duplicates: FlowDuplicates;
-  // The dead-letter backlog split into named root causes.
   deadLetterCauses: Array<{ cause: string; count: number }>;
-  // Where OMS / WMS / shipping engine disagree.
   crossSystem: { wmsShippedOmsOpen: number; staleConfirmed: number; sample: any[] };
-  // Past ship-by deadline but not shipped (marketplace late-shipment risk).
   sla: { breached: number; sample: any[] };
-  /** Open exceptions, tagged with the funnel stage they drop out of. */
-  issues: Array<OmsOpsIssue & { stage: FunnelStageKey | "other" }>;
-  health: OmsOpsHealthSummary;
+  issues: FlowIssue[];
+  health: { generatedAt: string; status: "healthy" | "degraded" | "critical"; counts: { critical: number; warning: number; info: number } };
 }
 
-function rows(result: any): any[] {
-  return Array.isArray(result?.rows) ? result.rows : [];
+const STAGE_FOR_CODE: Record<string, FunnelStageKey> = {
+  WEBHOOK_INBOX_FAILED: "intake",
+  WEBHOOK_RETRY_DEAD: "intake",
+  OMS_PAID_WITHOUT_WMS: "oms_to_wms",
+  WMS_READY_WITHOUT_SHIPMENT: "wms_fulfill",
+  SHIPMENT_REQUIRES_REVIEW: "wms_fulfill",
+  SHIPMENT_ON_HOLD: "wms_fulfill",
+  SHIPMENT_NOT_PUSHED_TO_SHIPSTATION: "engine_push",
+  SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: "writeback",
+};
+const ISSUE_META: Record<string, { severity: "critical" | "warning"; message: string }> = {
+  WEBHOOK_INBOX_FAILED: { severity: "critical", message: "Webhook inbox rows failed or dead-lettered after receipt." },
+  WEBHOOK_RETRY_DEAD: { severity: "critical", message: "Webhook retry rows are dead-lettered and need operator action." },
+  OMS_PAID_WITHOUT_WMS: { severity: "critical", message: "Paid OMS orders have not reached WMS." },
+  WMS_READY_WITHOUT_SHIPMENT: { severity: "critical", message: "Ready WMS orders have no outbound shipment row." },
+  SHIPMENT_NOT_PUSHED_TO_SHIPSTATION: { severity: "critical", message: "Outbound shipments are old enough to have been pushed but have no engine id." },
+  SHIPMENT_REQUIRES_REVIEW: { severity: "warning", message: "WMS shipments are flagged for warehouse-ops review." },
+  SHIPMENT_ON_HOLD: { severity: "warning", message: "WMS shipments are on hold and need warehouse-ops review." },
+  SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: { severity: "critical", message: "Shipped OMS orders have no tracking/fulfillment push success event." },
+};
+
+function num(r: any): number {
+  const v = Array.isArray(r?.rows) ? r.rows[0]?.count : undefined;
+  return Number(v ?? 0) || 0;
 }
-function countOf(result: any): number {
-  return Number(rows(result)[0]?.count ?? 0) || 0;
+function rows(r: any): any[] {
+  return Array.isArray(r?.rows) ? r.rows : [];
 }
 
-export async function getFlowWaterfall(
-  db: any,
-  opts: { windowDays?: number } = {},
-): Promise<FlowWaterfall> {
-  const windowDays = opts.windowDays ?? DEFAULT_WINDOW_DAYS;
-  const win = sql`NOW() - make_interval(days => ${windowDays})`;
-  const stateWin = sql`NOW() - make_interval(days => ${STATE_WINDOW_DAYS})`;
-  // OMS↔WMS link is soft (no FK): match on oms_fulfillment_order_id or source_table_id.
-  const link = sql`((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`;
+export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = {}): Promise<FlowWaterfall> {
+  const windowDays = Math.min(MAX_WINDOW_DAYS, Math.max(1, Math.floor(opts.windowDays || DEFAULT_WINDOW_DAYS)));
 
-  // Run the (already heavy) ops-health check first, THEN our queries in bounded
-  // groups. Firing everything in one big Promise.all stacks ~35 concurrent queries
-  // and exhausts the small Heroku Postgres pool ("timeout when trying to connect").
-  const health = await getOmsOpsHealth(db);
-  const [
-    entered,
-    reachedWms,
-    hasShipment,
-    shipped,
-    trackingConfirmed,
-    channelRows,
-    volumeRows,
-    wmsRows,
-    eventRows,
-  ] = await Promise.all([
-    db.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.created_at > ${win}`),
-    db.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} WHERE oo.created_at > ${win}`),
-    db.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} JOIN wms.outbound_shipments os ON os.order_id = wo.id AND os.status <> 'voided' WHERE oo.created_at > ${win}`),
-    db.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.created_at > ${win} AND oo.status = 'shipped'`),
-    db.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN oms.oms_order_events e ON e.order_id = oo.id AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed') WHERE oo.created_at > ${win}`),
-    db.execute(sql`SELECT COALESCE(c.provider, 'unknown') AS provider, COUNT(*)::int AS entered FROM oms.oms_orders oo LEFT JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.created_at > ${win} GROUP BY 1 ORDER BY 2 DESC`),
-    db.execute(sql`SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS orders FROM oms.oms_orders WHERE created_at > ${win} GROUP BY 1 ORDER BY 1`),
-    db.execute(sql`SELECT warehouse_status AS status, COUNT(*)::int AS count FROM wms.orders WHERE created_at > ${stateWin} GROUP BY 1 ORDER BY 2 DESC`),
-    db.execute(sql`SELECT event_type AS "eventType", COUNT(*)::int AS count FROM oms.oms_order_events WHERE created_at > ${stateWin} GROUP BY 1 ORDER BY 2 DESC LIMIT ${EVENT_SPINE_LIMIT}`),
-  ]);
+  return await db.transaction(async (tx: any) => {
+    // One connection, read-only, hard-capped — cannot starve the 3-slot pool or run away.
+    await tx.execute(sql`SET TRANSACTION READ ONLY`);
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`));
 
-  const issues = (health.issues ?? []).map((i) => ({
-    ...i,
-    stage: (STAGE_FOR_CODE[i.code] ?? "other") as FunnelStageKey | "other",
-  }));
+    const win = sql`NOW() - make_interval(days => ${windowDays})`;
+    const link = sql`((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`;
 
-  // ---- divergence lenses (all read-only) ----
-  const divWin = sql`NOW() - make_interval(days => ${DIVERGENCE_WINDOW_DAYS})`;
-  const [
-    omsToPicking, overShipped, unmappedSplits, blockedDup, dupSampleRows,
-    deadCauseRows, wmsShippedOmsOpen, staleConfirmed, slaBreach, slaSampleRows, crossSampleRows,
-  ] = await Promise.all([
-    // (1) OMS pushed duplicate work to picking: OMS order with 2+ ACTIVE (non-cancelled) WMS orders
-    db.execute(sql`SELECT COUNT(*)::int AS count FROM (SELECT oo.id FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} WHERE wo.warehouse_status <> 'cancelled' AND oo.created_at > ${divWin} GROUP BY oo.id HAVING COUNT(DISTINCT wo.id) > 1) t`),
-    // (2+3) An engine duplicated a shipment: any order-item whose total shipped qty across active shipments
-    // exceeds its ordered qty. Engine-agnostic + split/combine-safe (the canonical per-item mapping handles both).
-    db.execute(sql`SELECT COUNT(*)::int AS count FROM (SELECT osi.order_item_id FROM wms.outbound_shipment_items osi JOIN wms.outbound_shipments os ON os.id = osi.shipment_id AND os.status NOT IN ('voided','cancelled') JOIN wms.order_items oi ON oi.id = osi.order_item_id WHERE os.created_at > ${divWin} GROUP BY osi.order_item_id HAVING SUM(osi.qty) > MAX(oi.quantity)) t`),
-    // engine split items the adapter could not reconcile back onto order-items
-    db.execute(sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE review_reason LIKE '%split_items_unmapped%'`),
-    // duplicate OMS-order ingest attempts blocked by the unique index
-    db.execute(sql`SELECT COUNT(*)::int AS count FROM oms.webhook_inbox WHERE status IN ('failed','dead') AND last_error LIKE '%duplicate key value%'`),
-    // sample of the real OMS→picking duplicates (human order numbers)
-    db.execute(sql`SELECT oo.external_order_number, COUNT(DISTINCT wo.id)::int AS active_wms FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} WHERE wo.warehouse_status <> 'cancelled' AND oo.created_at > ${divWin} GROUP BY oo.id, oo.external_order_number HAVING COUNT(DISTINCT wo.id) > 1 ORDER BY 2 DESC LIMIT 6`),
-    db.execute(sql`SELECT cause, COUNT(*)::int AS count FROM (SELECT CASE
+    // ---- funnel (windowed on the INDEXED ordered_at) ----
+    const entered = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win}`));
+    const reachedWms = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} WHERE oo.ordered_at > ${win}`));
+    const hasShipment = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} JOIN wms.outbound_shipments os ON os.order_id = wo.id AND os.status <> 'voided' WHERE oo.ordered_at > ${win}`));
+    const shipped = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win} AND oo.status = 'shipped'`));
+    const trackingConfirmed = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN oms.oms_order_events e ON e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed') WHERE oo.ordered_at > ${win}`));
+
+    const channels = rows(await tx.execute(sql`SELECT COALESCE(c.provider,'unknown') AS provider, COUNT(*)::int AS entered FROM oms.oms_orders oo LEFT JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.ordered_at > ${win} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ provider: String(r.provider), entered: Number(r.entered) || 0 }));
+    const volumePerDay = rows(await tx.execute(sql`SELECT to_char(date_trunc('day', ordered_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS orders FROM oms.oms_orders WHERE ordered_at > ${win} GROUP BY 1 ORDER BY 1`)).map((r) => ({ day: String(r.day), orders: Number(r.orders) || 0 }));
+    const wmsBuckets = rows(await tx.execute(sql`SELECT warehouse_status AS status, COUNT(*)::int AS count FROM wms.orders WHERE created_at > ${win} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ status: String(r.status), count: Number(r.count) || 0 }));
+    const eventSpine = rows(await tx.execute(sql`SELECT event_type AS "eventType", COUNT(*)::int AS count FROM oms.oms_order_events WHERE created_at > ${win} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`)).map((r) => ({ eventType: String(r.eventType), count: Number(r.count) || 0 }));
+
+    // ---- exception buckets (counts only) ----
+    const bc: Record<string, number> = {};
+    bc.WEBHOOK_INBOX_FAILED = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.webhook_inbox WHERE status IN ('failed','dead')`));
+    bc.WEBHOOK_RETRY_DEAD = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.webhook_retry_queue WHERE status = 'dead'`));
+    bc.OMS_PAID_WITHOUT_WMS = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`));
+    // Match ops-health.service.ts: only orders that (a) still have a shippable, unfulfilled
+    // item, and (b) are not already cancelled/shipped/refunded on the OMS side. Without these
+    // guards, digital/membership-only and already-resolved orders inflate this critical count.
+    bc.WMS_READY_WITHOUT_SHIPMENT = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM wms.orders wo WHERE wo.warehouse_status IN ('ready','in_progress','ready_to_ship') AND wo.created_at > ${win} AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = wo.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(oi.quantity,0) > COALESCE(oi.fulfilled_quantity,0)) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) AND NOT EXISTS (SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id AND os.status <> 'voided')`));
+    // Match ops-health.service.ts: only shipments that actually carry a shippable, positive-qty
+    // item, and whose OMS order isn't already cancelled/shipped/refunded.
+    bc.SHIPMENT_NOT_PUSHED_TO_SHIPSTATION = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status IN ('planned','queued') AND os.created_at < NOW() - INTERVAL '15 minutes' AND os.engine_order_ref IS NULL AND wo.warehouse_status NOT IN ('cancelled','shipped') AND EXISTS (SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id = osi.order_item_id WHERE osi.shipment_id = os.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(osi.qty,0) > 0) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded'))`));
+    bc.SHIPMENT_REQUIRES_REVIEW = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE requires_review = true AND status NOT IN ('cancelled','voided','shipped')`));
+    bc.SHIPMENT_ON_HOLD = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE status = 'on_hold'`));
+    bc.SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.status = 'shipped' AND oo.shipped_at < NOW() - INTERVAL '1 hour' AND oo.shipped_at > ${win} AND c.provider IN ('ebay','shopify') AND NOT EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed'))`));
+
+    const issues: FlowIssue[] = Object.entries(ISSUE_META)
+      .map(([code, m]) => ({ code, severity: m.severity, count: bc[code] ?? 0, message: m.message, sample: [], stage: (STAGE_FOR_CODE[code] ?? "other") as FunnelStageKey | "other" }))
+      .filter((i) => i.count > 0);
+    const counts = issues.reduce((a, i) => { (a as any)[i.severity] += i.count; return a; }, { critical: 0, warning: 0, info: 0 });
+
+    // ---- divergence lenses ----
+    const overShipped = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM (SELECT osi.order_item_id FROM wms.outbound_shipment_items osi JOIN wms.outbound_shipments os ON os.id = osi.shipment_id AND os.status NOT IN ('voided','cancelled') JOIN wms.order_items oi ON oi.id = osi.order_item_id WHERE os.created_at > ${win} GROUP BY osi.order_item_id HAVING SUM(osi.qty) > MAX(oi.quantity)) t`));
+    const omsToPicking = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM (SELECT oo.id FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} WHERE wo.warehouse_status <> 'cancelled' AND oo.ordered_at > ${win} GROUP BY oo.id HAVING COUNT(DISTINCT wo.id) > 1) t`));
+    const unmappedSplits = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE review_reason LIKE '%split_items_unmapped%'`));
+    const blockedDup = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.webhook_inbox WHERE status IN ('failed','dead') AND last_error LIKE '%duplicate key value%'`));
+
+    const deadLetterCauses = rows(await tx.execute(sql`SELECT cause, COUNT(*)::int AS count FROM (SELECT CASE
       WHEN last_error LIKE '%no fulfillment-order line item%' THEN 'shopify fulfillment: SKU not on the fulfillment order'
       WHEN last_error LIKE '%2 character country code%' THEN 'shipstation: country code must be 2 chars (400)'
       WHEN last_error LIKE '%Negative Inventory Guard%' THEN 'ship_notify: negative inventory (0 on-hand)'
@@ -173,64 +136,33 @@ export async function getFlowWaterfall(
       WHEN last_error LIKE '%no items with positive quantity%' THEN 'fulfillment: no positive-qty items'
       WHEN last_error LIKE '%timeout exceeded%' THEN 'db connect timeout (transient)'
       WHEN last_error LIKE '%Local API returned 500%' THEN 'internal API 500'
-      WHEN last_error IS NULL THEN '(no message)'
-      ELSE left(last_error, 60) END AS cause
-      FROM oms.webhook_retry_queue WHERE status = 'dead') s GROUP BY cause ORDER BY 2 DESC LIMIT 12`),
-    db.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} WHERE oo.status NOT IN ('shipped','cancelled','refunded','partially_shipped') AND wo.warehouse_status = 'shipped' AND oo.created_at > ${divWin}`),
-    db.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders WHERE status = 'confirmed' AND created_at < NOW() - INTERVAL '2 days' AND created_at > ${divWin}`),
-    db.execute(sql`SELECT COUNT(*)::int AS count FROM wms.orders WHERE warehouse_status IN ('ready','in_progress','picking','picked','packing','packed') AND sla_due_at IS NOT NULL AND sla_due_at < NOW()`),
-    db.execute(sql`SELECT id AS wms_order_id, order_number, warehouse_status, sla_due_at FROM wms.orders WHERE warehouse_status IN ('ready','in_progress','picking','picked','packing','packed') AND sla_due_at IS NOT NULL AND sla_due_at < NOW() ORDER BY sla_due_at ASC LIMIT 6`),
-    db.execute(sql`SELECT id, external_order_number, status, created_at FROM oms.oms_orders WHERE status = 'confirmed' AND created_at < NOW() - INTERVAL '2 days' AND created_at > ${divWin} ORDER BY created_at ASC LIMIT 6`),
-  ]);
+      WHEN last_error IS NULL THEN '(no message)' ELSE left(last_error, 60) END AS cause
+      FROM oms.webhook_retry_queue WHERE status = 'dead') s GROUP BY cause ORDER BY 2 DESC LIMIT 10`)).map((r) => ({ cause: String(r.cause), count: Number(r.count) || 0 }));
 
-  const duplicates: FlowDuplicates = {
-    omsToPicking: countOf(omsToPicking),
-    overShippedItems: countOf(overShipped),
-    unmappedEngineSplits: countOf(unmappedSplits),
-    blockedDupOrders: countOf(blockedDup),
-    sample: rows(dupSampleRows),
-  };
-  const deadLetterCauses = rows(deadCauseRows).map((r) => ({ cause: String(r.cause), count: Number(r.count) || 0 }));
-  const crossSystem = {
-    wmsShippedOmsOpen: countOf(wmsShippedOmsOpen),
-    staleConfirmed: countOf(staleConfirmed),
-    sample: rows(crossSampleRows),
-  };
-  const sla = { breached: countOf(slaBreach), sample: rows(slaSampleRows) };
+    const wmsShippedOmsOpen = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${link} WHERE oo.status NOT IN ('shipped','cancelled','refunded','partially_shipped') AND wo.warehouse_status = 'shipped' AND oo.ordered_at > ${win}`));
+    const staleConfirmed = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders WHERE status = 'confirmed' AND ordered_at < NOW() - INTERVAL '2 days' AND ordered_at > ${win}`));
+    // Match the canonical SLA monitor (sla-monitor.service.ts): overdue = any non-terminal
+    // order past its sla_due_at. The exclusion form correctly includes awaiting_3pl/ready_to_ship/exception.
+    const slaBreached = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM wms.orders WHERE sla_due_at IS NOT NULL AND warehouse_status NOT IN ('shipped','completed','cancelled') AND sla_due_at < NOW()`));
 
-  return {
-    generatedAt: new Date().toISOString(),
-    windowDays,
-    funnel: {
-      entered: countOf(entered),
-      reachedWms: countOf(reachedWms),
-      hasShipment: countOf(hasShipment),
-      shipped: countOf(shipped),
-      trackingConfirmed: countOf(trackingConfirmed),
-    },
-    channels: rows(channelRows).map((r) => ({ provider: String(r.provider), entered: Number(r.entered) || 0 })),
-    volumePerDay: rows(volumeRows).map((r) => ({ day: String(r.day), orders: Number(r.orders) || 0 })),
-    wmsBuckets: rows(wmsRows).map((r) => ({ status: String(r.status), count: Number(r.count) || 0 })),
-    eventSpine: rows(eventRows).map((r) => ({ eventType: String(r.eventType), count: Number(r.count) || 0 })),
-    intakeModel: [
-      {
-        provider: "ebay",
-        model: "poll-primary",
-        cadenceSeconds: 300,
-        note: "eBay Fulfillment API polled every 5 min (4h lookback); intake self-reconciles, so eBay is not exposed to silent webhook-drop misses.",
-      },
-      {
-        provider: "shopify",
-        model: "webhook-primary",
-        cadenceSeconds: 900,
-        note: "Real-time webhooks plus a 15-min order-reconciliation sweep that pulls in any missing orders (POS, TikTok, dropped webhooks).",
-      },
-    ],
-    duplicates,
-    deadLetterCauses,
-    crossSystem,
-    sla,
-    issues,
-    health,
-  };
+    return {
+      generatedAt: new Date().toISOString(),
+      windowDays,
+      funnel: { entered, reachedWms, hasShipment, shipped, trackingConfirmed },
+      channels,
+      volumePerDay,
+      wmsBuckets,
+      eventSpine,
+      intakeModel: [
+        { provider: "ebay", model: "poll-primary", cadenceSeconds: 300, note: "eBay Fulfillment API polled every 5 min (4h lookback); intake self-reconciles." },
+        { provider: "shopify", model: "webhook-primary", cadenceSeconds: 900, note: "Real-time webhooks plus a 15-min order-reconciliation sweep." },
+      ],
+      duplicates: { omsToPicking, overShippedItems: overShipped, unmappedEngineSplits: unmappedSplits, blockedDupOrders: blockedDup, sample: [] },
+      deadLetterCauses,
+      crossSystem: { wmsShippedOmsOpen, staleConfirmed, sample: [] },
+      sla: { breached: slaBreached, sample: [] },
+      issues,
+      health: { generatedAt: new Date().toISOString(), status: counts.critical > 0 ? "critical" : counts.warning > 0 ? "degraded" : "healthy", counts },
+    };
+  });
 }
