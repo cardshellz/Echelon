@@ -12,7 +12,7 @@ import type { ShipStationService } from "../modules/oms/shipstation.service";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { getOmsOpsHealth } from "../modules/oms/ops-health.service";
-import { getFlowWaterfall } from "../modules/oms/flow-waterfall.service";
+import { getFlowWaterfall, getFlowBucketSamples } from "../modules/oms/flow-waterfall.service";
 import { getFlowTrace } from "../modules/oms/flow-trace.service";
 import { remediateOmsFlowIssue } from "../modules/oms/oms-flow-reconciliation.service";
 import { enqueueWebhookInboxReplay } from "../modules/oms/webhook-inbox.service";
@@ -64,6 +64,25 @@ export function registerOmsRoutes(app: Express) {
       res.json(await getFlowWaterfall(db, { windowDays }));
     } catch (err: any) {
       console.error("[OMS Routes] Flow waterfall error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/oms/ops/flow-bucket/:code — on-demand drill-down rows for one
+  // exception bucket (read-only, single connection, LIMIT 50)
+  // -----------------------------------------------------------------------
+  app.get("/api/oms/ops/flow-bucket/:code", requireAuth, async (req: Request, res: Response) => {
+    try {
+      const code = String(req.params.code ?? "").trim();
+      const requested = Number(req.query.windowDays);
+      const windowDays =
+        Number.isFinite(requested) && requested > 0
+          ? Math.min(365, Math.floor(requested))
+          : undefined;
+      res.json(await getFlowBucketSamples(db, code, { windowDays }));
+    } catch (err: any) {
+      console.error("[OMS Routes] Flow bucket error:", err);
       res.status(500).json({ error: err.message });
     }
   });
