@@ -119,6 +119,11 @@ export default function FlowMonitor() {
     queryKey: ["/api/oms/ops/flow-trace", encodeURIComponent(submittedRef)],
     enabled: submittedRef.length > 0,
   });
+  // On-demand drill-down rows for whichever exception bucket is open.
+  const bucket = useQuery<{ code: string; rows: any[] }>({
+    queryKey: ["/api/oms/ops/flow-bucket/" + (selected?.code ?? "_") + "?windowDays=" + windowDays],
+    enabled: !!selected,
+  });
 
   if (isLoading) {
     return (
@@ -521,21 +526,37 @@ export default function FlowMonitor() {
               </div>
 
               <div>
-                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Sample rows · live</div>
-                {selected.sample.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No samples returned.</div>
+                <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Affected rows · live · top 50
+                  {bucket.isFetching && <RotateCw className="h-3 w-3 animate-spin" />}
+                </div>
+                {bucket.isLoading ? (
+                  <div className="text-sm text-muted-foreground">Loading rows…</div>
+                ) : (bucket.data?.rows?.length ?? 0) === 0 ? (
+                  <div className="text-sm text-muted-foreground">No matching rows right now.</div>
                 ) : (
                   <div className="space-y-2">
-                    {selected.sample.slice(0, 10).map((row: any, i: number) => (
-                      <div key={i} className="rounded-md border bg-muted/40 p-2 text-xs">
-                        {Object.entries(row).map(([k, v]) => (
-                          <div key={k} className="flex gap-2 py-0.5">
-                            <span className="w-32 shrink-0 text-muted-foreground">{k}</span>
-                            <span className={cn("min-w-0 break-words", /error/i.test(k) ? "font-mono-sku text-red-600" : "font-medium")}>{String(v)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
+                    {bucket.data!.rows.map((row: any, i: number) => {
+                      const ordNum = row.order_number ?? row.orderNumber;
+                      return (
+                        <div key={i} className="rounded-md border bg-muted/40 p-2 text-xs">
+                          {ordNum != null && String(ordNum).length > 0 && (
+                            <button
+                              onClick={() => { setSubmittedRef(String(ordNum)); setRefInput(String(ordNum)); setSelected(null); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                              className="mb-1 inline-flex items-center gap-1 font-mono-sku font-semibold text-primary hover:underline"
+                            >
+                              <Search className="h-3 w-3" />trace {String(ordNum)}
+                            </button>
+                          )}
+                          {Object.entries(row).map(([k, v]) => (
+                            <div key={k} className="flex gap-2 py-0.5">
+                              <span className="w-32 shrink-0 text-muted-foreground">{k}</span>
+                              <span className={cn("min-w-0 break-words", /error/i.test(k) ? "font-mono-sku text-red-600" : "font-medium")}>{v === null ? "—" : String(v)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
