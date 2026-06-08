@@ -531,6 +531,7 @@ export const returns = wmsSchema.table("returns", {
   reason: varchar("reason", { length: 200 }),
   refundExternalId: varchar("refund_external_id", { length: 100 }),
   restocked: boolean("restocked").notNull().default(false),
+  status: varchar("status", { length: 20 }).notNull().default("closed"),
   receivedAt: timestamp("received_at"),
   refundedAt: timestamp("refunded_at"),
   notes: text("notes"),
@@ -540,6 +541,29 @@ export const returns = wmsSchema.table("returns", {
 
 export type Return = typeof returns.$inferSelect;
 export type InsertReturn = typeof returns.$inferInsert;
+
+// Per-line expected/received quantities for a return (REFUND_RESTOCK_DESIGN.md).
+// A refund flagged restock_type=return opens rows here with status='expected';
+// the physical return-to-stock path reconciles received_qty and restocks on-hand.
+export const returnItems = wmsSchema.table("return_items", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  returnId: bigint("return_id", { mode: "number" }).notNull().references(() => returns.id, { onDelete: "cascade" }),
+  orderItemId: integer("order_item_id").references(() => orderItems.id, { onDelete: "set null" }),
+  omsOrderLineId: integer("oms_order_line_id"),
+  externalLineItemId: varchar("external_line_item_id", { length: 100 }),
+  sku: varchar("sku", { length: 100 }),
+  expectedQty: integer("expected_qty").notNull(),
+  receivedQty: integer("received_qty").notNull().default(0),
+  restockPolicy: varchar("restock_policy", { length: 20 }),
+  locationId: varchar("location_id", { length: 100 }),
+  condition: varchar("condition", { length: 20 }),
+  status: varchar("status", { length: 20 }).notNull().default("expected"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type ReturnItem = typeof returnItems.$inferSelect;
+export type InsertReturnItem = typeof returnItems.$inferInsert;
 
 
 
