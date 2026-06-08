@@ -58,8 +58,8 @@ export function registerOmsRoutes(app: Express) {
     try {
       const requested = Number(req.query.windowDays);
       const windowDays =
-        Number.isFinite(requested) && requested > 0 && requested <= 90
-          ? Math.floor(requested)
+        Number.isFinite(requested) && requested > 0
+          ? Math.min(365, Math.floor(requested))
           : undefined;
       res.json(await getFlowWaterfall(db, { windowDays }));
     } catch (err: any) {

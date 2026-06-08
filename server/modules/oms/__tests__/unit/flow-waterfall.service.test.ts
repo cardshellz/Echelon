@@ -1,13 +1,18 @@
 import { describe, it, expect } from "vitest";
 import { getFlowWaterfall } from "../../flow-waterfall.service";
 
-// Pure unit test: a fake db whose every SELECT returns count 0, so no database
-// is required (mirrors ops-health.service.test.ts). Verifies composition + shape.
+// Pure unit test: a fake db whose .transaction runs the callback with a fake tx
+// whose every query returns count 0 — so no database is required (mirrors
+// ops-health.service.test.ts). getFlowWaterfall runs entirely inside ONE
+// read-only db.transaction, so the fake must provide .transaction, not .execute.
+function fakeDb() {
+  const execute = async () => ({ rows: [{ count: 0 }] });
+  return { transaction: async (fn: (tx: any) => any) => fn({ execute }) };
+}
+
 describe("getFlowWaterfall", () => {
   it("composes a read-only funnel view and tags each issue with a funnel stage", async () => {
-    const execute = async () => ({ rows: [{ count: 0 }] });
-
-    const result = await getFlowWaterfall({ execute }, { windowDays: 14 });
+    const result = await getFlowWaterfall(fakeDb(), { windowDays: 14 });
 
     expect(result.windowDays).toBe(14);
     expect(typeof result.funnel.entered).toBe("number");
@@ -28,9 +33,8 @@ describe("getFlowWaterfall", () => {
     }
   });
 
-  it("defaults to a 14-day window when none is provided", async () => {
-    const execute = async () => ({ rows: [{ count: 0 }] });
-    const result = await getFlowWaterfall({ execute });
-    expect(result.windowDays).toBe(14);
+  it("defaults to a 30-day window when none is provided", async () => {
+    const result = await getFlowWaterfall(fakeDb());
+    expect(result.windowDays).toBe(30);
   });
 });

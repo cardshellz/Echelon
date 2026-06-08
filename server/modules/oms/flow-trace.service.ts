@@ -66,6 +66,17 @@ function rows(r: any): any[] {
 
 /** Resolve an order by order number ("#58409" or "58409"), external id, or internal id. */
 export async function getFlowTrace(db: any, ref: string): Promise<FlowTrace> {
+  // One read-only connection with a hard statement_timeout — same pool-safety
+  // contract as getFlowWaterfall, so an on-demand trace can never hold more than
+  // one of the three pool slots, nor run away.
+  return await db.transaction(async (tx: any) => {
+    await tx.execute(sql`SET TRANSACTION READ ONLY`);
+    await tx.execute(sql`SET LOCAL statement_timeout = '8s'`);
+    return await traceWithin(tx, ref);
+  });
+}
+
+async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
   const raw = (ref ?? "").trim();
   const stripped = raw.replace(/^#/, "");
   const hashed = `#${stripped}`;
@@ -124,22 +135,22 @@ export async function getFlowTrace(db: any, ref: string): Promise<FlowTrace> {
 
   // Raw webhook timeline (reuses the matching approach from getOrderFlowHistory)
   const externalIds = [o.external_order_id, o.external_order_number, String(omsId)].filter(Boolean) as string[];
-  const [inbox, retries] = await Promise.all([
-    db.execute(sql`
-      SELECT id, provider, topic, status, attempts, last_error, first_received_at, last_attempt_at, processed_at, updated_at
-      FROM oms.webhook_inbox
-      WHERE payload->>'id' = ANY(${externalIds}) OR payload->>'order_id' = ANY(${externalIds})
-         OR payload->>'admin_graphql_api_id' = ANY(${externalIds}) OR payload->>'name' = ANY(${externalIds})
-      ORDER BY COALESCE(processed_at, last_attempt_at, first_received_at, updated_at) DESC NULLS LAST LIMIT 20
-    `),
-    db.execute(sql`
-      SELECT id, provider, topic, status, attempts, last_error, source_inbox_id, next_retry_at, created_at, updated_at
-      FROM oms.webhook_retry_queue
-      WHERE payload->>'id' = ANY(${externalIds}) OR payload->>'order_id' = ANY(${externalIds})
-         OR payload->>'orderId' = ${String(omsId)} OR payload->>'name' = ANY(${externalIds})
-      ORDER BY updated_at DESC NULLS LAST LIMIT 20
-    `),
-  ]);
+  // Sequential (not Promise.all): inside the single-connection tx, two concurrent
+  // queries would contend for the one connection. These two are cheap + LIMIT 20.
+  const inbox = await db.execute(sql`
+    SELECT id, provider, topic, status, attempts, last_error, first_received_at, last_attempt_at, processed_at, updated_at
+    FROM oms.webhook_inbox
+    WHERE payload->>'id' = ANY(${externalIds}) OR payload->>'order_id' = ANY(${externalIds})
+       OR payload->>'admin_graphql_api_id' = ANY(${externalIds}) OR payload->>'name' = ANY(${externalIds})
+    ORDER BY COALESCE(processed_at, last_attempt_at, first_received_at, updated_at) DESC NULLS LAST LIMIT 20
+  `);
+  const retries = await db.execute(sql`
+    SELECT id, provider, topic, status, attempts, last_error, source_inbox_id, next_retry_at, created_at, updated_at
+    FROM oms.webhook_retry_queue
+    WHERE payload->>'id' = ANY(${externalIds}) OR payload->>'order_id' = ANY(${externalIds})
+       OR payload->>'orderId' = ${String(omsId)} OR payload->>'name' = ANY(${externalIds})
+    ORDER BY updated_at DESC NULLS LAST LIMIT 20
+  `);
 
   const timeline: TraceTimelineEntry[] = [];
   for (const r of rows(inbox)) {
