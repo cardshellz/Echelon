@@ -166,3 +166,36 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     };
   });
 }
+
+/**
+ * On-demand drill-down: the offending rows for ONE exception bucket. Kept out of
+ * getFlowWaterfall so the waterfall stays counts-only and cheap; this fires a
+ * single LIMIT-capped query for just the bucket the user opened — same one
+ * read-only transaction + statement_timeout contract, so still ≤1 pool connection.
+ * Each window-scoped bucket mirrors the matching count query's WHERE clause exactly.
+ */
+export async function getFlowBucketSamples(
+  db: any,
+  code: string,
+  opts: { windowDays?: number } = {},
+): Promise<{ code: string; rows: any[] }> {
+  const windowDays = Math.min(MAX_WINDOW_DAYS, Math.max(1, Math.floor(opts.windowDays || DEFAULT_WINDOW_DAYS)));
+  return await db.transaction(async (tx: any) => {
+    await tx.execute(sql`SET TRANSACTION READ ONLY`);
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`));
+    const win = sql`NOW() - make_interval(days => ${windowDays})`;
+    const BUCKET: Record<string, any> = {
+      WEBHOOK_INBOX_FAILED: sql`SELECT id, provider, topic, status, attempts, last_error, COALESCE(processed_at, last_attempt_at, first_received_at) AS at FROM oms.webhook_inbox WHERE status IN ('failed','dead') ORDER BY COALESCE(processed_at, last_attempt_at, first_received_at) DESC NULLS LAST LIMIT 50`,
+      WEBHOOK_RETRY_DEAD: sql`SELECT id, provider, topic, attempts, last_error, next_retry_at, updated_at AS at FROM oms.webhook_retry_queue WHERE status = 'dead' ORDER BY updated_at DESC NULLS LAST LIMIT 50`,
+      OMS_PAID_WITHOUT_WMS: sql`SELECT oo.external_order_number AS order_number, oo.status, oo.financial_status, oo.ordered_at AS at FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) ORDER BY oo.ordered_at DESC LIMIT 50`,
+      WMS_READY_WITHOUT_SHIPMENT: sql`SELECT wo.order_number, wo.warehouse_status, wo.created_at AS at FROM wms.orders wo WHERE wo.warehouse_status IN ('ready','in_progress','ready_to_ship') AND wo.created_at > ${win} AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = wo.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(oi.quantity,0) > COALESCE(oi.fulfilled_quantity,0)) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) AND NOT EXISTS (SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id = wo.id AND os.status <> 'voided') ORDER BY wo.created_at DESC LIMIT 50`,
+      SHIPMENT_NOT_PUSHED_TO_SHIPSTATION: sql`SELECT os.id AS shipment_id, wo.order_number, os.status, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status IN ('planned','queued') AND os.created_at < NOW() - INTERVAL '15 minutes' AND os.engine_order_ref IS NULL AND wo.warehouse_status NOT IN ('cancelled','shipped') AND EXISTS (SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id = osi.order_item_id WHERE osi.shipment_id = os.id AND COALESCE(oi.requires_shipping,1) <> 0 AND COALESCE(osi.qty,0) > 0) AND NOT EXISTS (SELECT 1 FROM oms.oms_orders oo WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) AND (oo.status IN ('cancelled','shipped','refunded') OR oo.financial_status = 'refunded')) ORDER BY os.created_at ASC LIMIT 50`,
+      SHIPMENT_REQUIRES_REVIEW: sql`SELECT os.id AS shipment_id, wo.order_number, os.review_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.requires_review = true AND os.status NOT IN ('cancelled','voided','shipped') ORDER BY os.created_at DESC LIMIT 50`,
+      SHIPMENT_ON_HOLD: sql`SELECT os.id AS shipment_id, wo.order_number, os.on_hold_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status = 'on_hold' ORDER BY os.created_at DESC LIMIT 50`,
+      SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: sql`SELECT oo.external_order_number AS order_number, c.provider, oo.shipped_at AS at FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.status = 'shipped' AND oo.shipped_at < NOW() - INTERVAL '1 hour' AND oo.shipped_at > ${win} AND c.provider IN ('ebay','shopify') AND NOT EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed')) ORDER BY oo.shipped_at DESC LIMIT 50`,
+    };
+    const query = BUCKET[code];
+    if (!query) return { code, rows: [] };
+    return { code, rows: rows(await tx.execute(query)) };
+  });
+}
