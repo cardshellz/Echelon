@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   RotateCw,
@@ -124,6 +124,7 @@ export default function FlowMonitor() {
     queryKey: ["/api/oms/ops/flow-bucket/" + (selected?.code ?? "_") + "?windowDays=" + windowDays],
     enabled: !!selected,
   });
+  const traceRef = useRef<HTMLDivElement>(null);
 
   if (isLoading) {
     return (
@@ -220,7 +221,7 @@ export default function FlowMonitor() {
       </div>
 
       {/* Per-order trace */}
-      <Card>
+      <Card ref={traceRef}>
         <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Search className="h-4 w-4 text-muted-foreground" />Find an order — full flow trace</CardTitle></CardHeader>
         <CardContent>
           <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); setSubmittedRef(refInput.trim()); }}>
@@ -542,7 +543,7 @@ export default function FlowMonitor() {
                         <div key={i} className="rounded-md border bg-muted/40 p-2 text-xs">
                           {ordNum != null && String(ordNum).length > 0 && (
                             <button
-                              onClick={() => { setSubmittedRef(String(ordNum)); setRefInput(String(ordNum)); setSelected(null); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                              onClick={() => { setSubmittedRef(String(ordNum)); setRefInput(String(ordNum)); setSelected(null); setTimeout(() => traceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60); }}
                               className="mb-1 inline-flex items-center gap-1 font-mono-sku font-semibold text-primary hover:underline"
                             >
                               <Search className="h-3 w-3" />trace {String(ordNum)}
