@@ -601,17 +601,19 @@ async function applyRefundLineAdjustmentsToWms(
         ON adj.order_line_id = ol.id
        AND adj.adjustment_type IN ('refund', 'cancel')
       WHERE wi.order_id = ${args.wmsOrderId}
-        AND ol.external_line_item_id = ANY(${affectedExternalIds}::text[])
+        AND ol.external_line_item_id = ANY(ARRAY[${sql.join(affectedExternalIds, sql`, `)}]::text[])
       GROUP BY wi.id, wi.quantity
     ),
     updated_shipment_items AS (
       UPDATE wms.outbound_shipment_items si
       SET qty = GREATEST(0, mi.order_item_quantity - mi.adjusted_quantity)
       FROM matched_items mi
-      JOIN wms.outbound_shipments os ON os.id = si.shipment_id
       WHERE si.order_item_id = mi.order_item_id
-        AND os.order_id = ${args.wmsOrderId}
-        AND os.status = 'planned'
+        AND si.shipment_id IN (
+          SELECT os.id FROM wms.outbound_shipments os
+          WHERE os.order_id = ${args.wmsOrderId}
+            AND os.status = 'planned'
+        )
       RETURNING si.id
     )
     UPDATE wms.order_items wi
@@ -638,7 +640,7 @@ async function applyRefundLineAdjustmentsToWms(
       JOIN wms.order_items wi ON wi.id = si.order_item_id
       JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
       WHERE os.order_id = ${args.wmsOrderId}
-        AND ol.external_line_item_id = ANY(${affectedExternalIds}::text[])
+        AND ol.external_line_item_id = ANY(ARRAY[${sql.join(affectedExternalIds, sql`, `)}]::text[])
         AND os.status IN ('queued', 'labeled', 'shipped')
     ),
     held AS (
