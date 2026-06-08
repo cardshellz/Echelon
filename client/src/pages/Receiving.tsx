@@ -332,7 +332,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     queryKey: ["/api/warehouse/locations"],
   });
 
-  const { data: variants = [] } = useQuery<{ id: number; sku: string; name: string; productId: number }[]>({
+  const { data: variants = [] } = useQuery<{ id: number; sku: string; name: string; productId: number; unitsPerVariant: number }[]>({
     queryKey: ["/api/product-variants"],
   });
 
@@ -664,6 +664,24 @@ DEF-456,25,,,5.00,,Location TBD`;
       toast({ title: "Failed to update line", description: error.message, variant: "destructive" });
     },
   });
+
+  // Auto-default each unresolved receive line to its product's LARGEST variant
+  // (e.g. "Case of 10"), so the operator gets a pre-filled, changeable pick
+  // instead of an "unmatched SKU" wall. Ref guard => apply once per line.
+  const defaultedVariantLinesRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (!selectedReceipt?.lines || selectedReceipt.status === "closed") return;
+    for (const line of selectedReceipt.lines) {
+      if (line.productVariantId != null || line.productId == null) continue;
+      if (defaultedVariantLinesRef.current.has(line.id)) continue;
+      const lv = variants
+        .filter((v) => v.productId === line.productId)
+        .sort((a, b) => (b.unitsPerVariant || 1) - (a.unitsPerVariant || 1));
+      if (lv.length === 0) continue;
+      defaultedVariantLinesRef.current.add(line.id);
+      updateLineMutation.mutate({ lineId: line.id, updates: { productVariantId: lv[0].id } });
+    }
+  }, [selectedReceipt?.lines, variants]);
 
   const updateReceiptMutation = useMutation({
     mutationFn: async ({ id, updates }: { id: number; updates: Record<string, any> }) => {
@@ -1939,7 +1957,34 @@ DEF-456,25,,,5.00,,Location TBD`;
                         ) : (
                           sortedLines.map((line) => (
                             <TableRow key={line.id}>
-                              <TableCell className="font-mono whitespace-nowrap">{line.sku || "-"}</TableCell>
+                              <TableCell className="font-mono whitespace-nowrap">
+                                <div>{line.sku || "-"}</div>
+                                {selectedReceipt.status !== "closed" && (() => {
+                                  const lv = variants
+                                    .filter((v) => v.productId === line.productId)
+                                    .sort((a, b) => (b.unitsPerVariant || 1) - (a.unitsPerVariant || 1));
+                                  if (lv.length === 0) return null;
+                                  return (
+                                    <select
+                                      className="mt-1 block text-xs border rounded px-1 py-0.5 max-w-[150px]"
+                                      value={line.productVariantId ?? lv[0].id}
+                                      onChange={(e) =>
+                                        updateLineMutation.mutate({
+                                          lineId: line.id,
+                                          updates: { productVariantId: Number(e.target.value) },
+                                        })
+                                      }
+                                      title="Receive as which pack variant"
+                                    >
+                                      {lv.map((v) => (
+                                        <option key={v.id} value={v.id}>
+                                          {v.name}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  );
+                                })()}
+                              </TableCell>
                               <TableCell>{line.productName || "-"}</TableCell>
                               <TableCell>{line.expectedQty}</TableCell>
                               <TableCell>
@@ -1993,7 +2038,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 <TableCell>
                                   {(!line.productVariantId || !line.putawayLocationId) && (
                                     <div className="flex gap-1">
-                                      {!line.productVariantId && (
+                                      {!line.productVariantId && !variants.some((v) => v.productId === line.productId) && (
                                         <button
                                           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
                                           onClick={() => openResolve(line, 'sku')}
