@@ -50,6 +50,40 @@ export async function runStartupMigrations(): Promise<void> {
   });
   const client = await migrationsPool.connect();
   try {
+    // Refund return lifecycle (REFUND_RESTOCK_DESIGN.md): run FIRST and in its own
+    // try/catch. The rest of this function is one big try/catch, and a pre-existing
+    // unqualified index statement (idx_inventory_levels_*) resolves to a stray
+    // public.inventory_levels that lacks product_variant_id and throws — which would
+    // otherwise skip everything after it (including this). Fully schema-qualified
+    // (wms.*) here so search_path shadowing can't touch it.
+    try {
+      await client.query(`ALTER TABLE wms.returns ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'closed'`);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS wms.return_items (
+          id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          return_id BIGINT NOT NULL REFERENCES wms.returns(id) ON DELETE CASCADE,
+          order_item_id INTEGER REFERENCES wms.order_items(id) ON DELETE SET NULL,
+          oms_order_line_id INTEGER,
+          external_line_item_id VARCHAR(100),
+          sku VARCHAR(100),
+          expected_qty INTEGER NOT NULL,
+          received_qty INTEGER NOT NULL DEFAULT 0,
+          restock_policy VARCHAR(20),
+          location_id VARCHAR(100),
+          condition VARCHAR(20),
+          status VARCHAR(20) NOT NULL DEFAULT 'expected',
+          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+          updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_return_items_return ON wms.return_items(return_id)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_return_items_order_item ON wms.return_items(order_item_id)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_returns_status_open ON wms.returns(status) WHERE status <> 'closed'`);
+      console.log("Checked refund return lifecycle (wms.returns.status, wms.return_items)");
+    } catch (e: any) {
+      console.error("[startup-migration] refund return lifecycle DDL failed:", e?.message ?? e);
+    }
+
     // Create combined_order_groups table if it doesn't exist
     await client.query(`
       CREATE TABLE IF NOT EXISTS wms.combined_order_groups (
@@ -903,34 +937,6 @@ export async function runStartupMigrations(): Promise<void> {
           `(likely duplicate active WMS orders for same OMS order — needs manual reconciliation): ${err.message}`,
       );
     }
-
-    // Refund return lifecycle (REFUND_RESTOCK_DESIGN.md): track expected physical
-    // returns from refunds flagged restock_type=return so the return-to-stock path
-    // can reconcile them. drizzle-kit push is skipped on release, so this DDL must
-    // live here (startup migrations are the only schema path that runs on deploy).
-    await client.query(`ALTER TABLE wms.returns ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'closed'`);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS wms.return_items (
-        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        return_id BIGINT NOT NULL REFERENCES wms.returns(id) ON DELETE CASCADE,
-        order_item_id INTEGER REFERENCES wms.order_items(id) ON DELETE SET NULL,
-        oms_order_line_id INTEGER,
-        external_line_item_id VARCHAR(100),
-        sku VARCHAR(100),
-        expected_qty INTEGER NOT NULL,
-        received_qty INTEGER NOT NULL DEFAULT 0,
-        restock_policy VARCHAR(20),
-        location_id VARCHAR(100),
-        condition VARCHAR(20),
-        status VARCHAR(20) NOT NULL DEFAULT 'expected',
-        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
-        updated_at TIMESTAMP DEFAULT NOW() NOT NULL
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_return_items_return ON wms.return_items(return_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_return_items_order_item ON wms.return_items(order_item_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_returns_status_open ON wms.returns(status) WHERE status <> 'closed'`);
-    console.log("Checked refund return lifecycle (wms.returns.status, wms.return_items)");
 
   } catch (error) {
     console.error("Error running startup migrations:", error);
