@@ -1822,8 +1822,32 @@ export function createPurchasingService(db: any, storage: Storage) {
     // otherwise we derive mills from cents via centsToMills (no rounding).
     // Keeps receiving_lines consistent with the (post-0562) contract in
     // receiving.service.ts: mills is the source of truth, cents mirrors.
+    // Resolve a default receiving pack (largest variant) for product-level PO
+    // lines (no productVariantId) so the receiving line is born with a real pack
+    // AND expected expressed in that pack's units: 10 pieces ordered into a
+    // Case-of-10 => Expected 1 case (not 10). Done once, at creation, so it's
+    // unambiguous downstream (no client-side unit guessing).
+    const defaultPackByProduct = new Map<number, { id: number; unitsPerVariant: number }>();
+    for (const pid of Array.from(new Set(
+      receivableLines
+        .filter((pl: any) => !pl.productVariantId && pl.productId)
+        .map((pl: any) => pl.productId as number),
+    ))) {
+      try {
+        const vs = (await (storage as any).getProductVariantsByProductId?.(pid)) ?? [];
+        if (vs.length) {
+          const largest = vs.reduce((a: any, b: any) =>
+            ((b.unitsPerVariant || 1) > (a.unitsPerVariant || 1) ? b : a));
+          defaultPackByProduct.set(pid, { id: largest.id, unitsPerVariant: largest.unitsPerVariant || 1 });
+        }
+      } catch { /* non-critical: leave the line product-level */ }
+    }
+
     const receivingLineData = receivableLines.map((poLine: any) => {
-      const autoLocationId = productLocationMap.get(poLine.productVariantId) || null;
+      const pack = !poLine.productVariantId ? defaultPackByProduct.get(poLine.productId) : null;
+      const resolvedVariantId = poLine.productVariantId ?? pack?.id ?? null;
+      const packSize = poLine.productVariantId ? (poLine.unitsPerUom || 1) : (pack?.unitsPerVariant || 1);
+      const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
       const hasPoMills =
         typeof poLine.unitCostMills === "number" &&
         Number.isInteger(poLine.unitCostMills) &&
@@ -1838,13 +1862,12 @@ export function createPurchasingService(db: any, storage: Storage) {
         : (typeof poLine.unitCostCents === "number" ? poLine.unitCostCents : null);
       return {
         receivingOrderId: receivingOrder.id,
-        productVariantId: poLine.productVariantId,
+        productVariantId: resolvedVariantId,
         productId: poLine.productId,
         sku: poLine.sku,
         productName: poLine.productName,
         expectedQty: Math.ceil(
-          (poLine.orderQty - (poLine.receivedQty || 0) - (poLine.cancelledQty || 0)) /
-          (poLine.unitsPerUom || 1)
+          (poLine.orderQty - (poLine.receivedQty || 0) - (poLine.cancelledQty || 0)) / packSize
         ),
         receivedQty: 0,
         damagedQty: 0,
