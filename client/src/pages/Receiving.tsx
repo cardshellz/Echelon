@@ -668,18 +668,44 @@ DEF-456,25,,,5.00,,Location TBD`;
   // Auto-default each unresolved receive line to its product's LARGEST variant
   // (e.g. "Case of 10"), so the operator gets a pre-filled, changeable pick
   // instead of an "unmatched SKU" wall. Ref guard => apply once per line.
+  // Variants for a line's product, LARGEST pack first.
+  const variantsFor = (line: any) =>
+    variants.filter((v) => v.productId === line.productId)
+      .sort((a, b) => (b.unitsPerVariant || 1) - (a.unitsPerVariant || 1));
+  // Physical-unit noun for a variant ("case" / "pack" / "box" / "piece").
+  const unitNoun = (v: any) => {
+    if (!v) return "unit";
+    if ((v.unitsPerVariant || 1) === 1) return "piece";
+    const m = /^(pack|box|case)/i.exec(v.name || "");
+    return m ? m[1].toLowerCase() : "unit";
+  };
+  // Apply a pack to a line AND convert expected into that pack's units: recover
+  // base pieces from the current pack, divide by the new pack, reset received.
+  // So the server's complete/partial/overage compares cases-to-cases.
+  const applyVariant = (line: any, variantId: number) => {
+    const cur = variants.find((v) => v.id === line.productVariantId);
+    const next = variants.find((v) => v.id === variantId);
+    if (!next) return;
+    const basePieces = (line.expectedQty || 0) * (cur?.unitsPerVariant || 1);
+    const newExpected = Math.round(basePieces / (next.unitsPerVariant || 1));
+    updateLineMutation.mutate({
+      lineId: line.id,
+      updates: { productVariantId: variantId, expectedQty: newExpected, receivedQty: 0 },
+    });
+  };
+
+  // Auto-default each unresolved line to its product's largest pack and convert
+  // expected into that pack's units — pre-filled and changeable, no "unmatched".
   const defaultedVariantLinesRef = useRef<Set<number>>(new Set());
   useEffect(() => {
     if (!selectedReceipt?.lines || selectedReceipt.status === "closed") return;
     for (const line of selectedReceipt.lines) {
       if (line.productVariantId != null || line.productId == null) continue;
       if (defaultedVariantLinesRef.current.has(line.id)) continue;
-      const lv = variants
-        .filter((v) => v.productId === line.productId)
-        .sort((a, b) => (b.unitsPerVariant || 1) - (a.unitsPerVariant || 1));
+      const lv = variantsFor(line);
       if (lv.length === 0) continue;
       defaultedVariantLinesRef.current.add(line.id);
-      updateLineMutation.mutate({ lineId: line.id, updates: { productVariantId: lv[0].id } });
+      applyVariant(line, lv[0].id);
     }
   }, [selectedReceipt?.lines, variants]);
 
@@ -1939,6 +1965,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         <TableRow>
                           <TableHead>SKU</TableHead>
                           <TableHead>Product</TableHead>
+                          <TableHead>Receive in</TableHead>
                           <TableHead>Expected</TableHead>
                           <TableHead>Received</TableHead>
                           <TableHead>Location</TableHead>
@@ -1950,56 +1977,64 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <TableBody>
                         {sortedLines.length === 0 ? (
                           <TableRow>
-                            <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                            <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                               No lines yet. Import CSV or add lines manually.
                             </TableCell>
                           </TableRow>
                         ) : (
                           sortedLines.map((line) => (
                             <TableRow key={line.id}>
-                              <TableCell className="font-mono whitespace-nowrap">
-                                <div>{line.sku || "-"}</div>
-                                {selectedReceipt.status !== "closed" && (() => {
-                                  const lv = variants
-                                    .filter((v) => v.productId === line.productId)
-                                    .sort((a, b) => (b.unitsPerVariant || 1) - (a.unitsPerVariant || 1));
-                                  if (lv.length === 0) return null;
+                              <TableCell className="font-mono whitespace-nowrap">{line.sku || "-"}</TableCell>
+                              <TableCell>{line.productName || "-"}</TableCell>
+                              <TableCell>
+                                {(() => {
+                                  const lv = variantsFor(line);
+                                  if (lv.length === 0) return <span className="text-muted-foreground text-sm">—</span>;
+                                  if (selectedReceipt.status === "closed") {
+                                    const cur = variants.find((v) => v.id === line.productVariantId);
+                                    return <span className="text-sm">{cur?.name || "—"}</span>;
+                                  }
                                   return (
                                     <select
-                                      className="mt-1 block text-xs border rounded px-1 py-0.5 max-w-[150px]"
+                                      className="h-9 text-sm border rounded-md px-2 bg-white min-w-[120px]"
                                       value={line.productVariantId ?? lv[0].id}
-                                      onChange={(e) =>
-                                        updateLineMutation.mutate({
-                                          lineId: line.id,
-                                          updates: { productVariantId: Number(e.target.value) },
-                                        })
-                                      }
-                                      title="Receive as which pack variant"
+                                      onChange={(e) => applyVariant(line, Number(e.target.value))}
+                                      title="What pack did this arrive in?"
                                     >
                                       {lv.map((v) => (
-                                        <option key={v.id} value={v.id}>
-                                          {v.name}
-                                        </option>
+                                        <option key={v.id} value={v.id}>{v.name}</option>
                                       ))}
                                     </select>
                                   );
                                 })()}
                               </TableCell>
-                              <TableCell>{line.productName || "-"}</TableCell>
-                              <TableCell>{line.expectedQty}</TableCell>
+                              <TableCell className="whitespace-nowrap">
+                                {(() => {
+                                  const cur = variants.find((v) => v.id === line.productVariantId);
+                                  const noun = unitNoun(cur);
+                                  return <span><b>{line.expectedQty}</b> {noun}{line.expectedQty === 1 ? "" : "s"}</span>;
+                                })()}
+                              </TableCell>
                               <TableCell>
                                 {selectedReceipt.status !== "closed" ? (
-                                  <Input 
-                                    type="number"
-                                    value={line.receivedQty}
-                                    onChange={(e) => updateLineMutation.mutate({ 
-                                      lineId: line.id, 
-                                      updates: { receivedQty: parseInt(e.target.value) || 0 } 
-                                    })}
-                                    className="w-20 h-10"
-                                    min={0}
-                                    autoComplete="off"
-                                  />
+                                  <div>
+                                    <Input
+                                      type="number"
+                                      value={line.receivedQty}
+                                      onChange={(e) => updateLineMutation.mutate({
+                                        lineId: line.id,
+                                        updates: { receivedQty: parseInt(e.target.value) || 0 }
+                                      })}
+                                      className="w-20 h-10"
+                                      min={0}
+                                      autoComplete="off"
+                                    />
+                                    {(() => {
+                                      const cur = variants.find((v) => v.id === line.productVariantId);
+                                      if (!cur || (cur.unitsPerVariant || 1) === 1) return null;
+                                      return <div className="text-[11px] text-muted-foreground mt-1">{unitNoun(cur)}s of {cur.unitsPerVariant}</div>;
+                                    })()}
+                                  </div>
                                 ) : (
                                   line.receivedQty
                                 )}
