@@ -1822,15 +1822,17 @@ export function createPurchasingService(db: any, storage: Storage) {
     // otherwise we derive mills from cents via centsToMills (no rounding).
     // Keeps receiving_lines consistent with the (post-0562) contract in
     // receiving.service.ts: mills is the source of truth, cents mirrors.
-    // Resolve a default receiving pack (largest variant) for product-level PO
-    // lines (no productVariantId) so the receiving line is born with a real pack
-    // AND expected expressed in that pack's units: 10 pieces ordered into a
-    // Case-of-10 => Expected 1 case (not 10). Done once, at creation, so it's
-    // unambiguous downstream (no client-side unit guessing).
+    // Default EVERY receiving line to the product's LARGEST pack (the case) and
+    // express Expected in that pack's units, regardless of how the PO line was
+    // ordered (no variant, Pack-of-1, or any smaller variant). Receivers count
+    // cases; the catalog models Case -> N x base, so 10 pieces ordered => Expected
+    // 1 Case-of-10 (not 10). Done once at creation so the unit is unambiguous
+    // downstream; the receiving UI's variant dropdown is the override for
+    // off-default packs.
     const defaultPackByProduct = new Map<number, { id: number; unitsPerVariant: number }>();
     for (const pid of Array.from(new Set(
       receivableLines
-        .filter((pl: any) => !pl.productVariantId && pl.productId)
+        .filter((pl: any) => pl.productId)
         .map((pl: any) => pl.productId as number),
     ))) {
       try {
@@ -1844,9 +1846,12 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     const receivingLineData = receivableLines.map((poLine: any) => {
-      const pack = !poLine.productVariantId ? defaultPackByProduct.get(poLine.productId) : null;
-      const resolvedVariantId = poLine.productVariantId ?? pack?.id ?? null;
-      const packSize = poLine.productVariantId ? (poLine.unitsPerUom || 1) : (pack?.unitsPerVariant || 1);
+      // Prefer the product's largest pack (the case) as the receiving default,
+      // upgrading even Pack-of-1 / variant-level PO lines; fall back to the PO
+      // line's own variant only when the product has no resolvable packs.
+      const pack = defaultPackByProduct.get(poLine.productId);
+      const resolvedVariantId = pack?.id ?? poLine.productVariantId ?? null;
+      const packSize = pack?.unitsPerVariant ?? (poLine.unitsPerUom || 1);
       const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
       const hasPoMills =
         typeof poLine.unitCostMills === "number" &&
