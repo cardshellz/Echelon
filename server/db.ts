@@ -50,6 +50,15 @@ export async function runStartupMigrations(): Promise<void> {
   });
   const client = await migrationsPool.connect();
   try {
+    // Give the migration connection the SAME search_path the app's main pool uses
+    // (db.ts line ~36). migrationsPool has no on-connect handler, so its default
+    // search_path is just public — which silently made every UNQUALIFIED statement
+    // below depend on stray public.* shadow tables. With the empty shadows dropped,
+    // unqualified names now fall through public to the real schema tables (wms.*,
+    // inventory.*, …); public stays second so unqualified CREATE TABLE still lands in
+    // public (matching the app) and the remaining data tables resolve as the app sees them.
+    await client.query(`SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, orders, procurement, warehouse, oms, membership, wms, dropship`);
+
     // Refund return lifecycle (REFUND_RESTOCK_DESIGN.md): run FIRST and in its own
     // try/catch. The rest of this function is one big try/catch, and a pre-existing
     // unqualified index statement (idx_inventory_levels_*) resolves to a stray
