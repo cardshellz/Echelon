@@ -233,6 +233,28 @@ describe("oms-webhooks.ts :: internal retry loopback semantics", () => {
   });
 });
 
+// ─── Source regression: retry rows must link back to their inbox row ──
+// Without sourceInboxId on the enqueued retry row, the retry worker cannot
+// mirror a successful retry back onto the originating webhook_inbox row, so
+// the inbox row stays 'failed' forever and ops dashboards (ops-health,
+// flow-waterfall WEBHOOK_INBOX_FAILED) report a permanent false positive.
+
+describe("oms-webhooks.ts :: retry rows carry sourceInboxId", () => {
+  it("handleProcessingFailure persists the originating inbox id on the retry row", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(/sourceInboxId:\s*args\.sourceInboxId/);
+  });
+
+  it("every handleProcessingFailure call site passes inbox.receipt.id", () => {
+    const calls =
+      OMS_WEBHOOKS_SRC.match(/await handleProcessingFailure\(req, res, \{[\s\S]*?\}\);/g) ?? [];
+    // orders/paid, orders/updated, orders/cancelled, orders/fulfilled, refunds/create
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+    for (const call of calls) {
+      expect(call).toMatch(/sourceInboxId:\s*inbox\.receipt\.id/);
+    }
+  });
+});
+
 // ─── Source regression: shopify.routes.ts enqueue + bypass ───────────
 
 describe("shopify.routes.ts :: enqueue on error + internal retry bypass", () => {
