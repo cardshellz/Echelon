@@ -825,9 +825,11 @@ export async function runStartupMigrations(): Promise<void> {
 
     // Extend members table
     await client.query(`ALTER TABLE membership.members ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
-    await client.query(`ALTER TABLE membership.plans DROP COLUMN IF EXISTS tier`);
-    await client.query(`ALTER TABLE membership.plans DROP COLUMN IF EXISTS tier_level`);
-    await client.query(`ALTER TABLE membership.members DROP COLUMN IF EXISTS tier`);
+    // The membership schema is OWNED by the shellz-club-app; its plans.tier_level
+    // column is required (NOT NULL since its migration 0000) and read by the
+    // members/plan-access endpoints. The tier-removal DROPs that used to run here
+    // re-deleted that column on every Echelon boot, 500ing the Shellz Club admin.
+    // Never DROP membership.* columns from Echelon startup migrations.
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_members_shopify_customer ON membership.members(shopify_customer_id) WHERE shopify_customer_id IS NOT NULL`);
 
     // subscription_billing_log
