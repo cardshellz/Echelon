@@ -2133,92 +2133,101 @@ export function registerOmsWebhooks(
         (sum: number, t: any) => sum + dollarsToCents(t.amount),
         0,
       );
-      const priorRefundCents = existing.refundAmountCents ?? 0;
-      const newRefundAmountCents = priorRefundCents + thisRefundCents;
 
-      // Update OMS order
-      await db
-        .update(omsOrders)
-        .set({
-          financialStatus,
-          refundedAt: now,
-          refundAmountCents: newRefundAmountCents,
-          updatedAt: now,
-        })
-        .where(eq(omsOrders.id, existing.id));
+      // Per-refund idempotency: the financial update below is INCREMENTAL
+      // (prior + this), so a replayed/retried refunds/create webhook must not
+      // re-add the same refund. The 'refunded' event row (written in the same
+      // transaction as the update) is the marker — keyed by Shopify refund id.
+      const refundAlreadyApplied: any = await db.execute(sql`
+        SELECT 1 FROM oms.oms_order_events
+        WHERE order_id = ${existing.id}
+          AND event_type = 'refunded'
+          AND details->>'refundId' = ${String(refundPayload.id)}
+        LIMIT 1
+      `);
+
+      if ((refundAlreadyApplied?.rows?.length ?? 0) > 0) {
+        console.log(
+          `${LOG_PREFIX} refund ${refundPayload.id} already applied to order ${existing.externalOrderNumber} — skipping financial update, re-running cascade only`,
+        );
+      } else {
+        const priorRefundCents = existing.refundAmountCents ?? 0;
+        const newRefundAmountCents = priorRefundCents + thisRefundCents;
+
+        // One transaction: financial update + its idempotency marker commit
+        // together, so a crash between them cannot leave a counted-but-
+        // unmarked refund that a later retry would double-count.
+        await db.transaction(async (tx: any) => {
+          await tx
+            .update(omsOrders)
+            .set({
+              financialStatus,
+              refundedAt: now,
+              refundAmountCents: newRefundAmountCents,
+              updatedAt: now,
+            })
+            .where(eq(omsOrders.id, existing.id));
+
+          await tx.insert(omsOrderEvents).values({
+            orderId: existing.id,
+            eventType: "refunded",
+            details: {
+              source: "shopify_webhook",
+              refundId: refundPayload.id,
+              financialStatus,
+              refundedLineItems: refundLineItems.length,
+              restockedItems: refundLineItems.filter((li: any) => li.restock === true).length,
+              totalRefundAmount: refundPayload.transactions?.reduce(
+                (sum: number, t: any) => sum + parseFloat(t.amount || "0"), 0
+              ),
+            },
+          });
+        });
+      }
 
       // C29 — record the refund as a wms.returns row (audit trail) and
       // optionally restock. The WMS-side cascade is owned by
       // `applyShopifyRefundCascade`; the existing reservation-release is
       // wired in as the restock hook so behaviour parity with prior
-      // commits is preserved.
-      let cascadeOutcome: ApplyShopifyRefundCascadeOutcome = "order_not_tracked";
-      let cascadeAdjustedLines = 0;
-      let cascadeHeldShipments = 0;
-      try {
-        const cascade = await applyShopifyRefundCascade(
-          db,
-          refundPayload,
-          {
-            // OMS already resolved above — short-circuit the helper.
-            resolveOmsOrder: async () => ({ id: existing.id }),
-            restock: wmsServices
-              ? async (_db, ctx) => {
-                  await wmsServices.reservation.releaseOrderReservation(
-                    ctx.wmsOrderId,
-                    `Refund restock (${ctx.refundLineItems.length} items, refund=${ctx.refundPayload.id})`,
-                  );
-                  console.log(
-                    `${LOG_PREFIX} Released reservations for restocked items in order ${existing.externalOrderNumber}`,
-                  );
-                }
-              : undefined,
-            shipstation: shipStationService
-              ? {
-                  cancelOrder: async (shipstationOrderId: number) => {
-                    await shipStationService.cancelOrder(shipstationOrderId);
-                  },
-                }
-              : undefined,
-            shippingEngine: shippingEngine ?? undefined,
-          },
-          { channelId, now, logPrefix: LOG_PREFIX },
-        );
-        cascadeOutcome = cascade.outcome;
-        cascadeAdjustedLines = cascade.adjustedLines ?? 0;
-        cascadeHeldShipments = cascade.heldShipments ?? 0;
-        console.log(
-          `${LOG_PREFIX} refunds/create cascade for order ${existing.externalOrderNumber}: ` +
-            `outcome=${cascade.outcome} restocked=${cascade.restocked} ` +
-            `restockInvoked=${cascade.restockInvoked} shipmentId=${cascade.shipmentId ?? "null"} ` +
-            `adjustedLines=${cascade.adjustedLines ?? 0} heldShipments=${cascade.heldShipments ?? 0}`,
-        );
-      } catch (cascadeErr: any) {
-        // Re-throw to fall into the outer catch which queues a retry. The
-        // OMS-side update has already been applied; the retry will
-        // idempotently no-op the OMS update and re-attempt the WMS
-        // return-record insert.
-        throw cascadeErr;
-      }
-
-      // Log event
-      await db.insert(omsOrderEvents).values({
-        orderId: existing.id,
-        eventType: "refunded",
-        details: {
-          source: "shopify_webhook",
-          refundId: refundPayload.id,
-          financialStatus,
-          refundedLineItems: refundLineItems.length,
-          restockedItems: refundLineItems.filter((li: any) => li.restock === true).length,
-          adjustedLines: cascadeAdjustedLines,
-          heldShipments: cascadeHeldShipments,
-          totalRefundAmount: refundPayload.transactions?.reduce(
-            (sum: number, t: any) => sum + parseFloat(t.amount || "0"), 0
-          ),
-          wmsCascadeOutcome: cascadeOutcome,
+      // commits is preserved. A cascade failure propagates to the outer
+      // catch, which queues a retry; that retry skips the financial update
+      // (guarded by the 'refunded' event marker above) and re-attempts only
+      // this cascade, which is idempotent (returns keyed by
+      // refund_external_id, adjustments ON CONFLICT DO NOTHING).
+      const cascade = await applyShopifyRefundCascade(
+        db,
+        refundPayload,
+        {
+          // OMS already resolved above — short-circuit the helper.
+          resolveOmsOrder: async () => ({ id: existing.id }),
+          restock: wmsServices
+            ? async (_db, ctx) => {
+                await wmsServices.reservation.releaseOrderReservation(
+                  ctx.wmsOrderId,
+                  `Refund restock (${ctx.refundLineItems.length} items, refund=${ctx.refundPayload.id})`,
+                );
+                console.log(
+                  `${LOG_PREFIX} Released reservations for restocked items in order ${existing.externalOrderNumber}`,
+                );
+              }
+            : undefined,
+          shipstation: shipStationService
+            ? {
+                cancelOrder: async (shipstationOrderId: number) => {
+                  await shipStationService.cancelOrder(shipstationOrderId);
+                },
+              }
+            : undefined,
+          shippingEngine: shippingEngine ?? undefined,
         },
-      });
+        { channelId, now, logPrefix: LOG_PREFIX },
+      );
+      console.log(
+        `${LOG_PREFIX} refunds/create cascade for order ${existing.externalOrderNumber}: ` +
+          `outcome=${cascade.outcome} restocked=${cascade.restocked} ` +
+          `restockInvoked=${cascade.restockInvoked} shipmentId=${cascade.shipmentId ?? "null"} ` +
+          `adjustedLines=${cascade.adjustedLines ?? 0} heldShipments=${cascade.heldShipments ?? 0}`,
+      );
 
       console.log(`${LOG_PREFIX} ✅ Processed refund for order ${existing.externalOrderNumber} → ${financialStatus}`);
       pushToMissionControl(existing.id, "order.refunded");
