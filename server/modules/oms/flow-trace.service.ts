@@ -174,14 +174,46 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
   const pushedShipments = activeShipments.filter((s) => s.engine_order_ref != null);
   const shippedShipments = shipmentRows.filter((s) => String(s.status) === "shipped");
   const wroteBack = eventTypes.has("tracking_pushed") || eventTypes.has("shopify_fulfillment_pushed");
-  const failedInbox = rows(inbox).some((r) => ["failed", "dead"].includes(String(r.status)));
+  // A failed/dead inbox row only fails the ingestion stage when it was NOT
+  // superseded by a later successful delivery of the same provider/topic.
+  // Channels redeliver webhooks (and the retry worker replays them), so a
+  // transient blip that self-healed must not paint a healthy order as
+  // diverged — that's exactly the stale-flag false positive on the monitor.
+  const inboxRows = rows(inbox);
+  const inboxAt = (r: any): number => {
+    const t = r.processed_at ?? r.last_attempt_at ?? r.first_received_at ?? r.updated_at;
+    const ms = t ? new Date(t).getTime() : NaN;
+    return Number.isFinite(ms) ? ms : 0;
+  };
+  const failedInboxRows = inboxRows.filter((r) => ["failed", "dead"].includes(String(r.status)));
+  const unrecoveredInboxFailures = failedInboxRows.filter(
+    (f) =>
+      !inboxRows.some(
+        (s) =>
+          String(s.status) === "succeeded" &&
+          String(s.provider) === String(f.provider) &&
+          String(s.topic) === String(f.topic) &&
+          inboxAt(s) >= inboxAt(f),
+      ),
+  );
+  const recoveredInboxFailures = failedInboxRows.length - unrecoveredInboxFailures.length;
+  const failedInbox = unrecoveredInboxFailures.length > 0;
   const deadRetry = rows(retries).find((r) => String(r.status) === "dead");
 
   const stages: TraceStage[] = [];
   const add = (key: string, label: string, status: TraceStageStatus, detail?: string) => stages.push({ key, label, status, detail });
 
   add("placed", "Channel order placed", "done", `${o.provider ?? "channel"} ${o.external_order_number ?? ""}`.trim());
-  add("ingested", "Ingested → OMS", failedInbox ? "failed" : "done", failedInbox ? "a webhook for this order failed" : undefined);
+  add(
+    "ingested",
+    "Ingested → OMS",
+    failedInbox ? "failed" : "done",
+    failedInbox
+      ? "a webhook for this order failed and was never superseded by a successful delivery"
+      : recoveredInboxFailures > 0
+        ? `${recoveredInboxFailures} webhook failure${recoveredInboxFailures > 1 ? "s" : ""} recovered by a later successful delivery`
+        : undefined,
+  );
   add("wms", "Accepted & reached WMS",
     activeWms.length === 0 ? "failed" : activeWms.length > 1 ? "failed" : "done",
     activeWms.length === 0 ? "no active WMS order" : activeWms.length > 1 ? `${activeWms.length} active WMS orders (duplicate)` : undefined);

@@ -1261,7 +1261,7 @@ export function registerOmsWebhooks(
   async function handleProcessingFailure(
     req: Request,
     res: Response,
-    args: { provider: string; topic: string; payload: any; error: any },
+    args: { provider: string; topic: string; payload: any; error: any; sourceInboxId: number },
   ): Promise<void> {
     if (isInternalRetry(req)) {
       if (!res.headersSent) {
@@ -1270,10 +1270,15 @@ export function registerOmsWebhooks(
       return;
     }
 
+    // sourceInboxId links the retry row back to its webhook_inbox row so the
+    // retry worker can mirror the terminal outcome (succeeded/dead) onto the
+    // inbox. Without it, the inbox row stays 'failed' forever even after a
+    // successful retry, and ops dashboards report a permanent false positive.
     await db.insert(webhookRetryQueue).values({
       provider: args.provider,
       topic: args.topic,
       payload: args.payload,
+      sourceInboxId: args.sourceInboxId,
       lastError: args.error?.message || String(args.error),
     });
   }
@@ -1510,6 +1515,7 @@ export function registerOmsWebhooks(
         topic: "orders/paid",
         payload: shopifyOrder,
         error: err,
+        sourceInboxId: inbox.receipt.id,
       });
     }
   });
@@ -1851,6 +1857,7 @@ export function registerOmsWebhooks(
         topic: "orders/updated",
         payload: shopifyOrder,
         error: err,
+        sourceInboxId: inbox.receipt.id,
       });
     }
   });
@@ -1921,6 +1928,7 @@ export function registerOmsWebhooks(
         topic: "orders/cancelled",
         payload: shopifyOrder,
         error: err,
+        sourceInboxId: inbox.receipt.id,
       });
     }
   });
@@ -2045,6 +2053,7 @@ export function registerOmsWebhooks(
         topic: "orders/fulfilled",
         payload: shopifyOrder,
         error: err,
+        sourceInboxId: inbox.receipt.id,
       });
     }
   });
@@ -2223,6 +2232,7 @@ export function registerOmsWebhooks(
         topic: "refunds/create",
         payload: refundPayload,
         error: err,
+        sourceInboxId: inbox.receipt.id,
       });
     }
   });
