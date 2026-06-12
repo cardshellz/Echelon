@@ -437,3 +437,39 @@ describe("applyShopifyRefundCascade (C29)", () => {
     expect(r2.outcome).toBe("return_recorded");
   });
 });
+
+// ─── Source regression: per-refund financial idempotency guard ────────
+// The refunds/create handler's OMS update is INCREMENTAL
+// (refund_amount_cents = prior + this), so a replayed or retried webhook
+// must not re-add the same refund. The guard checks for the 'refunded'
+// event marker (keyed by Shopify refund id) and the marker is written in
+// the SAME transaction as the financial update.
+
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const OMS_WEBHOOKS_SRC = readFileSync(
+  resolve(__dirname, "../../oms-webhooks.ts"),
+  "utf-8",
+);
+
+describe("refunds/create :: per-refund financial idempotency", () => {
+  it("guards the financial update on the 'refunded' event marker keyed by refundId", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(
+      /event_type = 'refunded'[\s\S]{0,120}details->>'refundId' = \$\{String\(refundPayload\.id\)\}/,
+    );
+    expect(OMS_WEBHOOKS_SRC).toMatch(/refundAlreadyApplied/);
+  });
+
+  it("writes the financial update and the marker event in one transaction", () => {
+    const m = OMS_WEBHOOKS_SRC.match(
+      /await db\.transaction\(async \(tx: any\) => \{[\s\S]*?refundAmountCents: newRefundAmountCents[\s\S]*?eventType: "refunded"[\s\S]*?\}\);/,
+    );
+    expect(m).not.toBeNull();
+  });
+
+  it("does not write a second 'refunded' event after the cascade", () => {
+    const markers = OMS_WEBHOOKS_SRC.match(/eventType: "refunded"/g) ?? [];
+    expect(markers.length).toBe(1);
+  });
+});
