@@ -372,6 +372,11 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.engine_order_ref IS NULL
+          -- Exclude shipments already flagged for operator review: a permanent
+          -- push failure (e.g. bad address/total/country) stamps requires_review
+          -- and must NOT be auto-re-enqueued (it surfaces in the requires-review
+          -- bucket instead). Prevents the permanent-error dead-letter loop.
+          AND COALESCE(os.requires_review, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -402,6 +407,11 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.engine_order_ref IS NULL
+          -- Exclude shipments already flagged for operator review: a permanent
+          -- push failure (e.g. bad address/total/country) stamps requires_review
+          -- and must NOT be auto-re-enqueued (it surfaces in the requires-review
+          -- bucket instead). Prevents the permanent-error dead-letter loop.
+          AND COALESCE(os.requires_review, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1

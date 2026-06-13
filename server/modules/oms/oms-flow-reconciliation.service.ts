@@ -926,6 +926,11 @@ export async function remediateOmsFlowIssue(
       WHERE os.id = ${shipmentId}
         AND os.status IN ('planned', 'queued')
         AND os.engine_order_ref IS NULL
+        -- Skip shipments already flagged for review: a permanent push failure
+        -- (bad address/total/country) won't succeed on re-push, so don't queue
+        -- a guaranteed-dead retry. The operator must fix the data + clear the
+        -- flag first. (Mirrors the SHIPMENT_NOT_PUSHED_TO_SHIPSTATION bucket.)
+        AND COALESCE(os.requires_review, false) = false
         AND os.created_at < NOW() - INTERVAL '15 minutes'
         AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
         AND EXISTS (

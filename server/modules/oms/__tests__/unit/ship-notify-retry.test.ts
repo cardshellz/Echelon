@@ -79,6 +79,7 @@ import {
   dispatchDelayedTrackingPush,
   dispatchEbayWebhookRetry,
 } from "../../webhook-retry.worker";
+import { ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../shipstation.service";
 
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
   resolve(__dirname, "../../webhook-retry.worker.ts"),
@@ -535,6 +536,20 @@ describe("enqueueShipStationShipmentPushRetry", () => {
     });
 
     await enqueueShipStationShipmentPushRetry(db, 300, "manual fix");
+
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("does NOT re-enqueue a shipment already flagged requires_review (closes the side-door loop)", async () => {
+    // execute call order inside enqueue: (1) hasPendingRetryForScope → no pending,
+    // (2) requires_review guard → flagged. The guard must short-circuit the insert
+    // so event-driven callers (wms-sync, address-change webhooks) can't reopen the
+    // permanent-error loop on a shipment a human still needs to fix.
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [] }, { rows: [{ "?column?": 1 }] }],
+    });
+
+    await enqueueShipStationShipmentPushRetry(db, 300, "wms-sync reconcile");
 
     expect(inserts).toHaveLength(0);
   });
@@ -1242,6 +1257,60 @@ describe("dispatchShipStationShipmentPushRetry", () => {
       status: "pending",
       lastError: "ShipStation 500",
     });
+  });
+
+  it("treats SS_PUSH_INVALID_SHIPMENT as PERMANENT: flags requires_review, dead-letters, does not retry", async () => {
+    const pushShipment = vi.fn().mockRejectedValue(
+      new ShipStationPushError("order has no shipping_address", {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId: 300,
+        field: "order.shipping_address",
+      }),
+    );
+    const { db, updates, executes } = makeDb({
+      shipStationService: { processShipNotify: vi.fn(), pushShipment },
+    });
+
+    const outcome = await dispatchShipStationShipmentPushRetry(db, {
+      id: 953,
+      provider: "internal",
+      topic: "shipstation_shipment_push",
+      payload: { shipmentId: 300 },
+      attempts: 0,
+    });
+
+    // Dead immediately — NOT retried (status must not be 'pending', no attempts bump).
+    expect(outcome).toBe("dead");
+    // The retry row is marked dead in one shot (not attempts+1 → pending).
+    const deadUpdate = updates.find((u) => u.set.status === "dead");
+    expect(deadUpdate).toBeDefined();
+    expect(updates.some((u) => u.set.status === "pending")).toBe(false);
+    // The shipment was flagged requires_review via a raw UPDATE (guarded to
+    // non-terminal status). We can't introspect the sql template easily, but
+    // exactly one execute (the requires_review stamp) should have fired before
+    // the inbox mirror; assert at least the stamp ran.
+    expect(executes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does NOT permanently-fail a transient (non-SS_PUSH_INVALID_SHIPMENT) error", async () => {
+    const pushShipment = vi.fn().mockRejectedValue(
+      new ShipStationPushError("ShipStation API 503", { code: "SS_PUSH_TRANSIENT", shipmentId: 300 }),
+    );
+    const { db, updates } = makeDb({
+      shipStationService: { processShipNotify: vi.fn(), pushShipment },
+    });
+
+    const outcome = await dispatchShipStationShipmentPushRetry(db, {
+      id: 954,
+      provider: "internal",
+      topic: "shipstation_shipment_push",
+      payload: { shipmentId: 300 },
+      attempts: 0,
+    });
+
+    // Unknown code → normal retry path (pending), not the permanent branch.
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set).toMatchObject({ attempts: 1, status: "pending" });
   });
 });
 
