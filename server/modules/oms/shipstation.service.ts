@@ -312,6 +312,210 @@ export async function resolveShipStationIds(
 const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued", "voided"]);
 
 // ---------------------------------------------------------------------------
+// Country normalization — pure function, exported for tests.
+// ---------------------------------------------------------------------------
+//
+// ShipStation's POST /orders/createorder rejects any shipTo.country that is
+// not an ISO 3166-1 alpha-2 code ("Please use a 2 character country code",
+// HTTP 400). Some upstream channels (and manually-keyed orders) store the
+// full English country name ("United States") instead of "US". A shipment
+// carrying such a value would 400 on every push, dead-letter after 5 retries,
+// then get re-enqueued by the stale-push reconciler — an infinite dead-letter
+// loop (see the 'shipstation_shipment_push' / "2 character country code"
+// dead-letter cluster). Normalizing here turns those orders into clean pushes.
+//
+// Returns an uppercase 2-letter code, or null if the input is empty/unmappable.
+// Resolution order: (1) 2-letter input is accepted ONLY if it is a real ISO2
+// code (after applying the alias map, e.g. the common "UK" → "GB"); a bogus
+// 2-letter code like "XX" returns null rather than being POSTed verbatim (which
+// would 400-loop). (2) Otherwise the diacritic-stripped, lowercased value is
+// matched against the full-name map. (3) Anything else → null.
+//
+// A non-empty value that resolves to null is rejected by validateShipmentForPush
+// (check #6) BEFORE the network call — a precise, deterministic field error
+// rather than an opaque ShipStation 400. (Note: fully draining the dead-letter
+// loop for such genuinely-unmappable values also requires the push retry worker
+// to treat SS_PUSH_INVALID_SHIPMENT as a PERMANENT class — see the follow-up in
+// the PR. All country values observed in production map cleanly, so the live
+// loop is resolved by this change alone.)
+
+// Full ISO 3166-1 alpha-2 set — the authoritative allowlist for 2-letter input.
+const ISO2_CODES: ReadonlySet<string> = new Set([
+  "AD","AE","AF","AG","AI","AL","AM","AO","AQ","AR","AS","AT","AU","AW","AX","AZ",
+  "BA","BB","BD","BE","BF","BG","BH","BI","BJ","BL","BM","BN","BO","BQ","BR","BS","BT","BV","BW","BY","BZ",
+  "CA","CC","CD","CF","CG","CH","CI","CK","CL","CM","CN","CO","CR","CU","CV","CW","CX","CY","CZ",
+  "DE","DJ","DK","DM","DO","DZ","EC","EE","EG","EH","ER","ES","ET",
+  "FI","FJ","FK","FM","FO","FR","GA","GB","GD","GE","GF","GG","GH","GI","GL","GM","GN","GP","GQ","GR","GS","GT","GU","GW","GY",
+  "HK","HM","HN","HR","HT","HU","ID","IE","IL","IM","IN","IO","IQ","IR","IS","IT",
+  "JE","JM","JO","JP","KE","KG","KH","KI","KM","KN","KP","KR","KW","KY","KZ",
+  "LA","LB","LC","LI","LK","LR","LS","LT","LU","LV","LY",
+  "MA","MC","MD","ME","MF","MG","MH","MK","ML","MM","MN","MO","MP","MQ","MR","MS","MT","MU","MV","MW","MX","MY","MZ",
+  "NA","NC","NE","NF","NG","NI","NL","NO","NP","NR","NU","NZ","OM",
+  "PA","PE","PF","PG","PH","PK","PL","PM","PN","PR","PS","PT","PW","PY","QA","RE","RO","RS","RU","RW",
+  "SA","SB","SC","SD","SE","SG","SH","SI","SJ","SK","SL","SM","SN","SO","SR","SS","ST","SV","SX","SY","SZ",
+  "TC","TD","TF","TG","TH","TJ","TK","TL","TM","TN","TO","TR","TT","TV","TW","TZ",
+  "UA","UG","UM","US","UY","UZ","VA","VC","VE","VG","VI","VN","VU","WF","WS","YE","YT","ZA","ZM","ZW",
+]);
+
+// Non-ISO 2-letter aliases real channels store. "UK" is the big one: it is NOT
+// the ISO2 code for the United Kingdom ("GB" is) and ShipStation rejects it.
+const COUNTRY_ALIAS_2: Readonly<Record<string, string>> = {
+  UK: "GB",
+};
+
+const COUNTRY_NAME_TO_ISO2: Readonly<Record<string, string>> = {
+  "united states": "US",
+  "united states of america": "US",
+  "usa": "US",
+  "u.s.a.": "US",
+  "u.s.": "US",
+  "america": "US",
+  "puerto rico": "PR",
+  "guam": "GU",
+  "virgin islands": "VI",
+  "u.s. virgin islands": "VI",
+  "us virgin islands": "VI",
+  "american samoa": "AS",
+  "northern mariana islands": "MP",
+  "canada": "CA",
+  "united kingdom": "GB",
+  "great britain": "GB",
+  "britain": "GB",
+  "england": "GB",
+  "scotland": "GB",
+  "wales": "GB",
+  "northern ireland": "GB",
+  "uk": "GB",
+  "australia": "AU",
+  "new zealand": "NZ",
+  "ireland": "IE",
+  "germany": "DE",
+  "deutschland": "DE",
+  "france": "FR",
+  "spain": "ES",
+  "italy": "IT",
+  "netherlands": "NL",
+  "the netherlands": "NL",
+  "holland": "NL",
+  "belgium": "BE",
+  "switzerland": "CH",
+  "austria": "AT",
+  "sweden": "SE",
+  "norway": "NO",
+  "denmark": "DK",
+  "finland": "FI",
+  "iceland": "IS",
+  "poland": "PL",
+  "portugal": "PT",
+  "greece": "GR",
+  "czech republic": "CZ",
+  "czechia": "CZ",
+  "hungary": "HU",
+  "romania": "RO",
+  "bulgaria": "BG",
+  "croatia": "HR",
+  "slovakia": "SK",
+  "slovenia": "SI",
+  "estonia": "EE",
+  "latvia": "LV",
+  "lithuania": "LT",
+  "luxembourg": "LU",
+  "cyprus": "CY",
+  "malta": "MT",
+  "japan": "JP",
+  "china": "CN",
+  "hong kong": "HK",
+  "hong kong sar china": "HK",
+  "hong kong sar": "HK",
+  "macau": "MO",
+  "macao": "MO",
+  "macao sar china": "MO",
+  "south korea": "KR",
+  "korea, republic of": "KR",
+  "republic of korea": "KR",
+  "singapore": "SG",
+  "taiwan": "TW",
+  "taiwan, province of china": "TW",
+  "india": "IN",
+  "pakistan": "PK",
+  "bangladesh": "BD",
+  "sri lanka": "LK",
+  "nepal": "NP",
+  "mexico": "MX",
+  "brazil": "BR",
+  "argentina": "AR",
+  "chile": "CL",
+  "colombia": "CO",
+  "peru": "PE",
+  "ecuador": "EC",
+  "uruguay": "UY",
+  "venezuela": "VE",
+  "panama": "PA",
+  "guatemala": "GT",
+  "costa rica": "CR",
+  "dominican republic": "DO",
+  "united arab emirates": "AE",
+  "uae": "AE",
+  "saudi arabia": "SA",
+  "qatar": "QA",
+  "kuwait": "KW",
+  "bahrain": "BH",
+  "oman": "OM",
+  "jordan": "JO",
+  "lebanon": "LB",
+  "israel": "IL",
+  "turkey": "TR",
+  "turkiye": "TR",
+  "russia": "RU",
+  "russian federation": "RU",
+  "ukraine": "UA",
+  "egypt": "EG",
+  "morocco": "MA",
+  "nigeria": "NG",
+  "kenya": "KE",
+  "ghana": "GH",
+  "south africa": "ZA",
+  "philippines": "PH",
+  "malaysia": "MY",
+  "thailand": "TH",
+  "indonesia": "ID",
+  "vietnam": "VN",
+  "viet nam": "VN",
+  // common ISO 3166-1 alpha-3 codes that occasionally leak through
+  // ("usa" → US is already covered above)
+  "can": "CA",
+  "gbr": "GB",
+  "aus": "AU",
+  "deu": "DE",
+  "fra": "FR",
+  "nld": "NL",
+};
+
+export function normalizeCountryToIso2(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  // Strip diacritics so "México"/"Türkiye"/"Côte d'Ivoire" match the map.
+  // NFD splits an accented char into base + combining mark, then we drop the
+  // Combining Diacritical Marks block (U+0300..U+036F). Done with a charCode
+  // filter rather than a \p{Diacritic} regex so it needs no /u flag (which this
+  // tsconfig target rejects).
+  const cleaned = Array.from(input.normalize("NFD"))
+    .filter((ch) => { const c = ch.charCodeAt(0); return c < 0x0300 || c > 0x036f; })
+    .join("")
+    .trim();
+  if (cleaned.length === 0) return null;
+
+  // 2-letter input: accept only real ISO2 codes (after the alias map). A bogus
+  // 2-letter value (e.g. "XX") returns null rather than being POSTed verbatim.
+  if (/^[A-Za-z]{2}$/.test(cleaned)) {
+    const upper = cleaned.toUpperCase();
+    const aliased = COUNTRY_ALIAS_2[upper] ?? upper;
+    return ISO2_CODES.has(aliased) ? aliased : null;
+  }
+
+  return COUNTRY_NAME_TO_ISO2[cleaned.toLowerCase()] ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // validateShipmentForPush — pure function, exported for tests.
 // ---------------------------------------------------------------------------
 //
@@ -321,11 +525,11 @@ const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued", "voided"]);
 // guess which field to fix first. Order of checks is deliberate:
 //
 //   1. items non-empty (structural)
-//   2. per-line unit_price_cents positive integer (catches the $0 bug)
-//   3. amount_paid_cents > 0  (header-level paid-order invariant)
-//   4. line sum ≈ total_cents within 1¢/line tolerance
+//   2. per-line unit_price_cents positive integer + qty (catches the $0 bug)
+//   3. amount_paid_cents >= 0  (header-level paid-order invariant)
+//   4. total_cents a non-negative integer (line-sum reconciliation removed; see NOTE below)
 //   5. shipping address present
-//   6. customer email present
+//   6. shipping country, when present, maps to ISO 3166-1 alpha-2
 //
 // A single `code` constant lets log pipelines pattern-match one event.
 
@@ -343,6 +547,7 @@ export function validateShipmentForPush(
     | "non_shipping_total_cents"
     | "is_partial_shipment"
     | "shipping_address"
+    | "shipping_country"
     | "customer_email"
   >,
   items: ReadonlyArray<
@@ -467,6 +672,33 @@ export function validateShipmentForPush(
       field: "order.shipping_address",
       value: order.shipping_address,
     });
+  }
+
+  // 6. Shipping country, when present, must resolve to an ISO 3166-1 alpha-2
+  //    code. A non-empty, unmappable value (e.g. a typo) would 400 at
+  //    ShipStation; reject it here BEFORE the network call so the failure is a
+  //    precise, deterministic field error rather than an opaque API 400. An
+  //    empty/null country is allowed — pushShipment defaults it to "US".
+  //    NOTE: this throw is not yet wired as a PERMANENT error class, so for a
+  //    genuinely-unmappable value the push retry worker still retries 5x and
+  //    the stale-push reconciler re-enqueues it (the loop persists for that
+  //    theoretical case). Every country value seen in production maps cleanly,
+  //    so this is not currently hit; fully draining that loop needs the worker
+  //    to treat SS_PUSH_INVALID_SHIPMENT as permanent (see PR follow-up).
+  if (
+    typeof order.shipping_country === "string" &&
+    order.shipping_country.trim().length > 0 &&
+    normalizeCountryToIso2(order.shipping_country) === null
+  ) {
+    throw new ShipStationPushError(
+      `order has an unrecognized shipping_country (cannot map to ISO 3166-1 alpha-2)`,
+      {
+        code: SS_PUSH_INVALID_SHIPMENT,
+        shipmentId,
+        field: "order.shipping_country",
+        value: order.shipping_country,
+      },
+    );
   }
 
 }
@@ -3304,7 +3536,11 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         city: orderRow.shipping_city || "",
         state: orderRow.shipping_state || "",
         postalCode: orderRow.shipping_postal_code || "",
-        country: orderRow.shipping_country || "US",
+        // Normalize to ISO 3166-1 alpha-2 (ShipStation requires it). Non-empty
+        // unmappable values are already rejected by validateShipmentForPush
+        // above, so the "US" fallback only applies to an empty/null country
+        // (the existing domestic default).
+        country: normalizeCountryToIso2(orderRow.shipping_country) ?? "US",
         phone: "",
       },
       items: itemRows.map((item) => ({
