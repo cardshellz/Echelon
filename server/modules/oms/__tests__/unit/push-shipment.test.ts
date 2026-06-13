@@ -24,6 +24,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   createShipStationService,
   validateShipmentForPush,
+  normalizeCountryToIso2,
   ShipStationPushError,
   SS_PUSH_INVALID_SHIPMENT,
   type WmsShipmentRow,
@@ -359,6 +360,89 @@ describe("validateShipmentForPush :: structural violations", () => {
     expect(err).toBeInstanceOf(ShipStationPushError);
     expect(err?.context.field).toBe("items");
     expect(err?.context.value).toBe(0);
+  });
+});
+
+// ─── Country normalization (ShipStation requires ISO 3166-1 alpha-2) ──
+// Motivated by the live 'shipstation_shipment_push' dead-letter loop: orders
+// stored with the full country name "United States" 400'd on every push
+// ("Please use a 2 character country code"), dead-lettered, and were
+// re-enqueued by the reconciler indefinitely.
+
+describe("normalizeCountryToIso2", () => {
+  it("passes through real ISO2 codes, uppercased", () => {
+    expect(normalizeCountryToIso2("US")).toBe("US");
+    expect(normalizeCountryToIso2("us")).toBe("US");
+    expect(normalizeCountryToIso2("ca")).toBe("CA");
+    expect(normalizeCountryToIso2("  GB  ")).toBe("GB");
+  });
+
+  it("maps full English country names to ISO2 (the bug class)", () => {
+    expect(normalizeCountryToIso2("United States")).toBe("US");
+    expect(normalizeCountryToIso2("united states of america")).toBe("US");
+    expect(normalizeCountryToIso2("USA")).toBe("US");
+    expect(normalizeCountryToIso2("Canada")).toBe("CA");
+    expect(normalizeCountryToIso2("United Kingdom")).toBe("GB");
+    expect(normalizeCountryToIso2("United Arab Emirates")).toBe("AE");
+    expect(normalizeCountryToIso2("Netherlands")).toBe("NL");
+    expect(normalizeCountryToIso2("Japan")).toBe("JP");
+    expect(normalizeCountryToIso2("Puerto Rico")).toBe("PR");
+    expect(normalizeCountryToIso2("Turkey")).toBe("TR");
+  });
+
+  it("corrects the common non-ISO alias 'UK' to 'GB'", () => {
+    expect(normalizeCountryToIso2("UK")).toBe("GB");
+    expect(normalizeCountryToIso2("uk")).toBe("GB");
+  });
+
+  it("strips diacritics so localized names still map", () => {
+    expect(normalizeCountryToIso2("México")).toBe("MX");
+    expect(normalizeCountryToIso2("Türkiye")).toBe("TR");
+  });
+
+  it("rejects bogus 2-letter codes instead of forwarding them to ShipStation", () => {
+    // The old permissive regex let any 2-letter string through, so "XX" was
+    // POSTed verbatim and 400-looped. It must now be rejected (null → the
+    // validator throws a precise permanent error before the network call).
+    expect(normalizeCountryToIso2("XX")).toBeNull();
+    expect(normalizeCountryToIso2("ZZ")).toBeNull();
+    expect(normalizeCountryToIso2("EN")).toBeNull();
+  });
+
+  it("returns null for empty/nullish/unmappable input", () => {
+    expect(normalizeCountryToIso2(null)).toBeNull();
+    expect(normalizeCountryToIso2(undefined)).toBeNull();
+    expect(normalizeCountryToIso2("")).toBeNull();
+    expect(normalizeCountryToIso2("   ")).toBeNull();
+    expect(normalizeCountryToIso2("Freedonia")).toBeNull();
+    expect(normalizeCountryToIso2("Not A Country")).toBeNull();
+  });
+});
+
+describe("validateShipmentForPush :: shipping country", () => {
+  it("accepts a full country name that maps to ISO2 (normalized downstream)", () => {
+    expect(() =>
+      validateShipmentForPush(okShipment(), okOrder({ shipping_country: "United States" }), [okItem()]),
+    ).not.toThrow();
+  });
+
+  it("accepts an empty country (defaults to US at push time)", () => {
+    expect(() =>
+      validateShipmentForPush(okShipment(), okOrder({ shipping_country: "" }), [okItem()]),
+    ).not.toThrow();
+  });
+
+  it("throws a permanent SS_PUSH_INVALID_SHIPMENT for a non-empty unmappable country", () => {
+    let err: ShipStationPushError | undefined;
+    try {
+      validateShipmentForPush(okShipment(), okOrder({ shipping_country: "Freedonia" }), [okItem()]);
+    } catch (e) {
+      err = e as ShipStationPushError;
+    }
+    expect(err).toBeInstanceOf(ShipStationPushError);
+    expect(err?.context.code).toBe(SS_PUSH_INVALID_SHIPMENT);
+    expect(err?.context.field).toBe("order.shipping_country");
+    expect(err?.context.value).toBe("Freedonia");
   });
 });
 
