@@ -2,6 +2,11 @@ import { webhookRetryQueue } from "@shared/schema";
 import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
 import { createShipmentForOrder } from "../wms/create-shipment";
+// Stable error code for a deterministic, non-retryable ShipStation push
+// rejection (bad address/total/country, not-pushable status, finalized order).
+// Imported (not string-literal'd) so a rename stays in sync. shipstation.service
+// only imports this worker via dynamic import(), so this static import is cycle-safe.
+import { SS_PUSH_INVALID_SHIPMENT } from "./shipstation.service";
 
 const MAX_ATTEMPTS = 5;
 const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
@@ -472,6 +477,26 @@ export async function enqueueShipStationShipmentPushRetry(
     scope: sql`payload->>'shipmentId' = ${String(shipmentId)}`,
   })) {
     return;
+  }
+
+  // Single chokepoint: never re-enqueue a shipment already flagged for operator
+  // review. A permanent push failure (bad address/total/country) sets
+  // requires_review and dead-letters the row; every caller of this function —
+  // the stale-push reconciler AND the event-driven paths in wms-sync.service.ts
+  // (sync/reconcile/edit) and oms-webhooks.ts (address change) — funnels through
+  // here, so guarding once closes all of them. Without this, those callers would
+  // re-insert a fresh pending row on every sync tick / webhook (hasPendingRetry-
+  // ForScope only dedupes 'pending', not the 'dead' row), reopening the loop.
+  // The operator must fix the data + clear requires_review to re-enter the pipeline.
+  if (typeof dbArg?.execute === "function") {
+    const flagged = await dbArg.execute(sql`
+      SELECT 1 FROM wms.outbound_shipments
+      WHERE id = ${shipmentId} AND requires_review = true
+      LIMIT 1
+    `);
+    if ((flagged?.rows?.length ?? 0) > 0) {
+      return;
+    }
   }
 
   await insertWebhookRetryQueueRow(dbArg, {
@@ -997,6 +1022,17 @@ export async function dispatchShipStationShipmentPushRetry(
     );
     return "success";
   } catch (err: any) {
+    // Permanent, deterministic validation failure (bad address/total/country,
+    // not-pushable status, finalized order). Don't retry — flag for review and
+    // dead-letter immediately so the reconciler stops re-enqueuing it.
+    if (err?.context?.code === SS_PUSH_INVALID_SHIPMENT) {
+      const reason = err?.message || String(err);
+      await markShipmentPushPermanentlyFailed(dbArg, item, shipmentId, reason);
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) PERMANENT — flagged requires_review, not retrying: ${reason}`,
+      );
+      return "dead";
+    }
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
       dbArg,
       item,
@@ -1585,6 +1621,51 @@ async function markRowDead(
     .where(eq(webhookRetryQueue.id, item.id));
 
   await mirrorRetryStatusToInbox(dbArg, item, "dead", reason);
+}
+
+/**
+ * A ShipStation push failed PERMANENTLY — a deterministic validation rejection
+ * (SS_PUSH_INVALID_SHIPMENT: bad address/total/country, not-pushable status,
+ * orphaned/finalized order). Retrying identical data can never succeed, so per
+ * CLAUDE.md §6 ("never retry a permanent error") we stop here instead of burning
+ * 5 attempts and then being re-enqueued by the stale-push reconciler forever:
+ *   - flag the shipment requires_review (guarded to non-terminal shipments, and
+ *     only when one exists — "shipment not found" no-ops). This drops it from the
+ *     SHIPMENT_NOT_PUSHED_TO_SHIPSTATION auto-retry bucket and surfaces it in the
+ *     requires-review bucket. pushShipment already refuses requires_review
+ *     shipments, so a human must fix the data + clear the flag to re-enter.
+ *   - dead-letter the queue row immediately (markRowDead also mirrors to inbox).
+ */
+async function markShipmentPushPermanentlyFailed(
+  dbArg: any,
+  item: { id: number; sourceInboxId?: number | null },
+  shipmentId: number,
+  reason: string,
+): Promise<void> {
+  if (typeof dbArg?.execute === "function") {
+    // review_reason write is deliberate (see the two reviewed hazards):
+    //   - DON'T leave/keep 'inventory_deduction_missing_item_data': the V2
+    //     SHIP_NOTIFY reconciler auto-clears requires_review for exactly that
+    //     reason, which would un-flag this shipment on inventory arrival and
+    //     reopen the loop with the real (push) cause hidden. So overwrite it.
+    //   - DO preserve any OTHER pre-existing manual reason (e.g.
+    //     'refund_after_ship'): that context is still valid and shouldn't be lost.
+    //   - When unset, record the namespaced permanent-push cause for ops.
+    await dbArg.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET requires_review = true,
+          review_reason = CASE
+            WHEN review_reason IS NULL
+              OR review_reason = 'inventory_deduction_missing_item_data'
+            THEN ${`permanent_push_failure: ${reason}`}
+            ELSE review_reason
+          END,
+          updated_at = NOW()
+      WHERE id = ${shipmentId}
+        AND status NOT IN ('shipped', 'cancelled', 'voided')
+    `);
+  }
+  await markRowDead(dbArg, item, reason);
 }
 
 /**
