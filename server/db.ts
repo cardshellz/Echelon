@@ -709,11 +709,14 @@ export async function runStartupMigrations(): Promise<void> {
     console.log("Checked channel_allocation_rules floor_type column");
 
     // Migration 049 REMOVED (Path A — no cross-schema DDL at startup):
-    // `shopify_orders` is OWNED by shellz-club-app, which creates source_name in
-    // its own reviewed migration 0018 (shared/schema.ts:658). Echelon only READS
-    // source_name for reconciliation — it must not ALTER shellz-club's tables on
-    // boot. The redundant ADD COLUMN / CREATE INDEX was removed. Do not
-    // reintroduce DDL against shopify_* / any shellz-owned table here.
+    // shopify_orders is ORDER data (OMS domain) — not membership data. No app
+    // should ALTER it on every boot. The source_name column already exists in
+    // prod (it is also created by shellz-club's migration 0018 — that shellz-club
+    // currently creates/writes order tables at all is architectural drift to
+    // untangle in Path C; a membership app should not be the schema authority
+    // for orders). Echelon only READS source_name for reconciliation. Any future
+    // schema change to order tables belongs in a reviewed migration owned by the
+    // order authority (Echelon), never in this boot routine.
 
     // ─── Migration 051: COGS Engine — FIFO cost tracking ──────────
     // Dropship V2 DDL is migration-owned; the Phase 0 startup DDL was removed.
