@@ -708,10 +708,15 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE channel_allocation_rules ADD COLUMN IF NOT EXISTS floor_type VARCHAR(10) DEFAULT 'units'`);
     console.log("Checked channel_allocation_rules floor_type column");
 
-    // Migration 049: Add source_name to shopify_orders for reconciliation job
-    await client.query(`ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source_name VARCHAR(100)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_shopify_orders_source_name ON shopify_orders(source_name)`);
-    console.log("Checked shopify_orders source_name column");
+    // Migration 049 REMOVED (Path A — no cross-schema DDL at startup):
+    // shopify_orders is ORDER data (OMS domain) — not membership data. No app
+    // should ALTER it on every boot. The source_name column already exists in
+    // prod (it is also created by shellz-club's migration 0018 — that shellz-club
+    // currently creates/writes order tables at all is architectural drift to
+    // untangle in Path C; a membership app should not be the schema authority
+    // for orders). Echelon only READS source_name for reconciliation. Any future
+    // schema change to order tables belongs in a reviewed migration owned by the
+    // order authority (Echelon), never in this boot routine.
 
     // ─── Migration 051: COGS Engine — FIFO cost tracking ──────────
     // Dropship V2 DDL is migration-owned; the Phase 0 startup DDL was removed.
@@ -795,42 +800,16 @@ export async function runStartupMigrations(): Promise<void> {
 
     console.log("Checked COGS engine tables (order_line_costs, cost_adjustment_log, inventory_lots COGS columns)");
 
-    // ─── Migration 052: Subscription Engine — Native Shopify billing ──────────
-    // Extend plans table
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS shopify_selling_plan_id BIGINT`);
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS shopify_selling_plan_gid VARCHAR(100)`);
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS billing_interval VARCHAR(20)`);
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS billing_interval_count INTEGER DEFAULT 1`);
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS price_cents INTEGER`);
-
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS includes_dropship BOOLEAN DEFAULT false`);
-    await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
-
-    // Extend member_subscriptions table
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS shopify_subscription_contract_id BIGINT`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS shopify_subscription_contract_gid VARCHAR(100)`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS next_billing_date TIMESTAMP`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMP`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMP`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS billing_status VARCHAR(30) DEFAULT 'current'`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS failed_billing_attempts INTEGER DEFAULT 0`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS billing_in_progress BOOLEAN DEFAULT false`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS cancellation_reason TEXT`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS payment_method_id VARCHAR(100)`);
-    await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS revision_id VARCHAR(50)`);
-    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ms_shopify_contract ON membership.member_subscriptions(shopify_subscription_contract_id) WHERE shopify_subscription_contract_id IS NOT NULL`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_ms_next_billing ON membership.member_subscriptions(next_billing_date) WHERE billing_status IN ('current', 'past_due') AND billing_in_progress = false`);
-
-    // Extend members table
-    await client.query(`ALTER TABLE membership.members ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
-    // The membership schema is OWNED by the shellz-club-app; its plans.tier_level
-    // column is required (NOT NULL since its migration 0000) and read by the
-    // members/plan-access endpoints. The tier-removal DROPs that used to run here
-    // re-deleted that column on every Echelon boot, 500ing the Shellz Club admin.
-    // Never DROP membership.* columns from Echelon startup migrations.
-    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_members_shopify_customer ON membership.members(shopify_customer_id) WHERE shopify_customer_id IS NOT NULL`);
+    // ─── Migration 052 REMOVED (Path A — no cross-schema DDL at startup) ───────
+    // These ADD COLUMN / CREATE INDEX statements on membership.plans,
+    // membership.member_subscriptions, and membership.members duplicated schema
+    // that shellz-club-app already creates via its own reviewed migrations (the
+    // subscription engine is shellz-club's domain). Echelon must NOT manage the
+    // membership schema on boot — doing so is what caused the 2026-06 incident
+    // (a DROP COLUMN re-running every boot dropped plans.tier_level). Echelon
+    // accesses membership.* at runtime via grants only; all membership schema
+    // changes belong to shellz-club's migrations. NEVER reintroduce
+    // membership.* DDL in this startup routine.
 
     // subscription_billing_log
     await client.query(`
