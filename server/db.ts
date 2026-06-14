@@ -708,19 +708,12 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE channel_allocation_rules ADD COLUMN IF NOT EXISTS floor_type VARCHAR(10) DEFAULT 'units'`);
     console.log("Checked channel_allocation_rules floor_type column");
 
-    // Migration 049: Add source_name to shopify_orders for reconciliation job.
-    // `shopify_orders` is OWNED by shellz-club-app (DB role separation). Guarded
-    // so a `permission denied` after ownership transfer is non-fatal and does
-    // not abort the rest of this startup routine (it is one big try/catch — an
-    // unguarded throw here would skip every statement below). shellz-club owns
-    // this table's DDL; this block remains only for pre-separation back-compat.
-    try {
-      await client.query(`ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source_name VARCHAR(100)`);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_shopify_orders_source_name ON shopify_orders(source_name)`);
-      console.log("Checked shopify_orders source_name column");
-    } catch (e: any) {
-      console.warn("[startup-migration] skipped shopify_orders DDL (owned by shellz-club-app):", e?.message ?? e);
-    }
+    // Migration 049 REMOVED (Path A — no cross-schema DDL at startup):
+    // `shopify_orders` is OWNED by shellz-club-app, which creates source_name in
+    // its own reviewed migration 0018 (shared/schema.ts:658). Echelon only READS
+    // source_name for reconciliation — it must not ALTER shellz-club's tables on
+    // boot. The redundant ADD COLUMN / CREATE INDEX was removed. Do not
+    // reintroduce DDL against shopify_* / any shellz-owned table here.
 
     // ─── Migration 051: COGS Engine — FIFO cost tracking ──────────
     // Dropship V2 DDL is migration-owned; the Phase 0 startup DDL was removed.
@@ -804,51 +797,16 @@ export async function runStartupMigrations(): Promise<void> {
 
     console.log("Checked COGS engine tables (order_line_costs, cost_adjustment_log, inventory_lots COGS columns)");
 
-    // ─── Migration 052: Subscription Engine — Native Shopify billing ──────────
-    // The `membership` schema is OWNED by shellz-club-app (DB role separation).
-    // These ADD COLUMN / CREATE INDEX statements are already applied in prod and
-    // are shellz-club's to own — they remain here only for back-compat on
-    // pre-separation environments. The whole block is guarded so a `permission
-    // denied` after the ownership transfer is non-fatal and does NOT abort the
-    // rest of this routine (runStartupMigrations is one big try/catch; an
-    // unguarded throw here would silently skip every Echelon-owned statement
-    // below). NEVER add DROP statements for membership.* here — that was the
-    // 2026-06 incident that dropped plans.tier_level on every boot.
-    try {
-      // Extend plans table
-      await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS shopify_selling_plan_id BIGINT`);
-      await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS shopify_selling_plan_gid VARCHAR(100)`);
-      await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS billing_interval VARCHAR(20)`);
-      await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS billing_interval_count INTEGER DEFAULT 1`);
-      await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS price_cents INTEGER`);
-
-      await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS includes_dropship BOOLEAN DEFAULT false`);
-      await client.query(`ALTER TABLE membership.plans ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
-
-      // Extend member_subscriptions table
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS shopify_subscription_contract_id BIGINT`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS shopify_subscription_contract_gid VARCHAR(100)`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS next_billing_date TIMESTAMP`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMP`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMP`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS billing_status VARCHAR(30) DEFAULT 'current'`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS failed_billing_attempts INTEGER DEFAULT 0`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS billing_in_progress BOOLEAN DEFAULT false`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS cancellation_reason TEXT`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS payment_method_id VARCHAR(100)`);
-      await client.query(`ALTER TABLE membership.member_subscriptions ADD COLUMN IF NOT EXISTS revision_id VARCHAR(50)`);
-      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ms_shopify_contract ON membership.member_subscriptions(shopify_subscription_contract_id) WHERE shopify_subscription_contract_id IS NOT NULL`);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_ms_next_billing ON membership.member_subscriptions(next_billing_date) WHERE billing_status IN ('current', 'past_due') AND billing_in_progress = false`);
-
-      // Extend members table
-      await client.query(`ALTER TABLE membership.members ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
-      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_members_shopify_customer ON membership.members(shopify_customer_id) WHERE shopify_customer_id IS NOT NULL`);
-      console.log("Checked membership subscription-engine columns");
-    } catch (e: any) {
-      console.warn("[startup-migration] skipped membership.* DDL (owned by shellz-club-app):", e?.message ?? e);
-    }
+    // ─── Migration 052 REMOVED (Path A — no cross-schema DDL at startup) ───────
+    // These ADD COLUMN / CREATE INDEX statements on membership.plans,
+    // membership.member_subscriptions, and membership.members duplicated schema
+    // that shellz-club-app already creates via its own reviewed migrations (the
+    // subscription engine is shellz-club's domain). Echelon must NOT manage the
+    // membership schema on boot — doing so is what caused the 2026-06 incident
+    // (a DROP COLUMN re-running every boot dropped plans.tier_level). Echelon
+    // accesses membership.* at runtime via grants only; all membership schema
+    // changes belong to shellz-club's migrations. NEVER reintroduce
+    // membership.* DDL in this startup routine.
 
     // subscription_billing_log
     await client.query(`
