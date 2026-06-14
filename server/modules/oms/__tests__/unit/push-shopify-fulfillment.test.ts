@@ -487,6 +487,65 @@ describe("pushShopifyFulfillment :: happy path (Path B end-to-end)", () => {
   });
 });
 
+describe("pushShopifyFulfillment :: already-fulfilled idempotent no-op (end-to-end)", () => {
+  // Every fulfillment-order line is CLOSED with zero remaining — the order was
+  // already fulfilled on Shopify (e.g. a prior push it accepted). The push must
+  // return a no-op SUCCESS, not throw, so the retry row isn't dead-lettered.
+  function closedFulfillmentOrdersResponse() {
+    return {
+      order: {
+        id: SHOPIFY_ORDER_GID,
+        fulfillmentOrders: {
+          edges: [
+            {
+              node: {
+                id: FO_GID,
+                status: "CLOSED",
+                lineItems: {
+                  edges: [
+                    { node: { id: "gid://shopify/FulfillmentOrderLineItem/777-1", sku: "ABC-1", remainingQuantity: 0 } },
+                    { node: { id: "gid://shopify/FulfillmentOrderLineItem/777-2", sku: "XYZ-9", remainingQuantity: 0 } },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  it("returns no-op success (no fulfillmentCreateV2, no shipment UPDATE) when all lines already fulfilled", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] }, // idempotency
+      { rows: [okShipmentRow()] },                   // shipment
+      { rows: [okOrderRow()] },                      // order
+      { rows: [{ provider: "shopify" }] },           // channel.provider
+      { rows: okItems() },                           // items
+      { rows: pathAPartialRows() },                  // Path A read (partial → Path B)
+    ]);
+    const client = makeShopifyClient([
+      closedFulfillmentOrdersResponse(),             // Path B resolve → all closed
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    expect(result).toEqual({ shopifyFulfillmentId: null, alreadyPushed: false });
+    // Only the resolve query ran — no location filter, no mutation.
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0].query).toContain("fulfillmentOrders");
+    expect(client.calls.some((c) => c.query.includes("fulfillmentCreateV2"))).toBe(false);
+    // No fulfillment id was persisted (nothing was pushed).
+    expect(
+      db.capturedQueries.some(
+        (q) => q.sqlText.includes("UPDATE wms.outbound_shipments") && q.sqlText.includes("shopify_fulfillment_id"),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("pushShopifyFulfillment :: validation failures", () => {
   it("throws when shipmentId is non-positive", async () => {
     const db = makeDb([]);
@@ -1521,6 +1580,125 @@ describe("resolveFulfillmentOrderLinesFromCandidates :: no-SKU line fallback", (
         sku: "UNKNOWN", external_line_item_id: "does-not-exist", qty: 1 },
     ];
     const candidates = [candidate({ sku: "ABC-1", externalLineItemId: "111" })];
+    expect(() =>
+      __test__.resolveFulfillmentOrderLinesFromCandidates(ORDER, items as any, SHIPMENT, candidates as any),
+    ).toThrow(/no fulfillment-order line item available/);
+  });
+});
+
+// The idempotency fix: an item whose matching fulfillment-order line is already
+// CLOSED / zero-remaining was already fulfilled on Shopify (case A) — skip it
+// instead of throwing, so re-pushes of already-fulfilled orders don't dead-letter.
+// A genuinely unmatched item, or a matching OPEN line we still can't allocate
+// (case B), must still throw.
+describe("resolveFulfillmentOrderLinesFromCandidates :: already-fulfilled idempotency", () => {
+  const ORDER = "gid://shopify/Order/12095128600735";
+  const SHIPMENT = 936;
+  const candidate = (over: Partial<any>) => ({
+    fulfillmentOrderId: "gid://shopify/FulfillmentOrder/FO1",
+    fulfillmentOrderLineItemId: "gid://shopify/FulfillmentOrderLineItem/FOLI",
+    sku: null, externalLineItemId: null, assignedLocationId: null,
+    remaining: 5, status: "OPEN", ...over,
+  });
+
+  it("skips (no throw) when the matching line is CLOSED — already fulfilled", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "UNKNOWN", external_line_item_id: "35767315431583", qty: 1 },
+    ];
+    const candidates = [candidate({ externalLineItemId: "35767315431583", remaining: 0, status: "CLOSED" })];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+    expect(resolved).toHaveLength(0); // empty → caller returns idempotent no-op
+  });
+
+  it("skips when the matching line is OPEN but has zero remaining quantity", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 1 },
+    ];
+    const candidates = [candidate({ sku: "ABC-1", externalLineItemId: "111", remaining: 0, status: "OPEN" })];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+    expect(resolved).toHaveLength(0);
+  });
+
+  it("resolves only the open item in a mix of already-fulfilled + open lines", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "WAX", external_line_item_id: "111", qty: 1 },   // closed → skip
+      { shipment_item_id: 2, order_item_id: 11, oms_order_line_id: 101,
+        sku: "TOP", external_line_item_id: "222", qty: 1 },   // open → resolve
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "closed-wax", sku: "WAX", externalLineItemId: "111", remaining: 0, status: "CLOSED" }),
+      candidate({ fulfillmentOrderLineItemId: "open-top", sku: "TOP", externalLineItemId: "222", remaining: 3, status: "OPEN" }),
+    ];
+    const resolved = __test__.resolveFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].fulfillmentOrderLineItemId).toBe("open-top");
+  });
+
+  it("STILL throws for a genuine partial: matching line OPEN with remaining < qty (not already-fulfilled)", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 2 },
+    ];
+    // remaining 1 < qty 2, but the line is OPEN with quantity left → genuine
+    // under-allocation, surface it rather than silently skipping.
+    const candidates = [candidate({ sku: "ABC-1", externalLineItemId: "111", remaining: 1, status: "OPEN" })];
+    expect(() =>
+      __test__.resolveFulfillmentOrderLinesFromCandidates(ORDER, items as any, SHIPMENT, candidates as any),
+    ).toThrow(/no fulfillment-order line item available/);
+  });
+
+  it("does NOT mistake an in-loop-drained line for already-fulfilled (snapshots intake remaining)", () => {
+    // Two items, same SKU; one OPEN line with remaining 1. Item 1 allocates it
+    // (draining remaining to 0). Item 2 must THROW — the line started OPEN with
+    // quantity and we merely ran out, which is a real shortfall, NOT a
+    // pre-existing fulfillment. (Guards the decrement false-positive.)
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 1 },
+      { shipment_item_id: 2, order_item_id: 11, oms_order_line_id: 101,
+        sku: "ABC-1", external_line_item_id: "111", qty: 1 },
+    ];
+    const candidates = [candidate({ sku: "ABC-1", externalLineItemId: "111", remaining: 1, status: "OPEN" })];
+    expect(() =>
+      __test__.resolveFulfillmentOrderLinesFromCandidates(ORDER, items as any, SHIPMENT, candidates as any),
+    ).toThrow(/no fulfillment-order line item available/);
+  });
+
+  it("THROWS for a CANCELLED matching line — cancelled is NOT fulfilled (must stay visible)", () => {
+    // A positive-qty shipment item whose only matching fulfillment-order line is
+    // CANCELLED is a real discrepancy (we shipped something Shopify shows
+    // cancelled). It must NOT be silently skipped as 'already fulfilled'.
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 1 },
+    ];
+    const candidates = [candidate({ sku: "ABC-1", externalLineItemId: "111", remaining: 0, status: "CANCELLED" })];
+    expect(() =>
+      __test__.resolveFulfillmentOrderLinesFromCandidates(ORDER, items as any, SHIPMENT, candidates as any),
+    ).toThrow(/no fulfillment-order line item available/);
+  });
+
+  it("THROWS when a CLOSED line and a still-OPEN-with-remaining line both match (don't skip a viable line)", () => {
+    // `every` (not `some`): a single closed line must not let us silently skip an
+    // item that ALSO has an open line with quantity left (e.g. Shopify rerouted
+    // the line to a new open FO). The open partial is a real shortfall → surface.
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 2 },
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "old-closed", sku: "ABC-1", externalLineItemId: "111", remaining: 0, status: "CLOSED" }),
+      candidate({ fulfillmentOrderLineItemId: "new-open", sku: "ABC-1", externalLineItemId: "111", remaining: 1, status: "OPEN" }),
+    ];
     expect(() =>
       __test__.resolveFulfillmentOrderLinesFromCandidates(ORDER, items as any, SHIPMENT, candidates as any),
     ).toThrow(/no fulfillment-order line item available/);

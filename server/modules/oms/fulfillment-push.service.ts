@@ -1227,6 +1227,23 @@ export function createFulfillmentPushService(
       }
     }
 
+    // ---- 7a. Already-fulfilled idempotent no-op ------------------------
+    // If resolution skipped every item because its fulfillment-order line is
+    // already closed/zero-remaining (see case A above), there is nothing left
+    // to push. Return a silent no-op success — NOT an error — so the worker
+    // marks the retry row succeeded instead of dead-lettering it. The shipment
+    // leaves the SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED reconciler bucket once
+    // Shopify's orders/fulfilled webhook flips oo.fulfillment_status to
+    // 'fulfilled' (the bucket already excludes fulfilled orders).
+    if (resolved.length === 0) {
+      console.log(
+        `[pushShopifyFulfillment] shipment ${shipmentId} — all shippable items already ` +
+          `fulfilled on Shopify (closed fulfillment-order lines); idempotent no-op`,
+      );
+      incr("shopify_push_idempotent_skip", 1, { shipmentId });
+      return { shopifyFulfillmentId: null, alreadyPushed: false };
+    }
+
     // ---- 7b. Location filtering (D13) ----------------------------------
     // Only push for FOs assigned to OUR warehouse locations.
     // 3PL-assigned FOs (ShipMonk etc.) handle themselves via their own
@@ -2113,6 +2130,16 @@ function resolveFulfillmentOrderLinesFromCandidates(
       ? normaliseShopifyLocationId(shipFromLocationId)
       : null;
 
+  // Snapshot each candidate's remaining quantity at INTAKE. The "already
+  // fulfilled" detection below must judge against this, not the live
+  // `c.remaining` — we decrement that as we allocate within this loop, so a
+  // second shipment item for the same SKU/line could otherwise see a line we
+  // just drained to 0 and be wrongly treated as already-fulfilled (masking a
+  // genuine WMS-vs-Shopify quantity shortfall that should still error).
+  const remainingAtIntake = new Map<ShopifyFulfillmentOrderLineCandidate, number>(
+    candidates.map((c) => [c, c.remaining]),
+  );
+
   const resolved: ResolvedFulfillmentOrderLine[] = [];
   for (const item of items) {
     const rawSku = (item.sku ?? "").trim();
@@ -2176,6 +2203,42 @@ function resolveFulfillmentOrderLinesFromCandidates(
     }
 
     if (!candidate) {
+      // No ALLOCATABLE line for this item. Distinguish two very different cases
+      // that both land here, instead of erroring on both:
+      //   A. ALREADY FULFILLED — this item matches one or more fulfillment-order
+      //      lines (by line-id or SKU) and EVERY matching line is already done:
+      //      CLOSED, or zero remaining quantity AT INTAKE. The line was already
+      //      fulfilled (typically a prior push Shopify accepted before our side
+      //      recorded it). Re-pushing can never succeed, so SKIP it — throwing
+      //      here is what dead-lettered already-fulfilled orders and let the
+      //      reconciler re-enqueue them ~40x.
+      //   B. GENUINE — keep throwing (stays visible). Covers: no matching line at
+      //      all; a still-OPEN matching line with remaining we couldn't fully
+      //      allocate (a real shortfall, e.g. Shopify rerouted the line to a new
+      //      open FO); and a CANCELLED matching line (cancelled is NOT fulfilled —
+      //      a positive-qty item against a cancelled line is a real discrepancy,
+      //      e.g. we shipped something the customer cancelled).
+      // `every` (not `some`) + the explicit CANCELLED exclusion are deliberate: a
+      // single closed line must not let us silently skip an item that also has a
+      // still-open line, or whose line was cancelled.
+      const matchesItem = (c: ShopifyFulfillmentOrderLineCandidate) =>
+        byLineId(c) || bySku(c);
+      const matching = candidates.filter(matchesItem);
+      const alreadyFulfilled =
+        matching.length > 0 &&
+        !matching.some((c) => c.status === "CANCELLED") &&
+        matching.every(
+          (c) => c.status === "CLOSED" || (remainingAtIntake.get(c) ?? 0) <= 0,
+        );
+      if (alreadyFulfilled) {
+        console.log(
+          `[pushShopifyFulfillment] shipment ${shipmentId} item (sku=${rawSku || "(none)"}, ` +
+            `lineItemId=${externalLineId ?? "(none)"}, qty=${item.qty}) already fulfilled on ` +
+            `Shopify (every matching fulfillment-order line closed / zero-remaining) — skipping`,
+        );
+        incr("shopify_push_line_already_fulfilled", 1, { shipmentId });
+        continue;
+      }
       throw new ShopifyFulfillmentPushError(
         `pushShopifyFulfillment: no fulfillment-order line item available for ` +
           `sku=${rawSku || "(none)"} lineItemId=${externalLineId ?? "(none)"} ` +
