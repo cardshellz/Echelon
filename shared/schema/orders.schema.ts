@@ -217,6 +217,13 @@ export const orderItems = wmsSchema.table("order_items", {
 
   // ===== ORDER TYPE =====
   requiresShipping: integer("requires_shipping").notNull().default(1), // 1 = needs fulfillment, 0 = digital/membership
+
+  // ===== HOLD (per-line overlay, FULFILLMENT_STATE_DESIGN.md §2.3) =====
+  // Pause one line/SKU while the rest of the order ships. Boolean per the
+  // design; the order-level wms.orders.on_hold flag stays integer 1/0 (D1 —
+  // derivation coerces both). INERT until the fulfillment-ledger cutover.
+  onHold: boolean("on_hold").notNull().default(false),
+  holdReason: varchar("hold_reason", { length: 200 }),
 });
 
 export const insertOrderItemSchema = createInsertSchema(orderItems).omit({
@@ -499,6 +506,26 @@ export const insertOutboundShipmentItemSchema = createInsertSchema(outboundShipm
 
 export type InsertOutboundShipmentItem = z.infer<typeof insertOutboundShipmentItemSchema>;
 export type OutboundShipmentItem = typeof outboundShipmentItems.$inferSelect;
+
+// Line-fulfillment ledger — append-only, channel/engine-NEUTRAL source of truth
+// for net_shipped_qty per order line (FULFILLMENT_STATE_DESIGN.md §2.1).
+// Added by migration 103. One row per fulfillment event affecting a line; never
+// updated — voids/returns are negative compensating rows. INERT until the
+// fulfillment-state cutover wires recordFulfillmentEvent / recomputeOrderFulfillment.
+export const lineFulfillments = wmsSchema.table("line_fulfillments", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id),
+  shipmentId: integer("shipment_id").notNull().references(() => outboundShipments.id),
+  qty: integer("qty").notNull(), // + = shipped, − = void/return reversal (CHECK qty <> 0)
+  kind: varchar("kind", { length: 20 }).notNull(), // shipped | void_reversal | return | manual_correction
+  source: varchar("source", { length: 30 }).notNull(), // warehouse | reconcile | operator
+  externalEventId: varchar("external_event_id", { length: 200 }), // engine shipment ref / channel fulfillment id
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export type LineFulfillment = typeof lineFulfillments.$inferSelect;
+export type InsertLineFulfillment = typeof lineFulfillments.$inferInsert;
 
 // Shipment tracking history - audit trail of every tracking number a
 // shipment has ever carried, including voided / replaced values.
