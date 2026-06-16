@@ -136,6 +136,8 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
     customerName: shipTo?.fullName || ebayOrder.buyer?.username,
     customerEmail: shipTo?.email,
     customerPhone: shipTo?.primaryPhone?.phoneNumber,
+    // Channel-agnostic customer id — for eBay this is the buyer username (eBay's stable buyer identifier).
+    externalCustomerId: ebayOrder.buyer?.username || undefined,
     shipToName: shipTo?.fullName,
     shipToCompany: (shipTo as any)?.companyName || (address as any)?.companyName || null,
     shipToAddress1: address?.addressLine1,

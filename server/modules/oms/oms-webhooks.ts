@@ -1060,6 +1060,8 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     customerName,
     customerEmail: shopifyOrder.email || customer.email,
     customerPhone: shipping.phone || customer.phone,
+    // Channel-agnostic customer id — for Shopify this is the Shopify customer id.
+    externalCustomerId: customer.id != null ? String(customer.id) : undefined,
     shipToName: shipping.name,
     shipToCompany: shipping.company || null,
     shipToAddress1: shipping.address1,
