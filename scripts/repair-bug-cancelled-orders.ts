@@ -13,13 +13,17 @@
  * and OMS status), setting it to the true fulfillment state derived from the
  * now-restored shipment coverage.
  *
- * HARD GUARD — only orders where the channel proves the customer did NOT cancel:
+ * HARD GUARD — the CHANNEL is the source of truth for whether the customer
+ * cancelled. We trust Shopify's actual order fields, NOT our internal event log
+ * (which conflates a cancelled DUPLICATE shipment, and our own self-perpetuating
+ * 'cancelled' cascades, with a real customer cancel — that mis-fire is exactly
+ * what wrongly excluded #57977):
  *   - oms_orders.status = 'cancelled'
- *   - oms_orders.cancelled_at IS NULL          (no real cancellation timestamp)
+ *   - oms_orders.cancelled_at IS NULL          (Shopify sets this on a real cancel)
  *   - oms_orders.financial_status = 'paid'     (not refunded/voided)
  *   - has a shipped/returned/lost shipment      (physically shipped)
- *   - NO cancel/refund event other than the internal 'cancelled_via_shipstation'
- *     (excludes any genuine customer cancel — held for manual review)
+ * A genuine customer cancel/refund trips cancelled_at or financial_status and is
+ * therefore excluded automatically (surfaced below for manual review).
  *
  * SAFETY: DRY RUN by default (--execute to write); eligibility re-derived live;
  * idempotent; per-order transactions. DB-only — no channel/engine calls.
@@ -72,12 +76,6 @@ const TARGET_QUERY = sql`
       SELECT 1 FROM wms.outbound_shipments sh
       WHERE sh.order_id = o.id AND sh.status IN ('shipped', 'returned', 'lost')
     )
-    AND NOT EXISTS (
-      SELECT 1 FROM oms.oms_order_events e
-      WHERE e.order_id = om.id
-        AND (e.event_type ILIKE '%cancel%' OR e.event_type ILIKE '%refund%')
-        AND e.event_type <> 'cancelled_via_shipstation'
-    )
   ORDER BY o.order_number
 `;
 
@@ -92,22 +90,18 @@ async function main(): Promise<void> {
   console.log(`Eligible (OMS bug-cancelled, channel says paid+fulfilled, no customer cancel): ${rows.length}`);
   console.log("");
 
-  // For visibility: how many genuine cancels are being EXCLUDED for manual review.
+  // For visibility: genuinely cancelled/refunded-but-shipped orders the channel
+  // confirms (cancelled_at set or not-paid) — truth-wins, left for manual review.
   const excluded: any = await db.execute(sql`
     SELECT o.order_number, om.status, om.cancelled_at, om.financial_status
     FROM wms.orders o
     JOIN oms.oms_orders om ON om.id::text = o.oms_fulfillment_order_id
     WHERE om.status IN ('cancelled','refunded')
       AND EXISTS (SELECT 1 FROM wms.outbound_shipments sh WHERE sh.order_id=o.id AND sh.status IN ('shipped','returned','lost'))
-      AND (
-        om.cancelled_at IS NOT NULL OR om.financial_status <> 'paid'
-        OR EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id=om.id
-                   AND (e.event_type ILIKE '%cancel%' OR e.event_type ILIKE '%refund%')
-                   AND e.event_type <> 'cancelled_via_shipstation')
-      )
+      AND (om.cancelled_at IS NOT NULL OR om.financial_status <> 'paid')
     ORDER BY o.order_number`);
   if ((excluded.rows ?? []).length) {
-    console.log(`EXCLUDED — possible genuine cancel/refund (manual review, NOT touched): ${excluded.rows.length}`);
+    console.log(`EXCLUDED — channel-confirmed cancel/refund that shipped (manual review, NOT touched): ${excluded.rows.length}`);
     for (const r of excluded.rows) console.log(`  ${r.order_number}: oms=${r.status} cancelledAt=${r.cancelled_at} financial=${r.financial_status}`);
     console.log("");
   }

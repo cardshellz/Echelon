@@ -957,6 +957,36 @@ export async function applyShopifyRefundCascade(
   };
 }
 
+/**
+ * Decide, on a Shopify orders/updated webhook, whether the order is being
+ * cancelled by the channel vs merely already-terminal on our side.
+ *
+ * `cancelNow` (drives cancelOrderCascade) is derived ONLY from the Shopify
+ * payload — cancelled_at, or a refunded/voided financial_status. It must NEVER
+ * depend on our own existing OMS status: doing so created a self-perpetuating
+ * loop where an order wrongly cancelled by another path got RE-cancelled by
+ * every subsequent orders/updated webhook (#57977 accumulated 8 cascades on a
+ * paid+fulfilled order).
+ *
+ * `isFinal` (drives the reconcile / address-change SKIPS) still treats an
+ * already-terminal OMS order as final so a routine update doesn't re-activate a
+ * genuinely-cancelled order — but it does not trigger the cancel cascade.
+ *
+ * Pure: no DB, no network. Exported via __test__.
+ */
+export function deriveOmsUpdateFinality(
+  payload: { cancelled_at?: unknown; financial_status?: string | null },
+  existingStatus: string | null | undefined,
+): { cancelNow: boolean; isFinal: boolean } {
+  const cancelNow =
+    Boolean(payload.cancelled_at) ||
+    payload.financial_status === "refunded" ||
+    payload.financial_status === "voided";
+  const isFinal =
+    cancelNow || existingStatus === "cancelled" || existingStatus === "refunded";
+  return { cancelNow, isFinal };
+}
+
 export const __test__ = {
   extractShopifyRisk,
   cascadeShopifyCancelToShipments,
@@ -964,6 +994,7 @@ export const __test__ = {
   extractRefundLineAdjustments,
   RefundsCreateBadPayloadError,
   mapShopifyLineFulfillmentStatus,
+  deriveOmsUpdateFinality,
 };
 
 function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
@@ -1547,12 +1578,12 @@ export function registerOmsWebhooks(
       const nextShipTo = canonicalShipToFromShopifyUpdate(shopifyOrder, existing);
       const now = new Date();
       const isCancelledPayload = Boolean(shopifyOrder.cancelled_at);
-      const isFinalOmsState =
-        isCancelledPayload ||
-        existing.status === "cancelled" ||
-        existing.status === "refunded" ||
-        shopifyOrder.financial_status === "refunded" ||
-        shopifyOrder.financial_status === "voided";
+      // cancelNow (channel truth) drives the cancel cascade; isFinalOmsState
+      // (includes our existing terminal status) drives only the reconcile/
+      // address-change skips. See deriveOmsUpdateFinality for why cancelNow must
+      // never read existing.status (self-perpetuating re-cancel loop, #57977).
+      const { cancelNow: isCancelledByChannel, isFinal: isFinalOmsState } =
+        deriveOmsUpdateFinality(shopifyOrder, existing.status);
 
       // Update OMS order fields
       await db
@@ -1637,7 +1668,7 @@ export function registerOmsWebhooks(
              OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
         `);
 
-        if (isFinalOmsState) {
+        if (isCancelledByChannel) {
           await cancelOrderCascade(db, existing.id, {
             wmsServices,
             shipStationService,
