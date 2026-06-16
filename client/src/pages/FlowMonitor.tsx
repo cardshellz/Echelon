@@ -34,6 +34,7 @@ interface FlowIssue {
   severity: "critical" | "warning" | "info";
   count: number;
   message: string;
+  why?: string;
   sample: any[];
   stage: FunnelStageKey;
 }
@@ -524,6 +525,11 @@ export default function FlowMonitor() {
                   <Badge variant="outline" className="font-mono-sku">{selected.code}</Badge>
                   <Badge variant="outline">{fmt(selected.count)} open</Badge>
                 </div>
+                {selected.why && (
+                  <p className="mt-3 rounded-md border border-amber-200 bg-amber-50/60 p-2.5 text-xs leading-relaxed text-amber-900">
+                    <span className="font-semibold">Why / where to look — </span>{selected.why}
+                  </p>
+                )}
               </div>
 
               <div>
