@@ -254,7 +254,7 @@ export class COGSService {
     // Get current state
     const result = await this.db.execute(sql`
       SELECT il.id, il.lot_number, il.product_variant_id,
-             il.po_unit_cost_cents, il.landed_cost_cents, il.total_unit_cost_cents,
+             il.po_unit_cost_cents, il.packaging_cost_cents, il.landed_cost_cents, il.total_unit_cost_cents,
              pv.sku
       FROM inventory.inventory_lots il
       LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
@@ -265,7 +265,9 @@ export class COGSService {
 
     const oldTotal = Number(lot.total_unit_cost_cents) || 0;
     const poUnit = Number(lot.po_unit_cost_cents) || 0;
-    const newTotal = poUnit + landedCostCents;
+    const packaging = Number(lot.packaging_cost_cents) || 0;
+    // Total landed cost = product + packaging + landed (freight) — the COGS source of truth.
+    const newTotal = poUnit + packaging + landedCostCents;
 
     await this.db.execute(sql`
       UPDATE inventory_lots SET
