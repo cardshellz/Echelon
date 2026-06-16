@@ -103,6 +103,33 @@ const CODE_LABEL: Record<string, string> = {
   SHIPMENT_ON_HOLD: "on hold",
   SHIPMENT_NOT_PUSHED_TO_SHIPSTATION: "not pushed",
   SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: "tracking not confirmed",
+  // promoted divergences / contradictions
+  OMS_DOUBLE_PICKING: "picked twice",
+  STALE_CONFIRMED: "stuck >2 days",
+  SLA_BREACHED: "past ship-by",
+  UNMAPPED_ENGINE_SPLIT: "split unmatched",
+  BLOCKED_DUP_INGEST: "dup blocked",
+  ITEM_OVER_SHIPPED: "over-shipped",
+  WMS_SHIPPED_OMS_OPEN: "shipped, order open",
+  SHIPPED_SHIPMENT_CANCELLED: "shipped but cancelled",
+  ORDER_CANCELLED_WITH_SHIPPED_UNITS: "cancelled but shipped",
+  SHIPMENT_SHIPPED_AT_WRONG_STATUS: "ship date, wrong status",
+  ORDER_SHIPPED_BUT_LINE_SHORT: "shipped, item short",
+  // dead-letter reason buckets
+  SHIPNOTIFY_NO_INVENTORY: "no stock to deduct",
+  SHIPNOTIFY_UNSPECIFIED: "ship fail (no detail)",
+  SHIPNOTIFY_UNMAPPED_LINEITEM: "items didn't match",
+  SHIPNOTIFY_SHIPMENT_NOT_FOUND: "shipment not found",
+  SHOPIFY_PUSH_NO_POSITIVE_QTY: "push: empty shipment",
+  SHOPIFY_PUSH_SKU_NOT_ON_FO: "push: item not on order",
+  OMS_WMS_SYNC_NO_ORDER: "hand-off: no WMS order",
+  SHIPSTATION_COUNTRY_CODE: "bad country code",
+  PUSH_NEGATIVE_TOTAL: "negative total",
+  PUSH_TOTAL_MISMATCH: "total mismatch",
+  DB_CONNECT_TIMEOUT: "db timeout",
+  INTERNAL_API_500: "internal 500",
+  NO_MESSAGE: "no error message",
+  UNCLASSIFIED: "unclassified ⚠",
 };
 const shortLabel = (code: string) =>
   CODE_LABEL[code] ?? code.toLowerCase().replace(/_/g, " ").replace(/^(webhook|oms|wms|shipment)\s/, "");
@@ -165,7 +192,7 @@ export default function FlowMonitor() {
 
   const d = data;
   const byCode: Record<string, number> = Object.fromEntries(d.issues.map((i) => [i.code, i.count]));
-  const deadLetter = (byCode.WEBHOOK_RETRY_DEAD ?? 0) + (byCode.WEBHOOK_INBOX_FAILED ?? 0);
+  const deadLetter = d.issues.filter((i) => i.kind === "queue_failure").reduce((a, i) => a + i.count, 0) + (byCode.WEBHOOK_INBOX_FAILED ?? 0);
   const trackingRisk = byCode.SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED ?? 0;
   const perDay = Math.round(d.funnel.entered / Math.max(1, d.windowDays));
   const maxVol = Math.max(1, ...d.volumePerDay.map((v) => v.orders));

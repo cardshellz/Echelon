@@ -141,7 +141,10 @@ const DEAD_LETTER_LABELS: Record<string, string> = {
 };
 
 // ── The registry — every order-flow-stopper, declared once ──────────
-export const FLOW_ISSUES: FlowIssueDef[] = [
+// The retry-queue dead-letters are NOT one entry here — they're generated as one
+// issue PER reason code (see DEAD_LETTER_REASONS below) and appended, so each shows
+// as its own drillable bucket at the stage where it actually fails.
+const BASE_ISSUES: FlowIssueDef[] = [
   // ---- intake ----
   {
     code: "WEBHOOK_INBOX_FAILED", kind: "stuck", stage: "intake", severity: "critical",
@@ -150,14 +153,6 @@ export const FLOW_ISSUES: FlowIssueDef[] = [
     remediation: "REQUEUE", replaySafe: true,
     count: () => sql`SELECT COUNT(*)::int AS count FROM oms.webhook_inbox WHERE status IN ('failed','dead')`,
     sample: () => sql`SELECT COALESCE(oo.external_order_number, wi.payload->>'name', wi.payload->>'order_number') AS order_number, wi.provider, wi.topic, wi.status, wi.attempts, wi.last_error, COALESCE(wi.processed_at, wi.last_attempt_at, wi.first_received_at) AS at, wi.id AS inbox_id FROM oms.webhook_inbox wi LEFT JOIN oms.oms_orders oo ON oo.external_order_id = COALESCE(wi.payload->>'order_id', wi.payload->>'id') WHERE wi.status IN ('failed','dead') ORDER BY COALESCE(wi.processed_at, wi.last_attempt_at, wi.first_received_at) DESC NULLS LAST LIMIT 50`,
-  },
-  {
-    code: "WEBHOOK_RETRY_DEAD", kind: "queue_failure", stage: "intake", severity: "critical",
-    message: "Order updates gave up after retrying",
-    why: "An update (a shipment notice, a tracking push) failed over and over and stopped retrying. Each row below is tagged with a plain reason — fix the reason for a group, then requeue it. Anything tagged 'unclassified' is a new kind of failure we haven't labeled yet.",
-    remediation: "REQUEUE", replaySafe: true,
-    count: () => sql`SELECT COUNT(*)::int AS count FROM oms.webhook_retry_queue WHERE status = 'dead'`,
-    sample: () => sql`SELECT ${DEAD_LETTER_REASON_CODE} AS reason_code, COALESCE(rq.payload->>'name', rq.payload->>'order_number', rq.payload->>'orderNumber', wo.order_number) AS order_number, rq.payload->>'shipmentId' AS shipment_id, rq.provider, rq.topic, rq.attempts, rq.last_error, rq.next_retry_at, rq.updated_at AS at, rq.id AS retry_id FROM oms.webhook_retry_queue rq LEFT JOIN wms.outbound_shipments os ON os.id = NULLIF(rq.payload->>'shipmentId','')::int LEFT JOIN wms.orders wo ON wo.id = os.order_id WHERE rq.status = 'dead' ORDER BY rq.updated_at DESC NULLS LAST LIMIT 50`,
   },
   {
     code: "BLOCKED_DUP_INGEST", kind: "duplicate", stage: "intake", severity: "info",
@@ -326,6 +321,95 @@ export const FLOW_ISSUES: FlowIssueDef[] = [
   },
 ];
 
+// ── Dead-letter reason buckets — one first-class issue per reason code ──
+// Instead of one undifferentiated "1057 dead" list, each reason is its own
+// drillable chip (count + what + where + what-to-do), at the stage where it
+// actually fails, with the CORRECT remediation (e.g. no-stock is "receive stock
+// then re-run", NOT a misleading "replay-safe"). Classification reuses
+// DEAD_LETTER_REASON_CODE so the split exactly matches the breakdown, and the
+// UNCLASSIFIED bucket is itself an issue — a new failure mode surfaces as a chip.
+interface DeadLetterReasonDef {
+  code: string;
+  stage: FunnelStageKey | "other";
+  severity: "critical" | "warning" | "info";
+  message: string;
+  why: string;
+  remediation: RemediationClass;
+  replaySafe: boolean;
+}
+const DEAD_LETTER_REASONS: DeadLetterReasonDef[] = [
+  { code: "SHIPNOTIFY_NO_INVENTORY", stage: "shipped", severity: "critical",
+    message: "Shipped, but no stock on hand to deduct",
+    why: "The package shipped but there was no stock on hand to subtract, so recording the shipment was blocked. Receive the stock first, then re-run these — re-running alone won't help until the stock is there. (This is the inventory-deduction gap.)",
+    remediation: "REPLAY_AFTER_STOCK", replaySafe: false },
+  { code: "SHIPNOTIFY_UNSPECIFIED", stage: "shipped", severity: "warning",
+    message: "Ship update failed — reason wasn't recorded",
+    why: "These older failures didn't save why they failed (from before we captured the detail) — almost all are the same out-of-stock problem from one week in May. Treat them like the no-stock bucket, or clear them if those orders are long settled.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "SHOPIFY_PUSH_NO_POSITIVE_QTY", stage: "writeback", severity: "warning",
+    message: "Tracking push — the shipment had no items",
+    why: "We tried to send tracking to Shopify but the shipment had nothing to report (no items with a quantity). Find why the shipment came through empty before retrying.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "SHIPNOTIFY_UNMAPPED_LINEITEM", stage: "shipped", severity: "warning",
+    message: "Ship update — items didn't match the order",
+    why: "The shipping app's items couldn't be matched back to the order's items, so the ship update was rejected. Match them up by hand, then re-run.",
+    remediation: "MANUAL_REVIEW", replaySafe: false },
+  { code: "SHOPIFY_PUSH_SKU_NOT_ON_FO", stage: "writeback", severity: "warning",
+    message: "Tracking push — item isn't on the order",
+    why: "Shopify says the item we shipped isn't on its copy of the order (often a pre-order or a changed line). Reconcile the order on Shopify, then re-send tracking.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "OMS_WMS_SYNC_NO_ORDER", stage: "oms_to_wms", severity: "critical",
+    message: "Hand-off failed — no warehouse order created",
+    why: "Sending the order to the warehouse produced nothing, so it can't be picked. Re-send it to the warehouse.",
+    remediation: "REPLAY_AFTER_FIX", replaySafe: true },
+  { code: "SHIPNOTIFY_SHIPMENT_NOT_FOUND", stage: "shipped", severity: "warning",
+    message: "Ship update — shipment not found",
+    why: "A ship notice arrived for a shipment we can't find — usually it was voided or replaced. Confirm the shipment, then clear or re-run.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "SHIPSTATION_COUNTRY_CODE", stage: "engine_push", severity: "warning",
+    message: "Push rejected — country code must be 2 letters",
+    why: "The shipping app rejected the address because the country wasn't a 2-letter code. The normalizer should fix new ones; re-run these once you've confirmed the fix is live.",
+    remediation: "REQUEUE", replaySafe: true },
+  { code: "PUSH_NEGATIVE_TOTAL", stage: "engine_push", severity: "warning",
+    message: "Push rejected — order total came out negative",
+    why: "The computed order total was below zero, so the push was rejected. Check the line/discount math on the order before retrying.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "PUSH_TOTAL_MISMATCH", stage: "engine_push", severity: "warning",
+    message: "Push rejected — order total didn't match",
+    why: "The order total we computed didn't match the channel's, so the push was rejected. Reconcile the totals before retrying.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "DB_CONNECT_TIMEOUT", stage: "shipped", severity: "warning",
+    message: "Temporary database timeout",
+    why: "A transient database timeout — not a real problem with the order. Safe to re-run.",
+    remediation: "REQUEUE", replaySafe: true },
+  { code: "INTERNAL_API_500", stage: "shipped", severity: "warning",
+    message: "Internal error (500)",
+    why: "An internal request errored out. If it's not recurring, re-running clears it; if it recurs, the underlying call needs a look.",
+    remediation: "REQUEUE", replaySafe: true },
+  { code: "NO_MESSAGE", stage: "intake", severity: "warning",
+    message: "Failed with no error recorded",
+    why: "The update failed but saved no reason. Open a couple to see what they have in common, then add a rule so they bucket correctly.",
+    remediation: "INVESTIGATE", replaySafe: false },
+  { code: "UNCLASSIFIED", stage: "intake", severity: "warning",
+    message: "Unclassified failure — needs a rule",
+    why: "A failure we haven't labeled yet. This catch-all is what makes new problems visible — open a few, find the common reason, and add it to the reason list so it gets its own bucket.",
+    remediation: "INVESTIGATE", replaySafe: false },
+];
+
+// Drill-down rows for ONE reason bucket (the dead-letter row query + reason filter).
+const deadLetterRows = (reasonCode: string) => sql`SELECT ${DEAD_LETTER_REASON_CODE} AS reason_code, COALESCE(rq.payload->>'name', rq.payload->>'order_number', rq.payload->>'orderNumber', wo.order_number) AS order_number, rq.payload->>'shipmentId' AS shipment_id, rq.provider, rq.topic, rq.attempts, rq.last_error, rq.next_retry_at, rq.updated_at AS at, rq.id AS retry_id FROM oms.webhook_retry_queue rq LEFT JOIN wms.outbound_shipments os ON os.id = NULLIF(rq.payload->>'shipmentId','')::int LEFT JOIN wms.orders wo ON wo.id = os.order_id WHERE rq.status = 'dead' AND (${DEAD_LETTER_REASON_CODE}) = ${reasonCode} ORDER BY rq.updated_at DESC NULLS LAST LIMIT 50`;
+
+const DEAD_LETTER_ISSUES: FlowIssueDef[] = DEAD_LETTER_REASONS.map((r) => ({
+  code: r.code, kind: "queue_failure", stage: r.stage, severity: r.severity,
+  message: r.message, why: r.why, remediation: r.remediation, replaySafe: r.replaySafe,
+  // Counts come from ONE grouped pass in getFlowWaterfall (pool-friendly); this
+  // standalone form is used by the registry test and any direct count.
+  count: () => sql`SELECT COUNT(*)::int AS count FROM oms.webhook_retry_queue rq WHERE rq.status = 'dead' AND (${DEAD_LETTER_REASON_CODE}) = ${r.code}`,
+  sample: () => deadLetterRows(r.code),
+}));
+
+export const FLOW_ISSUES: FlowIssueDef[] = [...BASE_ISSUES, ...DEAD_LETTER_ISSUES];
+
 // Back-compat view: the contradiction subset, still validated by the invariants test
 // (so a refactor can't silently drop the 2026-06 audit bug classes).
 export const CONSISTENCY_INVARIANTS = FLOW_ISSUES.filter((i) => i.kind === "contradiction");
@@ -360,11 +444,18 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     const wmsBuckets = rows(await tx.execute(sql`SELECT warehouse_status AS status, COUNT(*)::int AS count FROM wms.orders WHERE created_at > ${win} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ status: String(r.status), count: Number(r.count) || 0 }));
     const eventSpine = rows(await tx.execute(sql`SELECT event_type AS "eventType", COUNT(*)::int AS count FROM oms.oms_order_events WHERE created_at > ${win} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`)).map((r) => ({ eventType: String(r.eventType), count: Number(r.count) || 0 }));
 
-    // ---- issues: iterate the ONE registry, counts only, SEQUENTIAL (pool-safe) ----
+    // ---- dead-letter reason counts in ONE grouped pass (one query feeds every
+    // queue_failure bucket AND the sidebar breakdown — keeps the tiny pool happy) ----
+    const dlRows = rows(await tx.execute(sql`SELECT ${DEAD_LETTER_REASON_CODE} AS code, COUNT(*)::int AS count FROM oms.webhook_retry_queue rq WHERE rq.status = 'dead' GROUP BY 1`));
+    const dlMap: Record<string, number> = {};
+    for (const r of dlRows) dlMap[String(r.code)] = Number(r.count) || 0;
+
+    // ---- issues: iterate the ONE registry, counts only, SEQUENTIAL (pool-safe).
+    // queue_failure (dead-letter) buckets read from dlMap; everything else self-counts. ----
     const bc: Record<string, number> = {};
     const allIssues: FlowIssue[] = [];
     for (const def of FLOW_ISSUES) {
-      const count = num(await tx.execute(def.count(win)));
+      const count = def.kind === "queue_failure" ? (dlMap[def.code] ?? 0) : num(await tx.execute(def.count(win)));
       bc[def.code] = count;
       allIssues.push({
         code: def.code, kind: def.kind, severity: def.severity, stage: def.stage,
@@ -375,9 +466,11 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     const issues = allIssues.filter((i) => i.count > 0);
     const counts = issues.reduce((a, i) => { (a as any)[i.severity] += i.count; return a; }, { critical: 0, warning: 0, info: 0 });
 
-    // ---- dead-letter reason breakdown (canonical codes + readable labels) ----
-    const deadLetterCauses = rows(await tx.execute(sql`SELECT code, COUNT(*)::int AS count FROM (SELECT ${DEAD_LETTER_REASON_CODE} AS code FROM oms.webhook_retry_queue rq WHERE rq.status = 'dead') s GROUP BY 1 ORDER BY 2 DESC LIMIT 14`))
-      .map((r) => ({ code: String(r.code), cause: DEAD_LETTER_LABELS[String(r.code)] ?? String(r.code), count: Number(r.count) || 0 }));
+    // ---- dead-letter reason breakdown for the sidebar (from the same grouped pass) ----
+    const deadLetterCauses = Object.entries(dlMap)
+      .map(([code, count]) => ({ code, cause: DEAD_LETTER_LABELS[code] ?? code, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 14);
 
     return {
       generatedAt: new Date().toISOString(),
