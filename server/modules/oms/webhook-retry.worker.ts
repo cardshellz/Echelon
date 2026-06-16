@@ -852,13 +852,18 @@ export async function dispatchOmsWmsSyncRetry(
 
   try {
     const wmsOrderId = await wmsSync.syncOmsOrderToWms(omsOrderId);
-    if (!wmsOrderId) {
-      throw new Error(`syncOmsOrderToWms returned no WMS order for OMS order ${omsOrderId}`);
-    }
+    // `null` = sync intentionally SKIPPED (order already final/fulfilled, no WMS order
+    // needed) — a no-op success, NOT a failure. A genuine error THROWS (handled below).
     await markRowSuccess(dbArg, item);
-    console.log(
-      `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}, wms=${wmsOrderId}) succeeded`,
-    );
+    if (!wmsOrderId) {
+      console.log(
+        `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}) skipped — order already final/fulfilled, no WMS order needed (no-op success)`,
+      );
+    } else {
+      console.log(
+        `${LOG_PREFIX} Item ${item.id} (oms_wms_sync, order=${omsOrderId}, wms=${wmsOrderId}) succeeded`,
+      );
+    }
     return "success";
   } catch (err: any) {
     const { status, attempts, nextRetryAt } = await recordRetryFailure(

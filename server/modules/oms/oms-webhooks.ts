@@ -52,7 +52,10 @@ async function ensureOmsOrderQueuedForWmsSync(
   try {
     const wmsOrderId = await wmsSyncService.syncOmsOrderToWms(omsOrderId);
     if (!wmsOrderId) {
-      throw new Error("syncOmsOrderToWms returned no WMS order id");
+      // `null` = sync intentionally skipped (order already final/fulfilled out-of-band) —
+      // a no-op, not a failure. Don't throw (that re-queues and dead-letters a harmless skip).
+      console.log(`${LOG_PREFIX} WMS sync skipped for ${label} — already fulfilled out-of-band; no-op`);
+      return;
     }
     console.log(`${LOG_PREFIX} Synced ${label} to WMS (wms=${wmsOrderId})`);
   } catch (error: any) {

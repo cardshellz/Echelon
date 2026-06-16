@@ -52,11 +52,9 @@ async function ensureEbayOrderQueuedForWmsSync(
   try {
     const wmsOrderId = await wmsSyncService.syncOmsOrderToWms(omsOrderId);
     if (!wmsOrderId) {
-      await enqueueOmsWmsSyncRetry(
-        db,
-        omsOrderId,
-        `eBay WMS sync returned no WMS order for ${externalOrderId}`,
-      );
+      // `null` = sync intentionally skipped (order already final/fulfilled out-of-band) —
+      // a no-op, not a failure. Do NOT re-queue it (that just dead-letters a harmless skip).
+      console.log(`[eBay Orders] WMS sync skipped for ${externalOrderId} (omsOrder ${omsOrderId}) — already fulfilled out-of-band; no-op`);
     }
   } catch (err: any) {
     await enqueueOmsWmsSyncRetry(db, omsOrderId, err);

@@ -14,8 +14,10 @@ describe("ebay-order-ingestion :: routing", () => {
     expect(EBAY_INGESTION_SRC).toMatch(/await ensureEbayOrderQueuedForWmsSync\(_wmsSyncService, result\.id, orderId\)/);
   });
 
-  it("persists an oms_wms_sync retry when eBay WMS sync cannot complete", () => {
+  it("re-queues on a genuine WMS sync failure, but treats an intentional skip as a no-op", () => {
+    // genuine error throws -> re-queue (the catch block)
     expect(EBAY_INGESTION_SRC).toMatch(/enqueueOmsWmsSyncRetry\(db, omsOrderId, err\)/);
-    expect(EBAY_INGESTION_SRC).toMatch(/eBay WMS sync returned no WMS order/);
+    // null = sync deliberately skipped (already fulfilled out-of-band) -> no-op, NOT a re-queue
+    expect(EBAY_INGESTION_SRC).toMatch(/WMS sync skipped for .*no-op/);
   });
 });
