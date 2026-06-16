@@ -219,6 +219,17 @@ export default function CycleCounts() {
     queryKey: ["/api/cycle-counts"],
   });
 
+  // List filtering + pagination — keeps stale in_progress counts from hiding below the fold.
+  const [listStatusFilter, setListStatusFilter] = useState<string>("all");
+  const [listPage, setListPage] = useState(1);
+  const CC_PAGE_SIZE = 25;
+  const ccFiltered = cycleCounts.filter(
+    (c) => listStatusFilter === "all" || c.status === listStatusFilter,
+  );
+  const ccTotalPages = Math.max(1, Math.ceil(ccFiltered.length / CC_PAGE_SIZE));
+  const ccPage = Math.min(listPage, ccTotalPages);
+  const ccVisible = ccFiltered.slice((ccPage - 1) * CC_PAGE_SIZE, ccPage * CC_PAGE_SIZE);
+
   const { data: cycleCountDetail } = useQuery<CycleCountDetail>({
     queryKey: ["/api/cycle-counts", selectedCount],
     enabled: !!selectedCount,
@@ -2974,10 +2985,39 @@ export default function CycleCounts() {
         </Card>
       ) : (
         <>
+          {/* List filter + pagination */}
+          <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Select value={listStatusFilter} onValueChange={(v) => { setListStatusFilter(v); setListPage(1); }}>
+                <SelectTrigger className="w-[170px]" data-testid="select-list-status">
+                  <SelectValue placeholder="All statuses" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All statuses</SelectItem>
+                  <SelectItem value="in_progress">In progress</SelectItem>
+                  <SelectItem value="completed">Completed</SelectItem>
+                  <SelectItem value="draft">Draft</SelectItem>
+                  <SelectItem value="cancelled">Cancelled</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="text-sm text-muted-foreground">{ccFiltered.length} count{ccFiltered.length === 1 ? "" : "s"}</span>
+            </div>
+            {ccTotalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" disabled={ccPage <= 1} onClick={() => setListPage(ccPage - 1)} data-testid="button-list-prev">
+                  <ChevronLeft className="h-4 w-4" /> Prev
+                </Button>
+                <span className="text-sm text-muted-foreground">Page {ccPage} of {ccTotalPages}</span>
+                <Button variant="outline" size="sm" disabled={ccPage >= ccTotalPages} onClick={() => setListPage(ccPage + 1)} data-testid="button-list-next">
+                  Next <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
+          </div>
           {/* Mobile card list */}
           <div className="flex-1 overflow-auto space-y-3 md:hidden">
-            {cycleCounts.map((count) => (
-              <Card 
+            {ccVisible.map((count) => (
+              <Card
                 key={count.id} 
                 className="cursor-pointer active:bg-muted/50"
                 onClick={() => setSelectedCount(count.id)}
@@ -3060,7 +3100,7 @@ export default function CycleCounts() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {cycleCounts.map((count) => (
+                {ccVisible.map((count) => (
                   <TableRow key={count.id} className="cursor-pointer" onClick={() => setSelectedCount(count.id)}>
                     <TableCell className="font-medium">{count.name}</TableCell>
                     <TableCell>
