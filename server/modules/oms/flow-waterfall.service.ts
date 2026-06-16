@@ -323,14 +323,18 @@ const BASE_ISSUES: FlowIssueDef[] = [
 
 // ── Dead-letter reason buckets — one first-class issue per reason code ──
 // Instead of one undifferentiated "1057 dead" list, each reason is its own
-// drillable chip (count + what + where + what-to-do), at the stage where it
-// actually fails, with the CORRECT remediation (e.g. no-stock is "receive stock
-// then re-run", NOT a misleading "replay-safe"). Classification reuses
-// DEAD_LETTER_REASON_CODE so the split exactly matches the breakdown, and the
-// UNCLASSIFIED bucket is itself an issue — a new failure mode surfaces as a chip.
+// drillable chip (count + what + where + what-to-do), with the CORRECT remediation
+// (e.g. no-stock is "receive stock then re-run", NOT a misleading "replay-safe").
+// ALL dead-letter buckets are GROUPED under the Ingested→OMS (intake) stage — that's
+// where the retry queue lives and where they've always shown. We do NOT scatter them
+// across the funnel (doing so made intake read "no drop-off" and looked like they
+// vanished). The per-reason `stage` below records where the failure TECHNICALLY
+// happens (informational only; not the display stage). Classification reuses
+// DEAD_LETTER_REASON_CODE so the split matches the breakdown, and the UNCLASSIFIED
+// bucket is itself an issue — a new failure mode surfaces as a chip.
 interface DeadLetterReasonDef {
   code: string;
-  stage: FunnelStageKey | "other";
+  stage: FunnelStageKey | "other"; // where it truly fails (info); all display under intake
   severity: "critical" | "warning" | "info";
   message: string;
   why: string;
@@ -400,7 +404,9 @@ const DEAD_LETTER_REASONS: DeadLetterReasonDef[] = [
 const deadLetterRows = (reasonCode: string) => sql`SELECT ${DEAD_LETTER_REASON_CODE} AS reason_code, COALESCE(rq.payload->>'name', rq.payload->>'order_number', rq.payload->>'orderNumber', wo.order_number) AS order_number, rq.payload->>'shipmentId' AS shipment_id, rq.provider, rq.topic, rq.attempts, rq.last_error, rq.next_retry_at, rq.updated_at AS at, rq.id AS retry_id FROM oms.webhook_retry_queue rq LEFT JOIN wms.outbound_shipments os ON os.id = NULLIF(rq.payload->>'shipmentId','')::int LEFT JOIN wms.orders wo ON wo.id = os.order_id WHERE rq.status = 'dead' AND (${DEAD_LETTER_REASON_CODE}) = ${reasonCode} ORDER BY rq.updated_at DESC NULLS LAST LIMIT 50`;
 
 const DEAD_LETTER_ISSUES: FlowIssueDef[] = DEAD_LETTER_REASONS.map((r) => ({
-  code: r.code, kind: "queue_failure", stage: r.stage, severity: r.severity,
+  // Grouped under intake (the retry-queue stage) regardless of where they technically
+  // fail — see the note above. r.stage is kept as informational metadata.
+  code: r.code, kind: "queue_failure", stage: "intake", severity: r.severity,
   message: r.message, why: r.why, remediation: r.remediation, replaySafe: r.replaySafe,
   // Counts come from ONE grouped pass in getFlowWaterfall (pool-friendly); this
   // standalone form is used by the registry test and any direct count.
