@@ -936,6 +936,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 WHERE os.order_id = ANY(${cancelledIds})
                   AND COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
                   AND os.status NOT IN ('cancelled', 'shipped', 'voided', 'returned', 'lost')
+                  AND os.shipped_at IS NULL  -- never cancel a shipment that already shipped (terminal)
               `);
               const engine = services.shippingEngine;
               if (engine?.isConfigured() && ssRows.rows.length > 0) {
@@ -1008,6 +1009,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         WHERE o.id = os.order_id
           AND o.warehouse_status IN ('shipped', 'cancelled')
           AND os.status IN ('planned', 'queued')
+          AND os.shipped_at IS NULL  -- never cancel a shipment that already shipped (terminal)
         RETURNING os.id, os.order_id
       `);
       if (shipmentFix.rows.length > 0) {
@@ -1060,7 +1062,22 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // One-time duplicate shipment cleanup: for each order with multiple
   // active shipments, keep the one furthest along and cancel the rest.
   // Also cancels the duplicate in ShipStation if it has a SS order ID.
+  //
+  // DISABLED 2026-06-15. This job conflated legitimate SPLIT shipments (one
+  // order legitimately ships as multiple packages) with duplicates: it ranks
+  // shipments per order and cancels all but one — and its candidate set
+  // INCLUDED already-shipped shipments. That cancelled 606 shipments that had
+  // already shipped (shipped_at + tracking set), with a null voided_reason,
+  // making their units look un-shipped (root cause of the stale-partial /
+  // "lost order" symptoms). A shipped shipment is TERMINAL and must never be
+  // cancelled. True duplicate-SS-order prevention belongs at shipment-creation
+  // time (idempotency key), not a destructive boot-time sweep — see the
+  // fulfillment-state redesign. Gated off by default; set
+  // ENABLE_DUP_SHIPMENT_CLEANUP=true only to force a (still-unsafe) run.
   setTimeout(async () => {
+    if (process.env.ENABLE_DUP_SHIPMENT_CLEANUP !== "true") {
+      return;
+    }
     try {
       const dupes = await db.execute(sql`
         WITH ranked AS (

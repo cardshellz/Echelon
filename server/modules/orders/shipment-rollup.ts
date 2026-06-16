@@ -371,6 +371,24 @@ export async function markShipmentCancelled(
     return { wmsOrderId: current.order_id, changed: false };
   }
 
+  // A shipped shipment is TERMINAL. Once it physically left the building
+  // (status 'shipped', or 'returned'/'lost' which both presuppose a ship), it
+  // must NEVER be cancelled — the only valid post-ship transitions are
+  // returned/lost (recorded as their own events). Refuse here rather than
+  // throw so reconcile/cleanup callers log and move on instead of crashing.
+  // This is the single-writer enforcement of the invariant whose absence let a
+  // boot-time dedup cancel 600+ already-shipped split shipments (2026-06-15).
+  if (
+    current.status === "shipped" ||
+    current.status === "returned" ||
+    current.status === "lost"
+  ) {
+    console.warn(
+      `[markShipmentCancelled] refused: shipment ${shipmentId} is '${current.status}' (terminal-shipped); not cancelling`,
+    );
+    return { wmsOrderId: current.order_id, changed: false };
+  }
+
   const safeReason = typeof reason === "string" && reason.trim().length > 0
     ? reason.slice(0, 200)
     : "operator_cancel";
@@ -967,6 +985,7 @@ export async function cancelStaleShipmentsIfFullyCovered(
         updated_at = NOW()
     WHERE order_id = ${wmsOrderId}
       AND status IN ('planned', 'queued')
+      AND shipped_at IS NULL
     RETURNING id
   `);
 

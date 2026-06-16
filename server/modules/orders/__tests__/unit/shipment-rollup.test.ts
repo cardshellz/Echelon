@@ -652,6 +652,20 @@ describe("markShipmentCancelled", () => {
     expect(mock.getCallCount()).toBe(1);
   });
 
+  it.each(["shipped", "returned", "lost"])(
+    "REFUSES to cancel a terminal-shipped shipment (status=%s) — no UPDATE",
+    async (status) => {
+      // Shipped is terminal: the boot-time dedup that cancelled 600+ already-
+      // shipped split shipments must be physically unable to do this here.
+      const mock = makeDb([{ rows: [shipmentRow({ status })] }]);
+      const result = await markShipmentCancelled(mock.db, 501, "dedup", {
+        now: NOW,
+      });
+      expect(result).toEqual({ wmsOrderId: 42, changed: false });
+      expect(mock.getCallCount()).toBe(1); // only the load read; no UPDATE
+    },
+  );
+
   it("tolerates omitted reason (writes null)", async () => {
     const mock = makeDb([
       { rows: [shipmentRow()] },

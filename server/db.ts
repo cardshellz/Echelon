@@ -93,6 +93,40 @@ export async function runStartupMigrations(): Promise<void> {
       console.error("[startup-migration] refund return lifecycle DDL failed:", e?.message ?? e);
     }
 
+    // Fulfillment-state ledger (FULFILLMENT_STATE_DESIGN.md §2.1, migration 103).
+    // Startup-fallback parity for the inert Phase-0 schema so a fresh/dev boot
+    // (the dev DB is empty) gets the table without the deploy migration step.
+    // Own try/catch + fully schema-qualified wms.* for the same reason as the
+    // refund block above. Idempotent (IF NOT EXISTS); no reader/writer yet.
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS wms.line_fulfillments (
+          id                BIGINT       GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          order_item_id     INTEGER      NOT NULL REFERENCES wms.order_items(id),
+          shipment_id       INTEGER      NOT NULL REFERENCES wms.outbound_shipments(id),
+          qty               INTEGER      NOT NULL,
+          kind              VARCHAR(20)  NOT NULL,
+          source            VARCHAR(30)  NOT NULL,
+          external_event_id VARCHAR(200),
+          occurred_at       TIMESTAMPTZ  NOT NULL,
+          created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+          CONSTRAINT line_fulfillments_qty_nonzero_chk CHECK (qty <> 0),
+          CONSTRAINT line_fulfillments_kind_chk
+            CHECK (kind IN ('shipped', 'void_reversal', 'return', 'manual_correction')),
+          CONSTRAINT line_fulfillments_source_chk
+            CHECK (source IN ('warehouse', 'reconcile', 'operator'))
+        )
+      `);
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_line_fulfillments_idempotency ON wms.line_fulfillments (order_item_id, shipment_id, kind, external_event_id)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_line_fulfillments_order_item ON wms.line_fulfillments (order_item_id)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_line_fulfillments_shipment ON wms.line_fulfillments (shipment_id)`);
+      await client.query(`ALTER TABLE wms.order_items ADD COLUMN IF NOT EXISTS on_hold BOOLEAN NOT NULL DEFAULT false`);
+      await client.query(`ALTER TABLE wms.order_items ADD COLUMN IF NOT EXISTS hold_reason VARCHAR(200)`);
+      console.log("Checked fulfillment-state ledger (wms.line_fulfillments, wms.order_items.on_hold)");
+    } catch (e: any) {
+      console.error("[startup-migration] fulfillment-state ledger DDL failed:", e?.message ?? e);
+    }
+
     // Create combined_order_groups table if it doesn't exist
     await client.query(`
       CREATE TABLE IF NOT EXISTS wms.combined_order_groups (
