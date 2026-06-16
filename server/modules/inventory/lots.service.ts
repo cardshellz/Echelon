@@ -83,20 +83,32 @@ export class InventoryLotService {
   }): Promise<InventoryLot> {
     const lotNumber = await this.generateLotNumber();
 
+    // Total landed cost is the COGS source of truth: product + packaging + landed.
+    // Components are stored individually; `total` (and the legacy `unitCostCents`
+    // mirror) is their sum, so valuation + COGS always read the all-in cost.
+    const poUnitCostCents = params.productCostCents ?? Math.max(0, params.unitCostCents - (params.packagingCostCents ?? 0));
+    const packagingCostCents = params.packagingCostCents ?? 0;
+    // Anything in unitCostCents above the product cost is freight already applied at
+    // receive (a finalized inbound-shipment landed cost). Only derivable when product
+    // is known explicitly; otherwise unitCostCents is the legacy all-in cost (landed 0).
+    const landedCostCents = params.productCostCents != null
+      ? Math.max(0, params.unitCostCents - params.productCostCents)
+      : 0;
+    const totalUnitCostCents = poUnitCostCents + packagingCostCents + landedCostCents;
+
     const [lot] = await this.db
       .insert(inventoryLots)
       .values({
         lotNumber,
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
-        unitCostCents: params.unitCostCents,
-        // Cost-layer breakdown. Keep total == unitCostCents (the value the FIFO
-        // pick path books into oms.order_item_costs) so valuation/reporting reads
-        // the same cost that COGS is booked at (fixes the $0-valuation bug where
-        // total_unit_cost_cents defaulted to 0 and COALESCE(total, unit, 0) → 0).
-        poUnitCostCents: params.productCostCents ?? Math.max(0, params.unitCostCents - (params.packagingCostCents ?? 0)),
-        packagingCostCents: params.packagingCostCents ?? 0,
-        totalUnitCostCents: params.unitCostCents,
+        // Cost-layer breakdown: total = product + packaging + landed (all-in), and
+        // unit_cost_cents mirrors total so valuation + COGS read the same all-in cost.
+        unitCostCents: totalUnitCostCents,
+        poUnitCostCents,
+        packagingCostCents,
+        landedCostCents,
+        totalUnitCostCents,
         qtyReceived: params.qty,
         costSource: params.costSource ?? ((params.poLineId || params.purchaseOrderId) ? "po" : "manual"),
         poLineId: params.poLineId ?? null,
