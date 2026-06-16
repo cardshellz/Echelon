@@ -20,6 +20,7 @@ import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastru
 import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
 import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
+import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
 import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reconciliation.service";
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import {
@@ -780,6 +781,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startFulfillmentSweeper(db);
       } else {
         logSchedulerDisabled("scheduler", "Fulfillment sweeper", "FULFILLMENT_SWEEPER_DISABLED");
+      }
+
+      if (!schedulersDisabled("CYCLE_COUNT_FREEZE_GUARD_DISABLED")) {
+        startCycleCountFreezeGuard(db);
+      } else {
+        logSchedulerDisabled("scheduler", "Cycle-count freeze guard", "CYCLE_COUNT_FREEZE_GUARD_DISABLED");
       }
 
       if (!schedulersDisabled("OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED")) {
