@@ -37,7 +37,7 @@ vi.mock("../../../../db", () => ({
 // Pull in the cascade helper after the db mock is registered.
 import { __test__ } from "../../oms-webhooks";
 
-const { cascadeShopifyCancelToShipments } = __test__;
+const { cascadeShopifyCancelToShipments, deriveOmsUpdateFinality } = __test__;
 
 // ─── Scripted db.execute mock ────────────────────────────────────────
 
@@ -60,6 +60,30 @@ function makeDb(scripted: ScriptedResponse[]) {
 }
 
 const NOW = new Date("2026-04-26T12:00:00Z");
+
+describe("deriveOmsUpdateFinality — cancel cascade must not self-perpetuate", () => {
+  it("cancels on a real channel signal (cancelled_at)", () => {
+    expect(deriveOmsUpdateFinality({ cancelled_at: "2026-06-01T00:00:00Z", financial_status: "paid" }, "processing"))
+      .toEqual({ cancelNow: true, isFinal: true });
+  });
+  it("cancels on refunded / voided financial_status", () => {
+    expect(deriveOmsUpdateFinality({ financial_status: "refunded" }, "processing").cancelNow).toBe(true);
+    expect(deriveOmsUpdateFinality({ financial_status: "voided" }, "processing").cancelNow).toBe(true);
+  });
+  it("THE LOOP FIX: an already-cancelled but paid+not-cancelled order does NOT re-cancel (#57977)", () => {
+    const r = deriveOmsUpdateFinality({ cancelled_at: null, financial_status: "paid" }, "cancelled");
+    expect(r.cancelNow).toBe(false); // would have been true before the fix → 8 re-cancels
+    expect(r.isFinal).toBe(true);    // still 'final' so we don't re-activate on a routine update
+  });
+  it("a normal paid order is neither cancel-now nor final", () => {
+    expect(deriveOmsUpdateFinality({ cancelled_at: null, financial_status: "paid" }, "shipped"))
+      .toEqual({ cancelNow: false, isFinal: false });
+  });
+  it("existing 'refunded' is final but does not re-cancel without a channel signal", () => {
+    expect(deriveOmsUpdateFinality({ financial_status: "paid" }, "refunded"))
+      .toEqual({ cancelNow: false, isFinal: true });
+  });
+});
 
 describe("cascadeShopifyCancelToShipments (C28)", () => {
   it("happy path: 2 pre-label shipments → both cancelled, rollup runs", async () => {

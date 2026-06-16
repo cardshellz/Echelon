@@ -28,7 +28,7 @@ export interface FlowDuplicates {
 }
 export interface FlowIntakeModel { provider: string; model: "poll-primary" | "webhook-primary"; cadenceSeconds: number; note: string }
 export interface FlowFunnel { entered: number; reachedWms: number; hasShipment: number; shipped: number; trackingConfirmed: number }
-export interface FlowIssue { code: string; severity: "critical" | "warning" | "info"; count: number; message: string; sample: any[]; stage: FunnelStageKey | "other" }
+export interface FlowIssue { code: string; severity: "critical" | "warning" | "info"; count: number; message: string; why?: string; sample: any[]; stage: FunnelStageKey | "other" }
 
 export interface FlowWaterfall {
   generatedAt: string;
@@ -67,6 +67,86 @@ const ISSUE_META: Record<string, { severity: "critical" | "warning"; message: st
   SHIPMENT_ON_HOLD: { severity: "warning", message: "WMS shipments are on hold and need warehouse-ops review." },
   SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: { severity: "critical", message: "Shipped OMS orders have no tracking/fulfillment push success event." },
 };
+
+// ── Consistency invariants (declarative) ────────────────────────────
+// The exception buckets above catch orders STUCK at a pipeline stage. These
+// catch CONTRADICTORY states — things that must NEVER be true — i.e. the bug
+// classes the 2026-06 fulfillment audit found by hand (a shipped shipment
+// marked cancelled, an order cancelled while the channel says paid+fulfilled,
+// a shipment with shipped_at but a non-shipped status, an order marked shipped
+// with a line still short). Each is declared ONCE — code, severity, stage, the
+// "what" (message) and the "why / where to look" (why), plus a count query and
+// a drill-down query. Add a future check by appending ONE entry; it then shows
+// up in the waterfall, the health roll-up, and the bucket drill-down with zero
+// other wiring. THIS is the "tell me where to look without being prompted" layer.
+interface ConsistencyInvariant {
+  code: string;
+  severity: "critical" | "warning";
+  stage: FunnelStageKey | "other";
+  message: string;
+  why: string;
+  count: (win: any) => any;
+  sample: (win: any) => any;
+}
+
+export const CONSISTENCY_INVARIANTS: ConsistencyInvariant[] = [
+  {
+    code: "SHIPPED_SHIPMENT_CANCELLED",
+    severity: "critical",
+    stage: "shipped",
+    message: "Shipments that already shipped are marked cancelled.",
+    why: "A shipped shipment is terminal — shipped_at/tracking are set, so the package physically left. A cleanup/dedup job or a reconcile cascade cancelled a real shipment, making its units look unshipped (root cause of stale-partial / 'lost order'). Look at wms.outbound_shipments: voided_reason NULL means an internal job (not ShipStation) did it; check cancelled_at clustering for a batch run.",
+    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE status = 'cancelled' AND shipped_at IS NOT NULL`,
+    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.source, os.voided_reason, os.tracking_number, os.cancelled_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status = 'cancelled' AND os.shipped_at IS NOT NULL ORDER BY os.cancelled_at DESC NULLS LAST LIMIT 50`,
+  },
+  {
+    code: "ORDER_CANCELLED_WITH_SHIPPED_UNITS",
+    severity: "critical",
+    stage: "shipped",
+    message: "OMS orders are cancelled but the channel says paid+fulfilled and units shipped.",
+    why: "Cancel-truth must come from the channel. Here cancelled_at is NULL and financial_status='paid' yet the order has shipped shipments — so the customer did NOT cancel; an internal cascade did. These are the 'lost orders' (vanish from the active view while Shopify shows them fulfilled). Look at oms.oms_orders + the cancelled_via_shipstation / shopify_order_update_final events.",
+    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status = 'cancelled' AND oo.cancelled_at IS NULL AND oo.financial_status = 'paid' AND oo.ordered_at > ${win} AND EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR wo.source_table_id = oo.id::text) AND os.status IN ('shipped','returned','lost'))`,
+    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, oo.status, oo.financial_status, oo.fulfillment_status, oo.ordered_at AS at FROM oms.oms_orders oo WHERE oo.status = 'cancelled' AND oo.cancelled_at IS NULL AND oo.financial_status = 'paid' AND oo.ordered_at > ${win} AND EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR wo.source_table_id = oo.id::text) AND os.status IN ('shipped','returned','lost')) ORDER BY oo.ordered_at DESC LIMIT 50`,
+  },
+  {
+    code: "SHIPMENT_SHIPPED_AT_WRONG_STATUS",
+    severity: "warning",
+    stage: "shipped",
+    message: "Shipments have a shipped_at timestamp but a non-shipped status (planned/queued/labeled/on_hold).",
+    why: "shipped_at means the package left. A non-terminal status on a shipped shipment hides fulfillment and skews coverage — e.g. an on_hold shipment from a post-label customer cancel, or a stale status never advanced to 'shipped'. Decide whether it shipped (→ shipped) or the timestamp is wrong.",
+    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE shipped_at IS NOT NULL AND status IN ('planned','queued','labeled','on_hold')`,
+    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.status, os.source, os.review_reason, os.tracking_number, os.shipped_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.shipped_at IS NOT NULL AND os.status IN ('planned','queued','labeled','on_hold') ORDER BY os.shipped_at DESC LIMIT 50`,
+  },
+  {
+    code: "ORDER_SHIPPED_BUT_LINE_SHORT",
+    severity: "warning",
+    stage: "shipped",
+    message: "Orders marked shipped have a line not fully covered by shipped shipments.",
+    why: "Claims fully shipped while a line's net shipped qty (over shipped/returned/lost shipments) is between 1 and ordered-1, with shipment-item evidence (so not a legacy no-data order). Usually a split shipment was cancelled/voided leaving units owed — the order should be partially_shipped. Pairs with SHIPPED_SHIPMENT_CANCELLED.",
+    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM (
+      SELECT oi.id
+      FROM wms.order_items oi
+      JOIN wms.orders wo ON wo.id = oi.order_id AND wo.warehouse_status = 'shipped' AND wo.created_at > ${win}
+      JOIN wms.outbound_shipment_items osi ON osi.order_item_id = oi.id
+      JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+      WHERE COALESCE(oi.requires_shipping,1) <> 0 AND oi.status <> 'cancelled' AND oi.quantity > 0
+      GROUP BY oi.id, oi.quantity
+      HAVING COALESCE(SUM(osi.qty) FILTER (WHERE os.status IN ('shipped','returned','lost')),0) > 0
+         AND COALESCE(SUM(osi.qty) FILTER (WHERE os.status IN ('shipped','returned','lost')),0) < oi.quantity
+    ) t`,
+    sample: (win: any) => sql`SELECT wo.order_number, oi.sku, oi.quantity AS ordered,
+        COALESCE(SUM(osi.qty) FILTER (WHERE os.status IN ('shipped','returned','lost')),0)::int AS shipped_qty, wo.created_at AS at
+      FROM wms.order_items oi
+      JOIN wms.orders wo ON wo.id = oi.order_id AND wo.warehouse_status = 'shipped' AND wo.created_at > ${win}
+      JOIN wms.outbound_shipment_items osi ON osi.order_item_id = oi.id
+      JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+      WHERE COALESCE(oi.requires_shipping,1) <> 0 AND oi.status <> 'cancelled' AND oi.quantity > 0
+      GROUP BY wo.order_number, oi.sku, oi.quantity, wo.created_at
+      HAVING COALESCE(SUM(osi.qty) FILTER (WHERE os.status IN ('shipped','returned','lost')),0) > 0
+         AND COALESCE(SUM(osi.qty) FILTER (WHERE os.status IN ('shipped','returned','lost')),0) < oi.quantity
+      ORDER BY wo.created_at DESC LIMIT 50`,
+  },
+];
 
 function num(r: any): number {
   const v = Array.isArray(r?.rows) ? r.rows[0]?.count : undefined;
@@ -115,9 +195,18 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     bc.SHIPMENT_ON_HOLD = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE status = 'on_hold'`));
     bc.SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.status = 'shipped' AND oo.shipped_at < NOW() - INTERVAL '1 hour' AND oo.shipped_at > ${win} AND c.provider IN ('ebay','shopify') AND NOT EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed'))`));
 
-    const issues: FlowIssue[] = Object.entries(ISSUE_META)
-      .map(([code, m]) => ({ code, severity: m.severity, count: bc[code] ?? 0, message: m.message, sample: [], stage: (STAGE_FOR_CODE[code] ?? "other") as FunnelStageKey | "other" }))
-      .filter((i) => i.count > 0);
+    // Consistency invariants — declarative; each runs ONE count query in this
+    // same read-only/timeout-bounded transaction (cost profile matches the
+    // overShipped lens below). A new invariant surfaces here automatically.
+    for (const inv of CONSISTENCY_INVARIANTS) {
+      bc[inv.code] = num(await tx.execute(inv.count(win)));
+    }
+
+    const flowIssues: FlowIssue[] = Object.entries(ISSUE_META)
+      .map(([code, m]) => ({ code, severity: m.severity, count: bc[code] ?? 0, message: m.message, sample: [], stage: (STAGE_FOR_CODE[code] ?? "other") as FunnelStageKey | "other" }));
+    const invariantIssues: FlowIssue[] = CONSISTENCY_INVARIANTS
+      .map((inv) => ({ code: inv.code, severity: inv.severity, count: bc[inv.code] ?? 0, message: inv.message, why: inv.why, sample: [], stage: inv.stage }));
+    const issues: FlowIssue[] = [...flowIssues, ...invariantIssues].filter((i) => i.count > 0);
     const counts = issues.reduce((a, i) => { (a as any)[i.severity] += i.count; return a; }, { critical: 0, warning: 0, info: 0 });
 
     // ---- divergence lenses ----
@@ -194,7 +283,8 @@ export async function getFlowBucketSamples(
       SHIPMENT_ON_HOLD: sql`SELECT os.id AS shipment_id, wo.order_number, os.on_hold_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status = 'on_hold' ORDER BY os.created_at DESC LIMIT 50`,
       SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: sql`SELECT oo.external_order_number AS order_number, c.provider, oo.shipped_at AS at FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.status = 'shipped' AND oo.shipped_at < NOW() - INTERVAL '1 hour' AND oo.shipped_at > ${win} AND c.provider IN ('ebay','shopify') AND NOT EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed')) ORDER BY oo.shipped_at DESC LIMIT 50`,
     };
-    const query = BUCKET[code];
+    // Flow-stage buckets first, then the declarative consistency invariants.
+    const query = BUCKET[code] ?? CONSISTENCY_INVARIANTS.find((i) => i.code === code)?.sample(win);
     if (!query) return { code, rows: [] };
     return { code, rows: rows(await tx.execute(query)) };
   });
