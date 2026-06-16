@@ -114,7 +114,11 @@ export class WmsSyncService {
    * Idempotent - safe to call multiple times (checks if already synced).
    *
    * @param omsOrderId - The oms_orders.id to sync
-   * @returns The WMS order ID, or null if already synced or failed
+   * @returns The WMS order ID when synced; `null` when sync was intentionally SKIPPED
+   *   (already synced, order already final/cancelled/refunded, already shipped/fulfilled
+   *   out-of-band with no WMS order, or no shippable lines) — a no-op success.
+   * @throws on a genuine sync failure (DB error, etc.) — callers should retry. Do NOT
+   *   treat a `null` return as a failure.
    */
   async syncOmsOrderToWms(omsOrderId: number): Promise<number | null> {
     try {
@@ -656,8 +660,15 @@ export class WmsSyncService {
 
       return newWmsOrder.id;
     } catch (err: any) {
+      // RETHROW genuine failures so callers can distinguish them from an intentional
+      // skip. This function returns `null` ONLY when sync was deliberately skipped
+      // (order already final/cancelled/refunded, already shipped/fulfilled out-of-band
+      // with no WMS order, or no shippable lines) — a no-op success, NOT a failure.
+      // Before, errors also returned null, so every caller treated a harmless skip as a
+      // failure and re-queued/dead-lettered it (e.g. old orders fulfilled in ShipStation
+      // before Echelon's WMS existed).
       console.error(`[WMS Sync] Failed to sync OMS order ${omsOrderId} to WMS: ${err.message}`);
-      return null;
+      throw err;
     }
   }
 

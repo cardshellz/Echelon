@@ -1061,6 +1061,46 @@ describe("dispatchOmsWmsSyncRetry", () => {
     expect(updates[0]!.set.status).toBe("success");
   });
 
+  it("treats a null (intentional skip) as a no-op success, NOT a failure/dead-letter", async () => {
+    // syncOmsOrderToWms returns null when it deliberately skips an order that is already
+    // fulfilled out-of-band (no WMS order needed). That must mark the row successful —
+    // never re-queue or dead-letter it. (Regression guard for the false-dead-letter bug.)
+    const sync = vi.fn(async () => null);
+    const { db, updates } = makeDb({ wmsSync: { syncOmsOrderToWms: sync } });
+
+    const outcome = await dispatchOmsWmsSyncRetry(db, {
+      id: 913,
+      provider: "internal",
+      topic: "oms_wms_sync",
+      payload: { omsOrderId: 215693 },
+      attempts: 4, // even at the brink of dead-lettering, a skip is a success
+    });
+
+    expect(outcome).toBe("success");
+    expect(sync).toHaveBeenCalledWith(215693);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("retries (does not succeed) when syncOmsOrderToWms throws a genuine error", async () => {
+    const sync = vi.fn(async () => {
+      throw new Error("db exploded");
+    });
+    const { db, updates } = makeDb({ wmsSync: { syncOmsOrderToWms: sync } });
+
+    const outcome = await dispatchOmsWmsSyncRetry(db, {
+      id: 914,
+      provider: "internal",
+      topic: "oms_wms_sync",
+      payload: { omsOrderId: 10 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending"); // attempts 0 -> 1, retried (not dead, not success)
+    expect(updates[0]!.set.status).not.toBe("success");
+    expect(updates.some((u) => /db exploded/.test(String(u.set.lastError ?? "")))).toBe(true);
+  });
+
   it("keeps pending without incrementing attempts when WMS sync is not wired", async () => {
     const { db, updates } = makeDb({ wmsSync: null });
 
