@@ -17,6 +17,7 @@ import {
   Check,
   RotateCcw,
   Trash2,
+  Ban,
   Pencil,
   ArrowRight,
   ChevronDown,
@@ -231,6 +232,8 @@ export default function CycleCounts() {
   const ccVisible = ccFiltered.slice((ccPage - 1) * CC_PAGE_SIZE, ccPage * CC_PAGE_SIZE);
   const ccRangeStart = ccFiltered.length === 0 ? 0 : (ccPage - 1) * CC_PAGE_SIZE + 1;
   const ccRangeEnd = Math.min(ccPage * CC_PAGE_SIZE, ccFiltered.length);
+  const CANCEL_CONFIRM =
+    "Cancel this cycle count? It will be closed and removed from the active list. Adjustments already applied are kept.";
 
   const { data: cycleCountDetail } = useQuery<CycleCountDetail>({
     queryKey: ["/api/cycle-counts", selectedCount],
@@ -549,6 +552,28 @@ export default function CycleCounts() {
     },
     onError: (error: Error) => {
       toast({ title: "Failed to delete", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/cycle-counts/${id}/cancel`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to cancel");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Cycle count cancelled", description: "Closed and removed from the active list. Applied adjustments were kept." });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
+      setSelectedCount(null);
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to cancel", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1597,9 +1622,26 @@ export default function CycleCounts() {
             </div>
             <p className="text-muted-foreground text-xs">{totalBins - pendingCount}/{totalBins} counted</p>
           </div>
+          {cycleCountDetail.status === "in_progress" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-muted-foreground"
+              onClick={() => {
+                if (confirm(CANCEL_CONFIRM)) {
+                  cancelMutation.mutate(selectedCount);
+                }
+              }}
+              disabled={cancelMutation.isPending}
+              title="Cancel count"
+              data-testid="button-cancel-count-detail"
+            >
+              <Ban className="h-4 w-4" />
+            </Button>
+          )}
           {cycleCountDetail.status !== "completed" && (
-            <Button 
-              variant="ghost" 
+            <Button
+              variant="ghost"
               size="sm"
               className="h-8 px-2 text-destructive"
               onClick={() => {
@@ -3051,6 +3093,23 @@ export default function CycleCounts() {
                             Continue <ChevronRight className="h-4 w-4 ml-1" />
                           </Button>
                         )}
+                        {count.status === "in_progress" && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground hover:text-foreground p-2"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirm(CANCEL_CONFIRM)) {
+                                cancelMutation.mutate(count.id);
+                              }
+                            }}
+                            disabled={cancelMutation.isPending}
+                            title="Cancel count"
+                          >
+                            <Ban className="h-4 w-4" />
+                          </Button>
+                        )}
                         {count.status === "completed" && (
                           <ChevronRight className="h-5 w-5 text-muted-foreground" />
                         )}
@@ -3128,6 +3187,23 @@ export default function CycleCounts() {
                         {count.status === "in_progress" && (
                           <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
                             Continue <ChevronRight className="h-4 w-4 ml-1" />
+                          </Button>
+                        )}
+                        {count.status === "in_progress" && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground hover:text-foreground"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirm(CANCEL_CONFIRM)) {
+                                cancelMutation.mutate(count.id);
+                              }
+                            }}
+                            disabled={cancelMutation.isPending}
+                            data-testid={`button-cancel-count-${count.id}`}
+                          >
+                            <Ban className="h-4 w-4 mr-1" /> Cancel
                           </Button>
                         )}
                         {count.status === "completed" && (
