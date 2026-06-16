@@ -26,6 +26,8 @@ export interface OrderData {
   customerName?: string;
   customerEmail?: string;
   customerPhone?: string;
+  /** Channel-agnostic customer id in the source channel (Shopify customer id, eBay buyer id, …). */
+  externalCustomerId?: string;
   shipToName?: string;
   shipToCompany?: string | null;
   shipToAddress1?: string;
@@ -181,6 +183,7 @@ export function createOmsService(db: any, reservationService?: any) {
           customerName: data.customerName,
           customerEmail: data.customerEmail,
           customerPhone: data.customerPhone,
+          externalCustomerId: data.externalCustomerId,
           shipToName: data.shipToName,
           shipToCompany: data.shipToCompany ?? null,
           shipToAddress1: data.shipToAddress1,

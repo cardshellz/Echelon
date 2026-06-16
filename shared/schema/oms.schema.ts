@@ -38,6 +38,11 @@ export const omsOrders = omsSchema.table("oms_orders", {
   customerName: varchar("customer_name", { length: 200 }),
   customerEmail: varchar("customer_email", { length: 200 }),
   customerPhone: varchar("customer_phone", { length: 50 }),
+  // Channel-agnostic customer identity: the customer's id IN this channel
+  // (Shopify customer id, eBay buyer id, …), interpreted via channel_id —
+  // mirrors the (channel_id, external_order_id) pattern. The stable key for
+  // member resolution + pick-priority; NOT Shopify-specific. (Path C, Phase 0.)
+  externalCustomerId: varchar("external_customer_id", { length: 100 }),
 
   // ===== FRAUD / RISK (migration 063 — §6 Group E D3) =====
   // Captured at OMS ingest from Shopify webhook. No behavior gating in
