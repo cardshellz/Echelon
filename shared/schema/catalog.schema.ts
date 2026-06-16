@@ -50,6 +50,34 @@ export type InsertProductCategory = z.infer<typeof insertProductCategorySchema>;
 export type ProductCategory = typeof productCategories.$inferSelect;
 
 // ============================================================================
+// SHIPPING GROUPS - Fulfillment equivalence classes ("can this item ship with
+// that item"). Distinct from category/product_type: governs which storefront
+// free-shipping threshold a product counts toward and how it's packed/mailed
+// (e.g. flat-mailer storage boxes can't combine with boxed plastic protection).
+// ============================================================================
+export const shippingGroups = catalogSchema.table("shipping_groups", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 50 }).notNull().unique(), // stable key used by storefront/sync (e.g. "protection", "storage_boxes")
+  name: varchar("name", { length: 100 }).notNull(),
+  description: text("description"),
+  sortOrder: integer("sort_order").default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_shipping_groups_active_sort").on(table.isActive, table.sortOrder, table.name),
+]);
+
+export const insertShippingGroupSchema = createInsertSchema(shippingGroups).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertShippingGroup = z.infer<typeof insertShippingGroupSchema>;
+export type ShippingGroup = typeof shippingGroups.$inferSelect;
+
+// ============================================================================
 // PRODUCTS - Master product catalog (source of truth for product identity)
 // ============================================================================
 export const products = catalogSchema.table("products", {
@@ -61,6 +89,7 @@ export const products = catalogSchema.table("products", {
   bulletPoints: jsonb("bullet_points"), // Array of feature bullet points
   categoryId: integer("category_id").references(() => productCategories.id, { onDelete: "set null" }),
   category: varchar("category", { length: 100 }), // Denormalized category name for channel/dropship compatibility
+  shippingGroupId: integer("shipping_group_id").references(() => shippingGroups.id, { onDelete: "set null" }), // Fulfillment equivalence class — see shippingGroups
   subcategory: varchar("subcategory", { length: 200 }),
   brand: varchar("brand", { length: 100 }), // Brand name
   manufacturer: varchar("manufacturer", { length: 200 }),

@@ -97,6 +97,7 @@ interface ProductDetailData {
   description: string | null;
   categoryId: number | null;
   category: string | null;
+  shippingGroupId: number | null;
   subcategory: string | null;
   brand: string | null;
   manufacturer: string | null;
@@ -130,6 +131,13 @@ interface ProductCategory {
   id: number;
   name: string;
   slug: string;
+  isActive: boolean;
+}
+
+interface ShippingGroup {
+  id: number;
+  code: string;
+  name: string;
   isActive: boolean;
 }
 
@@ -810,6 +818,17 @@ export default function ProductDetail() {
     },
   });
   const activeProductCategories = productCategories.filter((category) => category.isActive);
+
+  const { data: shippingGroups = [] } = useQuery<ShippingGroup[]>({
+    queryKey: ["/api/shipping-groups"],
+    queryFn: async () => {
+      const res = await fetch("/api/shipping-groups");
+      if (!res.ok) throw new Error("Failed to fetch shipping groups");
+      return res.json();
+    },
+  });
+  const activeShippingGroups = shippingGroups.filter((group) => group.isActive);
+
   const globalDefaultLeadTime = parseInt(settings?.default_lead_time_days || "120") || 120;
   const globalDefaultSafetyStock = parseInt(settings?.default_safety_stock_days || "7") || 7;
 
@@ -857,6 +876,7 @@ export default function ProductDetail() {
     description: "",
     bulletPoints: "",
     categoryId: "",
+    shippingGroupId: "",
     subcategory: "",
     brand: "",
     manufacturer: "",
@@ -886,6 +906,7 @@ export default function ProductDetail() {
         description: product.description || "",
         bulletPoints: (product.bulletPoints || []).join("\n"),
         categoryId: product.categoryId ? String(product.categoryId) : "",
+        shippingGroupId: product.shippingGroupId ? String(product.shippingGroupId) : "",
         subcategory: product.subcategory || "",
         brand: product.brand || "",
         manufacturer: product.manufacturer || "",
@@ -932,6 +953,7 @@ export default function ProductDetail() {
           description: contentForm.description || null,
           bulletPoints,
           categoryId: contentForm.categoryId ? Number(contentForm.categoryId) : null,
+          shippingGroupId: contentForm.shippingGroupId ? Number(contentForm.shippingGroupId) : null,
           subcategory: contentForm.subcategory || null,
           brand: contentForm.brand || null,
           manufacturer: contentForm.manufacturer || null,
@@ -2021,6 +2043,35 @@ export default function ProductDetail() {
                       placeholder="Comma-separated tags"
                       className="h-9"
                     />
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-3 md:p-6">
+                  <CardTitle className="text-base md:text-lg">Fulfillment characteristics</CardTitle>
+                </CardHeader>
+                <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs md:text-sm">Shipping group</Label>
+                      <Select
+                        value={contentForm.shippingGroupId}
+                        onValueChange={(value) => updateContentField("shippingGroupId", value)}
+                      >
+                        <SelectTrigger className="h-9">
+                          <SelectValue placeholder="Select shipping group" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {activeShippingGroups.map((group) => (
+                            <SelectItem key={group.id} value={String(group.id)}>{group.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Which items can ship together — governs packing and storefront free-shipping thresholds.
+                      </p>
+                    </div>
                   </div>
                 </CardContent>
               </Card>

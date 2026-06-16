@@ -10,6 +10,7 @@ import {
   productCategories,
   products,
   productVariants,
+  shippingGroups,
 } from "@shared/schema";
 import { catalogStorage } from "../catalog";
 import { createImageSyncService } from "./image-sync.service";
@@ -411,6 +412,40 @@ export async function registerProductRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching product categories:", error);
       res.status(500).json({ error: "Failed to fetch product categories" });
+    }
+  });
+
+  app.get("/api/shipping-groups", requirePermission("inventory", "view"), async (_req, res) => {
+    try {
+      const groups = await db
+        .select({
+          id: shippingGroups.id,
+          code: shippingGroups.code,
+          name: shippingGroups.name,
+          description: shippingGroups.description,
+          sortOrder: shippingGroups.sortOrder,
+          isActive: shippingGroups.isActive,
+          createdAt: shippingGroups.createdAt,
+          updatedAt: shippingGroups.updatedAt,
+          productCount: sql<number>`count(${products.id})::int`,
+        })
+        .from(shippingGroups)
+        .leftJoin(products, eq(products.shippingGroupId, shippingGroups.id))
+        .groupBy(
+          shippingGroups.id,
+          shippingGroups.code,
+          shippingGroups.name,
+          shippingGroups.description,
+          shippingGroups.sortOrder,
+          shippingGroups.isActive,
+          shippingGroups.createdAt,
+          shippingGroups.updatedAt,
+        )
+        .orderBy(asc(shippingGroups.sortOrder), asc(shippingGroups.name));
+      res.json(groups);
+    } catch (error) {
+      console.error("Error fetching shipping groups:", error);
+      res.status(500).json({ error: "Failed to fetch shipping groups" });
     }
   });
 
