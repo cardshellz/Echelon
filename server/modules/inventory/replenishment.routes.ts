@@ -2,10 +2,17 @@ import type { Express } from "express";
 import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
-const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage };
 import { requirePermission } from "../../routes/middleware";
 
 export function registerReplenishmentRoutes(app: Express) {
+  // Compose `storage` at CALL time, not at module-init. This module is re-exported
+  // by ../inventory (the barrel, index.ts:38), so during module evaluation
+  // `inventoryStorage` is still in its temporal dead zone — the barrel body that
+  // assigns it (index.ts:20) hasn't run yet. Snapshotting it at load made `storage`
+  // EMPTY in the esbuild prod bundle (TDZ -> undefined -> {...undefined}), so every
+  // /api/replen/* 500'd with "createReplenTask is not a function". By call time
+  // (app startup) the barrel is fully initialized.
+  const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage };
   // ===== REPLENISHMENT API =====
   
   // Tier Defaults - default rules by UOM hierarchy level
