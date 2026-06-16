@@ -39,6 +39,7 @@ import {
   markShipmentCancelled,
   markShipmentVoided,
   recomputeOrderStatusFromShipments,
+  applyLineCoverageGuard,
   dispatchShipmentEvent,
   handleAddressChangeOnShipment,
   handleCustomerCancelOnShipment,
@@ -1297,6 +1298,24 @@ describe("markShipmentVoided", () => {
 // Read order: order row FIRST, then shipments list. Tests script the
 // response queue in that order.
 
+describe("applyLineCoverageGuard (pure)", () => {
+  it("downgrades shipped → partially_shipped when units are owed with evidence", () => {
+    expect(applyLineCoverageGuard("shipped", { owedUnits: 1, hasLineEvidence: true })).toBe("partially_shipped");
+  });
+  it("leaves shipped untouched when fully covered (owedUnits=0)", () => {
+    expect(applyLineCoverageGuard("shipped", { owedUnits: 0, hasLineEvidence: true })).toBe("shipped");
+  });
+  it("never downgrades without line evidence (header-only / legacy preserve)", () => {
+    expect(applyLineCoverageGuard("shipped", { owedUnits: 9, hasLineEvidence: false })).toBe("shipped");
+  });
+  it("only acts on 'shipped' — other derived statuses pass through", () => {
+    expect(applyLineCoverageGuard("partially_shipped", { owedUnits: 3, hasLineEvidence: true })).toBe("partially_shipped");
+    expect(applyLineCoverageGuard("cancelled", { owedUnits: 3, hasLineEvidence: true })).toBe("cancelled");
+    expect(applyLineCoverageGuard("on_hold", { owedUnits: 3, hasLineEvidence: true })).toBe("on_hold");
+    expect(applyLineCoverageGuard("ready", { owedUnits: 3, hasLineEvidence: true })).toBe("ready");
+  });
+});
+
 describe("recomputeOrderStatusFromShipments :: state matrix", () => {
   it("1 shipment 'shipped' → order 'shipped' (changed=true)", async () => {
     const mock = makeDb([
@@ -1385,6 +1404,76 @@ describe("recomputeOrderStatusFromShipments :: state matrix", () => {
     });
     expect(result.warehouseStatus).toBe("shipped");
     expect(result.changed).toBe(true);
+  });
+
+  it("1 shipped + 1 cancelled WITH owed units → 'partially_shipped' (line-coverage guard, #57921 fix)", async () => {
+    // The shipped shipment covered some units; the cancelled shipment's units
+    // are still owed. deriveWmsFromShipments alone says 'shipped'; the guard
+    // downgrades because owed_units>0 and there IS line-item evidence.
+    const mock = makeDb([
+      {
+        rows: [
+          {
+            id: 42,
+            warehouse_status: "ready_to_ship",
+            completed_at: null,
+            owed_units: 1,
+            lines_with_evidence: 1,
+          },
+        ],
+      },
+      { rows: [{ status: "shipped" }, { status: "cancelled" }] },
+      { rows: [] },
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result.warehouseStatus).toBe("partially_shipped");
+    expect(result.changed).toBe(true);
+  });
+
+  it("1 shipped + 1 cancelled, owed units but NO line evidence → stays 'shipped' (header-only preserve)", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          {
+            id: 42,
+            warehouse_status: "ready_to_ship",
+            completed_at: null,
+            owed_units: 5,
+            lines_with_evidence: 0, // header-only shipment: no linked items
+          },
+        ],
+      },
+      { rows: [{ status: "shipped" }, { status: "cancelled" }] },
+      { rows: [] },
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result.warehouseStatus).toBe("shipped");
+  });
+
+  it("1 shipped + 1 cancelled, fully covered (owed_units=0) → stays 'shipped'", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          {
+            id: 42,
+            warehouse_status: "ready_to_ship",
+            completed_at: null,
+            owed_units: 0,
+            lines_with_evidence: 2,
+          },
+        ],
+      },
+      { rows: [{ status: "shipped" }, { status: "cancelled" }] },
+      { rows: [] },
+    ]);
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
+      now: NOW,
+    });
+    expect(result.warehouseStatus).toBe("shipped");
   });
 
   it("2 shipments both cancelled → 'cancelled'", async () => {

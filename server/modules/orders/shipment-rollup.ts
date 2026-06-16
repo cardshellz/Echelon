@@ -691,6 +691,42 @@ export async function markShipmentVoided(
   return { wmsOrderId: current.order_id, changed: true };
 }
 
+// ─── applyLineCoverageGuard ─────────────────────────────────────────
+
+/**
+ * Interim line-coverage guard, pending the line-fulfillment ledger
+ * (FULFILLMENT_STATE_DESIGN.md §2.1).
+ *
+ * THE BUG IT FIXES: `deriveWmsFromShipments` derives `shipped` whenever no
+ * shipment is still OPEN — but a `cancelled`/`voided` shipment is "not open"
+ * too, so an order whose remaining units were owed by a shipment that got
+ * cancelled is wrongly declared fully `shipped` (the shipment-set model has
+ * no concept of units-still-owed). The 2026-06-15 prod reconciliation found
+ * 223 live orders in this exact state (e.g. ordered 27, shipped 26, the 27th
+ * unit's shipment cancelled). See scripts/reconcile-line-fulfillments-dryrun.ts.
+ *
+ * THE GUARD: when the shipment-set says `shipped` BUT line-item evidence proves
+ * units are still owed, downgrade to `partially_shipped`. It only ever
+ * DOWNGRADES `shipped`→`partially_shipped`; fully-covered orders (owedUnits=0)
+ * are untouched, so the 1,994 correctly-shipped orders are unaffected.
+ *
+ * `hasLineEvidence` gates the downgrade: header-only / legacy shipped orders
+ * that have NO linked shipment-item rows (no evidence either way) are NEVER
+ * downgraded — that is the same preserve principle the empty-shipments guard
+ * uses, and it protects the ~54k legacy `shipped` orders from regressing.
+ *
+ * Pure + deterministic; the DB-aware caller supplies the coverage signals.
+ */
+export function applyLineCoverageGuard(
+  derived: WmsWarehouseStatus,
+  coverage: { owedUnits: number; hasLineEvidence: boolean },
+): WmsWarehouseStatus {
+  if (derived === "shipped" && coverage.hasLineEvidence && coverage.owedUnits > 0) {
+    return "partially_shipped";
+  }
+  return derived;
+}
+
 // ─── recomputeOrderStatusFromShipments ──────────────────────────────
 
 /**
@@ -702,6 +738,10 @@ export async function markShipmentVoided(
  * Behavior:
  *   - Reads all shipments for the order (status column only).
  *   - Feeds them into the pure `deriveWmsFromShipments` enum helper.
+ *   - Applies `applyLineCoverageGuard`: when the shipment-set derives
+ *     `shipped` but line-item evidence proves units are still owed (a
+ *     cancelled shipment left units un-shipped), downgrades to
+ *     `partially_shipped`. Interim fix pending the ledger cutover.
  *   - Compares the derived status to the current `warehouse_status`.
  *     If different, UPDATEs. Otherwise, no-op.
  *   - `completed_at` is stamped only on the transition INTO `shipped`
@@ -737,7 +777,36 @@ export async function recomputeOrderStatusFromShipments(
       COALESCE(SUM(CASE
         WHEN COALESCE(oi.requires_shipping, 1) <> 0 THEN COALESCE(oi.picked_quantity, 0)
         ELSE 0
-      END), 0)::int AS picked_unit_count
+      END), 0)::int AS picked_unit_count,
+      -- Line-coverage signals for applyLineCoverageGuard (scalar subqueries so
+      -- the call count stays at one query — the rollup tests script exactly
+      -- [order, shipments, UPDATE]). owed_units = units on shippable, non-
+      -- cancelled lines not yet covered by a shipped/returned/lost shipment.
+      (
+        SELECT COALESCE(SUM(GREATEST(oi2.quantity - COALESCE(sl.shipped_qty, 0), 0)), 0)::int
+        FROM wms.order_items oi2
+        LEFT JOIN (
+          SELECT osi.order_item_id, SUM(osi.qty)::int AS shipped_qty
+          FROM wms.outbound_shipment_items osi
+          JOIN wms.outbound_shipments os2 ON os2.id = osi.shipment_id
+          WHERE os2.status IN ('shipped', 'returned', 'lost')
+          GROUP BY osi.order_item_id
+        ) sl ON sl.order_item_id = oi2.id
+        WHERE oi2.order_id = o.id
+          AND COALESCE(oi2.requires_shipping, 1) <> 0
+          AND oi2.status <> 'cancelled'
+          AND oi2.quantity > 0
+      ) AS owed_units,
+      -- lines_with_evidence > 0 means there ARE linked shipment-item rows on a
+      -- shipped shipment for this order; without them we never downgrade.
+      (
+        SELECT COUNT(*)::int
+        FROM wms.outbound_shipment_items osi3
+        JOIN wms.outbound_shipments os3 ON os3.id = osi3.shipment_id
+        JOIN wms.order_items oi3 ON oi3.id = osi3.order_item_id
+        WHERE oi3.order_id = o.id
+          AND os3.status IN ('shipped', 'returned', 'lost')
+      ) AS lines_with_evidence
     FROM wms.orders o
     LEFT JOIN wms.order_items oi ON oi.order_id = o.id
     WHERE o.id = ${wmsOrderId}
@@ -754,7 +823,15 @@ export async function recomputeOrderStatusFromShipments(
   const shipmentRows: Array<{ status: string }> = shipmentsResult?.rows ?? [];
   const statuses = shipmentRows.map((r) => r.status as ShipmentStatus);
 
-  const derived = deriveWmsFromShipments(statuses);
+  // Shipment-set derivation, then the interim line-coverage guard. `derived` is
+  // reassigned so every downstream guard/UPDATE uses the coverage-adjusted
+  // value. When owed_units / lines_with_evidence are absent (older callers,
+  // unit-test mocks), the guard reads them as 0 → no downgrade → unchanged.
+  let derived = deriveWmsFromShipments(statuses);
+  derived = applyLineCoverageGuard(derived, {
+    owedUnits: Number(orderRow?.owed_units ?? 0),
+    hasLineEvidence: Number(orderRow?.lines_with_evidence ?? 0) > 0,
+  });
 
   if (!orderRow) {
     return { warehouseStatus: derived, changed: false };
