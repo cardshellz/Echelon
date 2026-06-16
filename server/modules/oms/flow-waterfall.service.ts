@@ -401,7 +401,12 @@ const DEAD_LETTER_REASONS: DeadLetterReasonDef[] = [
 ];
 
 // Drill-down rows for ONE reason bucket (the dead-letter row query + reason filter).
-const deadLetterRows = (reasonCode: string) => sql`SELECT ${DEAD_LETTER_REASON_CODE} AS reason_code, COALESCE(rq.payload->>'name', rq.payload->>'order_number', rq.payload->>'orderNumber', wo.order_number) AS order_number, rq.payload->>'shipmentId' AS shipment_id, rq.provider, rq.topic, rq.attempts, rq.last_error, rq.next_retry_at, rq.updated_at AS at, rq.id AS retry_id FROM oms.webhook_retry_queue rq LEFT JOIN wms.outbound_shipments os ON os.id = NULLIF(rq.payload->>'shipmentId','')::int LEFT JOIN wms.orders wo ON wo.id = os.order_id WHERE rq.status = 'dead' AND (${DEAD_LETTER_REASON_CODE}) = ${reasonCode} ORDER BY rq.updated_at DESC NULLS LAST LIMIT 50`;
+// Resolves an order ref per topic so the rows are actionable: oms_wms_sync carries
+// {omsOrderId} → oms_orders.external_order_number; shopify_fulfillment_push carries
+// {shipmentId} → our shipment → wms order number; SHIP_NOTIFY carries only a ShipStation
+// {resource_url batchId} (a batch of many orders — no single order), surfaced as
+// shipstation_batch so it can at least be opened in ShipStation.
+const deadLetterRows = (reasonCode: string) => sql`SELECT ${DEAD_LETTER_REASON_CODE} AS reason_code, COALESCE(rq.payload->>'name', rq.payload->>'order_number', rq.payload->>'orderNumber', oo.external_order_number, wo.order_number) AS order_number, rq.payload->>'shipmentId' AS shipment_id, (regexp_match(rq.payload->>'resource_url', 'batchId=([0-9]+)'))[1] AS shipstation_batch, rq.provider, rq.topic, rq.attempts, rq.last_error, rq.next_retry_at, rq.updated_at AS at, rq.id AS retry_id FROM oms.webhook_retry_queue rq LEFT JOIN wms.outbound_shipments os ON os.id = NULLIF(rq.payload->>'shipmentId','')::int LEFT JOIN wms.orders wo ON wo.id = os.order_id LEFT JOIN oms.oms_orders oo ON oo.id = NULLIF(rq.payload->>'omsOrderId','')::int WHERE rq.status = 'dead' AND (${DEAD_LETTER_REASON_CODE}) = ${reasonCode} ORDER BY rq.updated_at DESC NULLS LAST LIMIT 50`;
 
 const DEAD_LETTER_ISSUES: FlowIssueDef[] = DEAD_LETTER_REASONS.map((r) => ({
   code: r.code, kind: "queue_failure", stage: r.stage, severity: r.severity,
