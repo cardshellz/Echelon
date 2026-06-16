@@ -1643,24 +1643,31 @@ DEF-456,25,,,5.00,,Location TBD`;
                 <div className="flex gap-2 flex-wrap">
                   {selectedReceipt.status === "draft" && (
                     <>
-                      <Button 
-                        variant="outline"
-                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
-                        onClick={downloadTemplate}
-                        data-testid="btn-download-template"
-                      >
-                        <Download className="h-4 w-4 mr-1 md:mr-2" />
-                        <span className="hidden sm:inline">Download</span> Template
-                      </Button>
-                      <Button 
-                        variant="outline"
-                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
-                        onClick={() => { setShowCSVImport(true); }}
-                        data-testid="btn-import-csv"
-                      >
-                        <Upload className="h-4 w-4 mr-1 md:mr-2" />
-                        <span className="hidden sm:inline">Import</span> CSV
-                      </Button>
+                      {/* CSV bulk-entry builds the line list for blind/manual
+                          receipts; a PO receipt is already populated from the PO,
+                          so hide it here to keep the common flow clean. */}
+                      {selectedReceipt.sourceType !== "po" && (
+                        <>
+                          <Button
+                            variant="outline"
+                            className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
+                            onClick={downloadTemplate}
+                            data-testid="btn-download-template"
+                          >
+                            <Download className="h-4 w-4 mr-1 md:mr-2" />
+                            <span className="hidden sm:inline">Download</span> Template
+                          </Button>
+                          <Button
+                            variant="outline"
+                            className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
+                            onClick={() => { setShowCSVImport(true); }}
+                            data-testid="btn-import-csv"
+                          >
+                            <Upload className="h-4 w-4 mr-1 md:mr-2" />
+                            <span className="hidden sm:inline">Import</span> CSV
+                          </Button>
+                        </>
+                      )}
                       <Button 
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => openReceiptMutation.mutate(selectedReceipt.id)}
@@ -1876,7 +1883,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 </div>
                                 <div>
                                   <Label className="text-xs text-muted-foreground">Received</Label>
-                                  {selectedReceipt.status !== "closed" ? (
+                                  {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
                                     <Input
                                       type="number"
                                       value={line.receivedQty}
@@ -1888,6 +1895,8 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       min={0}
                                       autoComplete="off"
                                     />
+                                  ) : selectedReceipt.status === "draft" ? (
+                                    <div className="text-xs text-muted-foreground italic mt-1">Press Start to count</div>
                                   ) : (
                                     <div className="font-medium">{line.receivedQty}</div>
                                   )}
@@ -1897,14 +1906,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 <div className="flex-1">
                                   <Label className="text-xs text-muted-foreground">Location</Label>
                                   <div className="mt-1">
-                                    {selectedReceipt.status === "closed" ? (
-                                      <span className="text-sm">
-                                        {line.putawayLocationId 
-                                          ? locations.find(l => l.id === line.putawayLocationId)?.code || "Set"
-                                          : "Via CSV"
-                                        }
-                                      </span>
-                                    ) : (
+                                    {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
                                       <>
                                       <LocationTypeahead
                                         locations={selectedReceipt?.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
@@ -1927,19 +1929,26 @@ DEF-456,25,,,5.00,,Location TBD`;
                                         </button>
                                       )}
                                     </>
+                                    ) : (
+                                      <span className="text-sm">
+                                        {line.putawayLocationId
+                                          ? locations.find(l => l.id === line.putawayLocationId)?.code || "Set"
+                                          : (selectedReceipt.status === "closed" ? "Via CSV" : "—")
+                                        }
+                                      </span>
                                     )}
                                   </div>
                                 </div>
-                                {selectedReceipt.status !== "closed" && line.status !== "complete" && (
+                                {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && line.status !== "complete" && (
                                   <Button
                                     variant="outline"
                                     size="sm"
                                     className="min-h-[44px]"
                                     onClick={() => updateLineMutation.mutate({
                                       lineId: line.id,
-                                      updates: { 
+                                      updates: {
                                         receivedQty: line.expectedQty || 0,
-                                        status: "complete" 
+                                        status: "complete"
                                       }
                                     })}
                                     disabled={updateLineMutation.isPending}
@@ -2016,7 +2025,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 })()}
                               </TableCell>
                               <TableCell>
-                                {selectedReceipt.status !== "closed" ? (
+                                {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
                                   <div>
                                     <Input
                                       type="number"
@@ -2035,19 +2044,14 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       return <div className="text-[11px] text-muted-foreground mt-1">{unitNoun(cur)}s of {cur.unitsPerVariant}</div>;
                                     })()}
                                   </div>
+                                ) : selectedReceipt.status === "draft" ? (
+                                  <span className="text-xs text-muted-foreground italic">Press Start to count</span>
                                 ) : (
                                   line.receivedQty
                                 )}
                               </TableCell>
                               <TableCell>
-                                {selectedReceipt.status === "closed" ? (
-                                  <span className="text-sm text-muted-foreground">
-                                    {line.putawayLocationId 
-                                      ? locations.find(l => l.id === line.putawayLocationId)?.code || "Set"
-                                      : "Via CSV"
-                                    }
-                                  </span>
-                                ) : (
+                                {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
                                   <LocationTypeahead
                                     locations={locations}
                                     value={line.putawayLocationId}
@@ -2057,6 +2061,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                                     })}
                                     disabled={false}
                                   />
+                                ) : (
+                                  <span className="text-sm text-muted-foreground">
+                                    {line.putawayLocationId
+                                      ? locations.find(l => l.id === line.putawayLocationId)?.code || "Set"
+                                      : (selectedReceipt.status === "closed" ? "Via CSV" : "—")
+                                    }
+                                  </span>
                                 )}
                               </TableCell>
                               <TableCell>
@@ -2097,7 +2108,8 @@ DEF-456,25,,,5.00,,Location TBD`;
                               )}
                               {selectedReceipt.status !== "closed" && (
                                 <TableCell>
-                                  {line.status !== "complete" ? (
+                                  {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (
+                                    line.status !== "complete" ? (
                                     <Button
                                       variant="ghost"
                                       size="sm"
@@ -2118,7 +2130,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                     <AlertTriangle className="h-4 w-4 text-amber-500" />
                                   ) : (
                                     <Check className="h-4 w-4 text-green-600" />
-                                  )}
+                                  ))}
                                 </TableCell>
                               )}
                             </TableRow>
