@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { db } from "../../db";
-import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   channelConnections,
   channelFeeds,
@@ -446,6 +446,151 @@ export async function registerProductRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching shipping groups:", error);
       res.status(500).json({ error: "Failed to fetch shipping groups" });
+    }
+  });
+
+  // Paginated products with their current shipping group — drives the Shipping
+  // Groups admin table. filter = "all" | "unassigned" | "group:<id>".
+  // Registered before any "/:id" route so the literal "products" segment wins.
+  app.get("/api/shipping-groups/products", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const filterRaw = String(req.query.filter ?? "all");
+      const search = String(req.query.search ?? "").trim();
+      const page = Math.max(1, parseInt(String(req.query.page ?? "1")) || 1);
+      const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? "50")) || 50));
+      const offset = (page - 1) * limit;
+
+      const conds: any[] = [eq(products.isActive, true)];
+      if (filterRaw === "unassigned") {
+        conds.push(isNull(products.shippingGroupId));
+      } else if (filterRaw.startsWith("group:")) {
+        const gid = parseInt(filterRaw.slice("group:".length));
+        if (!Number.isInteger(gid) || gid <= 0) {
+          return res.status(400).json({ error: "Invalid group filter" });
+        }
+        conds.push(eq(products.shippingGroupId, gid));
+      }
+      if (search) {
+        const pattern = `%${search.toLowerCase()}%`;
+        conds.push(or(ilike(products.name, pattern), ilike(products.sku, pattern)));
+      }
+      const whereExpr = and(...conds);
+
+      const totalRows = await db.select({ c: sql<number>`count(*)::int` }).from(products).where(whereExpr);
+      const total = Number(totalRows[0]?.c ?? 0);
+      if (total === 0) return res.json({ rows: [], total: 0, page, limit });
+
+      const rows = await db
+        .select({
+          id: products.id,
+          name: products.name,
+          sku: products.sku,
+          status: products.status,
+          brand: products.brand,
+          shippingGroupId: products.shippingGroupId,
+        })
+        .from(products)
+        .where(whereExpr)
+        .orderBy(asc(products.name), asc(products.id))
+        .limit(limit)
+        .offset(offset);
+
+      res.json({ rows, total, page, limit });
+    } catch (error) {
+      console.error("Error listing shipping-group products:", error);
+      res.status(500).json({ error: "Failed to list products" });
+    }
+  });
+
+  // Bulk assign / reassign / clear the shipping group for a set of products.
+  // shippingGroupId null clears it. Single-membership: setting a new group
+  // automatically replaces the old one, so there is no separate "remove".
+  app.post("/api/shipping-groups/assign", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const productIds: number[] = Array.isArray(req.body.productIds)
+        ? req.body.productIds.filter((n: any) => Number.isInteger(n) && n > 0)
+        : [];
+      if (productIds.length === 0) {
+        return res.status(400).json({ error: "productIds must be a non-empty array of positive integers" });
+      }
+
+      const rawGroup = req.body.shippingGroupId;
+      let shippingGroupId: number | null = null;
+      if (rawGroup !== null && rawGroup !== undefined && rawGroup !== "") {
+        const gid = Number(rawGroup);
+        if (!Number.isInteger(gid) || gid <= 0) {
+          return res.status(400).json({ error: "Invalid shippingGroupId" });
+        }
+        const grp = await db.select({ id: shippingGroups.id }).from(shippingGroups).where(eq(shippingGroups.id, gid));
+        if (!grp[0]) return res.status(404).json({ error: "Shipping group not found" });
+        shippingGroupId = gid;
+      }
+
+      const updated = await db
+        .update(products)
+        .set({ shippingGroupId, updatedAt: new Date() })
+        .where(inArray(products.id, productIds))
+        .returning({ id: products.id });
+
+      res.json({ shippingGroupId, requested: productIds.length, updated: updated.length });
+    } catch (error) {
+      console.error("Error assigning shipping group:", error);
+      res.status(500).json({ error: "Failed to assign shipping group" });
+    }
+  });
+
+  app.post("/api/shipping-groups", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const name = String(req.body.name ?? "").trim();
+      if (!name) return res.status(400).json({ error: "Shipping group name is required" });
+      // code is the stable storefront/sync key; lowercase snake to match seeds
+      // (e.g. "protection", "storage_boxes").
+      const code = String(req.body.code ?? name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+      if (!code) return res.status(400).json({ error: "Shipping group code must contain at least one letter or number" });
+
+      const [group] = await db
+        .insert(shippingGroups)
+        .values({
+          code,
+          name,
+          description: req.body.description || null,
+          sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
+        })
+        .returning();
+      res.status(201).json(group);
+    } catch (error: any) {
+      if (error?.code === "23505") return res.status(409).json({ error: "Shipping group code already exists" });
+      console.error("Error creating shipping group:", error);
+      res.status(500).json({ error: "Failed to create shipping group" });
+    }
+  });
+
+  app.patch("/api/shipping-groups/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid shipping group id" });
+      const existing = await db.select().from(shippingGroups).where(eq(shippingGroups.id, id));
+      if (!existing[0]) return res.status(404).json({ error: "Shipping group not found" });
+
+      const name = req.body.name !== undefined ? String(req.body.name).trim() : existing[0].name;
+      if (!name) return res.status(400).json({ error: "Shipping group name is required" });
+
+      // code is intentionally immutable on update (stable storefront/sync key).
+      const [group] = await db
+        .update(shippingGroups)
+        .set({
+          name,
+          description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
+          sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
+          isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
+          updatedAt: new Date(),
+        })
+        .where(eq(shippingGroups.id, id))
+        .returning();
+      res.json(group);
+    } catch (error) {
+      console.error("Error updating shipping group:", error);
+      res.status(500).json({ error: "Failed to update shipping group" });
     }
   });
 
