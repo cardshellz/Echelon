@@ -526,9 +526,10 @@ export default function FlowMonitor() {
                   <Badge variant="outline">{fmt(selected.count)} open</Badge>
                 </div>
                 {selected.why && (
-                  <p className="mt-3 rounded-md border border-amber-200 bg-amber-50/60 p-2.5 text-xs leading-relaxed text-amber-900">
-                    <span className="font-semibold">Why / where to look — </span>{selected.why}
-                  </p>
+                  <div className="mt-3 rounded-md border border-amber-200 bg-amber-50/60 p-2.5">
+                    <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-700">What it means · what to do</div>
+                    <p className="text-xs leading-relaxed text-amber-900">{selected.why}</p>
+                  </div>
                 )}
               </div>
 
