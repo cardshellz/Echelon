@@ -256,7 +256,8 @@ type InventoryCore = {
     cycleCountId?: number;
     userId?: string;
     allowNegative?: boolean;
-  }) => Promise<void>;
+    unitCostCents?: number;
+  }) => Promise<{ orphanedQty: number; consumedCostCents?: number; consumedQty?: number }>;
   transfer: (params: {
     productVariantId: number;
     fromLocationId: number;
@@ -1224,8 +1225,11 @@ export class ReplenishmentUseCases {
           }
         }
 
-        // Decrement source variant
-        await invTx.adjustInventory({
+        // Decrement source variant. adjustInventory returns the ACTUAL cost
+        // consumed FIFO from the source lots — carry it onto the broken-out units
+        // so the new lots inherit the real cost of the case(s) opened, instead of
+        // falling back to the pick variant's (possibly stale) book cost.
+        const breakConsumed = await invTx.adjustInventory({
           productVariantId: sourceVariant.id,
           warehouseLocationId: executableTask.fromLocationId,
           qtyDelta: -executableTask.qtySourceUnits,
@@ -1233,7 +1237,18 @@ export class ReplenishmentUseCases {
           userId: userId ?? undefined,
         });
 
-        // Increment target variant
+        // Cost per base unit actually consumed (weighted across the FIFO source
+        // lots). Left undefined when the source had no cost (e.g. historical $0
+        // lots) so resolveCost falls back rather than forcing 0.
+        const baseConsumed = (breakConsumed.consumedQty ?? 0) * sourceVariant.unitsPerVariant;
+        const perBaseCostCents =
+          baseConsumed > 0 ? (breakConsumed.consumedCostCents ?? 0) / baseConsumed : 0;
+        const pickUnitCostCents =
+          perBaseCostCents > 0 ? Math.round(perBaseCostCents * pickVariant.unitsPerVariant) : undefined;
+        const remainderUnitCostCents =
+          perBaseCostCents > 0 ? Math.round(perBaseCostCents) : undefined;
+
+        // Increment target variant — inherit the case's actual per-unit cost.
         await invTx.adjustInventory({
           productVariantId: pickVariant.id,
           warehouseLocationId: executableTask.toLocationId,
@@ -1241,6 +1256,7 @@ export class ReplenishmentUseCases {
           reason: `Replen case-break to pick location` +
             (remainder > 0 ? ` (${remainder} base units remainder credited back to source)` : ""),
           userId: userId ?? undefined,
+          unitCostCents: pickUnitCostCents,
         });
 
         // Credit remainder back to source — conservation of units.
@@ -1255,6 +1271,7 @@ export class ReplenishmentUseCases {
               qtyDelta: remainder,
               reason: `Case-break remainder: ${remainder} x ${pickVariant.name} at source`,
               userId: userId ?? undefined,
+              unitCostCents: remainderUnitCostCents,
             });
           } else {
             // Remainder can't form complete pick units — credit as base variant
@@ -1271,6 +1288,7 @@ export class ReplenishmentUseCases {
               qtyDelta: remainder,
               reason: `Case-break remainder: ${remainder} base units credited as ${baseVariant.name}`,
               userId: userId ?? undefined,
+              unitCostCents: remainderUnitCostCents,
             });
           }
         }
