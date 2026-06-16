@@ -1,38 +1,46 @@
 /**
- * Structural guards for the Flow Monitor's declarative consistency-invariant
- * registry (flow-waterfall.service.ts). These don't hit a DB — they assert the
- * registry is well-formed so adding/editing an invariant can't silently break
- * the waterfall, and they pin the bug classes the 2026-06 fulfillment audit
- * found so a future refactor can't drop them.
+ * Structural guards for the Flow Monitor's declarative issue registry
+ * (flow-waterfall.service.ts). These don't hit a DB — they assert the registry is
+ * well-formed so adding/editing an issue can't silently break the waterfall, and
+ * they pin the contradiction bug-classes the 2026-06 fulfillment audit found so a
+ * future refactor can't drop them.
  */
 import { describe, it, expect } from "vitest";
-import { CONSISTENCY_INVARIANTS } from "../../flow-waterfall.service";
+import { FLOW_ISSUES, CONSISTENCY_INVARIANTS } from "../../flow-waterfall.service";
 
 const VALID_STAGES = new Set(["intake", "oms_to_wms", "wms_fulfill", "engine_push", "shipped", "writeback", "other"]);
+const VALID_KINDS = new Set(["stuck", "contradiction", "duplicate", "queue_failure", "sla"]);
+const VALID_SEVERITY = new Set(["critical", "warning", "info"]);
+const VALID_REMEDIATION = new Set([
+  "REQUEUE", "REPLAY_AFTER_STOCK", "REPLAY_AFTER_FIX", "MANUAL_REVIEW", "INVESTIGATE", "CODE_FIX", "PURGE_OBSOLETE",
+]);
 
-describe("flow-waterfall consistency invariants", () => {
-  it("every invariant is well-formed (code/severity/stage/message/why + count & sample builders)", () => {
-    for (const inv of CONSISTENCY_INVARIANTS) {
-      expect(inv.code).toMatch(/^[A-Z][A-Z0-9_]+$/);
-      expect(["critical", "warning"]).toContain(inv.severity);
-      expect(VALID_STAGES.has(inv.stage)).toBe(true);
-      expect(inv.message.length).toBeGreaterThan(10);
-      expect(inv.why.length).toBeGreaterThan(20); // the "where to look" must be substantive
-      expect(typeof inv.count).toBe("function");
-      expect(typeof inv.sample).toBe("function");
+describe("flow-waterfall issue registry", () => {
+  it("every issue is well-formed (code/kind/stage/severity/message/why/remediation + builders)", () => {
+    for (const i of FLOW_ISSUES) {
+      expect(i.code).toMatch(/^[A-Z][A-Z0-9_]+$/);
+      expect(VALID_KINDS.has(i.kind)).toBe(true);
+      expect(VALID_STAGES.has(i.stage)).toBe(true);
+      expect(VALID_SEVERITY.has(i.severity)).toBe(true);
+      expect(i.message.length).toBeGreaterThan(8);
+      expect(i.why.length).toBeGreaterThan(20); // the "where to look / what to do" must be substantive
+      expect(VALID_REMEDIATION.has(i.remediation)).toBe(true);
+      expect(typeof i.replaySafe).toBe("boolean");
+      expect(typeof i.count).toBe("function");
+      expect(typeof i.sample).toBe("function");
     }
   });
 
-  it("codes are unique (no collision with each other)", () => {
-    const codes = CONSISTENCY_INVARIANTS.map((i) => i.code);
+  it("codes are unique (no collision)", () => {
+    const codes = FLOW_ISSUES.map((i) => i.code);
     expect(new Set(codes).size).toBe(codes.length);
   });
 
   it("count/sample builders produce a query object without throwing", () => {
     const fakeWin = {}; // builders just interpolate it into sql``
-    for (const inv of CONSISTENCY_INVARIANTS) {
-      expect(inv.count(fakeWin)).toBeTruthy();
-      expect(inv.sample(fakeWin)).toBeTruthy();
+    for (const i of FLOW_ISSUES) {
+      expect(i.count(fakeWin)).toBeTruthy();
+      expect(i.sample(fakeWin)).toBeTruthy();
     }
   });
 
@@ -43,5 +51,7 @@ describe("flow-waterfall consistency invariants", () => {
     expect(codes.has("ORDER_CANCELLED_WITH_SHIPPED_UNITS")).toBe(true);  // bogus-cascade "lost orders"
     expect(codes.has("SHIPMENT_SHIPPED_AT_WRONG_STATUS")).toBe(true);    // shipped_at but non-shipped status
     expect(codes.has("ORDER_SHIPPED_BUT_LINE_SHORT")).toBe(true);        // claims shipped, a line is short
+    // The contradiction view is exactly the kind-filtered subset.
+    expect(CONSISTENCY_INVARIANTS.every((i) => i.kind === "contradiction")).toBe(true);
   });
 });

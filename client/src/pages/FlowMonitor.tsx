@@ -29,12 +29,29 @@ import { cn } from "@/lib/utils";
 type FunnelStageKey =
   | "intake" | "oms_to_wms" | "wms_fulfill" | "engine_push" | "shipped" | "writeback" | "other";
 
+type RemediationClass =
+  | "REQUEUE" | "REPLAY_AFTER_STOCK" | "REPLAY_AFTER_FIX"
+  | "MANUAL_REVIEW" | "INVESTIGATE" | "CODE_FIX" | "PURGE_OBSOLETE";
+
+const REMEDIATION_LABEL: Record<RemediationClass, string> = {
+  REQUEUE: "Re-run it",
+  REPLAY_AFTER_STOCK: "Receive stock, then re-run",
+  REPLAY_AFTER_FIX: "Fix, then re-run",
+  MANUAL_REVIEW: "Needs review",
+  INVESTIGATE: "Investigate",
+  CODE_FIX: "Needs a code fix",
+  PURGE_OBSOLETE: "Safe to drop",
+};
+
 interface FlowIssue {
   code: string;
+  kind?: "stuck" | "contradiction" | "duplicate" | "queue_failure" | "sla";
   severity: "critical" | "warning" | "info";
   count: number;
   message: string;
   why?: string;
+  remediation?: RemediationClass;
+  replaySafe?: boolean;
   sample: any[];
   stage: FunnelStageKey;
 }
@@ -49,7 +66,7 @@ interface FlowWaterfall {
   eventSpine: Array<{ eventType: string; count: number }>;
   intakeModel: Array<{ provider: string; model: string; cadenceSeconds: number; note: string }>;
   duplicates: { omsToPicking: number; overShippedItems: number; unmappedEngineSplits: number; blockedDupOrders: number; sample: any[] };
-  deadLetterCauses: Array<{ cause: string; count: number }>;
+  deadLetterCauses: Array<{ code?: string; cause: string; count: number }>;
   crossSystem: { wmsShippedOmsOpen: number; staleConfirmed: number; sample: any[] };
   sla: { breached: number; sample: any[] };
   issues: FlowIssue[];
@@ -522,8 +539,13 @@ export default function FlowMonitor() {
                 <SheetTitle className="text-base">{selected.message}</SheetTitle>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <Badge variant={selected.severity === "critical" ? "destructive" : "outline"} className="capitalize">{selected.severity}</Badge>
-                  <Badge variant="outline" className="font-mono-sku">{selected.code}</Badge>
                   <Badge variant="outline">{fmt(selected.count)} open</Badge>
+                  {selected.remediation && (
+                    <Badge className="border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-50">
+                      {REMEDIATION_LABEL[selected.remediation]}{selected.replaySafe ? " · replay-safe" : ""}
+                    </Badge>
+                  )}
+                  <Badge variant="outline" className="font-mono-sku">{selected.code}</Badge>
                 </div>
                 {selected.why && (
                   <div className="mt-3 rounded-md border border-amber-200 bg-amber-50/60 p-2.5">
