@@ -54,6 +54,7 @@ import Replenishment from "@/pages/Replenishment";
 import SlottingSetup from "@/pages/SlottingSetup";
 import ChannelAllocation from "@/pages/ChannelAllocation";
 import ProductLines from "@/pages/ProductLines";
+import ShippingGroups from "@/pages/ShippingGroups";
 import PurchaseOrders from "@/pages/PurchaseOrders";
 import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
 import PurchaseOrderEdit from "@/pages/PurchaseOrderEdit";
@@ -339,6 +340,9 @@ function Router() {
         </Route>
         <Route path="/product-lines">
           <ProtectedRoute component={ProductLines} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/shipping-groups">
+          <ProtectedRoute component={ShippingGroups} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/channel-allocation">
           <ProtectedRoute component={ChannelAllocation} allowedRoles={["admin", "lead"]} />

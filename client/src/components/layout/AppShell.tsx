@@ -163,6 +163,7 @@ const navStructure: NavEntry[] = [
     children: [
       { label: "Catalog", icon: Package, href: "/catalog" },
       { label: "Product Lines", icon: Tag, href: "/product-lines" },
+      { label: "Shipping Groups", icon: Truck, href: "/shipping-groups" },
       { label: "Channels", icon: Store, href: "/channels" },
       { label: "Allocation", icon: Layers, href: "/channel-allocation" },
       { label: "Sync Log", icon: History, href: "/sync-log" },
