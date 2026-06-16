@@ -127,6 +127,17 @@ export async function runStartupMigrations(): Promise<void> {
       console.error("[startup-migration] fulfillment-state ledger DDL failed:", e?.message ?? e);
     }
 
+    // As-shipped address capture (migration 106). Stores ShipStation's actual shipTo
+    // on the shipment (from SHIP_NOTIFY), distinct from the order's requested address.
+    // Startup-fallback so a fresh/dev boot has the column before the SHIP_NOTIFY
+    // handler writes to it. Idempotent.
+    try {
+      await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS shipped_to_address jsonb`);
+      console.log("Checked wms.outbound_shipments.shipped_to_address");
+    } catch (e: any) {
+      console.error("[startup-migration] outbound_shipments.shipped_to_address DDL failed:", e?.message ?? e);
+    }
+
     // Create combined_order_groups table if it doesn't exist
     await client.query(`
       CREATE TABLE IF NOT EXISTS wms.combined_order_groups (

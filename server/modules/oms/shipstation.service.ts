@@ -2528,13 +2528,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         );
       } else {
         // 1. Update the shipment row itself. This is the
-        //    shipment-native primary source of truth.
+        //    shipment-native primary source of truth. Also capture the address
+        //    ShipStation actually shipped to (the operator may have edited it in
+        //    ShipStation after we pushed); COALESCE so a SHIP_NOTIFY without shipTo
+        //    never wipes a previously-captured value.
         await db.execute(sql`
           UPDATE wms.outbound_shipments SET
             status = 'shipped',
             carrier = ${carrier},
             tracking_number = ${trackingNumber},
             shipped_at = ${now},
+            shipped_to_address = COALESCE(${shipment.shipTo ? JSON.stringify(shipment.shipTo) : null}::jsonb, shipped_to_address),
             updated_at = ${now}
           WHERE id = ${shipmentId}
         `);
