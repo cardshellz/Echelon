@@ -229,6 +229,8 @@ export default function CycleCounts() {
   const ccTotalPages = Math.max(1, Math.ceil(ccFiltered.length / CC_PAGE_SIZE));
   const ccPage = Math.min(listPage, ccTotalPages);
   const ccVisible = ccFiltered.slice((ccPage - 1) * CC_PAGE_SIZE, ccPage * CC_PAGE_SIZE);
+  const ccRangeStart = ccFiltered.length === 0 ? 0 : (ccPage - 1) * CC_PAGE_SIZE + 1;
+  const ccRangeEnd = Math.min(ccPage * CC_PAGE_SIZE, ccFiltered.length);
 
   const { data: cycleCountDetail } = useQuery<CycleCountDetail>({
     queryKey: ["/api/cycle-counts", selectedCount],
@@ -2985,8 +2987,8 @@ export default function CycleCounts() {
         </Card>
       ) : (
         <>
-          {/* List filter + pagination */}
-          <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+          {/* List filter + row count */}
+          <div className="flex items-center justify-between gap-3 flex-wrap shrink-0">
             <div className="flex items-center gap-2">
               <Select value={listStatusFilter} onValueChange={(v) => { setListStatusFilter(v); setListPage(1); }}>
                 <SelectTrigger className="w-[170px]" data-testid="select-list-status">
@@ -3000,22 +3002,13 @@ export default function CycleCounts() {
                   <SelectItem value="cancelled">Cancelled</SelectItem>
                 </SelectContent>
               </Select>
-              <span className="text-sm text-muted-foreground">{ccFiltered.length} count{ccFiltered.length === 1 ? "" : "s"}</span>
+              <span className="text-sm text-muted-foreground" data-testid="text-list-range">
+                {ccFiltered.length} count{ccFiltered.length === 1 ? "" : "s"}
+              </span>
             </div>
-            {ccTotalPages > 1 && (
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" disabled={ccPage <= 1} onClick={() => setListPage(ccPage - 1)} data-testid="button-list-prev">
-                  <ChevronLeft className="h-4 w-4" /> Prev
-                </Button>
-                <span className="text-sm text-muted-foreground">Page {ccPage} of {ccTotalPages}</span>
-                <Button variant="outline" size="sm" disabled={ccPage >= ccTotalPages} onClick={() => setListPage(ccPage + 1)} data-testid="button-list-next">
-                  Next <ChevronRight className="h-4 w-4" />
-                </Button>
-              </div>
-            )}
           </div>
           {/* Mobile card list */}
-          <div className="flex-1 overflow-auto space-y-3 md:hidden">
+          <div className="flex-1 min-h-0 overflow-auto space-y-3 md:hidden">
             {ccVisible.map((count) => (
               <Card
                 key={count.id} 
@@ -3085,10 +3078,11 @@ export default function CycleCounts() {
             ))}
           </div>
 
-          {/* Desktop table */}
-          <div className="rounded-md border bg-card hidden md:block">
+          {/* Desktop table — bounded scroll area with a sticky header */}
+          <div className="rounded-md border bg-card hidden md:flex md:flex-col flex-1 min-h-0 overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-auto">
             <Table>
-              <TableHeader className="bg-muted/40">
+              <TableHeader className="bg-muted sticky top-0 z-10">
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Warehouse</TableHead>
@@ -3164,6 +3158,24 @@ export default function CycleCounts() {
                 ))}
               </TableBody>
             </Table>
+            </div>
+          </div>
+          {/* Shared footer: range + pager — always visible, marks the end of the list */}
+          <div className="flex items-center justify-between gap-3 border-t pt-3 shrink-0">
+            <span className="text-sm text-muted-foreground" data-testid="text-list-footer-range">
+              Showing {ccRangeStart}–{ccRangeEnd} of {ccFiltered.length}
+            </span>
+            {ccTotalPages > 1 && (
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" disabled={ccPage <= 1} onClick={() => setListPage(ccPage - 1)} data-testid="button-list-prev">
+                  <ChevronLeft className="h-4 w-4" /> Prev
+                </Button>
+                <span className="text-sm text-muted-foreground">Page {ccPage} of {ccTotalPages}</span>
+                <Button variant="outline" size="sm" disabled={ccPage >= ccTotalPages} onClick={() => setListPage(ccPage + 1)} data-testid="button-list-next">
+                  Next <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
           </div>
         </>
       )}
