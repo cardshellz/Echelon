@@ -411,6 +411,17 @@ export function registerSettingsRoutes(app: Express) {
     }
   });
 
+  app.post("/api/cycle-counts/:id/cancel", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cycleCount: ccService } = req.app.locals.services;
+      res.json(await ccService.cancel(parseInt(req.params.id)));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      console.error("Error cancelling cycle count:", error);
+      res.status(500).json({ error: "Failed to cancel cycle count" });
+    }
+  });
+
   app.delete("/api/cycle-counts/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { cycleCount: ccService } = req.app.locals.services;

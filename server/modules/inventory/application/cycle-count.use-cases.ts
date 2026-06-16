@@ -1825,10 +1825,46 @@ export class CycleCountUseCases {
     return { success: true, linkedReplenBlockersClosed };
   }
 
+  /**
+   * Cancel (abandon) a draft or in-progress count. Closes it out WITHOUT
+   * touching inventory: any adjustments already applied from approved variances
+   * stay on the ledger. This is the safe way to retire a count that can't be
+   * deleted because applied adjustments reference it.
+   */
+  async cancel(id: number) {
+    const cycleCount = await this.storage.getCycleCountById(id);
+    if (!cycleCount) throw new CycleCountError("Cycle count not found", 404);
+    if (cycleCount.status === "completed" || cycleCount.status === "cancelled") {
+      throw new CycleCountError(`Cannot cancel a ${cycleCount.status} cycle count`, 409);
+    }
+
+    await this.storage.updateCycleCount(id, { status: "cancelled" });
+
+    // Release any bins this count had frozen and stop it blocking replenishment.
+    await this.unfreezeLocations(id);
+    const linkedReplenBlockersClosed = await this.closeLinkedReplenExceptionTasks(id);
+
+    return { success: true, linkedReplenBlockersClosed };
+  }
+
   async delete(id: number) {
     // Unfreeze locations before cascade delete removes the FK reference
     await this.unfreezeLocations(id);
-    const deleted = await this.storage.deleteCycleCount(id);
+    let deleted: boolean;
+    try {
+      deleted = await this.storage.deleteCycleCount(id);
+    } catch (err: any) {
+      // A count with applied adjustments is referenced by inventory_transactions
+      // (FK, no cascade), so Postgres rejects the delete. Surface a clear reason
+      // instead of a generic 500 and point the user at cancel().
+      if (err?.code === "23503" || /foreign key/i.test(err?.message ?? "")) {
+        throw new CycleCountError(
+          "This count has applied inventory adjustments and can't be deleted. Cancel it instead to keep the audit trail.",
+          409,
+        );
+      }
+      throw err;
+    }
     if (!deleted) throw new CycleCountError("Cycle count not found", 404);
     return { success: true };
   }
