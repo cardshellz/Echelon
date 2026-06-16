@@ -593,6 +593,19 @@ export class ReceivingService {
           }
         }
 
+        // Lots store quantity in the receiving variant's OWN units (e.g. cases),
+        // so the cost booked on the lot must be per that unit. resolveReceivingLineCost
+        // returns per-base (per-piece) cost; scale by the variant's units_per_variant
+        // so a line received as a Case-of-N books the full case cost, not 1/Nth of it.
+        // (e.g. 10 pieces @ $0.60 received as 1 Case-of-10 => $6.00/case, not $0.60.)
+        const upvRow = await tx.execute(sql`
+          SELECT units_per_variant FROM catalog.product_variants WHERE id = ${line.productVariantId}
+        `);
+        const unitsPerVariant = Math.max(1, Number((upvRow.rows?.[0] as any)?.units_per_variant) || 1);
+        const lotUnitCostCents = typeof unitCostCents === "number" ? unitCostCents * unitsPerVariant : unitCostCents;
+        const lotProductCostCents = typeof productCostCents === "number" ? productCostCents * unitsPerVariant : productCostCents;
+        const lotPackagingCostCents = (packagingCostCents ?? 0) * unitsPerVariant;
+
         await this.inventoryCore.receiveInventory({
           productVariantId: line.productVariantId,
           warehouseLocationId: line.putawayLocationId,
@@ -600,9 +613,9 @@ export class ReceivingService {
           referenceId: batchId,
           notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,
           userId: userId || undefined,
-          unitCostCents,
-          packagingCostCents,
-          productCostCents,
+          unitCostCents: lotUnitCostCents,
+          packagingCostCents: lotPackagingCostCents,
+          productCostCents: lotProductCostCents,
           receivingOrderId: orderId,
           purchaseOrderId: order.purchaseOrderId || undefined,
           purchaseOrderLineId: line.purchaseOrderLineId || undefined,
@@ -610,9 +623,11 @@ export class ReceivingService {
           costProvisional,
         }, tx);
 
-        // Mark line as put away and persist the resolved cost pair so
-        // the receiving_line row matches what inventoryCore was stamped
-        // with. Only write mills/cents when we actually resolved them
+        // Mark line as put away and persist the resolved PER-PIECE (base-unit) cost
+        // on the receiving_line — that's the PO/AP unit, so the line still reconciles
+        // against the PO line cost (unchanged from before this fix). The LOT above is
+        // stamped per VARIANT unit (× units_per_variant) for valuation/COGS; line and
+        // lot are intentionally in different units. Only write when resolved
         // (don't overwrite null → 0 on a costless receipt).
         const lineUpdates: Record<string, unknown> = {
           putawayComplete: 1,
