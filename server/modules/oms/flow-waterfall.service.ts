@@ -77,7 +77,7 @@ export interface FlowWaterfall {
   intakeModel: FlowIntakeModel[];
   duplicates: FlowDuplicates;
   deadLetterCauses: Array<{ code: string; cause: string; count: number }>;
-  crossSystem: { wmsShippedOmsOpen: number; staleConfirmed: number; sample: any[] };
+  crossSystem: { wmsShippedOmsOpen: number; omsNotUpdated: number; sample: any[] };
   sla: { breached: number; sample: any[] };
   issues: FlowIssue[];
   health: { generatedAt: string; status: "healthy" | "degraded" | "critical"; counts: { critical: number; warning: number; info: number } };
@@ -170,14 +170,6 @@ const BASE_ISSUES: FlowIssueDef[] = [
     remediation: "REPLAY_AFTER_FIX", replaySafe: true,
     count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`,
     sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, oo.status, oo.financial_status, oo.ordered_at AS at FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) ORDER BY oo.ordered_at DESC LIMIT 50`,
-  },
-  {
-    code: "STALE_CONFIRMED", kind: "stuck", stage: "oms_to_wms", severity: "warning",
-    message: "Orders stuck waiting over 2 days",
-    why: "These orders have been sitting confirmed for more than two days without moving to the warehouse — usually a stalled hand-off. Re-send them to the warehouse.",
-    remediation: "REQUEUE", replaySafe: true,
-    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders WHERE status = 'confirmed' AND ordered_at < NOW() - INTERVAL '2 days' AND ordered_at > ${win}`,
-    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, oo.status, oo.financial_status, oo.ordered_at AS at FROM oms.oms_orders oo WHERE oo.status = 'confirmed' AND oo.ordered_at < NOW() - INTERVAL '2 days' AND oo.ordered_at > ${win} ORDER BY oo.ordered_at DESC LIMIT 50`,
   },
   {
     code: "OMS_DOUBLE_PICKING", kind: "duplicate", stage: "oms_to_wms", severity: "critical",
@@ -310,6 +302,18 @@ const BASE_ISSUES: FlowIssueDef[] = [
     remediation: "REPLAY_AFTER_FIX", replaySafe: true,
     count: (win: any) => sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE oo.status NOT IN ('shipped','cancelled','refunded','partially_shipped') AND wo.warehouse_status = 'shipped' AND oo.ordered_at > ${win}`,
     sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, oo.status, wo.warehouse_status, oo.ordered_at AS at FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE oo.status NOT IN ('shipped','cancelled','refunded','partially_shipped') AND wo.warehouse_status = 'shipped' AND oo.ordered_at > ${win} ORDER BY oo.ordered_at DESC LIMIT 50`,
+  },
+  {
+    // Replaces the old time-based STALE_CONFIRMED. Authoritative: keys off the WMS
+    // order being terminal-done ('completed', typically shipped-via-combine) while the
+    // OMS status is still open — i.e. a real OMS-status-out-of-sync divergence, not a
+    // clock. ('shipped' is covered by WMS_SHIPPED_OMS_OPEN above; this is 'completed'.)
+    code: "ORDER_FULFILLED_OMS_NOT_UPDATED", kind: "contradiction", stage: "writeback", severity: "warning",
+    message: "Finished in the warehouse, but the order never updated",
+    why: "The warehouse marked this order completed — usually because it shipped combined into another order's package — but the OMS status never updated, so it still reads as confirmed/unfulfilled and lingers as an open order. Re-sync its status from the warehouse so it shows shipped (and the channel gets the fulfillment). This is the real divergence the old 'stuck >2 days' check was mis-flagging.",
+    remediation: "REPLAY_AFTER_FIX", replaySafe: true,
+    count: (win: any) => sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE oo.status NOT IN ('shipped','cancelled','refunded','partially_shipped') AND wo.warehouse_status = 'completed' AND oo.ordered_at > ${win}`,
+    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, oo.status, oo.fulfillment_status, wo.warehouse_status, oo.ordered_at AS at FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE oo.status NOT IN ('shipped','cancelled','refunded','partially_shipped') AND wo.warehouse_status = 'completed' AND oo.ordered_at > ${win} ORDER BY oo.ordered_at DESC LIMIT 50`,
   },
   {
     code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED", kind: "stuck", stage: "writeback", severity: "critical",
@@ -487,7 +491,7 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       // Back-compat summary fields, now derived from the registry counts.
       duplicates: { omsToPicking: bc.OMS_DOUBLE_PICKING ?? 0, overShippedItems: bc.ITEM_OVER_SHIPPED ?? 0, unmappedEngineSplits: bc.UNMAPPED_ENGINE_SPLIT ?? 0, blockedDupOrders: bc.BLOCKED_DUP_INGEST ?? 0, sample: [] },
       deadLetterCauses,
-      crossSystem: { wmsShippedOmsOpen: bc.WMS_SHIPPED_OMS_OPEN ?? 0, staleConfirmed: bc.STALE_CONFIRMED ?? 0, sample: [] },
+      crossSystem: { wmsShippedOmsOpen: bc.WMS_SHIPPED_OMS_OPEN ?? 0, omsNotUpdated: bc.ORDER_FULFILLED_OMS_NOT_UPDATED ?? 0, sample: [] },
       sla: { breached: bc.SLA_BREACHED ?? 0, sample: [] },
       issues,
       health: { generatedAt: new Date().toISOString(), status: counts.critical > 0 ? "critical" : counts.warning > 0 ? "degraded" : "healthy", counts },

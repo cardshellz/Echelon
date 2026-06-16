@@ -67,7 +67,7 @@ interface FlowWaterfall {
   intakeModel: Array<{ provider: string; model: string; cadenceSeconds: number; note: string }>;
   duplicates: { omsToPicking: number; overShippedItems: number; unmappedEngineSplits: number; blockedDupOrders: number; sample: any[] };
   deadLetterCauses: Array<{ code?: string; cause: string; count: number }>;
-  crossSystem: { wmsShippedOmsOpen: number; staleConfirmed: number; sample: any[] };
+  crossSystem: { wmsShippedOmsOpen: number; omsNotUpdated: number; sample: any[] };
   sla: { breached: number; sample: any[] };
   issues: FlowIssue[];
   health: { generatedAt: string; status: "healthy" | "degraded" | "critical"; counts: { critical: number; warning: number; info: number } };
@@ -105,7 +105,7 @@ const CODE_LABEL: Record<string, string> = {
   SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED: "tracking not confirmed",
   // promoted divergences / contradictions
   OMS_DOUBLE_PICKING: "picked twice",
-  STALE_CONFIRMED: "stuck >2 days",
+  ORDER_FULFILLED_OMS_NOT_UPDATED: "WMS done, OMS open",
   SLA_BREACHED: "past ship-by",
   UNMAPPED_ENGINE_SPLIT: "split unmatched",
   BLOCKED_DUP_INGEST: "dup blocked",
@@ -531,7 +531,7 @@ export default function FlowMonitor() {
             <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-sm"><GitCompare className="h-4 w-4 text-muted-foreground" />Cross-system mismatch</CardTitle></CardHeader>
             <CardContent className="pt-0 text-sm">
               <Stat label="WMS shipped, OMS open" value={d.crossSystem.wmsShippedOmsOpen} good />
-              <Stat label="Stale 'confirmed' (>2d)" value={d.crossSystem.staleConfirmed} warn />
+              <Stat label="WMS done, OMS not updated" value={d.crossSystem.omsNotUpdated} warn />
               <div className="mt-2 text-xs text-muted-foreground">Reconcilers keep OMS / WMS / ShipStation in sync — this catches drift early.</div>
             </CardContent>
           </Card>
