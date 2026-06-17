@@ -1183,7 +1183,12 @@ function canonicalShipToFromShopifyUpdate(shopifyOrder: any, existing: any): Can
 }
 
 function differentNullable(a: unknown, b: unknown): boolean {
-  return (a ?? null) !== (b ?? null);
+  // Normalize so only a MATERIAL change registers: treat null/undefined/"" as equal,
+  // trim, and case-fold. A raw !== flagged null-vs-empty (blank company/address2),
+  // case, and whitespace as "changed" — the source of the false-positive
+  // address-change reviews (≈93% of them were blank-field mismatches).
+  const norm = (x: unknown) => String(x ?? "").trim().toLowerCase();
+  return norm(a) !== norm(b);
 }
 
 function wmsAddressChanged(row: any, next: CanonicalShipTo): boolean {
