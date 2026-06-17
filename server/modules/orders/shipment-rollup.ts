@@ -476,18 +476,13 @@ export async function handleAddressChangeOnShipment(
     case "planned":
       return { mode: "can_repush", shipmentId };
 
-    case "queued": {
-      // Already pushed to ShipStation — re-pushing would overwrite the SS
-      // order and undo any operator-made splits.
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments SET
-          requires_review = true,
-          review_reason = 'address_changed_after_push',
-          updated_at = ${now}
-        WHERE id = ${shipmentId}
-      `);
-      return { mode: "requires_review", shipmentId };
-    }
+    case "queued":
+      // Pushed to ShipStation but NO label yet — re-push so the new address flows
+      // straight through. ShipStation upserts on orderKey and transparently updates
+      // the ship-to (same as the 'planned' path). An address change is normal business,
+      // not an error to review. (Restores the documented pre-label behavior; this case
+      // had drifted to requires_review out of an over-cautious split-clobber concern.)
+      return { mode: "can_repush", shipmentId };
 
     case "labeled":
     case "shipped": {
