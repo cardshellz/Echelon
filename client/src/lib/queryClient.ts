@@ -47,6 +47,13 @@ export const queryClient = new QueryClient({
       queryFn: getQueryFn({ on401: "throw" }),
       refetchInterval: false,
       refetchOnWindowFocus: false,
+      // Refetch whenever a query's component mounts (i.e. on navigation), even
+      // though staleTime is Infinity. With "fetch once, cache forever" caching,
+      // any flow that forgot to invalidate a list's exact query key left that
+      // list stale until a hard refresh (e.g. a PO not appearing after a related
+      // action). "always" makes every page show DB-fresh data on navigation —
+      // background refetch keeps prior data on screen, so no flicker.
+      refetchOnMount: "always",
       staleTime: Infinity,
       retry: false,
     },
