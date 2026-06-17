@@ -16,6 +16,8 @@ import {
   Search,
   XCircle,
   Circle,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -158,6 +160,8 @@ export default function FlowMonitor() {
     placeholderData: (prev) => prev,
   });
   const [selected, setSelected] = useState<FlowIssue | null>(null);
+  // Which reason-categories are expanded in the drill-down (rolled-up by default).
+  const [expandedReasons, setExpandedReasons] = useState<Set<string>>(new Set());
   const [refInput, setRefInput] = useState("");
   const [submittedRef, setSubmittedRef] = useState("");
   const trace = useQuery<FlowTrace>({
@@ -558,7 +562,7 @@ export default function FlowMonitor() {
       </p>
 
       {/* Drill-down sheet */}
-      <Sheet open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
+      <Sheet open={!!selected} onOpenChange={(open) => { if (!open) { setSelected(null); setExpandedReasons(new Set()); } }}>
         <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-xl">
           {selected && (
             <div className="space-y-4">
@@ -584,38 +588,84 @@ export default function FlowMonitor() {
 
               <div>
                 <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  Affected rows · live · top 50
+                  Affected rows · live
                   {bucket.isFetching && <RotateCw className="h-3 w-3 animate-spin" />}
                 </div>
                 {bucket.isLoading ? (
                   <div className="text-sm text-muted-foreground">Loading rows…</div>
                 ) : (bucket.data?.rows?.length ?? 0) === 0 ? (
                   <div className="text-sm text-muted-foreground">No matching rows right now.</div>
-                ) : (
-                  <div className="space-y-2">
-                    {bucket.data!.rows.map((row: any, i: number) => {
-                      const ordNum = row.order_number ?? row.orderNumber;
-                      return (
-                        <div key={i} className="rounded-md border bg-muted/40 p-2 text-xs">
-                          {ordNum != null && String(ordNum).length > 0 && (
+                ) : (() => {
+                  const rows = bucket.data!.rows as any[];
+                  // Roll up by a reason field when present (review_reason / reason_code),
+                  // so the drill-down shows categories first and expands to the orders.
+                  const reasonKey = rows.length && "review_reason" in rows[0]
+                    ? "review_reason"
+                    : rows.length && "reason_code" in rows[0]
+                      ? "reason_code"
+                      : null;
+
+                  const renderRow = (row: any, i: number) => {
+                    const ordNum = row.order_number ?? row.orderNumber;
+                    return (
+                      <div key={i} className="rounded-md border bg-muted/40 p-2 text-xs">
+                        {ordNum != null && String(ordNum).length > 0 && (
+                          <button
+                            onClick={() => { setSubmittedRef(String(ordNum)); setRefInput(String(ordNum)); setSelected(null); setTimeout(() => traceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60); }}
+                            className="mb-1 inline-flex items-center gap-1 font-mono-sku font-semibold text-primary hover:underline"
+                          >
+                            <Search className="h-3 w-3" />trace {String(ordNum)}
+                          </button>
+                        )}
+                        {Object.entries(row).filter(([k]) => k !== reasonKey).map(([k, v]) => (
+                          <div key={k} className="flex gap-2 py-0.5">
+                            <span className="w-32 shrink-0 text-muted-foreground">{k}</span>
+                            <span className={cn("min-w-0 break-words", /error/i.test(k) ? "font-mono-sku text-red-600" : "font-medium")}>{v === null ? "—" : String(v)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  };
+
+                  if (!reasonKey) {
+                    return <div className="space-y-2">{rows.map(renderRow)}</div>;
+                  }
+
+                  const groups = new Map<string, any[]>();
+                  for (const r of rows) {
+                    const key = String(r[reasonKey] ?? "(none)");
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key)!.push(r);
+                  }
+                  const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+
+                  return (
+                    <div className="space-y-2">
+                      {sorted.map(([reason, gr]) => {
+                        const open = expandedReasons.has(reason);
+                        return (
+                          <div key={reason} className="overflow-hidden rounded-md border">
                             <button
-                              onClick={() => { setSubmittedRef(String(ordNum)); setRefInput(String(ordNum)); setSelected(null); setTimeout(() => traceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60); }}
-                              className="mb-1 inline-flex items-center gap-1 font-mono-sku font-semibold text-primary hover:underline"
+                              onClick={() => setExpandedReasons((prev) => {
+                                const n = new Set(prev);
+                                if (n.has(reason)) n.delete(reason); else n.add(reason);
+                                return n;
+                              })}
+                              className="flex w-full items-center justify-between gap-2 bg-muted/40 px-2.5 py-2 text-left text-xs font-medium hover:bg-muted/70"
                             >
-                              <Search className="h-3 w-3" />trace {String(ordNum)}
+                              <span className="inline-flex min-w-0 items-center gap-1.5">
+                                {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+                                <span className="truncate">{reason}</span>
+                              </span>
+                              <Badge variant="outline" className="shrink-0 tabular-nums">{gr.length}</Badge>
                             </button>
-                          )}
-                          {Object.entries(row).map(([k, v]) => (
-                            <div key={k} className="flex gap-2 py-0.5">
-                              <span className="w-32 shrink-0 text-muted-foreground">{k}</span>
-                              <span className={cn("min-w-0 break-words", /error/i.test(k) ? "font-mono-sku text-red-600" : "font-medium")}>{v === null ? "—" : String(v)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                            {open && <div className="space-y-2 border-t p-2">{gr.map(renderRow)}</div>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">
