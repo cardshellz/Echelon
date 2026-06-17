@@ -14,6 +14,7 @@ import {
 } from "@shared/schema";
 import { catalogStorage } from "../catalog";
 import { createImageSyncService } from "./image-sync.service";
+import { enqueueShippingGroupMetafields } from "./shipping-group-sync";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
@@ -538,6 +539,9 @@ export async function registerProductRoutes(app: Express) {
         .where(inArray(products.id, productIds))
         .returning({ id: products.id });
 
+      // Propagate the new group to Shopify (cardshellz.shipping_group metafield).
+      await enqueueShippingGroupMetafields(updated.map((r) => r.id));
+
       res.json({ shippingGroupId, requested: productIds.length, updated: updated.length });
     } catch (error) {
       console.error("Error assigning shipping group:", error);
@@ -754,6 +758,11 @@ export async function registerProductRoutes(app: Express) {
       const product = await storage.updateProduct(id, normalizedUpdates);
       if (!product) {
         return res.status(404).json({ error: "Product not found" });
+      }
+
+      // If the shipping group changed via this update, propagate to Shopify.
+      if ("shippingGroupId" in updates) {
+        await enqueueShippingGroupMetafields([id]);
       }
 
       // Cascade base SKU rename to variants and all downstream tables
