@@ -435,7 +435,11 @@ export const procurementMethods: IProcurementStorage = {
     // Rule #12: q is parameterised — never interpolated into raw SQL.
     const vendorId = Number(opts.vendorId);
     const qTrim = (opts.q ?? "").trim().toLowerCase();
-    const combined = Math.max(1, Math.min(100, Math.floor(opts.limit) || 50));
+    // Typeahead cap. Higher default + ceiling so the un-typed preview covers a
+    // realistic catalog without a giant payload; typing narrows via LIKE, so the
+    // cap only bounds the browse list (no per-keystroke flood). Bump the ceiling
+    // or add pagination if the catalog grows into the thousands.
+    const combined = Math.max(1, Math.min(200, Math.floor(opts.limit) || 100));
     const like = qTrim.length > 0 ? `%${qTrim}%` : "%";
     const prefix = qTrim.length > 0 ? `${qTrim}%` : "";
     // rank: 0 SKU prefix, 1 SKU contains, 2 name contains, 3 other.
@@ -561,17 +565,22 @@ export const procurementMethods: IProcurementStorage = {
       variant_name: string | null;
       rank: number;
     }>(sql`
+      -- One row per PRODUCT (product-level, variant_id NULL) so non-catalog
+      -- products are purchasable at the product level — consistent with catalog
+      -- products and the product-level PO model. The LEFT JOIN to variants is
+      -- only so typing a VARIANT sku/name still surfaces the parent product.
       SELECT
         p.id AS product_id,
-        pv.id AS product_variant_id,
-        COALESCE(pv.sku, p.sku) AS sku,
+        NULL::int AS product_variant_id,
+        p.sku AS sku,
         p.name AS product_name,
-        pv.name AS variant_name,
+        NULL::text AS variant_name,
         MIN(
           CASE
-            WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${prefix}`} THEN 0
-            WHEN LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like} THEN 1
+            WHEN ${qTrim.length === 0 ? sql`true` : sql`LOWER(COALESCE(p.sku, '')) LIKE ${prefix}`} THEN 0
+            WHEN LOWER(COALESCE(p.sku, '')) LIKE ${like} THEN 1
             WHEN LOWER(p.name) LIKE ${like} THEN 2
+            WHEN LOWER(COALESCE(pv.sku, '')) LIKE ${like} THEN 1
             WHEN LOWER(COALESCE(pv.name, '')) LIKE ${like} THEN 2
             ELSE 3
           END
@@ -580,11 +589,12 @@ export const procurementMethods: IProcurementStorage = {
       LEFT JOIN catalog.product_variants pv ON pv.product_id = p.id AND pv.is_active = true
       WHERE p.is_active = true
         ${qTrim.length === 0 ? sql`` : sql`AND (
-          LOWER(COALESCE(pv.sku, p.sku, '')) LIKE ${like}
+          LOWER(COALESCE(p.sku, '')) LIKE ${like}
           OR LOWER(p.name) LIKE ${like}
+          OR LOWER(COALESCE(pv.sku, '')) LIKE ${like}
           OR LOWER(COALESCE(pv.name, '')) LIKE ${like}
         )`}
-      GROUP BY p.id, p.sku, p.name, pv.id, pv.sku, pv.name
+      GROUP BY p.id, p.sku, p.name
       ORDER BY rank ASC, p.name ASC
       LIMIT ${remaining * 3}
     `);
