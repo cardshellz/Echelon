@@ -597,13 +597,12 @@ export default function FlowMonitor() {
                   <div className="text-sm text-muted-foreground">No matching rows right now.</div>
                 ) : (() => {
                   const rows = bucket.data!.rows as any[];
-                  // Roll up by a reason field when present (review_reason / reason_code),
-                  // so the drill-down shows categories first and expands to the orders.
-                  const reasonKey = rows.length && "review_reason" in rows[0]
-                    ? "review_reason"
-                    : rows.length && "reason_code" in rows[0]
-                      ? "reason_code"
-                      : null;
+                  // Roll up by whatever reason/category field a bucket carries, so EVERY
+                  // multi-reason drill-down shows categories first and expands to the orders
+                  // (requires_review -> review_reason, dead-letters -> reason_code,
+                  // shipped-but-cancelled -> voided_reason, on-hold -> on_hold_reason).
+                  const REASON_FIELDS = ["review_reason", "reason_code", "voided_reason", "on_hold_reason"];
+                  const reasonKey = rows.length ? (REASON_FIELDS.find((f) => f in rows[0]) ?? null) : null;
 
                   const renderRow = (row: any, i: number) => {
                     const ordNum = row.order_number ?? row.orderNumber;
