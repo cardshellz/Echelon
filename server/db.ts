@@ -21,7 +21,11 @@ const useSSL = process.env.EXTERNAL_DATABASE_URL || (process.env.DATABASE_URL &&
 const poolConfig = {
   connectionString: connectionString || "postgresql://stub:stub@localhost:5432/stub",
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
-  max: connectionString ? 3 : 0,
+  // Pool size per process. The old max:3 throttled the app to 3 connections and made
+  // the reconcile sweep saturate and throw "timeout exceeded when trying to connect"
+  // (the pool-acquire timeout). Heroku PG allows 200 (≈19 in use, single web dyno), so
+  // there's ample headroom. Env-overridable (PG_POOL_MAX) for tuning; default 20.
+  max: connectionString ? (Number(process.env.PG_POOL_MAX) || 20) : 0,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 };

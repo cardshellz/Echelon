@@ -1436,13 +1436,20 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               err?.message,
             );
             const errMsg = String(err?.message || err).slice(0, 255);
-            await db.execute(sql`
-              UPDATE wms.outbound_shipments
-              SET last_reconciled_at = NOW(),
-                  requires_review = true,
-                  review_reason = ${errMsg}
-              WHERE id = ${shipmentId}
-            `);
+            // A transient DB connection/pool timeout means we couldn't CHECK this shipment
+            // this run — it's infra, not a shipment problem. Don't flag it for human review
+            // (and don't attempt another DB write that would also fail); the next sweep
+            // retries. Only a genuine reconcile failure gets a review flag.
+            const isTransientDbError = /timeout exceeded when trying to connect|connection terminated|ECONNRESET|too many clients|Client has encountered a connection error/i.test(errMsg);
+            if (!isTransientDbError) {
+              await db.execute(sql`
+                UPDATE wms.outbound_shipments
+                SET last_reconciled_at = NOW(),
+                    requires_review = true,
+                    review_reason = ${errMsg}
+                WHERE id = ${shipmentId}
+              `);
+            }
           }
         }
 
