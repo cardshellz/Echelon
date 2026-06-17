@@ -207,8 +207,8 @@ export async function markShipmentShipped(
   opts: {
     now?: Date;
     fulfillmentPush?: {
-      updateShopifyFulfillmentTracking?: (
-        fulfillmentGid: string,
+      reconcileShopifyFulfillment?: (
+        shipmentId: number,
         trackingInfo: { number: string; company: string; url?: string },
       ) => Promise<unknown>;
     };
@@ -285,38 +285,41 @@ export async function markShipmentShipped(
     WHERE id = ${shipmentId}
   `);
 
-  // Shopify fulfillment tracking-update hook (§6 Commit 24, re-label).
-  // Fires only when:
-  //   - the shipment had a prior tracking number that DIFFERED from
-  //     the incoming one (true re-label, not a first ship and not a
-  //     carrier-only mapping fix — same conditions that gated the
-  //     history-row insert above);
-  //   - the shipment carries a `shopify_fulfillment_id` (i.e. C21 has
-  //     already pushed it to Shopify; nothing to update otherwise);
-  //   - the caller wired `opts.fulfillmentPush.updateShopifyFulfillmentTracking`.
-  // Failure is logged but does NOT roll back the shipment UPDATE,
-  // matching the non-blocking contract used by markShipmentVoided's
-  // cancel hook (§6 Commit 17). Reconcile (Group F) catches drift.
+  // Shopify fulfillment convergence (void→re-ship heal; supersedes the
+  // §6 Commit 24 re-label-only hook). Fires when:
+  //   - the shipment already carries a `shopify_fulfillment_id` (it was
+  //     pushed to Shopify; nothing to converge otherwise — first ships
+  //     are owned by the create path), AND
+  //   - the incoming tracking differs from what's on the row.
+  // We deliberately do NOT require `current.tracking_number` to be
+  // non-empty: a label void nulls it (markShipmentVoided) before the
+  // re-ship, and that null-out is exactly why the old re-label gate
+  // silently missed void→re-ship and left channel tracking stale
+  // (CHANNEL_TRACKING_STALE / #58910). `null !== meta.trackingNumber`
+  // is true, so the void→re-ship now converges; an unchanged tracking
+  // (e.g. carrier-only mapping fix) still no-ops.
+  //
+  // `reconcileShopifyFulfillment` is idempotent (no-op when Shopify
+  // already carries this tracking) and self-healing (updates an open
+  // fulfillment, recreates a cancelled one). Failure is logged but does
+  // NOT roll back the shipment UPDATE, matching the non-blocking
+  // contract used by markShipmentVoided's cancel hook (§6 Commit 17);
+  // reconcile + the CHANNEL_TRACKING_STALE detector catch drift.
   if (
-    typeof current.tracking_number === "string" &&
-    current.tracking_number.length > 0 &&
-    current.tracking_number !== meta.trackingNumber &&
     typeof current.shopify_fulfillment_id === "string" &&
     current.shopify_fulfillment_id.length > 0 &&
-    typeof opts.fulfillmentPush?.updateShopifyFulfillmentTracking === "function"
+    current.tracking_number !== meta.trackingNumber &&
+    typeof opts.fulfillmentPush?.reconcileShopifyFulfillment === "function"
   ) {
     try {
-      await opts.fulfillmentPush.updateShopifyFulfillmentTracking(
-        current.shopify_fulfillment_id,
-        {
-          number: meta.trackingNumber,
-          company: meta.carrier,
-          url: meta.trackingUrl ?? undefined,
-        },
-      );
+      await opts.fulfillmentPush.reconcileShopifyFulfillment(shipmentId, {
+        number: meta.trackingNumber,
+        company: meta.carrier,
+        url: meta.trackingUrl ?? undefined,
+      });
     } catch (err: any) {
       console.error(
-        `[markShipmentShipped] Shopify tracking-update failed for shipment ${shipmentId} (fulfillment ${current.shopify_fulfillment_id}): ${err?.message ?? err}`,
+        `[markShipmentShipped] Shopify fulfillment convergence failed for shipment ${shipmentId} (fulfillment ${current.shopify_fulfillment_id}): ${err?.message ?? err}`,
       );
     }
   }
@@ -901,8 +904,8 @@ export async function dispatchShipmentEvent(
     now?: Date;
     fulfillmentPush?: {
       cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
-      updateShopifyFulfillmentTracking?: (
-        fulfillmentGid: string,
+      reconcileShopifyFulfillment?: (
+        shipmentId: number,
         trackingInfo: { number: string; company: string; url?: string },
       ) => Promise<unknown>;
     };

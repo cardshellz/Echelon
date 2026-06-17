@@ -1296,11 +1296,15 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               continue;
             }
 
-            // 4. Dispatch via shipment-rollup helpers
+            // 4. Dispatch via shipment-rollup helpers. Thread the
+            //    fulfillment-push handle so a reconcile-driven re-ship
+            //    converges Shopify tracking too (void→re-ship heal /
+            //    CHANNEL_TRACKING_STALE), matching the SHIP_NOTIFY path.
             const { wmsOrderId, changed } = await dispatchShipmentEvent(
               db,
               shipmentId,
               event as any,
+              { fulfillmentPush: (db as any).__fulfillmentPush },
             );
 
             if (changed) {

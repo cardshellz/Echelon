@@ -215,7 +215,7 @@ export async function handleShopifyFulfillmentCreate(
       },
       {
         now,
-        // Deliberately NOT wiring `fulfillmentPush.updateShopifyFulfillmentTracking`:
+        // Deliberately NOT wiring `fulfillmentPush.reconcileShopifyFulfillment`:
         // Shopify is the SOURCE of this event, so pushing back would loop.
       },
     );
@@ -375,7 +375,7 @@ export interface ShopifyFulfillmentUpdatePayload {
 //      `warehouse_status` (likely already 'shipped'; the function no-ops
 //      when status matches, so this is cheap), and `markShippedByExternalId`
 //      keeps OMS in sync with the new tracking.
-//   5. We do NOT wire `fulfillmentPush.updateShopifyFulfillmentTracking`
+//   5. We do NOT wire `fulfillmentPush.reconcileShopifyFulfillment`
 //      here. Shopify is the SOURCE of this event — pushing back would loop.
 // ---------------------------------------------------------------------------
 export interface FulfillmentsUpdateDeps {
@@ -587,7 +587,7 @@ export async function handleShopifyFulfillmentUpdate(
     },
     {
       now,
-      // Deliberately NOT wiring `fulfillmentPush.updateShopifyFulfillmentTracking`:
+      // Deliberately NOT wiring `fulfillmentPush.reconcileShopifyFulfillment`:
       // Shopify is the SOURCE of this event, so pushing back would loop.
     },
   );

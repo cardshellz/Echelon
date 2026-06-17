@@ -1912,6 +1912,132 @@ export function createFulfillmentPushService(
     return { fulfillmentGid, trackingNumberChanged: true };
   }
 
+  /**
+   * Converge the Shopify fulfillment for a (re-)shipped shipment to its
+   * current tracking. Closes the void→re-ship gap that left channel
+   * tracking stale (Flow Monitor `CHANNEL_TRACKING_STALE`, order #58910):
+   *
+   *   - On a label void, `markShipmentVoided` nulls the shipment's
+   *     `tracking_number` (so `markShipmentShipped`'s old re-label
+   *     detector, which keyed on a differing PRIOR tracking, no longer
+   *     fired on the re-ship) but leaves `shopify_fulfillment_id` set
+   *     (so the create path idempotent-skips). Neither path updated
+   *     Shopify, so the customer kept the voided label's tracking.
+   *
+   * Strategy ("converge to live"):
+   *   1. No `shopify_fulfillment_id` on the row → nothing to converge;
+   *      the create path owns first ships. → mode `no_fulfillment`.
+   *   2. Try `updateShopifyFulfillmentTracking` on the existing
+   *      fulfillment. If it is still OPEN, Shopify updates (or
+   *      idempotently no-ops when it already carries this tracking).
+   *      → mode `updated`.
+   *   3. If the update fails because the fulfillment is already
+   *      CANCELLED/gone (the void's `cancelShopifyFulfillment` ran on
+   *      Shopify's side), the dead fulfillment cannot be updated:
+   *      cancel-confirm (idempotent), clear the stale id, and recreate
+   *      via `pushShopifyFulfillment` so the customer gets a fresh
+   *      fulfillment carrying the new tracking. → mode `recreated`.
+   *   4. Any OTHER update failure (network, auth, unexpected userErrors)
+   *      is RETHROWN — we never recreate on a transient error, which
+   *      could spawn a duplicate LIVE fulfillment. The caller retries.
+   *
+   * Non-blocking by contract: callers (`markShipmentShipped`) invoke
+   * this inside a try/catch so a convergence failure never rolls back
+   * the shipment state transition; reconcile + the
+   * `CHANNEL_TRACKING_STALE` detector catch any residual drift.
+   */
+  async function reconcileShopifyFulfillment(
+    shipmentId: number,
+    trackingInfo: { number: string; company: string; url?: string },
+  ): Promise<{
+    reconciled: boolean;
+    mode: "no_fulfillment" | "updated" | "recreated";
+    fulfillmentGid: string | null;
+  }> {
+    if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+      throw new ShopifyFulfillmentPushError(
+        "reconcileShopifyFulfillment: shipmentId must be a positive integer",
+        { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "shipmentId", value: shipmentId },
+      );
+    }
+
+    // Read the current Shopify fulfillment handle off the shipment row.
+    const row: any = await db.execute(sql`
+      SELECT shopify_fulfillment_id
+      FROM wms.outbound_shipments
+      WHERE id = ${shipmentId}
+      LIMIT 1
+    `);
+    const fulfillmentGid: string | null =
+      row?.rows?.[0]?.shopify_fulfillment_id ?? null;
+
+    if (!fulfillmentGid || fulfillmentGid.trim().length === 0) {
+      // Never pushed to Shopify — the create path owns this shipment.
+      return { reconciled: false, mode: "no_fulfillment", fulfillmentGid: null };
+    }
+
+    try {
+      await updateShopifyFulfillmentTracking(fulfillmentGid, trackingInfo);
+      return { reconciled: true, mode: "updated", fulfillmentGid };
+    } catch (err: unknown) {
+      // Only recreate when the existing fulfillment is provably dead
+      // (cancelled / gone). Everything else (network, auth, unexpected
+      // userErrors) is transient-or-unknown → rethrow, never recreate.
+      const userErrors =
+        err instanceof ShopifyFulfillmentPushError
+          ? err.context?.userErrors ?? []
+          : [];
+      const isDeadFulfillment =
+        err instanceof ShopifyFulfillmentPushError &&
+        err.context?.code === SHOPIFY_TRACKING_UPDATE_USER_ERRORS &&
+        userErrors.some((e) => {
+          const m = (e?.message ?? "").toLowerCase();
+          return (
+            m.includes("cancel") || // "...has been cancelled" / "in CANCELLED state"
+            m.includes("does not exist") ||
+            m.includes("not found") ||
+            m.includes("closed") ||
+            m.includes("cannot be updated")
+          );
+        });
+
+      if (!isDeadFulfillment) {
+        throw err;
+      }
+
+      console.log(
+        `[reconcileShopifyFulfillment] fulfillment ${fulfillmentGid} not updatable (cancelled/gone) for shipment ${shipmentId} — recreating`,
+      );
+      incr("shopify_reconcile_recreate", 1, { shipmentId });
+
+      // Defensive cancel-confirm (idempotent if already cancelled) so the
+      // underlying fulfillment order is reopened and a fresh create is
+      // accepted. Failure here is non-fatal — proceed to clear + recreate.
+      try {
+        await cancelShopifyFulfillment(fulfillmentGid);
+      } catch (cancelErr: any) {
+        console.warn(
+          `[reconcileShopifyFulfillment] cancel-confirm failed for ${fulfillmentGid} (shipment ${shipmentId}): ${cancelErr?.message ?? cancelErr}`,
+        );
+      }
+
+      // Clear the dead handle so pushShopifyFulfillment's idempotency
+      // guard (D1) passes and a new fulfillment is created.
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments
+        SET shopify_fulfillment_id = NULL, updated_at = NOW()
+        WHERE id = ${shipmentId}
+      `);
+
+      const created = await pushShopifyFulfillment(shipmentId);
+      return {
+        reconciled: true,
+        mode: "recreated",
+        fulfillmentGid: created?.shopifyFulfillmentId ?? null,
+      };
+    }
+  }
+
   return {
     pushTracking,
     pushTrackingForShipment,
@@ -1921,6 +2047,7 @@ export function createFulfillmentPushService(
     pushShopifyFulfillment,
     cancelShopifyFulfillment,
     updateShopifyFulfillmentTracking,
+    reconcileShopifyFulfillment,
   };
 }
 
