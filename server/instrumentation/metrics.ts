@@ -64,6 +64,8 @@ export type CounterName =
   | "shopify_tracking_update_succeeded"
   | "shopify_tracking_update_idempotent_skip"
   | "shopify_tracking_update_failed"
+  // Shopify fulfillment convergence (void→re-ship heal)
+  | "shopify_reconcile_recreate"
   // Shopify webhook DLQ (orders/cancelled, refunds/create, fulfillments/*)
   | "shopify_webhook_retry_enqueued"
   | "shopify_webhook_retry_processed"

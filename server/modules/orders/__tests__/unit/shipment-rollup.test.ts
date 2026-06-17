@@ -380,9 +380,9 @@ describe("markShipmentShipped", () => {
     });
   });
 
-  // ─── §6 Commit 24: re-label Shopify fulfillment tracking-update hook ───
+  // ─── Shopify fulfillment convergence hook (void→re-ship heal) ─────────
 
-  it("invokes fulfillmentPush.updateShopifyFulfillmentTracking on re-label when shipment has shopify_fulfillment_id AND hook provided", async () => {
+  it("invokes fulfillmentPush.reconcileShopifyFulfillment on re-label when shipment has shopify_fulfillment_id AND hook provided", async () => {
     const mock = makeDb([
       {
         rows: [
@@ -397,7 +397,7 @@ describe("markShipmentShipped", () => {
       { rows: [] }, // history insert
       { rows: [] }, // UPDATE
     ]);
-    const update = vi.fn(async (_id: string, _info: any) => {});
+    const reconcile = vi.fn(async (_shipmentId: number, _info: any) => ({}));
     const result = await markShipmentShipped(
       mock.db,
       501,
@@ -409,23 +409,60 @@ describe("markShipmentShipped", () => {
       },
       {
         now: NOW,
-        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+        fulfillmentPush: { reconcileShopifyFulfillment: reconcile },
       },
     );
     expect(result).toEqual({ wmsOrderId: 42, changed: true });
-    // Hook called once with the new tracking + carrier + url.
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(update).toHaveBeenCalledWith(
-      "gid://shopify/Fulfillment/999",
+    // Hook called once with the SHIPMENT ID (not the gid — the service
+    // re-reads the row) + the new tracking + carrier + url.
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith(501, {
+      number: "NEW-456",
+      company: "FedEx",
+      url: "https://track/NEW-456",
+    });
+    // Still 3 DB calls: load + history + UPDATE. The hook call doesn't
+    // touch this mock's DB.
+    expect(mock.getCallCount()).toBe(3);
+  });
+
+  it("converges on void→re-ship: void nulled the prior tracking but kept the fulfillment id (#58910)", async () => {
+    // markShipmentVoided nulls tracking_number but keeps
+    // shopify_fulfillment_id. On the re-ship the shipment is 'voided'
+    // with null tracking + a live fulfillment id. The OLD re-label gate
+    // (prior tracking non-empty AND differs) silently missed this; the
+    // new gate (fulfillment id present AND tracking differs, null
+    // included) fires — this is the exact #58910 regression.
+    const mock = makeDb([
       {
-        number: "NEW-456",
-        company: "FedEx",
-        url: "https://track/NEW-456",
+        rows: [
+          shipmentRow({
+            status: "voided",
+            tracking_number: null,
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/6282938155167",
+          }),
+        ],
+      },
+      { rows: [] }, // UPDATE (no history insert — no prior tracking to audit)
+    ]);
+    const reconcile = vi.fn(async (_shipmentId: number, _info: any) => ({}));
+    const result = await markShipmentShipped(
+      mock.db,
+      501,
+      { trackingNumber: "1Z16D13WYW76682155", carrier: "UPS", shipDate: NOW },
+      {
+        now: NOW,
+        fulfillmentPush: { reconcileShopifyFulfillment: reconcile },
       },
     );
-    // Still 3 DB calls: load + history + UPDATE. The hook call doesn't
-    // touch the DB.
-    expect(mock.getCallCount()).toBe(3);
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith(501, {
+      number: "1Z16D13WYW76682155",
+      company: "UPS",
+      url: undefined,
+    });
   });
 
   it("passes url:undefined when no trackingUrl is provided", async () => {
@@ -443,27 +480,24 @@ describe("markShipmentShipped", () => {
       { rows: [] },
       { rows: [] },
     ]);
-    const update = vi.fn(async (_id: string, _info: any) => {});
+    const reconcile = vi.fn(async (_shipmentId: number, _info: any) => ({}));
     await markShipmentShipped(
       mock.db,
       501,
       { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
       {
         now: NOW,
-        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+        fulfillmentPush: { reconcileShopifyFulfillment: reconcile },
       },
     );
-    expect(update).toHaveBeenCalledWith(
-      "gid://shopify/Fulfillment/999",
-      {
-        number: "NEW-456",
-        company: "UPS",
-        url: undefined,
-      },
-    );
+    expect(reconcile).toHaveBeenCalledWith(501, {
+      number: "NEW-456",
+      company: "UPS",
+      url: undefined,
+    });
   });
 
-  it("does NOT call updateShopifyFulfillmentTracking when shipment has no shopify_fulfillment_id (nothing to update)", async () => {
+  it("does NOT call reconcileShopifyFulfillment when shipment has no shopify_fulfillment_id (never pushed)", async () => {
     const mock = makeDb([
       {
         rows: [
@@ -478,21 +512,21 @@ describe("markShipmentShipped", () => {
       { rows: [] }, // history insert
       { rows: [] }, // UPDATE
     ]);
-    const update = vi.fn(async () => {});
+    const reconcile = vi.fn(async () => ({}));
     const result = await markShipmentShipped(
       mock.db,
       501,
       { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
       {
         now: NOW,
-        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+        fulfillmentPush: { reconcileShopifyFulfillment: reconcile },
       },
     );
     expect(result.changed).toBe(true);
-    expect(update).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
-  it("does NOT call updateShopifyFulfillmentTracking when hook is not provided (graceful degrade)", async () => {
+  it("does NOT call reconcileShopifyFulfillment when hook is not provided (graceful degrade)", async () => {
     const mock = makeDb([
       {
         rows: [
@@ -518,12 +552,15 @@ describe("markShipmentShipped", () => {
     // Just sanity: this should not throw.
   });
 
-  it("does NOT call updateShopifyFulfillmentTracking on first ship (no prior tracking)", async () => {
-    // First-ship path: no prior tracking, so this is not a re-label
-    // even though the shipment may have a shopify_fulfillment_id
-    // (e.g. C21 pushed it but the SHIP_NOTIFY arrived later). No
-    // tracking-update fires — the original push already carried the
-    // correct tracking.
+  it("converges when a fulfillment id already exists and row tracking is null (idempotent; covers pre-created fulfillment)", async () => {
+    // A pre-existing fulfillment id with null row tracking (e.g. the
+    // fulfillment was created before this SHIP_NOTIFY arrived). The new
+    // tracking differs from null, so convergence fires.
+    // reconcileShopifyFulfillment is idempotent, so this is safe even
+    // when Shopify already carries the correct tracking. The COMMON
+    // first ship has NO fulfillment id yet (the create path owns it), so
+    // this only affects the pre-created edge case — and it's the same
+    // null-prior-tracking shape as a void→re-ship, which MUST converge.
     const mock = makeDb([
       {
         rows: [
@@ -536,20 +573,25 @@ describe("markShipmentShipped", () => {
       },
       { rows: [] }, // UPDATE
     ]);
-    const update = vi.fn(async () => {});
+    const reconcile = vi.fn(async () => ({}));
     await markShipmentShipped(
       mock.db,
       501,
       { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
       {
         now: NOW,
-        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+        fulfillmentPush: { reconcileShopifyFulfillment: reconcile },
       },
     );
-    expect(update).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith(501, {
+      number: "NEW-456",
+      company: "UPS",
+      url: undefined,
+    });
   });
 
-  it("does NOT call updateShopifyFulfillmentTracking on carrier-only swap (same tracking, mapping fix)", async () => {
+  it("does NOT call reconcileShopifyFulfillment on carrier-only swap (same tracking, mapping fix)", async () => {
     const mock = makeDb([
       {
         rows: [
@@ -563,23 +605,23 @@ describe("markShipmentShipped", () => {
       },
       { rows: [] }, // UPDATE (no history insert because tracking unchanged)
     ]);
-    const update = vi.fn(async () => {});
+    const reconcile = vi.fn(async () => ({}));
     await markShipmentShipped(
       mock.db,
       501,
       { trackingNumber: "1Z999", carrier: "FedEx", shipDate: NOW },
       {
         now: NOW,
-        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+        fulfillmentPush: { reconcileShopifyFulfillment: reconcile },
       },
     );
     // Tracking didn't change — same gating as the history-row insert.
     // A carrier mapping fix is not a re-label and Shopify already has
     // the correct tracking number.
-    expect(update).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
-  it("proceeds with shipment UPDATE even if updateShopifyFulfillmentTracking throws (non-blocking)", async () => {
+  it("proceeds with shipment UPDATE even if reconcileShopifyFulfillment throws (non-blocking)", async () => {
     const mock = makeDb([
       {
         rows: [
@@ -594,7 +636,7 @@ describe("markShipmentShipped", () => {
       { rows: [] }, // history insert
       { rows: [] }, // UPDATE
     ]);
-    const update = vi.fn(async () => {
+    const reconcile = vi.fn(async () => {
       throw new Error("shopify api 500");
     });
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -605,16 +647,16 @@ describe("markShipmentShipped", () => {
       { trackingNumber: "NEW-456", carrier: "UPS", shipDate: NOW },
       {
         now: NOW,
-        fulfillmentPush: { updateShopifyFulfillmentTracking: update },
+        fulfillmentPush: { reconcileShopifyFulfillment: reconcile },
       },
     );
 
     expect(result).toEqual({ wmsOrderId: 42, changed: true });
-    expect(update).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
     // The error was logged, not thrown.
     const matched = errSpy.mock.calls
       .map((args) => String(args[0] ?? ""))
-      .some((line) => line.includes("Shopify tracking-update failed"));
+      .some((line) => line.includes("Shopify fulfillment convergence failed"));
     expect(matched).toBe(true);
     errSpy.mockRestore();
   });
