@@ -325,6 +325,20 @@ const BASE_ISSUES: FlowIssueDef[] = [
     count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.status = 'shipped' AND oo.shipped_at < NOW() - INTERVAL '1 hour' AND oo.shipped_at > ${win} AND c.provider IN ('ebay','shopify') AND NOT EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed'))`,
     sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, c.provider, oo.shipped_at AS at FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.status = 'shipped' AND oo.shipped_at < NOW() - INTERVAL '1 hour' AND oo.shipped_at > ${win} AND c.provider IN ('ebay','shopify') AND NOT EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed')) ORDER BY oo.shipped_at DESC LIMIT 50`,
   },
+  {
+    // Catches the "re-shipped after a void, but the new tracking was never re-pushed"
+    // case (e.g. #58910): the tracking the channel holds is no longer on any live shipped
+    // shipment, so the customer is following a dead/voided label. SHIPPED_TRACKING_NOT_
+    // CONFIRMED_PUSHED misses these because a (stale) push event DOES exist. `last_push`
+    // = the most recent fulfillment-push tracking per order (windowed); flagged when it
+    // isn't on any currently-shipped shipment.
+    code: "CHANNEL_TRACKING_STALE", kind: "contradiction", stage: "writeback", severity: "warning",
+    message: "Shipped, but the channel has stale tracking",
+    why: "The tracking we sent the sales channel no longer matches the shipment that actually went out — usually the original label was voided and the order re-shipped with a new tracking that was never re-pushed. The customer is following a dead/voided tracking link. Re-push the current tracking to the channel.",
+    remediation: "REQUEUE", replaySafe: true,
+    count: (win: any) => sql`WITH last_push AS (SELECT DISTINCT ON (e.order_id) e.order_id, e.details->>'trackingNumber' AS pushed FROM oms.oms_order_events e WHERE e.event_type IN ('shopify_fulfillment_pushed','tracking_pushed') AND e.details->>'trackingNumber' IS NOT NULL AND e.created_at > ${win} ORDER BY e.order_id, e.created_at DESC) SELECT COUNT(*)::int AS count FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id JOIN last_push lp ON lp.order_id = oo.id WHERE oo.status = 'shipped' AND c.provider IN ('ebay','shopify') AND oo.shipped_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ${LINK} AND os.status = 'shipped' AND os.tracking_number = lp.pushed)`,
+    sample: (win: any) => sql`WITH last_push AS (SELECT DISTINCT ON (e.order_id) e.order_id, e.details->>'trackingNumber' AS pushed FROM oms.oms_order_events e WHERE e.event_type IN ('shopify_fulfillment_pushed','tracking_pushed') AND e.details->>'trackingNumber' IS NOT NULL AND e.created_at > ${win} ORDER BY e.order_id, e.created_at DESC) SELECT oo.external_order_number AS order_number, c.provider, lp.pushed AS channel_tracking, (SELECT string_agg(DISTINCT os.tracking_number, ', ') FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ${LINK} AND os.status = 'shipped' AND os.tracking_number IS NOT NULL) AS actual_tracking, oo.shipped_at AS at FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id JOIN last_push lp ON lp.order_id = oo.id WHERE oo.status = 'shipped' AND c.provider IN ('ebay','shopify') AND oo.shipped_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ${LINK} AND os.status = 'shipped' AND os.tracking_number = lp.pushed) ORDER BY oo.shipped_at DESC LIMIT 50`,
+  },
 ];
 
 // ── Dead-letter reason buckets — one first-class issue per reason code ──
