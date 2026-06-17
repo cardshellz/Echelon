@@ -196,7 +196,9 @@ const BASE_ISSUES: FlowIssueDef[] = [
     why: "These shipments were held for a person to check before they go out. Open each one, resolve the flag, and release it.",
     remediation: "MANUAL_REVIEW", replaySafe: false,
     count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE requires_review = true AND status NOT IN ('cancelled','voided','shipped')`,
-    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.review_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.requires_review = true AND os.status NOT IN ('cancelled','voided','shipped') ORDER BY os.created_at DESC LIMIT 50`,
+    // Higher limit + reason-ordered: the drill-down rolls these up by review_reason
+    // (categories first, expand to orders), so it must return the full set, not a top-50.
+    sample: () => sql`SELECT os.review_reason, os.id AS shipment_id, wo.order_number, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.requires_review = true AND os.status NOT IN ('cancelled','voided','shipped') ORDER BY os.review_reason, os.created_at DESC LIMIT 500`,
   },
   {
     code: "SHIPMENT_ON_HOLD", kind: "stuck", stage: "wms_fulfill", severity: "warning",
