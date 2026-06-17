@@ -430,7 +430,13 @@ export async function registerProductRoutes(app: Express) {
           productCount: sql<number>`count(${products.id})::int`,
         })
         .from(shippingGroups)
-        .leftJoin(products, eq(products.shippingGroupId, shippingGroups.id))
+        // Count only ACTIVE products so the sidebar badge matches the products
+        // table (which filters is_active=true). Archived/soft-deleted members
+        // would otherwise inflate the count (e.g. archived Quad Box divider SKUs).
+        .leftJoin(
+          products,
+          and(eq(products.shippingGroupId, shippingGroups.id), eq(products.isActive, true)),
+        )
         .groupBy(
           shippingGroups.id,
           shippingGroups.code,
