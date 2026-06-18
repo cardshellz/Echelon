@@ -1889,6 +1889,163 @@ export function createPurchasingService(db: any, storage: Storage) {
   }
 
   /**
+   * Create a receiving order against an inbound SHIPMENT (the freight-bearing
+   * leg). Mirrors createReceiptFromPO's line-building, but:
+   *   - Expected qty comes from each shipment line's qtyShipped (the goods on
+   *     THIS container), not the PO line's full orderQty;
+   *   - stamps inbound_shipment_id + source_type='shipment' on the order, so the
+   *     lots created at close inherit the shipment link + go provisional, and the
+   *     shipment's finalized landed cost attaches to exactly these lots.
+   * Cost is still stamped from the PO line (the AP source of truth).
+   *
+   * NOTE: the per-line cost stamping + largest-pack defaults intentionally mirror
+   * createReceiptFromPO — keep the two in sync (or DRY) if that logic changes.
+   */
+  async function createReceiptFromShipment(inboundShipmentId: number, userId?: string) {
+    const shipment = await (storage as any).getInboundShipmentById(inboundShipmentId);
+    if (!shipment) throw new PurchasingError("Inbound shipment not found", 404);
+
+    // Goods must be physically here (or being costed/closed) to receive them.
+    const receivableStatuses = ["at_port", "customs_clearance", "delivered", "costing", "closed"];
+    if (!receivableStatuses.includes((shipment as any).status)) {
+      throw new PurchasingError(`Cannot receive a shipment in '${(shipment as any).status}' status`, 400);
+    }
+
+    const shipmentLines = await (storage as any).getInboundShipmentLines(inboundShipmentId);
+    const receivableShipmentLines = shipmentLines.filter(
+      (sl: any) => Number(sl.qtyShipped) > 0 && sl.purchaseOrderLineId,
+    );
+    if (receivableShipmentLines.length === 0) {
+      throw new PurchasingError("Shipment has no receivable lines", 400);
+    }
+
+    // PR3a handles single-PO shipments (the common case). A multi-PO shipment
+    // makes the receiving order's PO link ambiguous for reconciliation; receive
+    // those per PO until that's modeled.
+    const poIds = Array.from(
+      new Set(receivableShipmentLines.map((sl: any) => sl.purchaseOrderId).filter(Boolean)),
+    );
+    if (poIds.length !== 1) {
+      throw new PurchasingError(
+        "This shipment's lines span multiple POs; receiving multi-PO shipments isn't supported yet.",
+        400,
+      );
+    }
+    const purchaseOrderId = poIds[0] as number;
+    const po = await storage.getPurchaseOrderById(purchaseOrderId);
+    if (!po) throw new PurchasingError("Linked purchase order not found", 404);
+
+    // Reuse: if an open receipt is already linked to THIS shipment, return it
+    // instead of spawning a duplicate (idempotent on repeat clicks).
+    const findOpenForShipment = async () =>
+      (await (storage as any).getReceivingOrdersForPurchaseOrder(purchaseOrderId)).find(
+        (r: any) =>
+          Number(r.inboundShipmentId) === inboundShipmentId &&
+          r.status !== "closed" &&
+          r.status !== "cancelled",
+      );
+    const reusable = await findOpenForShipment();
+    if (reusable) return { ...reusable, reusedExisting: true };
+
+    const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
+    const poLineById = new Map<number, any>(poLines.map((l: any) => [l.id, l]));
+
+    const receiptNumber = await storage.generateReceiptNumber();
+    let receivingOrder;
+    try {
+      receivingOrder = await storage.createReceivingOrder({
+        receiptNumber,
+        poNumber: po.poNumber,
+        purchaseOrderId: po.id,
+        inboundShipmentId,
+        sourceType: "shipment",
+        vendorId: po.vendorId,
+        warehouseId: po.warehouseId,
+        status: "draft",
+        expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
+        createdBy: userId,
+      });
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        const conflict = await findOpenForShipment();
+        if (conflict) return { ...conflict, reusedExisting: true };
+        throw new PurchasingError(`Receipt number '${receiptNumber}' already in use by an active record.`, 409);
+      }
+      throw error;
+    }
+
+    // Largest-pack defaults + primary putaway locations (mirrors createReceiptFromPO).
+    const productIds = Array.from(new Set(
+      receivableShipmentLines
+        .map((sl: any) => poLineById.get(sl.purchaseOrderLineId)?.productId)
+        .filter(Boolean),
+    )) as number[];
+    const defaultPackByProduct = new Map<number, { id: number; unitsPerVariant: number }>();
+    for (const pid of productIds) {
+      try {
+        const vs = (await (storage as any).getProductVariantsByProductId?.(pid)) ?? [];
+        if (vs.length) {
+          const largest = vs.reduce((a: any, b: any) =>
+            ((b.unitsPerVariant || 1) > (a.unitsPerVariant || 1) ? b : a));
+          defaultPackByProduct.set(pid, { id: largest.id, unitsPerVariant: largest.unitsPerVariant || 1 });
+        }
+      } catch { /* non-critical: leave the line product-level */ }
+    }
+    const productLocationMap = new Map<number, number>();
+    try {
+      const allProductLocations = (await (storage as any).getAllProductLocations?.()) ?? [];
+      for (const pl of allProductLocations) {
+        if (pl.productVariantId && pl.warehouseLocationId && pl.status === "active" && pl.isPrimary) {
+          if (!productLocationMap.has(pl.productVariantId)) {
+            productLocationMap.set(pl.productVariantId, pl.warehouseLocationId);
+          }
+        }
+      }
+    } catch { /* non-critical */ }
+
+    // Build receiving lines from the SHIPMENT lines: Expected = qtyShipped scaled
+    // to the product's largest pack; cost stamped from the PO line (mills-first).
+    const receivingLineData = receivableShipmentLines.map((sl: any) => {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const productId = poLine?.productId ?? null;
+      const pack = productId != null ? defaultPackByProduct.get(productId) : undefined;
+      const resolvedVariantId = pack?.id ?? sl.productVariantId ?? poLine?.productVariantId ?? null;
+      const packSize = Math.max(1, pack?.unitsPerVariant ?? (poLine?.unitsPerUom || 1));
+      const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
+      const hasPoMills =
+        typeof poLine?.unitCostMills === "number" &&
+        Number.isInteger(poLine.unitCostMills) &&
+        poLine.unitCostMills >= 0;
+      const unitCostMills = hasPoMills
+        ? (poLine.unitCostMills as number)
+        : (typeof poLine?.unitCostCents === "number" && poLine.unitCostCents >= 0
+            ? centsToMills(poLine.unitCostCents)
+            : null);
+      const unitCost = hasPoMills
+        ? millsToCents(poLine.unitCostMills as number)
+        : (typeof poLine?.unitCostCents === "number" ? poLine.unitCostCents : null);
+      return {
+        receivingOrderId: receivingOrder!.id,
+        productVariantId: resolvedVariantId,
+        productId,
+        sku: poLine?.sku ?? sl.sku,
+        productName: poLine?.productName,
+        expectedQty: Math.ceil(Number(sl.qtyShipped) / packSize),
+        receivedQty: 0,
+        damagedQty: 0,
+        purchaseOrderLineId: sl.purchaseOrderLineId,
+        unitCost,
+        unitCostMills,
+        putawayLocationId: autoLocationId,
+        status: "pending",
+      };
+    });
+
+    await storage.bulkCreateReceivingLines(receivingLineData as any);
+    return receivingOrder;
+  }
+
+  /**
    * Called by ReceivingService when a receiving order linked to a PO is closed.
    * Updates PO line received quantities and auto-transitions PO status.
    */
@@ -3447,6 +3604,7 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     // Receiving integration
     createReceiptFromPO,
+    createReceiptFromShipment,
     onReceivingOrderClosed,
 
     // Dual-track lifecycle (migration 0565)
