@@ -9,6 +9,7 @@
 
 import { sql } from "drizzle-orm";
 import { db } from "../../db";
+import { millsToCents } from "@shared/utils/money";
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -114,7 +115,7 @@ async function aggregateRange(from: Date, to: Date): Promise<RawAgg> {
 
 async function aggregateCogs(from: Date, to: Date): Promise<number> {
   const result = await db.execute(sql`
-    SELECT COALESCE(SUM(oic.total_cost_cents), 0)::bigint AS cogs
+    SELECT COALESCE(SUM(COALESCE(NULLIF(oic.total_cost_mills, 0), oic.total_cost_cents * 100, 0)), 0)::bigint AS cogs_mills
     FROM oms.order_item_costs oic
     JOIN wms.order_items wi ON wi.id = oic.order_item_id
     JOIN wms.orders wo ON wo.id = wi.order_id
@@ -123,7 +124,7 @@ async function aggregateCogs(from: Date, to: Date): Promise<number> {
       AND oo.ordered_at < ${to}
       AND oo.cancelled_at IS NULL
   `);
-  return Number((result.rows[0] as any)?.cogs) || 0;
+  return millsToCents(Math.round(Number((result.rows[0] as any)?.cogs_mills) || 0));
 }
 
 async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[]> {
@@ -152,7 +153,7 @@ async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[
   const cogsResult = await db.execute(sql`
     SELECT
       oo.channel_id,
-      COALESCE(SUM(oic.total_cost_cents), 0)::bigint AS cogs
+      COALESCE(SUM(COALESCE(NULLIF(oic.total_cost_mills, 0), oic.total_cost_cents * 100, 0)), 0)::bigint AS cogs_mills
     FROM oms.order_item_costs oic
     JOIN wms.order_items wi ON wi.id = oic.order_item_id
     JOIN wms.orders wo ON wo.id = wi.order_id
@@ -164,7 +165,7 @@ async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[
   `);
   const cogsMap = new Map<number, number>();
   for (const row of cogsResult.rows as any[]) {
-    cogsMap.set(Number(row.channel_id), Number(row.cogs) || 0);
+    cogsMap.set(Number(row.channel_id), millsToCents(Math.round(Number(row.cogs_mills) || 0)));
   }
 
   return (result.rows as any[]).map((r) => {
@@ -313,11 +314,11 @@ export async function getFinanceOrders(opts: {
         o.financial_status,
         o.status,
         o.customer_name,
-        COALESCE(cogs.total_cogs, 0)::bigint AS cogs_cents
+        COALESCE(cogs.total_cogs, 0)::bigint AS cogs_mills
       FROM oms.oms_orders o
       JOIN channels c ON c.id = o.channel_id
       LEFT JOIN LATERAL (
-        SELECT SUM(oic.total_cost_cents) AS total_cogs
+        SELECT SUM(COALESCE(NULLIF(oic.total_cost_mills, 0), oic.total_cost_cents * 100, 0)) AS total_cogs
         FROM oms.order_item_costs oic
         JOIN wms.order_items wi ON wi.id = oic.order_item_id
         JOIN wms.orders wo ON wo.id = wi.order_id
@@ -356,7 +357,7 @@ export async function getFinanceOrders(opts: {
       financialStatus: r.financial_status,
       status: r.status,
       customerName: r.customer_name,
-      cogsCents: Number(r.cogs_cents) || 0,
+      cogsCents: millsToCents(Math.round(Number(r.cogs_mills) || 0)),
     })),
     total: Number((countResult.rows[0] as any)?.total) || 0,
     page,

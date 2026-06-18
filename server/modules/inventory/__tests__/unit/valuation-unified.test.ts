@@ -119,8 +119,8 @@ describe("COGSService.getInventoryValuation (product-level)", () => {
                 product_name: "Widget",
                 base_sku: "WDG",
                 total_qty: "20",
-                avg_cost_per_piece: "350",
-                total_value_cents: "7000",
+                avg_cost_per_piece_mills: "35000",
+                total_value_mills: "700000",
                 active_lots: "4",
                 zero_cost_qty: "3",
                 has_landed_pending: false,
@@ -133,7 +133,7 @@ describe("COGSService.getInventoryValuation (product-level)", () => {
           return {
             rows: [{
               landed_pending_count: "1",
-              landed_pending_value: "500",
+              landed_pending_value_mills: "50000",
               provisional_qty: "8",
             }],
           };

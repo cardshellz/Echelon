@@ -381,14 +381,21 @@ export class InventoryLotService {
 
       // Record cost for this lot allocation
       if (params.orderItemId) {
+        // COGS in MILLS (lot.unitCostMills mirrors the lot's total per-variant-unit
+        // cost). cents columns are derived mirrors (half-up), so the period COGS stays
+        // exact when summed in mills (take × per-unit-mills, rounded once at display).
+        const lotUnitMills = Number((lot as any).unitCostMills) || centsToMills(lot.unitCostCents);
+        const totalCostMills = take * lotUnitMills;
         newCosts.push({
           orderId: params.orderId,
           orderItemId: params.orderItemId,
           inventoryLotId: lot.id,
           productVariantId: params.productVariantId,
           qty: take,
-          unitCostCents: lot.unitCostCents,
-          totalCostCents: take * lot.unitCostCents,
+          unitCostCents: millsToCents(lotUnitMills),
+          totalCostCents: millsToCents(totalCostMills),
+          unitCostMills: lotUnitMills,
+          totalCostMills,
         });
       }
 
