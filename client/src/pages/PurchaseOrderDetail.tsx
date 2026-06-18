@@ -808,6 +808,7 @@ export default function PurchaseOrderDetail() {
   const [cancelReason, setCancelReason] = useState("");
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
   const [showCreateShipmentDialog, setShowCreateShipmentDialog] = useState(false);
+  const [showReceivePicker, setShowReceivePicker] = useState(false);
   const [newShipmentForm, setNewShipmentForm] = useState({
     mode: "sea_fcl",
     shipmentNumber: "",
@@ -968,9 +969,9 @@ export default function PurchaseOrderDetail() {
     enabled: showAddLineDialog && !!po?.vendorId,
   });
 
-  const { data: linkedShipmentsRaw = [] } = useQuery<any[]>({
+  const { data: linkedShipmentsRaw = [], isLoading: shipmentsLoading } = useQuery<any[]>({
     queryKey: [`/api/purchase-orders/${poId}/shipments`],
-    enabled: !!poId && activeTab === "shipments",
+    enabled: !!poId && (activeTab === "shipments" || showReceivePicker),
   });
   const linkedShipments = linkedShipmentsRaw.filter((s: any) => s.status !== "cancelled");
 
@@ -1234,6 +1235,35 @@ export default function PurchaseOrderDetail() {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created` });
       // Navigate to the receiving page with this receipt
+      navigate(`/receiving?open=${receipt.id}`);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // Receive AGAINST a shipment: links the receipt to the shipment so its freight
+  // attaches to exactly these lots (vs createReceiptMutation, which is PO-direct).
+  const createReceiptFromShipmentMutation = useMutation({
+    mutationFn: async (shipmentId: number) => {
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `shp-receipt-${shipmentId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
+      const res = await fetch(`/api/inbound-shipments/${shipmentId}/create-receipt`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create receipt"); }
+      return res.json();
+    },
+    onSuccess: (receipt) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      setShowReceivePicker(false);
+      toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created from shipment` });
       navigate(`/receiving?open=${receipt.id}`);
     },
     onError: (err: Error) => {
@@ -1959,9 +1989,9 @@ export default function PurchaseOrderDetail() {
             </Button>
           )}
           {canCreateReceiptForPo && (
-            <Button variant="outline" onClick={() => createReceiptMutation.mutate()} disabled={createReceiptMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button variant="outline" onClick={() => setShowReceivePicker(true)} className="flex-1 sm:flex-none min-h-[44px]">
               <Truck className="h-4 w-4 mr-2" />
-              Create Receipt
+              Receive
             </Button>
           )}
           {canClosePo && (
@@ -3162,11 +3192,10 @@ export default function PurchaseOrderDetail() {
                 className="w-full justify-start"
                 variant="outline"
                 size="sm"
-                onClick={() => createReceiptMutation.mutate()}
-                disabled={createReceiptMutation.isPending}
+                onClick={() => setShowReceivePicker(true)}
               >
                 <Truck className="h-3.5 w-3.5 mr-2" />
-                {createReceiptMutation.isPending ? "Creating..." : "Create receipt"}
+                Receive
               </Button>
             )}
 
@@ -3929,6 +3958,83 @@ export default function PurchaseOrderDetail() {
               </Button>
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+      {/* ═══════ Receive — choose a source ═══════ */}
+      <Dialog open={showReceivePicker} onOpenChange={setShowReceivePicker}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><Truck className="h-5 w-5" /> Receive {po.poNumber}</DialogTitle>
+            <DialogDescription>
+              Choose where these goods are coming from. Receiving against a shipment carries its freight onto the received lots.
+            </DialogDescription>
+          </DialogHeader>
+          {(() => {
+            if (shipmentsLoading) {
+              return <div className="py-6 text-center text-sm text-muted-foreground">Checking for shipments…</div>;
+            }
+            const readyStatuses = ["at_port", "customs_clearance", "delivered", "costing"];
+            const readyShipments = linkedShipments.filter((s: any) => readyStatuses.includes(s.status));
+            const pendingShipments = linkedShipments.filter((s: any) => !readyStatuses.includes(s.status));
+            const busy = createReceiptMutation.isPending || createReceiptFromShipmentMutation.isPending;
+            return (
+              <div className="space-y-3">
+                {readyShipments.length > 0 ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      This PO has {readyShipments.length} shipment{readyShipments.length > 1 ? "s" : ""} with goods here:
+                    </p>
+                    {readyShipments.map((s: any) => (
+                      <div key={s.id} className="flex items-center justify-between gap-3 rounded-lg border-2 border-blue-200 bg-blue-50/50 p-3">
+                        <div className="min-w-0">
+                          <div className="font-mono text-sm font-medium flex items-center gap-1.5">
+                            <Ship className="h-4 w-4 text-blue-600" /> {s.shipmentNumber}
+                          </div>
+                          <div className="text-xs text-muted-foreground capitalize">
+                            {(s.status || "").replace(/_/g, " ")}
+                            {s.actualTotalCostCents ? ` · freight $${(s.actualTotalCostCents / 100).toFixed(2)}` : ""}
+                          </div>
+                        </div>
+                        <Button size="sm" disabled={busy} onClick={() => createReceiptFromShipmentMutation.mutate(s.id)}>
+                          Receive this shipment
+                        </Button>
+                      </div>
+                    ))}
+                    <div className="rounded-lg border p-3">
+                      <div className="font-medium text-sm flex items-center gap-1.5">
+                        <FileText className="h-4 w-4 text-muted-foreground" /> Receive against the PO directly
+                      </div>
+                      <div className="mt-1 flex items-start gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                        <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" /> Skips the shipment freight above — only for goods that arrived without a shipment.
+                      </div>
+                      <Button size="sm" variant="outline" className="mt-2" disabled={busy} onClick={() => createReceiptMutation.mutate()}>
+                        Receive against PO anyway
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="rounded-lg border p-3">
+                      <div className="font-medium text-sm">Receive against the PO directly</div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {pendingShipments.length > 0
+                          ? `This PO's shipment (${pendingShipments[0].shipmentNumber}, ${(pendingShipments[0].status || "").replace(/_/g, " ")}) isn't marked as arrived yet — receiving now won't carry its freight.`
+                          : "No inbound shipment exists for this PO. A shipment's freight won't apply (fine for domestic / no-freight goods)."}
+                      </div>
+                      <Button size="sm" className="mt-2" disabled={busy} onClick={() => createReceiptMutation.mutate()}>
+                        Receive against PO
+                      </Button>
+                    </div>
+                    <div className="text-center">
+                      <Button size="sm" variant="ghost" onClick={() => { setShowReceivePicker(false); setShowCreateShipmentDialog(true); }}>
+                        <Package className="h-3.5 w-3.5 mr-1.5" /> Create a shipment instead
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
         </DialogContent>
       </Dialog>
       {/* ═══════ Create Shipment Dialog ═══════ */}
