@@ -782,6 +782,42 @@ export async function runStartupMigrations(): Promise<void> {
       WHERE COALESCE(total_unit_cost_cents, 0) = 0 AND COALESCE(unit_cost_cents, 0) > 0
     `);
 
+    // --- Mills cost layers: AUTHORITATIVE source of truth for cost ------------
+    // Integer mills (1/100 cent, 4-decimal dollars) so per-unit × pack-size and
+    // FIFO × qty never amplify cent-rounding. *_cents stay as derived display
+    // mirrors. These columns are NEW, so ADD COLUMN IF NOT EXISTS actually
+    // applies — unlike the NUMERIC(10,4) upgrade above, which silently no-op'd on
+    // the pre-existing bigint po/landed/total columns (that drift is why total
+    // still stores whole cents today).
+    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS po_unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS packaging_cost_mills BIGINT NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS landed_cost_mills BIGINT NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS total_unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE oms.order_item_costs ADD COLUMN IF NOT EXISTS unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE oms.order_item_costs ADD COLUMN IF NOT EXISTS total_cost_mills BIGINT NOT NULL DEFAULT 0`);
+
+    // Backfill mills from existing cents (cents × 100, exact; ROUND collapses the
+    // NUMERIC packaging column cleanly). Idempotent + non-clobbering: only rows
+    // still at 0 mills with a positive cents value, so re-runs and the
+    // authoritative-mills writes from later PRs are never overwritten.
+    await client.query(`
+      UPDATE inventory_lots SET
+        unit_cost_mills       = ROUND(COALESCE(unit_cost_cents, 0)       * 100)::bigint,
+        po_unit_cost_mills    = ROUND(COALESCE(po_unit_cost_cents, 0)    * 100)::bigint,
+        packaging_cost_mills  = ROUND(COALESCE(packaging_cost_cents, 0)  * 100)::bigint,
+        landed_cost_mills     = ROUND(COALESCE(landed_cost_cents, 0)     * 100)::bigint,
+        total_unit_cost_mills = ROUND(COALESCE(total_unit_cost_cents, 0) * 100)::bigint
+      WHERE total_unit_cost_mills = 0 AND COALESCE(total_unit_cost_cents, 0) > 0
+    `);
+    await client.query(`
+      UPDATE oms.order_item_costs SET
+        unit_cost_mills  = ROUND(COALESCE(unit_cost_cents, 0)  * 100)::bigint,
+        total_cost_mills = ROUND(COALESCE(total_cost_cents, 0) * 100)::bigint
+      WHERE total_cost_mills = 0 AND COALESCE(total_cost_cents, 0) > 0
+    `);
+    console.log("Checked inventory_lots + oms.order_item_costs mills cost columns (backfilled from cents)");
+
     // order_line_costs table (COGS per order line)
     await client.query(`
       CREATE TABLE IF NOT EXISTS order_line_costs (
