@@ -285,7 +285,12 @@ export const orderItemCosts = omsSchema.table("order_item_costs", {
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
   qty: integer("qty").notNull(), 
   unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull(), 
-  totalCostCents: bigint("total_cost_cents", { mode: "number" }).notNull(), 
+  totalCostCents: bigint("total_cost_cents", { mode: "number" }).notNull(),
+  // Mills mirrors (1/100 cent) — authoritative COGS precision. Backfilled from
+  // *_cents (× 100) on startup; written authoritatively by the FIFO pick path
+  // (lot mills × qty) in a later PR. *_cents stay as derived display mirrors.
+  unitCostMills: bigint("unit_cost_mills", { mode: "number" }).notNull().default(0),
+  totalCostMills: bigint("total_cost_mills", { mode: "number" }).notNull().default(0), 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

@@ -574,6 +574,17 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   packagingCostCents: numeric("packaging_cost_cents", { precision: 10, scale: 4 }).default("0"),
   landedCostCents: numeric("landed_cost_cents", { precision: 10, scale: 4 }).default("0"),
   totalUnitCostCents: numeric("total_unit_cost_cents", { precision: 10, scale: 4 }).default("0"),
+  // --- Mills cost layers (1/100 cent) — AUTHORITATIVE source of truth for cost.
+  // Integer mills carry 4-decimal-dollar precision so per-unit × pack-size and
+  // FIFO × qty never amplify cent-rounding (see shared/utils/money.ts). The
+  // *_cents columns above become derived display mirrors (millsToCents, half-up).
+  // Backfilled from *_cents (× 100) on startup; written authoritatively from the
+  // receive/landed paths in a later PR.
+  unitCostMills: bigint("unit_cost_mills", { mode: "number" }).notNull().default(0),
+  poUnitCostMills: bigint("po_unit_cost_mills", { mode: "number" }).notNull().default(0),
+  packagingCostMills: bigint("packaging_cost_mills", { mode: "number" }).notNull().default(0),
+  landedCostMills: bigint("landed_cost_mills", { mode: "number" }).notNull().default(0),
+  totalUnitCostMills: bigint("total_unit_cost_mills", { mode: "number" }).notNull().default(0),
   qtyReceived: integer("qty_received").default(0),
   qtyConsumed: integer("qty_consumed").default(0),
   costSource: varchar("cost_source", { length: 20 }).default("manual"), // 'po' | 'manual' | 'landed' | 'legacy'
