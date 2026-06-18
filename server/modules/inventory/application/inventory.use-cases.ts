@@ -351,6 +351,11 @@ export class InventoryUseCases {
     orderItemId?: number;
     shipmentId?: string;
     userId?: string;
+    // SHIP-BEFORE-PICK FALLBACK (removable once pick-before-push is enforced):
+    // when true, deduct entirely from on-hand and release the reservation
+    // rather than drawing the location's shared picked pool — a never-picked
+    // item has no picked qty of its own.
+    deductFromOnHandOnly?: boolean;
   }): Promise<void> {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
@@ -379,7 +384,9 @@ export class InventoryUseCases {
         throw new Error(`No inventory level for variant ${params.productVariantId} at location ${params.warehouseLocationId}`);
       }
 
-      const fromPicked = Math.min(level.pickedQty, params.qty);
+      const fromPicked = params.deductFromOnHandOnly
+        ? 0
+        : Math.min(level.pickedQty, params.qty);
       let fromOnHand = params.qty - fromPicked;
 
       if (fromOnHand > level.variantQty) {

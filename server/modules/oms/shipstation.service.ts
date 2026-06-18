@@ -1518,8 +1518,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         osi.order_item_id,
         osi.product_variant_id,
         osi.qty,
-        -- Re-read through the pick ledger as a backstop for legacy planned
-        -- rows that were created before source-bin backfill existed.
+        -- Pick-derived source bin: the shipment item's own bin, or the pick
+        -- ledger backstop for legacy planned rows created before source-bin
+        -- backfill existed.
         COALESCE(
           osi.from_location_id,
           (
@@ -1532,12 +1533,54 @@ export function createShipStationService(db: any, inventoryCore?: any) {
             ORDER BY it.created_at DESC
             LIMIT 1
           )
-        ) AS from_location_id
+        ) AS pick_location_id,
+        -- ─── SHIP-BEFORE-PICK FALLBACK (removable once pick-before-push is
+        -- enforced) ───────────────────────────────────────────────────────
+        -- An order can reach ShipStation and ship before it is ever picked
+        -- (the temporary pre-picking push). With no pick there is no source
+        -- bin, so resolve the variant's reserved/assigned bin the SAME way
+        -- reserveStock does — assigned primary bin, then any in-stock unfrozen
+        -- location — and deduct from there. Mirrors
+        -- server/modules/channels/reservation.service.ts (reserveStock).
+        COALESCE(
+          (
+            SELECT pl.warehouse_location_id
+            FROM warehouse.product_locations pl
+            JOIN warehouse.warehouse_locations wl ON wl.id = pl.warehouse_location_id
+            WHERE pl.product_variant_id = osi.product_variant_id
+              AND pl.status = 'active'
+              AND wl.cycle_count_freeze_id IS NULL
+            ORDER BY pl.is_primary DESC
+            LIMIT 1
+          ),
+          (
+            SELECT il.warehouse_location_id
+            FROM inventory.inventory_levels il
+            JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+            WHERE il.product_variant_id = osi.product_variant_id
+              AND il.variant_qty > 0
+              AND wl.cycle_count_freeze_id IS NULL
+            ORDER BY il.variant_qty DESC
+            LIMIT 1
+          )
+        ) AS reserved_location_id
+        -- ─── END SHIP-BEFORE-PICK FALLBACK ────────────────────────────────
       FROM wms.outbound_shipment_items osi
       WHERE osi.shipment_id = ${shipmentId}
         AND osi.qty > 0
     `);
-    const rows = itemsResult.rows as any[];
+    const rows = (itemsResult.rows as any[]).map((item) => {
+      const pickLoc = item.pick_location_id ?? null;
+      const reservedLoc = item.reserved_location_id ?? null;
+      const fromLoc = pickLoc ?? reservedLoc;
+      return {
+        ...item,
+        from_location_id: fromLoc,
+        // Never picked: the location came from the reserved-bin fallback, not a
+        // pick. Drives on-hand-only deduction in recordShipment.
+        ship_before_pick: pickLoc == null && fromLoc != null,
+      };
+    });
     const invalidItems = rows.filter((item) =>
       !item.product_variant_id ||
       !item.from_location_id ||
@@ -1594,6 +1637,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           orderItemId: item.order_item_id,
           shipmentId: String(shipmentId),
           userId: "system:shipstation:v2",
+          // SHIP-BEFORE-PICK FALLBACK (removable): never-picked items have no
+          // picked pool — deduct on-hand only and release the reservation.
+          deductFromOnHandOnly: item.ship_before_pick === true,
         });
         console.log(`[ShipStation Webhook V2] Recorded shipment for variant ${item.product_variant_id} qty ${item.qty} (wmsOrder ${wmsOrderId})`);
       }
