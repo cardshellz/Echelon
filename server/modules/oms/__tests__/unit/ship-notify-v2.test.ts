@@ -333,6 +333,11 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
   it("handles a voided shipment → dispatches 'voided' (no OMS status change)", async () => {
     const shipmentPayload = makeShipmentPayload({
       voidDate: "2026-04-24T13:00:00Z",
+      // Void targets the shipment's CURRENT label of record ("OLD"), so the
+      // label-of-record guard lets it through. A void carrying a DIFFERENT
+      // tracking (a superseded label) is skipped — covered in
+      // shipment-rollup.test.ts.
+      trackingNumber: "OLD",
     });
 
     const mock = makeDb([

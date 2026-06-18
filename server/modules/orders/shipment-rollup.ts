@@ -96,7 +96,7 @@ export type ShipmentEvent =
       trackingUrl?: string | null;
     }
   | { kind: "cancelled"; reason?: string }
-  | { kind: "voided"; reason?: string };
+  | { kind: "voided"; reason?: string; trackingNumber?: string | null };
 
 // ─── Internals ───────────────────────────────────────────────────────
 
@@ -630,6 +630,12 @@ export async function markShipmentVoided(
   reason?: string,
   opts: {
     now?: Date;
+    /**
+     * Tracking number of the label THIS void targets (from the engine's
+     * void event). When provided, the void only takes effect if it matches
+     * the shipment's current label of record — see the guard below.
+     */
+    voidedTrackingNumber?: string | null;
     fulfillmentPush?: {
       cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
     };
@@ -641,6 +647,27 @@ export async function markShipmentVoided(
   const now = opts.now ?? new Date();
 
   if (current.status === "voided") {
+    return { wmsOrderId: current.order_id, changed: false };
+  }
+
+  // Label-of-record guard. A void cancels the physical shipment ONLY when it
+  // targets the shipment's CURRENT label. ShipStation keys events to a SS
+  // *order*, which can accumulate multiple labels over a void → re-label
+  // cycle. After an old label is voided and the shipment re-ships on a NEW
+  // label, SS (or the sweeper re-reading that order) can re-deliver the OLD
+  // label's void. Applying it blindly wipes the live tracking and cancels a
+  // valid Shopify fulfillment — exactly what stranded order #58984 / shipment
+  // 3649 (shipped on 1Z…03752644, then re-voided by the dead 1Z…02547145).
+  // If the void's tracking differs from the current label of record, it is a
+  // stale void of a superseded label: ignore it; the current label stands.
+  const voidedTrackingNumber = opts.voidedTrackingNumber;
+  if (
+    typeof voidedTrackingNumber === "string" &&
+    voidedTrackingNumber.length > 0 &&
+    typeof current.tracking_number === "string" &&
+    current.tracking_number.length > 0 &&
+    voidedTrackingNumber !== current.tracking_number
+  ) {
     return { wmsOrderId: current.order_id, changed: false };
   }
 
@@ -929,7 +956,10 @@ export async function dispatchShipmentEvent(
         now: opts.now,
       });
     case "voided":
-      return markShipmentVoided(db, shipmentId, event.reason, opts);
+      return markShipmentVoided(db, shipmentId, event.reason, {
+        ...opts,
+        voidedTrackingNumber: event.trackingNumber ?? null,
+      });
     default: {
       // Exhaustiveness guard — new ShipmentEvent variants must add a
       // case above, or TypeScript will fail to compile here.
