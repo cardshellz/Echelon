@@ -493,9 +493,20 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
   }
 
   async function close(id: number, userId?: string, notes?: string) {
-    // Finalize allocations before closing
+    // Finalize allocations, then PUSH the finalized landed costs onto the received
+    // (provisional) lots — closing a shipment flows its freight/duty to inventory
+    // automatically, instead of leaving it to a manual "Push Costs to Lots" click.
+    // Best-effort: a push failure (e.g. nothing received yet) must NOT block the close;
+    // the snapshots persist, the manual push remains as a re-trigger, and any receipt
+    // created after close still picks up the landed cost at receive time.
     await finalizeAllocations(id, userId);
-    return transitionTo(id, "closed", userId, notes || "Shipment closed — landed costs finalized");
+    const closed = await transitionTo(id, "closed", userId, notes || "Shipment closed — landed costs finalized");
+    try {
+      await pushLandedCostsToLots(id);
+    } catch (e: any) {
+      console.warn(`[ShipmentTracking] auto-push landed cost on close for shipment ${id} failed (non-fatal): ${e?.message ?? e}`);
+    }
+    return closed;
   }
 
   async function cancel(id: number, userId?: string, reason?: string) {

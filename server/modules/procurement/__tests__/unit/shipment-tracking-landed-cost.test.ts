@@ -337,6 +337,39 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
       skipped: [{ lotId: 501, productVariantId: 469, reason: "lot_missing_po_line" }],
     });
   });
+
+  it("close() finalizes AND pushes landed cost to lots — no manual Push step", async () => {
+    const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
+      updateInboundShipment: vi.fn().mockResolvedValue({}),
+      createInboundShipmentStatusHistory: vi.fn().mockResolvedValue({}),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, productVariantId: null, purchaseOrderLineId: 21, qtyShipped: 20 },
+      ]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, unitCostCents: 70 }),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([{ id: 31, costType: "freight", actualCents: 1000 }]),
+      getAllocationsForLine: vi.fn().mockResolvedValue([{ shipmentCostId: 31, allocatedCents: 1000 }]),
+      getInboundFreightCostById: vi.fn().mockResolvedValue({ id: 31, costType: "freight" }),
+      getLandedCostSnapshots: vi.fn().mockResolvedValue([{
+        inboundShipmentLineId: 11, purchaseOrderLineId: 21, poUnitCostCents: 70,
+        freightAllocatedCents: 1000, dutyAllocatedCents: 0, insuranceAllocatedCents: 0, otherAllocatedCents: 0,
+        totalLandedCostCents: 2400, landedUnitCostCents: 120, qty: 20,
+      }]),
+      getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
+        { id: 501, productVariantId: 469, poLineId: 21, poUnitCostMills: 70000, packagingCostMills: 0, costProvisional: 1 },
+      ]),
+      getProductVariantById: vi.fn().mockResolvedValue({ id: 469, unitsPerVariant: 10 }),
+    });
+    const service = createShipmentTrackingService(db as any, storage);
+
+    await service.close(1, "user-1");
+
+    // Transitioned to closed AND pushed the finalized landed cost onto the lot (db.execute
+    // is only used by the push's raw-SQL lot update) — no separate "Push Costs to Lots".
+    expect(storage.updateInboundShipment).toHaveBeenCalled();
+    expect(db.execute).toHaveBeenCalled();
+  });
 });
 
 describe("computeLotLandedMills", () => {
