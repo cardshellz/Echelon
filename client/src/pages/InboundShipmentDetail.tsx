@@ -959,7 +959,7 @@ export default function InboundShipmentDetail() {
                       ? (crypto as any).randomUUID()
                       : `shipment-receipt-${poIds[0]}-${Date.now()}-${Math.random().toString(36).slice(2)}`
                   ) as string;
-                  const res = await fetch(`/api/purchase-orders/${poIds[0]}/create-receipt`, {
+                  const res = await fetch(`/api/inbound-shipments/${shipment.id}/create-receipt`, {
                     method: "POST",
                     headers: { "Idempotency-Key": idempotencyKey },
                   });

@@ -1,0 +1,97 @@
+import { describe, it, expect, vi } from "vitest";
+import { createPurchasingService } from "../../purchasing.service";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR3a: createReceiptFromShipment — receive AGAINST an inbound shipment.
+// Verifies the receiving order is stamped with the shipment link + source, and
+// lines are defaulted from each shipment line's qtyShipped (scaled to the
+// product's largest pack), with cost stamped from the PO line.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function build(overrides: Record<string, any> = {}) {
+  const captured: { order: any; lines: any } = { order: null, lines: null };
+  const db: any = {
+    execute: vi.fn(),
+    select: vi.fn(),
+    insert: vi.fn(),
+    update: vi.fn(),
+    transaction: vi.fn(async (fn: any) => fn({ execute: vi.fn() })),
+  };
+  const storage: any = {
+    getInboundShipmentById: vi.fn().mockResolvedValue({ id: 84, status: "customs_clearance" }),
+    getInboundShipmentLines: vi.fn().mockResolvedValue([
+      { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, productVariantId: null, sku: "COGS-TEST-001", qtyShipped: 20 },
+      { id: 2, purchaseOrderLineId: 229, purchaseOrderId: 140, productVariantId: null, sku: "COGS-TEST-002", qtyShipped: 150 },
+    ]),
+    getPurchaseOrderById: vi.fn().mockResolvedValue({
+      id: 140, poNumber: "PO-20260617-002", vendorId: 101, warehouseId: 1,
+      expectedDeliveryDate: null, confirmedDeliveryDate: null,
+    }),
+    getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([]),
+    getPurchaseOrderLines: vi.fn().mockResolvedValue([
+      { id: 228, productId: 327, sku: "COGS-TEST-001", productName: "Widget A", unitCostMills: 26000, unitCostCents: 260 },
+      { id: 229, productId: 328, sku: "COGS-TEST-002", productName: "Widget B", unitCostMills: 7867, unitCostCents: 79 },
+    ]),
+    getProductVariantsByProductId: vi.fn(async (pid: number) =>
+      pid === 327
+        ? [{ id: 467, unitsPerVariant: 1 }, { id: 469, unitsPerVariant: 10 }]
+        : [{ id: 470, unitsPerVariant: 1 }, { id: 471, unitsPerVariant: 50 }]),
+    getAllProductLocations: vi.fn().mockResolvedValue([]),
+    generateReceiptNumber: vi.fn().mockResolvedValue("RCV-TEST-001"),
+    createReceivingOrder: vi.fn(async (o: any) => { captured.order = o; return { id: 999, ...o }; }),
+    bulkCreateReceivingLines: vi.fn(async (l: any) => { captured.lines = l; return l; }),
+    ...overrides,
+  };
+  const svc = createPurchasingService(db, storage as any);
+  return { svc, storage, captured };
+}
+
+describe("createReceiptFromShipment", () => {
+  it("creates a shipment-linked draft receipt with lines from qtyShipped (scaled to the case)", async () => {
+    const { svc, captured } = build();
+    const order: any = await svc.createReceiptFromShipment(84, "u1");
+
+    expect(order).toMatchObject({ id: 999 });
+    // The order carries the shipment link + source so lots inherit it at close.
+    expect(captured.order).toMatchObject({
+      sourceType: "shipment",
+      inboundShipmentId: 84,
+      purchaseOrderId: 140,
+      poNumber: "PO-20260617-002",
+      status: "draft",
+    });
+    // Lines: Expected = ceil(qtyShipped / largest-pack units); cost from PO line (mills-first).
+    expect(captured.lines).toHaveLength(2);
+    expect(captured.lines[0]).toMatchObject({
+      productVariantId: 469, purchaseOrderLineId: 228, expectedQty: 2, unitCostMills: 26000, unitCost: 260,
+    });
+    expect(captured.lines[1]).toMatchObject({
+      productVariantId: 471, purchaseOrderLineId: 229, expectedQty: 3, unitCostMills: 7867, unitCost: 79,
+    });
+  });
+
+  it("reuses an open receipt already linked to the shipment (idempotent)", async () => {
+    const existing = { id: 555, status: "open", inboundShipmentId: 84 };
+    const { svc, storage } = build({
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([existing]),
+    });
+    const order: any = await svc.createReceiptFromShipment(84, "u1");
+    expect(order).toMatchObject({ id: 555, reusedExisting: true });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("rejects receiving a shipment that isn't physically here yet", async () => {
+    const { svc } = build({ getInboundShipmentById: vi.fn().mockResolvedValue({ id: 84, status: "booked" }) });
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/status/);
+  });
+
+  it("rejects a shipment whose lines span multiple POs", async () => {
+    const { svc } = build({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 20 },
+        { id: 2, purchaseOrderLineId: 300, purchaseOrderId: 141, qtyShipped: 10 },
+      ]),
+    });
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/multiple POs/);
+  });
+});

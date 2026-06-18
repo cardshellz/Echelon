@@ -656,6 +656,24 @@ export function registerPurchaseOrderRoutes(app: Express) {
     await handleLifecycleCommand(req, res, "create_receipt");
   });
 
+  // Receive AGAINST an inbound shipment: creates a receiving order linked to the
+  // shipment (inbound_shipment_id + source_type='shipment'), lines defaulted from
+  // the shipment's qtyShipped, so lots created at close inherit the shipment link
+  // and the shipment's finalized freight attaches to exactly these lots.
+  app.post("/api/inbound-shipments/:id/create-receipt", requirePermission("inventory", "receive"), requireIdempotency(), async (req, res) => {
+    try {
+      const shipmentId = Number(req.params.id);
+      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+        return res.status(400).json({ error: "Invalid shipment id" });
+      }
+      const userId = (req as any).session?.user?.id;
+      const receipt = await purchasing.createReceiptFromShipment(shipmentId, userId);
+      res.status(201).json(receipt);
+    } catch (error: any) {
+      res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to create receipt from shipment" });
+    }
+  });
+
   app.get("/api/purchase-orders/:id/receipts", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const receipts = await purchasing.getPoReceipts(Number(req.params.id));
