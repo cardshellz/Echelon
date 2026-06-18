@@ -8,6 +8,7 @@ import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction }
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { IntegrityError, ValidationError } from "../../../../shared/errors";
 import { resolveCost } from "../cost-resolver";
+import { centsToMills } from "../../../../shared/utils/money";
 
 export class FreezeViolationError extends Error {
   code = "LOCATION_FROZEN";
@@ -75,6 +76,11 @@ export class InventoryUseCases {
     unitCostCents?: number;
     productCostCents?: number;
     packagingCostCents?: number;
+    // Mills (1/100 cent), already scaled to the lot's variant unit — authoritative when
+    // provided. The receive close passes these; cents params remain for legacy callers.
+    unitCostMills?: number;
+    packagingCostMills?: number;
+    landedCostMills?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     purchaseOrderLineId?: number;
@@ -118,13 +124,20 @@ export class InventoryUseCases {
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
         const resolved = await resolveCost(tx, params.productVariantId, params.unitCostCents);
+        // Mills are the cost source of truth. The caller passes the lot-unit mills
+        // directly (receive path); when cost instead came from the resolveCost fallback
+        // waterfall, lift the resolved cents → mills exactly (× 100).
+        const lotUnitCostMills = params.unitCostMills ?? centsToMills(resolved.costCents);
         const lot = await lotSvc.createLot({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
           qty: params.qty,
           unitCostCents: resolved.costCents,
+          unitCostMills: lotUnitCostMills,
           productCostCents: params.productCostCents,
           packagingCostCents: params.packagingCostCents ?? 0,
+          packagingCostMills: params.packagingCostMills,
+          landedCostMills: params.landedCostMills,
           receivingOrderId: params.receivingOrderId,
           purchaseOrderId: params.purchaseOrderId,
           poLineId: params.purchaseOrderLineId,

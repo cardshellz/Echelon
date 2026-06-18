@@ -20,6 +20,7 @@ import {
   millsToCents,
   centsToMills,
   dollarsToMills,
+  perUnitMills,
 } from "@shared/utils/money";
 import {
   type ReceivingCloseReconciliation,
@@ -39,6 +40,9 @@ interface InventoryCore {
     unitCostCents?: number;
     productCostCents?: number;
     packagingCostCents?: number;
+    unitCostMills?: number;
+    packagingCostMills?: number;
+    landedCostMills?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     purchaseOrderLineId?: number;
@@ -504,7 +508,6 @@ export class ReceivingService {
         let unitCostCents = resolved.cents;
         let unitCostMills = resolved.mills;
         const packagingCostCents = resolved.packagingCostCents ?? 0;
-        const productCostCents = resolved.productCostCents;
         let costProvisional = 0;
         const parsedInboundShipmentId = Number(order.inboundShipmentId);
         const inboundShipmentId =
@@ -593,18 +596,49 @@ export class ReceivingService {
           }
         }
 
-        // Lots store quantity in the receiving variant's OWN units (e.g. cases),
-        // so the cost booked on the lot must be per that unit. resolveReceivingLineCost
-        // returns per-base (per-piece) cost; scale by the variant's units_per_variant
-        // so a line received as a Case-of-N books the full case cost, not 1/Nth of it.
-        // (e.g. 10 pieces @ $0.60 received as 1 Case-of-10 => $6.00/case, not $0.60.)
+        // Lots store quantity in the receiving variant's OWN units (e.g. cases), so the
+        // cost booked on the lot is per that unit. Cost is carried in MILLS so the
+        // per-unit × pack-size scale never amplifies cent rounding (the old cents × upv
+        // turned a sub-cent per-piece rounding into real dollars on large packs).
         const upvRow = await tx.execute(sql`
           SELECT units_per_variant FROM catalog.product_variants WHERE id = ${line.productVariantId}
         `);
         const unitsPerVariant = Math.max(1, Number((upvRow.rows?.[0] as any)?.units_per_variant) || 1);
-        const lotUnitCostCents = typeof unitCostCents === "number" ? unitCostCents * unitsPerVariant : unitCostCents;
-        const lotProductCostCents = typeof productCostCents === "number" ? productCostCents * unitsPerVariant : productCostCents;
-        const lotPackagingCostCents = (packagingCostCents ?? 0) * unitsPerVariant;
+
+        // Pull the PO line so we can cost the lot EXACTLY from its totals when this is a
+        // plain PO receipt (no receiving-line override, no landed/typed adjustment).
+        let lotPoLine: any = null;
+        if (line.purchaseOrderLineId && typeof (this.storage as any).getPurchaseOrderLineById === "function") {
+          try { lotPoLine = await (this.storage as any).getPurchaseOrderLineById(line.purchaseOrderLineId); }
+          catch { lotPoLine = null; }
+        }
+        const lineQty = Number(lotPoLine?.orderQty) || 0;
+        const lineProductCents = Number(lotPoLine?.totalProductCostCents || 0);
+        const linePackagingCents = Number(lotPoLine?.packagingCostCents || 0);
+        const isProductPoLine = (lotPoLine?.lineType ?? "product") === "product";
+        // The per-unit mills the PO line itself implies. If the resolved blend equals
+        // this, nothing overrode the PO cost, so we can decompose straight from totals.
+        const poDerivedMills = (lineQty > 0 && isProductPoLine)
+          ? perUnitMills((lineProductCents + linePackagingCents) * 100, lineQty)
+          : undefined;
+
+        let lotUnitCostMills: number | undefined;
+        let lotPackagingCostMills = 0;
+        if (poDerivedMills != null && typeof unitCostMills === "number" && unitCostMills === poDerivedMills) {
+          // EXACT path: derive the lot's per-variant-unit cost from PO line TOTALS, so a
+          // 150-piece, $118 line received as 3 Cases-of-50 values to exactly $118 once
+          // valuation reads mills — no per-piece pre-rounding amplified by the pack size.
+          lotPackagingCostMills = perUnitMills(linePackagingCents * 100 * unitsPerVariant, lineQty);
+          const lotProductMills = perUnitMills(lineProductCents * 100 * unitsPerVariant, lineQty);
+          lotUnitCostMills = lotProductMills + lotPackagingCostMills;
+        } else if (typeof unitCostMills === "number") {
+          // Receiving-line override, finalized landed cost, typed-line allocation, or a
+          // manual receipt: scale the resolved per-unit mills by the pack size. Still
+          // mills (not cents), so no rounding amplification.
+          lotUnitCostMills = unitCostMills * unitsPerVariant;
+          lotPackagingCostMills = (typeof packagingCostCents === "number" ? centsToMills(packagingCostCents) : 0) * unitsPerVariant;
+        }
+        const lotUnitCostCents = lotUnitCostMills != null ? millsToCents(lotUnitCostMills) : undefined;
 
         await this.inventoryCore.receiveInventory({
           productVariantId: line.productVariantId,
@@ -614,8 +648,8 @@ export class ReceivingService {
           notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,
           userId: userId || undefined,
           unitCostCents: lotUnitCostCents,
-          packagingCostCents: lotPackagingCostCents,
-          productCostCents: lotProductCostCents,
+          unitCostMills: lotUnitCostMills,
+          packagingCostMills: lotPackagingCostMills,
           receivingOrderId: orderId,
           purchaseOrderId: order.purchaseOrderId || undefined,
           purchaseOrderLineId: line.purchaseOrderLineId || undefined,

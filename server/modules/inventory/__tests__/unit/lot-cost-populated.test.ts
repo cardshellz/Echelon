@@ -71,4 +71,35 @@ describe("InventoryLotService.createLot — cost-layer population", () => {
     expect(v.costSource).toBe("manual");
     expect(v.poLineId).toBeNull();
   });
+
+  it("stores mills as the cost source of truth; po is the remainder (no double-count)", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    const capture: { inserted: any } = { inserted: null };
+    const svc = new InventoryLotService(buildDb(capture));
+
+    // The receive path passes per-variant-unit mills directly (already scaled to case).
+    await svc.createLot({
+      productVariantId: 10,
+      warehouseLocationId: 20,
+      qty: 3,
+      unitCostCents: 3933, // cents mirror — ignored when mills are present
+      unitCostMills: 393333, // authoritative per-case total ($39.3333)
+      packagingCostMills: 60000, // $6.00 packaging
+      purchaseOrderId: 140,
+      poLineId: 229,
+    });
+
+    const v = capture.inserted;
+    // Mills stored verbatim; total = product + packaging + landed.
+    expect(v.totalUnitCostMills).toBe(393333);
+    expect(v.packagingCostMills).toBe(60000);
+    expect(v.landedCostMills).toBe(0);
+    // PO (product) = remainder, so the breakdown always reconciles to total.
+    expect(v.poUnitCostMills).toBe(333333);
+    // Cent mirrors derived half-up (display / GL).
+    expect(v.totalUnitCostCents).toBe(3933);
+    expect(v.poUnitCostCents).toBe(3333);
+    expect(v.packagingCostCents).toBe(600);
+  });
 });

@@ -22,6 +22,7 @@ import {
 } from "@shared/schema";
 import type { InventoryLot, InsertInventoryLot } from "@shared/schema";
 import { resolveCost } from "./cost-resolver";
+import { millsToCents, centsToMills } from "@shared/utils/money";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -73,6 +74,12 @@ export class InventoryLotService {
     unitCostCents: number;
     productCostCents?: number;
     packagingCostCents?: number;
+    // Mills (1/100 cent) — authoritative when provided (the receive path passes these,
+    // already scaled to the lot's variant unit). Cents inputs are lifted to mills (×100)
+    // when mills are absent (manual / case-break callers).
+    unitCostMills?: number;
+    packagingCostMills?: number;
+    landedCostMills?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
     inboundShipmentId?: number;
@@ -83,18 +90,24 @@ export class InventoryLotService {
   }): Promise<InventoryLot> {
     const lotNumber = await this.generateLotNumber();
 
-    // Total landed cost is the COGS source of truth: product + packaging + landed.
-    // Components are stored individually; `total` (and the legacy `unitCostCents`
-    // mirror) is their sum, so valuation + COGS always read the all-in cost.
-    const poUnitCostCents = params.productCostCents ?? Math.max(0, params.unitCostCents - (params.packagingCostCents ?? 0));
-    const packagingCostCents = params.packagingCostCents ?? 0;
-    // Anything in unitCostCents above the product cost is freight already applied at
-    // receive (a finalized inbound-shipment landed cost). Only derivable when product
-    // is known explicitly; otherwise unitCostCents is the legacy all-in cost (landed 0).
-    const landedCostCents = params.productCostCents != null
-      ? Math.max(0, params.unitCostCents - params.productCostCents)
-      : 0;
-    const totalUnitCostCents = poUnitCostCents + packagingCostCents + landedCostCents;
+    // Cost is tracked in MILLS (1/100 cent) as the source of truth: total = product
+    // (po) + packaging + landed. Carrying mills means per-unit × qty (FIFO/valuation)
+    // never amplifies cent rounding. The *_cents columns are derived display mirrors
+    // (millsToCents, half-up) for UI / GL. Callers pass mills directly (the receive
+    // path) or only cents (manual / case-break), in which case we lift cents → mills
+    // exactly (× 100).
+    const totalUnitCostMills = params.unitCostMills ?? centsToMills(params.unitCostCents);
+    const packagingCostMills = params.packagingCostMills ?? centsToMills(params.packagingCostCents ?? 0);
+    const landedCostMills = params.landedCostMills ?? 0;
+    // PO (product) cost = remainder, so the breakdown always reconciles to total. This
+    // also fixes the old double-count: landed used to be derived as (unitCost − product),
+    // which counted packaging twice whenever unitCost was the product+packaging blend.
+    const poUnitCostMills = Math.max(0, totalUnitCostMills - packagingCostMills - landedCostMills);
+    // Derived cent mirrors (display / GL / legacy readers until the COGS/valuation reads move to mills).
+    const totalUnitCostCents = millsToCents(totalUnitCostMills);
+    const poUnitCostCents = millsToCents(poUnitCostMills);
+    const packagingCostCents = millsToCents(packagingCostMills);
+    const landedCostCents = millsToCents(landedCostMills);
 
     const [lot] = await this.db
       .insert(inventoryLots)
@@ -109,6 +122,11 @@ export class InventoryLotService {
         packagingCostCents,
         landedCostCents,
         totalUnitCostCents,
+        unitCostMills: totalUnitCostMills,
+        poUnitCostMills,
+        packagingCostMills,
+        landedCostMills,
+        totalUnitCostMills,
         qtyReceived: params.qty,
         costSource: params.costSource ?? ((params.poLineId || params.purchaseOrderId) ? "po" : "manual"),
         poLineId: params.poLineId ?? null,
