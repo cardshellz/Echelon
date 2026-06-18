@@ -117,6 +117,7 @@ interface ReceivingOrder {
   warehouseId: number | null;
   receivingLocationId: number | null;
   purchaseOrderId: number | null;
+  inboundShipmentId: number | null;
   status: string;
   expectedDate: string | null;
   receivedDate: string | null;
@@ -1737,6 +1738,20 @@ DEF-456,25,,,5.00,,Location TBD`;
                     </>
                   )}
                 </div>
+
+                {/* Source banner — where these goods (and their cost) come from */}
+                {selectedReceipt.sourceType === "shipment" && selectedReceipt.status !== "closed" && (
+                  <div className="flex items-start gap-2 p-3 rounded-lg border bg-blue-50 border-blue-200 text-blue-800 text-sm">
+                    <Package className="h-4 w-4 mt-0.5 shrink-0 text-blue-600" />
+                    <span>Receiving against an <strong>inbound shipment</strong>. Lot cost is provisional (product + packaging) until the shipment's freight is finalized — then freight is added per case.</span>
+                  </div>
+                )}
+                {selectedReceipt.sourceType === "po" && selectedReceipt.status !== "closed" && (
+                  <div className="flex items-start gap-2 p-3 rounded-lg border bg-muted/40 text-muted-foreground text-sm">
+                    <FileText className="h-4 w-4 mt-0.5 shrink-0" />
+                    <span>Receiving against <strong>PO {selectedReceipt.poNumber}</strong> directly — no inbound‑shipment freight applies on this receipt.</span>
+                  </div>
+                )}
 
                 {/* Warehouse & Default Location */}
                 {selectedReceipt.status !== "closed" && (
