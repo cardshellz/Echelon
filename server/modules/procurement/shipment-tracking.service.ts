@@ -22,6 +22,29 @@ import type {
   InventoryLot,
 } from "@shared/schema";
 import { inboundShipmentLines, inboundFreightCosts, vendors } from "@shared/schema";
+import { millsToCents, perUnitMills } from "@shared/utils/money";
+
+/**
+ * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
+ * in cents over `qty` base units) onto ONE inventory lot's variant unit (e.g. a case),
+ * in mills, and fold it into the lot's total:
+ *   landed_per_case = round_half_up(nonProductCents × 100 × units_per_variant ÷ qty)
+ *   total = product + packaging + landed   (all mills; cents is a derived mirror)
+ * Pure + exported for unit tests.
+ */
+export function computeLotLandedMills(args: {
+  landedNonProductCents: number;
+  unitsPerVariant: number;
+  qty: number;
+  poUnitCostMills: number;
+  packagingCostMills: number;
+}): { landedCostMills: number; totalMills: number; totalCents: number } {
+  const upv = Math.max(1, Math.trunc(args.unitsPerVariant) || 1);
+  const qty = Math.max(1, Math.trunc(args.qty) || 1);
+  const landedCostMills = perUnitMills(Math.max(0, Math.trunc(args.landedNonProductCents)) * 100 * upv, qty);
+  const totalMills = (args.poUnitCostMills || 0) + (args.packagingCostMills || 0) + landedCostMills;
+  return { landedCostMills, totalMills, totalCents: millsToCents(totalMills) };
+}
 import { sql as sqlTag, eq } from "drizzle-orm";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
@@ -1481,44 +1504,46 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     if (lots.length === 0) return { updated: 0, total: 0, skipped: [] };
 
     const lines = await storage.getInboundShipmentLines(shipmentId);
-    const finalizedCostByVariant = new Map<number, {
-      landedUnitCostCents: number;
-      poUnitCostCents: number;
-      lineIds: number[];
-    }>();
-    const ambiguousVariantIds = new Set<number>();
-    const unfinalizedVariantIds = new Set<number>();
+    // Build finalized landed cost keyed by PO LINE. Snapshots/shipment lines are
+    // product-level (purchase_order_line_id) and lots are variant-level (case), so
+    // po_line is the durable join — the old variant-keyed match never matched
+    // product-level lines. Carry the NON-PRODUCT landed component
+    // (freight+duty+insurance+other) and qty so it can be allocated exactly to each
+    // lot's variant unit.
+    const finalizedByPoLine = new Map<number, { landedNonProductCents: number; qty: number; lineIds: number[] }>();
+    const unfinalizedPoLines = new Set<number>();
 
     for (const line of lines) {
-      const variantId = Number(line.productVariantId);
-      if (!Number.isInteger(variantId) || variantId <= 0) continue;
+      const poLineId = Number(line.purchaseOrderLineId);
+      if (!Number.isInteger(poLineId) || poLineId <= 0) continue;
 
       const snapshots = await storage.getLandedCostSnapshots(line.id);
       const snapshot = snapshots[0];
-      if (!snapshot || snapshot.landedUnitCostCents == null) {
-        unfinalizedVariantIds.add(variantId);
+      if (!snapshot || snapshot.totalLandedCostCents == null) {
+        unfinalizedPoLines.add(poLineId);
         continue;
       }
 
-      const landedUnitCostCents = Number(snapshot.landedUnitCostCents);
-      if (!Number.isFinite(landedUnitCostCents)) {
-        unfinalizedVariantIds.add(variantId);
+      const qty = Number(snapshot.qty) || 0;
+      const nonProduct = Math.max(0,
+        Number(snapshot.freightAllocatedCents || 0)
+        + Number(snapshot.dutyAllocatedCents || 0)
+        + Number(snapshot.insuranceAllocatedCents || 0)
+        + Number(snapshot.otherAllocatedCents || 0),
+      );
+      if (!Number.isFinite(nonProduct) || qty <= 0) {
+        unfinalizedPoLines.add(poLineId);
         continue;
       }
 
-      const poUnitCostCents = Number(snapshot.poUnitCostCents ?? 0);
-      const existing = finalizedCostByVariant.get(variantId);
+      const existing = finalizedByPoLine.get(poLineId);
       if (existing) {
+        // Same PO line across >1 line of this shipment: sum landed + qty.
+        existing.landedNonProductCents += nonProduct;
+        existing.qty += qty;
         existing.lineIds.push(line.id);
-        if (existing.landedUnitCostCents !== landedUnitCostCents) {
-          ambiguousVariantIds.add(variantId);
-        }
       } else {
-        finalizedCostByVariant.set(variantId, {
-          landedUnitCostCents,
-          poUnitCostCents: Number.isFinite(poUnitCostCents) ? poUnitCostCents : 0,
-          lineIds: [line.id],
-        });
+        finalizedByPoLine.set(poLineId, { landedNonProductCents: nonProduct, qty, lineIds: [line.id] });
       }
     }
 
@@ -1531,82 +1556,66 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     }> = [];
 
     for (const lot of lots) {
-      const variantId = Number(lot.productVariantId);
-      if (!Number.isInteger(variantId) || variantId <= 0) {
-        skipped.push({
-          lotId: lot.id,
-          productVariantId: lot.productVariantId ?? null,
-          reason: "invalid_lot_variant",
-        });
+      const poLineId = Number((lot as any).poLineId);
+      if (!Number.isInteger(poLineId) || poLineId <= 0) {
+        skipped.push({ lotId: lot.id, productVariantId: lot.productVariantId ?? null, reason: "lot_missing_po_line" });
         continue;
       }
 
-      const finalizedCost = finalizedCostByVariant.get(variantId);
-      if (ambiguousVariantIds.has(variantId)) {
+      const finalized = finalizedByPoLine.get(poLineId);
+      if (!finalized) {
         skipped.push({
           lotId: lot.id,
           productVariantId: lot.productVariantId,
-          reason: "ambiguous_variant_landed_cost",
-          lineIds: finalizedCost?.lineIds,
+          reason: unfinalizedPoLines.has(poLineId) ? "landed_cost_not_finalized" : "no_matching_finalized_landed_cost",
         });
         continue;
       }
 
-      if (unfinalizedVariantIds.has(variantId)) {
-        skipped.push({
-          lotId: lot.id,
-          productVariantId: lot.productVariantId,
-          reason: "landed_cost_not_finalized",
-          lineIds: finalizedCost?.lineIds,
-        });
-        continue;
-      }
-
-      if (!finalizedCost) {
-        skipped.push({
-          lotId: lot.id,
-          productVariantId: lot.productVariantId,
-          reason: "no_matching_finalized_landed_cost",
-        });
-        continue;
-      }
-
-      // Update the lot with finalized landed cost
-      await storage.updateInventoryLot(lot.id, {
-        unitCostCents: finalizedCost.landedUnitCostCents,
-        costProvisional: 0,
+      // Allocate the line's non-product landed cost to THIS lot's variant unit (case),
+      // in MILLS: round_half_up(nonProductCents × 100 × units_per_variant ÷ qty). The lot
+      // already carries product + packaging mills from receive; set landed and recompute
+      // total = product + packaging + landed (cents columns derived as display mirrors).
+      const variant = await storage.getProductVariantById(Number(lot.productVariantId));
+      const { landedCostMills, totalMills, totalCents } = computeLotLandedMills({
+        landedNonProductCents: finalized.landedNonProductCents,
+        unitsPerVariant: Number(variant?.unitsPerVariant) || 1,
+        qty: finalized.qty,
+        poUnitCostMills: Number((lot as any).poUnitCostMills) || 0,
+        packagingCostMills: Number((lot as any).packagingCostMills) || 0,
       });
 
-      // Also update COGS columns (landed_cost_cents, total_unit_cost_cents)
       try {
-        const poUnitCost = finalizedCost.poUnitCostCents || (lot as any).po_unit_cost_cents || (lot as any).unitCostCents || 0;
-        const landedPerPiece = finalizedCost.landedUnitCostCents - Number(poUnitCost);
-        const landedCostCents = Math.max(0, landedPerPiece);
-
-        // Use raw SQL to update COGS columns
-        await (storage as any).db?.execute?.(sqlTag`
-          UPDATE inventory_lots SET
-            landed_cost_cents = ${landedCostCents},
-            total_unit_cost_cents = ${finalizedCost.landedUnitCostCents},
-            cost_source = CASE
-              WHEN cost_source = 'po' THEN 'po_landed'
-              ELSE cost_source
-            END
+        await db.execute(sqlTag`
+          UPDATE inventory.inventory_lots SET
+            landed_cost_mills = ${landedCostMills},
+            total_unit_cost_mills = ${totalMills},
+            unit_cost_mills = ${totalMills},
+            landed_cost_cents = ${millsToCents(landedCostMills)},
+            total_unit_cost_cents = ${totalCents},
+            unit_cost_cents = ${totalCents},
+            cost_provisional = 0,
+            cost_source = CASE WHEN cost_source = 'po' THEN 'po_landed' ELSE cost_source END
           WHERE id = ${lot.id}
-        `) || await storage.updateInventoryLot(lot.id, {});
+        `);
       } catch (e: any) {
-        console.warn(`[ShipmentTracking] COGS column update for lot ${lot.id} failed (non-fatal): ${e.message}`);
+        console.warn(`[ShipmentTracking] landed-cost lot update for lot ${lot.id} failed: ${e.message}`);
+        skipped.push({ lotId: lot.id, productVariantId: lot.productVariantId, reason: "lot_update_failed", lineIds: finalized.lineIds });
+        continue;
       }
 
-      // Cascade: update any order_item_costs rows that were written from
-      // this lot at the old cost so shipped order COGS reflect landed truth.
+      // Cascade to any order_item_costs already booked from this lot (rare — provisional
+      // lots are usually unsold) so shipped COGS reflects the finalized landed cost. The
+      // lot's per-variant-unit total now includes freight; mirror it (mills + cents).
       try {
         await db.execute(sqlTag`
           UPDATE oms.order_item_costs
-          SET unit_cost_cents = ${finalizedCost.landedUnitCostCents},
-              total_cost_cents = qty * ${finalizedCost.landedUnitCostCents}
+          SET unit_cost_mills = ${totalMills},
+              total_cost_mills = qty * ${totalMills},
+              unit_cost_cents = ${totalCents},
+              total_cost_cents = qty * ${totalCents}
           WHERE inventory_lot_id = ${lot.id}
-            AND unit_cost_cents != ${finalizedCost.landedUnitCostCents}
+            AND unit_cost_mills != ${totalMills}
         `);
       } catch (e: any) {
         console.warn(`[ShipmentTracking] COGS cascade for lot ${lot.id} failed (non-fatal): ${e.message}`);
