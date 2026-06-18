@@ -141,6 +141,7 @@ function buildService(
     shipmentLandedCost?: number | null;
     shipmentLandedCostError?: Error;
     inboundShipmentId?: number | null;
+    unitsPerVariant?: number;
   } = {},
 ) {
   const updateReceivingLineCalls: Array<{ id: number; updates: any }> = [];
@@ -170,9 +171,14 @@ function buildService(
     ),
   } as any;
 
+  // The close runs SELECT units_per_variant via tx.execute when scaling cost to the
+  // lot's variant unit; return a row so the per-unit × pack-size math has a value.
+  const upvRows = { rows: [{ units_per_variant: opts.unitsPerVariant ?? 1 }] };
   const db = {
-    transaction: vi.fn(async (fn: any) => fn({ execute: vi.fn() })),
-    execute: vi.fn(),
+    transaction: vi.fn(async (fn: any) =>
+      fn({ execute: vi.fn().mockResolvedValue(upvRows) }),
+    ),
+    execute: vi.fn().mockResolvedValue(upvRows),
   } as any;
 
   const inventoryCore = {
@@ -390,5 +396,66 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     const putaway = updateReceivingLineCalls.find((c) => c.id === 506 && c.updates.putawayComplete === 1);
     expect(putaway!.updates.unitCost).toBe(4);
     expect(putaway!.updates.unitCostMills).toBe(350);
+  });
+
+  it("costs the lot EXACTLY from PO line totals — no per-piece rounding on a non-dividing line", async () => {
+    // PO line: 150 pieces, $100 product + $18 packaging = $118.00 all-in.
+    // Received as 3 Cases-of-50 (units_per_variant = 50). Per-case cost must come
+    // straight from the line totals, NOT from the rounded per-piece mills (7867),
+    // so 3 cases value to exactly $118.00 once valuation reads mills.
+    const { svc, receiveInventoryCalls } = buildService(
+      [
+        {
+          id: 601,
+          receivedQty: 3,
+          productVariantId: 11,
+          putawayLocationId: 22,
+          purchaseOrderLineId: 42,
+          unitCostMills: 7867, // PO line's per-piece blend (round(11800*100/150))
+        },
+      ],
+      {
+        42: {
+          unitCostMills: 7867,
+          orderQty: 150,
+          totalProductCostCents: 10000,
+          packagingCostCents: 1800,
+          lineType: "product",
+        },
+      },
+      { unitsPerVariant: 50 },
+    );
+
+    await svc.close(1, "u1");
+    const call = receiveInventoryCalls[0];
+    // per-case = round((10000+1800)*100*50/150) = round(393333.33) = 393333 mills.
+    // 3 cases × 393333 = 1,179,999 mills → millsToCents = 11800 = exactly $118.00.
+    expect(call.unitCostMills).toBe(393333);
+    expect(call.packagingCostMills).toBe(60000); // round(1800*100*50/150)
+    // Implied product (remainder) = 333333 mills; cents mirror per case = 3933.
+    expect(call.unitCostCents).toBe(3933);
+  });
+
+  it("uses per-piece mills scaling (not the exact path) when the receiving cost overrides the PO line", async () => {
+    // Receiving-line override ($1.2345) differs from the PO line blend, so we scale
+    // the override per-unit mills by the pack size rather than decomposing PO totals.
+    const { svc, receiveInventoryCalls } = buildService(
+      [
+        {
+          id: 602,
+          receivedQty: 2,
+          productVariantId: 11,
+          putawayLocationId: 22,
+          purchaseOrderLineId: 42,
+          unitCostMills: 12345,
+        },
+      ],
+      { 42: { unitCostMills: 7867, orderQty: 150, totalProductCostCents: 10000, packagingCostCents: 1800, lineType: "product" } },
+      { unitsPerVariant: 50 },
+    );
+
+    await svc.close(1, "u1");
+    const call = receiveInventoryCalls[0];
+    expect(call.unitCostMills).toBe(617250); // 12345 × 50, per-piece scaling
   });
 });
