@@ -11,6 +11,7 @@
  */
 
 import { eq, and, sql, asc, gt, desc, isNull, isNotNull } from "drizzle-orm";
+import { millsToCents, centsToMills } from "@shared/utils/money";
 import {
   inventoryLots,
   productVariants,
@@ -343,7 +344,9 @@ export class COGSService {
     await this.db.execute(sql`
       UPDATE oms.order_item_costs
       SET unit_cost_cents = ${newUnitCostCents},
-          total_cost_cents = qty * ${newUnitCostCents}
+          total_cost_cents = qty * ${newUnitCostCents},
+          unit_cost_mills = ${centsToMills(newUnitCostCents)},
+          total_cost_mills = qty * ${centsToMills(newUnitCostCents)}
       WHERE inventory_lot_id = ${lotId}
         AND unit_cost_cents != ${newUnitCostCents}
     `);
@@ -575,19 +578,19 @@ export class COGSService {
         p.base_sku,
         SUM(il.qty_on_hand) as total_qty,
         CASE WHEN SUM(il.qty_on_hand) > 0
-          THEN SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0)) / SUM(il.qty_on_hand)
+          THEN SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0)) / SUM(il.qty_on_hand)
           ELSE 0
-        END as avg_cost_per_piece,
-        SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0)) as total_value_cents,
+        END as avg_cost_per_piece_mills,
+        SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0)) as total_value_mills,
         COUNT(il.id) as active_lots,
-        SUM(CASE WHEN COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0) = 0 THEN il.qty_on_hand ELSE 0 END) as zero_cost_qty,
+        SUM(CASE WHEN COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0) = 0 THEN il.qty_on_hand ELSE 0 END) as zero_cost_qty,
         BOOL_OR(COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
       FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN catalog.products p ON p.id = pv.product_id
       WHERE il.status = 'active' AND il.qty_on_hand > 0
       GROUP BY p.id, p.name, p.base_sku
-      ORDER BY total_value_cents DESC
+      ORDER BY total_value_mills DESC
     `);
 
     const byProduct = (result.rows || []).map((r: any) => ({
@@ -595,8 +598,8 @@ export class COGSService {
       productName: r.product_name,
       baseSku: r.base_sku || '',
       totalQty: Number(r.total_qty) || 0,
-      avgCostPerPiece: Number(r.avg_cost_per_piece) || 0,
-      totalValueCents: Number(r.total_value_cents) || 0,
+      avgCostPerPiece: millsToCents(Math.round(Number(r.avg_cost_per_piece_mills) || 0)),
+      totalValueCents: millsToCents(Math.round(Number(r.total_value_mills) || 0)),
       activeLots: Number(r.active_lots) || 0,
       zeroCostQty: Number(r.zero_cost_qty) || 0,
       hasLandedPending: r.has_landed_pending || false,
@@ -610,8 +613,8 @@ export class COGSService {
     const pendingResult = await this.db.execute(sql`
       SELECT
         COUNT(*) FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as landed_pending_count,
-        COALESCE(SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0))
-          FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL), 0) as landed_pending_value,
+        COALESCE(SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0))
+          FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL), 0) as landed_pending_value_mills,
         COALESCE(SUM(il.qty_on_hand) FILTER (WHERE il.cost_provisional = 1), 0) as provisional_qty
       FROM inventory.inventory_lots il
       WHERE il.status = 'active'
@@ -625,7 +628,7 @@ export class COGSService {
       zeroCostQty,
       provisionalQty: Number(pending.provisional_qty) || 0,
       landedPendingLots: Number(pending.landed_pending_count) || 0,
-      landedPendingValueCents: Number(pending.landed_pending_value) || 0,
+      landedPendingValueCents: millsToCents(Math.round(Number(pending.landed_pending_value_mills) || 0)),
       byProduct,
     };
   }
