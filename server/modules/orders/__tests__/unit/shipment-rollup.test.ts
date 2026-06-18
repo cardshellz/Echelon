@@ -1081,7 +1081,7 @@ describe("handleCustomerCancelOnShipment", () => {
     expect(update).not.toContain("cancelled_at");
   });
 
-  it("sets status='on_hold' + review flags when shipment is 'shipped' (Option B)", async () => {
+  it("returns { mode: 'noop' } and does NOT regress status when shipment is 'shipped' (terminal physical fact)", async () => {
     const mock = makeDb([
       {
         rows: [
@@ -1092,14 +1092,15 @@ describe("handleCustomerCancelOnShipment", () => {
           }),
         ],
       },
-      { rows: [] },
     ]);
     const result = await handleCustomerCancelOnShipment(mock.db, 501, {
       now: NOW,
     });
-    expect(result).toEqual({ mode: "requires_review", shipmentId: 501 });
-    expect(mock.getCallCount()).toBe(2);
-    expect(mock.calls[1].sqlText).toContain("customer_cancel_after_label");
+    // A customer cancel after the package shipped is a commercial event —
+    // the shipment stays 'shipped'; no status regression to on_hold.
+    expect(result).toEqual({ mode: "noop", reason: "already_shipped" });
+    // Only the load — NO UPDATE.
+    expect(mock.getCallCount()).toBe(1);
   });
 
   it("returns { mode: 'noop' } when shipment is already cancelled", async () => {
