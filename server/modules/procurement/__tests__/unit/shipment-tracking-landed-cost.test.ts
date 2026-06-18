@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createShipmentTrackingService } from "../../shipment-tracking.service";
+import { createShipmentTrackingService, computeLotLandedMills } from "../../shipment-tracking.service";
 
 function buildStorage(overrides: Record<string, any> = {}) {
   return {
@@ -21,6 +21,7 @@ function buildStorage(overrides: Record<string, any> = {}) {
     bulkCreateLandedCostSnapshots: vi.fn().mockResolvedValue([]),
     createLandedCostAdjustment: vi.fn().mockResolvedValue({}),
     updateInventoryLot: vi.fn().mockResolvedValue({}),
+    getProductVariantById: vi.fn().mockResolvedValue({ id: 10, unitsPerVariant: 1 }),
     ...overrides,
   } as any;
 }
@@ -266,95 +267,98 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
     expect(storage.getProvisionalLotsByShipment).not.toHaveBeenCalled();
   });
 
-  it("pushes finalized snapshot costs to provisional lots", async () => {
+  it("matches lots to landed cost by PO LINE — even when the shipment line is product-level (null variant) and the lot is a case variant", async () => {
+    const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
     const storage = buildStorage({
       getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
-        { id: 501, productVariantId: 10, unitCostCents: 100, costProvisional: 1 },
+        { id: 501, productVariantId: 469, poLineId: 21, poUnitCostMills: 70000, packagingCostMills: 0, costProvisional: 1 },
       ]),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, productVariantId: 10, landedUnitCostCents: 999 },
+        { id: 11, productVariantId: null, purchaseOrderLineId: 21, qtyShipped: 20 },
       ]),
       getLandedCostSnapshots: vi.fn().mockResolvedValue([
-        { inboundShipmentLineId: 11, productVariantId: 10, poUnitCostCents: 100, landedUnitCostCents: 125 },
+        { inboundShipmentLineId: 11, purchaseOrderLineId: 21, poUnitCostCents: 70, freightAllocatedCents: 1000, dutyAllocatedCents: 0, insuranceAllocatedCents: 0, otherAllocatedCents: 0, totalLandedCostCents: 2400, landedUnitCostCents: 120, qty: 20 },
       ]),
+      getProductVariantById: vi.fn().mockResolvedValue({ id: 469, unitsPerVariant: 10 }),
     });
-    const service = createShipmentTrackingService({} as any, storage);
+    const service = createShipmentTrackingService(db as any, storage);
 
     const result = await service.pushLandedCostsToLots(1);
 
-    expect(storage.updateInventoryLot).toHaveBeenCalledWith(501, {
-      unitCostCents: 125,
-      costProvisional: 0,
-    });
-    expect(storage.db.execute).toHaveBeenCalled();
+    // Joined on po_line 21 despite variant null vs 469; lot updated via raw SQL.
+    expect(db.execute).toHaveBeenCalled();
     expect(result).toEqual({ updated: 1, total: 1, skipped: [] });
   });
 
-  it("does not use mutable shipment line cost before a finalized snapshot exists", async () => {
+  it("skips a lot whose PO line has no finalized snapshot", async () => {
+    const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
     const storage = buildStorage({
       getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
-        { id: 501, productVariantId: 10, unitCostCents: 100, costProvisional: 1 },
+        { id: 501, productVariantId: 469, poLineId: 21, poUnitCostMills: 70000, packagingCostMills: 0, costProvisional: 1 },
       ]),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, productVariantId: 10, landedUnitCostCents: 300 },
+        { id: 11, productVariantId: null, purchaseOrderLineId: 21, qtyShipped: 20 },
       ]),
       getLandedCostSnapshots: vi.fn().mockResolvedValue([]),
     });
-    const service = createShipmentTrackingService({} as any, storage);
+    const service = createShipmentTrackingService(db as any, storage);
 
     const result = await service.pushLandedCostsToLots(1);
 
-    expect(storage.updateInventoryLot).not.toHaveBeenCalled();
+    expect(db.execute).not.toHaveBeenCalled();
     expect(result).toEqual({
       updated: 0,
       total: 1,
-      skipped: [
-        {
-          lotId: 501,
-          productVariantId: 10,
-          reason: "landed_cost_not_finalized",
-          lineIds: undefined,
-        },
-      ],
+      skipped: [{ lotId: 501, productVariantId: 469, reason: "landed_cost_not_finalized" }],
     });
   });
 
-  it("skips ambiguous same-variant shipment lines with different finalized costs", async () => {
+  it("skips a lot with no PO line link", async () => {
+    const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
     const storage = buildStorage({
       getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
-        { id: 501, productVariantId: 10, unitCostCents: 100, costProvisional: 1 },
+        { id: 501, productVariantId: 469, poLineId: null, costProvisional: 1 },
       ]),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, productVariantId: 10 },
-        { id: 12, productVariantId: 10 },
+        { id: 11, productVariantId: null, purchaseOrderLineId: 21, qtyShipped: 20 },
       ]),
-      getLandedCostSnapshots: vi.fn((lineId: number) =>
-        Promise.resolve([
-          {
-            inboundShipmentLineId: lineId,
-            productVariantId: 10,
-            poUnitCostCents: 100,
-            landedUnitCostCents: lineId === 11 ? 125 : 150,
-          },
-        ]),
-      ),
+      getLandedCostSnapshots: vi.fn().mockResolvedValue([
+        { inboundShipmentLineId: 11, purchaseOrderLineId: 21, totalLandedCostCents: 2400, freightAllocatedCents: 1000, qty: 20 },
+      ]),
     });
-    const service = createShipmentTrackingService({} as any, storage);
+    const service = createShipmentTrackingService(db as any, storage);
 
     const result = await service.pushLandedCostsToLots(1);
 
-    expect(storage.updateInventoryLot).not.toHaveBeenCalled();
+    expect(db.execute).not.toHaveBeenCalled();
     expect(result).toEqual({
       updated: 0,
       total: 1,
-      skipped: [
-        {
-          lotId: 501,
-          productVariantId: 10,
-          reason: "ambiguous_variant_landed_cost",
-          lineIds: [11, 12],
-        },
-      ],
+      skipped: [{ lotId: 501, productVariantId: 469, reason: "lot_missing_po_line" }],
     });
+  });
+});
+
+describe("computeLotLandedMills", () => {
+  it("allocates freight per case in mills, folding into product + packaging", () => {
+    // $10.00 freight (1000c) over 20 pieces; lot = Case-of-10, product $7.00/case = 70000 mills.
+    // freight/case = round_half_up(1000 × 100 × 10 / 20) = 50000 mills ($5.00).
+    const out = computeLotLandedMills({
+      landedNonProductCents: 1000, unitsPerVariant: 10, qty: 20,
+      poUnitCostMills: 70000, packagingCostMills: 0,
+    });
+    expect(out.landedCostMills).toBe(50000);
+    expect(out.totalMills).toBe(120000);
+    expect(out.totalCents).toBe(1200);
+  });
+
+  it("rounds half-up once from the line total — no per-piece amplification", () => {
+    // freight 1800c over 150 pieces, Case-of-50: round(1800 × 100 × 50 / 150) = 60000 mills.
+    const out = computeLotLandedMills({
+      landedNonProductCents: 1800, unitsPerVariant: 50, qty: 150,
+      poUnitCostMills: 333333, packagingCostMills: 0,
+    });
+    expect(out.landedCostMills).toBe(60000);
+    expect(out.totalMills).toBe(393333);
   });
 });
