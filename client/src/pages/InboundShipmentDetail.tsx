@@ -359,6 +359,16 @@ export default function InboundShipmentDetail() {
 
   // ── Mutations ──
 
+  // A shipment links to its PO only through its lines, and the PO page reads its shipment
+  // list (and receipts) from SEPARATE /api/purchase-orders/:id/* queries. Global staleTime is
+  // Infinity ("fetch once, cache forever"), so unless we explicitly invalidate those keys, the
+  // PO's Receive picker keeps showing a stale shipment status (e.g. "draft" after we delivered).
+  const invalidatePoViews = () =>
+    queryClient.invalidateQueries({
+      predicate: (q) =>
+        typeof q.queryKey[0] === "string" && q.queryKey[0].startsWith("/api/purchase-orders/"),
+    });
+
   function createTransitionMutation(endpoint: string) {
     return useMutation({
       mutationFn: async (body: any = {}) => {
@@ -368,6 +378,7 @@ export default function InboundShipmentDetail() {
       onSuccess: () => {
         queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
         queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+        invalidatePoViews();
         toast({ title: "Success", description: `Shipment ${endpoint.replace(/-/g, " ")} completed` });
       },
       onError: (err: Error) => {
@@ -392,6 +403,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+      invalidatePoViews();
       setShowCancelDialog(false);
       setCancelReason("");
       toast({ title: "Cancelled", description: "Shipment cancelled" });
@@ -409,6 +421,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+      invalidatePoViews();
       setShowEditDialog(false);
       toast({ title: "Updated", description: "Shipment details updated" });
     },
@@ -966,6 +979,7 @@ export default function InboundShipmentDetail() {
                   if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed"); }
                   const receipt = await res.json();
                   toast({ title: "Receipt created", description: `${receipt.receiptNumber} created from shipment` });
+                  invalidatePoViews();
                   navigate(`/receiving?open=${receipt.id}`);
                 } catch (err: any) {
                   toast({ title: "Error", description: err.message, variant: "destructive" });
