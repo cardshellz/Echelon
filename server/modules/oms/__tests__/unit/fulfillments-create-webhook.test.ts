@@ -460,6 +460,10 @@ describe("handleShopifyFulfillmentCreate — path B supersedes ShipStation (scop
       (c) => c.sqlText.includes("wms.order_items") && c.sqlText.includes("sku = ANY"),
     );
     expect(skuLookup).toBeTruthy();
+    // Regression guard: array membership must use an ARRAY[...] literal, NOT
+    // `${jsArray}::text[]` — drizzle expands a JS array into a tuple `($1,$2)`,
+    // which Postgres rejects with "cannot cast record to <type>[]".
+    expect(skuLookup!.sqlText).toContain("ARRAY[");
     // Subset guard present (the NOT EXISTS that protects partially-covered
     // shipments).
     const subsetSelect = db.calls.find(

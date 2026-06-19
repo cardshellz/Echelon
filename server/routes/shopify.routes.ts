@@ -173,7 +173,8 @@ async function supersedeShipStationForFulfilledItems(
   const { db } = deps;
   const itemRows: any = await db.execute(sql`
     SELECT id FROM wms.order_items
-    WHERE order_id = ${wmsOrderId} AND sku = ANY(${fulfilledSkus}::text[])
+    WHERE order_id = ${wmsOrderId}
+      AND sku = ANY(ARRAY[${sql.join(fulfilledSkus.map((s) => sql`${s}`), sql`, `)}]::text[])
   `);
   const fulfilledItemIds = (itemRows?.rows ?? [])
     .map((r: any) => Number(r.id))
@@ -199,12 +200,12 @@ async function supersedeShipStationForFulfilledItems(
       AND EXISTS (
         SELECT 1 FROM wms.outbound_shipment_items osi
         WHERE osi.shipment_id = os.id AND osi.qty > 0
-          AND osi.order_item_id = ANY(${fulfilledItemIds}::int[])
+          AND osi.order_item_id = ANY(ARRAY[${sql.join(fulfilledItemIds.map((n: number) => sql`${n}`), sql`, `)}]::int[])
       )
       AND NOT EXISTS (
         SELECT 1 FROM wms.outbound_shipment_items osi
         WHERE osi.shipment_id = os.id AND osi.qty > 0
-          AND osi.order_item_id <> ALL(${fulfilledItemIds}::int[])
+          AND osi.order_item_id <> ALL(ARRAY[${sql.join(fulfilledItemIds.map((n: number) => sql`${n}`), sql`, `)}]::int[])
       )
     ORDER BY os.id
   `);
