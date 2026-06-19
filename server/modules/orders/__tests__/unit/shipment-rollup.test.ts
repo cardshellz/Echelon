@@ -1342,6 +1342,62 @@ describe("markShipmentVoided", () => {
       markShipmentVoided(mock.db, 501, "x", { now: NOW }),
     ).rejects.toMatchObject({ code: "SHIPMENT_NOT_FOUND" });
   });
+
+  it("ignores a stale void that targets a superseded label (label-of-record guard)", async () => {
+    // Shipment already re-shipped on the NEW label of record; a re-delivered
+    // void of the OLD label must NOT wipe it or cancel its fulfillment
+    // (incident: order #58984 / shipment 3649).
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "1Z_NEW",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      // No further responses scripted: the guard must return before any
+      // history insert / UPDATE / cancel.
+    ]);
+    const cancel = vi.fn(async () => {});
+    const result = await markShipmentVoided(mock.db, 501, "ss_label_void", {
+      now: NOW,
+      voidedTrackingNumber: "1Z_OLD",
+      fulfillmentPush: { cancelShopifyFulfillment: cancel },
+    });
+    expect(result).toEqual({ wmsOrderId: 42, changed: false });
+    // Only the initial load ran.
+    expect(mock.getCallCount()).toBe(1);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("voids normally when the void targets the current label of record", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "1Z_CURRENT",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] }, // history insert
+      { rows: [] }, // UPDATE
+    ]);
+    const cancel = vi.fn(async () => {});
+    const result = await markShipmentVoided(mock.db, 501, "ss_label_void", {
+      now: NOW,
+      voidedTrackingNumber: "1Z_CURRENT",
+      fulfillmentPush: { cancelShopifyFulfillment: cancel },
+    });
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(mock.getCallCount()).toBe(3);
+    expect(cancel).toHaveBeenCalledWith("gid://shopify/Fulfillment/999");
+  });
 });
 
 // ─── recomputeOrderStatusFromShipments ──────────────────────────────

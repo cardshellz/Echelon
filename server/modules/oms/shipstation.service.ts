@@ -1012,7 +1012,15 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     carrier: string,
   ): ShipmentEvent | null {
     if (shipment.voidDate) {
-      return { kind: "voided", reason: "ss_label_void" };
+      // Carry the voided label's tracking so the rollup can tell whether this
+      // void targets the shipment's CURRENT label of record or a superseded
+      // one (old label voided after the shipment already re-shipped on a new
+      // label). markShipmentVoided ignores stale voids of superseded labels.
+      return {
+        kind: "voided",
+        reason: "ss_label_void",
+        trackingNumber: shipment.trackingNumber ?? null,
+      };
     }
 
     const trackingNumber = shipment.trackingNumber;
