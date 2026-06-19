@@ -393,6 +393,175 @@ describe("handleShopifyFulfillmentCreate — path B (external fulfillment)", () 
   });
 });
 
+// ─── Path B: shipment-scoped ShipStation supersede (double-ship) ────
+
+describe("handleShopifyFulfillmentCreate — path B supersedes ShipStation (scoped)", () => {
+  // Path B base SQL: shipment miss → order found → lock / dedup / insert /
+  // unlock (calls 1–6).
+  const pathBBase = () => [
+    { rows: [] }, // 1 shipment lookup miss
+    { rows: [{ id: 8000, channel_id: 36 }] }, // 2 wms.orders lookup
+    { rows: [] }, // 3 advisory lock
+    { rows: [] }, // 4 dedup probe
+    { rows: [] }, // 5 INSERT external shipment
+    { rows: [] }, // 6 advisory unlock
+  ];
+
+  function makeEngine(opts: { fail?: boolean } = {}) {
+    return {
+      isConfigured: () => true,
+      cancel: vi.fn(async () => {
+        if (opts.fail) throw new Error("engine cancel boom");
+      }),
+    };
+  }
+
+  function liveSsShipmentRow() {
+    return {
+      id: 9001,
+      order_id: 8000,
+      status: "labeled",
+      tracking_number: null,
+      carrier: "UPS",
+      tracking_url: null,
+      shopify_fulfillment_id: null,
+      shipping_engine: null,
+      engine_order_ref: null,
+      engine_shipment_ref: null,
+      shipstation_order_id: 12345,
+      shipstation_order_key: "echelon-wms-shp-9001",
+    };
+  }
+
+  it("cancels only the SS shipment whose items the fulfillment fully covers", async () => {
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [{ id: 310049 }] }, // 7 SKU → order_item ids
+      { rows: [{ id: 9001 }] }, // 8 superseded SS shipments (subset rule)
+      { rows: [liveSsShipmentRow()] }, // 9 markShipmentCancelled loadShipment
+      { rows: [] }, // 10 cancel UPDATE
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] }, // 11
+      { rows: [{ status: "shipped" }, { status: "cancelled" }] }, // 12
+      { rows: [] }, // 13
+    ]);
+    const omsSvc = makeOmsSvc();
+    const engine = makeEngine();
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW, shippingEngine: engine },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("external_shipment_created");
+    expect(engine.cancel).toHaveBeenCalledTimes(1);
+    // Scoped by SKU, not whole-order.
+    const skuLookup = db.calls.find(
+      (c) => c.sqlText.includes("wms.order_items") && c.sqlText.includes("sku = ANY"),
+    );
+    expect(skuLookup).toBeTruthy();
+    // Subset guard present (the NOT EXISTS that protects partially-covered
+    // shipments).
+    const subsetSelect = db.calls.find(
+      (c) =>
+        c.sqlText.includes("NOT EXISTS") &&
+        c.sqlText.includes("outbound_shipment_items"),
+    );
+    expect(subsetSelect).toBeTruthy();
+  });
+
+  it("cancels nothing when no shipment is fully covered (subset guard)", async () => {
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [{ id: 310049 }] }, // 7 SKU → order_item ids
+      { rows: [] }, // 8 superseded SS → none (every live shipment has an uncovered item)
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
+    ]);
+    const omsSvc = makeOmsSvc();
+    const engine = makeEngine();
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW, shippingEngine: engine },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("external_shipment_created");
+    expect(engine.cancel).not.toHaveBeenCalled();
+  });
+
+  it("cancels nothing when the fulfilled SKUs map to no order items", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [] }, // 7 SKU → order_item ids: none (helper returns before subset query)
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
+    ]);
+    const omsSvc = makeOmsSvc();
+    const engine = makeEngine();
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW, shippingEngine: engine },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(engine.cancel).not.toHaveBeenCalled();
+    // 10 calls: 6 base + 1 SKU lookup + 3 recompute (no subset query).
+    expect(db.execute).toHaveBeenCalledTimes(10);
+    warnSpy.mockRestore();
+  });
+
+  it("skips the cancel entirely when no shippingEngine is injected", async () => {
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
+    ]);
+    const omsSvc = makeOmsSvc();
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW }, // no shippingEngine
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    // 9 calls: 6 base + 3 recompute. Helper not entered at all.
+    expect(db.execute).toHaveBeenCalledTimes(9);
+  });
+
+  it("is non-fatal when the engine cancel throws (WMS still cancels)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [{ id: 310049 }] },
+      { rows: [{ id: 9001 }] },
+      { rows: [liveSsShipmentRow()] },
+      { rows: [] }, // cancel UPDATE still runs
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }, { status: "cancelled" }] },
+      { rows: [] },
+    ]);
+    const omsSvc = makeOmsSvc();
+    const engine = makeEngine({ fail: true });
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW, shippingEngine: engine },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("external_shipment_created");
+    expect(engine.cancel).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
+  });
+});
+
 // ─── Order not tracked ───────────────────────────────────────────────
 
 describe("handleShopifyFulfillmentCreate — order not tracked", () => {
