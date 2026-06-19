@@ -818,6 +818,43 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     console.log("Checked inventory_lots + oms.order_item_costs mills cost columns (backfilled from cents)");
 
+    // PR5: repair historical lots whose mills drifted from the exact per-variant-unit cost.
+    // The PR1 backfill copied cents*100, which for pre-migration lots can be wrong: (a) pre-#635
+    // lots carried the per-piece-not-scaled bug ($0.60/case where it should be $6.00), and (b)
+    // pre-PR2 lots baked packaging into po (packaging_mills=0). For lots STILL ON HAND that came
+    // from a PO line (cost_source po / po_landed), recompute po + packaging mills EXACTLY from the
+    // PO line totals (same round_half_up(total*100*upv/order_qty) the receive path uses), keep
+    // landed, and refresh the cents mirrors. Idempotent: only rows that still drift are updated.
+    // Does NOT cascade to oms.order_item_costs — already-booked COGS is historical, not restated.
+    const lotRepair = await client.query(`
+      WITH src AS (
+        SELECT il.id,
+          ROUND(pol.total_product_cost_cents::numeric * 100 * pv.units_per_variant / NULLIF(pol.order_qty, 0))::bigint AS exact_po,
+          ROUND(pol.packaging_cost_cents::numeric    * 100 * pv.units_per_variant / NULLIF(pol.order_qty, 0))::bigint AS exact_pkg,
+          COALESCE(il.landed_cost_mills, 0) AS landed
+        FROM inventory_lots il
+        JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+        JOIN procurement.purchase_order_lines pol ON pol.id = il.po_line_id
+        WHERE il.qty_on_hand > 0
+          AND il.po_line_id IS NOT NULL
+          AND il.cost_source IN ('po', 'po_landed')
+          AND COALESCE(pol.order_qty, 0) > 0
+      )
+      UPDATE inventory_lots il SET
+        po_unit_cost_mills    = src.exact_po,
+        packaging_cost_mills  = src.exact_pkg,
+        total_unit_cost_mills = src.exact_po + src.exact_pkg + src.landed,
+        unit_cost_mills       = src.exact_po + src.exact_pkg + src.landed,
+        po_unit_cost_cents    = ROUND(src.exact_po::numeric / 100)::bigint,
+        packaging_cost_cents  = ROUND(src.exact_pkg::numeric / 100),
+        total_unit_cost_cents = ROUND((src.exact_po + src.exact_pkg + src.landed)::numeric / 100)::bigint,
+        unit_cost_cents       = ROUND((src.exact_po + src.exact_pkg + src.landed)::numeric / 100)::bigint
+      FROM src
+      WHERE src.id = il.id
+        AND (il.po_unit_cost_mills <> src.exact_po OR il.packaging_cost_mills <> src.exact_pkg)
+    `);
+    console.log(`Repaired ${lotRepair.rowCount ?? 0} historical lot(s) with drifted po/packaging mills (recomputed from PO line)`);
+
     // order_line_costs table (COGS per order line)
     await client.query(`
       CREATE TABLE IF NOT EXISTS order_line_costs (
