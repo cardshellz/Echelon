@@ -15,6 +15,7 @@ import { runReconciliationNow } from "../modules/orders/shopify-order-reconcilia
 import { sql } from "drizzle-orm";
 import {
   markShipmentShipped,
+  markShipmentCancelled,
   recomputeOrderStatusFromShipments,
 } from "../modules/orders/shipment-rollup";
 
@@ -100,6 +101,14 @@ export interface FulfillmentsCreateDeps {
   db: any;
   omsSvc?: { markShippedByExternalId?: (...args: any[]) => Promise<unknown> } | null;
   now?: Date;
+  // When an order is fulfilled directly in Shopify (e.g. int'l labels bought
+  // in Shopify), the SS shipment(s) carrying those exact items are superseded
+  // and must be engine-cancelled or they double-ship. Injected so the handler
+  // can engine-cancel; omit (tests) to skip the cancel.
+  shippingEngine?: {
+    isConfigured?: () => boolean;
+    cancel: (ref: any) => Promise<unknown>;
+  } | null;
 }
 
 export interface FulfillmentsCreateResult {
@@ -114,6 +123,106 @@ export interface FulfillmentsCreateResult {
       | "order_not_tracked";
     error?: string;
   };
+}
+
+/**
+ * Cancel the ShipStation shipment(s) this Shopify fulfillment supersedes.
+ *
+ * Shipment-SCOPED (not whole-order): when an order is fulfilled directly in
+ * Shopify for specific line items, only the PRE-SHIP SS shipment(s) whose
+ * qty>0 items are FULLY covered by the fulfilled SKUs are cancelled. A shipment
+ * that still has an item to ship via ShipStation is left alone (the NOT EXISTS
+ * subset guard). Mapping is by SKU — the only line-item key the webhook
+ * reliably carries (order_items.shopify_line_item_id is frequently null).
+ *
+ * Cancel goes through the shipping-engine port (markShipmentCancelled
+ * engine-cancels queued/labeled rows). Non-blocking: failures are logged;
+ * reconcile catches drift. Already-shipped shipments are excluded by
+ * `shipped_at IS NULL`, so a normal SS flow — or a webhook race on a
+ * fulfillment we pushed — never cancels a real shipment.
+ *
+ * KNOWN LIMITATION: scopes by order_item membership, not per-unit quantity. A
+ * SKU split across BOTH a Shopify fulfillment and an SS shipment (partial qty
+ * each) fails the subset rule, so the SS shipment is left for the operator
+ * rather than risk stranding units.
+ */
+async function supersedeShipStationForFulfilledItems(
+  deps: FulfillmentsCreateDeps,
+  wmsOrderId: number,
+  lineItems: Array<{ sku?: string | null; quantity: number }>,
+  fulfillmentGid: string,
+  now: Date,
+): Promise<void> {
+  const engine = deps.shippingEngine;
+  if (!engine || engine.isConfigured?.() === false) return;
+
+  const fulfilledSkus = Array.from(
+    new Set(
+      lineItems
+        .map((li) => (typeof li.sku === "string" ? li.sku.trim() : ""))
+        .filter((s) => s.length > 0),
+    ),
+  );
+  if (fulfilledSkus.length === 0) {
+    console.warn(
+      `[fulfillments/create] fulfillment ${fulfillmentGid} carried no line-item SKUs — cannot scope ShipStation cancel; skipping`,
+    );
+    return;
+  }
+
+  const { db } = deps;
+  const itemRows: any = await db.execute(sql`
+    SELECT id FROM wms.order_items
+    WHERE order_id = ${wmsOrderId} AND sku = ANY(${fulfilledSkus}::text[])
+  `);
+  const fulfilledItemIds = (itemRows?.rows ?? [])
+    .map((r: any) => Number(r.id))
+    .filter((n: number) => Number.isInteger(n) && n > 0);
+  if (fulfilledItemIds.length === 0) {
+    console.warn(
+      `[fulfillments/create] fulfillment ${fulfillmentGid} SKUs did not map to any order_items for order ${wmsOrderId} — no ShipStation shipment cancelled`,
+    );
+    return;
+  }
+
+  // Pre-ship SS shipments whose EVERY qty>0 item is in the fulfilled set (⊆)
+  // AND that hold at least one fulfilled item. The NOT EXISTS clause is the
+  // shipment-scoping guard: a shipment with any not-yet-fulfilled item is left
+  // to ship via ShipStation.
+  const superseded: any = await db.execute(sql`
+    SELECT os.id
+    FROM wms.outbound_shipments os
+    WHERE os.order_id = ${wmsOrderId}
+      AND os.status IN ('planned', 'queued', 'labeled')
+      AND os.shipped_at IS NULL
+      AND COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM wms.outbound_shipment_items osi
+        WHERE osi.shipment_id = os.id AND osi.qty > 0
+          AND osi.order_item_id = ANY(${fulfilledItemIds}::int[])
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM wms.outbound_shipment_items osi
+        WHERE osi.shipment_id = os.id AND osi.qty > 0
+          AND osi.order_item_id <> ALL(${fulfilledItemIds}::int[])
+      )
+    ORDER BY os.id
+  `);
+
+  for (const row of (superseded?.rows ?? []) as Array<{ id: number }>) {
+    try {
+      await markShipmentCancelled(db, row.id, "superseded_external_fulfillment", {
+        now,
+        engineCancel: async (ref: any) => {
+          await engine.cancel(ref);
+        },
+      });
+    } catch (err: any) {
+      console.error(
+        `[fulfillments/create] failed to cancel superseded SS shipment ${row.id} for order ${wmsOrderId}: ${err?.message ?? err}`,
+      );
+    }
+  }
 }
 
 export async function handleShopifyFulfillmentCreate(
@@ -313,6 +422,16 @@ export async function handleShopifyFulfillmentCreate(
   } finally {
     await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
   }
+
+  // Order fulfilled OUTSIDE ShipStation → cancel the SS shipment(s) this
+  // fulfillment supersedes (shipment-scoped; see helper). Prevents double-ship.
+  await supersedeShipStationForFulfilledItems(
+    deps,
+    wmsOrderId,
+    payload.line_items ?? [],
+    fulfillmentGid,
+    now,
+  );
 
   await recomputeOrderStatusFromShipments(db, wmsOrderId, { now });
 
@@ -1488,7 +1607,7 @@ export function registerShopifyRoutes(app: Express) {
       const { db } = app.locals;
       const { oms: omsSvc } = app.locals.services ?? {};
       const result = await handleShopifyFulfillmentCreate(
-        { db, omsSvc },
+        { db, omsSvc, shippingEngine: app.locals.services?.shippingEngine ?? null },
         payload,
       );
       console.log(
