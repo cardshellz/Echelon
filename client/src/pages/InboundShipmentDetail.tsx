@@ -1445,38 +1445,47 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 3: Allocation ══ */}
         <TabsContent value="allocation" className="space-y-4">
-          <div className="flex gap-2 flex-wrap">
-            <Button
-              variant="outline"
-              onClick={() => runAllocationMutation.mutate()}
-              disabled={runAllocationMutation.isPending || lines.length === 0}
-              className="min-h-[44px]"
-            >
-              <BarChart3 className={`h-4 w-4 mr-2 ${runAllocationMutation.isPending ? "animate-spin" : ""}`} />
-              {runAllocationMutation.isPending ? "Allocating..." : "Run Allocation"}
-            </Button>
-            {shipment.status === "costing" && (
-              <Button
-                onClick={() => finalizeMutation.mutate()}
-                disabled={finalizeMutation.isPending}
-                className="min-h-[44px]"
-              >
-                <CheckCircle className="h-4 w-4 mr-2" />
-                {finalizeMutation.isPending ? "Finalizing..." : "Finalize"}
-              </Button>
-            )}
-            {["costing", "closed"].includes(shipment.status) && (
+          <p className="text-sm text-muted-foreground">
+            Costs allocate automatically when you add or edit a cost, and finalize + push to inventory
+            automatically when the shipment is closed. This tab is the read-only result.
+          </p>
+          <details className="text-sm">
+            <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+              Advanced — manually re-run (rarely needed)
+            </summary>
+            <div className="flex gap-2 flex-wrap mt-2">
               <Button
                 variant="outline"
-                onClick={() => pushCostsToLotsMutation.mutate()}
-                disabled={pushCostsToLotsMutation.isPending}
+                onClick={() => runAllocationMutation.mutate()}
+                disabled={runAllocationMutation.isPending || lines.length === 0}
                 className="min-h-[44px]"
               >
-                <RefreshCw className={`h-4 w-4 mr-2 ${pushCostsToLotsMutation.isPending ? "animate-spin" : ""}`} />
-                {pushCostsToLotsMutation.isPending ? "Pushing..." : "Push Costs to Lots"}
+                <BarChart3 className={`h-4 w-4 mr-2 ${runAllocationMutation.isPending ? "animate-spin" : ""}`} />
+                {runAllocationMutation.isPending ? "Allocating..." : "Run Allocation"}
               </Button>
-            )}
-          </div>
+              {shipment.status === "costing" && (
+                <Button
+                  onClick={() => finalizeMutation.mutate()}
+                  disabled={finalizeMutation.isPending}
+                  className="min-h-[44px]"
+                >
+                  <CheckCircle className="h-4 w-4 mr-2" />
+                  {finalizeMutation.isPending ? "Finalizing..." : "Finalize"}
+                </Button>
+              )}
+              {["costing", "closed"].includes(shipment.status) && (
+                <Button
+                  variant="outline"
+                  onClick={() => pushCostsToLotsMutation.mutate()}
+                  disabled={pushCostsToLotsMutation.isPending}
+                  className="min-h-[44px]"
+                >
+                  <RefreshCw className={`h-4 w-4 mr-2 ${pushCostsToLotsMutation.isPending ? "animate-spin" : ""}`} />
+                  {pushCostsToLotsMutation.isPending ? "Pushing..." : "Push Costs to Lots"}
+                </Button>
+              )}
+            </div>
+          </details>
 
           {allocationStatus && (
             <Card>
