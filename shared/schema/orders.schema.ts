@@ -461,6 +461,14 @@ export const outboundShipments = wmsSchema.table("outbound_shipments", {
   reviewReason: varchar("review_reason", { length: 100 }),
   addressChangedAfterLabel: boolean("address_changed_after_label").notNull().default(false),
 
+  // ===== HOLD (orthogonal flag — see SHIPMENT-STATE-MACHINE-DESIGN.md) =====
+  // A reversible pause, independent of the lifecycle status. Phase 1a writes it
+  // alongside status='on_hold' (dual-write); later phases make it the single
+  // source of truth and retire the `on_hold` lifecycle status. `on_hold_reason`
+  // (below) carries the hold reason.
+  held: boolean("held").notNull().default(false),
+  heldAt: timestamp("held_at"),
+
   // ===== LIFECYCLE TIMESTAMPS =====
   // Stamped on the state-machine transitions defined in §2.4. Added by
   // migration 060 (§4.3). `lastReconciledAt` is set by the hourly

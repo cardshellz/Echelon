@@ -639,6 +639,14 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`UPDATE wms.outbound_shipments SET shipping_engine = 'shipstation', engine_order_ref = shipstation_order_id::text, engine_shipment_ref = shipstation_order_key WHERE shipstation_order_id IS NOT NULL AND shipping_engine IS NULL`);
     console.log("Checked shipping engine columns on outbound_shipments");
 
+    // 5c. Hold flag, orthogonal to the lifecycle status — Phase 1a of the
+    // single-flow design (SHIPMENT-STATE-MACHINE-DESIGN.md). Dual-written
+    // alongside status='on_hold'; backfill makes existing on_hold rows held.
+    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS held BOOLEAN NOT NULL DEFAULT false`);
+    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS held_at TIMESTAMP`);
+    await client.query(`UPDATE wms.outbound_shipments SET held = true WHERE status = 'on_hold' AND held = false`);
+    console.log("Checked hold flag columns on outbound_shipments (Phase 1a)");
+
     // 6. eBay listing control columns
     await client.query(`ALTER TABLE ebay_category_mappings ADD COLUMN IF NOT EXISTS listing_enabled BOOLEAN NOT NULL DEFAULT true`);
     await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
