@@ -108,6 +108,7 @@ interface CurrentShipmentRow {
   carrier: string | null;
   tracking_url: string | null;
   shopify_fulfillment_id: string | null;
+  shipped_at: Date | string | null;
   shipping_engine: string | null;
   engine_order_ref: string | null;
   engine_shipment_ref: string | null;
@@ -126,7 +127,7 @@ async function loadShipment(
 ): Promise<CurrentShipmentRow> {
   const result: any = await db.execute(sql`
     SELECT id, order_id, status, tracking_number, carrier, tracking_url,
-           shopify_fulfillment_id,
+           shopify_fulfillment_id, shipped_at,
            shipping_engine, engine_order_ref, engine_shipment_ref,
            shipstation_order_id, shipstation_order_key
     FROM wms.outbound_shipments
@@ -397,12 +398,17 @@ export async function markShipmentCancelled(
     : "operator_cancel";
 
   // Engine-side removal: cancel the order in the shipping engine when
-  // the shipment was already pushed (queued/labeled) and has an engine
-  // ref. Pre-push states (planned) never touched the engine. Failure
-  // is non-blocking — reconcile catches drift.
+  // the shipment was already pushed (queued/labeled/on_hold) and has an
+  // engine ref. Pre-push states (planned) never touched the engine.
+  // `on_hold` is included because a refund/cancel hold can leave a live SS
+  // order (e.g. a labeled shipment held by a refund); a subsequent channel
+  // cancel must drop it from ShipStation, not just WMS. Idempotent when SS
+  // is already cancelled. Failure is non-blocking — reconcile catches drift.
   const ref = engineRefFromRow(current as any);
   if (
-    (current.status === "queued" || current.status === "labeled") &&
+    (current.status === "queued" ||
+      current.status === "labeled" ||
+      current.status === "on_hold") &&
     ref
   ) {
     const cancelFn = opts.engineCancel
@@ -562,9 +568,23 @@ export async function handleCustomerCancelOnShipment(
   const current = await loadShipment(db, shipmentId);
   const now = opts.now ?? new Date();
 
+  // Sales-channel cancel model: cancel the shipment UNLESS it already shipped.
+  // A package that physically left can't be un-shipped — only a refund applies
+  // (and per the physical-fact rule, the refund must not regress status). So
+  // every NOT-yet-shipped state cancels (and a refund hold defers to the
+  // channel cancel); shipped/returned/lost stay put.
   switch (current.status) {
     case "planned":
-    case "queued": {
+    case "queued":
+    case "labeled":
+    case "on_hold": {
+      // Defensive: an on_hold row that already shipped (legacy regressed
+      // state) carries shipped_at — treat it as terminal, do not regress.
+      if (current.shipped_at != null) {
+        return { mode: "noop", reason: "already_shipped" };
+      }
+      // markShipmentCancelled also cancels the SS order / drops the label for
+      // queued/labeled/on_hold rows that carry an engine ref.
       const result = await markShipmentCancelled(
         db,
         shipmentId,
@@ -574,32 +594,14 @@ export async function handleCustomerCancelOnShipment(
       return { mode: "cancelled", wmsOrderId: result.wmsOrderId };
     }
 
-    case "labeled": {
-      // Pre-ship (label made, not yet shipped): hold + flag so it doesn't
-      // ship while the cancel is sorted out. (Whether pre-ship should hard-
-      // cancel instead is a separate decision — partial refunds / label voids.)
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments SET
-          status = 'on_hold',
-          requires_review = true,
-          review_reason = 'customer_cancel_after_label',
-          updated_at = ${now}
-        WHERE id = ${shipmentId}
-      `);
-      return { mode: "requires_review", shipmentId };
-    }
-
     case "shipped":
-      // Physical fact is terminal: a customer cancel after the package
-      // already shipped must NOT regress shipment status. The cancel is a
-      // commercial event (recorded on the order); the shipment stays 'shipped'.
+    case "returned":
+    case "lost":
+      // Terminal physical fact: already shipped — do not regress status.
       return { mode: "noop", reason: "already_shipped" };
 
     case "cancelled":
     case "voided":
-    case "returned":
-    case "lost":
-    case "on_hold":
       return { mode: "noop", reason: current.status };
 
     default:

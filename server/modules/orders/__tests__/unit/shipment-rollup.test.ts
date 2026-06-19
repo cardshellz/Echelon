@@ -95,6 +95,7 @@ function shipmentRow(
     tracking_url: string | null;
     shopify_fulfillment_id: string | null;
     shipstation_order_id: number | null;
+    shipped_at: string | null;
   }> = {},
 ) {
   return {
@@ -106,6 +107,7 @@ function shipmentRow(
     tracking_url: null,
     shopify_fulfillment_id: null,
     shipstation_order_id: null,
+    shipped_at: null,
     ...overrides,
   };
 }
@@ -1048,37 +1050,30 @@ describe("handleCustomerCancelOnShipment", () => {
     expect(removeFromList).toHaveBeenCalledWith(7777);
   });
 
-  it("sets status='on_hold' + review flags when shipment is 'labeled' (Option B, NOT cancelled)", async () => {
+  it("cancels a 'labeled' shipment and cancels the SS order (channel-cancel model)", async () => {
+    // Channel cancel: a labeled (pre-ship) shipment is cancelled, not held for
+    // review — and the SS order is dropped since labeled carries an engine ref.
+    const labeled = shipmentRow({
+      status: "labeled",
+      tracking_number: "1Z999",
+      carrier: "UPS",
+      shipstation_order_id: 8888,
+    });
     const mock = makeDb([
-      {
-        rows: [
-          shipmentRow({
-            status: "labeled",
-            tracking_number: "1Z999",
-            carrier: "UPS",
-            shipstation_order_id: 8888,
-          }),
-        ],
-      },
-      { rows: [] }, // UPDATE
+      { rows: [labeled] }, // outer load
+      { rows: [labeled] }, // inner load (markShipmentCancelled)
+      { rows: [] }, // UPDATE → cancelled
     ]);
     const removeFromList = vi.fn(async () => {});
     const result = await handleCustomerCancelOnShipment(mock.db, 501, {
       now: NOW,
       shipstation: { removeFromList },
     });
-    expect(result).toEqual({ mode: "requires_review", shipmentId: 501 });
-    // SS removeFromList must NOT fire — operator decides.
-    expect(removeFromList).not.toHaveBeenCalled();
-    // Only 2 DB calls: load + UPDATE (no delegation).
-    expect(mock.getCallCount()).toBe(2);
-    const update = mock.calls[1].sqlText;
-    expect(update).toContain("UPDATE wms.outbound_shipments");
-    expect(update).toContain("on_hold");
-    expect(update).toContain("requires_review");
-    expect(update).toContain("customer_cancel_after_label");
-    // Critically: not the cancelled branch.
-    expect(update).not.toContain("cancelled_at");
+    expect(result).toEqual({ mode: "cancelled", wmsOrderId: 42 });
+    expect(removeFromList).toHaveBeenCalledWith(8888);
+    expect(mock.getCallCount()).toBe(3);
+    expect(mock.calls[2].sqlText).toContain("UPDATE wms.outbound_shipments");
+    expect(mock.calls[2].sqlText).toContain("cancelled");
   });
 
   it("returns { mode: 'noop' } and does NOT regress status when shipment is 'shipped' (terminal physical fact)", async () => {
@@ -1124,14 +1119,33 @@ describe("handleCustomerCancelOnShipment", () => {
     expect(result).toEqual({ mode: "noop", reason: "voided" });
   });
 
-  it("returns { mode: 'noop' } when shipment is on_hold (already flagged)", async () => {
+  it("cancels an 'on_hold' shipment and cancels its live SS order (refund-hold defers to channel cancel)", async () => {
+    // A refund had held this shipment; the channel cancel now cancels it. on_hold
+    // can carry a live SS order (e.g. a labeled→on_hold), so it's cancelled too.
+    const onHold = shipmentRow({ status: "on_hold", shipstation_order_id: 9999 });
     const mock = makeDb([
-      { rows: [shipmentRow({ status: "on_hold" })] },
+      { rows: [onHold] }, // outer load
+      { rows: [onHold] }, // inner load (markShipmentCancelled)
+      { rows: [] }, // UPDATE → cancelled
     ]);
+    const removeFromList = vi.fn(async () => {});
     const result = await handleCustomerCancelOnShipment(mock.db, 501, {
       now: NOW,
+      shipstation: { removeFromList },
     });
-    expect(result).toEqual({ mode: "noop", reason: "on_hold" });
+    expect(result).toEqual({ mode: "cancelled", wmsOrderId: 42 });
+    expect(removeFromList).toHaveBeenCalledWith(9999);
+    expect(mock.calls[2].sqlText).toContain("cancelled");
+  });
+
+  it("does NOT cancel an 'on_hold' shipment that already shipped (shipped_at set)", async () => {
+    // Defensive: a held row that physically shipped is terminal — only a refund.
+    const mock = makeDb([
+      { rows: [shipmentRow({ status: "on_hold", shipped_at: "2026-06-01T00:00:00Z" })] },
+    ]);
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, { now: NOW });
+    expect(result).toEqual({ mode: "noop", reason: "already_shipped" });
+    expect(mock.getCallCount()).toBe(1); // load only — no UPDATE
   });
 
   it("throws SHIPMENT_NOT_FOUND when shipment is missing", async () => {
