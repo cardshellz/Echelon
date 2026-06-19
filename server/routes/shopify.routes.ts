@@ -15,6 +15,7 @@ import { runReconciliationNow } from "../modules/orders/shopify-order-reconcilia
 import { sql } from "drizzle-orm";
 import {
   markShipmentShipped,
+  markShipmentCancelled,
   recomputeOrderStatusFromShipments,
 } from "../modules/orders/shipment-rollup";
 
@@ -100,6 +101,14 @@ export interface FulfillmentsCreateDeps {
   db: any;
   omsSvc?: { markShippedByExternalId?: (...args: any[]) => Promise<unknown> } | null;
   now?: Date;
+  // When Shopify fulfills an order directly (e.g. int'l labels bought in
+  // Shopify), the matching ShipStation order is still live and must be
+  // cancelled in the engine or it will double-ship. Injected so the handler
+  // can engine-cancel; omit (tests) to skip the cancel.
+  shippingEngine?: {
+    isConfigured?: () => boolean;
+    cancel: (ref: any) => Promise<unknown>;
+  } | null;
 }
 
 export interface FulfillmentsCreateResult {
@@ -312,6 +321,41 @@ export async function handleShopifyFulfillmentCreate(
     }
   } finally {
     await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
+  }
+
+  // The order was fulfilled OUTSIDE ShipStation. Any live ShipStation shipment
+  // for this order is now superseded and MUST be cancelled in the engine, or it
+  // will double-ship. Cancel every pre-ship shipment that still has an engine
+  // order; markShipmentCancelled engine-cancels via the hook and is a no-op on
+  // already-terminal shipments.
+  // NOTE: this cancels ALL of the order's live SS shipments — correct for a
+  // whole-order external fulfillment (the int'l case). If an order is ever
+  // fulfilled PARTLY in Shopify and partly in ShipStation, this would
+  // over-cancel; revisit with line-item scoping if that becomes real.
+  if (deps.shippingEngine && deps.shippingEngine.isConfigured?.() !== false) {
+    const liveSs: any = await db.execute(sql`
+      SELECT id
+      FROM wms.outbound_shipments
+      WHERE order_id = ${wmsOrderId}
+        AND status IN ('planned', 'queued', 'labeled')
+        AND shipped_at IS NULL
+        AND COALESCE(engine_order_ref, shipstation_order_id::text) IS NOT NULL
+      ORDER BY id
+    `);
+    for (const row of (liveSs?.rows ?? []) as Array<{ id: number }>) {
+      try {
+        await markShipmentCancelled(db, row.id, "superseded_external_fulfillment", {
+          now,
+          engineCancel: async (ref: any) => {
+            await deps.shippingEngine!.cancel(ref);
+          },
+        });
+      } catch (err: any) {
+        console.error(
+          `[fulfillments/create] failed to cancel superseded SS shipment ${row.id} for order ${wmsOrderId}: ${err?.message ?? err}`,
+        );
+      }
+    }
   }
 
   await recomputeOrderStatusFromShipments(db, wmsOrderId, { now });
@@ -1488,7 +1532,7 @@ export function registerShopifyRoutes(app: Express) {
       const { db } = app.locals;
       const { oms: omsSvc } = app.locals.services ?? {};
       const result = await handleShopifyFulfillmentCreate(
-        { db, omsSvc },
+        { db, omsSvc, shippingEngine: app.locals.services?.shippingEngine ?? null },
         payload,
       );
       console.log(

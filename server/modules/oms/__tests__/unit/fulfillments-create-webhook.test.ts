@@ -393,6 +393,152 @@ describe("handleShopifyFulfillmentCreate — path B (external fulfillment)", () 
   });
 });
 
+// ─── Path B: supersede ShipStation (double-ship prevention) ─────────
+
+describe("handleShopifyFulfillmentCreate — path B supersedes ShipStation", () => {
+  // Path B base SQL: shipment miss → order found → lock / dedup / insert /
+  // unlock. (Calls 1–6, same as the Path B happy path.)
+  const pathBBase = () => [
+    { rows: [] }, // 1 shipment lookup miss
+    { rows: [{ id: 8000, channel_id: 36 }] }, // 2 wms.orders lookup
+    { rows: [] }, // 3 advisory lock
+    { rows: [] }, // 4 dedup probe
+    { rows: [] }, // 5 INSERT external shipment
+    { rows: [] }, // 6 advisory unlock
+  ];
+
+  function makeEngine(opts: { fail?: boolean } = {}) {
+    return {
+      isConfigured: () => true,
+      cancel: vi.fn(async () => {
+        if (opts.fail) throw new Error("engine cancel boom");
+      }),
+    };
+  }
+
+  function liveSsShipmentRow() {
+    // A pre-ship SS shipment (status 'labeled') with a ShipStation order id —
+    // engineRefFromRow resolves a ref from shipstation_order_id, so
+    // markShipmentCancelled engine-cancels it.
+    return {
+      id: 9001,
+      order_id: 8000,
+      status: "labeled",
+      tracking_number: null,
+      carrier: "UPS",
+      tracking_url: null,
+      shopify_fulfillment_id: null,
+      shipping_engine: null,
+      engine_order_ref: null,
+      engine_shipment_ref: null,
+      shipstation_order_id: 12345,
+      shipstation_order_key: "echelon-wms-shp-9001",
+    };
+  }
+
+  it("engine-cancels the order's live ShipStation shipment", async () => {
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [{ id: 9001 }] }, // 7 live SS shipment lookup → one
+      { rows: [liveSsShipmentRow()] }, // 8 markShipmentCancelled loadShipment
+      { rows: [] }, // 9 markShipmentCancelled UPDATE → cancelled
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] }, // 10
+      { rows: [{ status: "shipped" }, { status: "cancelled" }] }, // 11
+      { rows: [] }, // 12 recompute UPDATE
+    ]);
+    const omsSvc = makeOmsSvc();
+    const engine = makeEngine();
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW, shippingEngine: engine },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("external_shipment_created");
+    // The superseded SS shipment was engine-cancelled exactly once.
+    expect(engine.cancel).toHaveBeenCalledTimes(1);
+    expect(engine.cancel.mock.calls[0][0]).toMatchObject({
+      engineOrderRef: expect.anything(),
+    });
+    // markShipmentCancelled wrote the cancel (status='cancelled').
+    const cancelUpdate = db.calls.find(
+      (c) =>
+        c.sqlText.includes("UPDATE wms.outbound_shipments") &&
+        c.sqlText.includes("'cancelled'"),
+    );
+    expect(cancelUpdate).toBeTruthy();
+  });
+
+  it("is a clean no-op when the order has no live ShipStation shipment", async () => {
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [] }, // 7 live SS lookup → none
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
+    ]);
+    const omsSvc = makeOmsSvc();
+    const engine = makeEngine();
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW, shippingEngine: engine },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("external_shipment_created");
+    expect(engine.cancel).not.toHaveBeenCalled();
+  });
+
+  it("skips the cancel entirely when no shippingEngine is injected", async () => {
+    // Identical Path B scripting to the happy-path test (9 calls, no live-SS
+    // lookup) — proves the cancel loop is gated on the engine dep.
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }] },
+      { rows: [] },
+    ]);
+    const omsSvc = makeOmsSvc();
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW }, // no shippingEngine
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("external_shipment_created");
+    // 9 calls: 6 base + 3 recompute. No live-SS lookup, no cancel.
+    expect(db.execute).toHaveBeenCalledTimes(9);
+  });
+
+  it("is non-fatal when the engine cancel throws (WMS still cancels)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const db = makeDb([
+      ...pathBBase(),
+      { rows: [{ id: 9001 }] },
+      { rows: [liveSsShipmentRow()] },
+      { rows: [] }, // cancel UPDATE still runs (engine failure is logged, not thrown)
+      { rows: [{ id: 8000, warehouse_status: "ready_to_ship", completed_at: null }] },
+      { rows: [{ status: "shipped" }, { status: "cancelled" }] },
+      { rows: [] },
+    ]);
+    const omsSvc = makeOmsSvc();
+    const engine = makeEngine({ fail: true });
+
+    const result = await handleShopifyFulfillmentCreate(
+      { db, omsSvc, now: FIXED_NOW, shippingEngine: engine },
+      basePayload(),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.outcome).toBe("external_shipment_created");
+    expect(engine.cancel).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
+  });
+});
+
 // ─── Order not tracked ───────────────────────────────────────────────
 
 describe("handleShopifyFulfillmentCreate — order not tracked", () => {
