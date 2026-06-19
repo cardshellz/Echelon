@@ -644,21 +644,23 @@ async function applyRefundLineAdjustmentsToWms(
       JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
       WHERE os.order_id = ${args.wmsOrderId}
         AND ol.external_line_item_id = ANY(ARRAY[${sql.join(affectedExternalIds, sql`, `)}]::text[])
-        AND os.status IN ('queued', 'labeled', 'shipped')
+        -- Shipped is a terminal physical fact: a refund after ship is a
+        -- commercial event and must NOT regress shipment status. Only
+        -- pre-ship shipments are held here.
+        AND os.status IN ('queued', 'labeled')
     ),
     held AS (
       UPDATE wms.outbound_shipments os
       SET status = 'on_hold',
           requires_review = true,
           review_reason = CASE
-            WHEN os.status = 'shipped' THEN 'refund_after_ship'
             WHEN os.status = 'labeled' THEN 'refund_after_label'
             ELSE 'refund_after_shipstation_push'
           END,
           updated_at = ${args.now}
       FROM affected_shipments af
       WHERE os.id = af.id
-        AND os.status IN ('queued', 'labeled', 'shipped')
+        AND os.status IN ('queued', 'labeled')
       RETURNING os.id, af.shipstation_order_id, af.shipping_engine,
                 af.engine_order_ref, af.engine_shipment_ref,
                 af.shipstation_order_key, af.status AS previous_status

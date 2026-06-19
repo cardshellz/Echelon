@@ -574,8 +574,10 @@ export async function handleCustomerCancelOnShipment(
       return { mode: "cancelled", wmsOrderId: result.wmsOrderId };
     }
 
-    case "labeled":
-    case "shipped": {
+    case "labeled": {
+      // Pre-ship (label made, not yet shipped): hold + flag so it doesn't
+      // ship while the cancel is sorted out. (Whether pre-ship should hard-
+      // cancel instead is a separate decision — partial refunds / label voids.)
       await db.execute(sql`
         UPDATE wms.outbound_shipments SET
           status = 'on_hold',
@@ -586,6 +588,12 @@ export async function handleCustomerCancelOnShipment(
       `);
       return { mode: "requires_review", shipmentId };
     }
+
+    case "shipped":
+      // Physical fact is terminal: a customer cancel after the package
+      // already shipped must NOT regress shipment status. The cancel is a
+      // commercial event (recorded on the order); the shipment stays 'shipped'.
+      return { mode: "noop", reason: "already_shipped" };
 
     case "cancelled":
     case "voided":
