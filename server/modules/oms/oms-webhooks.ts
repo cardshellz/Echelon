@@ -652,6 +652,11 @@ async function applyRefundLineAdjustmentsToWms(
     held AS (
       UPDATE wms.outbound_shipments os
       SET status = 'on_hold',
+          -- Phase 1a single-flow: hold is an orthogonal flag. Dual-written
+          -- alongside status='on_hold' until later phases make it the source of
+          -- truth (SHIPMENT-STATE-MACHINE-DESIGN.md).
+          held = true,
+          held_at = ${args.now},
           requires_review = true,
           review_reason = CASE
             WHEN os.status = 'labeled' THEN 'refund_after_label'
