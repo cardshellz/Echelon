@@ -3519,6 +3519,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       .where(and(
         eq(outboundShipmentItems.shipmentId, shipmentId),
         sql`COALESCE(${wmsOrderItems.requiresShipping}, 1) = 1`,
+        // Never push a zeroed line to ShipStation. A partial refund can reduce a
+        // line to qty=0 while the shipment still ships other lines; the SS order
+        // must reflect only shippable items. A fully-emptied shipment then has no
+        // items and correctly trips the "no items" guard below (it is cancelled
+        // upstream, never re-pushed).
+        sql`${outboundShipmentItems.qty} > 0`,
       ))
       .orderBy(outboundShipmentItems.id) as WmsShipmentItemRow[];
 

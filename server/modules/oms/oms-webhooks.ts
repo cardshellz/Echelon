@@ -498,7 +498,9 @@ export interface ApplyShopifyRefundCascadeResult {
   restockInvoked: boolean;
   restockError?: string;
   adjustedLines?: number;
-  heldShipments?: number;
+  cancelledShipments?: number;
+  repushedShipments?: number;
+  flaggedShipments?: number;
 }
 
 type ShopifyRefundLineAdjustment = {
@@ -586,11 +588,16 @@ async function applyRefundLineAdjustmentsToWms(
     now: Date;
     shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
     shippingEngine?: { cancel: (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => Promise<unknown> };
+    // Re-push a shipment to the engine after its contents changed (reduced by a
+    // partial refund). Wired from the route; if absent, the shipment is flagged.
+    pushShipment?: (shipmentId: number) => Promise<unknown>;
   },
-): Promise<{ adjustedLines: number; heldShipments: number }> {
+): Promise<{ adjustedLines: number; cancelledShipments: number; repushedShipments: number; flaggedShipments: number }> {
   let adjustedLines = 0;
   const affectedExternalIds = args.adjustments.map((a) => a.externalLineItemId);
-  if (affectedExternalIds.length === 0) return { adjustedLines, heldShipments: 0 };
+  if (affectedExternalIds.length === 0) {
+    return { adjustedLines, cancelledShipments: 0, repushedShipments: 0, flaggedShipments: 0 };
+  }
 
   const quantityResult: any = await db.execute(sql`
     WITH matched_items AS (
@@ -615,7 +622,9 @@ async function applyRefundLineAdjustmentsToWms(
         AND si.shipment_id IN (
           SELECT os.id FROM wms.outbound_shipments os
           WHERE os.order_id = ${args.wmsOrderId}
-            AND os.status = 'planned'
+            -- Reduce contents for all PRE-SHIP shipments (was 'planned' only) so
+            -- the re-push / operator review reflects the true remaining items.
+            AND os.status IN ('planned', 'queued', 'labeled')
         )
       RETURNING si.id
     )
@@ -633,79 +642,121 @@ async function applyRefundLineAdjustmentsToWms(
   `);
   adjustedLines = quantityResult?.rows?.length ?? 0;
 
-  const holdResult: any = await db.execute(sql`
-    WITH affected_shipments AS (
-      SELECT DISTINCT os.id, os.shipstation_order_id,
-             os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
-             os.shipstation_order_key, os.status
-      FROM wms.outbound_shipments os
-      JOIN wms.outbound_shipment_items si ON si.shipment_id = os.id
-      JOIN wms.order_items wi ON wi.id = si.order_item_id
-      JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
-      WHERE os.order_id = ${args.wmsOrderId}
-        AND ol.external_line_item_id = ANY(ARRAY[${sql.join(affectedExternalIds, sql`, `)}]::text[])
-        -- Shipped is a terminal physical fact: a refund after ship is a
-        -- commercial event and must NOT regress shipment status. Only
-        -- pre-ship shipments are held here.
-        AND os.status IN ('queued', 'labeled')
-    ),
-    held AS (
-      UPDATE wms.outbound_shipments os
-      SET status = 'on_hold',
-          -- Phase 1a single-flow: hold is an orthogonal flag. Dual-written
-          -- alongside status='on_hold' until later phases make it the source of
-          -- truth (SHIPMENT-STATE-MACHINE-DESIGN.md).
-          held = true,
-          held_at = ${args.now},
-          requires_review = true,
-          review_reason = CASE
-            WHEN os.status = 'labeled' THEN 'refund_after_label'
-            ELSE 'refund_after_shipstation_push'
-          END,
-          updated_at = ${args.now}
-      FROM affected_shipments af
-      WHERE os.id = af.id
-        AND os.status IN ('queued', 'labeled')
-      RETURNING os.id, af.shipstation_order_id, af.shipping_engine,
-                af.engine_order_ref, af.engine_shipment_ref,
-                af.shipstation_order_key, af.status AS previous_status
-    )
-    SELECT * FROM held
+  // A refund is a PAYMENT state, not a fulfillment action. The line-item
+  // quantities were just reduced above. Now reconcile each affected PRE-SHIP
+  // shipment to physical reality — a refund NEVER "holds" a shipment:
+  //   - empty (all its items refunded) -> cancel the shipment (+ cancel the SS order)
+  //   - queued, items remain           -> re-push the SS order with the reduced contents
+  //   - labeled, items remain          -> flag for review; an associate must physically
+  //                                       find the printed-but-unshipped package and fix it
+  //   - planned, items remain          -> nothing (qty already reduced; never pushed)
+  // Shipped/terminal shipments are excluded (a refund after ship is payment-only; #659).
+  const affectedResult: any = await db.execute(sql`
+    SELECT os.id, os.status,
+           os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
+           os.shipstation_order_id, os.shipstation_order_key,
+           (SELECT COALESCE(SUM(x.qty), 0)::int
+              FROM wms.outbound_shipment_items x
+             WHERE x.shipment_id = os.id) AS remaining_qty
+    FROM wms.outbound_shipments os
+    WHERE os.order_id = ${args.wmsOrderId}
+      AND os.status IN ('planned', 'queued', 'labeled')
+      AND EXISTS (
+        SELECT 1 FROM wms.outbound_shipment_items si
+        JOIN wms.order_items wi ON wi.id = si.order_item_id
+        JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
+        WHERE si.shipment_id = os.id
+          AND ol.external_line_item_id = ANY(ARRAY[${sql.join(affectedExternalIds, sql`, `)}]::text[])
+      )
+    ORDER BY os.id
   `);
-  const heldRows: Array<{
+  const affectedRows: Array<{
     id: number;
-    shipstation_order_id: number | null;
+    status: string;
     shipping_engine: string | null;
     engine_order_ref: string | null;
     engine_shipment_ref: string | null;
+    shipstation_order_id: number | null;
     shipstation_order_key: string | null;
-    previous_status: string;
-  }> = holdResult?.rows ?? [];
-  for (const row of heldRows) {
-    if (row.previous_status !== "queued") continue;
-    const hasEngineRef = row.engine_order_ref || (row.shipstation_order_id && row.shipstation_order_id > 0);
-    if (!hasEngineRef) continue;
+    remaining_qty: number;
+  }> = affectedResult?.rows ?? [];
 
+  let cancelledShipments = 0;
+  let repushedShipments = 0;
+  let flaggedShipments = 0;
+
+  const flagForReview = async (shipmentId: number, reason: string) => {
+    await db.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET requires_review = true, review_reason = ${reason}, updated_at = ${args.now}
+      WHERE id = ${shipmentId}
+    `);
+  };
+
+  const { markShipmentCancelled, recomputeOrderStatusFromShipments } =
+    await import("../orders/shipment-rollup");
+
+  for (const row of affectedRows) {
     try {
-      if (args.shippingEngine) {
-        const { engineRefFromRow } = await import("../shipping");
-        const ref = engineRefFromRow(row);
-        if (ref) await args.shippingEngine.cancel(ref);
-      } else if (
-        args.shipstation &&
-        typeof row.shipstation_order_id === "number" &&
-        row.shipstation_order_id > 0
-      ) {
-        await args.shipstation.cancelOrder(row.shipstation_order_id);
+      if (row.remaining_qty <= 0) {
+        // Nothing left to ship -> cancel the shipment. markShipmentCancelled
+        // engine-cancels the SS order for queued/labeled/on_hold rows.
+        await markShipmentCancelled(db, row.id, "refund_fully_cancelled", {
+          now: args.now,
+          engineCancel: args.shippingEngine
+            ? async (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => {
+                await args.shippingEngine!.cancel(ref);
+              }
+            : undefined,
+          shipstation: args.shipstation
+            ? { removeFromList: async (ssId: number) => { await args.shipstation!.cancelOrder(ssId); } }
+            : undefined,
+        });
+        cancelledShipments++;
+      } else if (row.status === "queued") {
+        // Pre-ship, no label: re-sync the SS order to the reduced contents.
+        if (args.pushShipment) {
+          await args.pushShipment(row.id);
+          repushedShipments++;
+        } else {
+          await flagForReview(row.id, "refund_repush_unavailable");
+          flaggedShipments++;
+        }
+      } else if (row.status === "labeled") {
+        // A label was printed but the package has not shipped (no ship-notify):
+        // an associate must physically find it and pull the item / re-label.
+        await flagForReview(row.id, "refund_after_label");
+        flaggedShipments++;
       }
+      // planned + items remain: qty already reduced; nothing else to do.
     } catch (err: any) {
       console.error(
-        `[applyRefundLineAdjustmentsToWms] Engine cancel failed for held shipment ${row.id}: ${err?.message ?? err}`,
+        `[applyRefundLineAdjustmentsToWms] reconcile failed for shipment ${row.id} ` +
+          `(status=${row.status}, remaining=${row.remaining_qty}): ${err?.message ?? err}`,
+      );
+      try {
+        await flagForReview(row.id, "refund_reconcile_failed");
+        flaggedShipments++;
+      } catch (flagErr: any) {
+        console.error(
+          `[applyRefundLineAdjustmentsToWms] could not even flag shipment ${row.id} for review: ${flagErr?.message ?? flagErr}`,
+        );
+      }
+    }
+  }
+
+  // Cancels changed shipment statuses -> roll the order status up from them.
+  if (cancelledShipments > 0) {
+    try {
+      await recomputeOrderStatusFromShipments(db, args.wmsOrderId, { now: args.now });
+    } catch (err: any) {
+      console.error(
+        `[applyRefundLineAdjustmentsToWms] order recompute failed for ${args.wmsOrderId}: ${err?.message ?? err}`,
       );
     }
   }
 
-  return { adjustedLines, heldShipments: heldRows.length };
+  return { adjustedLines, cancelledShipments, repushedShipments, flaggedShipments };
 }
 
 export async function applyShopifyRefundCascade(
@@ -738,6 +789,7 @@ export async function applyShopifyRefundCascade(
     ) => Promise<void>;
     shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
     shippingEngine?: { cancel: (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => Promise<unknown> };
+    pushShipment?: (shipmentId: number) => Promise<unknown>;
   },
   opts: {
     channelId: number;
@@ -819,6 +871,7 @@ export async function applyShopifyRefundCascade(
     now,
     shipstation: helpers.shipstation,
     shippingEngine: helpers.shippingEngine,
+    pushShipment: helpers.pushShipment,
   });
 
   // ── 5. Idempotency check (do this before shipment resolution to
@@ -839,7 +892,9 @@ export async function applyShopifyRefundCascade(
       restocked: false,
       restockInvoked: false,
       adjustedLines: persistedAdjustments + wmsAdjustmentResult.adjustedLines,
-      heldShipments: wmsAdjustmentResult.heldShipments,
+      cancelledShipments: wmsAdjustmentResult.cancelledShipments,
+      repushedShipments: wmsAdjustmentResult.repushedShipments,
+      flaggedShipments: wmsAdjustmentResult.flaggedShipments,
     };
   }
 
@@ -963,7 +1018,9 @@ export async function applyShopifyRefundCascade(
     restockInvoked,
     restockError,
     adjustedLines: persistedAdjustments + wmsAdjustmentResult.adjustedLines,
-    heldShipments: wmsAdjustmentResult.heldShipments,
+    cancelledShipments: wmsAdjustmentResult.cancelledShipments,
+    repushedShipments: wmsAdjustmentResult.repushedShipments,
+    flaggedShipments: wmsAdjustmentResult.flaggedShipments,
   };
 }
 
@@ -1001,6 +1058,7 @@ export const __test__ = {
   extractShopifyRisk,
   cascadeShopifyCancelToShipments,
   applyShopifyRefundCascade,
+  applyRefundLineAdjustmentsToWms,
   extractRefundLineAdjustments,
   RefundsCreateBadPayloadError,
   mapShopifyLineFulfillmentStatus,
@@ -2267,6 +2325,20 @@ export function registerOmsWebhooks(
               }
             : undefined,
           shippingEngine: shippingEngine ?? undefined,
+          pushShipment:
+            shipStationService?.isConfigured() && typeof shipStationService.pushShipment === "function"
+              ? async (shipmentId: number) => {
+                  try {
+                    await shipStationService!.pushShipment!(shipmentId);
+                  } catch (err: any) {
+                    await enqueueShipStationShipmentPushRetry(
+                      db,
+                      shipmentId,
+                      err instanceof Error ? err : new Error(err?.message ?? String(err)),
+                    );
+                  }
+                }
+              : undefined,
         },
         { channelId, now, logPrefix: LOG_PREFIX },
       );
@@ -2274,7 +2346,8 @@ export function registerOmsWebhooks(
         `${LOG_PREFIX} refunds/create cascade for order ${existing.externalOrderNumber}: ` +
           `outcome=${cascade.outcome} restocked=${cascade.restocked} ` +
           `restockInvoked=${cascade.restockInvoked} shipmentId=${cascade.shipmentId ?? "null"} ` +
-          `adjustedLines=${cascade.adjustedLines ?? 0} heldShipments=${cascade.heldShipments ?? 0}`,
+          `adjustedLines=${cascade.adjustedLines ?? 0} cancelled=${cascade.cancelledShipments ?? 0} ` +
+            `repushed=${cascade.repushedShipments ?? 0} flagged=${cascade.flaggedShipments ?? 0}`,
       );
 
       console.log(`${LOG_PREFIX} ✅ Processed refund for order ${existing.externalOrderNumber} → ${financialStatus}`);

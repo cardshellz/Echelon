@@ -1376,3 +1376,23 @@ describe("pushShipment :: error cases", () => {
 
 
 });
+
+// ─── Source invariant: never push a refund-zeroed line to ShipStation ─
+// A partial refund can reduce one line of a multi-line queued shipment to
+// qty=0 while the shipment still ships its other lines (Phase 1c re-push).
+// The items query MUST filter qty > 0 so ShipStation never receives a
+// quantity:0 line. The hand-rolled db mock stubs `.where()`, so this is a
+// source-regression guard (same pattern as the refund idempotency guard).
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+describe("pushShipment :: never sends a zeroed line to ShipStation", () => {
+  it("restricts the shipment-items query to shippable AND qty > 0", () => {
+    const src = readFileSync(
+      resolve(__dirname, "../../shipstation.service.ts"),
+      "utf-8",
+    );
+    expect(src).toMatch(/COALESCE\(\$\{wmsOrderItems\.requiresShipping\}, 1\) = 1/);
+    expect(src).toMatch(/\$\{outboundShipmentItems\.qty\}\s*>\s*0/);
+  });
+});
