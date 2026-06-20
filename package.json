@@ -16,6 +16,7 @@
     "recover:allocation-exceptions": "tsx scripts/recover-allocation-exceptions.ts --json",
     "recover:replen-health": "tsx scripts/recover-replen-health.ts --json",
     "wms:reconcile-ledger": "tsx scripts/reconcile-inventory-ledger.ts",
+    "wms:reconcile-lots": "tsx scripts/reconcile-lot-onhand.ts",
     "dropship:dogfood-status": "tsx scripts/dropship-dogfood-status.ts",
     "db:push": "drizzle-kit push",
     "test": "vitest run",
