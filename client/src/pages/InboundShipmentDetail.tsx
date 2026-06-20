@@ -244,6 +244,8 @@ export default function InboundShipmentDetail() {
 
   // Edit line dialog state
   const [editDialogLine, setEditDialogLine] = useState<any | null>(null);
+  const [showDimFixModal, setShowDimFixModal] = useState(false);
+  const [dimFixRows, setDimFixRows] = useState<Array<{ lineId: number; sku: string; lengthCm: string; widthCm: string; heightCm: string; weightPerCarton: string }>>([]);
   const [lineEditForm, setLineEditForm] = useState({
     cartonCount: "",
     qtyShipped: "",
@@ -316,9 +318,9 @@ export default function InboundShipmentDetail() {
 
   const { data: allocationStatus } = useQuery<AllocationStatus>({
     queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`],
-    // Also load on the Lines tab so the missing-dimensions banner can surface there
-    // (that's where dimensions are entered / Resolve Dimensions lives).
-    enabled: !!shipmentId && (activeTab === "allocation" || activeTab === "lines"),
+    // Loaded whenever the shipment is open so the missing-dimensions banner + fix modal
+    // (and the close-blocked auto-open) always have allocation data, regardless of tab.
+    enabled: !!shipmentId,
   });
 
   const { data: vendorsData } = useQuery<any[]>({
@@ -653,6 +655,28 @@ export default function InboundShipmentDetail() {
     },
   });
 
+  // Save the missing-dimensions modal: PATCH each line; the server recomputes
+  // totalVolumeCbm/Weight so the by-volume/by-weight gate clears.
+  const saveDimFixMutation = useMutation({
+    mutationFn: async () => {
+      await Promise.all(dimFixRows.map((r) =>
+        apiRequest("PATCH", `/api/inbound-shipments/lines/${r.lineId}`, {
+          lengthCm: r.lengthCm || null,
+          widthCm: r.widthCm || null,
+          heightCm: r.heightCm || null,
+          weightKg: r.weightPerCarton || null,
+        })
+      ));
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+      setShowDimFixModal(false);
+      toast({ title: "Dimensions saved", description: "Lines updated — you can close the shipment now." });
+    },
+    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+  });
+
   // ── Import helpers ──
 
   function resetImportState() {
@@ -763,6 +787,32 @@ export default function InboundShipmentDetail() {
         notes: lineEditForm.notes || null,
       },
     });
+  }
+
+  // Open the missing-dimensions fix modal, pre-filled with exactly the lines that lack
+  // a dimension required by an in-use dimensional allocation method (mirrors the server gate).
+  function openDimFixModal() {
+    const DIM_METHODS = ["by_volume", "by_weight", "by_chargeable_weight"];
+    const methodsInUse = (allocationStatus?.costs ?? [])
+      .filter((c) => (c.effectiveCents ?? 0) > 0 && DIM_METHODS.includes(c.method))
+      .map((c) => c.method);
+    const needsDims = (l: any) =>
+      methodsInUse.some((m) => {
+        const basis = m === "by_volume" ? Number(l.totalVolumeCbm || 0)
+          : m === "by_weight" ? Number(l.totalWeightKg || 0)
+          : Number(l.chargeableWeightKg || 0);
+        return basis <= 0;
+      });
+    const rows = (lines as any[]).filter(needsDims).map((l) => ({
+      lineId: l.id,
+      sku: l.sku || `line ${l.id}`,
+      lengthCm: l.lengthCm ? String(Number(l.lengthCm)) : "",
+      widthCm: l.widthCm ? String(Number(l.widthCm)) : "",
+      heightCm: l.heightCm ? String(Number(l.heightCm)) : "",
+      weightPerCarton: Number(l.weightKg || 0) > 0 ? String(Number(l.weightKg)) : "",
+    }));
+    setDimFixRows(rows);
+    setShowDimFixModal(true);
   }
 
   // ── Loading / Not Found ──
@@ -1002,7 +1052,11 @@ export default function InboundShipmentDetail() {
           )}
 
           {shipment.status === "costing" && (
-            <Button onClick={() => closeMutation.mutate({})} disabled={closeMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button
+              onClick={() => closeMutation.mutate({}, { onError: (e: any) => { if (/dimension/i.test(e?.message || "")) openDimFixModal(); } })}
+              disabled={closeMutation.isPending}
+              className="flex-1 sm:flex-none min-h-[44px]"
+            >
               <CheckCircle className="h-4 w-4 mr-2" />
               Close Shipment
             </Button>
@@ -1087,6 +1141,9 @@ export default function InboundShipmentDetail() {
                       ))}
                     </ul>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={openDimFixModal}>
+                        Enter dimensions
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline"
@@ -1095,9 +1152,8 @@ export default function InboundShipmentDetail() {
                         disabled={resolveDimensionsMutation.isPending || lines.length === 0}
                       >
                         <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${resolveDimensionsMutation.isPending ? "animate-spin" : ""}`} />
-                        Resolve Dimensions from product data
+                        Resolve from product data
                       </Button>
-                      <span className="text-xs text-red-600">…or click a line below to enter dimensions manually.</span>
                     </div>
                   </div>
                 </div>
@@ -2784,6 +2840,62 @@ export default function InboundShipmentDetail() {
                 {createVendorMutation.isPending ? "Creating..." : "Create Vendor"}
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ═══════ Enter Missing Dimensions ═══════ */}
+      <Dialog open={showDimFixModal} onOpenChange={setShowDimFixModal}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-red-600" /> Enter missing dimensions
+            </DialogTitle>
+            <DialogDescription>
+              Freight is allocated by volume / weight, so every line needs dimensions before the shipment can be
+              closed. Enter per-carton values below — totals are recomputed on save.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+            {dimFixRows.length === 0 ? (
+              <div className="py-6 text-center text-sm text-muted-foreground">All lines already have dimensions.</div>
+            ) : (
+              dimFixRows.map((row, idx) => {
+                const vol = (Number(row.lengthCm) || 0) * (Number(row.widthCm) || 0) * (Number(row.heightCm) || 0) / 1_000_000;
+                const set = (field: keyof typeof row, value: string) =>
+                  setDimFixRows((rows) => rows.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
+                return (
+                  <div key={row.lineId} className="rounded-lg border p-3">
+                    <div className="font-mono text-sm font-medium mb-2">{row.sku}</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <div>
+                        <Label className="text-xs">Length (cm)</Label>
+                        <Input type="number" inputMode="decimal" value={row.lengthCm} onChange={(e) => set("lengthCm", e.target.value)} />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Width (cm)</Label>
+                        <Input type="number" inputMode="decimal" value={row.widthCm} onChange={(e) => set("widthCm", e.target.value)} />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Height (cm)</Label>
+                        <Input type="number" inputMode="decimal" value={row.heightCm} onChange={(e) => set("heightCm", e.target.value)} />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Weight/carton (kg)</Label>
+                        <Input type="number" inputMode="decimal" value={row.weightPerCarton} onChange={(e) => set("weightPerCarton", e.target.value)} />
+                      </div>
+                    </div>
+                    {vol > 0 && <div className="mt-1.5 text-xs text-muted-foreground">Volume/carton: {vol.toFixed(5)} CBM</div>}
+                  </div>
+                );
+              })
+            )}
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => setShowDimFixModal(false)}>Cancel</Button>
+            <Button onClick={() => saveDimFixMutation.mutate()} disabled={saveDimFixMutation.isPending || dimFixRows.length === 0}>
+              {saveDimFixMutation.isPending ? "Saving..." : "Save dimensions"}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
