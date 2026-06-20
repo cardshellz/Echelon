@@ -647,6 +647,27 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`UPDATE wms.outbound_shipments SET held = true WHERE status = 'on_hold' AND held = false`);
     console.log("Checked hold flag columns on outbound_shipments (Phase 1a)");
 
+    // 5d. Phase 1c: refunds no longer "hold" shipments (they reduce/cancel/flag),
+    // so `status='on_hold'` is now writerless. Restore any lingering on_hold rows
+    // to their real lifecycle status and clear the held flag: a shipped one
+    // (shipped_at set) -> 'shipped' (physical truth); a pre-ship one -> 'cancelled'
+    // (these were refund-held with the SS order already cancelled, so they will
+    // not ship). Idempotent — once retired, no rows match.
+    await client.query(`
+      UPDATE wms.outbound_shipments SET
+        status = (CASE WHEN shipped_at IS NOT NULL THEN 'shipped' ELSE 'cancelled' END)::wms.shipment_status,
+        held = false,
+        held_at = NULL,
+        cancelled_at = CASE WHEN shipped_at IS NULL THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+        updated_at = NOW()
+      WHERE status = 'on_hold'
+    `);
+    // Clear any stray `held` flag on non-on_hold rows — e.g. a refund-held row
+    // later cancelled by a channel cancel (markShipmentCancelled doesn't clear
+    // held). Post-1c `held` has no writer until an operational hold path lands.
+    await client.query(`UPDATE wms.outbound_shipments SET held = false, held_at = NULL WHERE held = true`);
+    console.log("Restored lingering on_hold shipments + cleared stray held (Phase 1c)");
+
     // 6. eBay listing control columns
     await client.query(`ALTER TABLE ebay_category_mappings ADD COLUMN IF NOT EXISTS listing_enabled BOOLEAN NOT NULL DEFAULT true`);
     await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
