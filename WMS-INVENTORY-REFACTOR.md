@@ -476,3 +476,111 @@ L3 (remove `allowNegative` footgun), L4 (junk imports).
   genuinely good (FOR UPDATE + ledger-in-tx + concurrency-tested). The untrust comes from
   the **bypass paths, missing DB constraints, and the advisory replen layer** — not the
   spine.
+
+---
+
+## 6. Lot Identity & Lineage arc (location off the lot)
+
+> A second arc on top of the trust spine. Phases 0–6 made `inventory_levels` + the ledger
+> provably correct; this arc makes the **lot cost-layer** equally trustworthy as inventory
+> *moves and transforms*. It does NOT touch the trust spine (`inventory_levels` + ledger stay
+> the source of on-hand truth); it restructures only `inventory.inventory_lots`.
+> Pairs with the deferred variant→base-unit storage migration — both restructure lot storage,
+> so they should be designed once. Phase labels `L0…L5` to avoid colliding with Phases 0–9.
+
+### The problem (lot lineage + cost break at every transformation) **[VERIFIED]**
+
+A lot is `(variant, location, cost layer)` — `inventory_lots.warehouse_location_id` is
+**NOT NULL** (`inventory.schema.ts:554`), and qty + cost live on the lot row. Consequences,
+all verified this cycle:
+
+- **Bin transfer mints a NEW lot, breaks lineage.** `transferLots` decrements the source
+  lot and creates a brand-new destination lot per cost layer via `createLot`
+  (`lots.service.ts:766-778`), which **always generates a new lot number**
+  (`generateLotNumber`, `lots.service.ts:91`). No source→dest link is recorded.
+- **The transfer ledger row is variant-level, no lot id.** `createInventoryTransaction({
+  transactionType:"transfer" })` sets `productVariantId` + from/to location but **no
+  `inventoryLotId`** (`inventory.use-cases.ts:861`, `inventory.repository.ts:413`). So the
+  ledger proves *units* moved bin→bin, not *which lot*.
+- **Transfer flattens cost identity.** `transferLots` passes only `unitCostCents` (total) +
+  `purchaseOrderId` — not the mills breakdown or `poLineId` — so the destination lot keeps
+  the right *total* but loses po/packaging/landed split and drops `po_line_id` (falls out of
+  the landed-cost cascade).
+- **Case-break re-introduces cent rounding + breaks lineage.** `breakVariant` consumes the
+  case lot, then sets each-cost = `Math.round(consumedCostCents / targetQty)` in **whole
+  cents** (`break-assembly.use-cases.ts:187`) and creates a new `manual` each-lot via
+  `adjustLots` (`lots.service.ts:638`) with no link to the case lot, no `poLineId`, breakdown
+  collapsed. (Break crosses variants, so a new lot is unavoidable — but the rounding and the
+  missing lineage are not.) This bypasses the mills precision the lots-mills migration just
+  shipped.
+
+Net: you cannot follow a lot through a move or a break, and a moved/broken lot's cost
+degrades.
+
+### Target model
+
+- **`inventory_lots`** = lot identity + cost only (immutable per layer): lot_number, variant,
+  mills cost breakdown, received_at, status, PO refs, **`origin_lot_id`** (lineage link).
+  No location, no per-location qty.
+- **New `lot_location_quantities`** = `(inventory_lot_id, warehouse_location_id,
+  qty_on_hand, qty_reserved, qty_picked)` — one lot distributed across N bins.
+- **Move** = decrement `(lot, A)`, increment `(lot, B)` in the qty table — **same lot, no new
+  row, cost untouched.**
+- **Break** = consume case lot; create one new each-lot (different variant) with
+  `origin_lot_id` → case lot + **mills-exact** per-each cost (`perUnitMills`, remainder-safe)
+  + carried `poLineId`/breakdown.
+- `inventory_levels` stays the (variant, location) aggregate (= SUM of `lot_location_quantities`);
+  the ledger stays the on-hand oracle, now joined by a lot-level oracle (below).
+
+### Trust principle (same as Phases 0–1)
+
+The **lot → levels on-hand reconciler** is the regression gate for this whole arc:
+`SUM(inventory_lots.qty_on_hand)` per (variant, location) MUST equal
+`inventory_levels.variant_qty`. Built in L0; must stay at **zero variance** through every
+later step.
+
+### Phases
+
+#### L0 — Lot-level reconciler + design ◐ (this PR)
+- `server/modules/inventory/reconcile/lot-onhand-replay.ts` (pure, reuses ledger-replay's
+  diff machinery) + `scripts/reconcile-lot-onhand.ts` (`npm run wms:reconcile-lots`, exit 1
+  on variance, CI-gateable) + unit tests. On-hand bucket only (matches Phase 0 scope).
+- This design section.
+- **Baseline (2026-06-20, prod, read-only):** 698 lot rows / 351 cells; **232 cells drift,
+  6,382 variant-units total absolute drift.** The lot layer does **NOT** currently reconcile
+  to `inventory_levels`. Phases 0–1 reconciled the *ledger* to levels (the trust spine), but
+  the *lot* layer was never tied to levels and has diverged — cells with stock in levels but
+  no lots (e.g. variant 12 across many bins) and lots with stock levels don't show (e.g.
+  variant 14). This is the lot-layer analogue of the historical drift Phase 1 backfilled.
+
+#### L0.5 — Lot↔level remediation ☐ (prerequisite — must precede L1)
+Drive the lot→level on-hand drift to **zero** before restructuring storage. Mirror Phase 1's
+corrective backfill: where a (variant, location) cell has level stock with no/short lots,
+create a zero-/resolved-cost remediation lot; where lots exceed the level, deplete the excess
+— all ledgered. The storage migration (L1+) must start from a green `wms:reconcile-lots`.
+Diagnose the 232 cells first (root-cause the divergence classes) before mass-correcting.
+
+#### L1 — Additive qty table + lineage column ☐
+Add `lot_location_quantities` + `inventory_lots.origin_lot_id`; backfill one qty row per
+existing lot at its current `warehouse_location_id`; **dual-write** alongside the existing
+lot qty columns. Zero behavior change; reconciler stays green.
+
+#### L2 — Switch reads ☐
+FIFO (`getLotsAtLocation`/`getLotsByVariant`), valuation, COGS read from
+`lot_location_quantities`. Reconciler proves parity.
+
+#### L3 — Switch writes ☐
+create/reserve/pick/ship/adjust write the qty table; **transfer becomes redistribute-qty
+(same lot)** + stamps `inventoryLotId` on the transfer ledger rows. Drop per-location qty
+from `inventory_lots`.
+
+#### L4 — Mills-correct, lineage-linked break/assemble ☐
+`breakVariant`/`assembleVariant` split cost in **mills** (`perUnitMills`, remainder-safe),
+set `origin_lot_id`, and carry `poLineId`/breakdown so broken lots stay in the cascade.
+
+#### L5 — Visibility ☐
+Lot-detail / movement-history view + a "lots in a bin" endpoint (today only aggregate
+variant-qty per bin is surfaced).
+
+#### Cleanup ☐
+Remove `warehouse_location_id` from `inventory_lots` once all reads/writes use the qty table.
