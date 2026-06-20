@@ -42,7 +42,7 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(
       /code: "SHIPMENT_ON_HOLD"[\s\S]*severity: "warning"/,
     );
-    expect(OPS_HEALTH_SRC).toMatch(/WHERE status = 'on_hold'/);
+    expect(OPS_HEALTH_SRC).toMatch(/WHERE held = true/);
   });
 
   it("treats stale due retry rows as critical worker backlog", () => {
@@ -87,7 +87,7 @@ describe("ops-health.service :: issue mapping", () => {
         return { rows: [{ id: 44, provider: "internal", topic: "oms_wms_sync", attempts: 2 }] };
       }
 
-      if (queryText.includes("FROM wms.outbound_shipments") && queryText.includes("WHERE status = 'on_hold'")) {
+      if (queryText.includes("FROM wms.outbound_shipments") && queryText.includes("WHERE held = true")) {
         if (queryText.includes("COUNT(*)")) return { rows: [{ count: 1 }] };
         return { rows: [{ shipment_id: 22, order_id: 33, status: "on_hold", on_hold_reason: "address review" }] };
       }
