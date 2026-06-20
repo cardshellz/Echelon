@@ -205,8 +205,8 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Shipments on hold",
     why: "These shipments are paused — often an address problem or a last-minute customer change. Sort out the issue and release them, or cancel if they shouldn't ship.",
     remediation: "MANUAL_REVIEW", replaySafe: false,
-    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE status = 'on_hold'`,
-    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.on_hold_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.status = 'on_hold' ORDER BY os.created_at DESC LIMIT 50`,
+    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE held = true`,
+    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.on_hold_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.held = true ORDER BY os.created_at DESC LIMIT 50`,
   },
   {
     // WHERE mirrors the canonical SLA monitor (sla-monitor.service.ts): overdue = non-terminal past due.

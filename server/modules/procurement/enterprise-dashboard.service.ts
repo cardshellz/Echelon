@@ -157,7 +157,7 @@ async function getShipmentHealth(from: Date, to: Date): Promise<ShipmentHealthSu
             AND voided_at IS NULL
         )::int AS unpushed,
         COUNT(*) FILTER (WHERE requires_review = true AND voided_at IS NULL)::int AS requires_review,
-        COUNT(*) FILTER (WHERE status = 'on_hold' AND voided_at IS NULL)::int AS on_hold,
+        COUNT(*) FILTER (WHERE held = true AND voided_at IS NULL)::int AS on_hold,
         COUNT(*) FILTER (
           WHERE shipped_at >= ${from} AND shipped_at < ${to} AND voided_at IS NULL
         )::int AS shipped_in_range

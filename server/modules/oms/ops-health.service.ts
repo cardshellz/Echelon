@@ -459,13 +459,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       sql`
         SELECT COUNT(*)::int AS count
         FROM wms.outbound_shipments
-        WHERE status = 'on_hold'
+        WHERE held = true
       `,
       sql`
         SELECT id AS shipment_id, order_id, status, on_hold_reason, review_reason,
                requires_review, updated_at
         FROM wms.outbound_shipments
-        WHERE status = 'on_hold'
+        WHERE held = true
         ORDER BY updated_at DESC NULLS LAST, id DESC
         LIMIT 10
       `,
