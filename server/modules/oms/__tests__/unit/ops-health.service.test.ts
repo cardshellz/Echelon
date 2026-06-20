@@ -89,7 +89,9 @@ describe("ops-health.service :: issue mapping", () => {
 
       if (queryText.includes("FROM wms.outbound_shipments") && queryText.includes("WHERE held = true")) {
         if (queryText.includes("COUNT(*)")) return { rows: [{ count: 1 }] };
-        return { rows: [{ shipment_id: 22, order_id: 33, status: "on_hold", on_hold_reason: "address review" }] };
+        // A held shipment now keeps its real lifecycle status (the `on_hold`
+        // shipment status was retired in Phase 1d); `held=true` is the signal.
+        return { rows: [{ shipment_id: 22, order_id: 33, status: "shipped", held: true, on_hold_reason: "address review" }] };
       }
 
       return { rows: [{ count: 0 }] };
@@ -109,7 +111,7 @@ describe("ops-health.service :: issue mapping", () => {
         expect.objectContaining({ id: 44, topic: "oms_wms_sync" }),
       ]);
       expect(onHold?.sample).toEqual([
-        expect.objectContaining({ shipment_id: 22, status: "on_hold" }),
+        expect.objectContaining({ shipment_id: 22, held: true }),
       ]);
       expect(health.workers.webhookRetry).toHaveProperty("startedAt");
       expect(health.workers.omsFlowReconciliation).toHaveProperty("startedAt");

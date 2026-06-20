@@ -41,13 +41,12 @@ describe("enum value sets", () => {
     expect(WMS_WAREHOUSE_STATUS_VALUES.length).toBe(14);
   });
 
-  it("SHIPMENT_STATUS_VALUES is the 9-element union", () => {
+  it("SHIPMENT_STATUS_VALUES is the 8-element union (on_hold retired in Phase 1d)", () => {
     expect(SHIPMENT_STATUS_VALUES).toEqual([
       "planned",
       "queued",
       "labeled",
       "shipped",
-      "on_hold",
       "voided",
       "cancelled",
       "returned",
@@ -83,19 +82,17 @@ describe("isShipmentShipped / isShipmentOpen — partition coverage", () => {
       "planned",
       "queued",
       "labeled",
-      "on_hold",
       "voided",
       "cancelled",
     ];
     for (const s of notShipped) expect(isShipmentShipped(s)).toBe(false);
   });
 
-  it("isShipmentOpen returns true for planned/queued/labeled/on_hold/voided", () => {
+  it("isShipmentOpen returns true for planned/queued/labeled/voided", () => {
     const open: ShipmentStatus[] = [
       "planned",
       "queued",
       "labeled",
-      "on_hold",
       "voided",
     ];
     for (const s of open) expect(isShipmentOpen(s)).toBe(true);
@@ -149,15 +146,6 @@ describe("deriveWmsFromShipments — roll-up matrix", () => {
   it("all shipped → shipped", () => {
     expect(deriveWmsFromShipments(["shipped"])).toBe("shipped");
     expect(deriveWmsFromShipments(["shipped", "shipped"])).toBe("shipped");
-  });
-
-  it("any on_hold → on_hold (wins over everything)", () => {
-    expect(deriveWmsFromShipments(["on_hold"])).toBe("on_hold");
-    // Priority: on_hold beats shipped siblings.
-    expect(deriveWmsFromShipments(["shipped", "on_hold"])).toBe("on_hold");
-    expect(deriveWmsFromShipments(["shipped", "on_hold", "cancelled"])).toBe(
-      "on_hold",
-    );
   });
 
   it("all cancelled → cancelled", () => {

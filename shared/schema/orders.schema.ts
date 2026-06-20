@@ -417,7 +417,9 @@ export type CombinedOrderGroup = typeof combinedOrderGroups.$inferSelect;
 // (created in migration 060). Drizzle does not natively map PG enum
 // types, so we keep the TS column type as varchar(20) here and narrow to
 // the `ShipmentStatus` union (from shared/enums/order-status.ts) at the
-// application layer. The full enum set is:
+// application layer. The application no longer uses `on_hold` — it was retired
+// in Phase 1d (hold is the orthogonal `held` flag). The value remains in the PG
+// enum, unused. The full PG enum set is:
 //   planned, queued, labeled, shipped,
 //   on_hold, voided, cancelled, returned, lost
 export const outboundShipments = wmsSchema.table("outbound_shipments", {
@@ -462,10 +464,10 @@ export const outboundShipments = wmsSchema.table("outbound_shipments", {
   addressChangedAfterLabel: boolean("address_changed_after_label").notNull().default(false),
 
   // ===== HOLD (orthogonal flag — see SHIPMENT-STATE-MACHINE-DESIGN.md) =====
-  // A reversible pause, independent of the lifecycle status. Phase 1a writes it
-  // alongside status='on_hold' (dual-write); later phases make it the single
-  // source of truth and retire the `on_hold` lifecycle status. `on_hold_reason`
-  // (below) carries the hold reason.
+  // A reversible pause, independent of the lifecycle status. This `held` flag is
+  // the single source of truth for shipment-level holds; the `on_hold` lifecycle
+  // status was retired from application use in Phase 1d (refunds reduce/cancel/
+  // flag instead — Phase 1c). `on_hold_reason` (below) carries the hold reason.
   held: boolean("held").notNull().default(false),
   heldAt: timestamp("held_at"),
 

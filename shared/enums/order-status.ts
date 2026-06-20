@@ -57,7 +57,6 @@ export const SHIPMENT_STATUS_VALUES = [
   "queued",
   "labeled",
   "shipped",
-  "on_hold",
   "voided",
   "cancelled",
   "returned",
@@ -95,7 +94,6 @@ export function isShipmentOpen(status: ShipmentStatus): boolean {
     case "planned":
     case "queued":
     case "labeled":
-    case "on_hold":
     case "voided":
       return true;
     case "shipped":
@@ -161,8 +159,9 @@ export function deriveOmsFromWms(
 // the plan lands (invariant #4). Keep this function pure; the caller
 // (`recomputeOrderStatusFromShipments`) handles the UPDATE.
 //
-// Table per plan §2.4:
-//   Any shipment on_hold            → `on_hold`
+// Table per plan §2.4 (hold is now the orthogonal `held` flag, NOT a status —
+// see SHIPMENT-STATE-MACHINE-DESIGN.md; the on_hold shipment status was retired
+// in Phase 1d, so it no longer participates in this roll-up):
 //   All shipments cancelled         → `cancelled`
 //   All shipments shipped           → `shipped`
 //   Some shipped + some open        → `partially_shipped`
@@ -176,9 +175,6 @@ export function deriveWmsFromShipments(
   shipmentStatuses: readonly ShipmentStatus[],
 ): WmsWarehouseStatus {
   if (shipmentStatuses.length === 0) return "ready";
-
-  // Any shipment on hold → whole order on hold (highest priority).
-  if (shipmentStatuses.some((s) => s === "on_hold")) return "on_hold";
 
   // All cancelled (terminal, none shipped) → cancelled.
   if (shipmentStatuses.every((s) => s === "cancelled")) return "cancelled";

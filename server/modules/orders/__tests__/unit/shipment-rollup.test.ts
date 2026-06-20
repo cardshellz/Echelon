@@ -13,7 +13,6 @@
  *       - 1 shipped + 1 planned  → 'partially_shipped'
  *       - 1 shipped + 1 cancelled→ 'shipped'
  *       - 2 cancelled            → 'cancelled'
- *       - 1 on_hold              → 'on_hold'
  *       - 0 shipments on already-post-ready order → no change
  *       - Already matching current state → changed=false
  *       - Missing order row → changed=false
@@ -975,16 +974,6 @@ describe("handleAddressChangeOnShipment", () => {
     expect(mock.getCallCount()).toBe(1);
   });
 
-  it("returns { mode: 'noop' } for status 'on_hold' (no UPDATE)", async () => {
-    const mock = makeDb([
-      { rows: [shipmentRow({ status: "on_hold" })] },
-    ]);
-    const result = await handleAddressChangeOnShipment(mock.db, 501, {
-      now: NOW,
-    });
-    expect(result).toEqual({ mode: "noop", reason: "on_hold" });
-  });
-
   it("throws SHIPMENT_NOT_FOUND when shipment row is missing", async () => {
     const mock = makeDb([{ rows: [] }]);
     await expect(
@@ -1117,35 +1106,6 @@ describe("handleCustomerCancelOnShipment", () => {
       now: NOW,
     });
     expect(result).toEqual({ mode: "noop", reason: "voided" });
-  });
-
-  it("cancels an 'on_hold' shipment and cancels its live SS order (refund-hold defers to channel cancel)", async () => {
-    // A refund had held this shipment; the channel cancel now cancels it. on_hold
-    // can carry a live SS order (e.g. a labeled→on_hold), so it's cancelled too.
-    const onHold = shipmentRow({ status: "on_hold", shipstation_order_id: 9999 });
-    const mock = makeDb([
-      { rows: [onHold] }, // outer load
-      { rows: [onHold] }, // inner load (markShipmentCancelled)
-      { rows: [] }, // UPDATE → cancelled
-    ]);
-    const removeFromList = vi.fn(async () => {});
-    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
-      now: NOW,
-      shipstation: { removeFromList },
-    });
-    expect(result).toEqual({ mode: "cancelled", wmsOrderId: 42 });
-    expect(removeFromList).toHaveBeenCalledWith(9999);
-    expect(mock.calls[2].sqlText).toContain("cancelled");
-  });
-
-  it("does NOT cancel an 'on_hold' shipment that already shipped (shipped_at set)", async () => {
-    // Defensive: a held row that physically shipped is terminal — only a refund.
-    const mock = makeDb([
-      { rows: [shipmentRow({ status: "on_hold", shipped_at: "2026-06-01T00:00:00Z" })] },
-    ]);
-    const result = await handleCustomerCancelOnShipment(mock.db, 501, { now: NOW });
-    expect(result).toEqual({ mode: "noop", reason: "already_shipped" });
-    expect(mock.getCallCount()).toBe(1); // load only — no UPDATE
   });
 
   it("throws SHIPMENT_NOT_FOUND when shipment is missing", async () => {
@@ -1529,26 +1489,6 @@ describe("recomputeOrderStatusFromShipments :: state matrix", () => {
     });
     expect(result.warehouseStatus).toBe("cancelled");
     expect(result.changed).toBe(true);
-  });
-
-  it("any on_hold → 'on_hold' (highest priority)", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready_to_ship",
-            completed_at: null,
-          },
-        ],
-      },
-      { rows: [{ status: "on_hold" }, { status: "shipped" }] },
-      { rows: [] },
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result.warehouseStatus).toBe("on_hold");
   });
 
   it("empty shipments + already-post-ready order → no change (no clobber)", async () => {

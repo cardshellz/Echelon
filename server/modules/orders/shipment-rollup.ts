@@ -397,18 +397,14 @@ export async function markShipmentCancelled(
     ? reason.slice(0, 200)
     : "operator_cancel";
 
-  // Engine-side removal: cancel the order in the shipping engine when
-  // the shipment was already pushed (queued/labeled/on_hold) and has an
-  // engine ref. Pre-push states (planned) never touched the engine.
-  // `on_hold` is included because a refund/cancel hold can leave a live SS
-  // order (e.g. a labeled shipment held by a refund); a subsequent channel
-  // cancel must drop it from ShipStation, not just WMS. Idempotent when SS
+  // Engine-side removal: cancel the order in the shipping engine when the
+  // shipment was already pushed (queued/labeled) and has an engine ref.
+  // Pre-push states (planned) never touched the engine. Idempotent when SS
   // is already cancelled. Failure is non-blocking — reconcile catches drift.
   const ref = engineRefFromRow(current as any);
   if (
     (current.status === "queued" ||
-      current.status === "labeled" ||
-      current.status === "on_hold") &&
+      current.status === "labeled") &&
     ref
   ) {
     const cancelFn = opts.engineCancel
@@ -456,8 +452,7 @@ export async function markShipmentCancelled(
  *     decides whether to void+re-label, ship as-is, or intercept.
  *     (Plan §6 Commit 19, "Option B".)
  *
- * Terminal (status in 'cancelled' | 'voided' | 'returned' | 'lost' |
- * 'on_hold'):
+ * Terminal (status in 'cancelled' | 'voided' | 'returned' | 'lost'):
  *   - Return `{ mode: 'noop', reason: <status> }`. Address changes on
  *     a terminal shipment are meaningless; the caller decides whether
  *     to log/alert or surface to the operator.
@@ -510,7 +505,6 @@ export async function handleAddressChangeOnShipment(
     case "voided":
     case "returned":
     case "lost":
-    case "on_hold":
       return { mode: "noop", reason: current.status };
 
     default:
@@ -527,22 +521,16 @@ export async function handleAddressChangeOnShipment(
  * Handle a customer-originated cancel on a shipment (e.g. Shopify
  * `orders/cancelled` webhook fan-out).
  *
- * Pre-label (status in 'planned' | 'queued'):
+ * Pre-ship (status in 'planned' | 'queued' | 'labeled'):
  *   - Delegates to `markShipmentCancelled` with
  *     `reason = 'customer_cancel'`, threading through the
- *     `opts.shipstation` hook so a queued shipment is also removed
- *     from the SS list. Returns `{ mode: 'cancelled', wmsOrderId }`.
+ *     `opts.shipstation` hook so a queued/labeled shipment is also
+ *     cancelled in the SS list (#668). A row that already carries
+ *     `shipped_at` is treated as terminal and left alone. Returns
+ *     `{ mode: 'cancelled', wmsOrderId }`.
  *
- * Post-label (status in 'labeled' | 'shipped'):
- *   - SET `status = 'on_hold'`, `requires_review = true`,
- *     `review_reason = 'customer_cancel_after_label'`. Operator
- *     decides void / ship-anyway / intercept. (Overlord's "Option B"
- *     from the plan discussion: never auto-void post-label, always
- *     surface to a human.) Returns
- *     `{ mode: 'requires_review', shipmentId }`.
- *
- * Terminal (status in 'cancelled' | 'voided' | 'returned' | 'lost' |
- * 'on_hold'):
+ * Terminal (status in 'shipped' | 'cancelled' | 'voided' | 'returned' |
+ * 'lost'):
  *   - Returns `{ mode: 'noop', reason: <status> }`. A customer-cancel
  *     event arriving on an already-terminal shipment is informational
  *     only.
@@ -576,15 +564,14 @@ export async function handleCustomerCancelOnShipment(
   switch (current.status) {
     case "planned":
     case "queued":
-    case "labeled":
-    case "on_hold": {
-      // Defensive: an on_hold row that already shipped (legacy regressed
-      // state) carries shipped_at — treat it as terminal, do not regress.
+    case "labeled": {
+      // Defensive: a pre-ship row that already carries shipped_at (a legacy
+      // regressed state) is treated as terminal — do not regress it.
       if (current.shipped_at != null) {
         return { mode: "noop", reason: "already_shipped" };
       }
       // markShipmentCancelled also cancels the SS order / drops the label for
-      // queued/labeled/on_hold rows that carry an engine ref.
+      // queued/labeled rows that carry an engine ref.
       const result = await markShipmentCancelled(
         db,
         shipmentId,

@@ -748,7 +748,7 @@ export const orderMethods: IOrderStorage = {
           const shipmentStatuses = shipmentStatusesByOrderId.get(order.id) || [];
           if (shipmentStatuses.length > 0) {
             const hasOpen = shipmentStatuses.some(
-              (s: string) => s === "planned" || s === "queued" || s === "labeled" || s === "on_hold" || s === "voided"
+              (s: string) => s === "planned" || s === "queued" || s === "labeled" || s === "voided"
             );
             const hasShipped = shipmentStatuses.some(
               (s: string) => s === "shipped" || s === "returned" || s === "lost"

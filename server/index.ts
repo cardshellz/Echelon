@@ -1094,8 +1094,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 WHEN 'shipped'  THEN 0
                 WHEN 'labeled'  THEN 1
                 WHEN 'queued'   THEN 2
-                WHEN 'on_hold'  THEN 3
-                WHEN 'planned'  THEN 4
+                WHEN 'planned'  THEN 3
                 ELSE 5
               END,
               os.created_at ASC
