@@ -255,10 +255,10 @@ const BASE_ISSUES: FlowIssueDef[] = [
   {
     code: "SHIPMENT_SHIPPED_AT_WRONG_STATUS", kind: "contradiction", stage: "shipped", severity: "warning",
     message: "Shipments with a ship date but not marked shipped",
-    why: "This shipment has a ship date but is stuck on hold or queued, so fulfillment looks incomplete. Confirm whether it actually shipped and mark it shipped, or clear the hold if it shouldn’t go out.",
+    why: "This shipment has a ship date but is stuck in a pre-ship status, so fulfillment looks incomplete. Confirm whether it actually shipped and mark it shipped.",
     remediation: "MANUAL_REVIEW", replaySafe: false,
-    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE shipped_at IS NOT NULL AND status IN ('planned','queued','labeled','on_hold')`,
-    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.status, os.source, os.review_reason, os.tracking_number, os.shipped_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.shipped_at IS NOT NULL AND os.status IN ('planned','queued','labeled','on_hold') ORDER BY os.shipped_at DESC LIMIT 50`,
+    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE shipped_at IS NOT NULL AND status IN ('planned','queued','labeled')`,
+    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.status, os.source, os.review_reason, os.tracking_number, os.shipped_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.shipped_at IS NOT NULL AND os.status IN ('planned','queued','labeled') ORDER BY os.shipped_at DESC LIMIT 50`,
   },
   {
     code: "ORDER_SHIPPED_BUT_LINE_SHORT", kind: "contradiction", stage: "shipped", severity: "warning",
