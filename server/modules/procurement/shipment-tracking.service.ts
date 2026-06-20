@@ -141,6 +141,25 @@ const MODE_DEFAULT_ALLOCATION: Record<string, string> = {
   courier: "by_weight",
 };
 
+// Allocation methods that require physical line dimensions. If a cost uses one of
+// these and ANY line lacks the dimension, allocation silently mis-distributes —
+// equal-split fallback when every line lacks it, or $0 to the dimensionless lines
+// when only some do — so we hard-block closing until dimensions are entered.
+const DIMENSIONAL_METHODS = new Set(["by_volume", "by_weight", "by_chargeable_weight"]);
+const DIMENSION_LABELS: Record<string, string> = {
+  by_volume: "volume (length × width × height)",
+  by_weight: "weight",
+  by_chargeable_weight: "chargeable weight",
+};
+function rawLineBasisForDimension(line: any, method: string): number {
+  switch (method) {
+    case "by_volume": return Number(line.totalVolumeCbm || 0);
+    case "by_weight": return Number(line.totalWeightKg || 0);
+    case "by_chargeable_weight": return Number(line.chargeableWeightKg || 0);
+    default: return 1;
+  }
+}
+
 // Cost types with hard-coded allocation method overrides
 const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   duty: "by_value",
@@ -499,6 +518,20 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     // Best-effort: a push failure (e.g. nothing received yet) must NOT block the close;
     // the snapshots persist, the manual push remains as a re-trigger, and any receipt
     // created after close still picks up the landed cost at receive time.
+    //
+    // HARD GATE (dimensions): refuse to close if any cost is allocated by a physical
+    // dimension (volume/weight) but some lines lack that dimension — otherwise freight
+    // silently equal-splits or drops $0 onto the dimensionless lines. Scoped to ONLY this
+    // blocker; other advisory blockers (unallocated/stale/mismatch) still don't gate close.
+    const allocationStatus = await getAllocationStatus(id);
+    const dimIssues = allocationStatus.issues.filter((issue) => issue.code === "missing_dimensions");
+    if (dimIssues.length > 0) {
+      throw new ShipmentTrackingError(
+        `Cannot close — freight is allocated by dimensions but some lines are missing them. ${dimIssues.map((i) => i.message).join(" ")}`,
+        400,
+      );
+    }
+
     await finalizeAllocations(id, userId);
     const closed = await transitionTo(id, "closed", userId, notes || "Shipment closed — landed costs finalized");
     try {
@@ -1145,9 +1178,21 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         allocatableCostCount += 1;
       }
 
+      const missingDimLines = DIMENSIONAL_METHODS.has(method)
+        ? lines.filter((line) => rawLineBasisForDimension(line, method) <= 0)
+        : [];
+
       let status = "allocated";
       if (effectiveCents === 0) {
         status = "zero_amount";
+      } else if (missingDimLines.length > 0) {
+        status = "missing_dimensions";
+        issues.push({
+          severity: "blocker",
+          code: "missing_dimensions",
+          costId: cost.id,
+          message: `${cost.costType} is allocated by ${DIMENSION_LABELS[method] ?? method}, but ${missingDimLines.length} line(s) are missing it: ${missingDimLines.map((line) => line.sku || `line ${line.id}`).join(", ")}. Enter dimensions (or use Resolve Dimensions) before closing.`,
+        });
       } else if (allocations.length === 0) {
         status = "needs_allocation";
         issues.push({

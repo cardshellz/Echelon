@@ -316,7 +316,9 @@ export default function InboundShipmentDetail() {
 
   const { data: allocationStatus } = useQuery<AllocationStatus>({
     queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`],
-    enabled: !!shipmentId && activeTab === "allocation",
+    // Also load on the Lines tab so the missing-dimensions banner can surface there
+    // (that's where dimensions are entered / Resolve Dimensions lives).
+    enabled: !!shipmentId && (activeTab === "allocation" || activeTab === "lines"),
   });
 
   const { data: vendorsData } = useQuery<any[]>({
@@ -1070,6 +1072,39 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 1: Lines ══ */}
         <TabsContent value="lines" className="space-y-4">
+          {(() => {
+            const dimIssues = (allocationStatus?.issues ?? []).filter((i) => i.code === "missing_dimensions");
+            if (dimIssues.length === 0) return null;
+            return (
+              <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-red-600" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-red-800">Missing dimensions — this shipment can't be closed</div>
+                    <ul className="mt-1 list-disc pl-4 text-red-700 space-y-0.5">
+                      {dimIssues.map((issue, i) => (
+                        <li key={i}>{issue.message}</li>
+                      ))}
+                    </ul>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-red-300"
+                        onClick={() => resolveDimensionsMutation.mutate()}
+                        disabled={resolveDimensionsMutation.isPending || lines.length === 0}
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${resolveDimensionsMutation.isPending ? "animate-spin" : ""}`} />
+                        Resolve Dimensions from product data
+                      </Button>
+                      <span className="text-xs text-red-600">…or click a line below to enter dimensions manually.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {isEditable && (
             <div className="flex gap-2 flex-wrap">
               <Button variant="outline" onClick={() => {

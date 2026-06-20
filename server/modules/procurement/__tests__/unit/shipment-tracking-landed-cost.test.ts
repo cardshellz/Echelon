@@ -74,7 +74,7 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
     }));
   });
 
-  it("reports allocation basis fallback as a warning", async () => {
+  it("escalates a dimensional method with missing line dimensions to a BLOCKER", async () => {
     const storage = buildStorage({
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_volume" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
@@ -91,18 +91,63 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
 
     const result = await service.getAllocationStatus(1);
 
-    expect(result.status).toBe("allocated_with_warnings");
-    expect(result.warningCount).toBe(1);
-    expect(result.costs[0]).toEqual(expect.objectContaining({
-      status: "allocated_with_fallback",
-      rawBasisTotal: 0,
-      basisTotal: 1,
-      usedFallback: true,
+    expect(result.status).toBe("needs_allocation");
+    expect(result.blockerCount).toBe(1);
+    expect(result.warningCount).toBe(0);
+    expect(result.costs[0]).toEqual(expect.objectContaining({ costId: 31, status: "missing_dimensions" }));
+    expect(result.issues[0]).toEqual(expect.objectContaining({
+      code: "missing_dimensions",
+      severity: "blocker",
+      costId: 31,
     }));
+  });
+
+  it("keeps NON-dimensional (by_value) fallback as a warning, not a blocker", async () => {
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_volume" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, sku: "SKU-1", qtyShipped: 5, purchaseOrderLineId: 21 },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 1200, allocationMethod: "by_value" },
+      ]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 1200 },
+      ]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, unitCostCents: 0 }),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getAllocationStatus(1);
+
+    expect(result.blockerCount).toBe(0);
+    expect(result.warningCount).toBe(1);
     expect(result.issues[0]).toEqual(expect.objectContaining({
       code: "allocation_basis_fallback",
       severity: "warning",
     }));
+  });
+});
+
+describe("ShipmentTrackingService.close (dimension hard gate)", () => {
+  it("refuses to close when a dimensional cost has lines missing dimensions", async () => {
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_volume" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, sku: "SKU-1", qtyShipped: 5, totalVolumeCbm: "0" },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 1200, allocationMethod: "by_volume" },
+      ]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 1200 },
+      ]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    await expect(service.close(1, "user-1")).rejects.toThrow(/dimension/i);
+    // gate fires before any allocation/state change
+    expect(storage.deleteAllocationsForShipment).not.toHaveBeenCalled();
   });
 });
 
@@ -345,7 +390,8 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
       updateInboundShipment: vi.fn().mockResolvedValue({}),
       createInboundShipmentStatusHistory: vi.fn().mockResolvedValue({}),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, productVariantId: null, purchaseOrderLineId: 21, qtyShipped: 20 },
+        // has volume so the by_volume dimension gate passes and close proceeds to push
+        { id: 11, productVariantId: null, purchaseOrderLineId: 21, qtyShipped: 20, totalVolumeCbm: "2.0" },
       ]),
       getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, unitCostCents: 70 }),
       getInboundFreightCosts: vi.fn().mockResolvedValue([{ id: 31, costType: "freight", actualCents: 1000 }]),
