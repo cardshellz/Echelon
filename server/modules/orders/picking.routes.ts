@@ -481,6 +481,120 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
+  // Hold a single LINE ITEM — gated by orders:hold (picker role lacks it).
+  // P1 of line-item hold (LINE-ITEM-HOLD-DESIGN.md): records the hold + reason so
+  // the line can be withheld while the rest of the order ships. The held line is
+  // not yet pulled from the ShipStation push — that behaviour is P2.
+  app.post(
+    "/api/orders/:id/items/:itemId/hold",
+    requireAuth,
+    requirePermission("orders", "hold"),
+    async (req, res) => {
+      try {
+        if (!req.session.user) {
+          return res.status(401).json({ error: "Authentication required" });
+        }
+        const orderId = parseInt(req.params.id);
+        const itemId = parseInt(req.params.itemId);
+        const reason =
+          typeof req.body?.reason === "string" && req.body.reason.trim()
+            ? req.body.reason.trim()
+            : "manual_hold";
+
+        const item = await storage.getOrderItemById(itemId);
+        if (!item || item.orderId !== orderId) {
+          return res.status(404).json({ error: "Line item not found on this order" });
+        }
+        // Only a line that has not started picking/fulfillment can be held; once
+        // it is in motion, holding it would strand a picked/shipped unit.
+        if (
+          item.status !== "pending" ||
+          (item.pickedQuantity ?? 0) > 0 ||
+          (item.fulfilledQuantity ?? 0) > 0
+        ) {
+          return res.status(409).json({
+            error: "Line has already started picking or fulfillment and cannot be held",
+            status: item.status,
+          });
+        }
+
+        const updated = await storage.holdOrderItem(itemId, reason);
+        if (!updated) {
+          return res.status(404).json({ error: "Line item not found" });
+        }
+
+        const order = await storage.getOrderById(orderId);
+        storage
+          .createPickingLog({
+            actionType: "line_item_held",
+            pickerId: req.session.user.id,
+            pickerName: req.session.user.displayName || req.session.user.username,
+            pickerRole: req.session.user.role,
+            orderId,
+            orderNumber: order?.orderNumber,
+            reason,
+            notes: `SKU ${item.sku}`,
+            deviceType: (req.headers["x-device-type"] as string) || "desktop",
+            sessionId: req.sessionID,
+          })
+          .catch((err) => console.warn("[PickingLog] Failed to log line_item_held:", err.message));
+
+        broadcastOrdersUpdated();
+        res.json(updated);
+      } catch (error: any) {
+        console.error("Error holding line item:", error);
+        res.status(500).json({ error: "Failed to hold line item" });
+      }
+    },
+  );
+
+  // Release a single LINE ITEM hold — gated by orders:hold.
+  app.post(
+    "/api/orders/:id/items/:itemId/release-hold",
+    requireAuth,
+    requirePermission("orders", "hold"),
+    async (req, res) => {
+      try {
+        if (!req.session.user) {
+          return res.status(401).json({ error: "Authentication required" });
+        }
+        const orderId = parseInt(req.params.id);
+        const itemId = parseInt(req.params.itemId);
+
+        const item = await storage.getOrderItemById(itemId);
+        if (!item || item.orderId !== orderId) {
+          return res.status(404).json({ error: "Line item not found on this order" });
+        }
+
+        const updated = await storage.releaseOrderItem(itemId);
+        if (!updated) {
+          return res.status(404).json({ error: "Line item not found" });
+        }
+
+        const order = await storage.getOrderById(orderId);
+        storage
+          .createPickingLog({
+            actionType: "line_item_released",
+            pickerId: req.session.user.id,
+            pickerName: req.session.user.displayName || req.session.user.username,
+            pickerRole: req.session.user.role,
+            orderId,
+            orderNumber: order?.orderNumber,
+            notes: `SKU ${item.sku}`,
+            deviceType: (req.headers["x-device-type"] as string) || "desktop",
+            sessionId: req.sessionID,
+          })
+          .catch((err) => console.warn("[PickingLog] Failed to log line_item_released:", err.message));
+
+        broadcastOrdersUpdated();
+        res.json(updated);
+      } catch (error: any) {
+        console.error("Error releasing line item hold:", error);
+        res.status(500).json({ error: "Failed to release line item hold" });
+      }
+    },
+  );
+
   // Set order priority (admin/lead only)
   // Accepts a numeric priority value: 9999 = Bump to Top, -1 = Hold, 100 = Normal (SLA reset)
   app.post("/api/orders/:id/priority", requireAuth, async (req, res) => {

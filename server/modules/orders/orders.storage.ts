@@ -251,6 +251,8 @@ export interface IOrderStorage {
   updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
   releaseHoldOrder(orderId: number): Promise<Order | null>;
+  holdOrderItem(itemId: number, reason: string): Promise<OrderItem | null>;
+  releaseOrderItem(itemId: number): Promise<OrderItem | null>;
   setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null>;
 
   getOrderItems(orderId: number): Promise<OrderItem[]>;
@@ -556,7 +558,9 @@ export const orderMethods: IOrderStorage = {
         zone,
         short_reason,
         picked_at,
-        image_url
+        image_url,
+        on_hold,
+        hold_reason
       FROM wms.order_items
       WHERE order_id IN (${idList})
       ORDER BY order_id, id
@@ -594,6 +598,8 @@ export const orderMethods: IOrderStorage = {
       shortReason: row.short_reason,
       pickedAt: row.picked_at,
       imageUrl: row.image_url,
+      onHold: row.on_hold,
+      holdReason: row.hold_reason,
       // Fields not in wms schema — default values for compatibility
       price: null,
       taxable: null,
@@ -1184,6 +1190,27 @@ export const orderMethods: IOrderStorage = {
       .where(eq(orders.id, orderId))
       .returning();
     if (result[0]) await recomputeSortRank(orderId);
+    return result[0] || null;
+  },
+
+  // Line-item hold (LINE-ITEM-HOLD-DESIGN.md P1): mark a single line held so it
+  // can be withheld from shipping while the rest of the order ships. Writes the
+  // intent only; the shipping behaviour (split + skip push) is P2.
+  async holdOrderItem(itemId: number, reason: string): Promise<OrderItem | null> {
+    const result = await db
+      .update(orderItems)
+      .set({ onHold: true, holdReason: reason.slice(0, 200) })
+      .where(eq(orderItems.id, itemId))
+      .returning();
+    return result[0] || null;
+  },
+
+  async releaseOrderItem(itemId: number): Promise<OrderItem | null> {
+    const result = await db
+      .update(orderItems)
+      .set({ onHold: false, holdReason: null })
+      .where(eq(orderItems.id, itemId))
+      .returning();
     return result[0] || null;
   },
 
