@@ -39,6 +39,7 @@ import {
   ChevronRight,
   Plus,
   Upload,
+  Download,
   Pencil,
   Trash2,
   TrendingUp,
@@ -101,7 +102,7 @@ export default function CostDashboard() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-5 lg:w-auto lg:inline-grid">
+        <TabsList className="grid w-full grid-cols-6 lg:w-auto lg:inline-grid">
           <TabsTrigger value="valuation" className="text-xs sm:text-sm">
             <DollarSign className="h-4 w-4 mr-1.5 hidden sm:block" />
             Valuation
@@ -121,6 +122,10 @@ export default function CostDashboard() {
           <TabsTrigger value="adjustments" className="text-xs sm:text-sm">
             <ArrowUpDown className="h-4 w-4 mr-1.5 hidden sm:block" />
             Adjustments
+          </TabsTrigger>
+          <TabsTrigger value="cost-upload" className="text-xs sm:text-sm">
+            <Upload className="h-4 w-4 mr-1.5 hidden sm:block" />
+            Cost Upload
           </TabsTrigger>
         </TabsList>
 
@@ -143,7 +148,134 @@ export default function CostDashboard() {
         <TabsContent value="adjustments" className="mt-4">
           <AdjustmentsSection />
         </TabsContent>
+
+        <TabsContent value="cost-upload" className="mt-4">
+          <CostUploadSection />
+        </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION: LOT-COST CSV UPLOAD (cost legacy / provisional lots in bulk)
+// ═══════════════════════════════════════════════════════════════════════
+
+function CostUploadSection() {
+  const { toast } = useToast();
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<any | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(apply: boolean) {
+    if (!file) {
+      toast({ title: "Choose a CSV first", description: "Download the template, fill in unit_cost, then upload.", variant: "destructive" });
+      return;
+    }
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`/api/cogs/lot-cost-upload${apply ? "?apply=true" : ""}`, {
+        method: "POST",
+        credentials: "include",
+        body: fd,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Upload failed");
+      if (apply) {
+        toast({ title: "Costs applied", description: `${data.summary.lotsAffected} lot(s) updated, ${data.summary.errors} skipped` });
+        setPreview(null);
+        setFile(null);
+      } else {
+        setPreview(data);
+      }
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Upload lot costs (CSV)</CardTitle>
+          <CardDescription>
+            Cost legacy / provisional lots in bulk. <strong>Download template</strong> — one row per un-costed
+            lot — fill in the <code>unit_cost</code> column (dollars), then <strong>Preview</strong> and
+            <strong> Apply</strong>. A bare <code>sku,unit_cost</code> row costs <em>all</em> of that SKU's
+            un-costed lots; include <code>lot_number</code> to target one exact lot. Real cost layers are never
+            touched. Nothing is written until you click Apply.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" onClick={() => { window.location.href = "/api/cogs/lot-cost-template"; }}>
+              <Download className="h-4 w-4 mr-2" /> Download template
+            </Button>
+            <Input
+              type="file"
+              accept=".csv"
+              className="max-w-xs"
+              onChange={(e) => { setFile(e.target.files?.[0] ?? null); setPreview(null); }}
+            />
+            <Button variant="outline" disabled={!file || busy} onClick={() => submit(false)}>
+              {busy && !preview ? "Working…" : "Preview"}
+            </Button>
+            <Button disabled={!preview || busy || preview.summary.lotsAffected === 0} onClick={() => submit(true)}>
+              <Upload className="h-4 w-4 mr-2" /> Apply{preview ? ` (${preview.summary.lotsAffected})` : ""}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {preview && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Preview</CardTitle>
+            <CardDescription>
+              {preview.summary.rows} row(s) → <strong>{preview.summary.lotsAffected} lot(s)</strong> to update,
+              {" "}{preview.summary.errors} issue(s). Nothing is written until you click Apply.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="max-h-[60vh] overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Status</TableHead>
+                    <TableHead>SKU</TableHead>
+                    <TableHead>Lot</TableHead>
+                    <TableHead>Location</TableHead>
+                    <TableHead className="text-right">Qty</TableHead>
+                    <TableHead className="text-right">Old</TableHead>
+                    <TableHead className="text-right">New</TableHead>
+                    <TableHead>Note</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {preview.results.map((r: any, i: number) => (
+                    <TableRow key={i}>
+                      <TableCell>
+                        <Badge variant={r.status === "preview" ? "secondary" : "destructive"}>{r.status}</Badge>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{r.sku ?? "—"}</TableCell>
+                      <TableCell className="font-mono text-xs">{r.lotNumber ?? "—"}</TableCell>
+                      <TableCell>{r.location ?? "—"}</TableCell>
+                      <TableCell className="text-right">{r.qty ?? "—"}</TableCell>
+                      <TableCell className="text-right">{r.oldCostCents != null ? formatDollars(r.oldCostCents) : "—"}</TableCell>
+                      <TableCell className="text-right font-medium">{r.newCostCents != null ? formatDollars(r.newCostCents) : "—"}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{r.message ?? ""}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
