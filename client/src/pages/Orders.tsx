@@ -70,6 +70,7 @@ import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/component
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useSettings, PickingMode } from "@/lib/settings";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { format, formatDistanceToNow } from "date-fns";
 
@@ -98,6 +99,8 @@ interface OrderItem {
   barcode: string | null;
   shortReason: string | null;
   pickedAt: string | null;
+  onHold?: boolean;
+  holdReason?: string | null;
 }
 
 interface Order {
@@ -280,6 +283,104 @@ const priorityColors: Record<string, string> = {
   high: "bg-orange-500 text-white",
   normal: "",
 };
+
+function LineItemHoldControls({ orderId, item }: { orderId: number; item: OrderItem }) {
+  const { hasPermission } = useAuth();
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const [pickingReason, setPickingReason] = useState(false);
+  const [reason, setReason] = useState("Pre-order — not yet in stock");
+  const canHold = hasPermission("orders", "hold");
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["/api/wms/orders"] });
+    queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+  };
+
+  const holdMutation = useMutation({
+    mutationFn: async (r: string) => {
+      const res = await fetch(`/api/orders/${orderId}/items/${item.id}/hold`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: r }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.error || "Failed to hold line");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      invalidate();
+      setPickingReason(false);
+      toast({ title: "Line held", description: "It won't ship until released." });
+    },
+    onError: (e: Error) => toast({ title: "Couldn't hold line", description: e.message, variant: "destructive" }),
+  });
+
+  const releaseMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/orders/${orderId}/items/${item.id}/release-hold`, { method: "POST" });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.error || "Failed to release line");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      invalidate();
+      toast({ title: "Hold released" });
+    },
+    onError: (e: Error) => toast({ title: "Couldn't release line", description: e.message, variant: "destructive" }),
+  });
+
+  if (item.onHold) {
+    return (
+      <div className="flex items-center gap-2 flex-wrap mt-2">
+        <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">
+          <Clock className="h-3 w-3 mr-1" /> Held{item.holdReason ? ` · ${item.holdReason}` : ""}
+        </Badge>
+        {canHold && (
+          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={releaseMutation.isPending} onClick={() => releaseMutation.mutate()}>
+            Release
+          </Button>
+        )}
+      </div>
+    );
+  }
+
+  if (!canHold) return null;
+  const holdable = item.status === "pending" && (item.pickedQuantity ?? 0) === 0;
+  if (!holdable) return null;
+
+  return (
+    <div className="mt-2">
+      {!pickingReason ? (
+        <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => setPickingReason(true)}>
+          <Clock className="h-3 w-3 mr-1" /> Hold line
+        </Button>
+      ) : (
+        <div className="flex items-center gap-2 flex-wrap">
+          <Select value={reason} onValueChange={setReason}>
+            <SelectTrigger className="h-7 w-auto text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="Pre-order — not yet in stock">Pre-order — not yet in stock</SelectItem>
+              <SelectItem value="Awaiting restock">Awaiting restock</SelectItem>
+              <SelectItem value="Damaged / quality hold">Damaged / quality hold</SelectItem>
+              <SelectItem value="Customer request">Customer request</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={holdMutation.isPending} onClick={() => holdMutation.mutate(reason)}>
+            Confirm hold
+          </Button>
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setPickingReason(false)}>
+            Cancel
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function CombineOrderItems({ orderId }: { orderId: number }) {
   const { data, isLoading } = useQuery<{ items: { id: number; sku: string; name: string; quantity: number; pickedQuantity: number; requiresShipping: number }[] }>({
@@ -672,6 +773,7 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
                     {item.shortReason && (
                       <p className="text-xs text-red-500 mt-1">Short: {item.shortReason}</p>
                     )}
+                    <LineItemHoldControls orderId={order.id} item={item} />
                   </div>
                 </div>
               </div>
