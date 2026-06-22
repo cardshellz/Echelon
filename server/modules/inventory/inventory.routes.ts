@@ -2603,6 +2603,50 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
+  // Lot-cost CSV: download a template of the un-costed lots (one row per lot, cost blank).
+  app.get("/api/cogs/lot-cost-template", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const lots = await cogs.getUncostedLots();
+      const header = "sku,lot_number,location,qty_on_hand,current_cost,unit_cost";
+      const rows = lots.map((l: any) =>
+        [
+          l.sku,
+          l.lot_number,
+          l.location_code ?? "",
+          l.qty_on_hand,
+          ((Number(l.total_unit_cost_cents) || 0) / 100).toFixed(2),
+          "",
+        ].join(","),
+      );
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=lot_costs_template.csv");
+      res.send([header, ...rows].join("\n"));
+    } catch (error: any) {
+      console.error("Error building lot-cost template:", error);
+      res.status(500).json({ error: "Failed to build lot-cost template" });
+    }
+  });
+
+  // Lot-cost CSV: upload costs. ?apply=true writes; default returns a preview (no writes).
+  app.post("/api/cogs/lot-cost-upload", requirePermission("inventory", "adjust"), upload.single("file"), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+      const { cogs } = req.app.locals.services;
+      const csvContent = req.file.buffer.toString("utf-8");
+      const { data, errors } = Papa.parse<Record<string, any>>(csvContent, { header: true, skipEmptyLines: true });
+      if (errors.length > 0) {
+        return res.status(400).json({ error: "CSV parse error", details: errors.slice(0, 5) });
+      }
+      const apply = req.query.apply === "true";
+      const result = await cogs.applyLotCostUpload(data, apply);
+      res.json({ apply, ...result });
+    } catch (error: any) {
+      console.error("Error processing lot-cost upload:", error);
+      res.status(500).json({ error: "Failed to process lot-cost upload" });
+    }
+  });
+
   // Order COGS lookup by order number
   app.get("/api/cogs/order", requirePermission("inventory", "view"), async (req, res) => {
     try {

@@ -21,6 +21,26 @@ import {
 } from "@shared/schema";
 import type { InventoryLot } from "@shared/schema";
 
+/**
+ * Parse one lot-cost CSV row. Pure + exported for unit testing.
+ * Columns: sku (required), unit_cost (required, dollars), lot_number (optional).
+ * unit_cost is dollars → mills ($1 = 10,000 mills) so sub-cent costs survive.
+ */
+export function parseLotCostCsvRow(row: Record<string, any>):
+  | { ok: true; sku: string; lotNumber: string | null; costMills: number }
+  | { ok: false; error: string } {
+  const sku = String(row.sku ?? "").trim();
+  const lotNumber = String(row.lot_number ?? "").trim() || null;
+  const rawCost = String(row.unit_cost ?? "").trim();
+  if (!sku) return { ok: false, error: "missing sku" };
+  if (!rawCost) return { ok: false, error: "missing unit_cost" };
+  const dollars = Number(rawCost.replace(/[$,\s]/g, ""));
+  if (!Number.isFinite(dollars) || dollars < 0) {
+    return { ok: false, error: `invalid unit_cost "${rawCost}"` };
+  }
+  return { ok: true, sku, lotNumber, costMills: Math.round(dollars * 10000) };
+}
+
 type DrizzleDb = {
   select: (...args: any[]) => any;
   insert: (...args: any[]) => any;
@@ -825,6 +845,119 @@ export class COGSService {
       lots: result.rows || [],
       total: Number(countResult.rows?.[0]?.total) || 0,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOT-COST CSV UPLOAD (cost legacy / provisional lots in bulk)
+  // ---------------------------------------------------------------------------
+
+  /** Active lots that still need a cost (provisional or zero total) — the CSV template source. */
+  async getUncostedLots(): Promise<any[]> {
+    const result = await this.db.execute(sql`
+      SELECT pv.sku, il.lot_number, wl.code AS location_code,
+             il.qty_on_hand, il.total_unit_cost_cents, il.cost_provisional
+      FROM inventory.inventory_lots il
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+      WHERE il.status = 'active' AND il.qty_on_hand > 0
+        AND (il.cost_provisional = 1 OR COALESCE(il.total_unit_cost_mills, 0) = 0)
+      ORDER BY pv.sku, il.lot_number
+    `);
+    return result.rows || [];
+  }
+
+  /**
+   * Set a lot's PRODUCT cost in mills (authoritative): po = product, total = po + packaging
+   * + landed, cents mirrors derived, provisional cleared, cost_source → 'manual'. Cascades the
+   * new total to any booked COGS rows. Used by the lot-cost CSV upload to cost legacy stock.
+   */
+  async setLotProductCostMills(
+    lotId: number,
+    productCostMills: number,
+  ): Promise<{ lotId: number; lotNumber: string; sku: string; oldCostCents: number; newCostCents: number } | null> {
+    const result = await this.db.execute(sql`
+      SELECT il.id, il.lot_number, il.product_variant_id,
+             COALESCE(il.packaging_cost_mills, 0) AS packaging_mills,
+             COALESCE(il.landed_cost_mills, 0) AS landed_mills,
+             COALESCE(il.total_unit_cost_cents, 0) AS old_total_cents, pv.sku
+      FROM inventory.inventory_lots il
+      LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      WHERE il.id = ${lotId}
+    `);
+    const lot = result.rows?.[0];
+    if (!lot) return null;
+
+    const totalMills = productCostMills + Number(lot.packaging_mills) + Number(lot.landed_mills);
+    const totalCents = millsToCents(totalMills);
+    const poCents = millsToCents(productCostMills);
+
+    await this.db.execute(sql`
+      UPDATE inventory.inventory_lots SET
+        po_unit_cost_mills = ${productCostMills},
+        total_unit_cost_mills = ${totalMills},
+        unit_cost_mills = ${totalMills},
+        po_unit_cost_cents = ${poCents},
+        total_unit_cost_cents = ${totalCents},
+        unit_cost_cents = ${totalCents},
+        cost_provisional = 0,
+        cost_source = 'manual'
+      WHERE id = ${lotId}
+    `);
+
+    // Cascade to any booked COGS rows (legacy lots usually have none yet).
+    await this.cascadeRecostForLot(lotId, totalCents);
+
+    const oldCents = Number(lot.old_total_cents) || 0;
+    await this.db.execute(sql`
+      INSERT INTO inventory.cost_adjustment_log (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
+      VALUES (${lotId}, ${lot.lot_number}, ${lot.product_variant_id}, ${lot.sku || ''}, ${oldCents}, ${totalCents}, ${totalCents - oldCents}, 'csv_cost_upload', NOW())
+    `);
+
+    return { lotId, lotNumber: lot.lot_number, sku: lot.sku || '', oldCostCents: oldCents, newCostCents: totalCents };
+  }
+
+  /**
+   * Apply a parsed lot-cost CSV. Per row: a lot_number targets that exact lot; a bare SKU
+   * targets ALL of the variant's un-costed (provisional / zero) active lots — so it never
+   * clobbers a real FIFO cost layer. preview (apply=false) computes changes without writing.
+   */
+  async applyLotCostUpload(
+    rawRows: Record<string, any>[],
+    apply: boolean,
+  ): Promise<{ results: any[]; summary: { rows: number; lotsAffected: number; errors: number } }> {
+    const results: any[] = [];
+    for (const raw of rawRows) {
+      const parsed = parseLotCostCsvRow(raw);
+      if (!parsed.ok) { results.push({ status: 'error', message: parsed.error, raw }); continue; }
+
+      const newCents = millsToCents(parsed.costMills);
+      const lotsRes = parsed.lotNumber
+        ? await this.db.execute(sql`
+            SELECT il.id, il.lot_number, wl.code AS loc, il.qty_on_hand, COALESCE(il.total_unit_cost_cents, 0) AS old_cents
+            FROM inventory.inventory_lots il
+            JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+            LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+            WHERE il.lot_number = ${parsed.lotNumber} AND UPPER(pv.sku) = UPPER(${parsed.sku}) AND il.status = 'active'`)
+        : await this.db.execute(sql`
+            SELECT il.id, il.lot_number, wl.code AS loc, il.qty_on_hand, COALESCE(il.total_unit_cost_cents, 0) AS old_cents
+            FROM inventory.inventory_lots il
+            JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+            LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
+            WHERE UPPER(pv.sku) = UPPER(${parsed.sku}) AND il.status = 'active' AND il.qty_on_hand > 0
+              AND (il.cost_provisional = 1 OR COALESCE(il.total_unit_cost_mills, 0) = 0)`);
+      const lots = lotsRes.rows || [];
+      if (lots.length === 0) {
+        results.push({ status: 'no_match', sku: parsed.sku, lotNumber: parsed.lotNumber, message: parsed.lotNumber ? 'lot not found for SKU' : 'no un-costed lots for SKU' });
+        continue;
+      }
+      for (const lot of lots) {
+        if (apply) await this.setLotProductCostMills(Number(lot.id), parsed.costMills);
+        results.push({ status: apply ? 'applied' : 'preview', sku: parsed.sku, lotNumber: lot.lot_number, location: lot.loc, qty: Number(lot.qty_on_hand), oldCostCents: Number(lot.old_cents), newCostCents: newCents });
+      }
+    }
+    const lotsAffected = results.filter(r => r.status === 'applied' || r.status === 'preview').length;
+    const errors = results.filter(r => r.status === 'error' || r.status === 'no_match').length;
+    return { results, summary: { rows: rawRows.length, lotsAffected, errors } };
   }
 
   // ---------------------------------------------------------------------------
