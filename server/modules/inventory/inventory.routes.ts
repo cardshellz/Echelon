@@ -2607,20 +2607,25 @@ export function registerInventoryRoutes(app: Express) {
   app.get("/api/cogs/lot-cost-template", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;
-      const lots = await cogs.getUncostedLots();
-      const header = "sku,lot_number,location,qty_on_hand,current_cost,unit_cost";
-      const rows = lots.map((l: any) =>
+      const products = await cogs.getUncostedProducts();
+      const esc = (v: any) => {
+        const s = String(v ?? "");
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const header = "product_id,product_sku,product_name,pack_sizes,uncosted_lots,units,cost_per_piece";
+      const rows = products.map((p: any) =>
         [
-          l.sku,
-          l.lot_number,
-          l.location_code ?? "",
-          l.qty_on_hand,
-          ((Number(l.total_unit_cost_cents) || 0) / 100).toFixed(2),
+          p.product_id,
+          esc(p.product_sku),
+          esc(p.product_name),
+          esc(p.pack_sizes),
+          p.uncosted_lots,
+          p.units,
           "",
         ].join(","),
       );
       res.setHeader("Content-Type", "text/csv");
-      res.setHeader("Content-Disposition", "attachment; filename=lot_costs_template.csv");
+      res.setHeader("Content-Disposition", "attachment; filename=lot_costs_per_piece_template.csv");
       res.send([header, ...rows].join("\n"));
     } catch (error: any) {
       console.error("Error building lot-cost template:", error);
