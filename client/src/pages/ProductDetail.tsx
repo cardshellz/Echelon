@@ -30,7 +30,6 @@ import {
   X,
   ChevronUp,
   ChevronDown,
-  Send,
   Globe,
   CheckCircle2,
   AlertCircle,
@@ -1205,25 +1204,6 @@ export default function ProductDetail() {
     enabled: !!productId && activeTab === "channels",
   });
 
-  const pushToChannelMutation = useMutation({
-    mutationFn: async ({ channelId }: { channelId?: number }) => {
-      const url = channelId
-        ? `/api/channel-push/product/${product?.productId}/channel/${channelId}`
-        : `/api/channel-push/product/${product?.productId}`;
-      const res = await fetch(url, { method: "POST" });
-      if (!res.ok) throw new Error("Failed to push product");
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-status`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
-      toast({ title: "Product pushed to channel" });
-    },
-    onError: () => {
-      toast({ title: "Failed to push product", variant: "destructive" });
-    },
-  });
-
   // --- Channel allocation query ---
   interface AllocationChannel { id: number; name: string; provider: string; status: string; }
   interface AllocationVariant { id: number; sku: string; name: string; unitsPerVariant: number; atpUnits: number; }
@@ -1292,10 +1272,11 @@ export default function ProductDetail() {
 
   const pushImagesMutation = useMutation({
     mutationFn: async (target: string) => {
-      // Use the existing product push which includes images
-      const res = await fetch(`/api/channel-push/product/${product?.productId}/channel/36`, {
+      const res = await fetch(`/api/images/push/${target}`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         credentials: "include",
+        body: JSON.stringify({ productIds: [product?.productId] }),
       });
       const text = await res.text();
       let data: any;
@@ -1303,8 +1284,9 @@ export default function ProductDetail() {
       if (!res.ok) throw new Error(data?.error || `Server returned ${res.status}`);
       return data;
     },
-    onSuccess: (data: any) => {
-      toast({ title: "Push complete", description: `Product pushed to Shopify (${data?.status || "ok"})` });
+    onSuccess: (data: any, target: string) => {
+      const pushed = data?.summary?.imagesPushed ?? 0;
+      toast({ title: "Push complete", description: `Pushed ${pushed} image${pushed !== 1 ? "s" : ""} to ${target}` });
     },
     onError: (err: Error) => {
       toast({ title: "Push failed", description: err.message, variant: "destructive" });
@@ -2290,19 +2272,6 @@ export default function ProductDetail() {
                     )}
                     Sync Inventory
                   </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => pushToChannelMutation.mutate({})}
-                    disabled={pushToChannelMutation.isPending}
-                    className="min-h-[44px]"
-                  >
-                    {pushToChannelMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                    ) : (
-                      <Send className="h-4 w-4 mr-1" />
-                    )}
-                    Push Product
-                  </Button>
                   {/* Image sync buttons */}
                   <Button
                     variant="outline"
@@ -2348,7 +2317,7 @@ export default function ProductDetail() {
                     <div className="text-center text-muted-foreground">
                       <Globe className="h-10 w-10 mx-auto mb-2 opacity-50" />
                       <p className="text-sm">No sales channels configured.</p>
-                      <p className="text-xs">Set up channels in Settings to push product data.</p>
+                      <p className="text-xs">Set up channels in Settings to sync inventory.</p>
                     </div>
                   </CardContent>
                 </Card>
@@ -2471,13 +2440,13 @@ export default function ProductDetail() {
                     </CardContent>
                   </Card>
 
-                  {/* Channel sync status (existing push/listing info) */}
+                  {/* Channel sync status and external listing IDs */}
                   {channelStatuses && channelStatuses.length > 0 && (
                     <Card>
                       <CardHeader className="p-3 md:p-6">
                         <CardTitle className="text-base md:text-lg">Listing Status</CardTitle>
                         <CardDescription className="text-xs md:text-sm">
-                          External listing IDs and push status
+                          External listing IDs and sync status
                         </CardDescription>
                       </CardHeader>
                       <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
@@ -2512,15 +2481,6 @@ export default function ProductDetail() {
                                   ) : (
                                     <Badge variant="secondary" className="text-[10px]">Not Listed</Badge>
                                   )}
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="h-8 text-xs"
-                                    onClick={() => pushToChannelMutation.mutate({ channelId: cs.channelId })}
-                                    disabled={pushToChannelMutation.isPending}
-                                  >
-                                    <Send className="h-3 w-3 mr-1" />Push
-                                  </Button>
                                 </div>
                               </div>
                               {cs.listings.length > 0 && (
