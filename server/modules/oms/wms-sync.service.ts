@@ -1460,6 +1460,9 @@ export class WmsSyncService {
             SELECT id FROM wms.outbound_shipments
             WHERE order_id = ${wmsOrderId}
               AND status = 'planned'
+              -- Never re-push a held shipment (line-item hold): it must stay out
+              -- of ShipStation until released (pushShipment refuses it anyway).
+              AND COALESCE(held, false) = false
             ORDER BY id
           `);
           for (const shipment of activeShipments.rows ?? []) {

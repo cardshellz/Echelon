@@ -10,6 +10,7 @@ import { db } from "../../db";
 import {
   enqueueShipStationHoldSyncRetry,
   enqueueShipStationSortRankSyncRetry,
+  enqueueShipStationShipmentPushRetry,
 } from "../oms/webhook-retry.worker";
 import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
 import { sql } from "drizzle-orm";
@@ -518,9 +519,19 @@ export function registerPickingRoutes(app: Express) {
           });
         }
 
-        const updated = await storage.holdOrderItem(itemId, reason);
-        if (!updated) {
-          return res.status(404).json({ error: "Line item not found" });
+        // P2a (LINE-ITEM-HOLD-DESIGN.md): mark held + split the line into its own
+        // held shipment in one transaction, then re-push the main shipment WITHOUT
+        // the held line if it was already in ShipStation.
+        const { holdLineItemWithSplit } = await import("../wms/line-item-hold");
+        const split = await holdLineItemWithSplit(db, {
+          wmsOrderId: orderId,
+          orderItemId: itemId,
+          reason,
+          now: new Date(),
+        });
+        if (split.mainShipmentPushed && split.mainStillHasItems && split.mainShipmentId) {
+          await enqueueShipStationShipmentPushRetry(db, split.mainShipmentId, "LineItemHeldRepushMain")
+            .catch((e: any) => console.warn("[line-item-hold] main re-push enqueue failed:", e?.message));
         }
 
         const order = await storage.getOrderById(orderId);
@@ -533,14 +544,14 @@ export function registerPickingRoutes(app: Express) {
             orderId,
             orderNumber: order?.orderNumber,
             reason,
-            notes: `SKU ${item.sku}`,
+            notes: `SKU ${item.sku} -> held shipment ${split.heldShipmentId ?? "?"}`,
             deviceType: (req.headers["x-device-type"] as string) || "desktop",
             sessionId: req.sessionID,
           })
           .catch((err) => console.warn("[PickingLog] Failed to log line_item_held:", err.message));
 
         broadcastOrdersUpdated();
-        res.json(updated);
+        res.json({ ok: true, heldShipmentId: split.heldShipmentId });
       } catch (error: any) {
         console.error("Error holding line item:", error);
         res.status(500).json({ error: "Failed to hold line item" });
@@ -566,9 +577,17 @@ export function registerPickingRoutes(app: Express) {
           return res.status(404).json({ error: "Line item not found on this order" });
         }
 
-        const updated = await storage.releaseOrderItem(itemId);
-        if (!updated) {
-          return res.status(404).json({ error: "Line item not found" });
+        // P2a: clear the line hold + un-hold its shipment in one transaction, then
+        // push that shipment so the released line ships on its own.
+        const { releaseLineItemFromHold } = await import("../wms/line-item-hold");
+        const released = await releaseLineItemFromHold(db, {
+          wmsOrderId: orderId,
+          orderItemId: itemId,
+          now: new Date(),
+        });
+        if (released.heldShipmentId) {
+          await enqueueShipStationShipmentPushRetry(db, released.heldShipmentId, "LineItemReleasedPush")
+            .catch((e: any) => console.warn("[line-item-hold] released push enqueue failed:", e?.message));
         }
 
         const order = await storage.getOrderById(orderId);
@@ -580,14 +599,14 @@ export function registerPickingRoutes(app: Express) {
             pickerRole: req.session.user.role,
             orderId,
             orderNumber: order?.orderNumber,
-            notes: `SKU ${item.sku}`,
+            notes: `SKU ${item.sku} -> shipment ${released.heldShipmentId ?? "?"}`,
             deviceType: (req.headers["x-device-type"] as string) || "desktop",
             sessionId: req.sessionID,
           })
           .catch((err) => console.warn("[PickingLog] Failed to log line_item_released:", err.message));
 
         broadcastOrdersUpdated();
-        res.json(updated);
+        res.json({ ok: true, heldShipmentId: released.heldShipmentId });
       } catch (error: any) {
         console.error("Error releasing line item hold:", error);
         res.status(500).json({ error: "Failed to release line item hold" });

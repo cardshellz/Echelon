@@ -931,6 +931,9 @@ export async function remediateOmsFlowIssue(
         -- a guaranteed-dead retry. The operator must fix the data + clear the
         -- flag first. (Mirrors the SHIPMENT_NOT_PUSHED_TO_SHIPSTATION bucket.)
         AND COALESCE(os.requires_review, false) = false
+        -- A held shipment (line-item hold) is intentionally unpushed; never
+        -- auto-remediate it onto ShipStation.
+        AND COALESCE(os.held, false) = false
         AND os.created_at < NOW() - INTERVAL '15 minutes'
         AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
         AND EXISTS (
