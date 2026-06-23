@@ -147,6 +147,7 @@ export interface WmsShipmentRow {
   order_id: number;
   channel_id: number | null;
   status: string;
+  held?: boolean | null;
   requires_review?: boolean | null;
   review_reason?: string | null;
   shipstation_order_id?: number | null;
@@ -3370,6 +3371,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       order_id: outboundShipments.orderId,
       channel_id: outboundShipments.channelId,
       status: outboundShipments.status,
+      held: outboundShipments.held,
       requires_review: outboundShipments.requiresReview,
       review_reason: outboundShipments.reviewReason,
       shipstation_order_id: outboundShipments.shipstationOrderId,
@@ -3416,6 +3418,20 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           shipmentId,
           field: "shipment.requires_review",
           value: shipmentRow.review_reason ?? true,
+        },
+      );
+    }
+    if (shipmentRow.held === true) {
+      // A held shipment (line-item hold — LINE-ITEM-HOLD-DESIGN.md P2) must
+      // never reach ShipStation until it is released. Single chokepoint: every
+      // push path funnels through pushShipment, so this one guard covers them all.
+      throw new ShipStationPushError(
+        "shipment is held and cannot be pushed to ShipStation",
+        {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field: "shipment.held",
+          value: true,
         },
       );
     }

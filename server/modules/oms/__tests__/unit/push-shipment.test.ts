@@ -1202,6 +1202,22 @@ describe("pushShipment :: error cases", () => {
     expect(err?.context.value).toBe("shipstation_queue_review");
   });
 
+  it("throws when shipment is held (line-item hold — a held shipment is never pushed)", async () => {
+    const mock = makeDb([
+      { rows: [okShipment({ status: "queued", held: true })] },
+    ]);
+    const svc = createShipStationService(mock.db);
+    let err: ShipStationPushError | undefined;
+    try {
+      await svc.pushShipment(okShipment().id);
+    } catch (e) {
+      err = e as ShipStationPushError;
+    }
+    expect(err).toBeInstanceOf(ShipStationPushError);
+    expect(err?.context.field).toBe("shipment.held");
+    expect(err?.context.value).toBe(true);
+  });
+
   it("throws when the owning WMS order is cancelled/refunded", async () => {
     const shipmentRow = okShipment({ status: "queued" });
     const mock = makeDb([
