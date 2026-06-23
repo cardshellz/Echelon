@@ -203,11 +203,11 @@ function CostUploadSection() {
         <CardHeader>
           <CardTitle>Upload lot costs (CSV)</CardTitle>
           <CardDescription>
-            Cost legacy / provisional lots in bulk. <strong>Download template</strong> — one row per un-costed
-            lot — fill in the <code>unit_cost</code> column (dollars), then <strong>Preview</strong> and
-            <strong> Apply</strong>. A bare <code>sku,unit_cost</code> row costs <em>all</em> of that SKU's
-            un-costed lots; include <code>lot_number</code> to target one exact lot. Real cost layers are never
-            touched. Nothing is written until you click Apply.
+            Cost legacy / provisional lots in bulk by <strong>per-piece cost</strong>. <strong>Download
+            template</strong> — one row per product with un-costed lots — fill the <code>cost_per_piece</code>
+            column (dollars per piece, up to 4 decimals), then <strong>Preview</strong> and <strong>Apply</strong>.
+            Each variant's lot is costed as <strong>per-piece × pack size</strong> (e.g. $0.04/piece → a 50-pack
+            lot becomes $2.00, a 700-case lot $28.00). Real cost layers are never touched; nothing is written until Apply.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -246,10 +246,12 @@ function CostUploadSection() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Status</TableHead>
-                    <TableHead>SKU</TableHead>
+                    <TableHead>Variant</TableHead>
+                    <TableHead className="text-right">Pack</TableHead>
                     <TableHead>Lot</TableHead>
                     <TableHead>Location</TableHead>
                     <TableHead className="text-right">Qty</TableHead>
+                    <TableHead className="text-right">Per-piece</TableHead>
                     <TableHead className="text-right">Old</TableHead>
                     <TableHead className="text-right">New</TableHead>
                     <TableHead>Note</TableHead>
@@ -262,11 +264,13 @@ function CostUploadSection() {
                         <Badge variant={r.status === "preview" ? "secondary" : "destructive"}>{r.status}</Badge>
                       </TableCell>
                       <TableCell className="font-mono text-xs">{r.sku ?? "—"}</TableCell>
+                      <TableCell className="text-right">{r.upv ? `×${r.upv}` : "—"}</TableCell>
                       <TableCell className="font-mono text-xs">{r.lotNumber ?? "—"}</TableCell>
                       <TableCell>{r.location ?? "—"}</TableCell>
                       <TableCell className="text-right">{r.qty ?? "—"}</TableCell>
+                      <TableCell className="text-right">{r.perPieceMills != null ? `$${(r.perPieceMills / 10000).toFixed(4)}` : "—"}</TableCell>
                       <TableCell className="text-right">{r.oldCostCents != null ? formatDollars(r.oldCostCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-medium">{r.newCostCents != null ? formatDollars(r.newCostCents) : "—"}</TableCell>
+                      <TableCell className="text-right font-medium">{r.newCostMills != null ? `$${(r.newCostMills / 10000).toFixed(4)}` : "—"}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">{r.message ?? ""}</TableCell>
                     </TableRow>
                   ))}
