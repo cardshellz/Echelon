@@ -922,6 +922,14 @@ export class PickingUseCases {
     if (!beforeItem) {
       throw new IntegrityError(`Item ${itemId} not found`);
     }
+    // Held lines (line-item hold) live in their own held shipment and must not be
+    // picked until released (LINE-ITEM-HOLD-DESIGN.md P2). Refuse a pick attempt.
+    if (beforeItem.onHold && status !== "pending") {
+      throw new IntegrityError(`Item ${itemId} is on hold and cannot be picked`, {
+        reason: "line_on_hold",
+        itemId,
+      });
+    }
     const orderForPick = await this.storage.getOrderById(beforeItem.orderId);
 
     // Prevent double-pick — if already completed, treat as success (idempotent)
@@ -2027,7 +2035,10 @@ export class PickingUseCases {
   private async getReadyToShipBlockers(orderId: number): Promise<string[]> {
     const blockers: string[] = [];
     const items = await this.storage.getOrderItems(orderId);
-    const shippableItems = items.filter(item => item.requiresShipping === 1);
+    // Held lines (line-item hold) live in their own held shipment and are not
+    // picked until released — they must NOT block the rest of the order from
+    // reaching ready_to_ship (LINE-ITEM-HOLD-DESIGN.md P2).
+    const shippableItems = items.filter(item => item.requiresShipping === 1 && !item.onHold);
 
     if (shippableItems.length === 0) {
       blockers.push("order has no shippable items");
