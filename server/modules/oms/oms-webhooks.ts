@@ -22,6 +22,7 @@ import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConne
 import { db } from "../../db";
 import { pushToMissionControl } from "./mc-push";
 import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
+import { buildChannelLineDisplayName, chooseBestLineDisplayName } from "./line-display-name";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
@@ -82,7 +83,7 @@ interface WmsServices {
     routeOrder: (ctx: any) => Promise<any>;
     assignWarehouseToOrder: (orderId: number, routing: any) => Promise<void>;
   };
-  slaMonitor: {
+  slaMonitor?: {
     setSLAForOrder: (orderId: number) => Promise<void>;
   };
 }
@@ -357,11 +358,11 @@ export async function cancelOrderCascade(
   const now = new Date();
   let cancelCascadeDetails: Record<string, any> | undefined;
 
-  const wmsOrderResult = await db.execute<{ id: number }>(sql`
+  const wmsOrderResult = await db.execute(sql`
     SELECT id FROM wms.orders
     WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrderId)})
        OR (source = 'shopify' AND source_table_id = ${String(omsOrderId)})
-  `);
+  `) as { rows?: Array<{ id: number }> };
   const wmsOrderRows = wmsOrderResult.rows ?? [];
 
   if (wmsOrderRows.length === 0) {
@@ -1082,6 +1083,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     externalProductId: item.externalProductId,
     sku: item.sku,
     title: item.title,
+    name: item.name,
     variantTitle: item.variantTitle,
     quantity: item.quantity,
     paidPriceCents: item.paidPriceCents,
@@ -1809,12 +1811,28 @@ export function registerOmsWebhooks(
               item,
               shopifyOrder.fulfillment_status,
             );
+            const incomingDisplayName = buildChannelLineDisplayName({
+              name: normalizedLine?.name ?? item.name,
+              title: normalizedLine?.title ?? item.title,
+              variantTitle: normalizedLine?.variantTitle ?? item.variant_title,
+            });
+            const preservedTitle = chooseBestLineDisplayName(
+              existingLine.title,
+              incomingDisplayName,
+            );
+            const preservedName = chooseBestLineDisplayName(
+              existingLine.name,
+              incomingDisplayName,
+            );
+
             // Update existing line
             await db
               .update(omsOrderLines)
               .set({
                 sku: item.sku || existingLine.sku,
-                title: item.title || existingLine.title,
+                title: preservedTitle,
+                name: preservedName,
+                variantTitle: (normalizedLine?.variantTitle ?? item.variant_title) || existingLine.variantTitle,
                 quantity: item.quantity ?? existingLine.quantity,
                 fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
                   ? Number(item.fulfillable_quantity)
@@ -1835,15 +1853,20 @@ export function registerOmsWebhooks(
               item,
               shopifyOrder.fulfillment_status,
             );
+            const displayName = buildChannelLineDisplayName({
+              name: normalizedLine?.name ?? item.name,
+              title: normalizedLine?.title ?? item.title,
+              variantTitle: normalizedLine?.variantTitle ?? item.variant_title,
+            });
             // Insert new line
             await db.insert(omsOrderLines).values({
               orderId: existing.id,
               productVariantId,
               externalLineItemId: lineId,
               sku: item.sku,
-              title: item.title,
-              variantTitle: item.variant_title,
-              name: normalizedLine?.name ?? item.name ?? item.title,
+              title: displayName,
+              variantTitle: normalizedLine?.variantTitle ?? item.variant_title,
+              name: displayName,
               vendor: normalizedLine?.vendor ?? item.vendor,
               externalProductId: normalizedLine?.externalProductId ?? (item.product_id ? String(item.product_id) : null),
               quantity: item.quantity || 1,

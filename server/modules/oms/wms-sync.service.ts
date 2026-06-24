@@ -39,6 +39,7 @@ import {
   enqueueShipStationShipmentPushRetry,
   enqueueShipStationSortRankSyncRetry,
 } from "./webhook-retry.worker";
+import { buildChannelLineDisplayName } from "./line-display-name";
 
 type WmsBinLocation = { location: string; zone: string };
 
@@ -77,6 +78,7 @@ interface WmsSyncServices {
   inventoryCore: any;
   reservation: any;
   fulfillmentRouter: any;
+  slaMonitor?: any;
   shippingEngine?: import("../shipping/engine").ShippingEngine;
   shipStation?: any;
   omsService?: any;
@@ -361,7 +363,11 @@ export class WmsSyncService {
           orderId: 0, // Will be set by createOrderWithItems
           omsOrderLineId: line.id,
           sku: line.sku || "UNKNOWN",
-          name: line.title || "Unknown Item",
+          name: buildChannelLineDisplayName({
+            name: (line as any).name,
+            title: line.title,
+            variantTitle: line.variantTitle,
+          }),
           quantity: line.quantity || 0,
           pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
           fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
@@ -951,7 +957,11 @@ export class WmsSyncService {
           orderId: wmsOrderId,
           omsOrderLineId: line.id,
           sku: line.sku || "UNKNOWN",
-          name: line.title || "Unknown Item",
+          name: buildChannelLineDisplayName({
+            name: (line as any).name,
+            title: line.title,
+            variantTitle: line.variantTitle,
+          }),
           quantity: line.quantity || 0,
           pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
           fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
@@ -1393,7 +1403,11 @@ export class WmsSyncService {
         orderId: wmsOrderId,
         omsOrderLineId: omsLine.id,
         sku: omsLine.sku || "UNKNOWN",
-        name: omsLine.title || "Unknown Item",
+        name: buildChannelLineDisplayName({
+          name: (omsLine as any).name,
+          title: omsLine.title,
+          variantTitle: omsLine.variantTitle,
+        }),
         quantity: omsLine.quantity || 0,
         pickedQuantity: itemRequiresShipping ? 0 : (omsLine.quantity || 0),
         fulfilledQuantity: itemRequiresShipping ? 0 : (omsLine.quantity || 0),
@@ -1858,7 +1872,11 @@ export class WmsSyncService {
           orderId: wmsOrderId,
           omsOrderLineId: line.id,
           sku: line.sku || 'UNKNOWN',
-          name: line.title || 'Unknown Item',
+          name: buildChannelLineDisplayName({
+            name: (line as any).name,
+            title: line.title,
+            variantTitle: line.variantTitle,
+          }),
           quantity: line.quantity || 0,
           pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
           fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),

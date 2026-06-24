@@ -69,6 +69,7 @@ export interface LineItemData {
   externalProductId?: string | null;
   sku?: string | null;
   title?: string;
+  name?: string | null;
   variantTitle?: string | null;
   quantity: number;
   paidPriceCents?: number;
@@ -245,6 +246,7 @@ export function createOmsService(db: any, reservationService?: any) {
           externalProductId: item.externalProductId || null,
           sku: item.sku,
           title: item.title,
+          name: item.name ?? item.title ?? null,
           variantTitle: item.variantTitle,
           quantity: item.quantity,
           paidPriceCents: item.paidPriceCents || 0,
@@ -353,6 +355,7 @@ export function createOmsService(db: any, reservationService?: any) {
             externalProductId: item.externalProductId || null,
             sku: item.sku,
             title: item.title,
+            name: item.name ?? item.title ?? null,
             variantTitle: item.variantTitle,
             quantity: item.quantity,
             paidPriceCents: item.paidPriceCents || 0,
