@@ -1259,11 +1259,11 @@ describe("processShipNotify V2 :: error resilience", () => {
       { rows: [] },
     ];
 
-    // Custom db: first 9 execute calls take from goodPath, next 3 from
-    // brokenPath (with the 3rd throwing), remainder from alsoGoodPath.
+    // Custom db: execute calls draw from goodPath → brokenPath → throw → alsoGoodPath.
     const goodQ = [...goodPath];
     const brokenQ = [...brokenPath];
     const alsoGoodQ = [...alsoGoodPath];
+    let thrownForBroken = false;
     const calls: RecordedCall[] = [];
     const execute = vi.fn(async (query: any) => {
       const chunks: unknown[] = query?.queryChunks ?? [];
@@ -1279,7 +1279,8 @@ describe("processShipNotify V2 :: error resilience", () => {
       calls.push({ sqlText: text, tag: "execute" });
       if (goodQ.length > 0) return goodQ.shift()!;
       if (brokenQ.length > 0) return brokenQ.shift()!;
-      if (brokenQ.length === 0 && calls.length === goodPath.length + brokenPath.length + 1) {
+      if (brokenQ.length === 0 && !thrownForBroken) {
+        thrownForBroken = true;
         throw new Error("simulated DB failure on UPDATE");
       }
       if (alsoGoodQ.length > 0) return alsoGoodQ.shift()!;
@@ -1322,6 +1323,159 @@ describe("processShipNotify V2 :: error resilience", () => {
       processed: 2,
       failures: [{ shipmentId: 77777 }],
     });
+  });
+});
+
+// ─── SHIP_NOTIFY idempotency hardening (no shipment creation) ──────
+
+describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+  });
+
+  it("mismatched SS orderId adopts onto existing active shipment (no INSERT)", async () => {
+    // Scenario: pushShipment created SS order 111, but a duplicate push
+    // created SS order 222 on the same key. SHIP_NOTIFY arrives with
+    // orderId=222 which doesn't match our DB's 111. The handler should
+    // UPDATE the existing shipment's SS orderId, not INSERT a new one.
+    const shipmentPayload = makeShipmentPayload({
+      orderId: 222, // doesn't match the 111 in our DB
+      orderKey: "echelon-wms-shp-501",
+    });
+
+    const mock = makeDb([
+      // V2 lookup by shipstation_order_id=222 → not found
+      { rows: [] },
+      // resolveShipmentByOrderKey: SELECT shipment 501 (the parent)
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "queued",
+            shipstation_order_id: 111,
+            shipstation_order_key: "echelon-wms-shp-501",
+          },
+        ],
+      },
+      // UPDATE shipment 501's SS orderId from 111 → 222
+      { rows: [] },
+      // markShipmentShipped load-current
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "queued",
+            tracking_number: null,
+            carrier: null,
+            tracking_url: null,
+          },
+        ],
+      },
+      // UPDATE outbound_shipments (ship)
+      { rows: [] },
+      // recompute: SELECT wms.orders
+      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
+      // recompute: SELECT shipment statuses
+      { rows: [{ status: "shipped" }] },
+      // recompute: UPDATE wms.orders
+      { rows: [] },
+      // resolve OMS id
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // finality guard
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
+      // OMS line status derivation
+      { rows: [] },
+      // delayed tracking provider guard
+      { rows: [{ provider: "shopify" }] },
+      // Shopify fulfillment provider guard
+      { rows: [{ provider: "shopify" }] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [shipmentPayload],
+    }) as any;
+
+    const svc = createShipStationService(mock.db);
+    const processed = await svc.processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+
+    const allSql = mock.calls.map((c) => c.sqlText).join("\n");
+    // Must NOT contain an INSERT INTO wms.outbound_shipments
+    expect(allSql).not.toMatch(/INSERT INTO wms\.outbound_shipments/);
+    // Must contain the SS orderId adoption UPDATE
+    expect(allSql).toMatch(/shipstation_order_id/);
+  });
+
+  it("cancelled parent with no active sibling → returns null, no INSERT", async () => {
+    // Scenario: parent shipment is cancelled, no siblings. SHIP_NOTIFY
+    // should flag for review, NOT create a replacement shipment.
+    const shipmentPayload = makeShipmentPayload({
+      orderId: 333,
+      orderKey: "echelon-wms-shp-501",
+    });
+
+    const mock = makeDb([
+      // V2 lookup by shipstation_order_id=333 → not found
+      { rows: [] },
+      // resolveShipmentByOrderKey: SELECT shipment 501 (cancelled)
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "cancelled",
+            shipstation_order_id: 111,
+            shipstation_order_key: "echelon-wms-shp-501",
+          },
+        ],
+      },
+      // Sibling search → none found
+      { rows: [] },
+      // INSERT into oms_order_events (audit log for unresolved)
+      { rows: [] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [shipmentPayload],
+    }) as any;
+
+    const svc = createShipStationService(mock.db);
+    const processed = await svc.processShipNotify("/foo");
+
+    // Should not have processed — no WMS shipment to operate on.
+    expect(processed).toBe(0);
+
+    const allSql = mock.calls.map((c) => c.sqlText).join("\n");
+    // Absolutely no INSERT INTO outbound_shipments
+    expect(allSql).not.toMatch(/INSERT INTO wms\.outbound_shipments/);
+    // The oms_order_events audit INSERT did fire
+    expect(allSql).toMatch(/ship_notify_unresolved/);
+  });
+
+  it("no INSERT INTO outbound_shipment_items when item mismatch (requires_review flagged)", async () => {
+    const src = readFileSync(
+      resolve(__dirname, "../../shipstation.service.ts"),
+      "utf-8",
+    );
+    // The INSERT INTO wms.outbound_shipment_items should no longer exist
+    // in the syncShipmentItemsFromShipStation function. Instead, a
+    // requires_review flag is set.
+    expect(src).not.toMatch(
+      /INSERT INTO wms\.outbound_shipment_items[\s\S]*?from_location_id[\s\S]*?tracking_id/,
+    );
+    expect(src).toContain("ship_notify_unmapped_item");
   });
 });
 
