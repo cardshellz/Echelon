@@ -27,20 +27,20 @@ import type { InventoryLot } from "@shared/schema";
  * unit_cost is dollars → mills ($1 = 10,000 mills) so sub-cent costs survive.
  */
 export function parseLotCostCsvRow(row: Record<string, any>):
-  | { ok: true; productId: number; costPerPieceMills: number }
+  | { ok: true; sku: string; costPerPieceMills: number }
   | { ok: false; error: string } {
-  // product_id is the match key (pre-filled by the template — the user never types it).
-  // cost_per_piece is dollars per BASE unit (piece) → mills ($1 = 10,000 mills) so sub-cent
-  // piece costs survive. Each variant's lot cost is derived as per_piece × units_per_variant.
-  const productId = parseInt(String(row.product_id ?? "").trim(), 10);
+  // sku = the variant SKU (as shown on the lots / template). cost_per_piece is dollars per
+  // piece → mills ($1 = 10,000 mills) so sub-cent piece costs survive. The lot cost is derived
+  // as per_piece × the variant's units_per_variant.
+  const sku = String(row.sku ?? "").trim();
   const rawCost = String(row.cost_per_piece ?? "").trim();
-  if (!Number.isInteger(productId) || productId <= 0) return { ok: false, error: "missing/invalid product_id" };
+  if (!sku) return { ok: false, error: "missing sku" };
   if (!rawCost) return { ok: false, error: "missing cost_per_piece" };
   const dollars = Number(rawCost.replace(/[$,\s]/g, ""));
   if (!Number.isFinite(dollars) || dollars < 0) {
     return { ok: false, error: `invalid cost_per_piece "${rawCost}"` };
   }
-  return { ok: true, productId, costPerPieceMills: Math.round(dollars * 10000) };
+  return { ok: true, sku, costPerPieceMills: Math.round(dollars * 10000) };
 }
 
 type DrizzleDb = {
@@ -853,23 +853,15 @@ export class COGSService {
   // LOT-COST CSV UPLOAD (cost legacy / provisional lots in bulk)
   // ---------------------------------------------------------------------------
 
-  /**
-   * Products that have un-costed lots, grouped — the per-piece CSV template source. One row
-   * per product (the per-piece source of truth); pack_sizes lists each variant + its multiplier.
-   */
-  async getUncostedProducts(): Promise<any[]> {
+  /** Distinct variant SKUs that have un-costed lots — the per-piece CSV template source. */
+  async getUncostedVariants(): Promise<any[]> {
     const result = await this.db.execute(sql`
-      SELECT p.id AS product_id, p.sku AS product_sku, p.name AS product_name,
-             STRING_AGG(DISTINCT pv.sku || ' (x' || pv.units_per_variant || ')', ', ') AS pack_sizes,
-             COUNT(DISTINCT il.id) AS uncosted_lots,
-             SUM(il.qty_on_hand) AS units
+      SELECT DISTINCT pv.sku
       FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
-      JOIN catalog.products p ON p.id = pv.product_id
       WHERE il.status = 'active' AND il.qty_on_hand > 0
         AND (il.cost_provisional = 1 OR COALESCE(il.total_unit_cost_mills, 0) = 0)
-      GROUP BY p.id, p.sku, p.name
-      ORDER BY p.sku NULLS LAST, p.id
+      ORDER BY pv.sku
     `);
     return result.rows || [];
   }
@@ -925,10 +917,10 @@ export class COGSService {
   }
 
   /**
-   * Apply a parsed per-piece lot-cost CSV. Each row sets ONE product's per-PIECE cost; every
-   * un-costed (provisional / zero) active lot across ALL that product's variants is costed as
-   * per_piece × units_per_variant (mills) — one source of truth, derived per pack/case. It
-   * never clobbers a real cost layer. preview (apply=false) computes changes without writing.
+   * Apply a parsed per-piece lot-cost CSV. Each row sets one variant SKU's per-PIECE cost; every
+   * un-costed (provisional / zero) active lot of that variant is costed as per_piece ×
+   * units_per_variant (mills). It never clobbers a real cost layer. preview (apply=false)
+   * computes changes without writing.
    */
   async applyLotCostUpload(
     rawRows: Record<string, any>[],
@@ -946,11 +938,11 @@ export class COGSService {
         FROM inventory.inventory_lots il
         JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
         LEFT JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
-        WHERE pv.product_id = ${parsed.productId} AND il.status = 'active' AND il.qty_on_hand > 0
+        WHERE UPPER(pv.sku) = UPPER(${parsed.sku}) AND il.status = 'active' AND il.qty_on_hand > 0
           AND (il.cost_provisional = 1 OR COALESCE(il.total_unit_cost_mills, 0) = 0)`);
       const lots = lotsRes.rows || [];
       if (lots.length === 0) {
-        results.push({ status: 'no_match', productId: parsed.productId, message: 'no un-costed lots for product_id' });
+        results.push({ status: 'no_match', sku: parsed.sku, message: 'no un-costed lots for SKU' });
         continue;
       }
       for (const lot of lots) {
@@ -959,7 +951,6 @@ export class COGSService {
         if (apply) await this.setLotProductCostMills(Number(lot.id), perVariantMills);
         results.push({
           status: apply ? 'applied' : 'preview',
-          productId: parsed.productId,
           sku: lot.sku,
           upv,
           lotNumber: lot.lot_number,

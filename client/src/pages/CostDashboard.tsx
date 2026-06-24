@@ -203,11 +203,12 @@ function CostUploadSection() {
         <CardHeader>
           <CardTitle>Upload lot costs (CSV)</CardTitle>
           <CardDescription>
-            Cost legacy / provisional lots in bulk by <strong>per-piece cost</strong>. <strong>Download
-            template</strong> — one row per product with un-costed lots — fill the <code>cost_per_piece</code>
-            column (dollars per piece, up to 4 decimals), then <strong>Preview</strong> and <strong>Apply</strong>.
-            Each variant's lot is costed as <strong>per-piece × pack size</strong> (e.g. $0.04/piece → a 50-pack
-            lot becomes $2.00, a 700-case lot $28.00). Real cost layers are never touched; nothing is written until Apply.
+            Cost legacy / provisional lots by <strong>per-piece cost</strong>. <strong>Download template</strong>
+            — just <code>sku</code> + <code>cost_per_piece</code>, one row per un-costed SKU — fill the
+            <code>cost_per_piece</code> column (dollars per piece, up to 4 decimals), then <strong>Preview</strong>
+            and <strong>Apply</strong>. The system multiplies by each SKU's pack size automatically (e.g.
+            $0.04/piece → a 50-pack lot = $2.00, a 700-case lot = $28.00). Real cost layers are never touched;
+            nothing is written until Apply.
           </CardDescription>
         </CardHeader>
         <CardContent>
