@@ -47,6 +47,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -211,6 +212,11 @@ function flowHistoryColor(source: OmsOrderFlowHistoryEntry["source"], status: st
 export default function OmsOrders() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
+  // Re-pushing an already-pushed order overrides the review/cancelled guards
+  // (resolves an "engine cancelled but order is live" review). Privileged, so
+  // gated on the same permission as holds — pickers don't see it.
+  const canOverrideReview = hasPermission("orders", "hold");
 
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -290,10 +296,11 @@ export default function OmsOrders() {
   });
 
   const pushToShipStationMutation = useMutation({
-    mutationFn: async (orderId: number) => {
+    mutationFn: async ({ orderId, overrideReview }: { orderId: number; overrideReview?: boolean }) => {
       const res = await fetch(`/api/oms/orders/${orderId}/push-to-shipstation`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ overrideReview: !!overrideReview }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed" }));
@@ -301,8 +308,11 @@ export default function OmsOrders() {
       }
       return res.json();
     },
-    onSuccess: (data) => {
-      toast({ title: "Pushed to ShipStation", description: `SS Order #${data.shipstationOrderId}` });
+    onSuccess: (data, vars) => {
+      toast({
+        title: vars.overrideReview ? "Re-pushed to ShipStation" : "Pushed to ShipStation",
+        description: `SS Order #${data.shipstationOrderId}`,
+      });
       queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
     },
     onError: (err: Error) => {
@@ -998,13 +1008,40 @@ export default function OmsOrders() {
                       size="sm"
                       variant="outline"
                       className="gap-1"
-                      onClick={() => pushToShipStationMutation.mutate(selectedOrder.id)}
+                      onClick={() => pushToShipStationMutation.mutate({ orderId: selectedOrder.id })}
                       disabled={pushToShipStationMutation.isPending}
                     >
                       <Ship className="h-3.5 w-3.5" />
                       {pushToShipStationMutation.isPending ? "Pushing..." : "Push to ShipStation"}
                     </Button>
                   )}
+                  {selectedOrder.shipstationOrderId &&
+                    selectedOrder.status !== "cancelled" &&
+                    selectedOrder.status !== "shipped" &&
+                    canOverrideReview && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-1"
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              "Re-push this order to ShipStation?\n\nThis clears any review flag and re-creates the ShipStation order — including resurrecting it if it was cancelled in ShipStation. Use this to resolve an \"engine cancelled but order is live\" review.",
+                            )
+                          ) {
+                            pushToShipStationMutation.mutate({
+                              orderId: selectedOrder.id,
+                              overrideReview: true,
+                            });
+                          }
+                        }}
+                        disabled={pushToShipStationMutation.isPending}
+                        title="Clear review flag and re-push to ShipStation"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        {pushToShipStationMutation.isPending ? "Re-pushing..." : "Re-push to ShipStation"}
+                      </Button>
+                    )}
                   {selectedOrder.status !== "shipped" && selectedOrder.status !== "cancelled" && (
                     <Button
                       size="sm"

@@ -17,6 +17,7 @@ import { getFlowTrace } from "../modules/oms/flow-trace.service";
 import { remediateOmsFlowIssue } from "../modules/oms/oms-flow-reconciliation.service";
 import { enqueueWebhookInboxReplay } from "../modules/oms/webhook-inbox.service";
 import { requeueDeadWebhookRetry } from "../modules/oms/webhook-retry.worker";
+import { hasPermission } from "../modules/identity";
 
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
@@ -327,6 +328,20 @@ export function registerOmsRoutes(app: Express) {
         return res.status(503).json({ error: "ShipStation not configured" });
       }
 
+      // overrideReview = an explicit operator "clear-review-and-push" (P2 of
+      // ENGINE-CANCEL-DIVERGENCE-DESIGN.md). It bypasses the requires_review /
+      // cancelled-SS-order guards and clears the review flag, so it is gated on
+      // the same privileged permission as holds (admin/lead, not pickers).
+      const overrideReview = req.body?.overrideReview === true;
+      if (overrideReview) {
+        const userId = req.session.user?.id;
+        if (!userId || !(await hasPermission(userId, "orders", "hold"))) {
+          return res.status(403).json({
+            error: "Permission denied: orders:hold is required to override a review flag",
+          });
+        }
+      }
+
       // Resolve the canonical (non-voided) WMS shipment for this OMS order.
       const shipmentLookup = await db.execute(sql`
         SELECT s.id
@@ -350,7 +365,7 @@ export function registerOmsRoutes(app: Express) {
         });
       }
 
-      const result = await ss.pushShipment(shipmentId);
+      const result = await ss.pushShipment(shipmentId, { overrideReview });
       const updated = await getOms(req).getOrderById(id);
 
       res.json({
