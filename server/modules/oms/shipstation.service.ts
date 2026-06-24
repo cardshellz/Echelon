@@ -3226,6 +3226,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   ): Promise<void> {
     const ssOrder = await getOrderById(shipstationOrderId);
     if (!ssOrder) return;
+    // A sort-rank refresh is cosmetic; never let it resurrect a cancelled order
+    // (createorder reactivates a cancelled SS order — ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
+    if (ssOrder.orderStatus === "cancelled") return;
 
     await apiRequest("POST", "/orders/createorder", {
       ...ssOrder,
@@ -3434,6 +3437,24 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           value: true,
         },
       );
+    }
+    // Never resurrect a cancelled ShipStation order: createorder reactivates a
+    // cancelled order to awaiting_shipment (ENGINE-CANCEL-DIVERGENCE-DESIGN.md;
+    // markAsShipped already guards this for the ship path). Only relevant on an
+    // UPDATE (existing SS order) — a fresh create has nothing to resurrect.
+    if (isUpdate) {
+      const liveSsOrder = await getOrderById(existingSsOrderId as number);
+      if (liveSsOrder?.orderStatus === "cancelled") {
+        throw new ShipStationPushError(
+          "ShipStation order is cancelled — refusing to resurrect it via push",
+          {
+            code: SS_PUSH_INVALID_SHIPMENT,
+            shipmentId,
+            field: "ss_order.cancelled",
+            value: existingSsOrderId,
+          },
+        );
+      }
     }
 
     // ─── 2. Load order (WMS only, with financial snapshot) ──────────

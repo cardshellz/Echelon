@@ -259,6 +259,19 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
     expect(v2Block).not.toContain("deriveShipStationShipmentReconcileEvent");
   });
 
+  it("V2 reconciler gates engine-cancel on order intent and flags live orders for review", () => {
+    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
+    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
+    const v2Block = indexSrc.substring(v2Start, v2End);
+    // Cancel is WMS-owned: the reconciler tells deriveReconcileEvent whether the
+    // ORDER itself is cancelled (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
+    expect(v2Block).toContain("orderIsCancelled");
+    // An engine-side cancel of a LIVE order is flagged for review, never applied.
+    expect(v2Block).toContain('event.kind === "review"');
+    expect(v2Block).toContain("requires_review = true");
+    expect(v2Block).toContain("engine_cancel_flagged_for_review");
+  });
+
   it("no longer imports SS-specific reconcile functions", () => {
     expect(indexSrc).not.toContain('from "./modules/oms/shipstation-reconcile-state"');
   });
