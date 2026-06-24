@@ -1186,7 +1186,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                  os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
                  os.shipstation_order_key,
                  w.order_number,
-                 w.oms_fulfillment_order_id AS oms_id
+                 w.oms_fulfillment_order_id AS oms_id,
+                 (SELECT oo.status FROM oms.oms_orders oo
+                   WHERE (w.source = 'oms' AND w.oms_fulfillment_order_id = oo.id::text)
+                      OR (w.source_table_id = oo.id::text)
+                   LIMIT 1) AS oms_order_status
           FROM wms.outbound_shipments os
           JOIN wms.orders w ON w.id = os.order_id
           WHERE COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
@@ -1235,6 +1239,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 currentTrackingNumber: row.tracking_number,
                 currentCarrier: row.carrier,
                 shipments: canonicalShipments,
+                // Cancel is WMS-owned: only follow an engine-side cancel when the
+                // order itself is cancelled; otherwise it's flagged for review.
+                orderIsCancelled: row.oms_order_status === "cancelled",
               });
 
             // 3. Push WMS shipped/cancelled status outward when engine has drifted.
@@ -1292,6 +1299,39 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 SET last_reconciled_at = NOW()
                 WHERE id = ${shipmentId}
               `);
+              continue;
+            }
+
+            if (event.kind === "review") {
+              // Engine-side cancel of a LIVE order: a discrepancy, not a fact.
+              // Flag for review (surfaces in the SHIPMENT_REQUIRES_REVIEW bucket);
+              // do NOT cancel the shipment or let a push resurrect it
+              // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
+              await db.execute(sql`
+                UPDATE wms.outbound_shipments
+                SET requires_review = true,
+                    review_reason = CASE WHEN COALESCE(requires_review, false)
+                                         THEN review_reason ELSE ${event.reason} END,
+                    last_reconciled_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = ${shipmentId}
+              `);
+              if (row.oms_id && String(row.oms_id).match(/^[0-9]+$/)) {
+                try {
+                  await db.execute(sql`
+                    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+                    VALUES (
+                      ${Number(row.oms_id)},
+                      'engine_cancel_flagged_for_review',
+                      ${JSON.stringify({ wmsShipmentId: shipmentId, engineOrderRef: ref.engineOrderRef, reason: event.reason })}::jsonb,
+                      NOW()
+                    )
+                  `);
+                } catch (auditErr: any) {
+                  console.warn(`[Reconcile V2] review audit insert failed for shipment ${shipmentId}:`, auditErr?.message);
+                }
+              }
+              console.log(`[Reconcile V2] shipment=${shipmentId} flagged for review (${event.reason}) — ShipStation cancelled but the order is live`);
               continue;
             }
 

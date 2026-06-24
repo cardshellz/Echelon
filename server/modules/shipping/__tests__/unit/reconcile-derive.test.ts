@@ -8,6 +8,7 @@ function makeInput(overrides: {
   currentTrackingNumber?: string | null;
   currentCarrier?: string | null;
   shipments?: CanonicalShipmentEvent[];
+  orderIsCancelled?: boolean;
 } = {}) {
   return {
     engineState: {
@@ -21,6 +22,7 @@ function makeInput(overrides: {
     currentTrackingNumber: overrides.currentTrackingNumber ?? null,
     currentCarrier: overrides.currentCarrier ?? null,
     shipments: overrides.shipments ?? [],
+    orderIsCancelled: overrides.orderIsCancelled,
   };
 }
 
@@ -76,11 +78,22 @@ describe("deriveReconcileEvent", () => {
     expect(result).toBeNull();
   });
 
-  it("returns cancelled when engine status is cancelled and WMS not cancelled", () => {
+  it("returns cancelled when engine cancelled, WMS not cancelled, and the ORDER is cancelled", () => {
     const result = deriveReconcileEvent(makeInput({
       engineState: { status: "cancelled" },
+      orderIsCancelled: true,
     }));
     expect(result).toEqual({ kind: "cancelled", reason: "engine_cancelled" });
+  });
+
+  it("returns review (not cancelled) when engine cancelled but the order is still live", () => {
+    // Cancel is WMS-owned: an engine-side cancel of a live order is a
+    // discrepancy to flag, never a cancel to apply (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
+    const result = deriveReconcileEvent(makeInput({
+      engineState: { status: "cancelled" },
+      orderIsCancelled: false,
+    }));
+    expect(result).toEqual({ kind: "review", reason: "engine_cancelled_order_active" });
   });
 
   it("returns null when engine cancelled and WMS already cancelled", () => {

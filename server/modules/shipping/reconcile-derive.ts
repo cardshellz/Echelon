@@ -12,7 +12,10 @@ import type { EngineOrderState, CanonicalShipmentEvent } from "./types";
 export type ReconcileEvent =
   | { kind: "shipped"; trackingNumber: string; carrier: string; shipDate: Date }
   | { kind: "cancelled"; reason: string }
-  | { kind: "voided"; reason: string };
+  | { kind: "voided"; reason: string }
+  // Engine reports cancelled but the ORDER is still live → a discrepancy to flag
+  // for review, not a cancel to apply (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
+  | { kind: "review"; reason: string };
 
 interface DeriveReconcileInput {
   engineState: EngineOrderState;
@@ -20,6 +23,9 @@ interface DeriveReconcileInput {
   currentTrackingNumber?: string | null;
   currentCarrier?: string | null;
   shipments: CanonicalShipmentEvent[];
+  /** Whether the sales/OMS order itself is cancelled. Cancel is WMS-intent-owned,
+   *  so an engine-side cancel is only authoritative when the order is cancelled. */
+  orderIsCancelled?: boolean;
 }
 
 export function deriveReconcileEvent(
@@ -54,12 +60,18 @@ export function deriveReconcileEvent(
     return { kind: "voided", reason: "engine_label_void" };
   }
 
-  // Engine order cancelled but WMS not cancelled
+  // Engine order cancelled but WMS not cancelled. Cancel is WMS-intent-owned, so
+  // an engine-side cancel is only authoritative when the ORDER is actually
+  // cancelled. If the order is still live, this is a discrepancy (someone
+  // cancelled it in ShipStation) — flag it for review; do NOT cancel the WMS
+  // shipment or let a downstream push resurrect it (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
   if (
     input.engineState.status === "cancelled" &&
     input.currentWmsShipmentStatus !== "cancelled"
   ) {
-    return { kind: "cancelled", reason: "engine_cancelled" };
+    return input.orderIsCancelled
+      ? { kind: "cancelled", reason: "engine_cancelled" }
+      : { kind: "review", reason: "engine_cancelled_order_active" };
   }
 
   return null;
