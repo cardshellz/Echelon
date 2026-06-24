@@ -3340,6 +3340,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
   async function pushShipment(
     shipmentId: number,
+    opts: { overrideReview?: boolean } = {},
   ): Promise<{ shipstationOrderId: number; orderKey: string }> {
     if (
       !Number.isInteger(shipmentId) ||
@@ -3413,7 +3414,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       existingSsOrderId != null &&
       Number.isInteger(existingSsOrderId) &&
       existingSsOrderId > 0;
-    if (shipmentRow.requires_review === true) {
+    if (shipmentRow.requires_review === true && !opts.overrideReview) {
       throw new ShipStationPushError(
         `shipment requires review and cannot be pushed to ShipStation (${shipmentRow.review_reason ?? "review_required"})`,
         {
@@ -3442,7 +3443,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // cancelled order to awaiting_shipment (ENGINE-CANCEL-DIVERGENCE-DESIGN.md;
     // markAsShipped already guards this for the ship path). Only relevant on an
     // UPDATE (existing SS order) — a fresh create has nothing to resurrect.
-    if (isUpdate) {
+    // An explicit operator override (clear-review-and-push, P2) intentionally
+    // resurrects the cancelled SS order, so it skips this guard.
+    if (isUpdate && !opts.overrideReview) {
       const liveSsOrder = await getOrderById(existingSsOrderId as number);
       if (liveSsOrder?.orderStatus === "cancelled") {
         throw new ShipStationPushError(
@@ -3760,6 +3763,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           updated_at = ${now}
       WHERE id = ${shipmentId}
     `);
+
+    if (opts.overrideReview) {
+      // The operator explicitly resolved the review by re-pushing; clear the
+      // flag so the shipment leaves the SHIPMENT_REQUIRES_REVIEW bucket
+      // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md P2).
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments
+        SET requires_review = false, review_reason = NULL, updated_at = ${now}
+        WHERE id = ${shipmentId} AND requires_review = true
+      `);
+    }
 
     await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);
 
