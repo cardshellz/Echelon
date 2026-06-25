@@ -274,6 +274,7 @@ export function registerChannelRoutes(app: Express) {
         data.channelId,
         externalOrderId,
         {
+          sourceTopic: "manual/create",
           externalOrderNumber: data.orderNumber,
           status: "pending",
           financialStatus: "paid",

@@ -13,6 +13,10 @@ import {
   channels,
 } from "@shared/schema";
 import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import {
+  deriveOmsLineAuthority,
+  type OmsLineAuthorityState,
+} from "./oms-line-authority";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,6 +66,9 @@ export interface OrderData {
   riskFacts?: unknown;
   orderedAt: Date;
   lineItems: LineItemData[];
+  sourceTopic?: string;
+  sourceEventId?: string | null;
+  sourceInboxId?: number | null;
 }
 
 export interface LineItemData {
@@ -120,6 +127,43 @@ function sameDateTime(
   if (!leftDate && !rightDate) return true;
   if (!leftDate || !rightDate) return false;
   return leftDate.getTime() === rightDate.getTime();
+}
+
+function authorityValues(state: OmsLineAuthorityState) {
+  return {
+    channelObservedQuantity: state.channelObservedQuantity,
+    paidQuantity: state.paidQuantity,
+    authorityFulfillableQuantity: state.authorityFulfillableQuantity,
+    authorizationStatus: state.authorizationStatus,
+    authorizedAt: state.authorizedAt,
+    authorizedByEventId: state.authorizedByEventId,
+    authoritySourceTopic: state.authoritySourceTopic,
+    authoritySourceInboxId: state.authoritySourceInboxId,
+  };
+}
+
+function buildLineAuthorityValues(
+  data: OrderData,
+  item: LineItemData,
+  previous?: {
+    paidQuantity?: number | null;
+    authorityFulfillableQuantity?: number | null;
+    authorizationStatus?: string | null;
+    authorizedAt?: Date | string | null;
+    authorizedByEventId?: string | null;
+  } | null,
+) {
+  return authorityValues(
+    deriveOmsLineAuthority({
+      sourceTopic: data.sourceTopic ?? "unknown",
+      sourceEventId: data.sourceEventId ?? null,
+      sourceInboxId: data.sourceInboxId ?? null,
+      financialStatus: data.financialStatus,
+      quantity: item.quantity,
+      fulfillableQuantity: item.fulfillableQuantity ?? null,
+      previous,
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +293,7 @@ export function createOmsService(db: any, reservationService?: any) {
           name: item.name ?? item.title ?? null,
           variantTitle: item.variantTitle,
           quantity: item.quantity,
+          ...buildLineAuthorityValues(data, item),
           paidPriceCents: item.paidPriceCents || 0,
           retailPriceCents: item.retailPriceCents || 0,
           totalPriceCents: item.totalCents || 0,
@@ -323,59 +368,107 @@ export function createOmsService(db: any, reservationService?: any) {
         });
       }
 
-      // Check if line items exist for this order
-      const existingLines = await db
+      const existingLines: OmsOrderLine[] = await db
         .select()
         .from(omsOrderLines)
-        .where(eq(omsOrderLines.orderId, existingOrder.id))
-        .limit(1);
+        .where(eq(omsOrderLines.orderId, existingOrder.id));
 
-      // If no line items, create them (handles partial ingestion recovery)
-      if (existingLines.length === 0 && data.lineItems.length > 0) {
-        for (const item of data.lineItems) {
-          let productVariantId: number | null = null;
-          let variantCompareAtPrice = null;
+      const existingLineByExternalId = new Map<string, OmsOrderLine>(
+        existingLines
+          .filter((line: OmsOrderLine) => line.externalLineItemId)
+          .map((line: OmsOrderLine) => [line.externalLineItemId!, line]),
+      );
+      let insertedLines = 0;
+      let updatedLines = 0;
 
-          if (item.sku) {
-            const [variant] = await db
-              .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
-              .from(productVariants)
-              .where(eq(productVariants.sku, item.sku.toUpperCase()))
-              .limit(1);
-            if (variant) {
-              productVariantId = variant.id;
-              variantCompareAtPrice = variant.compareAtPriceCents;
-            }
+      for (const item of data.lineItems) {
+        let productVariantId: number | null = null;
+        let variantCompareAtPrice = null;
+
+        if (item.sku) {
+          const [variant] = await db
+            .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
+            .from(productVariants)
+            .where(eq(productVariants.sku, item.sku.toUpperCase()))
+            .limit(1);
+          if (variant) {
+            productVariantId = variant.id;
+            variantCompareAtPrice = variant.compareAtPriceCents;
           }
-
-          await db.insert(omsOrderLines).values({
-            orderId: existingOrder.id,
-            productVariantId,
-            externalLineItemId: item.externalLineItemId,
-            externalProductId: item.externalProductId || null,
-            sku: item.sku,
-            title: item.title,
-            name: item.name ?? item.title ?? null,
-            variantTitle: item.variantTitle,
-            quantity: item.quantity,
-            paidPriceCents: item.paidPriceCents || 0,
-            retailPriceCents: item.retailPriceCents || 0,
-            totalPriceCents: item.totalCents || 0,
-            totalDiscountCents: item.discountCents || 0,
-            planDiscountCents: item.planDiscountCents || 0,
-            couponDiscountCents: item.couponDiscountCents || 0,
-            taxable: item.taxable ?? true,
-            requiresShipping: item.requiresShipping ?? true,
-            fulfillableQuantity: item.fulfillableQuantity ?? null,
-            fulfillmentService: item.fulfillmentService ?? null,
-            properties: item.properties ?? null,
-            compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,            
-            taxLines: item.taxLines ?? null,
-            discountAllocations: item.discountAllocations ?? null,
-            orderNumber: data.externalOrderNumber || null,
-          } satisfies InsertOmsOrderLine).onConflictDoNothing();
         }
-        console.log(`[OMS] Backfilled ${data.lineItems.length} missing line items for order ${existingOrder.id}`);
+
+        const existingLine = item.externalLineItemId
+          ? existingLineByExternalId.get(item.externalLineItemId)
+          : undefined;
+
+        if (existingLine) {
+          await db
+            .update(omsOrderLines)
+            .set({
+              productVariantId: productVariantId ?? existingLine.productVariantId,
+              externalProductId: item.externalProductId ?? existingLine.externalProductId ?? null,
+              sku: item.sku ?? existingLine.sku,
+              title: item.title ?? existingLine.title,
+              name: item.name ?? existingLine.name ?? item.title ?? null,
+              variantTitle: item.variantTitle ?? existingLine.variantTitle,
+              quantity: item.quantity,
+              ...buildLineAuthorityValues(data, item, existingLine),
+              paidPriceCents: item.paidPriceCents ?? existingLine.paidPriceCents ?? 0,
+              retailPriceCents: item.retailPriceCents ?? existingLine.retailPriceCents ?? 0,
+              totalPriceCents: item.totalCents ?? existingLine.totalPriceCents ?? 0,
+              totalDiscountCents: item.discountCents ?? existingLine.totalDiscountCents ?? 0,
+              planDiscountCents: item.planDiscountCents ?? existingLine.planDiscountCents ?? 0,
+              couponDiscountCents: item.couponDiscountCents ?? existingLine.couponDiscountCents ?? 0,
+              taxable: item.taxable ?? existingLine.taxable ?? true,
+              requiresShipping: item.requiresShipping ?? existingLine.requiresShipping ?? true,
+              fulfillableQuantity: item.fulfillableQuantity ?? existingLine.fulfillableQuantity ?? null,
+              fulfillmentService: item.fulfillmentService ?? existingLine.fulfillmentService ?? null,
+              properties: item.properties ?? existingLine.properties ?? null,
+              compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice ?? existingLine.compareAtPriceCents,
+              taxLines: item.taxLines ?? existingLine.taxLines ?? null,
+              discountAllocations: item.discountAllocations ?? existingLine.discountAllocations ?? null,
+              orderNumber: data.externalOrderNumber || existingLine.orderNumber || null,
+              updatedAt: new Date(),
+            })
+            .where(eq(omsOrderLines.id, existingLine.id));
+          updatedLines += 1;
+          continue;
+        }
+
+        await db.insert(omsOrderLines).values({
+          orderId: existingOrder.id,
+          productVariantId,
+          externalLineItemId: item.externalLineItemId,
+          externalProductId: item.externalProductId || null,
+          sku: item.sku,
+          title: item.title,
+          name: item.name ?? item.title ?? null,
+          variantTitle: item.variantTitle,
+          quantity: item.quantity,
+          ...buildLineAuthorityValues(data, item),
+          paidPriceCents: item.paidPriceCents || 0,
+          retailPriceCents: item.retailPriceCents || 0,
+          totalPriceCents: item.totalCents || 0,
+          totalDiscountCents: item.discountCents || 0,
+          planDiscountCents: item.planDiscountCents || 0,
+          couponDiscountCents: item.couponDiscountCents || 0,
+          taxable: item.taxable ?? true,
+          requiresShipping: item.requiresShipping ?? true,
+          fulfillableQuantity: item.fulfillableQuantity ?? null,
+          fulfillmentService: item.fulfillmentService ?? null,
+          properties: item.properties ?? null,
+          compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,
+          taxLines: item.taxLines ?? null,
+          discountAllocations: item.discountAllocations ?? null,
+          orderNumber: data.externalOrderNumber || null,
+        } satisfies InsertOmsOrderLine).onConflictDoNothing();
+        insertedLines += 1;
+      }
+
+      if (insertedLines > 0 || updatedLines > 0) {
+        console.log(
+          `[OMS] Reconciled duplicate ingest lines for order ${existingOrder.id}: inserted=${insertedLines} updated=${updatedLines}`,
+        );
       }
 
       return existingOrder;

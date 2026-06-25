@@ -70,6 +70,14 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toContain("omsQty <= 0");
   });
 
+  it("uses OMS line authority instead of raw channel quantity for WMS materialization", () => {
+    expect(WMS_SYNC_SRC).toMatch(/getOmsLineMaterializableQuantity/);
+    expect(WMS_SYNC_SRC).toMatch(/const materializableOmsLines = omsLines\.filter/);
+    expect(WMS_SYNC_SRC).toMatch(/no OMS-authorized fulfillable quantity/);
+    expect(WMS_SYNC_SRC).toMatch(/const omsQty = omsLine \? getOmsLineMaterializableQuantity\(omsLine\) : 0/);
+    expect(WMS_SYNC_SRC).toMatch(/const materializableQuantity = getOmsLineMaterializableQuantity\(omsLine\)/);
+  });
+
   it("recomputes WMS aggregate counts after reconciliation changes order items", () => {
     expect(WMS_SYNC_SRC).toMatch(/item_count = agg\.item_count/);
     expect(WMS_SYNC_SRC).toMatch(/unit_count = agg\.unit_count/);

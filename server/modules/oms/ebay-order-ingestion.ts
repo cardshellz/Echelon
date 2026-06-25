@@ -128,6 +128,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
   }
 
   return {
+    sourceTopic: "ebay/order",
     externalOrderNumber: ebayOrder.orderId,
     status,
     financialStatus,
