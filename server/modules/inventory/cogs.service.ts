@@ -825,6 +825,7 @@ export class COGSService {
              il.batch_number,
              pv.sku,
              pv.id as variant_id,
+             pv.units_per_variant AS units_per_variant,
              p.name as product_name,
              p.id as product_id,
              p.base_sku,
@@ -874,6 +875,7 @@ export class COGSService {
   async setLotProductCostMills(
     lotId: number,
     productCostMills: number,
+    reason: string = 'csv_cost_upload',
   ): Promise<{ lotId: number; lotNumber: string; sku: string; oldCostCents: number; newCostCents: number } | null> {
     const result = await this.db.execute(sql`
       SELECT il.id, il.lot_number, il.product_variant_id,
@@ -910,10 +912,33 @@ export class COGSService {
     const oldCents = Number(lot.old_total_cents) || 0;
     await this.db.execute(sql`
       INSERT INTO inventory.cost_adjustment_log (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
-      VALUES (${lotId}, ${lot.lot_number}, ${lot.product_variant_id}, ${lot.sku || ''}, ${oldCents}, ${totalCents}, ${totalCents - oldCents}, 'csv_cost_upload', NOW())
+      VALUES (${lotId}, ${lot.lot_number}, ${lot.product_variant_id}, ${lot.sku || ''}, ${oldCents}, ${totalCents}, ${totalCents - oldCents}, ${reason}, NOW())
     `);
 
     return { lotId, lotNumber: lot.lot_number, sku: lot.sku || '', oldCostCents: oldCents, newCostCents: totalCents };
+  }
+
+  /**
+   * Manually recost ANY lot (correction / override) by per-piece cost. Looks up the lot's
+   * units_per_variant and sets the lot cost = per_piece × upv (mills) via setLotProductCostMills
+   * — cent mirrors, provisional cleared, cost_source → 'manual', cascade to booked COGS, and an
+   * audit row in cost_adjustment_log with the given reason. Works on PO/landed/manual lots alike.
+   */
+  async recostLotPerPiece(
+    lotId: number,
+    perPieceMills: number,
+    reason: string,
+  ): Promise<{ lotId: number; lotNumber: string; sku: string; oldCostCents: number; newCostCents: number } | null> {
+    const r = await this.db.execute(sql`
+      SELECT pv.units_per_variant AS upv
+      FROM inventory.inventory_lots il
+      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+      WHERE il.id = ${lotId}
+    `);
+    const row = r.rows?.[0];
+    if (!row) return null;
+    const upv = Number(row.upv) || 1;
+    return this.setLotProductCostMills(lotId, perPieceMills * upv, reason);
   }
 
   /**
