@@ -545,6 +545,35 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_lines_variant ON oms.oms_order_lines(product_variant_id)`);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS oms.oms_order_line_authority_events (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        event_key VARCHAR(500) NOT NULL UNIQUE,
+        event_type VARCHAR(50) NOT NULL,
+        order_id BIGINT NOT NULL REFERENCES oms.oms_orders(id) ON DELETE CASCADE,
+        order_line_id BIGINT NOT NULL REFERENCES oms.oms_order_lines(id) ON DELETE CASCADE,
+        source_topic VARCHAR(50) NOT NULL,
+        source_event_id VARCHAR(100),
+        source_inbox_id INTEGER,
+        previous_channel_observed_quantity INTEGER,
+        previous_paid_quantity INTEGER,
+        previous_authority_fulfillable_quantity INTEGER,
+        previous_authorization_status VARCHAR(30),
+        channel_observed_quantity INTEGER NOT NULL,
+        paid_quantity INTEGER NOT NULL,
+        authority_fulfillable_quantity INTEGER NOT NULL,
+        cancelled_quantity INTEGER NOT NULL DEFAULT 0,
+        refunded_quantity INTEGER NOT NULL DEFAULT 0,
+        authorization_status VARCHAR(30) NOT NULL,
+        authorized_at TIMESTAMP,
+        authorized_by_event_id VARCHAR(100),
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_line_authority_events_order ON oms.oms_order_line_authority_events(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_line_authority_events_line ON oms.oms_order_line_authority_events(order_line_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_line_authority_events_source ON oms.oms_order_line_authority_events(source_topic, source_event_id)`);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS oms.oms_order_events (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         order_id BIGINT NOT NULL REFERENCES oms.oms_orders(id) ON DELETE CASCADE,

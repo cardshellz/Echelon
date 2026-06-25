@@ -27,6 +27,7 @@ import {
   deriveOmsLineAuthority,
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
+import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
@@ -1863,30 +1864,42 @@ export function registerOmsWebhooks(
               previous: existingLine,
             });
 
-            // Update existing line
-            await db
-              .update(omsOrderLines)
-              .set({
-                sku: item.sku || existingLine.sku,
-                title: preservedTitle,
-                name: preservedName,
-                variantTitle: (normalizedLine?.variantTitle ?? item.variant_title) || existingLine.variantTitle,
-                quantity: item.quantity ?? existingLine.quantity,
-                ...authorityLinePatch(authority),
-                fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
-                  ? Number(item.fulfillable_quantity)
-                  : existingLine.fulfillableQuantity,
-                fulfillmentStatus,
-                requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? existingLine.requiresShipping,
-                paidPriceCents: normalizedLine?.paidPriceCents ?? existingLine.paidPriceCents,
-                retailPriceCents: normalizedLine?.retailPriceCents ?? existingLine.retailPriceCents,
-                totalPriceCents: normalizedLine?.totalCents ?? existingLine.totalPriceCents,
-                totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
-                planDiscountCents: normalizedLine?.planDiscountCents ?? existingLine.planDiscountCents,
-                couponDiscountCents: normalizedLine?.couponDiscountCents ?? existingLine.couponDiscountCents,
-                productVariantId: productVariantId || existingLine.productVariantId,
-              })
-              .where(eq(omsOrderLines.id, existingLine.id));
+            // Update existing line and authority ledger atomically.
+            await db.transaction(async (tx: any) => {
+              await tx
+                .update(omsOrderLines)
+                .set({
+                  sku: item.sku || existingLine.sku,
+                  title: preservedTitle,
+                  name: preservedName,
+                  variantTitle: (normalizedLine?.variantTitle ?? item.variant_title) || existingLine.variantTitle,
+                  quantity: item.quantity ?? existingLine.quantity,
+                  ...authorityLinePatch(authority),
+                  fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                    ? Number(item.fulfillable_quantity)
+                    : existingLine.fulfillableQuantity,
+                  fulfillmentStatus,
+                  requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? existingLine.requiresShipping,
+                  paidPriceCents: normalizedLine?.paidPriceCents ?? existingLine.paidPriceCents,
+                  retailPriceCents: normalizedLine?.retailPriceCents ?? existingLine.retailPriceCents,
+                  totalPriceCents: normalizedLine?.totalCents ?? existingLine.totalPriceCents,
+                  totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
+                  planDiscountCents: normalizedLine?.planDiscountCents ?? existingLine.planDiscountCents,
+                  couponDiscountCents: normalizedLine?.couponDiscountCents ?? existingLine.couponDiscountCents,
+                  productVariantId: productVariantId || existingLine.productVariantId,
+                })
+                .where(eq(omsOrderLines.id, existingLine.id));
+
+              await recordOmsLineAuthorityEvent({
+                db: tx,
+                orderId: existing.id,
+                orderLineId: existingLine.id,
+                eventType: "line_updated",
+                sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                previous: existingLine,
+                authority,
+              });
+            });
           } else {
             const fulfillmentStatus = mapShopifyLineFulfillmentStatus(
               item,
@@ -1907,31 +1920,44 @@ export function registerOmsWebhooks(
                 ? Number(item.fulfillable_quantity)
                 : null,
             });
-            // Insert new line
-            await db.insert(omsOrderLines).values({
-              orderId: existing.id,
-              productVariantId,
-              externalLineItemId: lineId,
-              sku: item.sku,
-              title: displayName,
-              variantTitle: normalizedLine?.variantTitle ?? item.variant_title,
-              name: displayName,
-              vendor: normalizedLine?.vendor ?? item.vendor,
-              externalProductId: normalizedLine?.externalProductId ?? (item.product_id ? String(item.product_id) : null),
-              quantity: item.quantity || 1,
-              ...authorityLinePatch(authority),
-              fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
-                ? Number(item.fulfillable_quantity)
-                : null,
-              fulfillmentStatus,
-              requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? true,
-              paidPriceCents: normalizedLine?.paidPriceCents ?? 0,
-              retailPriceCents: normalizedLine?.retailPriceCents ?? 0,
-              totalPriceCents: normalizedLine?.totalCents ?? 0,
-              totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
-              planDiscountCents: normalizedLine?.planDiscountCents ?? 0,
-              couponDiscountCents: normalizedLine?.couponDiscountCents ?? 0,
-            }).onConflictDoNothing();
+            // Insert new line and authority ledger atomically.
+            await db.transaction(async (tx: any) => {
+              const [insertedLine] = await tx.insert(omsOrderLines).values({
+                orderId: existing.id,
+                productVariantId,
+                externalLineItemId: lineId,
+                sku: item.sku,
+                title: displayName,
+                variantTitle: normalizedLine?.variantTitle ?? item.variant_title,
+                name: displayName,
+                vendor: normalizedLine?.vendor ?? item.vendor,
+                externalProductId: normalizedLine?.externalProductId ?? (item.product_id ? String(item.product_id) : null),
+                quantity: item.quantity || 1,
+                ...authorityLinePatch(authority),
+                fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                  ? Number(item.fulfillable_quantity)
+                  : null,
+                fulfillmentStatus,
+                requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? true,
+                paidPriceCents: normalizedLine?.paidPriceCents ?? 0,
+                retailPriceCents: normalizedLine?.retailPriceCents ?? 0,
+                totalPriceCents: normalizedLine?.totalCents ?? 0,
+                totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
+                planDiscountCents: normalizedLine?.planDiscountCents ?? 0,
+                couponDiscountCents: normalizedLine?.couponDiscountCents ?? 0,
+              }).onConflictDoNothing().returning({ id: omsOrderLines.id });
+
+              if (insertedLine) {
+                await recordOmsLineAuthorityEvent({
+                  db: tx,
+                  orderId: existing.id,
+                  orderLineId: insertedLine.id,
+                  eventType: "line_inserted",
+                  sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                  authority,
+                });
+              }
+            });
           }
         }
 
@@ -1949,14 +1975,26 @@ export function registerOmsWebhooks(
                 fulfillableQuantity: 0,
                 previous: existingLine,
               });
-              await db
-                .update(omsOrderLines)
-                .set({
-                  quantity: 0,
-                  fulfillableQuantity: 0,
-                  ...authorityLinePatch(authority),
-                })
-                .where(eq(omsOrderLines.id, existingLine.id));
+              await db.transaction(async (tx: any) => {
+                await tx
+                  .update(omsOrderLines)
+                  .set({
+                    quantity: 0,
+                    fulfillableQuantity: 0,
+                    ...authorityLinePatch(authority),
+                  })
+                  .where(eq(omsOrderLines.id, existingLine.id));
+
+                await recordOmsLineAuthorityEvent({
+                  db: tx,
+                  orderId: existing.id,
+                  orderLineId: existingLine.id,
+                  eventType: "line_removed",
+                  sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                  previous: existingLine,
+                  authority,
+                });
+              });
               console.log(
                 `${LOG_PREFIX} Zeroed removed OMS line ${existingLine.externalLineItemId} (SKU: ${existingLine.sku}) for order ${shopifyOrder.name || externalOrderId}`,
               );
