@@ -148,3 +148,16 @@ export function getOmsLineMaterializableQuantity(line: {
   }
   return requireNonNegativeInteger(line.quantity ?? 0, "quantity");
 }
+
+export function getOmsLineRemainingMaterializableQuantity(line: {
+  quantity?: number | null;
+  authorityFulfillableQuantity?: number | null;
+  wmsMaterializedQuantity?: number | null;
+}): number {
+  const authorizedQuantity = getOmsLineMaterializableQuantity(line);
+  const materializedQuantity = requireNonNegativeInteger(
+    line.wmsMaterializedQuantity ?? 0,
+    "wmsMaterializedQuantity",
+  );
+  return Math.max(authorizedQuantity - materializedQuantity, 0);
+}

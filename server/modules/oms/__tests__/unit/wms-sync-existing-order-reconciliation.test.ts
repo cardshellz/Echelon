@@ -70,12 +70,21 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toContain("omsQty <= 0");
   });
 
-  it("uses OMS line authority instead of raw channel quantity for WMS materialization", () => {
+  it("uses remaining OMS line authority instead of raw channel quantity for WMS materialization", () => {
     expect(WMS_SYNC_SRC).toMatch(/getOmsLineMaterializableQuantity/);
+    expect(WMS_SYNC_SRC).toMatch(/getOmsLineRemainingMaterializableQuantity/);
     expect(WMS_SYNC_SRC).toMatch(/const materializableOmsLines = omsLines\.filter/);
     expect(WMS_SYNC_SRC).toMatch(/no OMS-authorized fulfillable quantity/);
     expect(WMS_SYNC_SRC).toMatch(/const omsQty = omsLine \? getOmsLineMaterializableQuantity\(omsLine\) : 0/);
-    expect(WMS_SYNC_SRC).toMatch(/const materializableQuantity = getOmsLineMaterializableQuantity\(omsLine\)/);
+    expect(WMS_SYNC_SRC).toMatch(/const materializableQuantity = getOmsLineRemainingMaterializableQuantity\(omsLine\)/);
+  });
+
+  it("locks and consumes OMS line materialization authority transactionally", () => {
+    expect(WMS_SYNC_SRC).toMatch(/FOR UPDATE/);
+    expect(WMS_SYNC_SRC).toMatch(/lockOmsLinesForMaterialization/);
+    expect(WMS_SYNC_SRC).toMatch(/incrementOmsLineMaterializedQuantities/);
+    expect(WMS_SYNC_SRC).toMatch(/wms_materialized_quantity = ol\.wms_materialized_quantity \+ consumed\.quantity/);
+    expect(WMS_SYNC_SRC).toMatch(/no remaining authorized quantity to materialize after row lock/);
   });
 
   it("recomputes WMS aggregate counts after reconciliation changes order items", () => {

@@ -33,7 +33,7 @@ describe("wms-sync duplicate WMS order / ShipStation push guard", () => {
 
   it("advisory lock is acquired before the create insert (ordering)", () => {
     const lockIdx = WMS_SYNC_SRC.indexOf("pg_advisory_xact_lock(918407");
-    const createIdx = WMS_SYNC_SRC.indexOf("createOrderWithItems(wmsOrderData");
+    const createIdx = WMS_SYNC_SRC.indexOf("createOrderWithItems(txWmsOrderData");
     expect(lockIdx).toBeGreaterThan(0);
     expect(createIdx).toBeGreaterThan(0);
     expect(lockIdx).toBeLessThan(createIdx);
