@@ -155,6 +155,7 @@ export async function bridgeShopifyOrderToOms(
     }
 
     const orderData: OrderData = {
+      sourceTopic: "shopify/bridge",
       externalOrderNumber: raw.order_number,
       status,
       financialStatus,

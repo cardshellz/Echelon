@@ -157,6 +157,17 @@ export const omsOrderLines = omsSchema.table("oms_order_lines", {
   name: text("name"),
   vendor: varchar("vendor", { length: 200 }),
   quantity: integer("quantity").notNull(),
+  channelObservedQuantity: integer("channel_observed_quantity").notNull().default(0),
+  paidQuantity: integer("paid_quantity").notNull().default(0),
+  authorityFulfillableQuantity: integer("authority_fulfillable_quantity").notNull().default(0),
+  cancelledQuantity: integer("cancelled_quantity").notNull().default(0),
+  refundedQuantity: integer("refunded_quantity").notNull().default(0),
+  wmsMaterializedQuantity: integer("wms_materialized_quantity").notNull().default(0),
+  authorizationStatus: varchar("authorization_status", { length: 30 }).notNull().default("authorized"),
+  authorizedAt: timestamp("authorized_at"),
+  authorizedByEventId: varchar("authorized_by_event_id", { length: 100 }),
+  authoritySourceTopic: varchar("authority_source_topic", { length: 50 }),
+  authoritySourceInboxId: integer("authority_source_inbox_id"),
   // paid_price_cents / total_price_cents are POST-discount (net) — what the
   // customer paid. retail_price_cents is the PRE-discount UNIT price (mirrors
   // Shopify line_items[].price); gross line total = retail_price_cents × qty.

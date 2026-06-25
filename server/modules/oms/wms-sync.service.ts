@@ -40,6 +40,7 @@ import {
   enqueueShipStationSortRankSyncRetry,
 } from "./webhook-retry.worker";
 import { buildChannelLineDisplayName } from "./line-display-name";
+import { getOmsLineMaterializableQuantity } from "./oms-line-authority";
 
 type WmsBinLocation = { location: string; zone: string };
 
@@ -221,6 +222,17 @@ export class WmsSyncService {
         return null;
       }
 
+      const materializableOmsLines = omsLines.filter(
+        (line) => getOmsLineMaterializableQuantity(line) > 0,
+      );
+
+      if (materializableOmsLines.length === 0) {
+        console.warn(
+          `[WMS Sync] OMS order ${omsOrderId} has no OMS-authorized fulfillable quantity; skipping WMS materialization`,
+        );
+        return null;
+      }
+
       // Snapshot financials into the WMS row so pushShipment reads cents
       // from wms.orders (WMS-owned push).
       validateOmsOrderFinancials(
@@ -233,9 +245,9 @@ export class WmsSyncService {
           totalCents: omsOrder.totalCents ?? 0,
           currency: omsOrder.currency ?? "USD",
         },
-        omsLines.map((l) => ({
+        materializableOmsLines.map((l) => ({
           id: l.id,
-          quantity: l.quantity ?? 0,
+          quantity: getOmsLineMaterializableQuantity(l),
           paidPriceCents: (l as any).paidPriceCents ?? 0,
           totalPriceCents: (l as any).totalPriceCents ?? 0,
         })),
@@ -251,7 +263,7 @@ export class WmsSyncService {
       });
 
       // 3. Check if order has any shippable items
-      const hasShippableItems = omsLines.some(line => line.requiresShipping !== false);
+      const hasShippableItems = materializableOmsLines.some(line => line.requiresShipping !== false);
 
       // 3b. Route to a fulfillment warehouse UP FRONT, so the order carries its
       // warehouse through picking and its SLA cutoff is bucketed in that
@@ -263,7 +275,7 @@ export class WmsSyncService {
         routing = await this.services.fulfillmentRouter.routeOrder({
           channelId: omsOrder.channelId,
           country: (omsOrder as any).shipToCountry ?? null,
-          skus: omsLines.map((l: any) => l.sku).filter(Boolean),
+          skus: materializableOmsLines.map((l: any) => l.sku).filter(Boolean),
         });
       } catch (err: any) {
         console.warn(`[WMS Sync] Warehouse routing failed for OMS order ${omsOrderId}: ${err?.message ?? err}`);
@@ -326,8 +338,8 @@ export class WmsSyncService {
         slaStatus: "on_time",
         sortRank,
         warehouseStatus,
-        itemCount: omsLines.length,
-        unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
+        itemCount: materializableOmsLines.length,
+        unitCount: materializableOmsLines.reduce((sum, line) => sum + getOmsLineMaterializableQuantity(line), 0),
         orderPlacedAt: omsOrder.orderedAt,
         ...orderFinancialSnapshot,
       };
@@ -335,7 +347,8 @@ export class WmsSyncService {
       // 4. Map line items
       const wmsLineItems: InsertWmsOrderItem[] = [];
 
-      for (const line of omsLines) {
+      for (const line of materializableOmsLines) {
+        const materializableQuantity = getOmsLineMaterializableQuantity(line);
         // Resolve product_variant_id and bin location from catalog
         const variantId = line.productVariantId || null;
         let binLocation: { location: string; zone: string } | null = null;
@@ -354,7 +367,7 @@ export class WmsSyncService {
         // Per-line financial snapshot for WMS-owned push.
         const itemSnapshot = buildWmsItemFinancialSnapshot({
           id: line.id,
-          quantity: line.quantity ?? 0,
+          quantity: materializableQuantity,
           paidPriceCents: (line as any).paidPriceCents ?? 0,
           totalPriceCents: (line as any).totalPriceCents ?? 0,
         });
@@ -368,9 +381,9 @@ export class WmsSyncService {
             title: line.title,
             variantTitle: line.variantTitle,
           }),
-          quantity: line.quantity || 0,
-          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          quantity: materializableQuantity,
+          pickedQuantity: itemRequiresShipping ? 0 : materializableQuantity,
+          fulfilledQuantity: itemRequiresShipping ? 0 : materializableQuantity,
           status: itemRequiresShipping ? "pending" : "completed",
           location: binLocation?.location || "UNASSIGNED",
           zone: binLocation?.zone || "U",
@@ -528,14 +541,14 @@ export class WmsSyncService {
                 }
               }
 
-              const shipmentItemInputs = omsLines
+              const shipmentItemInputs = materializableOmsLines
                 .filter((line) => line.requiresShipping !== false)
                 .map((line) => {
                   const item = itemsByOmsLineId.get(line.id);
                   return item != null
                     ? {
                         id: item.id,
-                        quantity: line.quantity ?? 0,
+                        quantity: getOmsLineMaterializableQuantity(line),
                         productVariantId: item.productVariantId,
                       }
                     : null;
@@ -596,6 +609,7 @@ export class WmsSyncService {
         );
         try {
           await this.reconcileExistingWmsOrderLines(omsOrderId, racedId);
+          await this.refreshOmsLineMaterializedQuantities(omsOrderId);
         } catch (err: any) {
           console.error(
             `[WMS Sync] Reconcile after race for OMS order ${omsOrderId} (WMS ${racedId}) failed: ${err.message}`,
@@ -614,6 +628,7 @@ export class WmsSyncService {
       // (Warehouse routing now happens BEFORE order creation — see step 3b —
       // so the row is inserted with its warehouse_id and a warehouse-correct
       // SLA, instead of being patched afterward.)
+      await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
       // 8. Push to ShipStation via WMS-owned pushShipment path.
       // Push failures never block the sync — reconcile retries.
@@ -700,10 +715,39 @@ export class WmsSyncService {
     );
   }
 
+  private async refreshOmsLineMaterializedQuantities(omsOrderId: number): Promise<void> {
+    await db.execute(sql`
+      WITH target_lines AS (
+        SELECT id
+        FROM oms.oms_order_lines
+        WHERE order_id = ${omsOrderId}
+      ),
+      materialized AS (
+        SELECT
+          oi.oms_order_line_id,
+          COALESCE(SUM(COALESCE(oi.quantity, 0)), 0)::int AS quantity
+        FROM wms.order_items oi
+        JOIN wms.orders w ON w.id = oi.order_id
+        WHERE w.source = 'oms'
+          AND w.oms_fulfillment_order_id = ${String(omsOrderId)}
+          AND oi.oms_order_line_id IS NOT NULL
+          AND oi.status <> 'cancelled'
+        GROUP BY oi.oms_order_line_id
+      )
+      UPDATE oms.oms_order_lines ol
+         SET wms_materialized_quantity = COALESCE(materialized.quantity, 0),
+             updated_at = NOW()
+        FROM target_lines
+        LEFT JOIN materialized
+          ON materialized.oms_order_line_id = target_lines.id
+       WHERE ol.id = target_lines.id
+    `);
+  }
+
   private hasOpenShippableOmsDemand(lines: Array<typeof omsOrderLines.$inferSelect>): boolean {
     return lines.some((line) => {
       if (line.requiresShipping === false) return false;
-      if ((line.quantity ?? 0) <= 0) return false;
+      if (getOmsLineMaterializableQuantity(line) <= 0) return false;
       const lineFulfillmentStatus = String(line.fulfillmentStatus ?? "").toLowerCase();
       if (lineFulfillmentStatus === "fulfilled") return false;
       const fulfillableQuantity = line.fulfillableQuantity;
@@ -890,7 +934,9 @@ export class WmsSyncService {
     const existingOmsLineIds = new Set(
       existingItems.map((item) => item.omsOrderLineId).filter((id): id is number => id != null),
     );
-    const missingLines = omsLines.filter((line) => !existingOmsLineIds.has(line.id));
+    const missingLines = omsLines.filter(
+      (line) => !existingOmsLineIds.has(line.id) && getOmsLineMaterializableQuantity(line) > 0,
+    );
 
     // Sync cancellations and quantity changes from OMS → WMS.
     // If an OMS line was removed (quantity zeroed) or edited, update the
@@ -901,7 +947,7 @@ export class WmsSyncService {
       if (wmsItem.status === "cancelled") continue;
 
       const omsLine = omsLineById.get(wmsItem.omsOrderLineId);
-      const omsQty = omsLine?.quantity ?? 0;
+      const omsQty = omsLine ? getOmsLineMaterializableQuantity(omsLine) : 0;
       const wmsQty = wmsItem.quantity ?? 0;
 
       if (omsQty === wmsQty) continue;
@@ -940,6 +986,7 @@ export class WmsSyncService {
     }[] = [];
 
     for (const line of missingLines) {
+      const materializableQuantity = getOmsLineMaterializableQuantity(line);
       const variantId = line.productVariantId || null;
       let binLocation: { location: string; zone: string } | null = null;
       if (variantId) {
@@ -962,9 +1009,9 @@ export class WmsSyncService {
             title: line.title,
             variantTitle: line.variantTitle,
           }),
-          quantity: line.quantity || 0,
-          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          quantity: materializableQuantity,
+          pickedQuantity: itemRequiresShipping ? 0 : materializableQuantity,
+          fulfilledQuantity: itemRequiresShipping ? 0 : materializableQuantity,
           status: itemRequiresShipping ? "pending" : "completed",
           location: binLocation?.location || "UNASSIGNED",
           zone: binLocation?.zone || "U",
@@ -1087,6 +1134,8 @@ export class WmsSyncService {
         ) agg
        WHERE w.id = agg.order_id
     `);
+
+    await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
     if (shippableShipmentItems.length === 0) {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
@@ -1281,7 +1330,7 @@ export class WmsSyncService {
 
       if (!omsLine) continue;
 
-      const omsQty = omsLine.quantity || 0;
+      const omsQty = getOmsLineMaterializableQuantity(omsLine);
       const wmsQty = wmsItem.quantity;
 
       if (omsQty === wmsQty) {
@@ -1374,8 +1423,9 @@ export class WmsSyncService {
 
     // 5. Add new items (OMS lines not yet in WMS)
     for (const omsLine of omsLines) {
+      const materializableQuantity = getOmsLineMaterializableQuantity(omsLine);
       if (wmsItemByOmsLineId.has(omsLine.id)) continue;
-      if (!omsLine.quantity || omsLine.quantity <= 0) continue;
+      if (materializableQuantity <= 0) continue;
 
       // Skip items already removed from Shopify
       if (
@@ -1408,9 +1458,9 @@ export class WmsSyncService {
           title: omsLine.title,
           variantTitle: omsLine.variantTitle,
         }),
-        quantity: omsLine.quantity || 0,
-        pickedQuantity: itemRequiresShipping ? 0 : (omsLine.quantity || 0),
-        fulfilledQuantity: itemRequiresShipping ? 0 : (omsLine.quantity || 0),
+        quantity: materializableQuantity,
+        pickedQuantity: itemRequiresShipping ? 0 : materializableQuantity,
+        fulfilledQuantity: itemRequiresShipping ? 0 : materializableQuantity,
         status: itemRequiresShipping ? "pending" : "completed",
         location: binLocation?.location || "UNASSIGNED",
         zone: binLocation?.zone || "U",
@@ -1421,7 +1471,7 @@ export class WmsSyncService {
         totalPriceCents: (omsLine as any).totalPriceCents ?? 0,
       } as any);
 
-      changes.push(`Added new item ${omsLine.sku} (qty ${omsLine.quantity})`);
+      changes.push(`Added new item ${omsLine.sku} (qty ${materializableQuantity})`);
       result.added++;
     }
 
@@ -1451,6 +1501,8 @@ export class WmsSyncService {
           updated_at = NOW()
         WHERE id = ${wmsOrderId}
       `);
+
+      await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
       // Re-reserve inventory (release all then re-reserve for updated items)
       try {
@@ -1858,6 +1910,8 @@ export class WmsSyncService {
       // 4. Re-create items from OMS
       const newItems: InsertWmsOrderItem[] = [];
       for (const line of omsLines) {
+        const materializableQuantity = getOmsLineMaterializableQuantity(line);
+        if (materializableQuantity <= 0) continue;
         const variantId = line.productVariantId || null;
         let binLocation: { location: string; zone: string } | null = null;
         if (variantId) {
@@ -1877,9 +1931,9 @@ export class WmsSyncService {
             title: line.title,
             variantTitle: line.variantTitle,
           }),
-          quantity: line.quantity || 0,
-          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
+          quantity: materializableQuantity,
+          pickedQuantity: itemRequiresShipping ? 0 : materializableQuantity,
+          fulfilledQuantity: itemRequiresShipping ? 0 : materializableQuantity,
           status: itemRequiresShipping ? 'pending' : 'completed',
           location: binLocation?.location || 'UNASSIGNED',
           zone: binLocation?.zone || 'U',
@@ -1891,6 +1945,8 @@ export class WmsSyncService {
       if (newItems.length > 0) {
         await db.insert(wmsOrderItems).values(newItems);
       }
+
+      await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
       // 5. Recalculate order counts
       const { ordersStorage } = await import('../orders');
