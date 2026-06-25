@@ -313,8 +313,8 @@ Changes:
 - Add foreign key from WMS items to OMS lines.
 - Add unique constraints for OMS line and WMS item lineage.
 - Add non-null/partial constraints for OMS-origin WMS lines.
-- Add unique non-null ShipStation order id constraint.
-- Add safe active-key constraint for ShipStation order keys.
+- Add unique non-null ShipStation order id constraint, scoped so combined-child mirror rows that intentionally inherit a parent ShipStation identity are exempt or represented in a separate non-physical-link model first.
+- Add safe active-key constraint for ShipStation order keys with the same combined-child scope.
 - Add quantity check constraints where possible.
 
 Acceptance criteria:
