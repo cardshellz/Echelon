@@ -145,7 +145,7 @@ ShipStation can confirm or update a shipment only when the callback maps to know
 
 ### OMS Line Authority Fields
 
-Add fields directly to `oms.oms_order_lines` or a companion authority table:
+Add latest-state enforcement fields directly to `oms.oms_order_lines`:
 
 ```
 source_event_id
@@ -164,6 +164,44 @@ authorization_status
 authorized_at
 authorized_by_event_id
 ```
+
+These columns are an enforcement cache, not the complete audit record. They
+exist so hot WMS paths can make deterministic decisions without replaying the
+entire event history.
+
+### OMS Line Authority Event Ledger
+
+Create an append-only `oms.oms_order_line_authority_events` ledger. Every write
+to OMS line authority state must insert an idempotent ledger row in the same
+transaction as the authority state write.
+
+Required fields:
+
+```
+event_key
+event_type
+order_id
+order_line_id
+source_topic
+source_event_id
+source_inbox_id
+previous_channel_observed_qty
+previous_paid_qty
+previous_authority_fulfillable_qty
+previous_authorization_status
+channel_observed_qty
+paid_qty
+authority_fulfillable_qty
+cancelled_qty
+refunded_qty
+authorization_status
+authorized_at
+authorized_by_event_id
+created_at
+```
+
+The ledger is the audit source for who/what/when/why authority changed. The
+latest-state columns are a derived operational view.
 
 Recommended status values:
 
@@ -233,18 +271,21 @@ Purpose: separate channel facts from fulfillable commercial authority.
 Changes:
 
 - Add authority fields to OMS lines or a companion table.
+- Add an append-only OMS line authority event ledger.
 - Classify inbound channel events by what they can authorize:
   - create/paid can authorize initial paid quantity.
   - update can refresh channel facts and addresses.
   - edited-order paid evidence can authorize newly added quantity.
   - cancel/refund reduces or blocks fulfillable quantity.
 - Stop treating update-payload line presence as enough to create fulfillable work.
+- Write a ledger row for every OMS line authority state write.
 
 Acceptance criteria:
 
 - An update webhook can record a seen line without making it fulfillable.
 - A paid edit can increase fulfillable quantity with an auditable source event.
 - Cancel/refund events reduce fulfillable quantity before WMS materialization.
+- Every authority state write has an append-only, idempotent ledger event.
 
 ### Phase 3: Make WMS Materialization Consume Authority
 
@@ -362,11 +403,12 @@ Recommended order:
 
 1. Phase 1 PR: immediate risk reduction.
 2. Phase 2 PR: line authority schema and Shopify authorization logic.
-3. Phase 3 PR: WMS consumes only authorized quantity.
-4. Phase 4 PR: database constraints after backfill readiness checks.
-5. Phase 5 PR: reconciliation proof model.
-6. Phase 6 scripts: production backfill and quarantine.
-7. Phase 7 PR: conformance suite and monitoring.
+3. Phase 2B PR: append-only line authority ledger.
+4. Phase 3 PR: WMS consumes only authorized quantity transactionally.
+5. Phase 4 PR: database constraints after backfill readiness checks.
+6. Phase 5 PR: reconciliation proof model.
+7. Phase 6 scripts: production backfill and quarantine.
+8. Phase 7 PR: conformance suite and monitoring.
 
 Avoid shipping Phase 4 constraints before Phase 6 dry runs prove production can pass or be quarantined safely.
 
@@ -385,7 +427,7 @@ Avoid shipping Phase 4 constraints before Phase 6 dry runs prove production can 
 - What eBay payload fields represent paid line authority and ship-by date?
 - Which historical WMS rows should remain visible in normal UI versus exception-only views?
 - Which ShipStation split cases are operationally valid and should remain automatic?
-- Should authority fields live on `oms.oms_order_lines` or in a separate append-only authority ledger?
+- Which authority ledger fields should be exposed in the first admin trace view?
 
 ## Decision Log
 

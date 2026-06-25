@@ -17,6 +17,7 @@ import {
   deriveOmsLineAuthority,
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
+import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -142,7 +143,7 @@ function authorityValues(state: OmsLineAuthorityState) {
   };
 }
 
-function buildLineAuthorityValues(
+function buildLineAuthorityState(
   data: OrderData,
   item: LineItemData,
   previous?: {
@@ -153,17 +154,15 @@ function buildLineAuthorityValues(
     authorizedByEventId?: string | null;
   } | null,
 ) {
-  return authorityValues(
-    deriveOmsLineAuthority({
-      sourceTopic: data.sourceTopic ?? "unknown",
-      sourceEventId: data.sourceEventId ?? null,
-      sourceInboxId: data.sourceInboxId ?? null,
-      financialStatus: data.financialStatus,
-      quantity: item.quantity,
-      fulfillableQuantity: item.fulfillableQuantity ?? null,
-      previous,
-    }),
-  );
+  return deriveOmsLineAuthority({
+    sourceTopic: data.sourceTopic ?? "unknown",
+    sourceEventId: data.sourceEventId ?? null,
+    sourceInboxId: data.sourceInboxId ?? null,
+    financialStatus: data.financialStatus,
+    quantity: item.quantity,
+    fulfillableQuantity: item.fulfillableQuantity ?? null,
+    previous,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +282,8 @@ export function createOmsService(db: any, reservationService?: any) {
           }
         }
 
-        await tx.insert(omsOrderLines).values({
+        const authority = buildLineAuthorityState(data, item);
+        const [insertedLine] = await tx.insert(omsOrderLines).values({
           orderId: inserted.id,
           productVariantId,
           externalLineItemId: item.externalLineItemId,
@@ -293,7 +293,7 @@ export function createOmsService(db: any, reservationService?: any) {
           name: item.name ?? item.title ?? null,
           variantTitle: item.variantTitle,
           quantity: item.quantity,
-          ...buildLineAuthorityValues(data, item),
+          ...authorityValues(authority),
           paidPriceCents: item.paidPriceCents || 0,
           retailPriceCents: item.retailPriceCents || 0,
           totalPriceCents: item.totalCents || 0,
@@ -309,7 +309,18 @@ export function createOmsService(db: any, reservationService?: any) {
           taxLines: item.taxLines ?? null,
           discountAllocations: item.discountAllocations ?? null,
           orderNumber: data.externalOrderNumber || null,
-        } satisfies InsertOmsOrderLine).onConflictDoNothing();
+        } satisfies InsertOmsOrderLine).onConflictDoNothing().returning({ id: omsOrderLines.id });
+
+        if (insertedLine) {
+          await recordOmsLineAuthorityEvent({
+            db: tx,
+            orderId: inserted.id,
+            orderLineId: insertedLine.id,
+            eventType: "line_inserted",
+            sourceEventId: data.sourceEventId ?? null,
+            authority,
+          });
+        }
       }
 
       await tx.insert(omsOrderEvents).values({
@@ -402,66 +413,93 @@ export function createOmsService(db: any, reservationService?: any) {
           : undefined;
 
         if (existingLine) {
-          await db
-            .update(omsOrderLines)
-            .set({
-              productVariantId: productVariantId ?? existingLine.productVariantId,
-              externalProductId: item.externalProductId ?? existingLine.externalProductId ?? null,
-              sku: item.sku ?? existingLine.sku,
-              title: item.title ?? existingLine.title,
-              name: item.name ?? existingLine.name ?? item.title ?? null,
-              variantTitle: item.variantTitle ?? existingLine.variantTitle,
-              quantity: item.quantity,
-              ...buildLineAuthorityValues(data, item, existingLine),
-              paidPriceCents: item.paidPriceCents ?? existingLine.paidPriceCents ?? 0,
-              retailPriceCents: item.retailPriceCents ?? existingLine.retailPriceCents ?? 0,
-              totalPriceCents: item.totalCents ?? existingLine.totalPriceCents ?? 0,
-              totalDiscountCents: item.discountCents ?? existingLine.totalDiscountCents ?? 0,
-              planDiscountCents: item.planDiscountCents ?? existingLine.planDiscountCents ?? 0,
-              couponDiscountCents: item.couponDiscountCents ?? existingLine.couponDiscountCents ?? 0,
-              taxable: item.taxable ?? existingLine.taxable ?? true,
-              requiresShipping: item.requiresShipping ?? existingLine.requiresShipping ?? true,
-              fulfillableQuantity: item.fulfillableQuantity ?? existingLine.fulfillableQuantity ?? null,
-              fulfillmentService: item.fulfillmentService ?? existingLine.fulfillmentService ?? null,
-              properties: item.properties ?? existingLine.properties ?? null,
-              compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice ?? existingLine.compareAtPriceCents,
-              taxLines: item.taxLines ?? existingLine.taxLines ?? null,
-              discountAllocations: item.discountAllocations ?? existingLine.discountAllocations ?? null,
-              orderNumber: data.externalOrderNumber || existingLine.orderNumber || null,
-              updatedAt: new Date(),
-            })
-            .where(eq(omsOrderLines.id, existingLine.id));
+          const authority = buildLineAuthorityState(data, item, existingLine);
+          await db.transaction(async (tx: any) => {
+            await tx
+              .update(omsOrderLines)
+              .set({
+                productVariantId: productVariantId ?? existingLine.productVariantId,
+                externalProductId: item.externalProductId ?? existingLine.externalProductId ?? null,
+                sku: item.sku ?? existingLine.sku,
+                title: item.title ?? existingLine.title,
+                name: item.name ?? existingLine.name ?? item.title ?? null,
+                variantTitle: item.variantTitle ?? existingLine.variantTitle,
+                quantity: item.quantity,
+                ...authorityValues(authority),
+                paidPriceCents: item.paidPriceCents ?? existingLine.paidPriceCents ?? 0,
+                retailPriceCents: item.retailPriceCents ?? existingLine.retailPriceCents ?? 0,
+                totalPriceCents: item.totalCents ?? existingLine.totalPriceCents ?? 0,
+                totalDiscountCents: item.discountCents ?? existingLine.totalDiscountCents ?? 0,
+                planDiscountCents: item.planDiscountCents ?? existingLine.planDiscountCents ?? 0,
+                couponDiscountCents: item.couponDiscountCents ?? existingLine.couponDiscountCents ?? 0,
+                taxable: item.taxable ?? existingLine.taxable ?? true,
+                requiresShipping: item.requiresShipping ?? existingLine.requiresShipping ?? true,
+                fulfillableQuantity: item.fulfillableQuantity ?? existingLine.fulfillableQuantity ?? null,
+                fulfillmentService: item.fulfillmentService ?? existingLine.fulfillmentService ?? null,
+                properties: item.properties ?? existingLine.properties ?? null,
+                compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice ?? existingLine.compareAtPriceCents,
+                taxLines: item.taxLines ?? existingLine.taxLines ?? null,
+                discountAllocations: item.discountAllocations ?? existingLine.discountAllocations ?? null,
+                orderNumber: data.externalOrderNumber || existingLine.orderNumber || null,
+                updatedAt: new Date(),
+              })
+              .where(eq(omsOrderLines.id, existingLine.id));
+
+            await recordOmsLineAuthorityEvent({
+              db: tx,
+              orderId: existingOrder.id,
+              orderLineId: existingLine.id,
+              eventType: "line_updated",
+              sourceEventId: data.sourceEventId ?? null,
+              previous: existingLine,
+              authority,
+            });
+          });
           updatedLines += 1;
           continue;
         }
 
-        await db.insert(omsOrderLines).values({
-          orderId: existingOrder.id,
-          productVariantId,
-          externalLineItemId: item.externalLineItemId,
-          externalProductId: item.externalProductId || null,
-          sku: item.sku,
-          title: item.title,
-          name: item.name ?? item.title ?? null,
-          variantTitle: item.variantTitle,
-          quantity: item.quantity,
-          ...buildLineAuthorityValues(data, item),
-          paidPriceCents: item.paidPriceCents || 0,
-          retailPriceCents: item.retailPriceCents || 0,
-          totalPriceCents: item.totalCents || 0,
-          totalDiscountCents: item.discountCents || 0,
-          planDiscountCents: item.planDiscountCents || 0,
-          couponDiscountCents: item.couponDiscountCents || 0,
-          taxable: item.taxable ?? true,
-          requiresShipping: item.requiresShipping ?? true,
-          fulfillableQuantity: item.fulfillableQuantity ?? null,
-          fulfillmentService: item.fulfillmentService ?? null,
-          properties: item.properties ?? null,
-          compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,
-          taxLines: item.taxLines ?? null,
-          discountAllocations: item.discountAllocations ?? null,
-          orderNumber: data.externalOrderNumber || null,
-        } satisfies InsertOmsOrderLine).onConflictDoNothing();
+        const authority = buildLineAuthorityState(data, item);
+        await db.transaction(async (tx: any) => {
+          const [insertedLine] = await tx.insert(omsOrderLines).values({
+            orderId: existingOrder.id,
+            productVariantId,
+            externalLineItemId: item.externalLineItemId,
+            externalProductId: item.externalProductId || null,
+            sku: item.sku,
+            title: item.title,
+            name: item.name ?? item.title ?? null,
+            variantTitle: item.variantTitle,
+            quantity: item.quantity,
+            ...authorityValues(authority),
+            paidPriceCents: item.paidPriceCents || 0,
+            retailPriceCents: item.retailPriceCents || 0,
+            totalPriceCents: item.totalCents || 0,
+            totalDiscountCents: item.discountCents || 0,
+            planDiscountCents: item.planDiscountCents || 0,
+            couponDiscountCents: item.couponDiscountCents || 0,
+            taxable: item.taxable ?? true,
+            requiresShipping: item.requiresShipping ?? true,
+            fulfillableQuantity: item.fulfillableQuantity ?? null,
+            fulfillmentService: item.fulfillmentService ?? null,
+            properties: item.properties ?? null,
+            compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,
+            taxLines: item.taxLines ?? null,
+            discountAllocations: item.discountAllocations ?? null,
+            orderNumber: data.externalOrderNumber || null,
+          } satisfies InsertOmsOrderLine).onConflictDoNothing().returning({ id: omsOrderLines.id });
+
+          if (insertedLine) {
+            await recordOmsLineAuthorityEvent({
+              db: tx,
+              orderId: existingOrder.id,
+              orderLineId: insertedLine.id,
+              eventType: "line_inserted",
+              sourceEventId: data.sourceEventId ?? null,
+              authority,
+            });
+          }
+        });
         insertedLines += 1;
       }
 
