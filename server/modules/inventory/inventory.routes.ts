@@ -2793,6 +2793,27 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
+  // Recost ANY lot (correction / override) by per-piece cost. Lot cost = per_piece × pack size
+  // (mills); clears provisional, cost_source → manual, cascades booked COGS, audit-logged.
+  app.post("/api/cogs/lots/:lotId/recost", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const lotId = parseInt(req.params.lotId);
+      const dollars = Number(String(req.body?.cost_per_piece ?? "").replace(/[$,\s]/g, ""));
+      if (!Number.isInteger(lotId) || lotId <= 0) return res.status(400).json({ error: "Invalid lotId" });
+      if (!Number.isFinite(dollars) || dollars < 0) return res.status(400).json({ error: "Invalid cost_per_piece" });
+      const note = String(req.body?.reason ?? "").trim();
+      const reason = note ? `manual_recost: ${note}` : "manual_recost";
+      const perPieceMills = Math.round(dollars * 10000);
+      const result = await cogs.recostLotPerPiece(lotId, perPieceMills, reason);
+      if (!result) return res.status(404).json({ error: "Lot not found" });
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error recosting lot:", error);
+      res.status(500).json({ error: "Failed to recost lot" });
+    }
+  });
+
   // Cost adjustments log
   app.get("/api/cogs/adjustments", requirePermission("inventory", "view"), async (req, res) => {
     try {
