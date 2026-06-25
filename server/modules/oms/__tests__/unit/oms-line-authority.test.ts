@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   deriveOmsLineAuthority,
   getOmsLineMaterializableQuantity,
+  getOmsLineRemainingMaterializableQuantity,
 } from "../../oms-line-authority";
 
 const NOW = new Date("2026-06-25T12:00:00.000Z");
@@ -133,5 +134,22 @@ describe("OMS line authority", () => {
   it("falls back to legacy raw quantity only when authority columns are absent", () => {
     expect(getOmsLineMaterializableQuantity({ quantity: 7 })).toBe(7);
     expect(getOmsLineMaterializableQuantity({ quantity: 7, authorityFulfillableQuantity: 0 })).toBe(0);
+  });
+
+  it("subtracts WMS-materialized quantity from remaining authority", () => {
+    expect(
+      getOmsLineRemainingMaterializableQuantity({
+        quantity: 5,
+        authorityFulfillableQuantity: 5,
+        wmsMaterializedQuantity: 2,
+      }),
+    ).toBe(3);
+    expect(
+      getOmsLineRemainingMaterializableQuantity({
+        quantity: 5,
+        authorityFulfillableQuantity: 2,
+        wmsMaterializedQuantity: 5,
+      }),
+    ).toBe(0);
   });
 });
