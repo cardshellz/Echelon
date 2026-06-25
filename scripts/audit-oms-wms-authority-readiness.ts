@@ -53,9 +53,14 @@ export interface AuditResult {
 }
 
 const OMS_ORIGIN_SOURCE_FILTER = "COALESCE(o.source, '') IN ('oms', 'shopify', 'ebay')";
-const ACTIVE_WMS_ITEM_FILTER = `
-  COALESCE(o.warehouse_status, '') <> 'cancelled'
-  AND COALESCE(oi.status, '') <> 'cancelled'
+const CURRENT_OPEN_WMS_ORDER_FILTER = `
+  o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+  AND o.cancelled_at IS NULL
+  AND o.completed_at IS NULL
+`;
+const CURRENT_OPEN_WMS_ITEM_FILTER = `
+  ${CURRENT_OPEN_WMS_ORDER_FILTER}
+  AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
 `;
 const ACTIVE_SHIPMENT_FILTER = "s.status IN ('planned', 'queued', 'labeled', 'on_hold')";
 const COMBINED_CHILD_SOURCE_FILTER = `
@@ -115,8 +120,8 @@ export function buildReadinessChecks(): ReadinessCheck[] {
     {
       id: "oms_origin_order_missing_oms_ref",
       severity: "blocker",
-      description: "OMS-origin WMS orders need a parseable OMS order reference before order-level lineage can be constrained.",
-      constraintTarget: "Future FK-like lineage guard from WMS orders to oms.oms_orders.",
+      description: "Current open OMS-origin WMS orders need a parseable OMS order reference before order-level lineage can be constrained.",
+      constraintTarget: "Future FK-like lineage guard from current open WMS orders to oms.oms_orders.",
       sql: `
         SELECT
           o.id AS wms_order_id,
@@ -128,7 +133,7 @@ export function buildReadinessChecks(): ReadinessCheck[] {
           o.created_at
         FROM wms.orders o
         WHERE ${OMS_ORIGIN_SOURCE_FILTER}
-          AND COALESCE(o.warehouse_status, '') <> 'cancelled'
+          AND ${CURRENT_OPEN_WMS_ORDER_FILTER}
           AND (
             ${expectedOmsOrderRef} IS NULL
             OR ${expectedOmsOrderRef} !~ '^[0-9]+$'
@@ -139,8 +144,8 @@ export function buildReadinessChecks(): ReadinessCheck[] {
     {
       id: "oms_wms_item_missing_oms_line_id",
       severity: "blocker",
-      description: "Active OMS-origin WMS items must point at the OMS line that authorized them.",
-      constraintTarget: "Partial NOT NULL constraint for OMS-origin WMS order_items.oms_order_line_id.",
+      description: "Current open OMS-origin WMS items must point at the OMS line that authorized them.",
+      constraintTarget: "Partial NOT NULL constraint for current open OMS-origin WMS order_items.oms_order_line_id.",
       sql: `
         SELECT
           o.id AS wms_order_id,
@@ -152,13 +157,13 @@ export function buildReadinessChecks(): ReadinessCheck[] {
           oi.sku,
           oi.quantity,
           oi.status AS item_status,
-          oi.created_at
+          o.created_at AS wms_order_created_at
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
         WHERE ${OMS_ORIGIN_SOURCE_FILTER}
-          AND ${ACTIVE_WMS_ITEM_FILTER}
+          AND ${CURRENT_OPEN_WMS_ITEM_FILTER}
           AND oi.oms_order_line_id IS NULL
-        ORDER BY oi.created_at DESC NULLS LAST, oi.id DESC
+        ORDER BY o.created_at DESC NULLS LAST, oi.id DESC
       `,
     },
     {
@@ -179,7 +184,6 @@ export function buildReadinessChecks(): ReadinessCheck[] {
         JOIN wms.orders o ON o.id = oi.order_id
         LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
         WHERE oi.oms_order_line_id IS NOT NULL
-          AND ${ACTIVE_WMS_ITEM_FILTER}
           AND ol.id IS NULL
         ORDER BY oi.id DESC
       `,
@@ -204,7 +208,7 @@ export function buildReadinessChecks(): ReadinessCheck[] {
         JOIN wms.orders o ON o.id = oi.order_id
         JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
         WHERE ${OMS_ORIGIN_SOURCE_FILTER}
-          AND ${ACTIVE_WMS_ITEM_FILTER}
+          AND ${CURRENT_OPEN_WMS_ITEM_FILTER}
           AND ${expectedOmsOrderRef} ~ '^[0-9]+$'
           AND ol.order_id::text <> ${expectedOmsOrderRef}
         ORDER BY oi.id DESC
@@ -226,7 +230,7 @@ export function buildReadinessChecks(): ReadinessCheck[] {
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
         WHERE oi.oms_order_line_id IS NOT NULL
-          AND ${ACTIVE_WMS_ITEM_FILTER}
+          AND ${CURRENT_OPEN_WMS_ITEM_FILTER}
         GROUP BY o.id, o.order_number, oi.oms_order_line_id
         HAVING COUNT(*) > 1
         ORDER BY duplicate_item_count DESC, o.id DESC
@@ -247,7 +251,7 @@ export function buildReadinessChecks(): ReadinessCheck[] {
         FROM wms.order_items oi
         JOIN wms.orders o ON o.id = oi.order_id
         WHERE oi.oms_order_line_id IS NOT NULL
-          AND ${ACTIVE_WMS_ITEM_FILTER}
+          AND ${CURRENT_OPEN_WMS_ITEM_FILTER}
         GROUP BY oi.oms_order_line_id
         HAVING COUNT(DISTINCT o.id) > 1
         ORDER BY wms_order_count DESC, oi.oms_order_line_id DESC
@@ -268,7 +272,7 @@ export function buildReadinessChecks(): ReadinessCheck[] {
           FROM wms.order_items oi
           JOIN wms.orders o ON o.id = oi.order_id
           WHERE oi.oms_order_line_id IS NOT NULL
-            AND ${ACTIVE_WMS_ITEM_FILTER}
+            AND ${CURRENT_OPEN_WMS_ITEM_FILTER}
           GROUP BY oi.oms_order_line_id
         )
         SELECT
@@ -300,7 +304,7 @@ export function buildReadinessChecks(): ReadinessCheck[] {
           FROM wms.order_items oi
           JOIN wms.orders o ON o.id = oi.order_id
           WHERE oi.oms_order_line_id IS NOT NULL
-            AND ${ACTIVE_WMS_ITEM_FILTER}
+            AND ${CURRENT_OPEN_WMS_ITEM_FILTER}
           GROUP BY oi.oms_order_line_id
         )
         SELECT
