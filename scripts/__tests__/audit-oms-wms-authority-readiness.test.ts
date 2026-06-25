@@ -77,6 +77,44 @@ describe("audit-oms-wms-authority-readiness", () => {
     }
   });
 
+  it("does not query nonexistent WMS order item timestamp columns", async () => {
+    const { buildReadinessChecks } = await loadAuditModule();
+
+    for (const check of buildReadinessChecks()) {
+      expect(check.sql, check.id).not.toContain("oi.created_at");
+    }
+  });
+
+  it("scopes materialization checks to current open WMS orders", async () => {
+    const { buildReadinessChecks } = await loadAuditModule();
+    const activeMaterializationChecks = buildReadinessChecks()
+      .filter((check) =>
+        check.id === "oms_wms_item_missing_oms_line_id" ||
+        check.id === "oms_wms_duplicate_order_line_items" ||
+        check.id === "oms_line_multiple_active_wms_orders" ||
+        check.id === "oms_line_over_materialized" ||
+        check.id === "wms_order_materialized_counter_drift"
+      );
+
+    expect(activeMaterializationChecks.length).toBe(5);
+    for (const check of activeMaterializationChecks) {
+      expect(check.sql, check.id).toContain("o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')");
+      expect(check.sql, check.id).toContain("o.cancelled_at IS NULL");
+      expect(check.sql, check.id).toContain("o.completed_at IS NULL");
+    }
+  });
+
+  it("keeps orphan OMS-line FK checks broad because FK validation is table-wide", async () => {
+    const { buildReadinessChecks } = await loadAuditModule();
+    const orphanCheck = buildReadinessChecks()
+      .find((check) => check.id === "oms_wms_item_orphan_oms_line");
+
+    expect(orphanCheck).toBeDefined();
+    expect(orphanCheck!.sql).not.toContain("o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')");
+    expect(orphanCheck!.sql).toContain("LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id");
+    expect(orphanCheck!.sql).toContain("ol.id IS NULL");
+  });
+
   it("exempts known combined-child mirror rows from external shipment identity duplicate checks", async () => {
     const { buildReadinessChecks } = await loadAuditModule();
     const identityChecks = buildReadinessChecks()
