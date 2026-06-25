@@ -98,6 +98,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
       externalProductId: item.legacyItemId || null, // eBay product ID
       sku: item.sku,
       title: item.title,
+      name: item.title,
       quantity: qty,
       paidPriceCents,
       totalCents: lineItemCostCents, // product cost only, no shipping/tax

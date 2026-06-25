@@ -786,6 +786,58 @@ function parseWmsShipmentItemLineKey(lineItemKey: string | null | undefined): nu
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
+function parsePositiveWmsShipmentItemsFromShipStation(
+  shipment: ShipStationShipment,
+): Array<{ sourceShipmentItemId: number; qty: number }> | null {
+  const ssItems = Array.isArray(shipment.shipmentItems)
+    ? shipment.shipmentItems
+    : [];
+  if (ssItems.length === 0) return null;
+
+  const parsed: Array<{ sourceShipmentItemId: number; qty: number }> = [];
+  for (const item of ssItems) {
+    const sourceShipmentItemId = parseWmsShipmentItemLineKey(item.lineItemKey);
+    const qty = Number(item.quantity);
+    if (
+      sourceShipmentItemId === null ||
+      !Number.isInteger(qty) ||
+      qty < 0
+    ) {
+      return null;
+    }
+    parsed.push({ sourceShipmentItemId, qty });
+  }
+
+  return parsed;
+}
+
+function hasSameShipmentItemSet(
+  parentItems: Array<{ id: number; qty: number }>,
+  ssItems: Array<{ sourceShipmentItemId: number; qty: number }>,
+): boolean {
+  if (parentItems.length === 0 || parentItems.length !== ssItems.length) {
+    return false;
+  }
+
+  const parentQtyByItemId = new Map<number, number>();
+  for (const item of parentItems) {
+    const id = Number(item.id);
+    const qty = Number(item.qty);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(qty) || qty < 0) {
+      return false;
+    }
+    parentQtyByItemId.set(id, qty);
+  }
+
+  for (const item of ssItems) {
+    if (parentQtyByItemId.get(item.sourceShipmentItemId) !== item.qty) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function withShipmentItemsIncluded(baseUrl: string, path: string): string {
   const isAbsolute = path.startsWith("http");
   const parsed = new URL(isAbsolute ? path : `${baseUrl}${path}`);
@@ -1113,6 +1165,51 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       `);
       if (existing?.rows?.[0]) {
         return existing.rows[0];
+      }
+
+      const parsedShipStationItems = parsePositiveWmsShipmentItemsFromShipStation(shipment);
+      if (parsedShipStationItems) {
+        const parentItemsResult: any = await db.execute(sql`
+          SELECT id, qty
+          FROM wms.outbound_shipment_items
+          WHERE shipment_id = ${parent.id}
+        `);
+        const parentItems = (parentItemsResult?.rows ?? []).map((row: any) => ({
+          id: Number(row.id),
+          qty: Number(row.qty),
+        }));
+
+        if (hasSameShipmentItemSet(parentItems, parsedShipStationItems)) {
+          const incomingOrderKey = shipment.orderKey || parent.shipstation_order_key || null;
+          const repaired: any = await db.execute(sql`
+            UPDATE wms.outbound_shipments
+            SET shipstation_order_id = ${shipment.orderId},
+                shipstation_order_key = ${incomingOrderKey},
+                external_fulfillment_id = ${externalFulfillmentId},
+                requires_review = CASE
+                  WHEN shipstation_order_id IS NOT NULL
+                   AND shipstation_order_id <> ${shipment.orderId}
+                    THEN true
+                  ELSE requires_review
+                END,
+                review_reason = CASE
+                  WHEN shipstation_order_id IS NOT NULL
+                   AND shipstation_order_id <> ${shipment.orderId}
+                    THEN 'shipstation_duplicate_order_key_repaired'
+                  ELSE review_reason
+                END,
+                updated_at = NOW()
+            WHERE id = ${parent.id}
+            RETURNING id, order_id, status, shipstation_order_id
+          `);
+          const repairedRow = repaired?.rows?.[0];
+          if (repairedRow) {
+            console.warn(
+              `[ShipStation Webhook V2] Repaired shipment ${parent.id} mapping to SS order ${shipment.orderId} instead of creating a split row for duplicate orderKey ${incomingOrderKey ?? "unknown"}.`,
+            );
+            return repairedRow;
+          }
+        }
       }
 
       const ssOrderKey = shipment.orderKey || parent.shipstation_order_key;

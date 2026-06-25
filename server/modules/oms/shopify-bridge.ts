@@ -16,6 +16,7 @@ import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 
 
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
+import { buildChannelLineDisplayName } from "./line-display-name";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 
 let notificationBackfillRunning = false;
@@ -113,11 +114,17 @@ export async function bridgeShopifyOrderToOms(
       
       const paidPriceCents = Math.round(retailPriceCents - (totalDiscountCents / qty));
       const totalCents = (retailPriceCents * qty) - totalDiscountCents;
+      const displayName = buildChannelLineDisplayName({
+        name: item.name,
+        title: item.title,
+        variantTitle: item.variant_title,
+      });
 
       return {
         externalLineItemId: item.shopify_line_item_id || String(item.id),
         sku: item.sku,
-        title: item.title,
+        title: displayName,
+        name: displayName,
         quantity: qty,
         paidPriceCents,
         retailPriceCents,

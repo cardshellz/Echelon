@@ -1325,6 +1325,146 @@ describe("processShipNotify V2 :: error resilience", () => {
   });
 });
 
+describe("processShipNotify V2 :: duplicate orderKey repair", () => {
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "false";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    delete process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED;
+    vi.restoreAllMocks();
+  });
+
+  it("repairs a duplicate ShipStation orderKey mapping instead of creating a fake split shipment", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7003,
+      orderId: 555099,
+      orderKey: "echelon-wms-shp-501",
+      shipmentItems: [
+        { lineItemKey: "wms-item-10001", sku: "SKU-A", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordShipment: vi.fn(async () => undefined),
+    };
+
+    const mock = makeDb([
+      // V2 lookup by ShipStation order id: duplicate SS order is not yet known.
+      { rows: [] },
+      // Parent shipment parsed from echelon-wms-shp-501.
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            channel_id: 7,
+            status: "queued",
+            shipstation_order_id: 555000,
+            shipstation_order_key: "echelon-wms-shp-501",
+          },
+        ],
+      },
+      // Advisory lock.
+      { rows: [] },
+      // No existing split row for the incoming SS shipment/order id.
+      { rows: [] },
+      // Parent shipment items exactly match the incoming SS shipment items.
+      { rows: [{ id: 10001, qty: 1 }] },
+      // Repair parent mapping instead of inserting a shipstation_split row.
+      { rows: [{ id: 501, order_id: 42, status: "queued", shipstation_order_id: 555099 }] },
+      // Advisory unlock.
+      { rows: [] },
+      // Combined-shipment source item order grouping.
+      { rows: [{ source_shipment_item_id: 10001, wms_order_id: 42 }] },
+      // Existing target shipment item row belongs to the original shipment.
+      { rows: [{ id: 10001, order_item_id: 30001, sku: "SKU-A", qty: 1 }] },
+      // Source item copied from the original shipment row.
+      {
+        rows: [
+          {
+            id: 10001,
+            order_item_id: 30001,
+            product_variant_id: 40001,
+            from_location_id: 50001,
+            box_id: null,
+            weight_oz: 4,
+          },
+        ],
+      },
+      // UPDATE wms.outbound_shipment_items.
+      { rows: [] },
+      // loadValidatedInventoryShipmentItems.
+      {
+        rows: [
+          {
+            id: 10001,
+            order_item_id: 30001,
+            product_variant_id: 40001,
+            qty: 1,
+            pick_location_id: 50001,
+          },
+        ],
+      },
+      // self-heal: clear inventory_deduction_missing_item_data flag.
+      { rows: [] },
+      // markShipmentShipped load-current.
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            status: "queued",
+            tracking_number: null,
+            carrier: null,
+            tracking_url: null,
+          },
+        ],
+      },
+      // UPDATE outbound_shipments.
+      { rows: [] },
+      // recompute: order row.
+      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
+      // recompute: shipment statuses.
+      { rows: [{ status: "shipped" }] },
+      // recompute UPDATE wms.orders.
+      { rows: [] },
+      // resolve OMS id.
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      // finality guard.
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
+      // OMS line status derivation.
+      { rows: [] },
+      // applyShipmentQuantitiesToWmsOrderItems.
+      { rows: [] },
+      // delayed tracking provider guard.
+      { rows: [{ provider: "shopify" }] },
+      // Shopify fulfillment provider guard.
+      { rows: [{ provider: "shopify" }] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [shipmentPayload],
+    }) as any;
+
+    const processed = await createShipStationService(mock.db, inventoryCore)
+      .processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
+      orderItemId: 30001,
+      qty: 1,
+      shipmentId: "501",
+    }));
+    const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
+    expect(sqlText).toMatch(/shipstation_duplicate_order_key_repaired/);
+    expect(sqlText).toMatch(/UPDATE wms\.outbound_shipments/);
+    expect(sqlText).not.toMatch(/shipstation_split/);
+  });
+});
+
 describe("shipstation.service.ts :: legacy tracking retry regression", () => {
   const src = readFileSync(
     resolve(__dirname, "../../shipstation.service.ts"),

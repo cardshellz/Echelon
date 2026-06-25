@@ -6,6 +6,8 @@
  * to ensure plan_discount_cents and coupon_discount_cents are calculated correctly.
  */
 
+import { buildChannelLineDisplayName } from "./line-display-name";
+
 // Rewards redemption detection constants
 const REWARDS_REDEMPTION_LABEL = process.env.REWARDS_REDEMPTION_LABEL || "Shellz Rewards Redemption";
 
@@ -140,7 +142,11 @@ function buildNormalizedLineItem(
     externalLineItemId: item.id?.toString() || "",
     externalProductId: item.product_id?.toString() || null,
     sku: item.sku || null,
-    title: `${item.title}${item.variant_title ? ` - ${item.variant_title}` : ""}`,
+    title: buildChannelLineDisplayName({
+      name: item.name,
+      title: item.title,
+      variantTitle: item.variant_title,
+    }),
     variantTitle: item.variant_title || null,
     name: item.name || null,
     vendor: item.vendor || null,
