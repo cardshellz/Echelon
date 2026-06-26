@@ -97,6 +97,14 @@ describe("wms-sync existing order reconciliation", () => {
     );
   });
 
+  it("creates manual-review exceptions for OMS edit propagation review branches", () => {
+    expect(WMS_SYNC_SRC).toMatch(/"edit_removed_picked_wms_item"/);
+    expect(WMS_SYNC_SRC).toMatch(/"edit_picked_quantity_exceeds_oms_authority"/);
+    expect(WMS_SYNC_SRC).toMatch(/source: "propagateOmsEditsToWms"/);
+    expect(WMS_SYNC_SRC).toMatch(/result\.flaggedForReview\.push\(reviewMessage\)/);
+    expect(WMS_SYNC_SRC).toMatch(/reviewMessage: args\.reviewMessage \?\? null/);
+  });
+
   it("uses remaining OMS line authority instead of raw channel quantity for WMS materialization", () => {
     expect(WMS_SYNC_SRC).toMatch(/getOmsLineMaterializableQuantity/);
     expect(WMS_SYNC_SRC).toMatch(/getOmsLineRemainingMaterializableQuantity/);
