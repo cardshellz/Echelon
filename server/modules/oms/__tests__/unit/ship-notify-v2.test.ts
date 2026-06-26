@@ -737,11 +737,49 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(executeSqls[0]).toMatch(/shipstation_order_id/);
     // Legacy fallback then ran the OMS-by-pointer query.
     expect(executeSqls[1]).toMatch(/oms_fulfillment_order_id/);
+    // Final no-match is persisted as a WMS review exception.
+    expect(executeSqls.join("\n")).toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
 
     // Proof the legacy path was reached: it used the fluent builder to
     // hit omsOrders select.
     const selectCalls = mock.calls.filter((c) => c.tag === "select");
     expect(selectCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("records unmatched ShipStation callbacks as reconciliation exceptions", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 88001,
+      orderId: 99001,
+      orderKey: "external-order-key",
+      orderNumber: "SS-EXT-99001",
+      trackingNumber: "1ZUNMATCHED",
+    });
+
+    const mock = makeDb([
+      // V2 lookup by shipstation_order_id -> not found. Non-Echelon orderKey
+      // skips legacy SQL, so the next execute is the review-exception upsert.
+      { rows: [] },
+      { rows: [] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [shipmentPayload],
+    }) as any;
+
+    const svc = createShipStationService(mock.db);
+    const processed = await svc.processShipNotify("/foo");
+
+    expect(processed).toBe(0);
+
+    const sqlText = mock.calls
+      .filter((c) => c.tag === "execute")
+      .map((c) => c.sqlText)
+      .join("\n");
+    expect(sqlText).toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
+    expect(sqlText).toMatch(/manual_review/);
+    expect(sqlText).toMatch(/ship_notify_no_match/);
+    expect(sqlText).toMatch(/ON CONFLICT \(idempotency_key\)/);
+    expect(mock.calls.some((c) => c.tag === "insert")).toBe(false);
   });
 });
 

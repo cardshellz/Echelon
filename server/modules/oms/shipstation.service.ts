@@ -2555,6 +2555,94 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  function nullableExternalRef(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    const text = String(value).trim();
+    return text.length > 0 ? text : null;
+  }
+
+  function buildShipNotifyNoMatchIdempotencyKey(
+    shipment: ShipStationShipment,
+  ): string {
+    const key = [
+      "shipstation_notify",
+      "ship_notify_no_match",
+      nullableExternalRef(shipment.orderId) ?? "no-order-id",
+      nullableExternalRef(shipment.shipmentId) ?? "no-shipment-id",
+      nullableExternalRef(shipment.orderKey) ?? "no-order-key",
+      nullableExternalRef(shipment.trackingNumber) ?? "no-tracking",
+    ].join(":");
+
+    return key.length <= 500 ? key : key.slice(0, 500);
+  }
+
+  async function recordShipNotifyNoMatchException(
+    shipment: ShipStationShipment,
+    v2Fallback: boolean,
+  ): Promise<void> {
+    const ssOrderRef = nullableExternalRef(shipment.orderId);
+    const ssShipmentRef = nullableExternalRef(shipment.shipmentId);
+    const details = {
+      ssShipmentId: shipment.shipmentId ?? null,
+      ssOrderId: shipment.orderId ?? null,
+      ssOrderKey: shipment.orderKey ?? null,
+      orderNumber: shipment.orderNumber ?? null,
+      trackingNumber: shipment.trackingNumber ?? null,
+      carrierCode: shipment.carrierCode ?? null,
+      serviceCode: shipment.serviceCode ?? null,
+      shipDate: shipment.shipDate ?? null,
+      v2Fallback,
+      requiresReview: true,
+      shipmentItems: Array.isArray(shipment.shipmentItems)
+        ? shipment.shipmentItems.map((item) => ({
+            orderItemId: item.orderItemId ?? null,
+            lineItemKey: item.lineItemKey ?? null,
+            sku: item.sku,
+            quantity: item.quantity,
+          }))
+        : [],
+    };
+    const summary = `Unmatched ShipStation SHIP_NOTIFY callback for order ${ssOrderRef ?? "unknown"} shipment ${ssShipmentRef ?? "unknown"}`;
+
+    await db.execute(sql`
+      INSERT INTO wms.reconciliation_exceptions (
+        source,
+        classification,
+        rule,
+        status,
+        severity,
+        external_system,
+        external_order_ref,
+        external_shipment_ref,
+        external_order_key,
+        idempotency_key,
+        summary,
+        details
+      )
+      VALUES (
+        'shipstation_notify',
+        'manual_review',
+        'ship_notify_no_match',
+        'open',
+        'review',
+        'shipstation',
+        ${ssOrderRef},
+        ${ssShipmentRef},
+        ${nullableExternalRef(shipment.orderKey)},
+        ${buildShipNotifyNoMatchIdempotencyKey(shipment)},
+        ${summary},
+        ${JSON.stringify(details)}::jsonb
+      )
+      ON CONFLICT (idempotency_key)
+        WHERE status IN ('open', 'acknowledged')
+      DO UPDATE SET
+        last_seen_at = NOW(),
+        updated_at = NOW(),
+        occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
+        details = wms.reconciliation_exceptions.details || EXCLUDED.details
+    `);
+  }
+
   /**
    * Legacy (pre-Commit 15) per-shipment handler. The body of the
    * original `for (const shipment of shipments)` loop, extracted into
@@ -3015,21 +3103,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     try {
-      await db.insert(omsOrderEvents).values({
-        orderId: 0,
-        eventType: "ship_notify_no_match",
-        details: {
-          ssShipmentId: shipment.shipmentId ?? null,
-          ssOrderId: shipment.orderId ?? null,
-          ssOrderKey: shipment.orderKey ?? null,
-          trackingNumber: shipment.trackingNumber ?? null,
-          carrierCode: shipment.carrierCode ?? null,
-          requiresReview: true,
-        },
-      });
-    } catch (deadLetterErr: any) {
+      await recordShipNotifyNoMatchException(shipment, v2Result.fallback);
+    } catch (exceptionErr: any) {
       console.error(
-        `[ShipStation Webhook] Failed to persist no-match dead letter for SS shipment ${shipment.shipmentId}: ${deadLetterErr?.message}`,
+        `[ShipStation Webhook] Failed to persist no-match reconciliation exception for SS shipment ${shipment.shipmentId}: ${exceptionErr?.message}`,
       );
     }
 

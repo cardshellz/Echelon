@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SHIPSTATION_SRC = readFileSync(
@@ -43,8 +44,10 @@ describe("D-DUPEVENT: recordShipmentEventV2 dedup", () => {
   });
 
   it("migration exists for the unique index", () => {
-    const migrationPath =
-      "/home/user/Echelon/migrations/0571_oms_order_events_ship_dedup.sql";
+    const migrationPath = resolve(
+      process.cwd(),
+      "migrations/0571_oms_order_events_ship_dedup.sql",
+    );
     expect(existsSync(migrationPath)).toBe(true);
 
     const sql = readFileSync(migrationPath, "utf8");
@@ -70,36 +73,41 @@ describe("D-NOMATCH: no-match SHIP_NOTIFY surfacing", () => {
     expect(fnBlock).toContain("JSON.stringify");
   });
 
-  it("persists a dead-letter event for unmatched shipments", () => {
+  it("persists a WMS reconciliation exception for unmatched shipments", () => {
     const fnBlock = SHIPSTATION_SRC.substring(
       SHIPSTATION_SRC.indexOf("D-NOMATCH"),
       SHIPSTATION_SRC.indexOf("return { processed: false }",
         SHIPSTATION_SRC.indexOf("D-NOMATCH")),
     );
-    expect(fnBlock).toContain("db.insert(omsOrderEvents)");
+    expect(fnBlock).toContain("recordShipNotifyNoMatchException");
     expect(fnBlock).toContain("ship_notify_no_match");
-    expect(fnBlock).toContain("requiresReview");
+    expect(SHIPSTATION_SRC).toContain("wms.reconciliation_exceptions");
+    expect(SHIPSTATION_SRC).toContain("manual_review");
+    expect(fnBlock).not.toContain("orderId: 0");
   });
 
-  it("includes ShipStation identifiers in dead letter", () => {
+  it("includes ShipStation identifiers in the exception details", () => {
     const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf("D-NOMATCH"),
-      SHIPSTATION_SRC.indexOf("return { processed: false }",
-        SHIPSTATION_SRC.indexOf("D-NOMATCH")),
+      SHIPSTATION_SRC.indexOf("async function recordShipNotifyNoMatchException"),
+      SHIPSTATION_SRC.indexOf(
+        "async function",
+        SHIPSTATION_SRC.indexOf("async function recordShipNotifyNoMatchException") + 10,
+      ),
     );
     expect(fnBlock).toContain("ssShipmentId");
     expect(fnBlock).toContain("ssOrderId");
     expect(fnBlock).toContain("ssOrderKey");
     expect(fnBlock).toContain("trackingNumber");
+    expect(fnBlock).toContain("idempotency_key");
   });
 
-  it("does not throw on dead-letter persistence failure", () => {
+  it("does not throw on exception persistence failure", () => {
     const fnBlock = SHIPSTATION_SRC.substring(
       SHIPSTATION_SRC.indexOf("D-NOMATCH"),
       SHIPSTATION_SRC.indexOf("return { processed: false }",
         SHIPSTATION_SRC.indexOf("D-NOMATCH")),
     );
-    expect(fnBlock).toContain("catch (deadLetterErr");
+    expect(fnBlock).toContain("catch (exceptionErr");
   });
 });
 
