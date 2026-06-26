@@ -95,6 +95,9 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   const [
     flowReconciliationIssues,
     failedInbox,
+    activeWmsItemsWithoutOmsAuthority,
+    omsLineAuthorityOverMaterialized,
+    reconciliationManualReviews,
     wmsPendingItemsWithoutShipment,
     staleProcessingInbox,
     deadRetries,
@@ -121,6 +124,130 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         FROM oms.webhook_inbox
         WHERE status IN ('failed', 'dead')
         ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.order_items oi
+        JOIN wms.orders wo ON wo.id = oi.order_id
+        LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+        WHERE COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+          AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+          AND wo.cancelled_at IS NULL
+          AND wo.completed_at IS NULL
+          AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+          AND COALESCE(oi.quantity, 0) > 0
+          AND (
+            oi.oms_order_line_id IS NULL
+            OR ol.id IS NULL
+          )
+      `,
+      sql`
+        SELECT wo.id AS wms_order_id,
+               wo.order_number,
+               wo.source,
+               wo.warehouse_status,
+               oi.id AS wms_order_item_id,
+               oi.oms_order_line_id,
+               oi.sku,
+               oi.quantity,
+               oi.status AS item_status,
+               CASE
+                 WHEN oi.oms_order_line_id IS NULL THEN 'missing_oms_order_line_id'
+                 WHEN ol.id IS NULL THEN 'orphan_oms_order_line_id'
+                 ELSE 'unknown'
+               END AS authority_gap
+        FROM wms.order_items oi
+        JOIN wms.orders wo ON wo.id = oi.order_id
+        LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+        WHERE COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+          AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+          AND wo.cancelled_at IS NULL
+          AND wo.completed_at IS NULL
+          AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+          AND COALESCE(oi.quantity, 0) > 0
+          AND (
+            oi.oms_order_line_id IS NULL
+            OR ol.id IS NULL
+          )
+        ORDER BY wo.updated_at DESC NULLS LAST, oi.id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        WITH active_materialized AS (
+          SELECT
+            oi.oms_order_line_id,
+            SUM(oi.quantity)::int AS materialized_quantity
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+          GROUP BY oi.oms_order_line_id
+        )
+        SELECT COUNT(*)::int AS count
+        FROM active_materialized am
+        JOIN oms.oms_order_lines ol ON ol.id = am.oms_order_line_id
+        WHERE am.materialized_quantity > COALESCE(ol.authority_fulfillable_quantity, 0)
+      `,
+      sql`
+        WITH active_materialized AS (
+          SELECT
+            oi.oms_order_line_id,
+            SUM(oi.quantity)::int AS materialized_quantity,
+            ARRAY_AGG(oi.id ORDER BY oi.id) AS wms_order_item_ids,
+            ARRAY_AGG(DISTINCT wo.id ORDER BY wo.id) AS wms_order_ids
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+          GROUP BY oi.oms_order_line_id
+        )
+        SELECT ol.order_id AS oms_order_id,
+               ol.id AS oms_order_line_id,
+               ol.sku,
+               ol.quantity AS oms_quantity,
+               ol.authority_fulfillable_quantity,
+               am.materialized_quantity,
+               am.materialized_quantity - COALESCE(ol.authority_fulfillable_quantity, 0) AS over_materialized_quantity,
+               am.wms_order_ids,
+               am.wms_order_item_ids
+        FROM active_materialized am
+        JOIN oms.oms_order_lines ol ON ol.id = am.oms_order_line_id
+        WHERE am.materialized_quantity > COALESCE(ol.authority_fulfillable_quantity, 0)
+        ORDER BY (am.materialized_quantity - COALESCE(ol.authority_fulfillable_quantity, 0)) DESC,
+                 ol.id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.reconciliation_exceptions
+        WHERE classification = 'manual_review'
+          AND status IN ('open', 'acknowledged')
+      `,
+      sql`
+        SELECT rule,
+               COUNT(*)::int AS count,
+               MAX(last_seen_at) AS last_seen_at
+        FROM wms.reconciliation_exceptions
+        WHERE classification = 'manual_review'
+          AND status IN ('open', 'acknowledged')
+        GROUP BY rule
+        ORDER BY COUNT(*) DESC, rule
         LIMIT 10
       `,
     ),
@@ -611,6 +738,27 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: wmsPendingItemsWithoutShipment.count,
       message: "Shippable WMS order items are pending but not attached to an active shipment.",
       sample: wmsPendingItemsWithoutShipment.sample,
+    }),
+    issue({
+      code: "WMS_ITEM_WITHOUT_OMS_AUTHORITY",
+      severity: "critical",
+      count: activeWmsItemsWithoutOmsAuthority.count,
+      message: "Active OMS-origin WMS items lack a valid OMS line authority reference.",
+      sample: activeWmsItemsWithoutOmsAuthority.sample,
+    }),
+    issue({
+      code: "OMS_LINE_AUTHORITY_OVER_MATERIALIZED",
+      severity: "critical",
+      count: omsLineAuthorityOverMaterialized.count,
+      message: "Active WMS materialized quantity exceeds OMS line authority.",
+      sample: omsLineAuthorityOverMaterialized.sample,
+    }),
+    issue({
+      code: "WMS_RECONCILIATION_MANUAL_REVIEW",
+      severity: "warning",
+      count: reconciliationManualReviews.count,
+      message: "Open OMS/WMS reconciliation exceptions need manual review, grouped by rule.",
+      sample: reconciliationManualReviews.sample,
     }),
     issue({
       code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
