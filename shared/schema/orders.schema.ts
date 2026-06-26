@@ -60,6 +60,22 @@ export type RoutingMatchType = typeof routingMatchTypeEnum[number];
 export const shipmentSourceEnum = ["shopify_webhook", "manual", "api"] as const;
 export type ShipmentSource = typeof shipmentSourceEnum[number];
 
+export const reconciliationClassificationEnum = [
+  "safe_auto_repair",
+  "manual_review",
+  "hard_block",
+  "historical_ignore",
+] as const;
+export type ReconciliationClassification = typeof reconciliationClassificationEnum[number];
+
+export const reconciliationExceptionStatusEnum = [
+  "open",
+  "acknowledged",
+  "resolved",
+  "ignored",
+] as const;
+export type ReconciliationExceptionStatus = typeof reconciliationExceptionStatusEnum[number];
+
 // Shipment status workflow (imported from shared/enums/order-status)
 
 // ============================================
@@ -516,6 +532,47 @@ export const insertOutboundShipmentItemSchema = createInsertSchema(outboundShipm
 
 export type InsertOutboundShipmentItem = z.infer<typeof insertOutboundShipmentItemSchema>;
 export type OutboundShipmentItem = typeof outboundShipmentItems.$inferSelect;
+
+// Durable review surface for proof-first OMS/WMS reconciliation. Reconciliation
+// code writes here when drift cannot be safely auto-repaired from complete line
+// authority and shipment evidence.
+export const reconciliationExceptions = wmsSchema.table("reconciliation_exceptions", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  source: varchar("source", { length: 50 }).notNull(),
+  classification: varchar("classification", { length: 30 }).notNull(),
+  rule: varchar("rule", { length: 80 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("open"),
+  severity: varchar("severity", { length: 20 }).notNull().default("review"),
+  wmsOrderId: integer("wms_order_id").references(() => orders.id, { onDelete: "set null" }),
+  wmsShipmentId: integer("wms_shipment_id").references(() => outboundShipments.id, { onDelete: "set null" }),
+  externalSystem: varchar("external_system", { length: 40 }),
+  externalOrderRef: varchar("external_order_ref", { length: 200 }),
+  externalShipmentRef: varchar("external_shipment_ref", { length: 200 }),
+  externalOrderKey: varchar("external_order_key", { length: 200 }),
+  idempotencyKey: varchar("idempotency_key", { length: 500 }).notNull(),
+  summary: text("summary").notNull(),
+  details: jsonb("details").notNull().default({}),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  occurrenceCount: integer("occurrence_count").notNull().default(1),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  resolvedBy: varchar("resolved_by", { length: 120 }),
+  resolution: text("resolution"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const insertReconciliationExceptionSchema = createInsertSchema(reconciliationExceptions).omit({
+  id: true,
+  firstSeenAt: true,
+  lastSeenAt: true,
+  occurrenceCount: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReconciliationException = z.infer<typeof insertReconciliationExceptionSchema>;
+export type ReconciliationException = typeof reconciliationExceptions.$inferSelect;
 
 // Line-fulfillment ledger — append-only, channel/engine-NEUTRAL source of truth
 // for net_shipped_qty per order line (FULFILLMENT_STATE_DESIGN.md §2.1).
