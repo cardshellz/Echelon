@@ -69,6 +69,9 @@ type WmsReconciliationAutoRepairRule =
   | "create_missing_initial_shipment"
   | "attach_authorized_line_to_planned_shipment";
 
+type WmsReconciliationManualReviewRule =
+  | "picked_quantity_exceeds_oms_authority";
+
 function toNonNegativeInteger(value: unknown, field: string): number {
   const normalized = Number(value ?? 0);
   if (!Number.isInteger(normalized) || normalized < 0) {
@@ -312,6 +315,80 @@ export class WmsSyncService {
         ...details,
       },
     });
+  }
+
+  private async recordWmsReconciliationReviewException(
+    database: DbLike,
+    args: {
+      rule: WmsReconciliationManualReviewRule;
+      omsOrderId: number;
+      wmsOrderId: number;
+      wmsOrderItemId: number;
+      omsOrderLineId: number | null;
+      sku: string | null;
+      omsQuantity: number;
+      wmsQuantity: number;
+      pickedQuantity: number;
+    },
+  ): Promise<void> {
+    const idempotencyKey = [
+      "oms_wms_reconciliation",
+      args.rule,
+      `oms-${args.omsOrderId}`,
+      `wms-${args.wmsOrderId}`,
+      `item-${args.wmsOrderItemId}`,
+      `line-${args.omsOrderLineId ?? "none"}`,
+    ].join(":").slice(0, 500);
+    const summary =
+      `WMS item ${args.wmsOrderItemId} has picked quantity ${args.pickedQuantity} ` +
+      `above OMS-authorized quantity ${args.omsQuantity}`;
+    const details = {
+      source: "reconcileExistingWmsOrderLines",
+      omsOrderId: args.omsOrderId,
+      wmsOrderId: args.wmsOrderId,
+      wmsOrderItemId: args.wmsOrderItemId,
+      omsOrderLineId: args.omsOrderLineId,
+      sku: args.sku,
+      omsQuantity: args.omsQuantity,
+      wmsQuantity: args.wmsQuantity,
+      pickedQuantity: args.pickedQuantity,
+    };
+
+    await database.execute(sql`
+      INSERT INTO wms.reconciliation_exceptions (
+        source,
+        classification,
+        rule,
+        status,
+        severity,
+        wms_order_id,
+        external_system,
+        external_order_ref,
+        idempotency_key,
+        summary,
+        details
+      )
+      VALUES (
+        'oms_wms_reconciliation',
+        'manual_review',
+        ${args.rule},
+        'open',
+        'review',
+        ${args.wmsOrderId},
+        'oms',
+        ${String(args.omsOrderId)},
+        ${idempotencyKey},
+        ${summary},
+        ${JSON.stringify(details)}::jsonb
+      )
+      ON CONFLICT (idempotency_key)
+        WHERE status IN ('open', 'acknowledged')
+      DO UPDATE SET
+        last_seen_at = NOW(),
+        updated_at = NOW(),
+        occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
+        details = wms.reconciliation_exceptions.details || EXCLUDED.details
+    `);
   }
 
   /**
@@ -1170,6 +1247,17 @@ export class WmsSyncService {
         console.warn(
           `[WMS Sync] Item ${wmsItem.sku} (id ${wmsItem.id}): OMS qty reduced to ${omsQty} but ${wmsItem.pickedQuantity} already picked — needs manual review`,
         );
+        await this.recordWmsReconciliationReviewException(db, {
+          rule: "picked_quantity_exceeds_oms_authority",
+          omsOrderId,
+          wmsOrderId,
+          wmsOrderItemId: wmsItem.id,
+          omsOrderLineId: wmsItem.omsOrderLineId,
+          sku: wmsItem.sku,
+          omsQuantity: omsQty,
+          wmsQuantity: wmsQty,
+          pickedQuantity: wmsItem.pickedQuantity ?? 0,
+        });
       } else if (omsQty !== wmsQty) {
         await db
           .update(wmsOrderItems)
