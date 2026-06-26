@@ -70,7 +70,13 @@ type WmsReconciliationAutoRepairRule =
   | "attach_authorized_line_to_planned_shipment";
 
 type WmsReconciliationManualReviewRule =
-  | "picked_quantity_exceeds_oms_authority";
+  | "picked_quantity_exceeds_oms_authority"
+  | "edit_removed_picked_wms_item"
+  | "edit_picked_quantity_exceeds_oms_authority";
+
+type WmsReconciliationManualReviewSource =
+  | "reconcileExistingWmsOrderLines"
+  | "propagateOmsEditsToWms";
 
 function toNonNegativeInteger(value: unknown, field: string): number {
   const normalized = Number(value ?? 0);
@@ -321,6 +327,7 @@ export class WmsSyncService {
     database: DbLike,
     args: {
       rule: WmsReconciliationManualReviewRule;
+      source: WmsReconciliationManualReviewSource;
       omsOrderId: number;
       wmsOrderId: number;
       wmsOrderItemId: number;
@@ -329,6 +336,9 @@ export class WmsSyncService {
       omsQuantity: number;
       wmsQuantity: number;
       pickedQuantity: number;
+      externalLineItemId?: string | null;
+      reviewMessage?: string;
+      summary?: string;
     },
   ): Promise<void> {
     const idempotencyKey = [
@@ -339,19 +349,21 @@ export class WmsSyncService {
       `item-${args.wmsOrderItemId}`,
       `line-${args.omsOrderLineId ?? "none"}`,
     ].join(":").slice(0, 500);
-    const summary =
+    const summary = args.summary ??
       `WMS item ${args.wmsOrderItemId} has picked quantity ${args.pickedQuantity} ` +
       `above OMS-authorized quantity ${args.omsQuantity}`;
     const details = {
-      source: "reconcileExistingWmsOrderLines",
+      source: args.source,
       omsOrderId: args.omsOrderId,
       wmsOrderId: args.wmsOrderId,
       wmsOrderItemId: args.wmsOrderItemId,
       omsOrderLineId: args.omsOrderLineId,
+      externalLineItemId: args.externalLineItemId ?? null,
       sku: args.sku,
       omsQuantity: args.omsQuantity,
       wmsQuantity: args.wmsQuantity,
       pickedQuantity: args.pickedQuantity,
+      reviewMessage: args.reviewMessage ?? null,
     };
 
     await database.execute(sql`
@@ -1249,6 +1261,7 @@ export class WmsSyncService {
         );
         await this.recordWmsReconciliationReviewException(db, {
           rule: "picked_quantity_exceeds_oms_authority",
+          source: "reconcileExistingWmsOrderLines",
           omsOrderId,
           wmsOrderId,
           wmsOrderItemId: wmsItem.id,
@@ -1664,9 +1677,24 @@ export class WmsSyncService {
           changes.push(`Cancelled pending item ${wmsItem.sku} (removed from order)`);
           result.removed++;
         } else if (wmsItem.status === "completed" || wmsItem.pickedQuantity > 0) {
-          result.flaggedForReview.push(
-            `Item ${wmsItem.sku} (id ${wmsItem.id}) removed from order but ${wmsItem.pickedQuantity} already picked — needs manual reversal`,
-          );
+          const reviewMessage =
+            `Item ${wmsItem.sku} (id ${wmsItem.id}) removed from order but ${wmsItem.pickedQuantity} already picked - needs manual reversal`;
+          result.flaggedForReview.push(reviewMessage);
+          await this.recordWmsReconciliationReviewException(db, {
+            rule: "edit_removed_picked_wms_item",
+            source: "propagateOmsEditsToWms",
+            omsOrderId,
+            wmsOrderId,
+            wmsOrderItemId: wmsItem.id,
+            omsOrderLineId: wmsItem.omsOrderLineId,
+            externalLineItemId: omsLine?.externalLineItemId ?? null,
+            sku: wmsItem.sku,
+            omsQuantity: 0,
+            wmsQuantity: wmsItem.quantity ?? 0,
+            pickedQuantity: wmsItem.pickedQuantity ?? 0,
+            reviewMessage,
+            summary: reviewMessage,
+          });
         }
         continue;
       }
@@ -1739,9 +1767,24 @@ export class WmsSyncService {
       } else if (wmsItem.pickedQuantity > 0) {
         if (omsQty < wmsItem.pickedQuantity) {
           // Qty reduced below what was already picked
-          result.flaggedForReview.push(
-            `Item ${wmsItem.sku} (id ${wmsItem.id}): qty reduced ${wmsQty} → ${omsQty} but ${wmsItem.pickedQuantity} already picked`,
-          );
+          const reviewMessage =
+            `Item ${wmsItem.sku} (id ${wmsItem.id}): qty reduced ${wmsQty} -> ${omsQty} but ${wmsItem.pickedQuantity} already picked`;
+          result.flaggedForReview.push(reviewMessage);
+          await this.recordWmsReconciliationReviewException(db, {
+            rule: "edit_picked_quantity_exceeds_oms_authority",
+            source: "propagateOmsEditsToWms",
+            omsOrderId,
+            wmsOrderId,
+            wmsOrderItemId: wmsItem.id,
+            omsOrderLineId: wmsItem.omsOrderLineId,
+            externalLineItemId: omsLine.externalLineItemId ?? null,
+            sku: wmsItem.sku,
+            omsQuantity: omsQty,
+            wmsQuantity: wmsQty,
+            pickedQuantity: wmsItem.pickedQuantity ?? 0,
+            reviewMessage,
+            summary: reviewMessage,
+          });
         } else if (omsQty > wmsQty) {
           // Qty increased — update qty, mark pending so picker picks the rest
           await db
