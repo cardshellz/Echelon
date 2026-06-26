@@ -63,6 +63,21 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_OPS_ALERT_SCHEDULER_NOT_STARTED"/);
     expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_OPS_ALERT_SCHEDULER_STALE"/);
   });
+
+  it("surfaces Phase 7 OMS/WMS authority monitoring signals", () => {
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "WMS_ITEM_WITHOUT_OMS_AUTHORITY"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "OMS_LINE_AUTHORITY_OVER_MATERIALIZED"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "WMS_RECONCILIATION_MANUAL_REVIEW"[\s\S]*severity: "warning"/,
+    );
+    expect(OPS_HEALTH_SRC).toContain("wms.reconciliation_exceptions");
+    expect(OPS_HEALTH_SRC).toContain("GROUP BY rule");
+    expect(OPS_HEALTH_SRC).toContain("authority_fulfillable_quantity");
+  });
 });
 
 describe("ops-health.service :: issue mapping", () => {
@@ -116,6 +131,69 @@ describe("ops-health.service :: issue mapping", () => {
       expect(health.workers.webhookRetry).toHaveProperty("startedAt");
       expect(health.workers.omsFlowReconciliation).toHaveProperty("startedAt");
       expect(health.workers.omsOpsAlert).toHaveProperty("startedAt");
+    } finally {
+      if (previousDisableSchedulers === undefined) {
+        delete process.env.DISABLE_SCHEDULERS;
+      } else {
+        process.env.DISABLE_SCHEDULERS = previousDisableSchedulers;
+      }
+    }
+  });
+
+  it("maps authority health query results to Phase 7 issue buckets", async () => {
+    const previousDisableSchedulers = process.env.DISABLE_SCHEDULERS;
+    process.env.DISABLE_SCHEDULERS = "true";
+    const execute = vi.fn(async (query: any) => {
+      const queryText = (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ");
+
+      if (
+        queryText.includes("LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id") &&
+        queryText.includes("authority_gap")
+      ) {
+        return { rows: [{ wms_order_item_id: 101, authority_gap: "missing_oms_order_line_id" }] };
+      }
+      if (
+        queryText.includes("LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id") &&
+        queryText.includes("COUNT(*)")
+      ) {
+        return { rows: [{ count: 1 }] };
+      }
+
+      if (queryText.includes("WITH active_materialized") && queryText.includes("over_materialized_quantity")) {
+        return { rows: [{ oms_order_line_id: 202, over_materialized_quantity: 1 }] };
+      }
+      if (
+        queryText.includes("WITH active_materialized") &&
+        queryText.includes("authority_fulfillable_quantity") &&
+        queryText.includes("COUNT(*)")
+      ) {
+        return { rows: [{ count: 1 }] };
+      }
+
+      if (queryText.includes("FROM wms.reconciliation_exceptions") && queryText.includes("GROUP BY rule")) {
+        return { rows: [{ rule: "picked_quantity_exceeds_oms_authority", count: 2 }] };
+      }
+      if (queryText.includes("FROM wms.reconciliation_exceptions") && queryText.includes("COUNT(*)")) {
+        return { rows: [{ count: 2 }] };
+      }
+
+      return { rows: [{ count: 0 }] };
+    });
+
+    try {
+      const health = await getOmsOpsHealth({ execute });
+
+      expect(
+        health.issues.find((issue) => issue.code === "WMS_ITEM_WITHOUT_OMS_AUTHORITY")?.sample,
+      ).toEqual([expect.objectContaining({ authority_gap: "missing_oms_order_line_id" })]);
+      expect(
+        health.issues.find((issue) => issue.code === "OMS_LINE_AUTHORITY_OVER_MATERIALIZED")?.sample,
+      ).toEqual([expect.objectContaining({ over_materialized_quantity: 1 })]);
+      expect(
+        health.issues.find((issue) => issue.code === "WMS_RECONCILIATION_MANUAL_REVIEW")?.sample,
+      ).toEqual([expect.objectContaining({ rule: "picked_quantity_exceeds_oms_authority" })]);
     } finally {
       if (previousDisableSchedulers === undefined) {
         delete process.env.DISABLE_SCHEDULERS;
