@@ -368,8 +368,13 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         className="mt-5 h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
         onClick={startOAuth}
       >
-        {connectButtonIcon(principal?.hasPasskey ?? false, emailCodeSent)}
+        {connectButtonIcon({
+          connectProofActive,
+          hasPasskey: principal?.hasPasskey ?? false,
+          emailCodeSent,
+        })}
         {connectButtonLabel({
+          connectProofActive,
           hasPasskey: principal?.hasPasskey ?? false,
           emailCodeSent,
           pendingAction,
@@ -442,6 +447,7 @@ function LaunchGate({
 }
 
 function connectButtonLabel(input: {
+  connectProofActive: boolean;
   hasPasskey: boolean;
   emailCodeSent: boolean;
   pendingAction: PendingAction;
@@ -451,6 +457,7 @@ function connectButtonLabel(input: {
   if (input.pendingAction === "verify-email-code") return "Verifying code";
   if (input.pendingAction === "passkey-proof") return "Waiting for passkey";
   if (input.pendingAction === "oauth-start") return "Opening authorization";
+  if (input.connectProofActive) return `Connect ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
   if (!input.hasPasskey && !input.emailCodeSent) return "Send verification code";
   return `Connect ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
 }
@@ -468,9 +475,14 @@ function activateButtonLabel(input: {
   return "Activate .ops";
 }
 
-function connectButtonIcon(hasPasskey: boolean, emailCodeSent: boolean): ReactNode {
-  if (hasPasskey) return <Fingerprint className="h-4 w-4" />;
-  if (!emailCodeSent) return <Mail className="h-4 w-4" />;
+function connectButtonIcon(input: {
+  connectProofActive: boolean;
+  hasPasskey: boolean;
+  emailCodeSent: boolean;
+}): ReactNode {
+  if (input.connectProofActive) return <Store className="h-4 w-4" />;
+  if (input.hasPasskey) return <Fingerprint className="h-4 w-4" />;
+  if (!input.emailCodeSent) return <Mail className="h-4 w-4" />;
   return <ArrowRight className="h-4 w-4" />;
 }
 
