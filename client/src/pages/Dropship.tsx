@@ -317,11 +317,11 @@ interface ReturnPolicyFormState {
 interface ShippingBoxFormState {
   code: string;
   name: string;
-  lengthMm: string;
-  widthMm: string;
-  heightMm: string;
-  tareWeightGrams: string;
-  maxWeightGrams: string;
+  lengthIn: string;
+  widthIn: string;
+  heightIn: string;
+  tareWeightLb: string;
+  maxWeightLb: string;
   isActive: boolean;
 }
 
@@ -398,11 +398,11 @@ const emptyCatalogRuleForm: CatalogRuleFormState = {
 const emptyShippingBoxForm: ShippingBoxFormState = {
   code: "",
   name: "",
-  lengthMm: "",
-  widthMm: "",
-  heightMm: "",
-  tareWeightGrams: "0",
-  maxWeightGrams: "",
+  lengthIn: "",
+  widthIn: "",
+  heightIn: "",
+  tareWeightLb: "0",
+  maxWeightLb: "",
   isActive: true,
 };
 
@@ -3334,7 +3334,14 @@ function ShippingConfigTab() {
   async function saveBox() {
     await runShippingAction("box", async () => {
       await putJson("/api/dropship/admin/shipping/boxes", buildShippingBoxInput({
-        ...boxForm,
+        code: boxForm.code,
+        name: boxForm.name,
+        lengthMm: inchesToMillimetersString(boxForm.lengthIn, "length"),
+        widthMm: inchesToMillimetersString(boxForm.widthIn, "width"),
+        heightMm: inchesToMillimetersString(boxForm.heightIn, "height"),
+        tareWeightGrams: poundsToGramsString(boxForm.tareWeightLb, "tare weight"),
+        maxWeightGrams: boxForm.maxWeightLb.trim() ? poundsToGramsString(boxForm.maxWeightLb, "max weight") : "",
+        isActive: boxForm.isActive,
         idempotencyKey: createDropshipIdempotencyKey("shipping-box"),
       }));
       setBoxForm(emptyShippingBoxForm);
@@ -3504,11 +3511,11 @@ function ShippingBoxPanel({
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <ShippingInput label="Code" value={form.code} onChange={(value) => onChange((current) => ({ ...current, code: value }))} />
         <ShippingInput label="Name" value={form.name} onChange={(value) => onChange((current) => ({ ...current, name: value }))} />
-        <ShippingInput label="Length mm" value={form.lengthMm} onChange={(value) => onChange((current) => ({ ...current, lengthMm: value }))} />
-        <ShippingInput label="Width mm" value={form.widthMm} onChange={(value) => onChange((current) => ({ ...current, widthMm: value }))} />
-        <ShippingInput label="Height mm" value={form.heightMm} onChange={(value) => onChange((current) => ({ ...current, heightMm: value }))} />
-        <ShippingInput label="Tare grams" value={form.tareWeightGrams} onChange={(value) => onChange((current) => ({ ...current, tareWeightGrams: value }))} />
-        <ShippingInput label="Max weight grams" value={form.maxWeightGrams} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxWeightGrams: value }))} />
+        <ShippingInput label="Length in" value={form.lengthIn} onChange={(value) => onChange((current) => ({ ...current, lengthIn: value }))} />
+        <ShippingInput label="Width in" value={form.widthIn} onChange={(value) => onChange((current) => ({ ...current, widthIn: value }))} />
+        <ShippingInput label="Height in" value={form.heightIn} onChange={(value) => onChange((current) => ({ ...current, heightIn: value }))} />
+        <ShippingInput label="Tare weight lb" value={form.tareWeightLb} onChange={(value) => onChange((current) => ({ ...current, tareWeightLb: value }))} />
+        <ShippingInput label="Max weight lb" value={form.maxWeightLb} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxWeightLb: value }))} />
         <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
       </div>
       <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
@@ -3749,8 +3756,8 @@ function ShippingConfigTables({
         headers={["Code", "Size", "Weight", "Status"]}
         rows={config.boxes.map((box) => [
           box.code,
-          `${box.lengthMm} x ${box.widthMm} x ${box.heightMm} mm`,
-          `${box.tareWeightGrams}g tare${box.maxWeightGrams ? ` / ${box.maxWeightGrams}g max` : ""}`,
+          `${formatMmAsInches(box.lengthMm)} x ${formatMmAsInches(box.widthMm)} x ${formatMmAsInches(box.heightMm)} in`,
+          `${formatGramsAsPounds(box.tareWeightGrams)} lb tare${box.maxWeightGrams ? ` / ${formatGramsAsPounds(box.maxWeightGrams)} lb max` : ""}`,
           box.isActive ? "Active" : "Inactive",
         ])}
       />
@@ -7149,6 +7156,44 @@ function storeConnectionNeedsAttention(connection: DropshipAdminStoreConnectionL
 function formatWarehouseOption(warehouse: DropshipWarehouseOption): string {
   const defaultSuffix = warehouse.isDefault === 1 ? " default" : "";
   return `${warehouse.name} (${warehouse.code}) - ID ${warehouse.id}${defaultSuffix}`;
+}
+
+function inchesToMillimetersString(value: string, field: string): string {
+  const parsed = parsePositiveDecimal(value, field);
+  return String(Math.max(1, Math.round(parsed * 25.4)));
+}
+
+function poundsToGramsString(value: string, field: string): string {
+  const parsed = parseNonNegativeDecimal(value, field);
+  return String(Math.round(parsed * 453.59237));
+}
+
+function parsePositiveDecimal(value: string, field: string): number {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${field} must be a positive number.`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeDecimal(value: string, field: string): number {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${field} must be zero or greater.`);
+  }
+  return parsed;
+}
+
+function formatMmAsInches(value: number): string {
+  return formatMeasurement(value / 25.4);
+}
+
+function formatGramsAsPounds(value: number): string {
+  return formatMeasurement(value / 453.59237);
+}
+
+function formatMeasurement(value: number): string {
+  return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
 function listingConfigResponseToForm(response: DropshipStoreListingConfigResponse): ListingConfigFormState {
