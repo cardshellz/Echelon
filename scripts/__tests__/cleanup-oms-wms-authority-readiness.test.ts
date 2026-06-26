@@ -136,7 +136,8 @@ describe("cleanup-oms-wms-authority-readiness", () => {
     expect(clearFn.indexOf("insertAuditRows")).toBeGreaterThan(-1);
     expect(clearFn.indexOf("UPDATE wms.order_items")).toBeGreaterThan(clearFn.indexOf("insertAuditRows"));
     expect(clearFn).toContain("assertExpectedRowCount");
-    expect(clearFn).toContain("AND ol.id IS NULL");
+    expect(clearFn).toContain("AND NOT EXISTS");
+    expect(clearFn).toContain("WHERE ol.id = oi.oms_order_line_id");
 
     const deleteFn = source.slice(
       source.indexOf("async function deleteNonpositiveShipmentItems"),

@@ -469,11 +469,14 @@ async function clearOrphanOmsLineRefs(
     UPDATE wms.order_items oi
        SET oms_order_line_id = NULL
       FROM wms.orders o
-      LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
      WHERE oi.id = ANY($1::int[])
        AND o.id = oi.order_id
        AND oi.oms_order_line_id IS NOT NULL
-       AND ol.id IS NULL
+       AND NOT EXISTS (
+         SELECT 1
+         FROM oms.oms_order_lines ol
+         WHERE ol.id = oi.oms_order_line_id
+       )
        AND ${SAFE_HISTORICAL_ORPHAN_ORDER_FILTER}
   `, [ids]);
   assertExpectedRowCount(operation.id, candidates.length, updateResult.rowCount ?? 0);
