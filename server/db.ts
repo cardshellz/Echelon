@@ -76,7 +76,7 @@ export async function runStartupMigrations(): Promise<void> {
           id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
           return_id BIGINT NOT NULL REFERENCES wms.returns(id) ON DELETE CASCADE,
           order_item_id INTEGER REFERENCES wms.order_items(id) ON DELETE SET NULL,
-          oms_order_line_id INTEGER,
+          oms_order_line_id BIGINT,
           external_line_item_id VARCHAR(100),
           sku VARCHAR(100),
           expected_qty INTEGER NOT NULL,
