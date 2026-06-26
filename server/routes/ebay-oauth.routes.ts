@@ -11,6 +11,11 @@ import { requireAuth } from "./middleware";
 import type { Express, Request, Response } from "express";
 import { db } from "../db";
 import { EbayAuthService, type EbayAuthConfig } from "../modules/channels/adapters/ebay/ebay-auth.service";
+import { createDropshipStoreConnectionServiceFromEnv } from "../modules/dropship/infrastructure/dropship-store-connection.factory";
+import { DropshipError } from "../modules/dropship/domain/errors";
+import { parseDropshipOAuthCallbackQuery } from "../modules/dropship/interfaces/http/dropship-store-connection.routes";
+
+const DROPSHIP_PORTAL_URL = process.env.DROPSHIP_PORTAL_URL || "https://cardshellz.io";
 
 function getEbayAuthConfig(): EbayAuthConfig | null {
   const clientId = process.env.EBAY_CLIENT_ID;
@@ -51,14 +56,19 @@ export function registerEbayOAuthRoutes(app: Express): void {
   // GET /api/ebay/oauth/callback — Exchange auth code for tokens
   // -----------------------------------------------------------------------
   app.get("/api/ebay/oauth/callback", async (req: Request, res: Response) => {
+    if (isLikelyDropshipOAuthState(req.query.state)) {
+      await handleDropshipEbayOAuthCallback(req, res);
+      return;
+    }
+
     const config = getEbayAuthConfig();
     if (!config) {
       res.status(500).json({ error: "eBay OAuth not configured." });
       return;
     }
 
-    const code = req.query.code as string | undefined;
-    const error = req.query.error as string | undefined;
+    const code = singleQueryParam(req.query.code);
+    const error = singleQueryParam(req.query.error);
 
     if (error) {
       console.error(`[eBay OAuth] Error from eBay: ${error}`);
@@ -86,7 +96,8 @@ export function registerEbayOAuthRoutes(app: Express): void {
       const authService = new EbayAuthService(db as any, config);
 
       // Find or create the eBay channel — use channel_id from query or default
-      const channelIdParam = req.query.state === "echelon-ebay-setup" ? undefined : req.query.state;
+      const stateParam = singleQueryParam(req.query.state);
+      const channelIdParam = stateParam === "echelon-ebay-setup" ? undefined : stateParam;
       
       // Look up the eBay channel in DB
       const { channels } = await import("@shared/schema");
@@ -94,7 +105,16 @@ export function registerEbayOAuthRoutes(app: Express): void {
       let channelId: number;
 
       if (channelIdParam) {
-        channelId = parseInt(channelIdParam as string, 10);
+        channelId = parseInt(channelIdParam, 10);
+        if (!Number.isInteger(channelId) || channelId <= 0) {
+          res.status(400).send(`
+            <html><body style="font-family: sans-serif; padding: 40px; text-align: center;">
+              <h1>Invalid eBay OAuth State</h1>
+              <p>The eBay authorization state did not identify a valid channel.</p>
+            </body></html>
+          `);
+          return;
+        }
       } else {
         // Find existing eBay channel or inform user to create one
         const [ebayChannel] = await (db as any)
@@ -193,4 +213,58 @@ export function registerEbayOAuthRoutes(app: Express): void {
       res.json({ configured: true, error: err.message });
     }
   });
+}
+
+async function handleDropshipEbayOAuthCallback(req: Request, res: Response): Promise<void> {
+  try {
+    const input = parseDropshipOAuthCallbackQuery(req.query);
+    const service = createDropshipStoreConnectionServiceFromEnv();
+    const result = await service.completeOAuthCallback({
+      ...input,
+      platform: "ebay",
+    });
+    res.redirect(buildDropshipPortalRedirect("connected", result.returnTo));
+  } catch (error) {
+    const code = error instanceof DropshipError ? error.code : "DROPSHIP_STORE_CONNECTION_INTERNAL_ERROR";
+    res.redirect(buildDropshipPortalRedirect("error", null, code));
+  }
+}
+
+export function isLikelyDropshipOAuthState(value: unknown): value is string {
+  if (typeof value !== "string" || !value.includes(".")) {
+    return false;
+  }
+
+  const [encodedPayload, signature, extra] = value.split(".");
+  if (!encodedPayload || !signature || extra !== undefined) {
+    return false;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as {
+      version?: unknown;
+      memberId?: unknown;
+      vendorId?: unknown;
+      platform?: unknown;
+    };
+    return payload.version === 1
+      && typeof payload.memberId === "string"
+      && typeof payload.vendorId === "number"
+      && payload.platform === "ebay";
+  } catch {
+    return false;
+  }
+}
+
+function buildDropshipPortalRedirect(status: "connected" | "error", returnTo: string | null, errorCode?: string): string {
+  const url = new URL(returnTo || "/settings", DROPSHIP_PORTAL_URL);
+  url.searchParams.set("storeConnection", status);
+  if (errorCode) {
+    url.searchParams.set("error", errorCode);
+  }
+  return url.toString();
+}
+
+function singleQueryParam(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
