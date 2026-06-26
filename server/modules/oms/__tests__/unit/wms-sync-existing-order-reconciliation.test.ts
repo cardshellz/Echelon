@@ -86,6 +86,17 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toContain("omsQty <= 0");
   });
 
+  it("creates manual-review exceptions when picked WMS quantity exceeds OMS authority", () => {
+    expect(WMS_SYNC_SRC).toMatch(/recordWmsReconciliationReviewException/);
+    expect(WMS_SYNC_SRC).toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
+    expect(WMS_SYNC_SRC).toMatch(/'manual_review'/);
+    expect(WMS_SYNC_SRC).toMatch(/"picked_quantity_exceeds_oms_authority"/);
+    expect(WMS_SYNC_SRC).toMatch(/ON CONFLICT \(idempotency_key\)/);
+    expect(WMS_SYNC_SRC).toMatch(
+      /already picked[\s\S]*recordWmsReconciliationReviewException/,
+    );
+  });
+
   it("uses remaining OMS line authority instead of raw channel quantity for WMS materialization", () => {
     expect(WMS_SYNC_SRC).toMatch(/getOmsLineMaterializableQuantity/);
     expect(WMS_SYNC_SRC).toMatch(/getOmsLineRemainingMaterializableQuantity/);
