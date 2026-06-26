@@ -356,12 +356,18 @@ Changes:
 - Identify duplicate ShipStation order keys/order ids.
 - Auto-repair only rows with complete proof.
 - Quarantine ambiguous rows with review reasons.
+- Run the authority-readiness cleanup tool before validating Phase 4 constraints:
+  - Clear historical terminal `wms.order_items.oms_order_line_id` values only when the referenced `oms.oms_order_lines` row no longer exists.
+  - Delete terminal `wms.outbound_shipment_items` rows with `qty <= 0`; these rows carry no physical quantity and block a positive-quantity constraint.
+  - Refresh current-open `oms.oms_order_lines.wms_materialized_quantity` from active WMS item quantity using the same current-open predicate as the readiness audit.
+  - Write every cleanup mutation to `wms.oms_wms_authority_cleanup_audit` with before/after row snapshots.
 
 Acceptance criteria:
 
 - No active OMS-origin WMS item lacks valid OMS line authority.
 - No active shipment has ambiguous ShipStation identity.
 - Historical rows that cannot be proven are visible as exceptions.
+- The readiness audit reports zero blockers for orphan OMS line references, non-positive shipment item quantities, shipment item order mismatches caused by zero-quantity rows, and current-open materialized-counter drift.
 
 ### Phase 7: Conformance Tests And Monitoring
 
@@ -420,6 +426,10 @@ Avoid shipping Phase 4 constraints before Phase 6 dry runs prove production can 
 - ShipStation duplicate key repair.
 - Reconciliation exception triage.
 - Backfill dry-run and execute procedure.
+- OMS/WMS authority cleanup:
+  - Dry run: `npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --dry-run --limit=all`
+  - Execute after reviewing the plan: `npx tsx scripts/cleanup-oms-wms-authority-readiness.ts --execute --limit=all`
+  - Verify after execution: `npx tsx scripts/audit-oms-wms-authority-readiness.ts --limit=5`
 
 ## Open Questions
 
