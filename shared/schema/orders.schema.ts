@@ -182,7 +182,7 @@ export const orderItems = wmsSchema.table("order_items", {
 
   // ===== CHANNEL LINKAGE =====
   // Links to source raw tables for full line item data (pricing, properties, etc.)
-  omsOrderLineId: integer("oms_order_line_id"),
+  omsOrderLineId: bigint("oms_order_line_id", { mode: "number" }),
   shopifyLineItemId: varchar("shopify_line_item_id", { length: 50 }), // Legacy
   sourceItemId: varchar("source_item_id", { length: 100 }), // ID in source table for JOIN lookups
 
@@ -586,7 +586,7 @@ export const returnItems = wmsSchema.table("return_items", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   returnId: bigint("return_id", { mode: "number" }).notNull().references(() => returns.id, { onDelete: "cascade" }),
   orderItemId: integer("order_item_id").references(() => orderItems.id, { onDelete: "set null" }),
-  omsOrderLineId: integer("oms_order_line_id"),
+  omsOrderLineId: bigint("oms_order_line_id", { mode: "number" }),
   externalLineItemId: varchar("external_line_item_id", { length: 100 }),
   sku: varchar("sku", { length: 100 }),
   expectedQty: integer("expected_qty").notNull(),
