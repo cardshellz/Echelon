@@ -212,6 +212,17 @@ type DropshipOpsTabValue =
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
 type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
 
+interface DropshipWarehouseOption {
+  id: number;
+  code: string;
+  name: string;
+  warehouseType: string;
+  isActive: number;
+  isDefault: number;
+}
+
+const NO_DEFAULT_WAREHOUSE_VALUE = "__none__";
+
 const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "overview",
   "dogfood",
@@ -2008,9 +2019,23 @@ function StoreConnectionOpsTab() {
     queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(storeConnectionsUrl),
   });
 
+  const warehousesQuery = useQuery<DropshipWarehouseOption[]>({
+    queryKey: ["/api/warehouses"],
+    queryFn: () => fetchJson<DropshipWarehouseOption[]>("/api/warehouses"),
+  });
+
   const connections = useMemo(
     () => storeConnectionsQuery.data?.items ?? [],
     [storeConnectionsQuery.data?.items],
+  );
+  const warehouseOptions = useMemo(
+    () => (warehousesQuery.data ?? [])
+      .filter((warehouse) => warehouse.isActive === 1 && warehouse.warehouseType !== "bulk_storage")
+      .sort((a, b) => {
+        if (a.isDefault !== b.isDefault) return b.isDefault - a.isDefault;
+        return a.name.localeCompare(b.name);
+      }),
+    [warehousesQuery.data],
   );
   const attentionCount = connections.filter((connection) => storeConnectionNeedsAttention(connection)).length;
   const listingConfigActiveCount = connections.filter((connection) => connection.listingConfig.isActive).length;
@@ -2227,6 +2252,8 @@ function StoreConnectionOpsTab() {
         savingConnectionId={savingConnectionId}
         repairingWebhookConnectionId={repairingWebhookConnectionId}
         total={storeConnectionsQuery.data?.total ?? 0}
+        warehouses={warehouseOptions}
+        warehousesLoading={warehousesQuery.isLoading}
         warehouseInputs={warehouseInputs}
         onSaveWarehouseConfig={saveWarehouseConfig}
         onWarehouseInputChange={(storeConnectionId, value) => setWarehouseInputs((current) => ({
@@ -5809,6 +5836,8 @@ function StoreConnectionsTable({
   repairingWebhookConnectionId,
   savingConnectionId,
   total,
+  warehouses,
+  warehousesLoading,
   warehouseInputs,
 }: {
   connections: DropshipAdminStoreConnectionListItem[];
@@ -5821,6 +5850,8 @@ function StoreConnectionsTable({
   repairingWebhookConnectionId: number | null;
   savingConnectionId: number | null;
   total: number;
+  warehouses: DropshipWarehouseOption[];
+  warehousesLoading: boolean;
   warehouseInputs: Record<number, string>;
 }) {
   if (isLoading) {
@@ -5860,13 +5891,16 @@ function StoreConnectionsTable({
             <TableHead>Sync</TableHead>
             <TableHead>Setup checks</TableHead>
             <TableHead className="w-[230px]">Listing config</TableHead>
-            <TableHead className="w-[260px]">Default warehouse</TableHead>
+            <TableHead className="w-[340px]">Default warehouse</TableHead>
             <TableHead className="w-[190px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {connections.map((connection) => {
             const canRepairShopifyWebhooks = connection.platform === "shopify" && connection.status === "connected";
+            const selectedWarehouseId = warehouseInputs[connection.storeConnectionId] ?? "";
+            const selectedWarehouseKnown = selectedWarehouseId === ""
+              || warehouses.some((warehouse) => String(warehouse.id) === selectedWarehouseId);
             return (
               <TableRow key={connection.storeConnectionId}>
                 <TableCell>
@@ -5942,12 +5976,29 @@ function StoreConnectionsTable({
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-col gap-2 sm:flex-row">
-                    <Input
-                      value={warehouseInputs[connection.storeConnectionId] ?? ""}
-                      onChange={(event) => onWarehouseInputChange(connection.storeConnectionId, event.target.value)}
-                      placeholder="Warehouse ID"
-                      className="h-9"
-                    />
+                    <Select
+                      value={selectedWarehouseId || NO_DEFAULT_WAREHOUSE_VALUE}
+                      onValueChange={(value) => onWarehouseInputChange(
+                        connection.storeConnectionId,
+                        value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value,
+                      )}
+                      disabled={warehousesLoading}
+                    >
+                      <SelectTrigger className="h-9 min-w-[220px]">
+                        <SelectValue placeholder={warehousesLoading ? "Loading warehouses..." : "Select warehouse"} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>Not assigned</SelectItem>
+                        {!selectedWarehouseKnown && (
+                          <SelectItem value={selectedWarehouseId}>Warehouse ID {selectedWarehouseId} (not found)</SelectItem>
+                        )}
+                        {warehouses.map((warehouse) => (
+                          <SelectItem key={warehouse.id} value={String(warehouse.id)}>
+                            {formatWarehouseOption(warehouse)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <Button
                       type="button"
                       variant="outline"
@@ -7093,6 +7144,11 @@ function storeConnectionNeedsAttention(connection: DropshipAdminStoreConnectionL
     || !connection.hasAccessToken
     || !connection.listingConfig.isConfigured
     || !connection.listingConfig.isActive;
+}
+
+function formatWarehouseOption(warehouse: DropshipWarehouseOption): string {
+  const defaultSuffix = warehouse.isDefault === 1 ? " default" : "";
+  return `${warehouse.name} (${warehouse.code}) - ID ${warehouse.id}${defaultSuffix}`;
 }
 
 function listingConfigResponseToForm(response: DropshipStoreListingConfigResponse): ListingConfigFormState {
