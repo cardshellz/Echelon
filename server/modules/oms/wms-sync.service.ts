@@ -64,6 +64,11 @@ type MaterializableOmsLine = {
   fulfillmentStatus?: string | null;
 };
 
+type WmsReconciliationAutoRepairRule =
+  | "materialize_authorized_oms_line"
+  | "create_missing_initial_shipment"
+  | "attach_authorized_line_to_planned_shipment";
+
 function toNonNegativeInteger(value: unknown, field: string): number {
   const normalized = Number(value ?? 0);
   if (!Number.isInteger(normalized) || normalized < 0) {
@@ -289,6 +294,24 @@ export class WmsSyncService {
         FROM consumed
        WHERE ol.id = consumed.order_line_id
     `);
+  }
+
+  private async recordWmsReconciliationAuditEvent(
+    database: DbLike,
+    omsOrderId: number,
+    rule: WmsReconciliationAutoRepairRule,
+    details: Record<string, unknown>,
+  ): Promise<void> {
+    await database.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "wms_reconciliation_auto_repair",
+      details: {
+        classification: "safe_auto_repair",
+        rule,
+        source: "reconcileExistingWmsOrderLines",
+        ...details,
+      },
+    });
   }
 
   /**
@@ -1207,6 +1230,18 @@ export class WmsSyncService {
 
         if (created) {
           await this.incrementOmsLineMaterializedQuantities(tx, [created]);
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "materialize_authorized_oms_line",
+            {
+              wmsOrderId,
+              wmsOrderItemId: created.id,
+              omsOrderLineId: created.omsOrderLineId,
+              quantity: created.quantity,
+              requiresShipping: Number((created as any).requiresShipping ?? 0) !== 0,
+            },
+          );
         }
         return created ?? null;
       });
@@ -1347,16 +1382,33 @@ export class WmsSyncService {
     if (activeShipments.length === 0) {
       // Case A: No shipment exists at all — initial sync must have crashed
       // before creating one. Create a new shipment and push it.
-      const created = await createShipmentForOrder(
-        db,
-        wmsOrderId,
-        wmsOrderState?.channelId ?? null,
-        shippableShipmentItems.map((item) => ({
-          id: item.id,
-          quantity: item.quantity ?? 0,
-          productVariantId: item.productId,
-        })),
-      );
+      const created = await db.transaction(async (tx: any) => {
+        const result = await createShipmentForOrder(
+          tx as any,
+          wmsOrderId,
+          wmsOrderState?.channelId ?? null,
+          shippableShipmentItems.map((item) => ({
+            id: item.id,
+            quantity: item.quantity ?? 0,
+            productVariantId: item.productId,
+          })),
+          { useXactLock: true },
+        );
+        if (result.created) {
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "create_missing_initial_shipment",
+            {
+              wmsOrderId,
+              wmsShipmentId: result.shipmentId,
+              itemCount: shippableShipmentItems.length,
+              orderItemIds: shippableShipmentItems.map((item) => item.id),
+            },
+          );
+        }
+        return result;
+      });
       updatedShipments += shippableShipmentItems.length;
       try {
         await enqueueShipStationShipmentPushRetry(
@@ -1379,27 +1431,46 @@ export class WmsSyncService {
         for (const item of shippableShipmentItems) {
           const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
           if (!line || line.requiresShipping === false) continue;
-          const inserted: any = await db.execute(sql`
-            INSERT INTO wms.outbound_shipment_items (
-              shipment_id,
-              order_item_id,
-              product_variant_id,
-              qty
-            )
-            SELECT
-              ${shipment.id},
-              ${item.id},
-              ${item.productId},
-              ${item.quantity ?? 0}
-            WHERE NOT EXISTS (
-              SELECT 1
-              FROM wms.outbound_shipment_items
-              WHERE shipment_id = ${shipment.id}
-                AND order_item_id = ${item.id}
-            )
-            RETURNING id
-          `);
-          updatedShipments += inserted?.rows?.length ?? 0;
+          const insertedCount = await db.transaction(async (tx: any) => {
+            const inserted: any = await tx.execute(sql`
+              INSERT INTO wms.outbound_shipment_items (
+                shipment_id,
+                order_item_id,
+                product_variant_id,
+                qty
+              )
+              SELECT
+                ${shipment.id},
+                ${item.id},
+                ${item.productId},
+                ${item.quantity ?? 0}
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM wms.outbound_shipment_items
+                WHERE shipment_id = ${shipment.id}
+                  AND order_item_id = ${item.id}
+              )
+              RETURNING id
+            `);
+            const createdRows = inserted?.rows ?? [];
+            if (createdRows.length > 0) {
+              await this.recordWmsReconciliationAuditEvent(
+                tx,
+                omsOrderId,
+                "attach_authorized_line_to_planned_shipment",
+                {
+                  wmsOrderId,
+                  wmsShipmentId: shipment.id,
+                  wmsOrderItemId: item.id,
+                  outboundShipmentItemIds: createdRows.map((row: any) => row.id),
+                  omsOrderLineId: item.omsOrderLineId,
+                  quantity: item.quantity ?? 0,
+                },
+              );
+            }
+            return createdRows.length;
+          });
+          updatedShipments += insertedCount;
         }
         try {
           await enqueueShipStationShipmentPushRetry(

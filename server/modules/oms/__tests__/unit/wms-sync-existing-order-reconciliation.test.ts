@@ -21,6 +21,22 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/enqueueShipStationShipmentPushRetry/);
   });
 
+  it("records named safe-auto-repair audit events for reconciliation-created WMS work", () => {
+    expect(WMS_SYNC_SRC).toMatch(/recordWmsReconciliationAuditEvent/);
+    expect(WMS_SYNC_SRC).toMatch(/eventType: "wms_reconciliation_auto_repair"/);
+    expect(WMS_SYNC_SRC).toMatch(/classification: "safe_auto_repair"/);
+    expect(WMS_SYNC_SRC).toMatch(/"materialize_authorized_oms_line"/);
+    expect(WMS_SYNC_SRC).toMatch(/"create_missing_initial_shipment"/);
+    expect(WMS_SYNC_SRC).toMatch(/"attach_authorized_line_to_planned_shipment"/);
+  });
+
+  it("keeps reconciliation-created shipment work and its audit event in the same transaction", () => {
+    expect(WMS_SYNC_SRC).toMatch(/const created = await db\.transaction/);
+    expect(WMS_SYNC_SRC).toMatch(/createShipmentForOrder\([\s\S]*\{ useXactLock: true \}/);
+    expect(WMS_SYNC_SRC).toMatch(/const insertedCount = await db\.transaction/);
+    expect(WMS_SYNC_SRC).toMatch(/await this\.recordWmsReconciliationAuditEvent/);
+  });
+
   it("does not reconcile cancelled or refunded OMS orders back into WMS work", () => {
     expect(WMS_SYNC_SRC).toMatch(/isFinalOrCancelledOmsOrder/);
     expect(WMS_SYNC_SRC).toMatch(/cancelExistingWmsOrderForFinalOmsOrder/);
