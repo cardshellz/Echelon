@@ -95,6 +95,9 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   const [
     flowReconciliationIssues,
     failedInbox,
+    duplicateShipStationOrderIds,
+    duplicateShipStationOrderKeys,
+    duplicateShippingEngineOrderRefs,
     activeWmsItemsWithoutOmsAuthority,
     omsLineAuthorityOverMaterialized,
     reconciliationManualReviews,
@@ -124,6 +127,108 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         FROM oms.webhook_inbox
         WHERE status IN ('failed', 'dead')
         ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM (
+          SELECT s.shipstation_order_id
+          FROM wms.outbound_shipments s
+          WHERE s.status IN ('planned', 'queued', 'labeled', 'on_hold')
+            AND COALESCE(s.source, '') NOT IN ('echelon_combined_child', 'shipstation_combined_child')
+            AND s.shipstation_order_id IS NOT NULL
+          GROUP BY s.shipstation_order_id
+          HAVING COUNT(*) > 1
+        ) duplicate_identity
+      `,
+      sql`
+        SELECT s.shipstation_order_id,
+               COUNT(*)::int AS shipment_count,
+               ARRAY_AGG(s.id ORDER BY s.id) AS shipment_ids,
+               ARRAY_AGG(s.order_id ORDER BY s.id) AS wms_order_ids,
+               ARRAY_AGG(o.order_number ORDER BY s.id) AS order_numbers,
+               ARRAY_AGG(COALESCE(s.source, '') ORDER BY s.id) AS sources,
+               ARRAY_AGG(s.status ORDER BY s.id) AS statuses
+        FROM wms.outbound_shipments s
+        LEFT JOIN wms.orders o ON o.id = s.order_id
+        WHERE s.status IN ('planned', 'queued', 'labeled', 'on_hold')
+          AND COALESCE(s.source, '') NOT IN ('echelon_combined_child', 'shipstation_combined_child')
+          AND s.shipstation_order_id IS NOT NULL
+        GROUP BY s.shipstation_order_id
+        HAVING COUNT(*) > 1
+        ORDER BY shipment_count DESC, s.shipstation_order_id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM (
+          SELECT s.shipstation_order_key
+          FROM wms.outbound_shipments s
+          WHERE s.status IN ('planned', 'queued', 'labeled', 'on_hold')
+            AND COALESCE(s.source, '') NOT IN ('echelon_combined_child', 'shipstation_combined_child')
+            AND NULLIF(TRIM(s.shipstation_order_key), '') IS NOT NULL
+          GROUP BY s.shipstation_order_key
+          HAVING COUNT(*) > 1
+        ) duplicate_identity
+      `,
+      sql`
+        SELECT s.shipstation_order_key,
+               COUNT(*)::int AS shipment_count,
+               ARRAY_AGG(s.id ORDER BY s.id) AS shipment_ids,
+               ARRAY_AGG(s.order_id ORDER BY s.id) AS wms_order_ids,
+               ARRAY_AGG(o.order_number ORDER BY s.id) AS order_numbers,
+               ARRAY_AGG(COALESCE(s.source, '') ORDER BY s.id) AS sources,
+               ARRAY_AGG(s.status ORDER BY s.id) AS statuses
+        FROM wms.outbound_shipments s
+        LEFT JOIN wms.orders o ON o.id = s.order_id
+        WHERE s.status IN ('planned', 'queued', 'labeled', 'on_hold')
+          AND COALESCE(s.source, '') NOT IN ('echelon_combined_child', 'shipstation_combined_child')
+          AND NULLIF(TRIM(s.shipstation_order_key), '') IS NOT NULL
+        GROUP BY s.shipstation_order_key
+        HAVING COUNT(*) > 1
+        ORDER BY shipment_count DESC, s.shipstation_order_key DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM (
+          SELECT s.shipping_engine, s.engine_order_ref
+          FROM wms.outbound_shipments s
+          WHERE s.status IN ('planned', 'queued', 'labeled', 'on_hold')
+            AND COALESCE(s.source, '') NOT IN ('echelon_combined_child', 'shipstation_combined_child')
+            AND NULLIF(TRIM(s.shipping_engine), '') IS NOT NULL
+            AND NULLIF(TRIM(s.engine_order_ref), '') IS NOT NULL
+          GROUP BY s.shipping_engine, s.engine_order_ref
+          HAVING COUNT(*) > 1
+        ) duplicate_identity
+      `,
+      sql`
+        SELECT s.shipping_engine,
+               s.engine_order_ref,
+               COUNT(*)::int AS shipment_count,
+               ARRAY_AGG(s.id ORDER BY s.id) AS shipment_ids,
+               ARRAY_AGG(s.order_id ORDER BY s.id) AS wms_order_ids,
+               ARRAY_AGG(o.order_number ORDER BY s.id) AS order_numbers,
+               ARRAY_AGG(COALESCE(s.source, '') ORDER BY s.id) AS sources,
+               ARRAY_AGG(s.status ORDER BY s.id) AS statuses
+        FROM wms.outbound_shipments s
+        LEFT JOIN wms.orders o ON o.id = s.order_id
+        WHERE s.status IN ('planned', 'queued', 'labeled', 'on_hold')
+          AND COALESCE(s.source, '') NOT IN ('echelon_combined_child', 'shipstation_combined_child')
+          AND NULLIF(TRIM(s.shipping_engine), '') IS NOT NULL
+          AND NULLIF(TRIM(s.engine_order_ref), '') IS NOT NULL
+        GROUP BY s.shipping_engine, s.engine_order_ref
+        HAVING COUNT(*) > 1
+        ORDER BY shipment_count DESC, s.shipping_engine, s.engine_order_ref
         LIMIT 10
       `,
     ),
@@ -759,6 +864,27 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: reconciliationManualReviews.count,
       message: "Open OMS/WMS reconciliation exceptions need manual review, grouped by rule.",
       sample: reconciliationManualReviews.sample,
+    }),
+    issue({
+      code: "SHIPSTATION_ORDER_ID_DUPLICATE",
+      severity: "critical",
+      count: duplicateShipStationOrderIds.count,
+      message: "Active standalone shipments share a ShipStation order id.",
+      sample: duplicateShipStationOrderIds.sample,
+    }),
+    issue({
+      code: "SHIPSTATION_ORDER_KEY_DUPLICATE",
+      severity: "critical",
+      count: duplicateShipStationOrderKeys.count,
+      message: "Active standalone shipments share a ShipStation order key.",
+      sample: duplicateShipStationOrderKeys.sample,
+    }),
+    issue({
+      code: "SHIPPING_ENGINE_ORDER_REF_DUPLICATE",
+      severity: "critical",
+      count: duplicateShippingEngineOrderRefs.count,
+      message: "Active standalone shipments share a shipping-engine order reference.",
+      sample: duplicateShippingEngineOrderRefs.sample,
     }),
     issue({
       code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
