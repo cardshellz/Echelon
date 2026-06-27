@@ -78,6 +78,22 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toContain("GROUP BY rule");
     expect(OPS_HEALTH_SRC).toContain("authority_fulfillable_quantity");
   });
+
+  it("surfaces duplicate active shipment identity monitoring signals", () => {
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "SHIPSTATION_ORDER_ID_DUPLICATE"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "SHIPSTATION_ORDER_KEY_DUPLICATE"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "SHIPPING_ENGINE_ORDER_REF_DUPLICATE"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toContain("s.shipstation_order_key");
+    expect(OPS_HEALTH_SRC).toContain("s.engine_order_ref");
+    expect(OPS_HEALTH_SRC).toContain("echelon_combined_child");
+    expect(OPS_HEALTH_SRC).toContain("shipstation_combined_child");
+  });
 });
 
 describe("ops-health.service :: issue mapping", () => {
@@ -194,6 +210,50 @@ describe("ops-health.service :: issue mapping", () => {
       expect(
         health.issues.find((issue) => issue.code === "WMS_RECONCILIATION_MANUAL_REVIEW")?.sample,
       ).toEqual([expect.objectContaining({ rule: "picked_quantity_exceeds_oms_authority" })]);
+    } finally {
+      if (previousDisableSchedulers === undefined) {
+        delete process.env.DISABLE_SCHEDULERS;
+      } else {
+        process.env.DISABLE_SCHEDULERS = previousDisableSchedulers;
+      }
+    }
+  });
+
+  it("maps duplicate shipment identity query results to health issues", async () => {
+    const previousDisableSchedulers = process.env.DISABLE_SCHEDULERS;
+    process.env.DISABLE_SCHEDULERS = "true";
+    const execute = vi.fn(async (query: any) => {
+      const queryText = (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ");
+
+      if (queryText.includes("s.shipstation_order_key") && queryText.includes("shipment_count")) {
+        return {
+          rows: [{
+            shipstation_order_key: "ss-key-1",
+            shipment_count: 2,
+            shipment_ids: [11, 12],
+          }],
+        };
+      }
+      if (queryText.includes("s.shipstation_order_key") && queryText.includes("duplicate_identity")) {
+        return { rows: [{ count: 1 }] };
+      }
+
+      return { rows: [{ count: 0 }] };
+    });
+
+    try {
+      const health = await getOmsOpsHealth({ execute });
+
+      expect(
+        health.issues.find((issue) => issue.code === "SHIPSTATION_ORDER_KEY_DUPLICATE")?.sample,
+      ).toEqual([
+        expect.objectContaining({
+          shipstation_order_key: "ss-key-1",
+          shipment_count: 2,
+        }),
+      ]);
     } finally {
       if (previousDisableSchedulers === undefined) {
         delete process.env.DISABLE_SCHEDULERS;

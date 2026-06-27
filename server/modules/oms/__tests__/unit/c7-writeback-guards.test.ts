@@ -188,8 +188,12 @@ describe("D-RETRYDEDUP: DB-level dedup on retry queue", () => {
   });
 
   it("migration exists for the unique index", () => {
-    const migrationPath =
-      "/home/user/Echelon/migrations/0572_webhook_retry_queue_pending_dedup.sql";
+    const migrationPath = fileURLToPath(
+      new URL(
+        "../../../../../migrations/0572_webhook_retry_queue_pending_dedup.sql",
+        import.meta.url,
+      ),
+    );
     expect(existsSync(migrationPath)).toBe(true);
 
     const sql = readFileSync(migrationPath, "utf8");

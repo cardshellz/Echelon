@@ -420,6 +420,9 @@ Avoid shipping Phase 4 constraints before Phase 6 dry runs prove production can 
 
 ## Operational Runbooks Needed
 
+The procedures are captured in
+[`OMS-WMS-AUTHORITY-OPERATIONS-RUNBOOK.md`](./OMS-WMS-AUTHORITY-OPERATIONS-RUNBOOK.md).
+
 - Order authority trace by order number.
 - OMS line authority trace by channel line id.
 - WMS materialization trace by WMS order id.
