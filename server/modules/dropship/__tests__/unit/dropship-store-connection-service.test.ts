@@ -325,11 +325,27 @@ describe("DropshipStoreConnectionService", () => {
     });
   });
 
-  it("blocks new OAuth when the membership store limit is already used", async () => {
-    repository.connections = [makeConnection({ status: "connected" })];
+  it("blocks new OAuth for a different platform when the membership store limit is already used", async () => {
+    repository.connections = [makeConnection({ platform: "ebay", status: "connected" })];
 
-    await expect(service.startOAuth("member-1", { platform: "ebay" })).rejects.toMatchObject({
+    await expect(service.startOAuth("member-1", {
+      platform: "shopify",
+      shopDomain: "Vendor-Test",
+    })).rejects.toMatchObject({
       code: "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
+    });
+  });
+
+  it("allows OAuth to reconnect an occupied same-platform store slot", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
+
+    const start = await service.startOAuth("member-1", { platform: "ebay" });
+
+    expect(start.platform).toBe("ebay");
+    expect(stateSigner.lastPayload).toMatchObject({
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
     });
   });
 
@@ -424,6 +440,35 @@ describe("DropshipStoreConnectionService", () => {
     expect(result.connection).toMatchObject({
       storeConnectionId: 21,
       status: "connected",
+      hasAccessToken: true,
+      hasRefreshToken: true,
+    });
+  });
+
+  it("completes OAuth by replacing the existing same-platform store authorization", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+    };
+
+    const result = await service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    });
+
+    expect(result.connection).toMatchObject({
+      storeConnectionId: 21,
+      status: "connected",
+      externalAccountId: "external-ebay",
       hasAccessToken: true,
       hasRefreshToken: true,
     });
@@ -802,13 +847,13 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     )).length;
   }
 
-  async hasRepairableConnection(
-    input: Parameters<DropshipStoreConnectionRepository["hasRepairableConnection"]>[0],
+  async hasReconnectableConnection(
+    input: Parameters<DropshipStoreConnectionRepository["hasReconnectableConnection"]>[0],
   ): Promise<boolean> {
     return this.connections.some((connection) => (
       connection.vendorId === input.vendorId
       && connection.platform === input.platform
-      && ["needs_reauth", "refresh_failed"].includes(connection.status)
+      && ["connected", "needs_reauth", "refresh_failed"].includes(connection.status)
     ));
   }
 
@@ -817,7 +862,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     const existing = this.connections.find((connection) => (
       connection.vendorId === input.vendorId
       && connection.platform === input.platform
-      && ["needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
+      && ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
     ));
     const connection = makeConnection({
       storeConnectionId: existing?.storeConnectionId ?? 20,
