@@ -525,8 +525,19 @@ function canReconnectStoreConnection(connection: DropshipStoreConnectionProfileR
 function ConnectedStoreSummary({ connection }: { connection: DropshipStoreConnectionProfileResponse }) {
   return (
     <div className="mt-5 border-t border-zinc-200 pt-4">
-      <div className="grid gap-4 text-sm sm:grid-cols-4">
-        <StoreConnectionDetail label="Account" value={connectionDisplayName(connection)} />
+      <div className="rounded-md border border-[#C060E0]/30 bg-[#C060E0]/5 p-4">
+        <div className="flex items-start gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-white text-[#C060E0]">
+            <Store className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-xs uppercase text-zinc-500">Connected store</div>
+            <div className="mt-1 truncate text-base font-semibold text-zinc-950">{connectionDisplayName(connection)}</div>
+            <p className="mt-1 text-sm text-zinc-500">{connectedStoreIdentityDetail(connection)}</p>
+          </div>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-4 text-sm sm:grid-cols-3">
         <StoreConnectionDetail label="Status" value={formatStatus(connection.status)} />
         <StoreConnectionDetail label="Readiness" value={connection.launchReady ? "Launch ready" : launchReadinessDetail(connection)} />
         <StoreConnectionDetail label="Updated" value={formatDateTime(connection.updatedAt)} />
@@ -626,6 +637,17 @@ function connectButtonIcon(input: {
 
 function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
   return connection.externalDisplayName || connection.shopDomain || `${storePlatformName(connection.platform)} connection ${connection.storeConnectionId}`;
+}
+
+function connectedStoreIdentityDetail(connection: DropshipStoreConnectionProfileResponse): string {
+  const details = [storePlatformName(connection.platform)];
+  if (connection.shopDomain && connection.shopDomain !== connectionDisplayName(connection)) {
+    details.push(connection.shopDomain);
+  }
+  if (connection.externalAccountId && connection.externalAccountId !== connection.externalDisplayName) {
+    details.push(`Account ID ${connection.externalAccountId}`);
+  }
+  return details.join(" | ");
 }
 
 function launchReadinessDetail(connection: DropshipStoreConnectionProfileResponse): string {
