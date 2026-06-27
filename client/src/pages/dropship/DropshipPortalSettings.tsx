@@ -481,9 +481,12 @@ function StoreConnectionCard({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <Store className="h-4 w-4 text-zinc-500" />
-            <h3 className="truncate font-semibold">{connectionDisplayName(connection)}</h3>
+            <div className="min-w-0">
+              <div className="text-xs uppercase text-zinc-500">Connected store</div>
+              <h3 className="truncate font-semibold">{connectionDisplayName(connection)}</h3>
+            </div>
           </div>
-          <p className="mt-1 text-sm text-zinc-500">{formatStatus(connection.platform)}</p>
+          <p className="mt-1 text-sm text-zinc-500">{connectedStoreIdentityDetail(connection)}</p>
         </div>
         <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
           {formatStatus(connection.status)}
@@ -635,6 +638,17 @@ function canChangeStoreConnection(connection: DropshipStoreConnectionProfileResp
 
 function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
   return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} connection ${connection.storeConnectionId}`;
+}
+
+function connectedStoreIdentityDetail(connection: DropshipStoreConnectionProfileResponse): string {
+  const details = [formatStatus(connection.platform)];
+  if (connection.shopDomain && connection.shopDomain !== connectionDisplayName(connection)) {
+    details.push(connection.shopDomain);
+  }
+  if (connection.externalAccountId && connection.externalAccountId !== connection.externalDisplayName) {
+    details.push(`Account ID ${connection.externalAccountId}`);
+  }
+  return details.join(" | ");
 }
 
 function launchReadinessDetail(connection: DropshipStoreConnectionProfileResponse): string {
