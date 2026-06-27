@@ -80,6 +80,44 @@ export class PgDropshipAuthIdentityRepository implements DropshipAuthIdentityRep
     }
   }
 
+  async upsertEmailVerifiedIdentity(input: {
+    memberId: string;
+    cardShellzEmail: string;
+    verifiedAt: Date;
+  }): Promise<DropshipAuthIdentityRecord> {
+    const normalizedEmail = normalizeCardShellzEmail(input.cardShellzEmail);
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<AuthIdentityRow>(
+        `INSERT INTO dropship.dropship_auth_identities
+          (member_id, primary_email, last_card_shellz_proof_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $3, $3)
+         ON CONFLICT (member_id) DO UPDATE
+           SET primary_email = EXCLUDED.primary_email,
+               last_card_shellz_proof_at = EXCLUDED.last_card_shellz_proof_at,
+               updated_at = EXCLUDED.updated_at
+         RETURNING id, member_id, primary_email, password_hash, password_hash_algorithm, status, passkey_enrolled_at`,
+        [
+          input.memberId,
+          normalizedEmail,
+          input.verifiedAt,
+        ],
+      );
+      await client.query("COMMIT");
+      const identity = mapAuthIdentity(result.rows[0]);
+      if (!identity) {
+        throw new Error("Dropship auth identity email proof upsert did not return a row.");
+      }
+      return identity;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async upsertPasswordIdentity(input: {
     memberId: string;
     cardShellzEmail: string;

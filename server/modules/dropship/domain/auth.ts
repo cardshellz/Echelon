@@ -23,7 +23,7 @@ export const dropshipSensitiveActionEnum = [
 
 export type DropshipSensitiveAction = typeof dropshipSensitiveActionEnum[number];
 export type DropshipStepUpMethod = "passkey" | "email_mfa";
-export type DropshipAuthMethod = "passkey" | "password";
+export type DropshipAuthMethod = "passkey" | "password" | "email_mfa";
 export type DropshipEntitlementStatus =
   | "active"
   | "grace"

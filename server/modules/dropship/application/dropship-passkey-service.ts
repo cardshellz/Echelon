@@ -3,6 +3,7 @@ import {
   DROPSHIP_SENSITIVE_ACTION_PROOF_TTL_MINUTES,
   normalizeCardShellzEmail,
   resolveSensitiveActionStepUp,
+  type DropshipAuthMethod,
   type DropshipSensitiveAction,
   type DropshipSessionPrincipal,
 } from "../domain/auth";
@@ -455,7 +456,7 @@ export class DropshipPasskeyService {
   private buildSessionPrincipal(
     identity: DropshipAuthIdentityRecord,
     entitlementStatus: "active" | "grace",
-    authMethod: "password" | "passkey",
+    authMethod: DropshipAuthMethod,
   ): DropshipSessionPrincipal {
     return {
       authIdentityId: identity.authIdentityId,

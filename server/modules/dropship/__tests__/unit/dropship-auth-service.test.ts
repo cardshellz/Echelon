@@ -46,6 +46,45 @@ describe("DropshipAuthService", () => {
     });
   });
 
+  it("looks up email auth state without creating a login", async () => {
+    await expect(service.lookupAuthEmail({
+      email: "vendor@cardshellz.test",
+    })).resolves.toEqual({
+      status: "eligible_new",
+      eligible: true,
+      hasPassword: false,
+      hasPasskey: false,
+    });
+
+    deps.identitiesByEmail.set("vendor@cardshellz.test", {
+      authIdentityId: 101,
+      memberId: "member-1",
+      primaryEmail: "vendor@cardshellz.test",
+      passwordHash: "hashed:StrongPassword123",
+      passwordHashAlgorithm: "test",
+      status: "active",
+      passkeyEnrolledAt: null,
+    });
+
+    await expect(service.lookupAuthEmail({
+      email: "vendor@cardshellz.test",
+    })).resolves.toEqual({
+      status: "eligible_returning",
+      eligible: true,
+      hasPassword: true,
+      hasPasskey: false,
+    });
+
+    await expect(service.lookupAuthEmail({
+      email: "missing@cardshellz.test",
+    })).resolves.toEqual({
+      status: "ineligible",
+      eligible: false,
+      hasPassword: false,
+      hasPasskey: false,
+    });
+  });
+
   it("completes bootstrap after email proof and creates a password identity", async () => {
     await service.startAccountBootstrap({
       email: "vendor@cardshellz.test",
@@ -67,6 +106,28 @@ describe("DropshipAuthService", () => {
       entitlementStatus: "active",
     });
     expect(deps.identitiesByEmail.get("vendor@cardshellz.test")?.passwordHash).toBe("hashed:StrongPassword123");
+  });
+
+  it("completes bootstrap after email proof without requiring a password", async () => {
+    await service.startAccountBootstrap({
+      email: "vendor@cardshellz.test",
+      idempotencyKey: "bootstrap-key-0006",
+    });
+
+    const principal = await service.completeAccountBootstrap({
+      email: "vendor@cardshellz.test",
+      verificationCode: "123456",
+    });
+
+    expect(principal).toMatchObject({
+      authIdentityId: 101,
+      memberId: "member-1",
+      cardShellzEmail: "vendor@cardshellz.test",
+      authMethod: "email_mfa",
+      hasPasskey: false,
+      entitlementStatus: "active",
+    });
+    expect(deps.identitiesByEmail.get("vendor@cardshellz.test")?.passwordHash).toBeNull();
   });
 
   it("rejects bootstrap completion when the email code is wrong", async () => {
@@ -306,6 +367,29 @@ class FakeAuthIdentityRepository implements DropshipAuthIdentityRepository {
 
   async findAuthIdentityByPrimaryEmail(email: string): Promise<DropshipAuthIdentityRecord | null> {
     return this.deps.identitiesByEmail.get(email.toLowerCase().trim()) ?? null;
+  }
+
+  async upsertEmailVerifiedIdentity(input: {
+    memberId: string;
+    cardShellzEmail: string;
+    verifiedAt: Date;
+  }): Promise<DropshipAuthIdentityRecord> {
+    void input.verifiedAt;
+    const existing = await this.findAuthIdentityByMemberId(input.memberId);
+    const identity: DropshipAuthIdentityRecord = {
+      authIdentityId: existing?.authIdentityId ?? 101,
+      memberId: input.memberId,
+      primaryEmail: input.cardShellzEmail,
+      passwordHash: existing?.passwordHash ?? null,
+      passwordHashAlgorithm: existing?.passwordHashAlgorithm ?? null,
+      status: existing?.status ?? "active",
+      passkeyEnrolledAt: existing?.passkeyEnrolledAt ?? null,
+    };
+    if (existing?.primaryEmail && existing.primaryEmail !== input.cardShellzEmail) {
+      this.deps.identitiesByEmail.delete(existing.primaryEmail);
+    }
+    this.deps.identitiesByEmail.set(input.cardShellzEmail, identity);
+    return identity;
   }
 
   async upsertPasswordIdentity(input: {

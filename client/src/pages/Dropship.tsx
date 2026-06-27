@@ -5,7 +5,9 @@ import {
   AlertCircle,
   Bell,
   Boxes,
+  Check,
   CheckCircle2,
+  ChevronsUpDown,
   CircleDollarSign,
   ClipboardList,
   FileSearch,
@@ -26,8 +28,10 @@ import { useLocation, useSearch } from "wouter";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
@@ -221,6 +225,15 @@ interface DropshipWarehouseOption {
   isDefault: number;
 }
 
+interface DropshipProductVariantOption {
+  id: number;
+  sku: string | null;
+  name: string;
+  productId: number;
+  active?: number | null;
+  isActive?: boolean;
+}
+
 const NO_DEFAULT_WAREHOUSE_VALUE = "__none__";
 
 const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
@@ -327,10 +340,10 @@ interface ShippingBoxFormState {
 
 interface ShippingPackageProfileFormState {
   productVariantId: string;
-  weightGrams: string;
-  lengthMm: string;
-  widthMm: string;
-  heightMm: string;
+  weightLb: string;
+  lengthIn: string;
+  widthIn: string;
+  heightIn: string;
   shipAlone: boolean;
   defaultCarrier: string;
   defaultService: string;
@@ -445,10 +458,10 @@ function makeEmptyReturnCreateForm(): ReturnCreateFormState {
 
 const emptyShippingPackageProfileForm: ShippingPackageProfileFormState = {
   productVariantId: "",
-  weightGrams: "",
-  lengthMm: "",
-  widthMm: "",
-  heightMm: "",
+  weightLb: "",
+  lengthIn: "",
+  widthIn: "",
+  heightIn: "",
   shipAlone: false,
   defaultCarrier: "",
   defaultService: "",
@@ -3308,7 +3321,22 @@ function ShippingConfigTab() {
     queryKey: [shippingConfigUrl],
     queryFn: () => fetchJson<DropshipAdminShippingConfigResponse>(shippingConfigUrl),
   });
+  const variantsQuery = useQuery<DropshipProductVariantOption[]>({
+    queryKey: ["/api/product-variants"],
+    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+  });
   const config = shippingQuery.data?.config;
+  const productVariantOptions = useMemo(
+    () => (variantsQuery.data ?? [])
+      .filter((variant) => variant.isActive !== false && variant.active !== 0)
+      .sort((first, second) => {
+        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+        if (skuCompare !== 0) return skuCompare;
+        const nameCompare = first.name.localeCompare(second.name);
+        return nameCompare !== 0 ? nameCompare : first.id - second.id;
+      }),
+    [variantsQuery.data],
+  );
 
   async function runShippingAction(action: string, task: () => Promise<void>) {
     setPendingAction(action);
@@ -3352,11 +3380,21 @@ function ShippingConfigTab() {
   async function savePackageProfile() {
     await runShippingAction("profile", async () => {
       await putJson("/api/dropship/admin/shipping/package-profiles", buildShippingPackageProfileInput({
-        ...profileForm,
+        productVariantId: profileForm.productVariantId,
+        weightGrams: poundsToGramsString(profileForm.weightLb, "weight"),
+        lengthMm: inchesToMillimetersString(profileForm.lengthIn, "length"),
+        widthMm: inchesToMillimetersString(profileForm.widthIn, "width"),
+        heightMm: inchesToMillimetersString(profileForm.heightIn, "height"),
+        shipAlone: profileForm.shipAlone,
+        defaultCarrier: profileForm.defaultCarrier,
+        defaultService: profileForm.defaultService,
+        defaultBoxId: profileForm.defaultBoxId,
+        maxUnitsPerPackage: profileForm.maxUnitsPerPackage,
+        isActive: profileForm.isActive,
         idempotencyKey: createDropshipIdempotencyKey("shipping-package-profile"),
       }));
       setProfileForm(emptyShippingPackageProfileForm);
-      setMessage("Package profile saved.");
+      setMessage("Product shipping profile saved.");
     });
   }
 
@@ -3423,7 +3461,7 @@ function ShippingConfigTab() {
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active boxes" value={String(activeCount(config?.boxes))} />
-        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Package profiles" value={String(config?.packageProfiles.length ?? 0)} />
+        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Product profiles" value={String(config?.packageProfiles.length ?? 0)} />
         <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Zone rules" value={String(activeCount(config?.zoneRules))} />
         <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Active rate tables" value={String(activeRateTableCount(config))} />
       </section>
@@ -3436,7 +3474,7 @@ function ShippingConfigTab() {
           </div>
           <Input
             className="lg:w-72"
-            placeholder="Search package profiles"
+            placeholder="Search product shipping profiles"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
@@ -3460,6 +3498,8 @@ function ShippingConfigTab() {
           isSaving={pendingAction === "profile"}
           onChange={setProfileForm}
           onSave={savePackageProfile}
+          variants={productVariantOptions}
+          variantsLoading={variantsQuery.isLoading}
         />
         <ShippingZoneRulePanel
           form={zoneForm}
@@ -3532,22 +3572,31 @@ function ShippingPackageProfilePanel({
   isSaving,
   onChange,
   onSave,
+  variants,
+  variantsLoading,
 }: {
   boxes: DropshipShippingConfigOverview["boxes"];
   form: ShippingPackageProfileFormState;
   isSaving: boolean;
   onChange: Dispatch<SetStateAction<ShippingPackageProfileFormState>>;
   onSave: () => void;
+  variants: DropshipProductVariantOption[];
+  variantsLoading: boolean;
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <PanelHeader title="Package profiles" detail="SKU-level weight, dimensions, and default package rules." />
+      <PanelHeader title="Product shipping profiles" detail="SKU-level shipping dimensions, weight, and package rules." />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <ShippingInput label="Variant ID" value={form.productVariantId} onChange={(value) => onChange((current) => ({ ...current, productVariantId: value }))} />
-        <ShippingInput label="Weight grams" value={form.weightGrams} onChange={(value) => onChange((current) => ({ ...current, weightGrams: value }))} />
-        <ShippingInput label="Length mm" value={form.lengthMm} onChange={(value) => onChange((current) => ({ ...current, lengthMm: value }))} />
-        <ShippingInput label="Width mm" value={form.widthMm} onChange={(value) => onChange((current) => ({ ...current, widthMm: value }))} />
-        <ShippingInput label="Height mm" value={form.heightMm} onChange={(value) => onChange((current) => ({ ...current, heightMm: value }))} />
+        <ProductVariantSkuPicker
+          isLoading={variantsLoading}
+          onChange={(value) => onChange((current) => ({ ...current, productVariantId: value }))}
+          value={form.productVariantId}
+          variants={variants}
+        />
+        <ShippingInput label="Weight lb" value={form.weightLb} onChange={(value) => onChange((current) => ({ ...current, weightLb: value }))} />
+        <ShippingInput label="Length in" value={form.lengthIn} onChange={(value) => onChange((current) => ({ ...current, lengthIn: value }))} />
+        <ShippingInput label="Width in" value={form.widthIn} onChange={(value) => onChange((current) => ({ ...current, widthIn: value }))} />
+        <ShippingInput label="Height in" value={form.heightIn} onChange={(value) => onChange((current) => ({ ...current, heightIn: value }))} />
         <ShippingInput label="Max units/package" value={form.maxUnitsPerPackage} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxUnitsPerPackage: value }))} />
         <ShippingInput label="Default carrier" value={form.defaultCarrier} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultCarrier: value }))} />
         <ShippingInput label="Default service" value={form.defaultService} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultService: value }))} />
@@ -3583,9 +3632,74 @@ function ShippingPackageProfilePanel({
       </div>
       <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
         <Save className="h-4 w-4" />
-        Save profile
+        Save product profile
       </Button>
     </section>
+  );
+}
+
+function ProductVariantSkuPicker({
+  isLoading,
+  onChange,
+  value,
+  variants,
+}: {
+  isLoading: boolean;
+  onChange: (value: string) => void;
+  value: string;
+  variants: DropshipProductVariantOption[];
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedVariant = variants.find((variant) => String(variant.id) === value) ?? null;
+
+  return (
+    <div>
+      <label className="text-sm font-medium">SKU</label>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            aria-expanded={open}
+            className="mt-2 h-10 w-full justify-between"
+            role="combobox"
+            type="button"
+            variant="outline"
+          >
+            <span className={selectedVariant ? "truncate" : "truncate text-muted-foreground"}>
+              {isLoading ? "Loading SKUs..." : selectedVariant ? formatVariantOption(selectedVariant) : "Select SKU"}
+            </span>
+            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[360px] p-0">
+          <Command>
+            <CommandInput placeholder="Search SKU or name..." />
+            <CommandList>
+              <CommandEmpty>No SKU found.</CommandEmpty>
+              <CommandGroup>
+                {variants.map((variant) => (
+                  <CommandItem
+                    key={variant.id}
+                    onSelect={() => {
+                      onChange(String(variant.id));
+                      setOpen(false);
+                    }}
+                    value={variantOptionSearchValue(variant)}
+                  >
+                    <Check className={`mr-2 h-4 w-4 ${String(variant.id) === value ? "opacity-100" : "opacity-0"}`} />
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{variant.sku || `Variant ${variant.id}`}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {variant.name} - ID {variant.id}
+                      </div>
+                    </div>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </div>
   );
 }
 
@@ -3762,13 +3876,13 @@ function ShippingConfigTables({
         ])}
       />
       <ShippingSimpleTable
-        title="Package profiles"
-        emptyTitle="No package profiles"
-        headers={["Variant", "Size", "Weight", "Status"]}
+        title="Product shipping profiles"
+        emptyTitle="No product shipping profiles"
+        headers={["SKU", "Size", "Weight", "Status"]}
         rows={config.packageProfiles.map((profile) => [
           profile.variantSku || String(profile.productVariantId),
-          `${profile.lengthMm} x ${profile.widthMm} x ${profile.heightMm} mm`,
-          `${profile.weightGrams}g`,
+          `${formatMmAsInches(profile.lengthMm)} x ${formatMmAsInches(profile.widthMm)} x ${formatMmAsInches(profile.heightMm)} in`,
+          `${formatGramsAsPounds(profile.weightGrams)} lb`,
           profile.isActive ? "Active" : "Inactive",
         ])}
       />
@@ -7156,6 +7270,14 @@ function storeConnectionNeedsAttention(connection: DropshipAdminStoreConnectionL
 function formatWarehouseOption(warehouse: DropshipWarehouseOption): string {
   const defaultSuffix = warehouse.isDefault === 1 ? " default" : "";
   return `${warehouse.name} (${warehouse.code}) - ID ${warehouse.id}${defaultSuffix}`;
+}
+
+function formatVariantOption(variant: DropshipProductVariantOption): string {
+  return `${variant.sku || `Variant ${variant.id}`} - ${variant.name}`;
+}
+
+function variantOptionSearchValue(variant: DropshipProductVariantOption): string {
+  return `${variant.sku ?? ""} ${variant.name} ${variant.id}`;
 }
 
 function inchesToMillimetersString(value: string, field: string): string {

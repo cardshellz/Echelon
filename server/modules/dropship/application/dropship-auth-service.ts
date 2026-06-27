@@ -7,6 +7,7 @@ import {
   assertDropshipPasswordPolicy,
   normalizeCardShellzEmail,
   resolveSensitiveActionStepUp,
+  type DropshipAuthMethod,
   type DropshipSensitiveAction,
   type DropshipSessionPrincipal,
   type DropshipStepUpMethod,
@@ -21,6 +22,7 @@ import type {
 import type {
   CompleteDropshipAccountBootstrapInput,
   DropshipPasswordLoginInput,
+  LookupDropshipAuthEmailInput,
   StartDropshipAccountBootstrapInput,
   StartDropshipSensitiveActionChallengeInput,
   VerifyDropshipSensitiveActionChallengeInput,
@@ -48,9 +50,21 @@ export interface DropshipAuthChallengeConsumeResult {
   failureReason?: "not_found" | "expired" | "too_many_attempts" | "invalid_code";
 }
 
+export interface DropshipAuthEmailLookupResult {
+  status: "eligible_new" | "eligible_returning" | "ineligible";
+  eligible: boolean;
+  hasPassword: boolean;
+  hasPasskey: boolean;
+}
+
 export interface DropshipAuthIdentityRepository {
   findAuthIdentityByMemberId(memberId: string): Promise<DropshipAuthIdentityRecord | null>;
   findAuthIdentityByPrimaryEmail(email: string): Promise<DropshipAuthIdentityRecord | null>;
+  upsertEmailVerifiedIdentity(input: {
+    memberId: string;
+    cardShellzEmail: string;
+    verifiedAt: Date;
+  }): Promise<DropshipAuthIdentityRecord>;
   upsertPasswordIdentity(input: {
     memberId: string;
     cardShellzEmail: string;
@@ -118,6 +132,30 @@ export class DropshipAuthService {
     }
   }
 
+  async lookupAuthEmail(input: LookupDropshipAuthEmailInput): Promise<DropshipAuthEmailLookupResult> {
+    const email = normalizeCardShellzEmail(input.email);
+    const member = await this.deps.identity.resolveMemberByCardShellzEmail(email);
+    if (!member) {
+      return buildIneligibleAuthEmailLookupResult();
+    }
+
+    const entitlement = await this.deps.entitlement.getEntitlementByMemberId(member.memberId);
+    if (!entitlement || !isLoginEntitled(entitlement.status)) {
+      return buildIneligibleAuthEmailLookupResult();
+    }
+
+    const identityByMember = await this.deps.authIdentities.findAuthIdentityByMemberId(member.memberId);
+    const identity = identityByMember ?? await this.deps.authIdentities.findAuthIdentityByPrimaryEmail(email);
+    const activeIdentity = identity?.status === "active" ? identity : null;
+
+    return {
+      status: activeIdentity ? "eligible_returning" : "eligible_new",
+      eligible: true,
+      hasPassword: !!activeIdentity?.passwordHash,
+      hasPasskey: !!activeIdentity?.passkeyEnrolledAt,
+    };
+  }
+
   async startAccountBootstrap(input: StartDropshipAccountBootstrapInput): Promise<{ accepted: true }> {
     const email = normalizeCardShellzEmail(input.email);
     const member = await this.deps.identity.resolveMemberByCardShellzEmail(email);
@@ -158,7 +196,6 @@ export class DropshipAuthService {
     input: CompleteDropshipAccountBootstrapInput,
   ): Promise<DropshipSessionPrincipal> {
     const email = normalizeCardShellzEmail(input.email);
-    assertDropshipPasswordPolicy(input.password);
 
     const member = await this.requireMemberByEmail(email);
     const entitlementStatus = await this.requireLoginEntitlement(member.memberId);
@@ -184,16 +221,28 @@ export class DropshipAuthService {
       );
     }
 
-    const passwordHash = await this.deps.passwordHasher.hash(input.password);
-    const identity = await this.deps.authIdentities.upsertPasswordIdentity({
-      memberId: member.memberId,
-      cardShellzEmail: member.cardShellzEmail,
-      passwordHash,
-      passwordHashAlgorithm: this.deps.passwordHasher.algorithm,
-      verifiedAt: this.deps.clock.now(),
-    });
+    let authMethod: DropshipAuthMethod = "email_mfa";
+    let identity: DropshipAuthIdentityRecord;
+    if (input.password) {
+      assertDropshipPasswordPolicy(input.password);
+      const passwordHash = await this.deps.passwordHasher.hash(input.password);
+      identity = await this.deps.authIdentities.upsertPasswordIdentity({
+        memberId: member.memberId,
+        cardShellzEmail: member.cardShellzEmail,
+        passwordHash,
+        passwordHashAlgorithm: this.deps.passwordHasher.algorithm,
+        verifiedAt: this.deps.clock.now(),
+      });
+      authMethod = "password";
+    } else {
+      identity = await this.deps.authIdentities.upsertEmailVerifiedIdentity({
+        memberId: member.memberId,
+        cardShellzEmail: member.cardShellzEmail,
+        verifiedAt: this.deps.clock.now(),
+      });
+    }
 
-    return this.buildSessionPrincipal(identity, entitlementStatus, "password");
+    return this.buildSessionPrincipal(identity, entitlementStatus, authMethod);
   }
 
   async loginWithPassword(input: DropshipPasswordLoginInput): Promise<DropshipSessionPrincipal> {
@@ -355,7 +404,7 @@ export class DropshipAuthService {
   private buildSessionPrincipal(
     identity: DropshipAuthIdentityRecord,
     entitlementStatus: "active" | "grace",
-    authMethod: "password" | "passkey",
+    authMethod: DropshipAuthMethod,
     authenticatedAt: string = this.deps.clock.now().toISOString(),
   ): DropshipSessionPrincipal {
     return {
@@ -438,4 +487,13 @@ export function addMinutes(date: Date, minutes: number): Date {
 
 function isLoginEntitled(status: string): status is "active" | "grace" {
   return status === "active" || status === "grace";
+}
+
+function buildIneligibleAuthEmailLookupResult(): DropshipAuthEmailLookupResult {
+  return {
+    status: "ineligible",
+    eligible: false,
+    hasPassword: false,
+    hasPasskey: false,
+  };
 }
