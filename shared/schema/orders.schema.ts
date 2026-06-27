@@ -127,6 +127,7 @@ export const orders = wmsSchema.table("orders", {
   channelShipByDate: timestamp("channel_ship_by_date"), // platform-provided ship-by deadline, preferred over generic channel SLA
   sortRank: varchar("sort_rank", { length: 32 }), // flattened pick queue sort key (26 chars), pushed to ShipStation customField1
   warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled, awaiting_3pl
+  fulfillmentPartitionKey: varchar("fulfillment_partition_key", { length: 120 }).notNull().default("default"), // Explicit fulfillment partition; default preserves one WMS work order per OMS order.
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
   heldAt: timestamp("held_at"),
   assignedPickerId: varchar("assigned_picker_id", { length: 100 }),

@@ -54,6 +54,17 @@ Reason this matters:
 
 ### Explicit fulfillment partitions for future multi-warehouse routing
 
+Initial schema/backstop slice:
+
+- Added `wms.orders.fulfillment_partition_key`, defaulting existing and new
+  rows to `default`.
+- Replaced the active OMS WMS-order uniqueness backstop with a partition-aware
+  index on `source + oms_fulfillment_order_id + warehouse_id +
+  fulfillment_partition_key` for the current OMS creation path.
+- WMS sync and order-create idempotency now key duplicate detection to the
+  default partition so future split routing can introduce non-overlapping
+  partition keys without changing the storage contract.
+
 Current valid shape:
 
 - One `oms.oms_orders` row represents the customer/channel order.

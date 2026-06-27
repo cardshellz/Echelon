@@ -32,10 +32,15 @@ const SHIPMENT_DERIVED_STATUSES = new Set<OrderStatus>([
 ]);
 
 const WMS_ORDER_CREATE_LOCK_NAMESPACE = 917403;
+const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
+
+function fulfillmentPartitionKeyForCreate(order: InsertOrder): string {
+  return String((order as any).fulfillmentPartitionKey || DEFAULT_FULFILLMENT_PARTITION_KEY);
+}
 
 function getWmsOrderCreateLockKey(order: InsertOrder): string | null {
   if (order.source === "oms" && order.omsFulfillmentOrderId) {
-    return `oms:${order.omsFulfillmentOrderId}`;
+    return `oms:${order.omsFulfillmentOrderId}:${fulfillmentPartitionKeyForCreate(order)}`;
   }
   if (order.sourceTableId) {
     return `source:${order.source || "unknown"}:${order.sourceTableId}`;
@@ -67,6 +72,7 @@ async function findExistingOrderForCreate(tx: any, order: InsertOrder): Promise<
         and(
           eq(orders.source, "oms"),
           eq(orders.omsFulfillmentOrderId, order.omsFulfillmentOrderId),
+          eq(orders.fulfillmentPartitionKey, fulfillmentPartitionKeyForCreate(order)),
         ),
       )
       .limit(1);
