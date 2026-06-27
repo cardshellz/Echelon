@@ -353,7 +353,7 @@ export default function DropshipPortalAuth() {
                 </div>
                 <Button asChild className="h-11 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800">
                   <a href={OPS_UPSELL_URL} target="_blank" rel="noreferrer">
-                    View Card Shellz Club
+                    Sign up for .ops
                     <ExternalLink className="h-4 w-4" />
                   </a>
                 </Button>
