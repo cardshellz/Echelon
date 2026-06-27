@@ -8,14 +8,19 @@
 ALTER TABLE wms.orders
   ADD COLUMN IF NOT EXISTS fulfillment_partition_key varchar(120);
 
+ALTER TABLE wms.orders
+  ALTER COLUMN fulfillment_partition_key SET DEFAULT 'default';
+
+-- Migration 064 intentionally leaves legacy orphan WMS rows in place with
+-- NULL oms_fulfillment_order_id under a NOT VALID check constraint. Postgres
+-- still enforces that constraint on UPDATE, so do not touch those rows here.
 UPDATE wms.orders
 SET fulfillment_partition_key = 'default'
-WHERE fulfillment_partition_key IS NULL
-   OR BTRIM(fulfillment_partition_key) = '';
-
-ALTER TABLE wms.orders
-  ALTER COLUMN fulfillment_partition_key SET DEFAULT 'default',
-  ALTER COLUMN fulfillment_partition_key SET NOT NULL;
+WHERE oms_fulfillment_order_id IS NOT NULL
+  AND (
+    fulfillment_partition_key IS NULL
+    OR BTRIM(fulfillment_partition_key) = ''
+  );
 
 DO $$
 BEGIN
@@ -27,6 +32,19 @@ BEGIN
     ALTER TABLE wms.orders
       ADD CONSTRAINT wms_orders_fulfillment_partition_key_not_blank_chk
       CHECK (BTRIM(fulfillment_partition_key) <> '');
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'wms_orders_fulfillment_partition_required_chk'
+  ) THEN
+    ALTER TABLE wms.orders
+      ADD CONSTRAINT wms_orders_fulfillment_partition_required_chk
+      CHECK (
+        oms_fulfillment_order_id IS NULL
+        OR fulfillment_partition_key IS NOT NULL
+      );
   END IF;
 END $$;
 

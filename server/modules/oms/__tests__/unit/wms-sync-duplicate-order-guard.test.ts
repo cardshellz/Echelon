@@ -54,7 +54,11 @@ describe("wms-sync duplicate WMS order / ShipStation push guard", () => {
     expect(FULFILLMENT_PARTITION_MIGRATION).toContain("(COALESCE(warehouse_id, 0))");
     expect(FULFILLMENT_PARTITION_MIGRATION).toContain("fulfillment_partition_key");
     expect(FULFILLMENT_PARTITION_MIGRATION).toContain("DROP INDEX IF EXISTS wms.uq_wms_orders_oms_fulfillment_active");
+    expect(FULFILLMENT_PARTITION_MIGRATION).toContain("WHERE oms_fulfillment_order_id IS NOT NULL");
+    expect(FULFILLMENT_PARTITION_MIGRATION).not.toContain("ALTER COLUMN fulfillment_partition_key SET NOT NULL");
     expect(DB_SRC).toContain("uq_wms_orders_oms_fulfillment_partition_active");
+    expect(DB_SRC).toContain("WHERE oms_fulfillment_order_id IS NOT NULL");
+    expect(DB_SRC).not.toContain("ALTER COLUMN fulfillment_partition_key SET NOT NULL");
   });
 
   it("returns the winner's WMS order id without creating a duplicate when a race is detected", () => {
