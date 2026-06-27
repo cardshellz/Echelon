@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -11,6 +11,7 @@ import {
   Fingerprint,
   Mail,
   Plug,
+  RefreshCw,
   Rocket,
   ShieldCheck,
   Store,
@@ -215,17 +216,28 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
     queryFn: () => fetchJson<DropshipStoreConnectionListResponse>("/api/dropship/store-connections"),
     enabled: !!principal,
   });
-  const selectedPlatformConnection = storeConnectionsQuery.data?.connections.find((connection) => (
+  const reconnectableConnections = storeConnectionsQuery.data?.connections.filter(canReconnectStoreConnection) ?? [];
+  const selectedPlatformConnection = reconnectableConnections.find((connection) => (
     connection.platform === platform && canReconnectStoreConnection(connection)
   )) ?? null;
+  const occupiedConnection = reconnectableConnections[0] ?? null;
   const canConnectStore = onboarding.storeConnections.canConnectStore;
   const canReconnectSelectedPlatform = selectedPlatformConnection !== null;
   const canStartStoreOAuth = canConnectStore || canReconnectSelectedPlatform;
+  const platformName = storePlatformName(platform);
+  const occupiedPlatform = occupiedConnection?.platform ?? null;
   const selectedShopifyDomain = platform === "shopify"
     ? shopDomain.trim() || selectedPlatformConnection?.shopDomain || ""
     : "";
   const shopifyDomainRequired = platform === "shopify" && !selectedShopifyDomain;
   const connectDisabled = !canStartStoreOAuth || shopifyDomainRequired || pendingAction !== null || (!principal?.hasPasskey && emailCodeSent && verificationCode.length !== 6);
+  const ebaySelectable = canConnectStore || reconnectableConnections.some((connection) => connection.platform === "ebay");
+  const shopifySelectable = canConnectStore || reconnectableConnections.some((connection) => connection.platform === "shopify");
+  useEffect(() => {
+    if (!canConnectStore && occupiedPlatform && platform !== occupiedPlatform) {
+      setPlatform(occupiedPlatform);
+    }
+  }, [canConnectStore, occupiedPlatform, platform]);
 
   async function run(action: PendingAction, task: () => Promise<void>): Promise<boolean> {
     setPendingAction(action);
@@ -254,12 +266,12 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           await startEmailStepUp("connect_store");
           setEmailCodeSent(true);
           setVerificationCode("");
-          setMessage("Verification code sent.");
+          setMessage(`Verification code sent. Enter it below, then ${canReconnectSelectedPlatform ? "reconnect" : "connect"} ${platformName}.`);
         });
         return;
       } else {
         if (verificationCode.length !== 6) {
-          setError("Enter the 6-digit verification code before connecting a store.");
+          setError(`Enter the 6-digit verification code before ${canReconnectSelectedPlatform ? "reconnecting" : "connecting"} ${platformName}.`);
           return;
         }
         const verified = await run("verify-email-code", async () => {
@@ -291,13 +303,15 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
     <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Connect store</h2>
+          <h2 className="text-lg font-semibold">
+            {selectedPlatformConnection ? `${platformName} connected` : "Connect store"}
+          </h2>
           <p className="mt-1 text-sm text-zinc-500">
-            {onboarding.storeConnections.launchReadyConnectedCount} launch-ready / {onboarding.storeConnections.includedLimit} included connection(s)
+            {storeConnectPanelSubtitle({ canConnectStore, occupiedConnection, onboarding, selectedPlatformConnection })}
           </p>
         </div>
-        <Badge variant="outline" className={canStartStoreOAuth ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}>
-          {canReconnectSelectedPlatform ? "Reconnect" : canConnectStore ? "Available" : "Unavailable"}
+        <Badge variant="outline" className={storeConnectPanelBadgeTone({ canConnectStore, selectedPlatformConnection })}>
+          {storeConnectPanelBadgeLabel({ canConnectStore, selectedPlatformConnection })}
         </Badge>
       </div>
 
@@ -329,21 +343,31 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           type="button"
           variant={platform === "ebay" ? "default" : "outline"}
           className={platform === "ebay" ? "h-11 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" : "h-11 gap-2"}
+          disabled={!ebaySelectable || pendingAction !== null}
           onClick={() => setPlatform("ebay")}
         >
           <Store className="h-4 w-4" />
           eBay
+          {platform === "ebay" && <CheckCircle2 className="h-4 w-4" />}
         </Button>
         <Button
           type="button"
           variant={platform === "shopify" ? "default" : "outline"}
           className={platform === "shopify" ? "h-11 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" : "h-11 gap-2"}
+          disabled={!shopifySelectable || pendingAction !== null}
           onClick={() => setPlatform("shopify")}
         >
           <Store className="h-4 w-4" />
           Shopify
+          {platform === "shopify" && <CheckCircle2 className="h-4 w-4" />}
         </Button>
       </div>
+
+      {!canConnectStore && occupiedConnection && !canReconnectSelectedPlatform && (
+        <p className="mt-3 text-sm text-zinc-500">
+          {storePlatformName(platform)} is unavailable because the included connection is used by {storePlatformName(occupiedConnection.platform)}.
+        </p>
+      )}
 
       {platform === "shopify" && (
         <div className="mt-4 space-y-2">
@@ -358,11 +382,13 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         </div>
       )}
 
-      {canReconnectSelectedPlatform && (
+      {selectedPlatformConnection ? (
+        <ConnectedStoreSummary connection={selectedPlatformConnection} />
+      ) : canConnectStore ? (
         <p className="mt-4 text-sm text-zinc-500">
-          Reconnect replaces the current {platform === "ebay" ? "eBay" : "Shopify"} authorization after marketplace sign-in.
+          Continue sends you to {platformName} to sign in and authorize the store.
         </p>
-      )}
+      ) : null}
 
       {!principal?.hasPasskey && emailCodeSent && (
         <div className="mt-4 space-y-2">
@@ -393,6 +419,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           connectProofActive,
           hasPasskey: principal?.hasPasskey ?? false,
           emailCodeSent,
+          isReconnect: canReconnectSelectedPlatform,
         })}
         {connectButtonLabel({
           connectProofActive,
@@ -472,6 +499,64 @@ function canReconnectStoreConnection(connection: DropshipStoreConnectionProfileR
   return ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status);
 }
 
+function ConnectedStoreSummary({ connection }: { connection: DropshipStoreConnectionProfileResponse }) {
+  return (
+    <div className="mt-5 border-t border-zinc-200 pt-4">
+      <div className="grid gap-4 text-sm sm:grid-cols-4">
+        <StoreConnectionDetail label="Account" value={connectionDisplayName(connection)} />
+        <StoreConnectionDetail label="Status" value={formatStatus(connection.status)} />
+        <StoreConnectionDetail label="Readiness" value={connection.launchReady ? "Launch ready" : launchReadinessDetail(connection)} />
+        <StoreConnectionDetail label="Updated" value={formatDateTime(connection.updatedAt)} />
+      </div>
+      <p className="mt-4 text-sm text-zinc-500">
+        Reconnect opens {storePlatformName(connection.platform)} authorization and can refresh tokens or switch the connected account.
+      </p>
+    </div>
+  );
+}
+
+function StoreConnectionDetail({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-xs uppercase text-zinc-500">{label}</div>
+      <div className="mt-1 truncate font-medium text-zinc-900">{value}</div>
+    </div>
+  );
+}
+
+function storeConnectPanelSubtitle(input: {
+  canConnectStore: boolean;
+  occupiedConnection: DropshipStoreConnectionProfileResponse | null;
+  onboarding: DropshipOnboardingState;
+  selectedPlatformConnection: DropshipStoreConnectionProfileResponse | null;
+}): string {
+  if (input.selectedPlatformConnection) {
+    return `${input.onboarding.storeConnections.launchReadyConnectedCount} launch-ready / ${input.onboarding.storeConnections.includedLimit} included connection(s)`;
+  }
+  if (!input.canConnectStore && input.occupiedConnection) {
+    return `Included connection used by ${storePlatformName(input.occupiedConnection.platform)}`;
+  }
+  return "Choose a marketplace to authorize.";
+}
+
+function storeConnectPanelBadgeLabel(input: {
+  canConnectStore: boolean;
+  selectedPlatformConnection: DropshipStoreConnectionProfileResponse | null;
+}): string {
+  if (input.selectedPlatformConnection?.launchReady) return "Launch ready";
+  if (input.selectedPlatformConnection) return "Needs attention";
+  return input.canConnectStore ? "Available" : "Slot used";
+}
+
+function storeConnectPanelBadgeTone(input: {
+  canConnectStore: boolean;
+  selectedPlatformConnection: DropshipStoreConnectionProfileResponse | null;
+}): string {
+  if (input.selectedPlatformConnection?.launchReady) return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (input.selectedPlatformConnection) return "border-amber-200 bg-amber-50 text-amber-900";
+  return input.canConnectStore ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
 function connectButtonLabel(input: {
   connectProofActive: boolean;
   hasPasskey: boolean;
@@ -480,13 +565,15 @@ function connectButtonLabel(input: {
   isReconnect: boolean;
   platform: DropshipStorePlatform;
 }): string {
+  const action = input.isReconnect ? "reconnect" : "connect";
+  const platformName = storePlatformName(input.platform);
   if (input.pendingAction === "send-email-code") return "Sending code";
   if (input.pendingAction === "verify-email-code") return "Verifying code";
   if (input.pendingAction === "passkey-proof") return "Waiting for passkey";
   if (input.pendingAction === "oauth-start") return "Opening authorization";
-  if (input.connectProofActive) return `${input.isReconnect ? "Reconnect" : "Connect"} ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
-  if (!input.hasPasskey && !input.emailCodeSent) return "Send verification code";
-  return `${input.isReconnect ? "Reconnect" : "Connect"} ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
+  if (input.connectProofActive || input.hasPasskey) return `${capitalizeAction(action)} ${platformName}`;
+  if (!input.emailCodeSent) return `Verify to ${action} ${platformName}`;
+  return `Verify and ${action} ${platformName}`;
 }
 
 function activateButtonLabel(input: {
@@ -506,11 +593,44 @@ function connectButtonIcon(input: {
   connectProofActive: boolean;
   hasPasskey: boolean;
   emailCodeSent: boolean;
+  isReconnect: boolean;
 }): ReactNode {
-  if (input.connectProofActive) return <Store className="h-4 w-4" />;
+  if (input.connectProofActive) return input.isReconnect ? <RefreshCw className="h-4 w-4" /> : <Store className="h-4 w-4" />;
   if (input.hasPasskey) return <Fingerprint className="h-4 w-4" />;
   if (!input.emailCodeSent) return <Mail className="h-4 w-4" />;
   return <ArrowRight className="h-4 w-4" />;
+}
+
+function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
+  return connection.externalDisplayName || connection.shopDomain || `${storePlatformName(connection.platform)} connection ${connection.storeConnectionId}`;
+}
+
+function launchReadinessDetail(connection: DropshipStoreConnectionProfileResponse): string {
+  if (connection.status !== "connected") return formatStatus(connection.status);
+  if (connection.setupStatus !== "ready") return `Setup ${formatStatus(connection.setupStatus)}`;
+  if (!connection.hasAccessToken) return "Access token missing";
+  if (connection.platform === "ebay" && !connection.hasRefreshToken) return "Refresh token missing";
+  return "Not ready";
+}
+
+function formatDateTime(value: string | null): string {
+  if (!value) return "-";
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
+
+function storePlatformName(platform: DropshipStorePlatform): string {
+  return platform === "ebay" ? "eBay" : "Shopify";
+}
+
+function capitalizeAction(action: "connect" | "reconnect"): string {
+  return action === "connect" ? "Connect" : "Reconnect";
 }
 
 function activateButtonIcon(hasPasskey: boolean, emailCodeSent: boolean): ReactNode {
