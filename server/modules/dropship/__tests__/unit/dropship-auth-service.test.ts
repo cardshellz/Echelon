@@ -145,6 +145,47 @@ describe("DropshipAuthService", () => {
     });
   });
 
+  it("starts and completes password reset with email proof", async () => {
+    await service.startPasswordReset({
+      email: "vendor@cardshellz.test",
+      idempotencyKey: "password-reset-key-0001",
+    });
+
+    expect(deps.sentEmails).toEqual([{
+      toEmail: "vendor@cardshellz.test",
+      code: "123456",
+      action: "password_reset",
+      expiresAt: new Date("2026-04-30T12:10:00.000Z"),
+    }]);
+
+    const principal = await service.completePasswordReset({
+      email: "vendor@cardshellz.test",
+      verificationCode: "123456",
+      password: "NewStrongPassword123",
+    });
+
+    expect(principal).toMatchObject({
+      authIdentityId: 101,
+      memberId: "member-1",
+      cardShellzEmail: "vendor@cardshellz.test",
+      authMethod: "password",
+      entitlementStatus: "active",
+    });
+    expect(deps.identitiesByEmail.get("vendor@cardshellz.test")?.passwordHash).toBe("hashed:NewStrongPassword123");
+  });
+
+  it("does not reveal unknown emails during password reset start", async () => {
+    await service.startPasswordReset({
+      email: "missing@cardshellz.test",
+      idempotencyKey: "password-reset-key-0002",
+    });
+
+    expect(deps.sentEmails).toEqual([]);
+    expect(deps.logs.warn[0]).toMatchObject({
+      code: "DROPSHIP_PASSWORD_RESET_MEMBER_NOT_FOUND",
+    });
+  });
+
   it("logs in with password and marks sensitive actions for email MFA when no passkey exists", async () => {
     await service.startAccountBootstrap({
       email: "vendor@cardshellz.test",

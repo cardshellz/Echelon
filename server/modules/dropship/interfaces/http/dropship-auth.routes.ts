@@ -19,6 +19,7 @@ import {
   type DropshipStoredPasskeyRegistration,
 } from "../../application/dropship-passkey-service";
 import {
+  completeDropshipPasswordResetInputSchema,
   completeDropshipPasskeyLoginInputSchema,
   completeDropshipPasskeyRegistrationInputSchema,
   completeDropshipAccountBootstrapInputSchema,
@@ -26,6 +27,7 @@ import {
   lookupDropshipAuthEmailInputSchema,
   startDropshipPasskeyLoginInputSchema,
   startDropshipAccountBootstrapInputSchema,
+  startDropshipPasswordResetInputSchema,
   startDropshipSensitiveActionChallengeInputSchema,
   startDropshipSensitiveActionPasskeyInputSchema,
   verifyDropshipSensitiveActionChallengeInputSchema,
@@ -137,6 +139,30 @@ export function registerDropshipAuthRoutes(
         vendor,
         sensitiveActionStepUp: principal.hasPasskey ? "passkey" : "email_mfa",
       });
+    } catch (error) {
+      return sendDropshipAuthError(res, error);
+    }
+  });
+
+  app.post("/api/dropship/auth/password-reset/start", authRateLimiter, async (req, res) => {
+    try {
+      const input = parseBody(startDropshipPasswordResetInputSchema, req.body);
+      await service.startPasswordReset(input);
+      return res.status(202).json({ accepted: true });
+    } catch (error) {
+      return sendDropshipAuthError(res, error);
+    }
+  });
+
+  app.post("/api/dropship/auth/password-reset/complete", authRateLimiter, async (req, res) => {
+    try {
+      const input = parseBody(completeDropshipPasswordResetInputSchema, req.body);
+      const principal = await service.completePasswordReset(input);
+      const vendor = await provisionDropshipVendorProfile(vendorProvisioningService, principal);
+      req.session.dropship = principal;
+      req.session.dropshipSensitiveProofs = {};
+      await saveSession(req);
+      return res.json({ principal, vendor });
     } catch (error) {
       return sendDropshipAuthError(res, error);
     }
