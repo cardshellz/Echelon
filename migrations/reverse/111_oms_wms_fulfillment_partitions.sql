@@ -5,6 +5,7 @@ DROP INDEX IF EXISTS wms.idx_wms_orders_oms_fulfillment_partition;
 DROP INDEX IF EXISTS wms.uq_wms_orders_oms_fulfillment_partition_active;
 
 ALTER TABLE wms.orders
+  DROP CONSTRAINT IF EXISTS wms_orders_fulfillment_partition_required_chk,
   DROP CONSTRAINT IF EXISTS wms_orders_fulfillment_partition_key_not_blank_chk,
   DROP COLUMN IF EXISTS fulfillment_partition_key;
 
