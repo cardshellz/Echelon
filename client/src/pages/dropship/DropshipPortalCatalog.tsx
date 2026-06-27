@@ -675,7 +675,7 @@ function ScopeSelectionPanel({
         <div className="flex flex-col gap-2 sm:flex-row">
           <Button
             type="button"
-            className="h-10 gap-2 bg-zinc-950 hover:bg-zinc-800"
+            className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
             disabled={selectionDisabled}
             onClick={onSelectCatalog}
           >

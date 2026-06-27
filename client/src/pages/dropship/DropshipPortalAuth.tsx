@@ -103,7 +103,7 @@ export default function DropshipPortalAuth() {
         <section className="hidden border-r border-zinc-200 bg-white px-10 py-12 lg:flex lg:flex-col lg:justify-between">
           <div>
             <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-md bg-emerald-600 text-white">
+              <div className="flex h-11 w-11 items-center justify-center rounded-md bg-[#C060E0] text-white">
                 <ShieldCheck className="h-6 w-6" />
               </div>
               <div>
@@ -140,7 +140,7 @@ export default function DropshipPortalAuth() {
           <div className="w-full max-w-[440px] rounded-md border border-zinc-200 bg-white p-6 shadow-sm">
             <div className="mb-6 lg:hidden">
               <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-emerald-600 text-white">
+                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-[#C060E0] text-white">
                   <ShieldCheck className="h-5 w-5" />
                 </div>
                 <div>
@@ -204,7 +204,7 @@ export default function DropshipPortalAuth() {
                 <Button
                   type="submit"
                   disabled={!normalizedEmail || pendingAction === "lookup"}
-                  className="h-11 w-full gap-2 bg-emerald-600 hover:bg-emerald-700"
+                  className="h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
                 >
                   {pendingAction === "lookup" ? "Checking access" : "Continue"}
                   <ArrowRight className="h-4 w-4" />
@@ -222,7 +222,7 @@ export default function DropshipPortalAuth() {
                       await loginWithPasskey(normalizedEmail);
                       continueToPortal();
                     })}
-                    className="h-11 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
+                    className="h-11 w-full gap-2 bg-[#C060E0] text-white hover:bg-[#a94bc9]"
                   >
                     <Fingerprint className="h-4 w-4" />
                     {pendingAction === "passkey" ? "Waiting for passkey" : passkeyLabel}
@@ -283,7 +283,7 @@ export default function DropshipPortalAuth() {
                 <Button
                   type="submit"
                   disabled={!password || pendingAction === "password"}
-                  className="h-11 w-full gap-2 bg-emerald-600 hover:bg-emerald-700"
+                  className="h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
                 >
                   {pendingAction === "password" ? "Signing in" : "Sign in"}
                   <ArrowRight className="h-4 w-4" />
@@ -328,7 +328,7 @@ export default function DropshipPortalAuth() {
                     });
                     continueToPortal();
                   })}
-                  className="h-11 w-full gap-2 bg-emerald-600 hover:bg-emerald-700"
+                  className="h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
                 >
                   {pendingAction === "code-complete" ? "Verifying" : codeSent ? "Continue" : "Verify code"}
                   <ArrowRight className="h-4 w-4" />
@@ -351,7 +351,7 @@ export default function DropshipPortalAuth() {
                 <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
                   This email is not currently authorized for `.ops` dropship access.
                 </div>
-                <Button asChild className="h-11 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800">
+                <Button asChild className="h-11 w-full gap-2 bg-[#C060E0] text-white hover:bg-[#a94bc9]">
                   <a href={OPS_UPSELL_URL} target="_blank" rel="noreferrer">
                     Sign up for .ops
                     <ExternalLink className="h-4 w-4" />
