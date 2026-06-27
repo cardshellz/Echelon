@@ -23,11 +23,17 @@ const EBAY_IDENTITY_URLS = {
   production: "https://api.ebay.com/commerce/identity/v1/user/",
 } as const;
 
+const EBAY_STORES_URLS = {
+  sandbox: "https://api.sandbox.ebay.com/sell/stores/v1/store",
+  production: "https://api.ebay.com/sell/stores/v1/store",
+} as const;
+
 const EBAY_SCOPES = [
   "https://api.ebay.com/oauth/api_scope",
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
   "https://api.ebay.com/oauth/api_scope/sell.account",
+  "https://api.ebay.com/oauth/api_scope/sell.stores",
   "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ] as const;
 
@@ -112,17 +118,25 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
     const accessTokenExpiresAt = typeof tokenData.expires_in === "number"
       ? new Date(Date.now() + tokenData.expires_in * 1000)
       : null;
-    const identity = await this.fetchIdentity(accessToken);
+    const [identity, store] = await Promise.all([
+      this.fetchIdentity(accessToken),
+      this.fetchStore(accessToken),
+    ]);
 
     return {
       accessToken,
       refreshToken,
       accessTokenExpiresAt,
       externalAccountId: identity.accountId,
-      externalDisplayName: identity.displayName,
+      externalDisplayName: store.storeName ?? identity.displayName,
       tokenMetadata: {
         environment: this.config.environment,
+        identityAccountId: identity.accountId,
+        identityDisplayName: identity.displayName,
         provider: "ebay",
+        storeName: store.storeName,
+        storeUrl: store.storeUrl,
+        storeUrlPath: store.storeUrlPath,
       },
     };
   }
@@ -145,6 +159,33 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
       accountId: userId ?? username,
       displayName: username ?? userId,
     };
+  }
+
+  private async fetchStore(accessToken: string): Promise<{
+    storeName: string | null;
+    storeUrl: string | null;
+    storeUrlPath: string | null;
+  }> {
+    const response = await fetch(EBAY_STORES_URLS[this.config.environment], {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
+    if (!response.ok) {
+      return { storeName: null, storeUrl: null, storeUrlPath: null };
+    }
+
+    try {
+      const store = await response.json() as Record<string, unknown>;
+      return {
+        storeName: optionalString(store.name),
+        storeUrl: optionalString(store.url),
+        storeUrlPath: optionalString(store.urlPath),
+      };
+    } catch {
+      return { storeName: null, storeUrl: null, storeUrlPath: null };
+    }
   }
 }
 
