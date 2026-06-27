@@ -313,7 +313,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         <Button
           type="button"
           variant={platform === "ebay" ? "default" : "outline"}
-          className={platform === "ebay" ? "h-11 gap-2 bg-zinc-950 hover:bg-zinc-800" : "h-11 gap-2"}
+          className={platform === "ebay" ? "h-11 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" : "h-11 gap-2"}
           onClick={() => setPlatform("ebay")}
         >
           <Store className="h-4 w-4" />
@@ -322,7 +322,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         <Button
           type="button"
           variant={platform === "shopify" ? "default" : "outline"}
-          className={platform === "shopify" ? "h-11 gap-2 bg-zinc-950 hover:bg-zinc-800" : "h-11 gap-2"}
+          className={platform === "shopify" ? "h-11 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" : "h-11 gap-2"}
           onClick={() => setPlatform("shopify")}
         >
           <Store className="h-4 w-4" />
@@ -659,7 +659,7 @@ function ActivationPanel({
       {alreadyActive ? (
         <Button
           type="button"
-          className="mt-5 h-11 w-full gap-2 bg-zinc-950 hover:bg-zinc-800"
+          className="mt-5 h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
           onClick={() => setLocation(dropshipPortalPath("/dashboard"))}
         >
           Open dashboard

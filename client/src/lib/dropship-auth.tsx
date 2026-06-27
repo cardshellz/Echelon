@@ -97,6 +97,12 @@ interface DropshipAuthContextValue {
     email: string;
     password: string;
   }) => Promise<DropshipSessionPrincipal>;
+  startPasswordReset: (email: string) => Promise<void>;
+  completePasswordReset: (input: {
+    email: string;
+    verificationCode: string;
+    password: string;
+  }) => Promise<DropshipSessionPrincipal>;
   loginWithPasskey: (email?: string) => Promise<DropshipSessionPrincipal>;
   startEmailStepUp: (action: DropshipSensitiveAction) => Promise<void>;
   verifyEmailStepUp: (input: {
@@ -188,6 +194,27 @@ export function DropshipAuthProvider({ children }: { children: React.ReactNode }
     loginWithPassword: async (input) => {
       const data = await dropshipJson<{ principal: DropshipSessionPrincipal }>(
         "/api/dropship/auth/login/password",
+        {
+          method: "POST",
+          body: input,
+        },
+      );
+      setPrincipal(data.principal);
+      setSensitiveProofs({});
+      return data.principal;
+    },
+    startPasswordReset: async (email: string) => {
+      await dropshipJson("/api/dropship/auth/password-reset/start", {
+        method: "POST",
+        body: {
+          email,
+          idempotencyKey: createIdempotencyKey("password-reset"),
+        },
+      });
+    },
+    completePasswordReset: async (input) => {
+      const data = await dropshipJson<{ principal: DropshipSessionPrincipal }>(
+        "/api/dropship/auth/password-reset/complete",
         {
           method: "POST",
           body: input,

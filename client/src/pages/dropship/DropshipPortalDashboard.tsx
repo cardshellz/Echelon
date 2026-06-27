@@ -478,7 +478,7 @@ function SecurityPanel({
     <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-zinc-950 text-white">
+          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-[#C060E0] text-white">
             <Fingerprint className="h-5 w-5" />
           </div>
           <div>
@@ -559,7 +559,7 @@ function SecurityPanel({
           <Button
             type="button"
             disabled={!proofReady || !passkeysSupported || pendingAction === "register-passkey"}
-            className="h-10 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
+            className="h-10 w-full gap-2 bg-[#C060E0] text-white hover:bg-[#a94bc9]"
             onClick={() => run("register-passkey", async () => {
               await registerPasskey();
               onVerificationCodeChange("");
@@ -588,7 +588,7 @@ function SecurityPanel({
           <Button
             type="button"
             disabled={!registerPasskeyProofActive || pendingAction === "register-passkey"}
-            className="h-10 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
+            className="h-10 w-full gap-2 bg-[#C060E0] text-white hover:bg-[#a94bc9]"
             onClick={() => run("register-passkey", async () => {
               await registerPasskey();
               onVerificationCodeChange("");

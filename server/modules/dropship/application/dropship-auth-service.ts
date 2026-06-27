@@ -21,9 +21,11 @@ import type {
 } from "./dropship-ports";
 import type {
   CompleteDropshipAccountBootstrapInput,
+  CompleteDropshipPasswordResetInput,
   DropshipPasswordLoginInput,
   LookupDropshipAuthEmailInput,
   StartDropshipAccountBootstrapInput,
+  StartDropshipPasswordResetInput,
   StartDropshipSensitiveActionChallengeInput,
   VerifyDropshipSensitiveActionChallengeInput,
 } from "./dropship-auth-dtos";
@@ -268,6 +270,81 @@ export class DropshipAuthService {
 
     const entitlementStatus = await this.requireLoginEntitlement(identity.memberId);
     await this.deps.authIdentities.touchLastLogin(identity.authIdentityId, this.deps.clock.now());
+    return this.buildSessionPrincipal(identity, entitlementStatus, "password");
+  }
+
+  async startPasswordReset(input: StartDropshipPasswordResetInput): Promise<{ accepted: true }> {
+    const email = normalizeCardShellzEmail(input.email);
+    const member = await this.deps.identity.resolveMemberByCardShellzEmail(email);
+    if (!member) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_PASSWORD_RESET_MEMBER_NOT_FOUND",
+        message: "Dropship password reset requested for an unknown Card Shellz email.",
+      });
+      return { accepted: true };
+    }
+
+    const entitlement = await this.deps.entitlement.getEntitlementByMemberId(member.memberId);
+    if (!entitlement || !isLoginEntitled(entitlement.status)) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_PASSWORD_RESET_NOT_ENTITLED",
+        message: "Dropship password reset requested by a member without active dropship entitlement.",
+        context: {
+          memberId: member.memberId,
+          entitlementStatus: entitlement?.status ?? "missing",
+          reasonCode: entitlement?.reasonCode ?? "ENTITLEMENT_NOT_FOUND",
+        },
+      });
+      return { accepted: true };
+    }
+
+    await this.createAndSendEmailChallenge({
+      memberId: member.memberId,
+      email,
+      action: "password_reset",
+      idempotencyKey: input.idempotencyKey,
+      metadata: { source: "password_reset" },
+    });
+
+    return { accepted: true };
+  }
+
+  async completePasswordReset(input: CompleteDropshipPasswordResetInput): Promise<DropshipSessionPrincipal> {
+    const email = normalizeCardShellzEmail(input.email);
+    assertDropshipPasswordPolicy(input.password);
+
+    const member = await this.requireMemberByEmail(email);
+    const entitlementStatus = await this.requireLoginEntitlement(member.memberId);
+
+    const challengeHash = this.hashEmailCode({
+      memberId: member.memberId,
+      action: "password_reset",
+      code: input.verificationCode,
+    });
+    const consumed = await this.deps.authIdentities.consumeLatestEmailChallenge({
+      memberId: member.memberId,
+      action: "password_reset",
+      challengeHash,
+      now: this.deps.clock.now(),
+      maxAttempts: DROPSHIP_EMAIL_CHALLENGE_MAX_ATTEMPTS,
+    });
+    if (!consumed.consumed) {
+      throw new DropshipError(
+        "DROPSHIP_INVALID_EMAIL_CHALLENGE",
+        "Verification code is invalid or expired.",
+        { action: "password_reset", reason: consumed.failureReason ?? "unknown" },
+      );
+    }
+
+    const passwordHash = await this.deps.passwordHasher.hash(input.password);
+    const identity = await this.deps.authIdentities.upsertPasswordIdentity({
+      memberId: member.memberId,
+      cardShellzEmail: member.cardShellzEmail,
+      passwordHash,
+      passwordHashAlgorithm: this.deps.passwordHasher.algorithm,
+      verifiedAt: this.deps.clock.now(),
+    });
+
     return this.buildSessionPrincipal(identity, entitlementStatus, "password");
   }
 

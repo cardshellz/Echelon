@@ -22,8 +22,16 @@ import {
   useDropshipAuth,
 } from "@/lib/dropship-auth";
 
-type AuthStep = "email" | "returning" | "code" | "password" | "ineligible";
-type PendingAction = "lookup" | "code-start" | "code-complete" | "password" | "passkey" | null;
+type AuthStep = "email" | "returning" | "code" | "password" | "reset-password" | "ineligible";
+type PendingAction =
+  | "lookup"
+  | "code-start"
+  | "code-complete"
+  | "password"
+  | "passkey"
+  | "reset-start"
+  | "reset-complete"
+  | null;
 
 const OPS_UPSELL_URL = "https://www.cardshellz.com/pages/club";
 
@@ -31,6 +39,7 @@ export default function DropshipPortalAuth() {
   const [, setLocation] = useLocation();
   const {
     completeBootstrap,
+    completePasswordReset,
     isAuthenticated,
     loginWithPasskey,
     loginWithPassword,
@@ -38,10 +47,13 @@ export default function DropshipPortalAuth() {
     passkeysSupported,
     platformPasskeyAvailable,
     startBootstrap,
+    startPasswordReset,
   } = useDropshipAuth();
   const [step, setStep] = useState<AuthStep>("email");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetPasswordConfirm, setResetPasswordConfirm] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
   const [emailStatus, setEmailStatus] = useState<DropshipAuthEmailStatus | null>(null);
   const [codeSent, setCodeSent] = useState(false);
@@ -89,6 +101,8 @@ export default function DropshipPortalAuth() {
     setCodeSent(false);
     setVerificationCode("");
     setPassword("");
+    setResetPassword("");
+    setResetPasswordConfirm("");
     setMessage("");
     setError("");
   }
@@ -97,13 +111,22 @@ export default function DropshipPortalAuth() {
     setLocation(dropshipPortalPath("/onboarding"));
   }
 
+  async function startResetPassword() {
+    await startPasswordReset(normalizedEmail);
+    setVerificationCode("");
+    setResetPassword("");
+    setResetPasswordConfirm("");
+    setStep("reset-password");
+    setMessage("Password reset code sent.");
+  }
+
   return (
     <main className="min-h-screen bg-zinc-50 text-zinc-950">
       <div className="mx-auto grid min-h-screen w-full max-w-6xl grid-cols-1 lg:grid-cols-[1fr_440px]">
-        <section className="hidden border-r border-zinc-200 bg-white px-10 py-12 lg:flex lg:flex-col lg:justify-between">
+        <section className="hidden border-r border-zinc-200 bg-white px-10 py-12 lg:flex lg:flex-col lg:justify-center">
           <div>
             <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-md bg-emerald-600 text-white">
+              <div className="flex h-11 w-11 items-center justify-center rounded-md bg-[#C060E0] text-white">
                 <ShieldCheck className="h-6 w-6" />
               </div>
               <div>
@@ -120,27 +143,13 @@ export default function DropshipPortalAuth() {
               </p>
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-3 text-sm">
-            <div className="rounded-md border border-zinc-200 p-4">
-              <div className="font-medium text-zinc-900">Identity</div>
-              <div className="mt-1 text-zinc-500">Card Shellz email</div>
-            </div>
-            <div className="rounded-md border border-zinc-200 p-4">
-              <div className="font-medium text-zinc-900">Access</div>
-              <div className="mt-1 text-zinc-500">`.ops` entitlement</div>
-            </div>
-            <div className="rounded-md border border-zinc-200 p-4">
-              <div className="font-medium text-zinc-900">Step-up</div>
-              <div className="mt-1 text-zinc-500">Passkey or email MFA</div>
-            </div>
-          </div>
         </section>
 
         <section className="flex items-center justify-center px-4 py-10 sm:px-8">
           <div className="w-full max-w-[440px] rounded-md border border-zinc-200 bg-white p-6 shadow-sm">
             <div className="mb-6 lg:hidden">
               <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-emerald-600 text-white">
+                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-[#C060E0] text-white">
                   <ShieldCheck className="h-5 w-5" />
                 </div>
                 <div>
@@ -204,7 +213,7 @@ export default function DropshipPortalAuth() {
                 <Button
                   type="submit"
                   disabled={!normalizedEmail || pendingAction === "lookup"}
-                  className="h-11 w-full gap-2 bg-emerald-600 hover:bg-emerald-700"
+                  className="h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
                 >
                   {pendingAction === "lookup" ? "Checking access" : "Continue"}
                   <ArrowRight className="h-4 w-4" />
@@ -222,7 +231,7 @@ export default function DropshipPortalAuth() {
                       await loginWithPasskey(normalizedEmail);
                       continueToPortal();
                     })}
-                    className="h-11 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800"
+                    className="h-11 w-full gap-2 bg-[#C060E0] text-white hover:bg-[#a94bc9]"
                   >
                     <Fingerprint className="h-4 w-4" />
                     {pendingAction === "passkey" ? "Waiting for passkey" : passkeyLabel}
@@ -283,7 +292,7 @@ export default function DropshipPortalAuth() {
                 <Button
                   type="submit"
                   disabled={!password || pendingAction === "password"}
-                  className="h-11 w-full gap-2 bg-emerald-600 hover:bg-emerald-700"
+                  className="h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
                 >
                   {pendingAction === "password" ? "Signing in" : "Sign in"}
                   <ArrowRight className="h-4 w-4" />
@@ -298,7 +307,97 @@ export default function DropshipPortalAuth() {
                   <Mail className="h-4 w-4" />
                   Email me a code instead
                 </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={pendingAction === "reset-start"}
+                  onClick={() => run("reset-start", startResetPassword)}
+                  className="h-10 w-full gap-2"
+                >
+                  <KeyRound className="h-4 w-4" />
+                  Reset password
+                </Button>
               </form>
+            )}
+
+            {step === "reset-password" && (
+              <div className="mt-6 space-y-4">
+                <div className="space-y-2">
+                  <Label>Verification code</Label>
+                  <InputOTP
+                    maxLength={6}
+                    value={verificationCode}
+                    onChange={setVerificationCode}
+                    containerClassName="justify-between"
+                  >
+                    <InputOTPGroup>
+                      {Array.from({ length: 6 }).map((_, index) => (
+                        <InputOTPSlot key={index} index={index} className="h-11 w-11 text-base" />
+                      ))}
+                    </InputOTPGroup>
+                  </InputOTP>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="dropship-reset-password">New password</Label>
+                  <div className="relative">
+                    <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                    <Input
+                      id="dropship-reset-password"
+                      type="password"
+                      value={resetPassword}
+                      onChange={(event) => setResetPassword(event.target.value)}
+                      autoComplete="new-password"
+                      className="h-11 pl-10"
+                    />
+                  </div>
+                  <p className="text-xs text-zinc-500">Use at least 12 characters with uppercase, lowercase, and a number.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="dropship-reset-password-confirm">Confirm password</Label>
+                  <Input
+                    id="dropship-reset-password-confirm"
+                    type="password"
+                    value={resetPasswordConfirm}
+                    onChange={(event) => setResetPasswordConfirm(event.target.value)}
+                    autoComplete="new-password"
+                    className="h-11"
+                  />
+                </div>
+
+                <Button
+                  type="button"
+                  disabled={
+                    verificationCode.length !== 6 ||
+                    !resetPassword ||
+                    resetPassword !== resetPasswordConfirm ||
+                    pendingAction === "reset-complete"
+                  }
+                  onClick={() => run("reset-complete", async () => {
+                    await completePasswordReset({
+                      email: normalizedEmail,
+                      verificationCode,
+                      password: resetPassword,
+                    });
+                    continueToPortal();
+                  })}
+                  className="h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                >
+                  {pendingAction === "reset-complete" ? "Resetting password" : "Reset password"}
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={pendingAction === "reset-start"}
+                  onClick={() => run("reset-start", startResetPassword)}
+                  className="h-11 w-full gap-2"
+                >
+                  <Mail className="h-4 w-4" />
+                  {pendingAction === "reset-start" ? "Sending code" : "Send another code"}
+                </Button>
+              </div>
             )}
 
             {step === "code" && (
@@ -328,7 +427,7 @@ export default function DropshipPortalAuth() {
                     });
                     continueToPortal();
                   })}
-                  className="h-11 w-full gap-2 bg-emerald-600 hover:bg-emerald-700"
+                  className="h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
                 >
                   {pendingAction === "code-complete" ? "Verifying" : codeSent ? "Continue" : "Verify code"}
                   <ArrowRight className="h-4 w-4" />
@@ -351,9 +450,9 @@ export default function DropshipPortalAuth() {
                 <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
                   This email is not currently authorized for `.ops` dropship access.
                 </div>
-                <Button asChild className="h-11 w-full gap-2 bg-zinc-950 text-white hover:bg-zinc-800">
+                <Button asChild className="h-11 w-full gap-2 bg-[#C060E0] text-white hover:bg-[#a94bc9]">
                   <a href={OPS_UPSELL_URL} target="_blank" rel="noreferrer">
-                    View Card Shellz Club
+                    Sign up for .ops
                     <ExternalLink className="h-4 w-4" />
                   </a>
                 </Button>
@@ -395,6 +494,7 @@ function headingForStep(step: AuthStep, status: DropshipAuthEmailStatus | null):
   if (step === "returning") return "Welcome back";
   if (step === "code") return status?.status === "eligible_new" ? "Verify your email" : "Check your email";
   if (step === "password") return "Enter password";
+  if (step === "reset-password") return "Reset password";
   if (step === "ineligible") return ".ops access required";
   return "Sign in";
 }
@@ -403,6 +503,7 @@ function descriptionForStep(step: AuthStep, email: string): string {
   if (step === "returning") return email;
   if (step === "code") return `Enter the 6-digit code sent to ${email}.`;
   if (step === "password") return email;
+  if (step === "reset-password") return `Enter the code sent to ${email}, then choose a new password.`;
   if (step === "ineligible") return "Use an eligible account email or upgrade to continue.";
   return "Use the email on your Card Shellz customer account.";
 }
