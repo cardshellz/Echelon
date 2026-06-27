@@ -1192,12 +1192,12 @@ export function createFulfillmentPushService(
             shipFromLocationId,
           );
 
-      // Self-healing back-write (D2): now that Path B has resolved
-      // these IDs, store them on oms_order_lines so the next push can
-      // use Path A. The WHERE guard only updates null or stale values,
-      // which lets us repair fulfillment-order mappings changed by
-      // Shopify partial cancellations/refunds without touching rows
-      // that already match the live Shopify response.
+      // Self-healing back-write (D2): now that Path B has resolved these IDs,
+      // store them on the provider-neutral OMS line columns and maintain the
+      // Shopify aliases so the next push can use Path A during the transition.
+      // The WHERE guard only updates null or stale Shopify mappings, which lets
+      // us repair fulfillment-order mappings changed by Shopify partial
+      // cancellations/refunds without clobbering another provider's references.
       for (const r of resolved) {
         if (
           r.omsOrderLineId &&
@@ -1207,11 +1207,20 @@ export function createFulfillmentPushService(
           try {
             await db.execute(sql`
               UPDATE oms.oms_order_lines
-                 SET shopify_fulfillment_order_id = ${r.fulfillmentOrderId},
+                 SET fulfillment_provider = 'shopify',
+                     provider_fulfillment_order_id = ${r.fulfillmentOrderId},
+                     provider_fulfillment_order_line_item_id = ${r.fulfillmentOrderLineItemId},
+                     shopify_fulfillment_order_id = ${r.fulfillmentOrderId},
                      shopify_fulfillment_order_line_item_id = ${r.fulfillmentOrderLineItemId}
                WHERE id = ${r.omsOrderLineId}
+                 AND (fulfillment_provider IS NULL OR fulfillment_provider = 'shopify')
                  AND (
-                   shopify_fulfillment_order_id IS NULL
+                   fulfillment_provider IS NULL
+                   OR provider_fulfillment_order_id IS NULL
+                   OR provider_fulfillment_order_id <> ${r.fulfillmentOrderId}
+                   OR provider_fulfillment_order_line_item_id IS NULL
+                   OR provider_fulfillment_order_line_item_id <> ${r.fulfillmentOrderLineItemId}
+                   OR shopify_fulfillment_order_id IS NULL
                    OR shopify_fulfillment_order_id <> ${r.fulfillmentOrderId}
                    OR shopify_fulfillment_order_line_item_id IS NULL
                    OR shopify_fulfillment_order_line_item_id <> ${r.fulfillmentOrderLineItemId}
@@ -2445,8 +2454,16 @@ async function tryReadPathA(
         si.id  AS shipment_item_id,
         GREATEST(0, si.qty - COALESCE(la.adjusted_qty, 0))::int AS quantity,
         oi.oms_order_line_id AS oms_order_line_id,
-        ol.shopify_fulfillment_order_id AS shopify_fulfillment_order_id,
-        ol.shopify_fulfillment_order_line_item_id AS shopify_fulfillment_order_line_item_id
+        CASE
+          WHEN COALESCE(NULLIF(ol.fulfillment_provider, ''), 'shopify') = 'shopify'
+            THEN COALESCE(NULLIF(ol.provider_fulfillment_order_id, ''), ol.shopify_fulfillment_order_id)
+          ELSE ol.shopify_fulfillment_order_id
+        END AS fulfillment_order_id,
+        CASE
+          WHEN COALESCE(NULLIF(ol.fulfillment_provider, ''), 'shopify') = 'shopify'
+            THEN COALESCE(NULLIF(ol.provider_fulfillment_order_line_item_id, ''), ol.shopify_fulfillment_order_line_item_id)
+          ELSE ol.shopify_fulfillment_order_line_item_id
+        END AS fulfillment_order_line_item_id
       FROM wms.outbound_shipment_items si
       JOIN wms.order_items wi ON wi.id = si.order_item_id
       LEFT JOIN wms.order_items oi ON oi.id = si.order_item_id
@@ -2472,16 +2489,27 @@ async function tryReadPathA(
     omsOrderLineId:
       r.oms_order_line_id == null ? null : Number(r.oms_order_line_id),
     fulfillmentOrderId:
-      typeof r.shopify_fulfillment_order_id === "string" &&
-      r.shopify_fulfillment_order_id.length > 0
-        ? r.shopify_fulfillment_order_id
-        : null,
+      firstNonEmptyString(
+        r.fulfillment_order_id,
+        r.provider_fulfillment_order_id,
+        r.shopify_fulfillment_order_id,
+      ),
     fulfillmentOrderLineItemId:
-      typeof r.shopify_fulfillment_order_line_item_id === "string" &&
-      r.shopify_fulfillment_order_line_item_id.length > 0
-        ? r.shopify_fulfillment_order_line_item_id
-        : null,
+      firstNonEmptyString(
+        r.fulfillment_order_line_item_id,
+        r.provider_fulfillment_order_line_item_id,
+        r.shopify_fulfillment_order_line_item_id,
+      ),
   }));
+}
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
