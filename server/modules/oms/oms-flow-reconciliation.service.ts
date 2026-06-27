@@ -132,6 +132,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     wmsReadyWithoutShipment,
     unpushedShipStationShipments,
     shopifyShipmentFulfillmentMissing,
+    partitionDuplicateLineCoverage,
   ] = await Promise.all([
     countAndSample(
       db,
@@ -495,6 +496,62 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         LIMIT 10
       `,
     ),
+    countAndSample(
+      db,
+      sql`
+        WITH duplicate_line_coverage AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oi.oms_order_line_id,
+            COUNT(DISTINCT wo.id)::int AS wms_order_count
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+            AND COALESCE(oi.quantity, 0) > 0
+          GROUP BY ol.order_id, oi.oms_order_line_id
+          HAVING COUNT(DISTINCT wo.id) > 1
+        )
+        SELECT COUNT(*)::int AS count
+        FROM duplicate_line_coverage
+      `,
+      sql`
+        WITH duplicate_line_coverage AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oi.oms_order_line_id,
+            ol.sku,
+            ol.authority_fulfillable_quantity,
+            SUM(COALESCE(oi.quantity, 0))::int AS materialized_quantity,
+            COUNT(DISTINCT wo.id)::int AS wms_order_count,
+            ARRAY_AGG(DISTINCT wo.id) AS wms_order_ids,
+            ARRAY_AGG(DISTINCT COALESCE(wo.warehouse_id, 0)) AS warehouse_ids,
+            ARRAY_AGG(DISTINCT COALESCE(NULLIF(wo.fulfillment_partition_key, ''), 'default')) AS fulfillment_partition_keys,
+            ARRAY_AGG(DISTINCT oi.id) AS wms_order_item_ids
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+            AND COALESCE(oi.quantity, 0) > 0
+          GROUP BY ol.order_id, oi.oms_order_line_id, ol.sku, ol.authority_fulfillable_quantity
+          HAVING COUNT(DISTINCT wo.id) > 1
+        )
+        SELECT *
+        FROM duplicate_line_coverage
+        ORDER BY wms_order_count DESC, oms_order_line_id DESC
+        LIMIT 10
+      `,
+    ),
   ]);
 
   const issues: OmsOpsIssue[] = [
@@ -553,6 +610,13 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       count: shopifyShipmentFulfillmentMissing.count,
       message: "Shopify WMS shipments are shipped but have no Shopify fulfillment id.",
       sample: shopifyShipmentFulfillmentMissing.sample,
+    },
+    {
+      code: "WMS_PARTITION_DUPLICATE_LINE_COVERAGE",
+      severity: "critical" as const,
+      count: partitionDuplicateLineCoverage.count,
+      message: "Active WMS fulfillment partitions cover the same OMS order line.",
+      sample: partitionDuplicateLineCoverage.sample,
     },
   ];
 

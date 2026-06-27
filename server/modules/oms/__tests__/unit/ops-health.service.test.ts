@@ -7,6 +7,10 @@ const OPS_HEALTH_SRC = readFileSync(
   resolve(__dirname, "../../ops-health.service.ts"),
   "utf-8",
 );
+const OMS_FLOW_RECONCILIATION_SRC = readFileSync(
+  resolve(__dirname, "../../oms-flow-reconciliation.service.ts"),
+  "utf-8",
+);
 
 describe("ops-health.service :: fulfillment alert severity", () => {
   it("treats stuck ShipStation push and missing tracking confirmation as critical", () => {
@@ -74,9 +78,11 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(
       /code: "WMS_RECONCILIATION_MANUAL_REVIEW"[\s\S]*severity: "warning"/,
     );
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("WMS_PARTITION_DUPLICATE_LINE_COVERAGE");
     expect(OPS_HEALTH_SRC).toContain("wms.reconciliation_exceptions");
     expect(OPS_HEALTH_SRC).toContain("GROUP BY rule");
     expect(OPS_HEALTH_SRC).toContain("authority_fulfillable_quantity");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("fulfillment_partition_key");
   });
 
   it("surfaces duplicate active shipment identity monitoring signals", () => {
@@ -195,6 +201,19 @@ describe("ops-health.service :: issue mapping", () => {
         return { rows: [{ count: 2 }] };
       }
 
+      if (queryText.includes("duplicate_line_coverage") && queryText.includes("fulfillment_partition_keys")) {
+        return {
+          rows: [{
+            oms_order_line_id: 303,
+            wms_order_count: 2,
+            fulfillment_partition_keys: ["default", "west"],
+          }],
+        };
+      }
+      if (queryText.includes("duplicate_line_coverage") && queryText.includes("COUNT(*)")) {
+        return { rows: [{ count: 1 }] };
+      }
+
       return { rows: [{ count: 0 }] };
     });
 
@@ -210,6 +229,9 @@ describe("ops-health.service :: issue mapping", () => {
       expect(
         health.issues.find((issue) => issue.code === "WMS_RECONCILIATION_MANUAL_REVIEW")?.sample,
       ).toEqual([expect.objectContaining({ rule: "picked_quantity_exceeds_oms_authority" })]);
+      expect(
+        health.issues.find((issue) => issue.code === "WMS_PARTITION_DUPLICATE_LINE_COVERAGE")?.sample,
+      ).toEqual([expect.objectContaining({ fulfillment_partition_keys: ["default", "west"] })]);
     } finally {
       if (previousDisableSchedulers === undefined) {
         delete process.env.DISABLE_SCHEDULERS;
