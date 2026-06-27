@@ -66,6 +66,24 @@ type MaterializableOmsLine = {
 
 const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
 
+function normalizeFulfillmentPartitionKey(value: string | null | undefined): string {
+  const normalized = String(value ?? "").trim();
+  return normalized.length > 0 ? normalized : DEFAULT_FULFILLMENT_PARTITION_KEY;
+}
+
+function resolveOmsFulfillmentPartitionKey(): string {
+  return normalizeFulfillmentPartitionKey(DEFAULT_FULFILLMENT_PARTITION_KEY);
+}
+
+function buildOmsWmsOrderScope(omsOrderId: number, fulfillmentPartitionKey: string) {
+  const normalizedPartitionKey = normalizeFulfillmentPartitionKey(fulfillmentPartitionKey);
+  return and(
+    eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
+    eq(wmsOrders.source, 'oms'),
+    eq(wmsOrders.fulfillmentPartitionKey, normalizedPartitionKey),
+  );
+}
+
 type WmsReconciliationAutoRepairRule =
   | "materialize_authorized_oms_line"
   | "create_missing_initial_shipment"
@@ -430,6 +448,7 @@ export class WmsSyncService {
       }
 
       const omsOrder = omsOrderResult[0];
+      const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey();
 
       if (this.isFinalOrCancelledOmsOrder(omsOrder)) {
         await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
@@ -446,13 +465,7 @@ export class WmsSyncService {
           warehouseStatus: wmsOrders.warehouseStatus,
         })
         .from(wmsOrders)
-        .where(
-          and(
-            eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
-            eq(wmsOrders.source, 'oms'), // Distinguish from legacy shopify orders
-            eq(wmsOrders.fulfillmentPartitionKey, DEFAULT_FULFILLMENT_PARTITION_KEY),
-          )
-        )
+        .where(buildOmsWmsOrderScope(omsOrderId, fulfillmentPartitionKey))
         .orderBy(sql`
           CASE
             WHEN ${wmsOrders.warehouseStatus} = 'cancelled' THEN 2
@@ -632,7 +645,7 @@ export class WmsSyncService {
         slaStatus: "on_time",
         sortRank,
         warehouseStatus,
-        fulfillmentPartitionKey: DEFAULT_FULFILLMENT_PARTITION_KEY,
+        fulfillmentPartitionKey,
         itemCount: materializableOmsLines.length,
         unitCount: materializableOmsLines.reduce((sum, line) => sum + getOmsLineMaterializableQuantity(line), 0),
         orderPlacedAt: omsOrder.orderedAt,
@@ -672,13 +685,7 @@ export class WmsSyncService {
         const racedWmsOrder = await tx
           .select({ id: wmsOrders.id })
           .from(wmsOrders)
-          .where(
-            and(
-              eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
-              eq(wmsOrders.source, 'oms'),
-              eq(wmsOrders.fulfillmentPartitionKey, DEFAULT_FULFILLMENT_PARTITION_KEY),
-            ),
-          )
+          .where(buildOmsWmsOrderScope(omsOrderId, fulfillmentPartitionKey))
           .orderBy(sql`
             CASE
               WHEN ${wmsOrders.warehouseStatus} = 'cancelled' THEN 2

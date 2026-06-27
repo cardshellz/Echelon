@@ -67,6 +67,9 @@ Initial schema/backstop slice:
 - OMS flow reconciliation now flags active WMS partitions/jobs that cover the
   same OMS order line as `WMS_PARTITION_DUPLICATE_LINE_COVERAGE`, which feeds
   the ops health surface as a critical issue.
+- WMS sync now resolves the OMS fulfillment partition key once and reuses it
+  for the existing-order lookup, locked race recheck, and WMS order create
+  payload. Today that resolver preserves the default single-partition behavior.
 
 Current valid shape:
 
