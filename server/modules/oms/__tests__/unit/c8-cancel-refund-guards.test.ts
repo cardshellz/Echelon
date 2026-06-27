@@ -62,7 +62,7 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
 
 function extractCancelOrderCascade(): string {
   const start = OMS_WEBHOOKS_SRC.indexOf("export async function cancelOrderCascade(");
-  const nextExport = OMS_WEBHOOKS_SRC.indexOf("/**\n * Apply a Shopify `refunds/create`");
+  const nextExport = OMS_WEBHOOKS_SRC.indexOf("Apply a Shopify `refunds/create`", start);
   return OMS_WEBHOOKS_SRC.substring(start, nextExport);
 }
 
