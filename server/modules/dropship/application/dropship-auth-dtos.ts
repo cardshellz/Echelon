@@ -58,10 +58,18 @@ export type StartDropshipAccountBootstrapInput = z.infer<
   typeof startDropshipAccountBootstrapInputSchema
 >;
 
+export const lookupDropshipAuthEmailInputSchema = z.object({
+  email: emailSchema,
+}).strict();
+
+export type LookupDropshipAuthEmailInput = z.infer<
+  typeof lookupDropshipAuthEmailInputSchema
+>;
+
 export const completeDropshipAccountBootstrapInputSchema = z.object({
   email: emailSchema,
   verificationCode: verificationCodeSchema,
-  password: z.string().min(1).max(DROPSHIP_PASSWORD_MAX_LENGTH),
+  password: z.string().min(1).max(DROPSHIP_PASSWORD_MAX_LENGTH).optional(),
 }).strict();
 
 export type CompleteDropshipAccountBootstrapInput = z.infer<

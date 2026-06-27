@@ -23,6 +23,7 @@ import {
   completeDropshipPasskeyRegistrationInputSchema,
   completeDropshipAccountBootstrapInputSchema,
   dropshipPasswordLoginInputSchema,
+  lookupDropshipAuthEmailInputSchema,
   startDropshipPasskeyLoginInputSchema,
   startDropshipAccountBootstrapInputSchema,
   startDropshipSensitiveActionChallengeInputSchema,
@@ -89,6 +90,16 @@ export function registerDropshipAuthRoutes(
   passkeyService: DropshipPasskeyService = createDropshipPasskeyServiceFromEnv(),
   vendorProvisioningService: DropshipVendorProvisioningService = createDropshipVendorProvisioningServiceFromEnv(),
 ): void {
+  app.post("/api/dropship/auth/email/status", authRateLimiter, async (req, res) => {
+    try {
+      const input = parseBody(lookupDropshipAuthEmailInputSchema, req.body);
+      const status = await service.lookupAuthEmail(input);
+      return res.json(status);
+    } catch (error) {
+      return sendDropshipAuthError(res, error);
+    }
+  });
+
   app.post("/api/dropship/auth/bootstrap/start", authRateLimiter, async (req, res) => {
     try {
       const input = parseBody(startDropshipAccountBootstrapInputSchema, req.body);

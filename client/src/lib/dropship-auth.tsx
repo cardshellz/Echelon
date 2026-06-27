@@ -30,9 +30,16 @@ export interface DropshipSessionPrincipal {
   memberId: string;
   cardShellzEmail: string;
   hasPasskey: boolean;
-  authMethod: "passkey" | "password";
+  authMethod: "passkey" | "password" | "email_mfa";
   entitlementStatus: "active" | "grace";
   authenticatedAt: string;
+}
+
+export interface DropshipAuthEmailStatus {
+  status: "eligible_new" | "eligible_returning" | "ineligible";
+  eligible: boolean;
+  hasPassword: boolean;
+  hasPasskey: boolean;
 }
 
 export interface DropshipSensitiveProof {
@@ -79,11 +86,12 @@ interface DropshipAuthContextValue {
   platformPasskeyAvailable: boolean;
   refetch: () => Promise<void>;
   logout: () => Promise<void>;
+  lookupAuthEmail: (email: string) => Promise<DropshipAuthEmailStatus>;
   startBootstrap: (email: string) => Promise<void>;
   completeBootstrap: (input: {
     email: string;
     verificationCode: string;
-    password: string;
+    password?: string;
   }) => Promise<DropshipSessionPrincipal>;
   loginWithPassword: (input: {
     email: string;
@@ -149,6 +157,12 @@ export function DropshipAuthProvider({ children }: { children: React.ReactNode }
       await dropshipJson("/api/dropship/auth/logout", { method: "POST" }).catch(() => undefined);
       setPrincipal(null);
       setSensitiveProofs({});
+    },
+    lookupAuthEmail: async (email: string) => {
+      return await dropshipJson<DropshipAuthEmailStatus>("/api/dropship/auth/email/status", {
+        method: "POST",
+        body: { email },
+      });
     },
     startBootstrap: async (email: string) => {
       await dropshipJson("/api/dropship/auth/bootstrap/start", {
