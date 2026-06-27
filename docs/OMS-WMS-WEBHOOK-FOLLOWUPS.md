@@ -37,6 +37,7 @@ Proposed follow-up:
 - Introduce provider-neutral fulfillment reference fields or a separate fulfillment-line mapping table.
 - Preserve provider context explicitly, for example `provider`, `provider_fulfillment_order_id`, and `provider_fulfillment_order_line_item_id`.
 - Initial compatibility slice: migration `110_oms_provider_fulfillment_references.sql` adds nullable neutral columns on `oms.oms_order_lines` and backfills them from existing Shopify fulfillment-order columns while the legacy Shopify aliases remain in place.
+- Shopify fulfillment push now reads provider-neutral fulfillment references first, falls back to the Shopify aliases, and back-writes both sets when Path B self-heals fulfillment-order line ids.
 - Migrate Shopify values into the neutral representation.
 - Update Shopify fulfillment push, eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.

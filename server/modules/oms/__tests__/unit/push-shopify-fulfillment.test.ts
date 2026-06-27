@@ -958,6 +958,62 @@ describe("pushShopifyFulfillment :: idempotency (D1)", () => {
 // ─── C22c: Path A primary (D2/D4) ───────────────────────────────────
 
 describe("pushShopifyFulfillment :: Path A primary (D2/D4)", () => {
+  it("prefers provider-neutral Path A fields and keeps Shopify aliases as SQL fallback", async () => {
+    const db = makeDb([
+      {
+        rows: [
+          {
+            shipment_item_id: 1,
+            quantity: 2,
+            oms_order_line_id: 8001,
+            fulfillment_order_id: "gid://shopify/FulfillmentOrder/neutral",
+            fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/neutral-1",
+            shopify_fulfillment_order_id: FO_GID,
+            shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+          },
+        ],
+      },
+    ]);
+
+    const rows = await __test__.tryReadPathA(db.db, SHIPMENT_ID);
+
+    expect(rows).toEqual([
+      {
+        shipmentItemId: 1,
+        quantity: 2,
+        omsOrderLineId: 8001,
+        fulfillmentOrderId: "gid://shopify/FulfillmentOrder/neutral",
+        fulfillmentOrderLineItemId: "gid://shopify/FulfillmentOrderLineItem/neutral-1",
+      },
+    ]);
+    expect(db.capturedQueries[0].sqlText).toContain("fulfillment_provider");
+    expect(db.capturedQueries[0].sqlText).toContain("provider_fulfillment_order_id");
+    expect(db.capturedQueries[0].sqlText).toContain("provider_fulfillment_order_line_item_id");
+    expect(db.capturedQueries[0].sqlText).toContain("shopify_fulfillment_order_id");
+    expect(db.capturedQueries[0].sqlText).toContain("shopify_fulfillment_order_line_item_id");
+  });
+
+  it("falls back to legacy Shopify Path A aliases when neutral fields are absent", async () => {
+    const db = makeDb([
+      {
+        rows: [
+          {
+            shipment_item_id: 1,
+            quantity: 2,
+            oms_order_line_id: 8001,
+            shopify_fulfillment_order_id: FO_GID,
+            shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+          },
+        ],
+      },
+    ]);
+
+    const rows = await __test__.tryReadPathA(db.db, SHIPMENT_ID);
+
+    expect(rows?.[0]?.fulfillmentOrderId).toBe(FO_GID);
+    expect(rows?.[0]?.fulfillmentOrderLineItemId).toBe("gid://shopify/FulfillmentOrderLineItem/777-1");
+  });
+
   it("uses Path A after validating stored FO IDs against live Shopify quantities", async () => {
     const db = makeDb([
       { rows: [{ shopify_fulfillment_id: null }] },
@@ -1074,6 +1130,9 @@ describe("pushShopifyFulfillment :: self-healing back-write (D2)", () => {
       q.sqlText.includes("UPDATE oms.oms_order_lines"),
     );
     expect(backWrites).toHaveLength(2);
+    expect(backWrites[0].sqlText).toContain("fulfillment_provider");
+    expect(backWrites[0].sqlText).toContain("provider_fulfillment_order_id");
+    expect(backWrites[0].sqlText).toContain("provider_fulfillment_order_line_item_id");
     expect(backWrites[0].sqlText).toContain("shopify_fulfillment_order_id");
     expect(backWrites[0].sqlText).toContain("shopify_fulfillment_order_line_item_id");
     // Idempotency guard
@@ -1139,6 +1198,7 @@ describe("pushShopifyFulfillment :: self-healing back-write (D2)", () => {
       q.sqlText.includes("UPDATE oms.oms_order_lines"),
     );
     expect(backWrites).toHaveLength(2);
+    expect(backWrites[0].sqlText).toContain("provider_fulfillment_order_line_item_id <>");
     expect(backWrites[0].sqlText).toContain("shopify_fulfillment_order_line_item_id <>");
   });
 
