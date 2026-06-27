@@ -198,7 +198,7 @@ export interface DropshipStoreConnectionRepository {
   listByVendorId(vendorId: number): Promise<DropshipStoreConnectionProfile[]>;
   listForAdmin(input: ListDropshipAdminStoreConnectionsInput): Promise<DropshipAdminStoreConnectionListResult>;
   countActiveByVendorId(vendorId: number): Promise<number>;
-  hasRepairableConnection(input: {
+  hasReconnectableConnection(input: {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
   }): Promise<boolean>;
@@ -515,11 +515,11 @@ export class DropshipStoreConnectionService {
         throw error;
       }
 
-      const canRepairExistingConnection = await this.deps.repository.hasRepairableConnection({
+      const canReconnectExistingConnection = await this.deps.repository.hasReconnectableConnection({
         vendorId: input.vendor.vendorId,
         platform: input.platform,
       });
-      if (!canRepairExistingConnection) {
+      if (!canReconnectExistingConnection) {
         throw error;
       }
     }

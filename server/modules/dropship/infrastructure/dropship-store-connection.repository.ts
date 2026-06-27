@@ -158,13 +158,13 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     }
   }
 
-  async hasRepairableConnection(input: {
+  async hasReconnectableConnection(input: {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
   }): Promise<boolean> {
     const client = await this.dbPool.connect();
     try {
-      return await hasRepairableConnectionWithClient(client, input.vendorId, input.platform);
+      return await hasReconnectableConnectionWithClient(client, input.vendorId, input.platform);
     } finally {
       client.release();
     }
@@ -190,7 +190,7 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
 
       const existing = await findReusableConnection(client, input.vendorId, input.platform, input.shopDomain);
       const activeCount = await countActiveByVendorIdWithClient(client, input.vendorId);
-      if (activeCount > 0 && (activeCount > 1 || !isRepairableActiveConnection(existing))) {
+      if (activeCount > 0 && (activeCount > 1 || !isReconnectableActiveConnection(existing))) {
         throw new DropshipError(
           "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
           "Dropship store connection limit has been reached.",
@@ -565,7 +565,7 @@ async function countActiveByVendorIdWithClient(client: PoolClient, vendorId: num
   return Number(result.rows[0]?.count ?? 0);
 }
 
-async function hasRepairableConnectionWithClient(
+async function hasReconnectableConnectionWithClient(
   client: PoolClient,
   vendorId: number,
   platform: DropshipSupportedStorePlatform,
@@ -575,7 +575,7 @@ async function hasRepairableConnectionWithClient(
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
-       AND status IN ('needs_reauth','refresh_failed')`,
+       AND status IN ('connected','needs_reauth','refresh_failed')`,
     [vendorId, platform],
   );
   return Number(result.rows[0]?.count ?? 0) > 0;
@@ -632,15 +632,16 @@ async function findReusableConnection(
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
-       AND status IN ('needs_reauth','refresh_failed','disconnected')
+       AND status IN ('connected','needs_reauth','refresh_failed','disconnected')
        AND (
-         status IN ('needs_reauth','refresh_failed')
+         status IN ('connected','needs_reauth','refresh_failed')
          OR COALESCE(shop_domain, '') = COALESCE($3, '')
        )
      ORDER BY CASE status
                 WHEN 'needs_reauth' THEN 0
                 WHEN 'refresh_failed' THEN 1
-                ELSE 2
+                WHEN 'connected' THEN 2
+                ELSE 3
               END,
               updated_at DESC,
               id DESC
@@ -651,8 +652,8 @@ async function findReusableConnection(
   return result.rows[0] ?? null;
 }
 
-function isRepairableActiveConnection(connection: StoreConnectionRow | null): boolean {
-  return connection?.status === "needs_reauth" || connection?.status === "refresh_failed";
+function isReconnectableActiveConnection(connection: StoreConnectionRow | null): boolean {
+  return connection?.status === "connected" || connection?.status === "needs_reauth" || connection?.status === "refresh_failed";
 }
 
 async function findConnectionByIdForUpdate(
