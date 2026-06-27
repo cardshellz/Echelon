@@ -565,11 +565,118 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
+  await autoCloseResolvedDeadFulfillmentRetries(dbArg);
   await autoRemediateCriticalFlowIssues(dbArg, issues);
   await autoQueueStaleTrackingPushRetries(dbArg, issues);
   await autoQueueStaleShipStationPushRetries(dbArg, issues);
   await autoQueueMissingShopifyFulfillmentRetries(dbArg, issues);
   return issues;
+}
+
+export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<number> {
+  const result = await db.execute(sql`
+    WITH candidates AS (
+      SELECT
+        q.id,
+        q.topic,
+        q.created_at,
+        q.updated_at AS dead_at,
+        CASE
+          WHEN q.payload->>'shipmentId' ~ '^[0-9]+$'
+            THEN (q.payload->>'shipmentId')::bigint
+          ELSE NULL
+        END AS payload_shipment_id,
+        CASE
+          WHEN q.payload->>'orderId' ~ '^[0-9]+$'
+            THEN (q.payload->>'orderId')::bigint
+          ELSE NULL
+        END AS payload_order_id,
+        CASE
+          WHEN q.payload->>'omsOrderId' ~ '^[0-9]+$'
+            THEN (q.payload->>'omsOrderId')::bigint
+          ELSE NULL
+        END AS payload_oms_order_id,
+        NULLIF(q.payload->>'trackingNumber', '') AS payload_tracking_number,
+        COALESCE(
+          NULLIF(q.payload->>'shopifyFulfillmentId', ''),
+          NULLIF(q.payload->>'fulfillmentId', '')
+        ) AS payload_fulfillment_id
+      FROM oms.webhook_retry_queue q
+      WHERE q.provider = 'internal'
+        AND q.status = 'dead'
+        AND q.topic IN ('delayed_tracking_push', 'shopify_fulfillment_push')
+    ),
+    scoped_candidates AS (
+      SELECT
+        c.*,
+        os.id AS shipment_id,
+        NULLIF(os.tracking_number, '') AS shipment_tracking_number,
+        NULLIF(os.shopify_fulfillment_id, '') AS shipment_shopify_fulfillment_id,
+        COALESCE(payload_oo.id, shipment_oo.id) AS oms_order_id,
+        (
+             c.payload_shipment_id IS NOT NULL
+          OR c.payload_tracking_number IS NOT NULL
+          OR c.payload_fulfillment_id IS NOT NULL
+          OR NULLIF(os.tracking_number, '') IS NOT NULL
+          OR NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+        ) AS has_specific_scope
+      FROM candidates c
+      LEFT JOIN wms.outbound_shipments os ON os.id = c.payload_shipment_id
+      LEFT JOIN wms.orders wo ON wo.id = os.order_id
+      LEFT JOIN oms.oms_orders shipment_oo ON (
+           (wo.source = 'oms' AND wo.oms_fulfillment_order_id = shipment_oo.id::text)
+        OR (wo.source_table_id = shipment_oo.id::text)
+      )
+      LEFT JOIN oms.oms_orders payload_oo
+        ON payload_oo.id = COALESCE(c.payload_order_id, c.payload_oms_order_id)
+    ),
+    resolved AS (
+      SELECT DISTINCT c.id
+      FROM scoped_candidates c
+      JOIN oms.oms_order_events e
+        ON e.created_at >= COALESCE(c.dead_at, c.created_at)
+       AND (
+            (c.topic = 'delayed_tracking_push'
+              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed'))
+         OR (c.topic = 'shopify_fulfillment_push'
+              AND e.event_type = 'shopify_fulfillment_pushed')
+       )
+      WHERE (c.oms_order_id IS NULL OR e.order_id = c.oms_order_id)
+        AND (
+             (c.shipment_id IS NOT NULL
+               AND e.details->>'wmsShipmentId' = c.shipment_id::text)
+          OR (c.payload_shipment_id IS NOT NULL
+               AND e.details->>'wmsShipmentId' = c.payload_shipment_id::text)
+          OR (c.shipment_tracking_number IS NOT NULL
+               AND e.details->>'trackingNumber' = c.shipment_tracking_number)
+          OR (c.payload_tracking_number IS NOT NULL
+               AND e.details->>'trackingNumber' = c.payload_tracking_number)
+          OR (c.shipment_shopify_fulfillment_id IS NOT NULL
+               AND e.details->>'shopifyFulfillmentId' = c.shipment_shopify_fulfillment_id)
+          OR (c.shipment_shopify_fulfillment_id IS NOT NULL
+               AND e.details->>'fulfillmentId' = c.shipment_shopify_fulfillment_id)
+          OR (c.payload_fulfillment_id IS NOT NULL
+               AND e.details->>'shopifyFulfillmentId' = c.payload_fulfillment_id)
+          OR (c.payload_fulfillment_id IS NOT NULL
+               AND e.details->>'fulfillmentId' = c.payload_fulfillment_id)
+          OR (c.has_specific_scope = false AND c.oms_order_id IS NOT NULL)
+        )
+    )
+    UPDATE oms.webhook_retry_queue q
+    SET status = 'success',
+        last_error = 'auto-closed: later OMS fulfillment/tracking event confirmed success',
+        updated_at = NOW()
+    FROM resolved
+    WHERE q.id = resolved.id
+      AND q.status = 'dead'
+    RETURNING q.id
+  `);
+
+  const closed = rows(result).filter((row) => row?.id != null).length;
+  if (closed > 0) {
+    console.warn(`${LOG_PREFIX} auto-closed ${closed} resolved fulfillment/tracking retry row(s)`);
+  }
+  return closed;
 }
 
 async function autoRemediateCriticalFlowIssues(

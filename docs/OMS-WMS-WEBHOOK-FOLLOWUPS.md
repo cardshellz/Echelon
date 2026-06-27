@@ -1,8 +1,10 @@
 # OMS/WMS Webhook Follow-ups
 
-## Open Issues
+## Completed Slices
 
 ### Auto-close dead fulfillment retries when later webhook evidence proves success
+
+Status: implemented in `runOmsFlowReconciliation`.
 
 Observed case:
 
@@ -14,7 +16,7 @@ Needed behavior:
 
 - Reconciliation should detect dead retry rows for `delayed_tracking_push` and `shopify_fulfillment_push`.
 - If OMS has later proof of fulfillment/tracking success for the same order, shipment, fulfillment id, or tracking number, mark the dead retry row `success`.
-- Write a clear `last_error`/note such as `auto-closed: later Shopify fulfillment webhook confirmed success`.
+- Write a clear `last_error`/note: `auto-closed: later OMS fulfillment/tracking event confirmed success`.
 - Keep truly unresolved Shopify quantity/fulfillment-order errors visible.
 
 Reason this matters:
@@ -22,6 +24,8 @@ Reason this matters:
 - Dead-letter queues should represent currently actionable failures, not stale failures that later self-healed through webhook arrival.
 - Operators need health counts to mean real current risk.
 - This prevents the same stale Shopify fulfillment rows from being repeatedly investigated by hand.
+
+## Open Issues
 
 ### Provider-specific fulfillment identifiers on OMS order lines
 
