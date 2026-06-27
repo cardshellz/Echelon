@@ -64,6 +64,8 @@ type MaterializableOmsLine = {
   fulfillmentStatus?: string | null;
 };
 
+const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
+
 type WmsReconciliationAutoRepairRule =
   | "materialize_authorized_oms_line"
   | "create_missing_initial_shipment"
@@ -447,7 +449,8 @@ export class WmsSyncService {
         .where(
           and(
             eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
-            eq(wmsOrders.source, 'oms') // Distinguish from legacy shopify orders
+            eq(wmsOrders.source, 'oms'), // Distinguish from legacy shopify orders
+            eq(wmsOrders.fulfillmentPartitionKey, DEFAULT_FULFILLMENT_PARTITION_KEY),
           )
         )
         .orderBy(sql`
@@ -629,6 +632,7 @@ export class WmsSyncService {
         slaStatus: "on_time",
         sortRank,
         warehouseStatus,
+        fulfillmentPartitionKey: DEFAULT_FULFILLMENT_PARTITION_KEY,
         itemCount: materializableOmsLines.length,
         unitCount: materializableOmsLines.reduce((sum, line) => sum + getOmsLineMaterializableQuantity(line), 0),
         orderPlacedAt: omsOrder.orderedAt,
@@ -672,6 +676,7 @@ export class WmsSyncService {
             and(
               eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
               eq(wmsOrders.source, 'oms'),
+              eq(wmsOrders.fulfillmentPartitionKey, DEFAULT_FULFILLMENT_PARTITION_KEY),
             ),
           )
           .orderBy(sql`
