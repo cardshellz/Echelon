@@ -180,8 +180,8 @@ export default function DropshipPortalSettings() {
       passkeyAction: "reauth-passkey-proof",
       sendCodeAction: "reauth-send-code",
       verifyCodeAction: "reauth-verify-code",
-      sentMessage: "Verification code sent. Enter it below, then retry the reauthorization.",
-      codeRequiredMessage: "Enter the 6-digit verification code before reauthorizing the store.",
+      sentMessage: "Verification code sent. Enter it below, then retry the reconnect.",
+      codeRequiredMessage: "Enter the 6-digit verification code before reconnecting the store.",
     });
   }
 
@@ -190,7 +190,7 @@ export default function DropshipPortalSettings() {
     try {
       if (!canReauthorizeStoreConnection(connection)) return;
       if (connection.platform === "shopify" && !connection.shopDomain) {
-        setError("Shopify reauthorization requires the stored shop domain. Disconnect and reconnect the store if the domain is missing.");
+        setError("Shopify reconnect requires the stored shop domain. Disconnect and reconnect the store if the domain is missing.");
         return;
       }
       if (!await ensureConnectProof()) return;
@@ -598,7 +598,7 @@ function canDisconnectStoreConnection(connection: DropshipStoreConnectionProfile
 }
 
 function canReauthorizeStoreConnection(connection: DropshipStoreConnectionProfileResponse): boolean {
-  return connection.status === "needs_reauth" || connection.status === "refresh_failed";
+  return ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status);
 }
 
 function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
@@ -660,8 +660,8 @@ function reauthorizeButtonLabel(input: {
   if (input.isReauthorizeTarget && input.pendingStoreAction === "reauth-verify-code") return "Verifying code";
   if (input.isReauthorizeTarget && input.pendingStoreAction === "reauth-passkey-proof") return "Waiting for passkey";
   if (input.isReauthorizeTarget && input.pendingStoreAction === "reauth-start") return "Opening authorization";
-  if (input.emailChallengeAction === "connect_store") return `Verify and reauthorize ${formatStatus(input.platform)}`;
-  return `Reauthorize ${formatStatus(input.platform)}`;
+  if (input.emailChallengeAction === "connect_store") return `Verify and reconnect ${formatStatus(input.platform)}`;
+  return `Reconnect ${formatStatus(input.platform)}`;
 }
 
 function reauthorizeButtonIcon(input: {

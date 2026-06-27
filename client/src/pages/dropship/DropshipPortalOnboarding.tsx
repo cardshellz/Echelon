@@ -36,9 +36,11 @@ import {
   formatCents,
   formatStatus,
   postJson,
+  type DropshipStoreConnectionListResponse,
   type DropshipOnboardingState,
   type DropshipOnboardingStep,
   type DropshipStoreConnectionOAuthStartResponse,
+  type DropshipStoreConnectionProfileResponse,
   type DropshipStorePlatform,
 } from "@/lib/dropship-ops-surface";
 import { DropshipPortalShell } from "./DropshipPortalShell";
@@ -208,9 +210,22 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
       proof: sensitiveProofs.connect_store,
     });
   }, [principal, sensitiveProofs.connect_store]);
+  const storeConnectionsQuery = useQuery<DropshipStoreConnectionListResponse>({
+    queryKey: ["/api/dropship/store-connections"],
+    queryFn: () => fetchJson<DropshipStoreConnectionListResponse>("/api/dropship/store-connections"),
+    enabled: !!principal,
+  });
+  const selectedPlatformConnection = storeConnectionsQuery.data?.connections.find((connection) => (
+    connection.platform === platform && canReconnectStoreConnection(connection)
+  )) ?? null;
   const canConnectStore = onboarding.storeConnections.canConnectStore;
-  const shopifyDomainRequired = platform === "shopify" && !shopDomain.trim();
-  const connectDisabled = !canConnectStore || shopifyDomainRequired || pendingAction !== null || (!principal?.hasPasskey && emailCodeSent && verificationCode.length !== 6);
+  const canReconnectSelectedPlatform = selectedPlatformConnection !== null;
+  const canStartStoreOAuth = canConnectStore || canReconnectSelectedPlatform;
+  const selectedShopifyDomain = platform === "shopify"
+    ? shopDomain.trim() || selectedPlatformConnection?.shopDomain || ""
+    : "";
+  const shopifyDomainRequired = platform === "shopify" && !selectedShopifyDomain;
+  const connectDisabled = !canStartStoreOAuth || shopifyDomainRequired || pendingAction !== null || (!principal?.hasPasskey && emailCodeSent && verificationCode.length !== 6);
 
   async function run(action: PendingAction, task: () => Promise<void>): Promise<boolean> {
     setPendingAction(action);
@@ -264,7 +279,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         "/api/dropship/store-connections/oauth/start",
         buildStoreConnectionOAuthStartInput({
           platform,
-          shopDomain,
+          shopDomain: platform === "shopify" ? selectedShopifyDomain : shopDomain,
           returnTo: dropshipPortalPath("/onboarding"),
         }),
       );
@@ -281,8 +296,8 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
             {onboarding.storeConnections.launchReadyConnectedCount} launch-ready / {onboarding.storeConnections.includedLimit} included connection(s)
           </p>
         </div>
-        <Badge variant="outline" className={canConnectStore ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}>
-          {canConnectStore ? "Available" : "Unavailable"}
+        <Badge variant="outline" className={canStartStoreOAuth ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}>
+          {canReconnectSelectedPlatform ? "Reconnect" : canConnectStore ? "Available" : "Unavailable"}
         </Badge>
       </div>
 
@@ -343,6 +358,12 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
         </div>
       )}
 
+      {canReconnectSelectedPlatform && (
+        <p className="mt-4 text-sm text-zinc-500">
+          Reconnect replaces the current {platform === "ebay" ? "eBay" : "Shopify"} authorization after marketplace sign-in.
+        </p>
+      )}
+
       {!principal?.hasPasskey && emailCodeSent && (
         <div className="mt-4 space-y-2">
           <Label>Verification code</Label>
@@ -377,6 +398,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           connectProofActive,
           hasPasskey: principal?.hasPasskey ?? false,
           emailCodeSent,
+          isReconnect: canReconnectSelectedPlatform,
           pendingAction,
           platform,
         })}
@@ -446,20 +468,25 @@ function LaunchGate({
   );
 }
 
+function canReconnectStoreConnection(connection: DropshipStoreConnectionProfileResponse): boolean {
+  return ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status);
+}
+
 function connectButtonLabel(input: {
   connectProofActive: boolean;
   hasPasskey: boolean;
   emailCodeSent: boolean;
   pendingAction: PendingAction;
+  isReconnect: boolean;
   platform: DropshipStorePlatform;
 }): string {
   if (input.pendingAction === "send-email-code") return "Sending code";
   if (input.pendingAction === "verify-email-code") return "Verifying code";
   if (input.pendingAction === "passkey-proof") return "Waiting for passkey";
   if (input.pendingAction === "oauth-start") return "Opening authorization";
-  if (input.connectProofActive) return `Connect ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
+  if (input.connectProofActive) return `${input.isReconnect ? "Reconnect" : "Connect"} ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
   if (!input.hasPasskey && !input.emailCodeSent) return "Send verification code";
-  return `Connect ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
+  return `${input.isReconnect ? "Reconnect" : "Connect"} ${input.platform === "ebay" ? "eBay" : "Shopify"}`;
 }
 
 function activateButtonLabel(input: {
