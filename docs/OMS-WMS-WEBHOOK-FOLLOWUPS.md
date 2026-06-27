@@ -64,6 +64,9 @@ Initial schema/backstop slice:
 - WMS sync and order-create idempotency now key duplicate detection to the
   default partition so future split routing can introduce non-overlapping
   partition keys without changing the storage contract.
+- OMS flow reconciliation now flags active WMS partitions/jobs that cover the
+  same OMS order line as `WMS_PARTITION_DUPLICATE_LINE_COVERAGE`, which feeds
+  the ops health surface as a critical issue.
 
 Current valid shape:
 

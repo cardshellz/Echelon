@@ -30,7 +30,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await collectOmsFlowReconciliationIssues(db);
 
     expect(issues).toEqual([]);
-    expect(db.execute).toHaveBeenCalledTimes(16);
+    expect(db.execute).toHaveBeenCalledTimes(18);
   });
 
   it("returns critical OMS/WMS and shipment drift issues with samples", async () => {
@@ -101,6 +101,14 @@ describe("oms-flow-reconciliation.service", () => {
     ) ?? [];
 
     expect(fulfillmentStatusGuards.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("flags active fulfillment partitions that cover the same OMS line", () => {
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("WMS_PARTITION_DUPLICATE_LINE_COVERAGE");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("duplicate_line_coverage");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("wo.fulfillment_partition_key");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("COUNT(DISTINCT wo.id) > 1");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("fulfillment_partition_keys");
   });
 
   it("treats refunded OMS financial status as final for WMS reconciliation", () => {
@@ -207,7 +215,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await runOmsFlowReconciliation(db);
 
     expect(issues).toHaveLength(1);
-    expect(db.execute).toHaveBeenCalledTimes(21);
+    expect(db.execute).toHaveBeenCalledTimes(23);
     expect(inserts).toHaveLength(2);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("auto-queued 2 delayed tracking push retry"),
@@ -327,6 +335,9 @@ describe("oms-flow-reconciliation.service", () => {
         .mockResolvedValueOnce(sampleRows([{ wms_order_id: 20 }]))
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        // WMS_PARTITION_DUPLICATE_LINE_COVERAGE detector count + sample.
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         // Auto-close cleanup finds no resolved dead fulfillment/tracking retries.
