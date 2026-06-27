@@ -34,15 +34,20 @@ describe("wms-sync duplicate WMS order / ShipStation push guard", () => {
 
   it("rechecks for an existing WMS order under the lock before inserting", () => {
     expect(WMS_SYNC_SRC).toMatch(/racedWmsOrder/);
-    expect(WMS_SYNC_SRC).toMatch(/eq\(wmsOrders\.omsFulfillmentOrderId, String\(omsOrderId\)\)/);
-    expect(WMS_SYNC_SRC).toMatch(
+    expect(WMS_SYNC_SRC).toMatch(/buildOmsWmsOrderScope\(omsOrderId, fulfillmentPartitionKey\)/);
+    expect(WMS_SYNC_SRC).not.toMatch(
       /eq\(wmsOrders\.fulfillmentPartitionKey, DEFAULT_FULFILLMENT_PARTITION_KEY\)/,
     );
   });
 
-  it("creates OMS-backed WMS orders in the default fulfillment partition", () => {
+  it("resolves and reuses the OMS fulfillment partition key for lookup and create", () => {
     expect(WMS_SYNC_SRC).toMatch(/const DEFAULT_FULFILLMENT_PARTITION_KEY = "default"/);
-    expect(WMS_SYNC_SRC).toMatch(/fulfillmentPartitionKey: DEFAULT_FULFILLMENT_PARTITION_KEY/);
+    expect(WMS_SYNC_SRC).toMatch(/function normalizeFulfillmentPartitionKey/);
+    expect(WMS_SYNC_SRC).toMatch(/function resolveOmsFulfillmentPartitionKey/);
+    expect(WMS_SYNC_SRC).toMatch(/const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey\(\)/);
+    expect(WMS_SYNC_SRC.match(/buildOmsWmsOrderScope\(omsOrderId, fulfillmentPartitionKey\)/g)).toHaveLength(2);
+    expect(WMS_SYNC_SRC).toMatch(/eq\(wmsOrders\.fulfillmentPartitionKey, normalizedPartitionKey\)/);
+    expect(WMS_SYNC_SRC).toMatch(/fulfillmentPartitionKey,/);
   });
 
   it("schema and migrations define the active OMS fulfillment partition backstop", () => {
