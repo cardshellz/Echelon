@@ -1308,14 +1308,17 @@ describe("dropship ops surface client helpers", () => {
       returnTo: " /onboarding ",
     })).toEqual({
       platform: "ebay",
+      intent: "connect",
       returnTo: "/onboarding",
     });
     expect(buildStoreConnectionOAuthStartInput({
       platform: "shopify",
+      intent: "change_store",
       shopDomain: "Vendor-Test",
       returnTo: "/onboarding",
     })).toEqual({
       platform: "shopify",
+      intent: "change_store",
       shopDomain: "vendor-test.myshopify.com",
       returnTo: "/onboarding",
     });

@@ -83,6 +83,7 @@ export type DropshipStoreConnectionLifecycleStatus =
   | "grace_period"
   | "paused"
   | "disconnected";
+export type DropshipStoreOAuthIntent = "connect" | "refresh_connection" | "change_store";
 
 export const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] = [
   "received",
@@ -266,6 +267,7 @@ export interface DropshipOnboardingState {
 
 export interface DropshipStoreConnectionOAuthStartInput {
   platform: DropshipStorePlatform;
+  intent: DropshipStoreOAuthIntent;
   shopDomain?: string;
   returnTo?: string;
 }
@@ -3285,16 +3287,19 @@ export function catalogExposureRuleKey(rule: Pick<
 
 export function buildStoreConnectionOAuthStartInput(input: {
   platform: DropshipStorePlatform;
+  intent?: DropshipStoreOAuthIntent;
   shopDomain: string;
   returnTo: string;
 }): DropshipStoreConnectionOAuthStartInput {
   const returnTo = normalizePortalReturnPath(input.returnTo);
+  const intent = input.intent ?? "connect";
   if (input.platform === "ebay") {
-    return { platform: input.platform, returnTo };
+    return { platform: input.platform, intent, returnTo };
   }
 
   return {
     platform: input.platform,
+    intent,
     shopDomain: normalizeShopifyShopDomainInput(input.shopDomain),
     returnTo,
   };

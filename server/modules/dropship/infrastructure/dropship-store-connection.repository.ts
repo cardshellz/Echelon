@@ -575,7 +575,7 @@ async function hasReconnectableConnectionWithClient(
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
-       AND status IN ('connected','needs_reauth','refresh_failed')`,
+       AND status IN ('connected','needs_reauth','refresh_failed','disconnected')`,
     [vendorId, platform],
   );
   return Number(result.rows[0]?.count ?? 0) > 0;

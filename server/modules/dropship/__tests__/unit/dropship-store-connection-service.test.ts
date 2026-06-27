@@ -321,7 +321,12 @@ describe("DropshipStoreConnectionService", () => {
       memberId: "member-1",
       platform: "shopify",
       shopDomain: "vendor-test.myshopify.com",
+      intent: "connect",
       returnTo: "/dropship/settings",
+    });
+    expect(shopifyOAuthProvider.authorizationCalls[0]).toMatchObject({
+      intent: "connect",
+      shopDomain: "vendor-test.myshopify.com",
     });
   });
 
@@ -336,29 +341,44 @@ describe("DropshipStoreConnectionService", () => {
     });
   });
 
-  it("allows OAuth to reconnect an occupied same-platform store slot", async () => {
+  it("blocks default OAuth connect when the same-platform store slot is already used", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
 
-    const start = await service.startOAuth("member-1", { platform: "ebay" });
+    await expect(service.startOAuth("member-1", { platform: "ebay" })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
+    });
+
+    expect(stateSigner.lastPayload).toBeNull();
+  });
+
+  it("allows OAuth to change an occupied same-platform store slot", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
+
+    const start = await service.startOAuth("member-1", { platform: "ebay", intent: "change_store" });
 
     expect(start.platform).toBe("ebay");
     expect(stateSigner.lastPayload).toMatchObject({
       vendorId: 10,
       memberId: "member-1",
       platform: "ebay",
+      intent: "change_store",
+    });
+    expect(ebayOAuthProvider.authorizationCalls[0]).toMatchObject({
+      intent: "change_store",
     });
   });
 
   it("allows OAuth to repair an unhealthy existing store connection", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21, status: "needs_reauth" })];
 
-    const start = await service.startOAuth("member-1", { platform: "ebay" });
+    const start = await service.startOAuth("member-1", { platform: "ebay", intent: "refresh_connection" });
 
     expect(start.platform).toBe("ebay");
     expect(stateSigner.lastPayload).toMatchObject({
       vendorId: 10,
       memberId: "member-1",
       platform: "ebay",
+      intent: "refresh_connection",
     });
   });
 
@@ -397,6 +417,7 @@ describe("DropshipStoreConnectionService", () => {
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
+      intent: "connect",
     };
 
     const result = await service.completeOAuthCallback({
@@ -429,6 +450,7 @@ describe("DropshipStoreConnectionService", () => {
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
+      intent: "refresh_connection",
     };
 
     const result = await service.completeOAuthCallback({
@@ -457,6 +479,7 @@ describe("DropshipStoreConnectionService", () => {
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
+      intent: "change_store",
     };
 
     const result = await service.completeOAuthCallback({
@@ -472,6 +495,41 @@ describe("DropshipStoreConnectionService", () => {
       hasAccessToken: true,
       hasRefreshToken: true,
     });
+    expect(repository.lastConnectInput?.config).toMatchObject({
+      oauthIntent: "change_store",
+    });
+  });
+
+  it("rejects refresh OAuth when eBay returns a different marketplace account", async () => {
+    repository.connections = [makeConnection({
+      storeConnectionId: 21,
+      platform: "ebay",
+      status: "connected",
+      externalAccountId: "external-ebay",
+    })];
+    ebayOAuthProvider.externalAccountId = "different-ebay";
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "refresh_connection",
+    };
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH",
+    });
+
+    expect(repository.lastConnectInput).toBeNull();
   });
 
   it("rejects OAuth completion for a different platform when an unhealthy connection owns the launch store slot", async () => {
@@ -723,6 +781,8 @@ class FakeStateSigner implements DropshipOAuthStateSigner {
 }
 
 class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
+  authorizationCalls: Array<Parameters<DropshipMarketplaceOAuthProvider["createAuthorizationUrl"]>[0]> = [];
+  externalAccountId: string | null = null;
   exchangeCalls: Array<{
     code: string;
     shopDomain: string | null;
@@ -731,7 +791,10 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
 
   constructor(readonly platform: "ebay" | "shopify") {}
 
-  createAuthorizationUrl(input: { state: string; shopDomain: string | null }): DropshipStoreConnectionOAuthStart {
+  createAuthorizationUrl(
+    input: Parameters<DropshipMarketplaceOAuthProvider["createAuthorizationUrl"]>[0],
+  ): DropshipStoreConnectionOAuthStart {
+    this.authorizationCalls.push(input);
     return {
       authorizationUrl: `https://${this.platform}.example.test/oauth?state=${input.state}`,
       platform: this.platform,
@@ -752,7 +815,7 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
       accessToken: "access-token",
       refreshToken: this.platform === "ebay" ? "refresh-token" : null,
       accessTokenExpiresAt: new Date(now.getTime() + 3600000),
-      externalAccountId: `external-${this.platform}`,
+      externalAccountId: this.externalAccountId ?? `external-${this.platform}`,
       externalDisplayName: `External ${this.platform}`,
     };
   }
@@ -853,7 +916,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     return this.connections.some((connection) => (
       connection.vendorId === input.vendorId
       && connection.platform === input.platform
-      && ["connected", "needs_reauth", "refresh_failed"].includes(connection.status)
+      && ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
     ));
   }
 

@@ -27,13 +27,39 @@ describe("EbayDropshipOAuthProvider", () => {
 
     const start = EbayDropshipOAuthProvider
       .fromEnv()
-      .createAuthorizationUrl({ state: "state", shopDomain: null });
+      .createAuthorizationUrl({ state: "state", shopDomain: null, intent: "connect" });
     const url = new URL(start.authorizationUrl);
 
     expect(url.origin).toBe("https://auth.sandbox.ebay.com");
     expect(url.searchParams.get("client_id")).toBe("dropship-ebay-client");
     expect(url.searchParams.get("redirect_uri")).toBe("Cardshellz_Cardshellz-dropship-oauth");
+    expect(url.searchParams.get("prompt")).toBe("login");
     expect(url.searchParams.toString()).not.toContain("dropship-ebay-secret");
+  });
+
+  it("forces eBay login when changing stores but keeps refresh on the current session", () => {
+    process.env = {
+      ...ORIGINAL_ENV,
+      DROPSHIP_EBAY_CLIENT_ID: "dropship-ebay-client",
+      DROPSHIP_EBAY_CLIENT_SECRET: "dropship-ebay-secret",
+      EBAY_VENDOR_RUNAME: "Cardshellz_Cardshellz-dropship-oauth",
+      EBAY_ENVIRONMENT: "sandbox",
+    };
+    const provider = EbayDropshipOAuthProvider.fromEnv();
+
+    const changeStoreUrl = new URL(provider.createAuthorizationUrl({
+      state: "state",
+      shopDomain: null,
+      intent: "change_store",
+    }).authorizationUrl);
+    const refreshUrl = new URL(provider.createAuthorizationUrl({
+      state: "state",
+      shopDomain: null,
+      intent: "refresh_connection",
+    }).authorizationUrl);
+
+    expect(changeStoreUrl.searchParams.get("prompt")).toBe("login");
+    expect(refreshUrl.searchParams.has("prompt")).toBe(false);
   });
 
   it("requires either dropship-specific or shared eBay OAuth client credentials", () => {
@@ -69,7 +95,7 @@ describe("ShopifyDropshipOAuthProvider", () => {
 
     const start = ShopifyDropshipOAuthProvider
       .fromEnv()
-      .createAuthorizationUrl({ state: "state", shopDomain: "vendor.myshopify.com" });
+      .createAuthorizationUrl({ state: "state", shopDomain: "vendor.myshopify.com", intent: "connect" });
     const url = new URL(start.authorizationUrl);
 
     expect(url.origin).toBe("https://vendor.myshopify.com");

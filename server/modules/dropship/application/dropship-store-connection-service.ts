@@ -124,11 +124,14 @@ export interface DropshipStoreConnectionTokenGrant {
   tokenMetadata?: Record<string, unknown>;
 }
 
+export type DropshipStoreOAuthIntent = "connect" | "refresh_connection" | "change_store";
+
 export interface DropshipMarketplaceOAuthProvider {
   platform: DropshipSupportedStorePlatform;
   createAuthorizationUrl(input: {
     state: string;
     shopDomain: string | null;
+    intent: DropshipStoreOAuthIntent;
   }): DropshipStoreConnectionOAuthStart;
   exchangeCode(input: {
     code: string;
@@ -152,6 +155,7 @@ export interface DropshipOAuthStatePayload {
   memberId: string;
   platform: DropshipSupportedStorePlatform;
   shopDomain: string | null;
+  intent?: DropshipStoreOAuthIntent;
   nonce: string;
   issuedAt: string;
   expiresAt: string;
@@ -292,10 +296,12 @@ export class DropshipStoreConnectionService {
 
   async startOAuth(memberId: string, input: {
     platform: DropshipSupportedStorePlatform;
+    intent?: DropshipStoreOAuthIntent;
     shopDomain?: string;
     returnTo?: string;
   }): Promise<DropshipStoreConnectionOAuthStart> {
     const platform = assertDropshipStorePlatform(input.platform);
+    const intent = normalizeStoreOAuthIntent(input.intent);
     const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
     const shopDomain = platform === "shopify"
       ? normalizeShopifyShopDomain(input.shopDomain ?? "")
@@ -303,6 +309,7 @@ export class DropshipStoreConnectionService {
     await this.assertCanStartOAuth({
       vendor,
       platform,
+      intent,
     });
 
     const now = this.deps.clock.now();
@@ -313,6 +320,7 @@ export class DropshipStoreConnectionService {
       memberId: vendor.memberId,
       platform,
       shopDomain,
+      intent,
       nonce: randomUUID(),
       issuedAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
@@ -322,6 +330,7 @@ export class DropshipStoreConnectionService {
     return this.deps.oauthProviders[platform].createAuthorizationUrl({
       state,
       shopDomain,
+      intent,
     });
   }
 
@@ -341,6 +350,7 @@ export class DropshipStoreConnectionService {
     const now = this.deps.clock.now();
     const state = this.deps.stateSigner.verify(input.state, now);
     const platform = assertDropshipStorePlatform(input.platform ?? state.platform);
+    const intent = normalizeStoreOAuthIntent(state.intent);
     if (platform !== state.platform) {
       throw new DropshipError("DROPSHIP_STORE_OAUTH_STATE_MISMATCH", "Store authorization state does not match platform.", {
         statePlatform: state.platform,
@@ -356,12 +366,25 @@ export class DropshipStoreConnectionService {
     await this.assertCanStartOAuth({
       vendor,
       platform,
+      intent,
     });
+    const refreshTargetConnection = intent === "refresh_connection"
+      ? await this.loadOAuthTargetConnection({
+          vendorId: vendor.vendorId,
+          platform,
+        })
+      : null;
 
     const grant = await this.deps.oauthProviders[platform].exchangeCode({
       code: input.code,
       shopDomain: state.shopDomain,
       query: input,
+    });
+    assertOAuthGrantMatchesIntent({
+      intent,
+      platform,
+      targetConnection: refreshTargetConnection,
+      grant,
     });
     const tokenRecords = [
       this.deps.tokenCipher.seal({
@@ -395,6 +418,7 @@ export class DropshipStoreConnectionService {
       config: {
         tokenMetadata: grant.tokenMetadata ?? {},
         connectedByMemberId: vendor.memberId,
+        oauthIntent: intent,
       },
       connectedAt: now,
     });
@@ -495,6 +519,7 @@ export class DropshipStoreConnectionService {
   private async assertCanStartOAuth(input: {
     vendor: DropshipProvisionedVendorProfile;
     platform: DropshipSupportedStorePlatform;
+    intent: DropshipStoreOAuthIntent;
   }): Promise<void> {
     const activeConnectionCount = await this.deps.repository.countActiveByVendorId(input.vendor.vendorId);
     try {
@@ -511,6 +536,10 @@ export class DropshipStoreConnectionService {
         throw error;
       }
 
+      if (input.intent === "connect") {
+        throw error;
+      }
+
       if (activeConnectionCount > input.vendor.includedStoreConnections) {
         throw error;
       }
@@ -522,7 +551,34 @@ export class DropshipStoreConnectionService {
       if (!canReconnectExistingConnection) {
         throw error;
       }
+      return;
     }
+
+    if (input.intent !== "connect") {
+      const canReconnectExistingConnection = await this.deps.repository.hasReconnectableConnection({
+        vendorId: input.vendor.vendorId,
+        platform: input.platform,
+      });
+      if (!canReconnectExistingConnection) {
+        throw new DropshipError(
+          "DROPSHIP_STORE_CONNECTION_NOT_FOUND",
+          "A store connection is required before it can be refreshed or changed.",
+          {
+            vendorId: input.vendor.vendorId,
+            platform: input.platform,
+            intent: input.intent,
+          },
+        );
+      }
+    }
+  }
+
+  private async loadOAuthTargetConnection(input: {
+    vendorId: number;
+    platform: DropshipSupportedStorePlatform;
+  }): Promise<DropshipStoreConnectionProfile | null> {
+    const connections = await this.deps.repository.listByVendorId(input.vendorId);
+    return selectOAuthTargetConnection(connections, input.platform);
   }
 
   private async runPostConnectSetup(
@@ -736,6 +792,58 @@ function resolveDropshipStoreConnectionSetupRetryable(error: unknown): boolean {
 function isFreshDisconnect(connection: DropshipStoreConnectionProfile, disconnectedAt: Date): boolean {
   return connection.status === "grace_period"
     && connection.disconnectedAt?.getTime() === disconnectedAt.getTime();
+}
+
+function normalizeStoreOAuthIntent(intent: DropshipStoreOAuthIntent | undefined): DropshipStoreOAuthIntent {
+  if (intent === "refresh_connection" || intent === "change_store") {
+    return intent;
+  }
+  return "connect";
+}
+
+function selectOAuthTargetConnection(
+  connections: DropshipStoreConnectionProfile[],
+  platform: DropshipSupportedStorePlatform,
+): DropshipStoreConnectionProfile | null {
+  return connections
+    .filter((connection) => (
+      connection.platform === platform
+      && ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
+    ))
+    .sort((left, right) => {
+      const statusOrder = (status: DropshipStoreConnectionProfile["status"]) => {
+        if (status === "needs_reauth") return 0;
+        if (status === "refresh_failed") return 1;
+        if (status === "connected") return 2;
+        return 3;
+      };
+      return statusOrder(left.status) - statusOrder(right.status)
+        || right.updatedAt.getTime() - left.updatedAt.getTime()
+        || right.storeConnectionId - left.storeConnectionId;
+    })[0] ?? null;
+}
+
+function assertOAuthGrantMatchesIntent(input: {
+  intent: DropshipStoreOAuthIntent;
+  platform: DropshipSupportedStorePlatform;
+  targetConnection: DropshipStoreConnectionProfile | null;
+  grant: DropshipStoreConnectionTokenGrant;
+}): void {
+  if (input.intent !== "refresh_connection" || !input.targetConnection?.externalAccountId) {
+    return;
+  }
+
+  if (input.grant.externalAccountId !== input.targetConnection.externalAccountId) {
+    throw new DropshipError(
+      "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH",
+      "The authorized marketplace account did not match the store connection being refreshed.",
+      {
+        platform: input.platform,
+        expectedExternalAccountId: input.targetConnection.externalAccountId,
+        actualExternalAccountId: input.grant.externalAccountId,
+      },
+    );
+  }
 }
 
 function parseListForAdminInput(input: unknown): ListDropshipAdminStoreConnectionsInput {
