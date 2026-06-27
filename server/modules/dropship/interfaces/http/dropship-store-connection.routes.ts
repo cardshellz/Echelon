@@ -155,6 +155,7 @@ function statusForDropshipStoreConnectionError(code: string): number {
       return 403;
     case "DROPSHIP_STORE_CONNECTION_NOT_FOUND":
       return 404;
+    case "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH":
     case "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED":
       return 409;
     case "DROPSHIP_OAUTH_STATE_EXPIRED":

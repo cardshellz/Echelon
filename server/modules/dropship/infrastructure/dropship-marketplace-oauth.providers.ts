@@ -66,7 +66,7 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
     });
   }
 
-  createAuthorizationUrl(input: { state: string; shopDomain: string | null }): DropshipStoreConnectionOAuthStart {
+  createAuthorizationUrl(input: Parameters<DropshipMarketplaceOAuthProvider["createAuthorizationUrl"]>[0]): DropshipStoreConnectionOAuthStart {
     const params = new URLSearchParams({
       client_id: this.config.clientId,
       response_type: "code",
@@ -74,6 +74,9 @@ export class EbayDropshipOAuthProvider implements DropshipMarketplaceOAuthProvid
       scope: EBAY_SCOPES.join(" "),
       state: input.state,
     });
+    if (input.intent !== "refresh_connection") {
+      params.set("prompt", "login");
+    }
 
     return {
       authorizationUrl: `${EBAY_CONSENT_URLS[this.config.environment]}?${params.toString()}`,
@@ -168,7 +171,7 @@ export class ShopifyDropshipOAuthProvider implements DropshipMarketplaceOAuthPro
     return new ShopifyDropshipOAuthProvider({ apiKey, apiSecret, redirectUri });
   }
 
-  createAuthorizationUrl(input: { state: string; shopDomain: string | null }): DropshipStoreConnectionOAuthStart {
+  createAuthorizationUrl(input: Parameters<DropshipMarketplaceOAuthProvider["createAuthorizationUrl"]>[0]): DropshipStoreConnectionOAuthStart {
     if (!input.shopDomain) {
       throw new DropshipError("DROPSHIP_SHOP_DOMAIN_REQUIRED", "Shopify shop domain is required.");
     }
