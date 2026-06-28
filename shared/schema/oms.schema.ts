@@ -151,6 +151,10 @@ export const omsOrderLines = omsSchema.table("oms_order_lines", {
   // Fallback to live Shopify query (Path B) when null.
   shopifyFulfillmentOrderId: varchar("shopify_fulfillment_order_id", { length: 100 }),
   shopifyFulfillmentOrderLineItemId: varchar("shopify_fulfillment_order_line_item_id", { length: 100 }),
+  // Provider-neutral fulfillment references. Shopify aliases remain during migration.
+  fulfillmentProvider: varchar("fulfillment_provider", { length: 40 }),
+  providerFulfillmentOrderId: varchar("provider_fulfillment_order_id", { length: 200 }),
+  providerFulfillmentOrderLineItemId: varchar("provider_fulfillment_order_line_item_id", { length: 200 }),
   sku: varchar("sku", { length: 100 }),
   title: varchar("title", { length: 300 }),
   variantTitle: varchar("variant_title", { length: 200 }),

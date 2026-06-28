@@ -133,6 +133,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     unpushedShipStationShipments,
     shopifyShipmentFulfillmentMissing,
     partitionDuplicateLineCoverage,
+    providerFulfillmentReferenceDrift,
   ] = await Promise.all([
     countAndSample(
       db,
@@ -552,6 +553,66 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         LIMIT 10
       `,
     ),
+    countAndSample(
+      db,
+      sql`
+        WITH provider_reference_drift AS (
+          SELECT ol.id
+          FROM oms.oms_order_lines ol
+          WHERE (
+              NULLIF(ol.fulfillment_provider, '') = 'shopify'
+              OR NULLIF(ol.shopify_fulfillment_order_id, '') IS NOT NULL
+              OR NULLIF(ol.shopify_fulfillment_order_line_item_id, '') IS NOT NULL
+            )
+            AND (
+              NULLIF(ol.fulfillment_provider, '') IS DISTINCT FROM 'shopify'
+              OR NULLIF(ol.provider_fulfillment_order_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_id, '')
+              OR NULLIF(ol.provider_fulfillment_order_line_item_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_line_item_id, '')
+            )
+        )
+        SELECT COUNT(*)::int AS count
+        FROM provider_reference_drift
+      `,
+      sql`
+        WITH provider_reference_drift AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oo.external_order_number,
+            ol.id AS oms_order_line_id,
+            ol.sku,
+            ol.fulfillment_provider,
+            ol.provider_fulfillment_order_id,
+            ol.provider_fulfillment_order_line_item_id,
+            ol.shopify_fulfillment_order_id,
+            ol.shopify_fulfillment_order_line_item_id,
+            CASE
+              WHEN NULLIF(ol.fulfillment_provider, '') IS DISTINCT FROM 'shopify'
+                THEN 'provider_context_missing_or_mismatched'
+              WHEN NULLIF(ol.provider_fulfillment_order_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_id, '')
+                THEN 'fulfillment_order_id_mismatch'
+              WHEN NULLIF(ol.provider_fulfillment_order_line_item_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_line_item_id, '')
+                THEN 'fulfillment_order_line_item_id_mismatch'
+              ELSE 'unknown'
+            END AS drift_reason
+          FROM oms.oms_order_lines ol
+          JOIN oms.oms_orders oo ON oo.id = ol.order_id
+          WHERE (
+              NULLIF(ol.fulfillment_provider, '') = 'shopify'
+              OR NULLIF(ol.shopify_fulfillment_order_id, '') IS NOT NULL
+              OR NULLIF(ol.shopify_fulfillment_order_line_item_id, '') IS NOT NULL
+            )
+            AND (
+              NULLIF(ol.fulfillment_provider, '') IS DISTINCT FROM 'shopify'
+              OR NULLIF(ol.provider_fulfillment_order_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_id, '')
+              OR NULLIF(ol.provider_fulfillment_order_line_item_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_line_item_id, '')
+            )
+        )
+        SELECT *
+        FROM provider_reference_drift
+        ORDER BY oms_order_id DESC, oms_order_line_id DESC
+        LIMIT 10
+      `,
+    ),
   ]);
 
   const issues: OmsOpsIssue[] = [
@@ -617,6 +678,13 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       count: partitionDuplicateLineCoverage.count,
       message: "Active WMS fulfillment partitions cover the same OMS order line.",
       sample: partitionDuplicateLineCoverage.sample,
+    },
+    {
+      code: "OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT",
+      severity: "warning" as const,
+      count: providerFulfillmentReferenceDrift.count,
+      message: "Shopify OMS line fulfillment references differ from provider-neutral references.",
+      sample: providerFulfillmentReferenceDrift.sample,
     },
   ];
 
