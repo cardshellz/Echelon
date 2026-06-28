@@ -225,10 +225,7 @@ export class DropshipSelectionAtpService {
       this.deps.repository.listVendorCatalogCandidates(facetInput),
     ]);
     const now = this.deps.clock.now();
-    const exposedFacetCandidates = facetCandidates.filter((candidate) => {
-      return evaluateDropshipCatalogExposure(candidate, adminRules, now).exposed;
-    });
-    const facets = buildCatalogFacets(exposedFacetCandidates);
+    const facets = buildCatalogFacets(facetCandidates);
 
     const productIds = uniqueNumbers(candidates.map((candidate) => candidate.productId));
     const productVariantIds = uniqueNumbers(candidates.map((candidate) => candidate.productVariantId));
@@ -262,10 +259,9 @@ export class DropshipSelectionAtpService {
         selectionDecision,
       };
     });
-    const exposedRows = evaluatedRows.filter((row) => row.adminExposureDecision.exposed);
     const filteredRows = parsed.selectedOnly
-      ? exposedRows.filter((row) => row.selectionDecision.selected)
-      : exposedRows;
+      ? evaluatedRows.filter((row) => row.selectionDecision.selected)
+      : evaluatedRows;
     const start = (parsed.page - 1) * parsed.limit;
 
     return {
