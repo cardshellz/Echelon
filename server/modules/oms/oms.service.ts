@@ -91,6 +91,9 @@ export interface LineItemData {
   requiresShipping?: boolean;
   fulfillableQuantity?: number | null;
   fulfillmentService?: string | null;
+  fulfillmentProvider?: string | null;
+  providerFulfillmentOrderId?: string | null;
+  providerFulfillmentOrderLineItemId?: string | null;
   properties?: any | null;
   compareAtPriceCents?: number | null;
   taxLines?: any | null;
@@ -304,6 +307,9 @@ export function createOmsService(db: any, reservationService?: any) {
           requiresShipping: item.requiresShipping ?? true,
           fulfillableQuantity: item.fulfillableQuantity ?? null,
           fulfillmentService: item.fulfillmentService ?? null,
+          fulfillmentProvider: item.fulfillmentProvider ?? null,
+          providerFulfillmentOrderId: item.providerFulfillmentOrderId ?? null,
+          providerFulfillmentOrderLineItemId: item.providerFulfillmentOrderLineItemId ?? null,
           properties: item.properties ?? null,
           compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,
           taxLines: item.taxLines ?? null,
@@ -436,6 +442,9 @@ export function createOmsService(db: any, reservationService?: any) {
                 requiresShipping: item.requiresShipping ?? existingLine.requiresShipping ?? true,
                 fulfillableQuantity: item.fulfillableQuantity ?? existingLine.fulfillableQuantity ?? null,
                 fulfillmentService: item.fulfillmentService ?? existingLine.fulfillmentService ?? null,
+                fulfillmentProvider: item.fulfillmentProvider ?? existingLine.fulfillmentProvider ?? null,
+                providerFulfillmentOrderId: item.providerFulfillmentOrderId ?? existingLine.providerFulfillmentOrderId ?? null,
+                providerFulfillmentOrderLineItemId: item.providerFulfillmentOrderLineItemId ?? existingLine.providerFulfillmentOrderLineItemId ?? null,
                 properties: item.properties ?? existingLine.properties ?? null,
                 compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice ?? existingLine.compareAtPriceCents,
                 taxLines: item.taxLines ?? existingLine.taxLines ?? null,
@@ -482,6 +491,9 @@ export function createOmsService(db: any, reservationService?: any) {
             requiresShipping: item.requiresShipping ?? true,
             fulfillableQuantity: item.fulfillableQuantity ?? null,
             fulfillmentService: item.fulfillmentService ?? null,
+            fulfillmentProvider: item.fulfillmentProvider ?? null,
+            providerFulfillmentOrderId: item.providerFulfillmentOrderId ?? null,
+            providerFulfillmentOrderLineItemId: item.providerFulfillmentOrderLineItemId ?? null,
             properties: item.properties ?? null,
             compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,
             taxLines: item.taxLines ?? null,

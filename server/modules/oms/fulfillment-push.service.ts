@@ -574,7 +574,11 @@ export function createFulfillmentPushService(
     }
 
     const lineItems = lines
-      .filter((l: any) => l.externalLineItemId && Number(l.quantity) > 0)
+      .filter((l: any) =>
+        l.externalLineItemId &&
+        Number(l.quantity) > 0 &&
+        isEbayFulfillmentProvider(l.fulfillmentProvider ?? l.fulfillment_provider)
+      )
       .map((l: any) => ({
         lineItemId: l.externalLineItemId,
         quantity: l.quantity,
@@ -2676,6 +2680,11 @@ function isShopifyFulfillmentProvider(provider: string | null | undefined): bool
   return normalized.length === 0 || normalized === "shopify";
 }
 
+function isEbayFulfillmentProvider(provider: string | null | undefined): boolean {
+  const normalized = String(provider ?? "").trim().toLowerCase();
+  return normalized.length === 0 || normalized === "ebay";
+}
+
 export type FulfillmentPushService = ReturnType<typeof createFulfillmentPushService>;
 
 // Exposed for unit testing the resolver in isolation.
@@ -2689,4 +2698,5 @@ export const __test__ = {
   fetchOurFulfillmentOrderIds,
   normaliseShopifyLocationId,
   isShopifyFulfillmentProvider,
+  isEbayFulfillmentProvider,
 };

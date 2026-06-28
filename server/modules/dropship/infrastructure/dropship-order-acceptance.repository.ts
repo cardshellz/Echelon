@@ -817,11 +817,11 @@ async function createOmsOrderLinesWithClient(
         (order_id, product_variant_id, external_line_item_id, external_product_id,
          sku, title, variant_title, quantity, paid_price_cents, total_price_cents,
          total_discount_cents, taxable, requires_shipping, fulfillable_quantity,
-         fulfillment_status, order_number, created_at, updated_at)
+         fulfillment_provider, fulfillment_status, order_number, created_at, updated_at)
        VALUES ($1, $2, $3, $4,
          $5, $6, NULL, $7, $8, $9,
          0, true, true, $7,
-         'unfulfilled', $10, $11, $11)
+         'dropship', 'unfulfilled', $10, $11, $11)
        RETURNING id, product_variant_id, quantity`,
       [
         input.omsOrderId,

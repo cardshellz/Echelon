@@ -100,6 +100,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
       title: item.title,
       name: item.title,
       quantity: qty,
+      fulfillmentProvider: "ebay",
       paidPriceCents,
       totalCents: lineItemCostCents, // product cost only, no shipping/tax
       taxCents,

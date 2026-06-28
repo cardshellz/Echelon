@@ -93,6 +93,7 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     expect(mapBlock).toContain('financialStatus = "partially_refunded"');
     expect(mapBlock).toContain("channelShipByDate");
     expect(mapBlock).toContain("externalLineItemId: item.lineItemId");
+    expect(mapBlock).toContain('fulfillmentProvider: "ebay"');
     expect(mapBlock).toContain("paidPriceCents");
   });
 
