@@ -59,6 +59,8 @@ export function registerDropshipVendorCatalogRoutes(
         search: parseOptionalStringQuery(req.query.search),
         category: parseOptionalStringQuery(req.query.category),
         productLineId: parseOptionalNumberQuery(req.query.productLineId),
+        productLineIds: parseOptionalNumberListQuery(req.query.productLineIds),
+        productId: parseOptionalNumberQuery(req.query.productId),
         selectedOnly: parseBooleanQuery(req.query.selectedOnly, false),
         page: parseNumberQuery(req.query.page, 1),
         limit: parseNumberQuery(req.query.limit, 50),
@@ -110,6 +112,22 @@ function parseOptionalNumberQuery(value: unknown): number | undefined {
   }
   const asNumber = Number(parsed);
   return Number.isInteger(asNumber) && asNumber > 0 ? asNumber : undefined;
+}
+
+function parseOptionalNumberListQuery(value: unknown): number[] | undefined {
+  if (Array.isArray(value)) {
+    const parsed = value.flatMap((item) => parseOptionalNumberListQuery(item) ?? []);
+    return parsed.length > 0 ? Array.from(new Set(parsed)) : undefined;
+  }
+  const parsed = parseOptionalStringQuery(value);
+  if (!parsed) {
+    return undefined;
+  }
+  const numbers = parsed
+    .split(",")
+    .map((item) => Number(item.trim()))
+    .filter((item) => Number.isInteger(item) && item > 0);
+  return numbers.length > 0 ? Array.from(new Set(numbers)) : undefined;
 }
 
 function parseNumberQuery(value: unknown, fallback: number): number {

@@ -88,6 +88,8 @@ export const previewDropshipVendorCatalogInputSchema = z.object({
   search: z.string().trim().min(1).max(200).optional(),
   category: z.string().trim().min(1).max(200).optional(),
   productLineId: positiveIdSchema.optional(),
+  productLineIds: z.array(positiveIdSchema).max(50).optional(),
+  productId: positiveIdSchema.optional(),
   selectedOnly: z.boolean().default(false),
   page: z.number().int().min(1).default(1),
   limit: z.number().int().min(1).max(200).default(50),
