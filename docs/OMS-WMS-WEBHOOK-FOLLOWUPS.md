@@ -49,7 +49,9 @@ Proposed follow-up:
   alongside the legacy Shopify aliases.
 - Shopify fulfillment-order ingest preserves existing non-Shopify provider
   context instead of overwriting it with Shopify references.
-- Migrate Shopify values into the neutral representation.
+- Transition-window Shopify alias values are re-backfilled into the neutral
+  provider representation by migration
+  `112_oms_provider_fulfillment_reference_backfill.sql`.
 - Update Shopify fulfillment push, eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.
 
