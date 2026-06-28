@@ -57,7 +57,8 @@ Proposed follow-up:
 - Direct eBay ingest and dropship acceptance now stamp OMS line provider
   ownership, and eBay/dropship tracking reads ignore rows explicitly owned by
   another provider.
-- Finish reconciliation and health reads through the neutral provider contract.
+- Reconciliation and ops health now normalize the neutral provider contract
+  before comparing Shopify compatibility aliases for drift.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.
 
 Reason this matters:

@@ -556,55 +556,79 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     countAndSample(
       db,
       sql`
-        WITH provider_reference_drift AS (
-          SELECT ol.id
+        WITH provider_reference_rows AS (
+          SELECT
+            ol.id,
+            LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')) AS normalized_fulfillment_provider,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_id), '') AS provider_fulfillment_order_id,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_line_item_id), '') AS provider_fulfillment_order_line_item_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_id), '') AS shopify_fulfillment_order_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_line_item_id), '') AS shopify_fulfillment_order_line_item_id
           FROM oms.oms_order_lines ol
+        ),
+        provider_reference_drift AS (
+          SELECT id
+          FROM provider_reference_rows
           WHERE (
-              NULLIF(ol.fulfillment_provider, '') = 'shopify'
-              OR NULLIF(ol.shopify_fulfillment_order_id, '') IS NOT NULL
-              OR NULLIF(ol.shopify_fulfillment_order_line_item_id, '') IS NOT NULL
+              normalized_fulfillment_provider = 'shopify'
+              OR shopify_fulfillment_order_id IS NOT NULL
+              OR shopify_fulfillment_order_line_item_id IS NOT NULL
             )
             AND (
-              NULLIF(ol.fulfillment_provider, '') IS DISTINCT FROM 'shopify'
-              OR NULLIF(ol.provider_fulfillment_order_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_id, '')
-              OR NULLIF(ol.provider_fulfillment_order_line_item_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_line_item_id, '')
+              normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+              OR provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+              OR provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
             )
         )
         SELECT COUNT(*)::int AS count
         FROM provider_reference_drift
       `,
       sql`
-        WITH provider_reference_drift AS (
+        WITH provider_reference_rows AS (
           SELECT
             ol.order_id AS oms_order_id,
             oo.external_order_number,
             ol.id AS oms_order_line_id,
             ol.sku,
             ol.fulfillment_provider,
-            ol.provider_fulfillment_order_id,
-            ol.provider_fulfillment_order_line_item_id,
-            ol.shopify_fulfillment_order_id,
-            ol.shopify_fulfillment_order_line_item_id,
+            LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')) AS normalized_fulfillment_provider,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_id), '') AS provider_fulfillment_order_id,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_line_item_id), '') AS provider_fulfillment_order_line_item_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_id), '') AS shopify_fulfillment_order_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_line_item_id), '') AS shopify_fulfillment_order_line_item_id
+          FROM oms.oms_order_lines ol
+          JOIN oms.oms_orders oo ON oo.id = ol.order_id
+        ),
+        provider_reference_drift AS (
+          SELECT
+            oms_order_id,
+            external_order_number,
+            oms_order_line_id,
+            sku,
+            fulfillment_provider,
+            normalized_fulfillment_provider,
+            provider_fulfillment_order_id,
+            provider_fulfillment_order_line_item_id,
+            shopify_fulfillment_order_id,
+            shopify_fulfillment_order_line_item_id,
             CASE
-              WHEN NULLIF(ol.fulfillment_provider, '') IS DISTINCT FROM 'shopify'
+              WHEN normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
                 THEN 'provider_context_missing_or_mismatched'
-              WHEN NULLIF(ol.provider_fulfillment_order_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_id, '')
+              WHEN provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
                 THEN 'fulfillment_order_id_mismatch'
-              WHEN NULLIF(ol.provider_fulfillment_order_line_item_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_line_item_id, '')
+              WHEN provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
                 THEN 'fulfillment_order_line_item_id_mismatch'
               ELSE 'unknown'
             END AS drift_reason
-          FROM oms.oms_order_lines ol
-          JOIN oms.oms_orders oo ON oo.id = ol.order_id
           WHERE (
-              NULLIF(ol.fulfillment_provider, '') = 'shopify'
-              OR NULLIF(ol.shopify_fulfillment_order_id, '') IS NOT NULL
-              OR NULLIF(ol.shopify_fulfillment_order_line_item_id, '') IS NOT NULL
+              normalized_fulfillment_provider = 'shopify'
+              OR shopify_fulfillment_order_id IS NOT NULL
+              OR shopify_fulfillment_order_line_item_id IS NOT NULL
             )
             AND (
-              NULLIF(ol.fulfillment_provider, '') IS DISTINCT FROM 'shopify'
-              OR NULLIF(ol.provider_fulfillment_order_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_id, '')
-              OR NULLIF(ol.provider_fulfillment_order_line_item_id, '') IS DISTINCT FROM NULLIF(ol.shopify_fulfillment_order_line_item_id, '')
+              normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+              OR provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+              OR provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
             )
         )
         SELECT *
