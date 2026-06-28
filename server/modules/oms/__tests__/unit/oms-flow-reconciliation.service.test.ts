@@ -30,7 +30,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await collectOmsFlowReconciliationIssues(db);
 
     expect(issues).toEqual([]);
-    expect(db.execute).toHaveBeenCalledTimes(18);
+    expect(db.execute).toHaveBeenCalledTimes(20);
   });
 
   it("returns critical OMS/WMS and shipment drift issues with samples", async () => {
@@ -109,6 +109,16 @@ describe("oms-flow-reconciliation.service", () => {
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("wo.fulfillment_partition_key");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("COUNT(DISTINCT wo.id) > 1");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("fulfillment_partition_keys");
+  });
+
+  it("flags Shopify fulfillment reference drift from provider-neutral OMS line columns", () => {
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_drift");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.fulfillment_provider");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.provider_fulfillment_order_id");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.shopify_fulfillment_order_id");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("IS DISTINCT FROM");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_context_missing_or_mismatched");
   });
 
   it("treats refunded OMS financial status as final for WMS reconciliation", () => {
@@ -215,7 +225,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await runOmsFlowReconciliation(db);
 
     expect(issues).toHaveLength(1);
-    expect(db.execute).toHaveBeenCalledTimes(23);
+    expect(db.execute).toHaveBeenCalledTimes(25);
     expect(inserts).toHaveLength(2);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("auto-queued 2 delayed tracking push retry"),
@@ -338,6 +348,9 @@ describe("oms-flow-reconciliation.service", () => {
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         // WMS_PARTITION_DUPLICATE_LINE_COVERAGE detector count + sample.
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        // OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT detector count + sample.
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         // Auto-close cleanup finds no resolved dead fulfillment/tracking retries.
