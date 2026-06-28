@@ -1205,7 +1205,7 @@ describe("dropship ops surface client helpers", () => {
       productVariantId: null,
       category: null,
       priority: 100,
-      notes: "Include Display",
+      notes: "Expose Display",
       metadata: { source: "admin_catalog_preview" },
     }));
 
@@ -1218,7 +1218,7 @@ describe("dropship ops surface client helpers", () => {
       action: "exclude",
       category: "Cases",
       priority: 200,
-      notes: "Exclude category Cases",
+      notes: "Hide category Cases",
     }));
 
     expect(buildCatalogExposureRuleFromPreviewRow({
@@ -1228,7 +1228,7 @@ describe("dropship ops surface client helpers", () => {
     })).toEqual(expect.objectContaining({
       scopeType: "product",
       productId: 14,
-      notes: "Include PROD-14",
+      notes: "Expose PROD-14",
     }));
   });
 

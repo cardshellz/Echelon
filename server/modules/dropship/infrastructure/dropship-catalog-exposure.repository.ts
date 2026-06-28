@@ -59,7 +59,7 @@ export class PgDropshipCatalogExposureRepository implements DropshipCatalogExpos
                 notes, metadata, created_at, updated_at
          FROM dropship.dropship_catalog_rules
          WHERE ($1::boolean = true OR is_active = true)
-         ORDER BY is_active DESC, priority DESC, id ASC`,
+         ORDER BY is_active DESC, priority ASC, id ASC`,
         [input.includeInactive],
       );
       return result.rows.map(mapCatalogRuleRow);
@@ -240,7 +240,7 @@ async function listRulesWithClient(
             notes, metadata, created_at, updated_at
      FROM dropship.dropship_catalog_rules
      WHERE ($1::boolean = true OR is_active = true)
-     ORDER BY is_active DESC, priority DESC, id ASC`,
+     ORDER BY is_active DESC, priority ASC, id ASC`,
     [input.includeInactive],
   );
   return result.rows.map(mapCatalogRuleRow);
