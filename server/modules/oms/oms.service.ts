@@ -990,12 +990,14 @@ export function createOmsService(db: any, reservationService?: any) {
       id: number;
       sku: string | null;
       quantity: number;
+      fulfillmentProvider: string | null;
       shopifyFulfillmentOrderLineItemId: string | null;
     }> = await db
       .select({
         id: omsOrderLines.id,
         sku: omsOrderLines.sku,
         quantity: omsOrderLines.quantity,
+        fulfillmentProvider: omsOrderLines.fulfillmentProvider,
         shopifyFulfillmentOrderLineItemId:
           omsOrderLines.shopifyFulfillmentOrderLineItemId,
       })
@@ -1079,6 +1081,15 @@ export function createOmsService(db: any, reservationService?: any) {
     let unmatched = 0;
     let updates = 0;
     for (const line of lines) {
+      const provider = String(line.fulfillmentProvider ?? "").trim();
+      if (provider.length > 0 && provider.toLowerCase() !== "shopify") {
+        unmatched++;
+        console.log(
+          `[OMS] populateShopifyFulfillmentOrderIds: skipping line ${line.id} provider=${provider} (not Shopify)`,
+        );
+        continue;
+      }
+
       const sku = (line.sku ?? "").trim();
       if (sku.length === 0) {
         unmatched++;
