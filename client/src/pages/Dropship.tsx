@@ -3,6 +3,8 @@ import type { Dispatch, SetStateAction } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   Bell,
   Boxes,
   Check,
@@ -29,6 +31,14 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -2989,6 +2999,7 @@ function CatalogExposureTab() {
   const [draftRules, setDraftRules] = useState<DropshipAdminCatalogExposureRuleInput[]>([]);
   const [loadedRulesKey, setLoadedRulesKey] = useState("");
   const [ruleForm, setRuleForm] = useState<CatalogRuleFormState>(emptyCatalogRuleForm);
+  const [ruleDialogOpen, setRuleDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -3014,12 +3025,11 @@ function CatalogExposureTab() {
 
   useEffect(() => {
     if (!rulesQuery.data) return;
-    const activeInputs = rulesQuery.data.rules
+    const activeInputs = normalizeCatalogRuleOrder(rulesQuery.data.rules
       .filter((rule) => rule.isActive !== false)
-      .map(catalogExposureRecordToInput);
+      .map(catalogExposureRecordToInput));
     const nextRulesKey = activeInputs
-      .map((rule) => `${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`)
-      .sort()
+      .map((rule, index) => `${index}:${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`)
       .join("|");
     if (nextRulesKey === loadedRulesKey) return;
     setDraftRules(activeInputs);
@@ -3032,8 +3042,14 @@ function CatalogExposureTab() {
 
   function addRuleFromForm() {
     try {
-      upsertDraftRule(buildCatalogExposureRuleInput(ruleForm));
-      setMessage("Catalog exposure rule added to draft.");
+      const rule = buildCatalogExposureRuleInput({
+        ...ruleForm,
+        priority: draftRules.length,
+      });
+      upsertDraftRule(rule);
+      setRuleDialogOpen(false);
+      setRuleForm(emptyCatalogRuleForm);
+      setMessage(`${catalogExposureActionLabel(rule.action)} ${catalogRuleTargetLabel(rule)} added to unsaved changes.`);
       setError("");
     } catch (caught) {
       setMessage("");
@@ -3042,22 +3058,23 @@ function CatalogExposureTab() {
   }
 
   function addCatalogWideRule(action: CatalogExposureActionFilter) {
-    upsertDraftRule(buildCatalogExposureRuleInput({
+    const rule = buildCatalogExposureRuleInput({
       scopeType: "catalog",
       action,
-      priority: action === "include" ? 0 : 300,
-      notes: `${action === "include" ? "Include" : "Exclude"} entire active catalog`,
+      priority: draftRules.length,
+      notes: `${catalogExposureActionLabel(action)} entire active catalog`,
       metadata: {
         source: "admin_catalog_quick_action",
       },
-    }));
-    setMessage(`${action === "include" ? "Include" : "Exclude"} entire catalog rule added to draft.`);
+    });
+    upsertDraftRule(rule);
+    setMessage(`${catalogExposureActionLabel(action)} entire active catalog added to unsaved changes.`);
     setError("");
   }
 
   function clearDraftRules() {
     setDraftRules([]);
-    setMessage("Catalog exposure draft cleared.");
+    setMessage("Unsaved exposure changes cleared.");
     setError("");
   }
 
@@ -3074,8 +3091,14 @@ function CatalogExposureTab() {
         action,
         productLineId,
       });
-      upsertDraftRule(rule);
-      setMessage(`${action === "include" ? "Include" : "Exclude"} ${formatStatus(scopeType)} rule added to draft.`);
+      upsertDraftRule({
+        ...rule,
+        priority: draftRules.length,
+        notes: rule.notes
+          ?.replace(/^Include /, "Expose ")
+          .replace(/^Exclude /, "Hide ") ?? rule.notes,
+      });
+      setMessage(`${catalogExposureActionLabel(action)} ${formatStatus(scopeType)} rule added to unsaved changes.`);
       setError("");
     } catch (caught) {
       setMessage("");
@@ -3085,15 +3108,32 @@ function CatalogExposureTab() {
 
   function upsertDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
     const ruleKey = catalogExposureRuleKey(rule);
-    setDraftRules((current) => [
-      ...current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey),
-      rule,
-    ]);
+    setDraftRules((current) => {
+      const existingIndex = current.findIndex((existing) => catalogExposureRuleKey(existing) === ruleKey);
+      if (existingIndex < 0) {
+        return normalizeCatalogRuleOrder([...current, rule]);
+      }
+      return normalizeCatalogRuleOrder(current.map((existing, index) => (index === existingIndex ? rule : existing)));
+    });
   }
 
   function removeDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
     const ruleKey = catalogExposureRuleKey(rule);
-    setDraftRules((current) => current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey));
+    setDraftRules((current) => normalizeCatalogRuleOrder(
+      current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey),
+    ));
+  }
+
+  function moveDraftRule(rule: DropshipAdminCatalogExposureRuleInput, direction: -1 | 1) {
+    const ruleKey = catalogExposureRuleKey(rule);
+    setDraftRules((current) => {
+      const currentIndex = current.findIndex((existing) => catalogExposureRuleKey(existing) === ruleKey);
+      const nextIndex = currentIndex + direction;
+      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= current.length) return current;
+      const next = [...current];
+      [next[currentIndex], next[nextIndex]] = [next[nextIndex], next[currentIndex]];
+      return normalizeCatalogRuleOrder(next);
+    });
   }
 
   async function saveDraftRules() {
@@ -3101,14 +3141,16 @@ function CatalogExposureTab() {
     setError("");
     setMessage("");
     try {
+      const orderedRules = normalizeCatalogRuleOrder(draftRules);
       const result = await putJson<DropshipAdminCatalogExposureRulesReplaceResponse>(
         "/api/dropship/admin/catalog/rules",
         {
           idempotencyKey: createDropshipIdempotencyKey("admin-catalog-exposure"),
-          rules: draftRules,
+          rules: orderedRules,
         },
       );
-      setMessage(`Catalog exposure rules saved as revision ${result.revisionId}.`);
+      setDraftRules(orderedRules);
+      setMessage(`Catalog exposure rules published as revision ${result.revisionId}.`);
       await Promise.all([
         rulesQuery.refetch(),
         previewQuery.refetch(),
@@ -3142,111 +3184,72 @@ function CatalogExposureTab() {
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active rules" value={String(rulesQuery.data?.rules.length ?? 0)} />
-        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Draft rules" value={String(draftRules.length)} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Exposed preview rows" value={String(exposedPreviewCount)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Blocked preview rows" value={String(blockedPreviewCount)} />
+        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Unsaved changes" value={String(draftRules.length)} />
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible preview rows" value={String(exposedPreviewCount)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Hidden preview rows" value={String(blockedPreviewCount)} />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
         <section className="rounded-md border bg-card p-4">
-          <div>
-            <h2 className="text-lg font-semibold">Rule draft</h2>
-            <p className="text-sm text-muted-foreground">Define the catalog Card Shellz makes available to dropship vendors.</p>
-          </div>
-
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <div className="flex flex-col gap-4">
             <div>
-              <label className="text-sm font-medium">Scope</label>
-              <Select
-                value={ruleForm.scopeType}
-                onValueChange={(value) => setRuleForm((current) => ({
-                  ...current,
-                  scopeType: value as CatalogExposureScopeFilter,
-                }))}
+              <h2 className="text-lg font-semibold">Catalog exposure</h2>
+              <p className="text-sm text-muted-foreground">
+                Publish the catalog vendors can see. Rules run top to bottom, and later matching rules override earlier ones.
+              </p>
+            </div>
+            <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+              Common setup: expose the entire active catalog first, then add hide rules below it for exceptions.
+            </div>
+            <div className="grid gap-2">
+              <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={() => addCatalogWideRule("include")}>
+                <PlusCircle className="h-4 w-4" />
+                Expose entire active catalog
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-2"
+                onClick={() => {
+                  setRuleForm(emptyCatalogRuleForm);
+                  setRuleDialogOpen(true);
+                }}
               >
-                <SelectTrigger className="mt-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="catalog">Entire catalog</SelectItem>
-                  <SelectItem value="product_line">Product line</SelectItem>
-                  <SelectItem value="category">Category</SelectItem>
-                  <SelectItem value="product">Product</SelectItem>
-                  <SelectItem value="variant">Variant</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <label className="text-sm font-medium">Action</label>
-              <Select
-                value={ruleForm.action}
-                onValueChange={(value) => setRuleForm((current) => ({
-                  ...current,
-                  action: value as CatalogExposureActionFilter,
-                }))}
+                <PlusCircle className="h-4 w-4" />
+                Add exposure rule
+              </Button>
+              <Button type="button" variant="outline" className="gap-2" onClick={clearDraftRules}>
+                <MinusCircle className="h-4 w-4" />
+                Clear unsaved changes
+              </Button>
+              <Button
+                type="button"
+                className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+                disabled={saving || draftRules.length === 0}
+                onClick={saveDraftRules}
               >
-                <SelectTrigger className="mt-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="include">Include</SelectItem>
-                  <SelectItem value="exclude">Exclude</SelectItem>
-                </SelectContent>
-              </Select>
+                <Save className="h-4 w-4" />
+                {saving ? "Publishing" : "Publish exposure rules"}
+              </Button>
             </div>
-
-            <CatalogRuleTargetInput ruleForm={ruleForm} setRuleForm={setRuleForm} />
-
-            <div>
-              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-priority">Priority</label>
-              <Input
-                id="dropship-catalog-rule-priority"
-                className="mt-2"
-                value={ruleForm.priority}
-                onChange={(event) => setRuleForm((current) => ({ ...current, priority: event.target.value }))}
-              />
-            </div>
-            <div className="md:col-span-2">
-              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-notes">Notes</label>
-              <Input
-                id="dropship-catalog-rule-notes"
-                className="mt-2"
-                value={ruleForm.notes}
-                onChange={(event) => setRuleForm((current) => ({ ...current, notes: event.target.value }))}
-                placeholder="Optional admin note"
-              />
-            </div>
-          </div>
-
-          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-            <Button type="button" variant="outline" className="gap-2" onClick={() => addCatalogWideRule("include")}>
-              <PlusCircle className="h-4 w-4" />
-              Include active catalog
-            </Button>
-            <Button type="button" variant="outline" className="gap-2" onClick={addRuleFromForm}>
-              <PlusCircle className="h-4 w-4" />
-              Add draft rule
-            </Button>
-            <Button type="button" variant="outline" onClick={() => setRuleForm(emptyCatalogRuleForm)}>
-              Reset form
-            </Button>
-            <Button type="button" variant="outline" className="gap-2" onClick={clearDraftRules}>
-              <MinusCircle className="h-4 w-4" />
-              Clear draft
-            </Button>
-            <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={saving} onClick={saveDraftRules}>
-              <Save className="h-4 w-4" />
-              {saving ? "Saving" : "Save rules"}
-            </Button>
           </div>
         </section>
 
         <CatalogDraftRulesTable
           rules={draftRules}
           isLoading={rulesQuery.isLoading}
+          onMoveRule={moveDraftRule}
           onRemoveRule={removeDraftRule}
         />
       </div>
+
+      <CatalogRuleDialog
+        open={ruleDialogOpen}
+        onOpenChange={setRuleDialogOpen}
+        onSubmit={addRuleFromForm}
+        ruleForm={ruleForm}
+        setRuleForm={setRuleForm}
+      />
 
       <section className="rounded-md border bg-card p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -3270,7 +3273,7 @@ function CatalogExposureTab() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="false">All rows</SelectItem>
-                <SelectItem value="true">Exposed only</SelectItem>
+                <SelectItem value="true">Visible only</SelectItem>
               </SelectContent>
             </Select>
             <Select value={includeInactiveCatalog} onValueChange={setIncludeInactiveCatalog}>
@@ -6662,12 +6665,114 @@ function CatalogRuleTargetInput({
   );
 }
 
+function CatalogRuleDialog({
+  onOpenChange,
+  onSubmit,
+  open,
+  ruleForm,
+  setRuleForm,
+}: {
+  onOpenChange: (open: boolean) => void;
+  onSubmit: () => void;
+  open: boolean;
+  ruleForm: CatalogRuleFormState;
+  setRuleForm: Dispatch<SetStateAction<CatalogRuleFormState>>;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmit();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Add exposure rule</DialogTitle>
+            <DialogDescription>
+              Add a broad rule or an exception. Place exceptions lower in the run order when they should override broader rules.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <label className="text-sm font-medium">Scope</label>
+              <Select
+                value={ruleForm.scopeType}
+                onValueChange={(value) => setRuleForm((current) => ({
+                  ...current,
+                  scopeType: value as CatalogExposureScopeFilter,
+                }))}
+              >
+                <SelectTrigger className="mt-2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="catalog">Entire catalog</SelectItem>
+                  <SelectItem value="product_line">Product line</SelectItem>
+                  <SelectItem value="category">Category</SelectItem>
+                  <SelectItem value="product">Product</SelectItem>
+                  <SelectItem value="variant">Variant</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-sm font-medium">Action</label>
+              <Select
+                value={ruleForm.action}
+                onValueChange={(value) => setRuleForm((current) => ({
+                  ...current,
+                  action: value as CatalogExposureActionFilter,
+                }))}
+              >
+                <SelectTrigger className="mt-2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="include">Expose</SelectItem>
+                  <SelectItem value="exclude">Hide</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <CatalogRuleTargetInput ruleForm={ruleForm} setRuleForm={setRuleForm} />
+
+            <div className="md:col-span-2">
+              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-notes">Notes</label>
+              <Input
+                id="dropship-catalog-rule-notes"
+                className="mt-2"
+                value={ruleForm.notes}
+                onChange={(event) => setRuleForm((current) => ({ ...current, notes: event.target.value }))}
+                placeholder="Optional admin note"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]">
+              <PlusCircle className="h-4 w-4" />
+              Add exposure rule
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function CatalogDraftRulesTable({
   isLoading,
+  onMoveRule,
   onRemoveRule,
   rules,
 }: {
   isLoading: boolean;
+  onMoveRule: (rule: DropshipAdminCatalogExposureRuleInput, direction: -1 | 1) => void;
   onRemoveRule: (rule: DropshipAdminCatalogExposureRuleInput) => void;
   rules: DropshipAdminCatalogExposureRuleInput[];
 }) {
@@ -6675,10 +6780,10 @@ function CatalogDraftRulesTable({
     <section className="rounded-md border bg-card p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Draft rule set</h2>
-          <p className="text-sm text-muted-foreground">Saving replaces the active admin exposure rule set.</p>
+          <h2 className="text-lg font-semibold">Unsaved exposure changes</h2>
+          <p className="text-sm text-muted-foreground">Publish replaces the active admin exposure rules.</p>
         </div>
-        <Badge variant="outline">{rules.length} draft</Badge>
+        <Badge variant="outline">{rules.length} rule{rules.length === 1 ? "" : "s"}</Badge>
       </div>
 
       {isLoading ? (
@@ -6691,8 +6796,8 @@ function CatalogDraftRulesTable({
         <Empty className="mt-4 rounded-md border border-dashed p-8">
           <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
           <EmptyHeader>
-            <EmptyTitle>No draft rules</EmptyTitle>
-            <EmptyDescription>No catalog is exposed until at least one include rule is saved.</EmptyDescription>
+            <EmptyTitle>No unsaved changes</EmptyTitle>
+            <EmptyDescription>Add an exposure rule before publishing. No catalog is visible without at least one expose rule.</EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (
@@ -6700,38 +6805,62 @@ function CatalogDraftRulesTable({
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-[96px]">Run order</TableHead>
                 <TableHead>Rule</TableHead>
                 <TableHead>Target</TableHead>
-                <TableHead>Priority</TableHead>
                 <TableHead>Notes</TableHead>
-                <TableHead className="w-[92px]">Action</TableHead>
+                <TableHead className="w-[168px]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rules.map((rule) => (
+              {rules.map((rule, index) => (
                 <TableRow key={catalogExposureRuleKey(rule)}>
+                  <TableCell className="font-mono text-sm">#{index + 1}</TableCell>
                   <TableCell>
                     <Badge variant="outline" className={catalogExposureActionTone(rule.action)}>
-                      {formatStatus(rule.action)}
+                      {catalogExposureActionLabel(rule.action)}
                     </Badge>
                   </TableCell>
                   <TableCell>
                     <div className="font-medium">{formatStatus(rule.scopeType)}</div>
                     <div className="text-xs text-muted-foreground">{catalogRuleTargetLabel(rule)}</div>
                   </TableCell>
-                  <TableCell className="font-mono">{rule.priority}</TableCell>
                   <TableCell className="max-w-[260px] truncate text-sm text-muted-foreground">{rule.notes || "None"}</TableCell>
                   <TableCell>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-8 gap-2"
-                      onClick={() => onRemoveRule(rule)}
-                    >
-                      <MinusCircle className="h-4 w-4" />
-                      Remove
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8"
+                        disabled={index === 0}
+                        title="Move up"
+                        onClick={() => onMoveRule(rule, -1)}
+                      >
+                        <ArrowUp className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8"
+                        disabled={index === rules.length - 1}
+                        title="Move down"
+                        onClick={() => onMoveRule(rule, 1)}
+                      >
+                        <ArrowDown className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 gap-2"
+                        onClick={() => onRemoveRule(rule)}
+                      >
+                        <MinusCircle className="h-4 w-4" />
+                        Remove
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -6792,8 +6921,8 @@ function CatalogPreviewTable({
             <TableHead>Catalog row</TableHead>
             <TableHead>Category</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Decision</TableHead>
-            <TableHead className="w-[320px]">Quick draft rules</TableHead>
+            <TableHead>Vendor visibility</TableHead>
+            <TableHead className="w-[320px]">Add exposure change</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -6824,9 +6953,9 @@ function CatalogPreviewTable({
                   ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                   : "border-zinc-200 bg-zinc-50 text-zinc-700"}
                 >
-                  {row.decision.exposed ? "Exposed" : "Blocked"}
+                  {row.decision.exposed ? "Visible" : "Hidden"}
                 </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">{formatStatus(row.decision.reason)}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{catalogVisibilityReasonLabel(row.decision.reason)}</div>
               </TableCell>
               <TableCell>
                 <CatalogPreviewQuickRules row={row} onAddPreviewRule={onAddPreviewRule} />
@@ -6903,7 +7032,7 @@ function CatalogPreviewQuickRuleRow({
         onClick={onInclude}
       >
         <PlusCircle className="h-4 w-4" />
-        Include
+        Expose
       </Button>
       <Button
         type="button"
@@ -6913,7 +7042,7 @@ function CatalogPreviewQuickRuleRow({
         onClick={onExclude}
       >
         <MinusCircle className="h-4 w-4" />
-        Exclude
+        Hide
       </Button>
     </div>
   );
@@ -6981,9 +7110,30 @@ function catalogRuleTargetLabel(rule: DropshipAdminCatalogExposureRuleInput): st
   return rule.category || "Category";
 }
 
+function normalizeCatalogRuleOrder(
+  rules: DropshipAdminCatalogExposureRuleInput[],
+): DropshipAdminCatalogExposureRuleInput[] {
+  return rules.map((rule, index) => ({
+    ...rule,
+    priority: index,
+  }));
+}
+
+function catalogExposureActionLabel(action: CatalogExposureActionFilter): string {
+  return action === "include" ? "Expose" : "Hide";
+}
+
 function catalogExposureActionTone(action: CatalogExposureActionFilter): string {
   if (action === "include") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   return "border-rose-200 bg-rose-50 text-rose-800";
+}
+
+function catalogVisibilityReasonLabel(reason: string): string {
+  if (reason === "exposed") return "Allowed by exposure rule";
+  if (reason === "excluded_by_admin_rule") return "Hidden by exposure rule";
+  if (reason === "inactive_product_or_variant") return "Inactive product or variant";
+  if (reason === "missing_include_rule") return "No exposure rule";
+  return formatStatus(reason);
 }
 
 function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {

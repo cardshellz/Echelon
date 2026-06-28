@@ -3208,7 +3208,7 @@ export function buildCatalogExposureRuleFromPreviewRow(input: {
     productVariantId: target.productVariantId,
     category: target.category,
     priority: input.action === "include" ? 100 : 200,
-    notes: `${input.action === "include" ? "Include" : "Exclude"} ${target.label}`,
+    notes: `${input.action === "include" ? "Expose" : "Hide"} ${target.label}`,
     metadata: {
       source: "admin_catalog_preview",
     },

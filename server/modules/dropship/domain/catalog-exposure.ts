@@ -67,7 +67,11 @@ export function evaluateDropshipCatalogExposure(
     .map((rule) => rule.id)
     .filter((id): id is number => typeof id === "number");
 
-  if (excludeRuleIds.length > 0) {
+  const winningRule = effectiveRules
+    .filter((rule) => dropshipCatalogRuleMatchesVariant(rule, candidate))
+    .at(-1);
+
+  if (winningRule?.action === "exclude") {
     return {
       exposed: false,
       reason: "excluded_by_admin_rule",
@@ -76,7 +80,7 @@ export function evaluateDropshipCatalogExposure(
     };
   }
 
-  if (includeRuleIds.length === 0) {
+  if (winningRule?.action !== "include") {
     return {
       exposed: false,
       reason: "missing_include_rule",

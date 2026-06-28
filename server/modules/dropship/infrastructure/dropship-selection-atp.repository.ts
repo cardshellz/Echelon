@@ -117,7 +117,7 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
                 product_variant_id, category, starts_at, ends_at
          FROM dropship.dropship_catalog_rules
          WHERE is_active = true
-         ORDER BY priority DESC, id ASC`,
+         ORDER BY priority ASC, id ASC`,
       );
       return result.rows.map(mapCatalogExposureRuleRow);
     } finally {

@@ -49,7 +49,22 @@ describe("dropship catalog exposure domain", () => {
     expect(decision.includeRuleIds).toEqual([1]);
   });
 
-  it("lets any active exclusion rule block a broader include", () => {
+  it("lets later matching rules override earlier matching rules", () => {
+    const rules: DropshipCatalogExposureRule[] = [
+      { id: 1, scopeType: "catalog", action: "include" },
+      { id: 2, scopeType: "variant", action: "exclude", productVariantId: 20 },
+      { id: 3, scopeType: "product", action: "include", productId: 10 },
+    ];
+
+    const decision = evaluateDropshipCatalogExposure(activeCandidate, rules, now);
+
+    expect(decision.exposed).toBe(true);
+    expect(decision.reason).toBe("exposed");
+    expect(decision.includeRuleIds).toEqual([1, 3]);
+    expect(decision.excludeRuleIds).toEqual([2]);
+  });
+
+  it("blocks variants when a later hide rule overrides a broader expose rule", () => {
     const rules: DropshipCatalogExposureRule[] = [
       { id: 1, scopeType: "catalog", action: "include" },
       { id: 2, scopeType: "variant", action: "exclude", productVariantId: 20 },
