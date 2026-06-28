@@ -1104,6 +1104,9 @@ export function createOmsService(db: any, reservationService?: any) {
       const result = await db
         .update(omsOrderLines)
         .set({
+          fulfillmentProvider: "shopify",
+          providerFulfillmentOrderId: candidate.fulfillmentOrderId,
+          providerFulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
           shopifyFulfillmentOrderId: candidate.fulfillmentOrderId,
           shopifyFulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
           updatedAt: new Date(),
