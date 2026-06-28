@@ -1424,11 +1424,31 @@ export interface DropshipCatalogRow {
   selectionDecision: DropshipCatalogSelectionDecision;
 }
 
+export interface DropshipCatalogFacets {
+  categories: Array<{
+    category: string;
+    label: string;
+    rowCount: number;
+  }>;
+  productLines: Array<{
+    productLineIds: number[];
+    label: string;
+    rowCount: number;
+  }>;
+  products: Array<{
+    productId: number;
+    label: string;
+    sku: string | null;
+    rowCount: number;
+  }>;
+}
+
 export interface DropshipCatalogResponse {
   rows: DropshipCatalogRow[];
   total: number;
   page: number;
   limit: number;
+  facets: DropshipCatalogFacets;
 }
 
 export interface DropshipListingPreviewRow {
