@@ -52,7 +52,9 @@ Proposed follow-up:
 - Transition-window Shopify alias values are re-backfilled into the neutral
   provider representation by migration
   `112_oms_provider_fulfillment_reference_backfill.sql`.
-- Update Shopify fulfillment push, eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
+- Shopify fulfillment push now filters explicit non-Shopify OMS line
+  providers out of both Path A and Path B resolution.
+- Update eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.
 
 Reason this matters:
