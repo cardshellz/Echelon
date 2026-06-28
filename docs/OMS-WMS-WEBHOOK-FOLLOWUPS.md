@@ -54,7 +54,10 @@ Proposed follow-up:
   `112_oms_provider_fulfillment_reference_backfill.sql`.
 - Shopify fulfillment push now filters explicit non-Shopify OMS line
   providers out of both Path A and Path B resolution.
-- Update eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
+- Direct eBay ingest and dropship acceptance now stamp OMS line provider
+  ownership, and eBay/dropship tracking reads ignore rows explicitly owned by
+  another provider.
+- Finish reconciliation and health reads through the neutral provider contract.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.
 
 Reason this matters:
