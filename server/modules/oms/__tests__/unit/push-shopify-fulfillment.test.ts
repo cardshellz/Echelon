@@ -80,6 +80,7 @@ function okItems() {
       shipment_item_id: 1,
       order_item_id: 500,
       oms_order_line_id: 8001,
+      fulfillment_provider: "shopify",
       sku: "ABC-1",
       qty: 2,
     },
@@ -87,6 +88,7 @@ function okItems() {
       shipment_item_id: 2,
       order_item_id: 501,
       oms_order_line_id: 8002,
+      fulfillment_provider: "shopify",
       sku: "XYZ-9",
       qty: 1,
     },
@@ -100,15 +102,15 @@ function pathAFullyPopulatedRows() {
       shipment_item_id: 1,
       quantity: 2,
       oms_order_line_id: 8001,
-      shopify_fulfillment_order_id: FO_GID,
-      shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+      fulfillment_order_id: FO_GID,
+      fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
     },
     {
       shipment_item_id: 2,
       quantity: 1,
       oms_order_line_id: 8002,
-      shopify_fulfillment_order_id: FO_GID,
-      shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-2",
+      fulfillment_order_id: FO_GID,
+      fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-2",
     },
   ];
 }
@@ -120,15 +122,15 @@ function pathAPartialRows() {
       shipment_item_id: 1,
       quantity: 2,
       oms_order_line_id: 8001,
-      shopify_fulfillment_order_id: FO_GID,
-      shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+      fulfillment_order_id: FO_GID,
+      fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
     },
     {
       shipment_item_id: 2,
       quantity: 1,
       oms_order_line_id: 8002,
-      shopify_fulfillment_order_id: null,
-      shopify_fulfillment_order_line_item_id: null,
+      fulfillment_order_id: null,
+      fulfillment_order_line_item_id: null,
     },
   ];
 }
@@ -1001,8 +1003,8 @@ describe("pushShopifyFulfillment :: Path A primary (D2/D4)", () => {
             shipment_item_id: 1,
             quantity: 2,
             oms_order_line_id: 8001,
-            shopify_fulfillment_order_id: FO_GID,
-            shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+            fulfillment_order_id: FO_GID,
+            fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
           },
         ],
       },
@@ -1012,6 +1014,93 @@ describe("pushShopifyFulfillment :: Path A primary (D2/D4)", () => {
 
     expect(rows?.[0]?.fulfillmentOrderId).toBe(FO_GID);
     expect(rows?.[0]?.fulfillmentOrderLineItemId).toBe("gid://shopify/FulfillmentOrderLineItem/777-1");
+  });
+
+  it("does not recover stale Shopify aliases for explicit non-Shopify Path A rows", async () => {
+    const db = makeDb([
+      {
+        rows: [
+          {
+            shipment_item_id: 1,
+            quantity: 2,
+            oms_order_line_id: 8001,
+            fulfillment_order_id: null,
+            fulfillment_order_line_item_id: null,
+            shopify_fulfillment_order_id: FO_GID,
+            shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+          },
+        ],
+      },
+    ]);
+
+    const rows = await __test__.tryReadPathA(db.db, SHIPMENT_ID);
+
+    expect(rows?.[0]?.fulfillmentOrderId).toBeNull();
+    expect(rows?.[0]?.fulfillmentOrderLineItemId).toBeNull();
+    expect(db.capturedQueries[0].sqlText).toContain(
+      "COALESCE(LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')), 'shopify') = 'shopify'",
+    );
+  });
+
+  it("filters explicit non-Shopify provider items out of Shopify fulfillment pushes", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      {
+        rows: [
+          {
+            shipment_item_id: 1,
+            order_item_id: 500,
+            oms_order_line_id: 8001,
+            fulfillment_provider: "shopify",
+            sku: "ABC-1",
+            qty: 2,
+          },
+          {
+            shipment_item_id: 2,
+            order_item_id: 501,
+            oms_order_line_id: 8002,
+            fulfillment_provider: "dropship",
+            sku: "XYZ-9",
+            qty: 1,
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            shipment_item_id: 1,
+            quantity: 2,
+            oms_order_line_id: 8001,
+            fulfillment_order_id: FO_GID,
+            fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+          },
+        ],
+      },
+      ...locationConfigRows(),
+      { rows: [] },
+    ]);
+    const client = makeShopifyClient([
+      okFulfillmentOrdersResponse(),
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    const fulfillment = (client.calls[2].variables as any).fulfillment;
+    const fulfillmentOrderLines =
+      fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderLineItems;
+    expect(fulfillmentOrderLines).toEqual([
+      {
+        id: "gid://shopify/FulfillmentOrderLineItem/777-1",
+        quantity: 2,
+      },
+    ]);
   });
 
   it("uses Path A after validating stored FO IDs against live Shopify quantities", async () => {
@@ -1331,15 +1420,15 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
             shipment_item_id: 1,
             quantity: 2,
             oms_order_line_id: 8001,
-            shopify_fulfillment_order_id: ourFo,
-            shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/ours-1",
+            fulfillment_order_id: ourFo,
+            fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/ours-1",
           },
           {
             shipment_item_id: 2,
             quantity: 1,
             oms_order_line_id: 8002,
-            shopify_fulfillment_order_id: threePlFo,
-            shopify_fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/3pl-1",
+            fulfillment_order_id: threePlFo,
+            fulfillment_order_line_item_id: "gid://shopify/FulfillmentOrderLineItem/3pl-1",
           },
         ],
       },
