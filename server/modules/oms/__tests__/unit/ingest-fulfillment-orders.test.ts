@@ -257,10 +257,16 @@ describe("populateShopifyFulfillmentOrderIds :: happy path", () => {
 
     const byLine = new Map(dbMock.updates.map((u) => [u.whereLineId, u.set]));
     expect(byLine.get(8001)).toMatchObject({
+      fulfillmentProvider: "shopify",
+      providerFulfillmentOrderId: FO_777,
+      providerFulfillmentOrderLineItemId: `${FO_777}-li-1`,
       shopifyFulfillmentOrderId: FO_777,
       shopifyFulfillmentOrderLineItemId: `${FO_777}-li-1`,
     });
     expect(byLine.get(8002)).toMatchObject({
+      fulfillmentProvider: "shopify",
+      providerFulfillmentOrderId: FO_777,
+      providerFulfillmentOrderLineItemId: `${FO_777}-li-2`,
       shopifyFulfillmentOrderId: FO_777,
       shopifyFulfillmentOrderLineItemId: `${FO_777}-li-2`,
     });
@@ -486,6 +492,9 @@ describe("populateShopifyFulfillmentOrderIds :: edge cases", () => {
     expect(summary).toEqual({ matched: 1, unmatched: 0, updates: 1 });
     expect(dbMock.updates).toHaveLength(1);
     expect(dbMock.updates[0].set).toMatchObject({
+      fulfillmentProvider: "shopify",
+      providerFulfillmentOrderId: FO_777,
+      providerFulfillmentOrderLineItemId: `${FO_777}-li-1`,
       shopifyFulfillmentOrderId: FO_777,
       shopifyFulfillmentOrderLineItemId: `${FO_777}-li-1`,
     });

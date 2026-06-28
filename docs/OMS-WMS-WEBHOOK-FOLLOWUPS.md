@@ -45,6 +45,8 @@ Proposed follow-up:
 - Shared OMS line schema now exposes the neutral provider fulfillment columns,
   and OMS flow reconciliation/ops health flags Shopify alias drift as
   `OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT`.
+- Shopify fulfillment-order ingest now writes the neutral provider fields
+  alongside the legacy Shopify aliases.
 - Migrate Shopify values into the neutral representation.
 - Update Shopify fulfillment push, eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.
