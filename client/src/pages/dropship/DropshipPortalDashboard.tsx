@@ -669,7 +669,7 @@ function StoreConnectionCard({ connection }: { connection: DropshipStoreConnecti
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-xs uppercase text-zinc-500">Connected store</div>
-          <h3 className="mt-1 truncate font-semibold">{connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}</h3>
+          <h3 className="mt-1 truncate font-semibold">{storeConnectionDisplayName(connection)}</h3>
           <p className="mt-1 text-sm text-zinc-500">{connectedStoreSummaryDetail(connection)}</p>
         </div>
         <Badge variant={connection.launchReady ? "default" : "outline"}>
@@ -700,6 +700,10 @@ function connectedStoreSummaryDetail(connection: DropshipStoreConnectionSummary)
     details.push(connection.shopDomain);
   }
   return details.join(" | ");
+}
+
+function storeConnectionDisplayName(connection: DropshipStoreConnectionSummary): string {
+  return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`;
 }
 
 function formatLedgerAmount(amountCents: number): string {

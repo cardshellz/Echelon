@@ -637,7 +637,7 @@ function canChangeStoreConnection(connection: DropshipStoreConnectionProfileResp
 }
 
 function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
-  return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} connection ${connection.storeConnectionId}`;
+  return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`;
 }
 
 function connectedStoreIdentityDetail(connection: DropshipStoreConnectionProfileResponse): string {
@@ -647,6 +647,9 @@ function connectedStoreIdentityDetail(connection: DropshipStoreConnectionProfile
   }
   if (connection.externalAccountId && connection.externalAccountId !== connection.externalDisplayName) {
     details.push(`Account ID ${connection.externalAccountId}`);
+  }
+  if (!connection.externalDisplayName && !connection.shopDomain && !connection.externalAccountId) {
+    details.push("Reauthorize to load store name");
   }
   return details.join(" | ");
 }
