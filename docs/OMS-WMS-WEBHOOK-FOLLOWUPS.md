@@ -47,6 +47,8 @@ Proposed follow-up:
   `OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT`.
 - Shopify fulfillment-order ingest now writes the neutral provider fields
   alongside the legacy Shopify aliases.
+- Shopify fulfillment-order ingest preserves existing non-Shopify provider
+  context instead of overwriting it with Shopify references.
 - Migrate Shopify values into the neutral representation.
 - Update Shopify fulfillment push, eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.
