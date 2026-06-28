@@ -926,7 +926,7 @@ function ListingPreviewPanel({
             <SelectContent>
               {launchReadyStoreConnections.map((connection) => (
                 <SelectItem key={connection.storeConnectionId} value={String(connection.storeConnectionId)}>
-                  {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
+                  {connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`}
                 </SelectItem>
               ))}
             </SelectContent>
