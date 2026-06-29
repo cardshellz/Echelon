@@ -277,7 +277,8 @@ export function registerPickingRoutes(app: Express) {
       res.json({ item: result.item, inventory: result.inventory });
     } catch (error: any) {
       console.error("Error updating item:", error);
-      res.status(500).json({ error: "Failed to update item" });
+      const status = error?.name === "ValidationError" ? 400 : 500;
+      res.status(status).json({ error: error.message || "Failed to update item" });
     }
   });
 
