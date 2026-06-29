@@ -482,13 +482,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       ],
     });
 
-    const mock = makeDb([
-      {
-        rows: [
-          { id: 501, order_id: 42, status: "queued" },
-        ],
-      },
-    ]);
+    const mock = makeDb([]);
 
     globalThis.fetch = mockFetchOnceOk({
       shipments: [splitButNotShipped],
@@ -498,7 +492,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     expect(processed).toBe(0);
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
-    expect(sqlText).toMatch(/shipstation_order_id/);
+    expect(sqlText).not.toMatch(/FROM wms\.outbound_shipments/);
     expect(sqlText).not.toMatch(/UPDATE wms\.order_items/);
     expect(sqlText).not.toMatch(/UPDATE wms\.orders/);
     expect(sqlText).not.toMatch(/INSERT INTO wms\.outbound_shipment_items/);
@@ -518,12 +512,38 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     };
 
     const mock = makeDb([
-      // V2 lookup by shipstation_order_id.
-      { rows: [{ id: 501, order_id: 42, status: "planned", shipstation_order_id: 555000 }] },
+      // Physical ShipStation shipment id lookup -> not found.
+      { rows: [] },
+      // ensureSplitShipmentFromShipStation external id guard -> not found.
+      { rows: [] },
+      // Parent WMS shipment referenced by orderKey.
+      {
+        rows: [
+          {
+            id: 501,
+            order_id: 42,
+            channel_id: 7,
+            status: "planned",
+            shipstation_order_id: 555000,
+            shipstation_order_key: "echelon-wms-shp-501",
+          },
+        ],
+      },
+      // Advisory lock for the parent WMS order.
+      { rows: [] },
+      // Post-lock external id guard -> still not found.
+      { rows: [] },
+      // Parent item qty is larger than this physical package, so this must
+      // become a child shipment instead of mutating the parent item to qty=1.
+      { rows: [{ id: 10001, qty: 3 }] },
+      // INSERT child wms.outbound_shipments with source=shipstation_split.
+      { rows: [{ id: 9001, order_id: 42, status: "queued", shipstation_order_id: 555000 }] },
+      // Advisory unlock for the parent WMS order.
+      { rows: [] },
       // Combined-shipment source item order grouping.
       { rows: [{ source_shipment_item_id: 10001, wms_order_id: 42 }] },
-      // Existing shipment item row belongs to the original shipment.
-      { rows: [{ id: 10001, order_item_id: 30001 }] },
+      // Child shipment currently has no copied item rows.
+      { rows: [] },
       // Source item copied from the original shipment row.
       {
         rows: [
@@ -537,13 +557,13 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
-      // UPDATE wms.outbound_shipment_items.
-      { rows: [] },
+      // INSERT child wms.outbound_shipment_items.
+      { rows: [{ id: 91001 }] },
       // loadValidatedInventoryShipmentItems.
       {
         rows: [
           {
-            id: 10001,
+            id: 91001,
             order_item_id: 30001,
             product_variant_id: 40001,
             qty: 1,
@@ -557,9 +577,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       {
         rows: [
           {
-            id: 501,
+            id: 9001,
             order_id: 42,
-            status: "planned",
+            status: "queued",
             tracking_number: null,
             carrier: null,
             tracking_url: null,
@@ -601,9 +621,11 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
       orderItemId: 30001,
       qty: 1,
-      shipmentId: "501",
+      shipmentId: "9001",
     }));
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
+    expect(sqlText).toMatch(/shipstation_split/);
+    expect(sqlText).not.toMatch(/UPDATE wms\.outbound_shipment_items[\s\S]*SET qty/);
     expect(sqlText).toMatch(/fulfilled_quantity = LEAST\(/);
     expect(sqlText).toMatch(/SUM\(osi\.qty\)/);
     expect(sqlText).toMatch(/outbound_shipment_items/);
@@ -707,7 +729,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     });
 
     const mock = makeDb([
-      // V2 lookup by shipstation_order_id → not found
+      // Physical ShipStation shipment id lookup -> not found.
+      { rows: [] },
+      // Legacy shipstation_order_id fallback -> not found.
       { rows: [] },
       // Legacy path kicks in. The source === "oms" branch reads:
       //   SELECT wms.orders WHERE oms_fulfillment_order_id = '789'
@@ -733,10 +757,11 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       .filter((c) => c.tag === "execute")
       .map((c) => c.sqlText);
 
-    // V2 lookup ran first.
-    expect(executeSqls[0]).toMatch(/shipstation_order_id/);
+    // V2 probes by physical shipment id first, then legacy order id.
+    expect(executeSqls[0]).toMatch(/external_fulfillment_id/);
+    expect(executeSqls[1]).toMatch(/shipstation_order_id/);
     // Legacy fallback then ran the OMS-by-pointer query.
-    expect(executeSqls[1]).toMatch(/oms_fulfillment_order_id/);
+    expect(executeSqls[2]).toMatch(/oms_fulfillment_order_id/);
     // Final no-match is persisted as a WMS review exception.
     expect(executeSqls.join("\n")).toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
 
@@ -1390,7 +1415,9 @@ describe("processShipNotify V2 :: duplicate orderKey repair", () => {
     };
 
     const mock = makeDb([
-      // V2 lookup by ShipStation order id: duplicate SS order is not yet known.
+      // Physical ShipStation shipment id lookup -> not found.
+      { rows: [] },
+      // ensureSplitShipmentFromShipStation external id guard -> not found.
       { rows: [] },
       // Parent shipment parsed from echelon-wms-shp-501.
       {
