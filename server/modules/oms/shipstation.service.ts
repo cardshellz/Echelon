@@ -838,6 +838,11 @@ function hasSameShipmentItemSet(
   return true;
 }
 
+function shipStationShipmentExternalFulfillmentId(shipmentId: number): string | null {
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) return null;
+  return `shipstation_shipment:${shipmentId}`;
+}
+
 function withShipmentItemsIncluded(baseUrl: string, path: string): string {
   const isAbsolute = path.startsWith("http");
   const parsed = new URL(isAbsolute ? path : `${baseUrl}${path}`);
@@ -1102,6 +1107,31 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   async function resolveWmsShipmentForShipNotify(
     shipment: ShipStationShipment,
   ): Promise<{ row: any | null; fallback: boolean }> {
+    const externalFulfillmentId = shipStationShipmentExternalFulfillmentId(
+      shipment.shipmentId,
+    );
+    if (externalFulfillmentId) {
+      const byPhysicalShipment: any = await db.execute(sql`
+        SELECT id, order_id, status, shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE external_fulfillment_id = ${externalFulfillmentId}
+        LIMIT 1
+      `);
+      const existing = byPhysicalShipment?.rows?.[0];
+      if (existing) {
+        return { row: existing, fallback: false };
+      }
+    }
+
+    const parsed = parseEchelonOrderKey(shipment.orderKey);
+    if (parsed?.source === "wms-shipment") {
+      const splitRow = await ensureSplitShipmentFromShipStation(
+        parsed.shipmentId,
+        shipment,
+      );
+      return { row: splitRow, fallback: false };
+    }
+
     const ssOrderId = shipment.orderId;
     if (Number.isInteger(ssOrderId) && ssOrderId > 0) {
       const byOrderId: any = await db.execute(sql`
@@ -1116,16 +1146,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       }
     }
 
-    const parsed = parseEchelonOrderKey(shipment.orderKey);
-    if (parsed?.source !== "wms-shipment") {
-      return { row: null, fallback: true };
-    }
-
-    const splitRow = await ensureSplitShipmentFromShipStation(
-      parsed.shipmentId,
-      shipment,
-    );
-    return { row: splitRow, fallback: false };
+    return { row: null, fallback: true };
   }
 
   async function ensureSplitShipmentFromShipStation(
@@ -1137,6 +1158,22 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
     if (!Number.isInteger(shipment.orderId) || shipment.orderId <= 0) {
       throw new Error("ShipStation split shipment is missing orderId");
+    }
+
+    const externalFulfillmentId = shipStationShipmentExternalFulfillmentId(
+      shipment.shipmentId,
+    );
+    if (!externalFulfillmentId) {
+      throw new Error("ShipStation split shipment is missing shipmentId");
+    }
+    const existing: any = await db.execute(sql`
+      SELECT id, order_id, status, shipstation_order_id
+      FROM wms.outbound_shipments
+      WHERE external_fulfillment_id = ${externalFulfillmentId}
+      LIMIT 1
+    `);
+    if (existing?.rows?.[0]) {
+      return existing.rows[0];
     }
 
     const parentResult: any = await db.execute(sql`
@@ -1155,16 +1192,14 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     const orderId = parent.order_id;
     await db.execute(sql`SELECT pg_advisory_lock(918406, ${orderId})`);
     try {
-      const externalFulfillmentId = `shipstation_shipment:${shipment.shipmentId}`;
-      const existing: any = await db.execute(sql`
+      const existingAfterLock: any = await db.execute(sql`
         SELECT id, order_id, status, shipstation_order_id
         FROM wms.outbound_shipments
         WHERE external_fulfillment_id = ${externalFulfillmentId}
-           OR shipstation_order_id = ${shipment.orderId}
         LIMIT 1
       `);
-      if (existing?.rows?.[0]) {
-        return existing.rows[0];
+      if (existingAfterLock?.rows?.[0]) {
+        return existingAfterLock.rows[0];
       }
 
       const parsedShipStationItems = parsePositiveWmsShipmentItemsFromShipStation(shipment);
@@ -2221,21 +2256,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   async function processShipNotifyV2(
     shipment: ShipStationShipment,
   ): Promise<{ processed: boolean; fallback: boolean }> {
+    const carrier = mapShipStationCarrier(shipment.carrierCode);
+    const event = deriveEventFromSSShipment(shipment, carrier);
+    if (!event) {
+      console.log(
+        `[ShipStation Webhook V2] No actionable event for ShipStation shipment ${shipment.shipmentId ?? "unknown"} (SS order ${shipment.orderId ?? "unknown"}) - skipping`,
+      );
+      return { processed: false, fallback: false };
+    }
+
     const resolved = await resolveWmsShipmentForShipNotify(shipment);
     const wmsShipmentRow: any = resolved.row;
     if (!wmsShipmentRow) {
       // Pre-cutover order (pushed via pushOrder, no shipstation_order_id
       // on outbound_shipments). Fall back to legacy orderKey path.
       return { processed: false, fallback: resolved.fallback };
-    }
-
-    const carrier = mapShipStationCarrier(shipment.carrierCode);
-    const event = deriveEventFromSSShipment(shipment, carrier);
-    if (!event) {
-      console.log(
-        `[ShipStation Webhook V2] No actionable event for shipment ${wmsShipmentRow.id} (SS order ${shipment.orderId}) — skipping`,
-      );
-      return { processed: false, fallback: false };
     }
 
     if (event.kind === "shipped") {
