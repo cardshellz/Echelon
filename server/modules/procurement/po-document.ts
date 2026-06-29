@@ -70,10 +70,12 @@ export function renderPoHtml(data: PoDocumentData): string {
   const hasInternalNotes = po?.internalNotes && po.internalNotes.trim();
 
   const lineRows = lines.map((line: any, idx: number) => {
-    const sku = line.variant?.sku || line.sku || "—";
+    const sku = line.sku || line.product?.sku || "—";
     const description = line.description || line.product?.name || line.variant?.name || "—";
     const qty = Number(line.orderQty ?? 0);
-    const uom = line.uom || (line.unitsPerUom > 1 ? `CASE/${line.unitsPerUom}` : "EA");
+    const receiveUnits =
+      line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1;
+    const uom = line.uom || (receiveUnits > 1 ? `RECV/${receiveUnits}` : "EA");
     const unitCost = line.unitCostCents;
     const lineTotal = line.lineTotalCents ?? (unitCost * qty);
     return `

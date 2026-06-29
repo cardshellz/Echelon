@@ -1055,6 +1055,8 @@ export function createPurchasingService(db: any, storage: Storage) {
   async function addLine(purchaseOrderId: number, data: {
     productId: number;
     productVariantId?: number | null;
+    expectedReceiveVariantId?: number | null;
+    expectedReceiveUnitsPerVariant?: number | null;
     vendorProductId?: number;
     orderQty: number;
     unitCostCents: number;
@@ -1073,9 +1075,11 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot add lines to PO in '${po.status}' status`, 400);
     }
 
-    // Cache product info
-    const variant = data.productVariantId ? await storage.getProductVariantById(data.productVariantId) : null;
-    if (data.productVariantId && !variant) throw new PurchasingError("Product variant not found", 404);
+    // Cache product info. The PO buys product pieces; the variant is the
+    // expected receive configuration used by receiving/AP downstream.
+    const receiveVariantId = data.expectedReceiveVariantId ?? data.productVariantId ?? null;
+    const variant = receiveVariantId ? await storage.getProductVariantById(receiveVariantId) : null;
+    if (receiveVariantId && !variant) throw new PurchasingError("Expected receive variant not found", 404);
     const product = await storage.getProductById(data.productId);
     if (!product) throw new PurchasingError("Product not found", 404);
 
@@ -1096,14 +1100,17 @@ export function createPurchasingService(db: any, storage: Storage) {
       purchaseOrderId,
       lineNumber: nextLineNumber,
       productId: data.productId,
-      productVariantId: data.productVariantId || null,
+      productVariantId: receiveVariantId,
+      expectedReceiveVariantId: receiveVariantId,
       vendorProductId: data.vendorProductId,
-      sku: variant?.sku || product.sku,
+      sku: product.sku || variant?.sku,
       productName: product.name,
       vendorSku: data.vendorSku,
       description: data.description,
       unitOfMeasure: data.unitOfMeasure || variant?.name?.split(" ")[0]?.toLowerCase() || product.baseUnit,
       unitsPerUom: data.unitsPerUom || variant?.unitsPerVariant || 1,
+      expectedReceiveUnitsPerVariant:
+        data.expectedReceiveUnitsPerVariant || data.unitsPerUom || variant?.unitsPerVariant || 1,
       orderQty: data.orderQty,
       unitCostCents: data.unitCostCents,
       discountPercent: String(data.discountPercent || 0),
@@ -1123,6 +1130,8 @@ export function createPurchasingService(db: any, storage: Storage) {
   async function addBulkLines(purchaseOrderId: number, lines: Array<{
     productId: number;
     productVariantId?: number | null;
+    expectedReceiveVariantId?: number | null;
+    expectedReceiveUnitsPerVariant?: number | null;
     vendorProductId?: number;
     orderQty: number;
     unitCostCents: number;
@@ -1143,7 +1152,9 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     const lineData: any[] = [];
     for (const line of lines) {
-      const variant = line.productVariantId ? await storage.getProductVariantById(line.productVariantId) : null;
+      const receiveVariantId = line.expectedReceiveVariantId ?? line.productVariantId ?? null;
+      const variant = receiveVariantId ? await storage.getProductVariantById(receiveVariantId) : null;
+      if (receiveVariantId && !variant) throw new PurchasingError("Expected receive variant not found", 404);
       const product = await storage.getProductById(line.productId);
       if (!product) continue;
 
@@ -1156,14 +1167,17 @@ export function createPurchasingService(db: any, storage: Storage) {
         purchaseOrderId,
         lineNumber: nextLineNumber++,
         productId: line.productId,
-        productVariantId: line.productVariantId || null,
+        productVariantId: receiveVariantId,
+        expectedReceiveVariantId: receiveVariantId,
         vendorProductId: line.vendorProductId,
-        sku: variant?.sku || product.sku,
+        sku: product.sku || variant?.sku,
         productName: product.name,
         vendorSku: line.vendorSku,
         description: line.description,
         unitOfMeasure: line.unitOfMeasure || "each",
         unitsPerUom: variant?.unitsPerVariant || 1,
+        expectedReceiveUnitsPerVariant:
+          line.expectedReceiveUnitsPerVariant || variant?.unitsPerVariant || 1,
         orderQty: line.orderQty,
         unitCostCents: line.unitCostCents,
         lineTotalCents: costs.lineTotalCents,
@@ -1189,14 +1203,61 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot edit lines on PO in '${po.status}' status`, 400);
     }
 
-    const updated = await storage.updatePurchaseOrderLine(lineId, updates);
+    const normalizedUpdates = { ...updates };
+    const receiveVariantId =
+      normalizedUpdates.expectedReceiveVariantId ??
+      normalizedUpdates.productVariantId ??
+      null;
 
-    // Cascade variant/SKU changes to downstream records
-    if (updates.productVariantId || updates.sku) {
-      const newVariantId = updates.productVariantId ?? line.productVariantId;
-      const newSku = updates.sku ?? line.sku;
+    if (
+      normalizedUpdates.expectedReceiveUnitsPerVariant !== undefined &&
+      normalizedUpdates.expectedReceiveUnitsPerVariant !== null &&
+      (
+        !Number.isInteger(normalizedUpdates.expectedReceiveUnitsPerVariant) ||
+        normalizedUpdates.expectedReceiveUnitsPerVariant <= 0
+      )
+    ) {
+      throw new PurchasingError("expected_receive_units_per_variant must be a positive integer", 400);
+    }
+
+    if (receiveVariantId !== null) {
+      if (!Number.isInteger(receiveVariantId) || receiveVariantId <= 0) {
+        throw new PurchasingError("expected_receive_variant_id must be a positive integer", 400);
+      }
+      const variant = await storage.getProductVariantById(receiveVariantId);
+      if (!variant) throw new PurchasingError("Expected receive variant not found", 404);
+
+      normalizedUpdates.productVariantId = receiveVariantId;
+      normalizedUpdates.expectedReceiveVariantId = receiveVariantId;
+      normalizedUpdates.unitsPerUom =
+        normalizedUpdates.unitsPerUom ?? variant.unitsPerVariant ?? 1;
+      normalizedUpdates.expectedReceiveUnitsPerVariant =
+        normalizedUpdates.expectedReceiveUnitsPerVariant ??
+        variant.unitsPerVariant ??
+        1;
+    }
+
+    const updated = await storage.updatePurchaseOrderLine(lineId, normalizedUpdates);
+
+    // Cascade receive-configuration/SKU changes to downstream records.
+    if (
+      normalizedUpdates.productVariantId ||
+      normalizedUpdates.expectedReceiveVariantId ||
+      normalizedUpdates.sku
+    ) {
+      const newVariantId =
+        normalizedUpdates.expectedReceiveVariantId ??
+        normalizedUpdates.productVariantId ??
+        line.expectedReceiveVariantId ??
+        line.productVariantId;
+      const newSku = normalizedUpdates.sku ?? line.sku;
+      if (!newVariantId) {
+        console.warn(`[Purchasing] Skipped receive config cascade for PO line ${lineId}: no receive variant`);
+        await recalculateTotals(line.purchaseOrderId, userId);
+        return updated;
+      }
       try {
-        // Look up the new variant's units-per-case for carton recalc
+        // Look up the receive configuration's units-per-variant for carton recalc.
         const newVariant = await storage.getProductVariantById(newVariantId);
         const newUpc = newVariant?.unitsPerVariant ?? 1;
 
@@ -1218,9 +1279,9 @@ export function createPurchasingService(db: any, storage: Storage) {
         await db.update(vendorInvoiceLines)
           .set({ productVariantId: newVariantId })
           .where(eq(vendorInvoiceLines.purchaseOrderLineId, lineId));
-        console.log(`[Purchasing] Cascaded variant change on PO line ${lineId}: variant=${newVariantId} sku=${newSku} upc=${newUpc}`);
+        console.log(`[Purchasing] Cascaded receive config change on PO line ${lineId}: variant=${newVariantId} sku=${newSku} upc=${newUpc}`);
       } catch (err: any) {
-        console.warn(`[Purchasing] Failed to cascade variant change for PO line ${lineId}: ${err.message}`);
+        console.warn(`[Purchasing] Failed to cascade receive config change for PO line ${lineId}: ${err.message}`);
       }
     }
 
@@ -1822,36 +1883,11 @@ export function createPurchasingService(db: any, storage: Storage) {
     // otherwise we derive mills from cents via centsToMills (no rounding).
     // Keeps receiving_lines consistent with the (post-0562) contract in
     // receiving.service.ts: mills is the source of truth, cents mirrors.
-    // Default EVERY receiving line to the product's LARGEST pack (the case) and
-    // express Expected in that pack's units, regardless of how the PO line was
-    // ordered (no variant, Pack-of-1, or any smaller variant). Receivers count
-    // cases; the catalog models Case -> N x base, so 10 pieces ordered => Expected
-    // 1 Case-of-10 (not 10). Done once at creation so the unit is unambiguous
-    // downstream; the receiving UI's variant dropdown is the override for
-    // off-default packs.
-    const defaultPackByProduct = new Map<number, { id: number; unitsPerVariant: number }>();
-    for (const pid of Array.from(new Set(
-      receivableLines
-        .filter((pl: any) => pl.productId)
-        .map((pl: any) => pl.productId as number),
-    ))) {
-      try {
-        const vs = (await (storage as any).getProductVariantsByProductId?.(pid)) ?? [];
-        if (vs.length) {
-          const largest = vs.reduce((a: any, b: any) =>
-            ((b.unitsPerVariant || 1) > (a.unitsPerVariant || 1) ? b : a));
-          defaultPackByProduct.set(pid, { id: largest.id, unitsPerVariant: largest.unitsPerVariant || 1 });
-        }
-      } catch { /* non-critical: leave the line product-level */ }
-    }
-
     const receivingLineData = receivableLines.map((poLine: any) => {
-      // Prefer the product's largest pack (the case) as the receiving default,
-      // upgrading even Pack-of-1 / variant-level PO lines; fall back to the PO
-      // line's own variant only when the product has no resolvable packs.
-      const pack = defaultPackByProduct.get(poLine.productId);
-      const resolvedVariantId = pack?.id ?? poLine.productVariantId ?? null;
-      const packSize = pack?.unitsPerVariant ?? (poLine.unitsPerUom || 1);
+      const resolvedVariantId =
+        poLine.expectedReceiveVariantId ?? poLine.productVariantId ?? null;
+      const packSize =
+        poLine.expectedReceiveUnitsPerVariant ?? poLine.unitsPerUom ?? 1;
       const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
       const hasPoMills =
         typeof poLine.unitCostMills === "number" &&
@@ -1898,8 +1934,8 @@ export function createPurchasingService(db: any, storage: Storage) {
    *     shipment's finalized landed cost attaches to exactly these lots.
    * Cost is still stamped from the PO line (the AP source of truth).
    *
-   * NOTE: the per-line cost stamping + largest-pack defaults intentionally mirror
-   * createReceiptFromPO — keep the two in sync (or DRY) if that logic changes.
+   * NOTE: cost stamping mirrors createReceiptFromPO. Shipment lines already
+   * carry the resolved receive variant.
    */
   async function createReceiptFromShipment(inboundShipmentId: number, userId?: string) {
     const shipment = await (storage as any).getInboundShipmentById(inboundShipmentId);
@@ -1974,23 +2010,21 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw error;
     }
 
-    // Largest-pack defaults + primary putaway locations (mirrors createReceiptFromPO).
-    const productIds = Array.from(new Set(
+    const unitsPerVariantById = new Map<number, number>();
+    const shipmentVariantIds = Array.from(new Set(
       receivableShipmentLines
-        .map((sl: any) => poLineById.get(sl.purchaseOrderLineId)?.productId)
+        .map((sl: any) => sl.productVariantId)
         .filter(Boolean),
     )) as number[];
-    const defaultPackByProduct = new Map<number, { id: number; unitsPerVariant: number }>();
-    for (const pid of productIds) {
+    for (const variantId of shipmentVariantIds) {
       try {
-        const vs = (await (storage as any).getProductVariantsByProductId?.(pid)) ?? [];
-        if (vs.length) {
-          const largest = vs.reduce((a: any, b: any) =>
-            ((b.unitsPerVariant || 1) > (a.unitsPerVariant || 1) ? b : a));
-          defaultPackByProduct.set(pid, { id: largest.id, unitsPerVariant: largest.unitsPerVariant || 1 });
+        const variant = await storage.getProductVariantById(variantId);
+        if (variant) {
+          unitsPerVariantById.set(variantId, Math.max(1, variant.unitsPerVariant || 1));
         }
-      } catch { /* non-critical: leave the line product-level */ }
+      } catch { /* non-critical: fall back to PO receive units */ }
     }
+    // Primary putaway locations keyed by receive variant.
     const productLocationMap = new Map<number, number>();
     try {
       const allProductLocations = (await (storage as any).getAllProductLocations?.()) ?? [];
@@ -2003,14 +2037,20 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     } catch { /* non-critical */ }
 
-    // Build receiving lines from the SHIPMENT lines: Expected = qtyShipped scaled
-    // to the product's largest pack; cost stamped from the PO line (mills-first).
+    // Build receiving lines from SHIPMENT lines. Expected = qtyShipped scaled to
+    // the shipment line's receive variant; cost is stamped from the PO line.
     const receivingLineData = receivableShipmentLines.map((sl: any) => {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
       const productId = poLine?.productId ?? null;
-      const pack = productId != null ? defaultPackByProduct.get(productId) : undefined;
-      const resolvedVariantId = pack?.id ?? sl.productVariantId ?? poLine?.productVariantId ?? null;
-      const packSize = Math.max(1, pack?.unitsPerVariant ?? (poLine?.unitsPerUom || 1));
+      const resolvedVariantId =
+        sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId ?? null;
+      const packSize = Math.max(
+        1,
+        (resolvedVariantId ? unitsPerVariantById.get(resolvedVariantId) : undefined) ??
+          poLine?.expectedReceiveUnitsPerVariant ??
+          poLine?.unitsPerUom ??
+          1,
+      );
       const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
       const hasPoMills =
         typeof poLine?.unitCostMills === "number" &&
@@ -2357,13 +2397,15 @@ export function createPurchasingService(db: any, storage: Storage) {
       // product line; no chains.
       parentClientId?: string | null;
 
-      // Required on non-product lines; ignored on product lines (which
-      // cache product_name/sku from the variant lookup).
+      // Required on non-product lines; product lines cache product_name/sku
+      // from product_id and receive configuration from expected_receive_*.
       description?: string | null;
 
       // Required on product lines only. Must be null/absent on other types.
       productId?: number | null;
       productVariantId?: number | null;
+      expectedReceiveVariantId?: number | null;
+      expectedReceiveUnitsPerVariant?: number | null;
 
       // Product lines: qty > 0. Fee: qty >= 1. All other types: qty == 1.
       orderQty: number;
@@ -2391,7 +2433,7 @@ export function createPurchasingService(db: any, storage: Storage) {
   //
   // Rules per line_type:
   //
-  //   product     requires productVariantId; cost >= 0; qty > 0.
+  //   product     requires productId; cost >= 0; qty > 0.
   //   discount    no variant; cost <= 0; qty == 1.
   //   fee         no variant; cost >= 0; qty >= 1.
   //   tax         no variant; cost >= 0; qty == 1.
@@ -2449,6 +2491,19 @@ export function createPurchasingService(db: any, storage: Storage) {
         ) {
           throw new PurchasingError(`${label}.product_id is required`, 400);
         }
+        if (
+          line.expectedReceiveUnitsPerVariant !== undefined &&
+          line.expectedReceiveUnitsPerVariant !== null &&
+          (
+            !Number.isInteger(line.expectedReceiveUnitsPerVariant) ||
+            line.expectedReceiveUnitsPerVariant <= 0
+          )
+        ) {
+          throw new PurchasingError(
+            `${label}.expected_receive_units_per_variant must be a positive integer`,
+            400,
+          );
+        }
       } else {
         if (
           line.productId !== undefined &&
@@ -2465,6 +2520,24 @@ export function createPurchasingService(db: any, storage: Storage) {
         ) {
           throw new PurchasingError(
             `${label}.product_variant_id is only valid on product lines`,
+            400,
+          );
+        }
+        if (
+          line.expectedReceiveVariantId !== undefined &&
+          line.expectedReceiveVariantId !== null
+        ) {
+          throw new PurchasingError(
+            `${label}.expected_receive_variant_id is only valid on product lines`,
+            400,
+          );
+        }
+        if (
+          line.expectedReceiveUnitsPerVariant !== undefined &&
+          line.expectedReceiveUnitsPerVariant !== null
+        ) {
+          throw new PurchasingError(
+            `${label}.expected_receive_units_per_variant is only valid on product lines`,
             400,
           );
         }
@@ -2673,8 +2746,16 @@ export function createPurchasingService(db: any, storage: Storage) {
           if (!product) {
             throw new PurchasingError(`Product ${line.productId} not found`, 404);
           }
-          if (line.productVariantId) {
-            variant = await storage.getProductVariantById(line.productVariantId);
+          const expectedReceiveVariantId =
+            line.expectedReceiveVariantId ?? line.productVariantId ?? null;
+          if (expectedReceiveVariantId) {
+            variant = await storage.getProductVariantById(expectedReceiveVariantId);
+            if (!variant) {
+              throw new PurchasingError(
+                `Expected receive variant ${expectedReceiveVariantId} not found`,
+                404,
+              );
+            }
           }
         }
 
@@ -2736,24 +2817,31 @@ export function createPurchasingService(db: any, storage: Storage) {
         })
         .returning();
 
-      // Build line rows. Product lines pull cached product info from the
-      // variant lookup; non-product lines carry only the description. Both
-      // record line_type (migration 0563) so downstream consumers can filter.
+      // Build line rows. Product lines cache product identity/SKU and carry
+      // expected_receive_* as the physical receiving configuration. Both record
+      // line_type (migration 0563) so downstream consumers can filter.
       const lineRows = resolvedLines.map((r, idx) => {
         const isProduct = r.lineType === "product";
         return {
           purchaseOrderId: header.id,
           lineNumber: idx + 1,
           productId: isProduct ? r.product.id : null,
+          // Deprecated compatibility field. PO purchasing identity is product_id
+          // + product SKU + piece quantity; expected_receive_* carries the
+          // receiving configuration.
           productVariantId: isProduct ? (r.variant?.id ?? null) : null,
+          expectedReceiveVariantId: isProduct ? (r.variant?.id ?? null) : null,
           vendorProductId: isProduct ? (r.line.vendorProductId ?? null) : null,
-          sku: isProduct ? (r.variant?.sku || r.product.sku || null) : null,
+          sku: isProduct ? (r.product.sku ?? r.variant?.sku ?? null) : null,
           productName: isProduct ? r.product.name : null,
           description: r.line.description ?? null,
           unitOfMeasure: isProduct
             ? (r.variant?.name?.split(" ")[0]?.toLowerCase() ?? "each")
             : null,
           unitsPerUom: isProduct ? (r.variant?.unitsPerVariant || 1) : 1,
+          expectedReceiveUnitsPerVariant: isProduct
+            ? (r.line.expectedReceiveUnitsPerVariant || r.variant?.unitsPerVariant || 1)
+            : 1,
           orderQty: r.line.orderQty,
           // Write BOTH mills/cents and totals on INSERT (Spec F Phase 1).
           // Mills/cents are computed-derived for back-compat; totals are source of truth.
@@ -3045,7 +3133,7 @@ export function createPurchasingService(db: any, storage: Storage) {
         try {
           const vp = await storage.getPreferredVendorProduct(
             src.productId,
-            src.productVariantId,
+            src.expectedReceiveVariantId ?? src.productVariantId,
           );
           if (vp && vp.vendorId === targetVendorId) {
             if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
@@ -3069,7 +3157,15 @@ export function createPurchasingService(db: any, storage: Storage) {
         clientId: clientIdBySourceId.get(src.id),
         lineType: srcLineType,
         parentClientId,
-        productVariantId: srcLineType === "product" ? src.productVariantId : null,
+        productVariantId: srcLineType === "product"
+          ? (src.expectedReceiveVariantId ?? src.productVariantId ?? null)
+          : null,
+        expectedReceiveVariantId: srcLineType === "product"
+          ? (src.expectedReceiveVariantId ?? src.productVariantId ?? null)
+          : null,
+        expectedReceiveUnitsPerVariant: srcLineType === "product"
+          ? (src.expectedReceiveUnitsPerVariant ?? src.unitsPerUom ?? 1)
+          : 1,
         orderQty: src.orderQty,
         unitCostMills,
         // Include cents (derived) so downstream validators that still look
@@ -3394,7 +3490,10 @@ export function createPurchasingService(db: any, storage: Storage) {
   // can render without a cascade of follow-up fetches.
 
   type PreloadLine = {
-    productVariantId: number;
+    productId: number;
+    productVariantId: number | null;
+    expectedReceiveVariantId: number | null;
+    expectedReceiveUnitsPerVariant: number;
     productName: string;
     sku: string | null;
     variantDescription: string | null;
@@ -3438,7 +3537,10 @@ export function createPurchasingService(db: any, storage: Storage) {
             : centsToMills(Number(src.unitCostCents || 0));
         let catalogSource: PreloadLine["catalogSource"] = "duplicate";
         try {
-          const vp = await storage.getPreferredVendorProduct(src.productId, src.productVariantId);
+          const vp = await storage.getPreferredVendorProduct(
+            src.productId,
+            src.expectedReceiveVariantId ?? src.productVariantId,
+          );
           if (vp && vp.vendorId === source.vendorId) {
             if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
               unitCostMills = vp.unitCostMills;
@@ -3452,7 +3554,10 @@ export function createPurchasingService(db: any, storage: Storage) {
           // non-fatal
         }
         lines.push({
-          productVariantId: src.productVariantId,
+          productId: src.productId,
+          productVariantId: src.expectedReceiveVariantId ?? src.productVariantId,
+          expectedReceiveVariantId: src.expectedReceiveVariantId ?? src.productVariantId,
+          expectedReceiveUnitsPerVariant: src.expectedReceiveUnitsPerVariant ?? src.unitsPerUom ?? 1,
           productName: src.productName ?? "",
           sku: src.sku ?? null,
           variantDescription: null,
@@ -3510,9 +3615,12 @@ export function createPurchasingService(db: any, storage: Storage) {
           }
         }
         lines.push({
+          productId: product.id,
           productVariantId: variant.id,
+          expectedReceiveVariantId: variant.id,
+          expectedReceiveUnitsPerVariant: variant.unitsPerVariant || 1,
           productName: product.name ?? "",
-          sku: variant.sku ?? null,
+          sku: product.sku ?? variant.sku ?? null,
           variantDescription: variant.name ?? null,
           uomLabel: variant.name?.split(" ")[0]?.toLowerCase() ?? null,
           // No reorder_quantity column today. Default to 1 so the row is

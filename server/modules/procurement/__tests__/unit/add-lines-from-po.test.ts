@@ -69,6 +69,9 @@ function buildMockDb(storage: any) {
               cancelled_qty: l.cancelledQty,
               sku: l.sku,
               product_variant_id: l.productVariantId,
+              expected_receive_variant_id: l.expectedReceiveVariantId,
+              expected_receive_units_per_variant: l.expectedReceiveUnitsPerVariant,
+              units_per_uom: l.unitsPerUom,
             })),
           };
         }
@@ -108,6 +111,7 @@ function makeProductLine(overrides: Record<string, any> = {}) {
     purchaseOrderId: 10,
     lineNumber: 1,
     productVariantId: 200,
+    expectedReceiveVariantId: 200,
     sku: "SKU-001",
     productName: "Widget",
     lineType: "product",
@@ -235,6 +239,47 @@ describe("addLinesFromPO", () => {
     expect(mockInsertValues).toHaveBeenCalledWith(
       expect.arrayContaining([
         expect.objectContaining({ qtyShipped: 25, cartonCount: 3 }),
+      ]),
+    );
+  });
+
+  it("uses the expected receive variant for shipment lines and carton math", async () => {
+    const poLine = makeProductLine({
+      id: 5,
+      orderQty: 1000,
+      productVariantId: 200,
+      expectedReceiveVariantId: 900,
+      expectedReceiveUnitsPerVariant: 250,
+    });
+    storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
+    storage.getVendorProducts.mockResolvedValue([
+      {
+        productVariantId: 900,
+        weightKg: "12.5",
+        lengthCm: "40",
+        widthCm: "30",
+        heightCm: "20",
+      },
+    ]);
+
+    await svc.addLinesFromPO(1, 10, [{ poLineId: 5, qty: 501 }]);
+
+    expect(storage.getVendorProducts).toHaveBeenCalledWith({
+      vendorId: 100,
+      productVariantId: 900,
+    });
+    expect(mockInsertValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          purchaseOrderLineId: 5,
+          productVariantId: 900,
+          qtyShipped: 501,
+          cartonCount: 3,
+          weightKg: "12.5",
+          lengthCm: "40",
+          widthCm: "30",
+          heightCm: "20",
+        }),
       ]),
     );
   });
