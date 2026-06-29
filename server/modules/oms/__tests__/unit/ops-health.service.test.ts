@@ -89,6 +89,8 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toContain("authority_fulfillable_quantity");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("fulfillment_partition_key");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_drift");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_rows");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("normalized_fulfillment_provider");
     expect(OMS_SCHEMA_SRC).toContain("fulfillmentProvider");
     expect(OMS_SCHEMA_SRC).toContain("providerFulfillmentOrderId");
     expect(OMS_SCHEMA_SRC).toContain("providerFulfillmentOrderLineItemId");
@@ -228,6 +230,7 @@ describe("ops-health.service :: issue mapping", () => {
           rows: [{
             oms_order_line_id: 404,
             fulfillment_provider: null,
+            normalized_fulfillment_provider: null,
             shopify_fulfillment_order_id: "gid://shopify/FulfillmentOrder/1",
             provider_fulfillment_order_id: null,
             drift_reason: "provider_context_missing_or_mismatched",

@@ -49,8 +49,16 @@ Proposed follow-up:
   alongside the legacy Shopify aliases.
 - Shopify fulfillment-order ingest preserves existing non-Shopify provider
   context instead of overwriting it with Shopify references.
-- Migrate Shopify values into the neutral representation.
-- Update Shopify fulfillment push, eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
+- Transition-window Shopify alias values are re-backfilled into the neutral
+  provider representation by migration
+  `112_oms_provider_fulfillment_reference_backfill.sql`.
+- Shopify fulfillment push now filters explicit non-Shopify OMS line
+  providers out of both Path A and Path B resolution.
+- Direct eBay ingest and dropship acceptance now stamp OMS line provider
+  ownership, and eBay/dropship tracking reads ignore rows explicitly owned by
+  another provider.
+- Reconciliation and ops health now normalize the neutral provider contract
+  before comparing Shopify compatibility aliases for drift.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.
 
 Reason this matters:

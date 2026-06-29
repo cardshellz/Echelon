@@ -114,9 +114,13 @@ describe("oms-flow-reconciliation.service", () => {
   it("flags Shopify fulfillment reference drift from provider-neutral OMS line columns", () => {
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_drift");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_rows");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.fulfillment_provider");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.provider_fulfillment_order_id");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.shopify_fulfillment_order_id");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("normalized_fulfillment_provider");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("LOWER(NULLIF(BTRIM(ol.fulfillment_provider), ''))");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("NULLIF(BTRIM(ol.provider_fulfillment_order_id), '')");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("IS DISTINCT FROM");
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_context_missing_or_mismatched");
   });

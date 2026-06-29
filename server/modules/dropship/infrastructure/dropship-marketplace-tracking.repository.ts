@@ -304,6 +304,7 @@ async function loadLineItemsForOmsOrder(
        WHERE si.shipment_id = $1
          AND ol.order_id = $2
          AND COALESCE(si.qty, 0) > 0
+         AND COALESCE(LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')), 'dropship') = 'dropship'
        GROUP BY ol.external_line_item_id
        ORDER BY MIN(si.id) ASC`,
       [input.wmsShipmentId, input.omsOrderId],
@@ -319,6 +320,7 @@ async function loadLineItemsForOmsOrder(
      FROM oms.oms_order_lines
      WHERE order_id = $1
        AND COALESCE(quantity, 0) > 0
+       AND COALESCE(LOWER(NULLIF(BTRIM(fulfillment_provider), '')), 'dropship') = 'dropship'
      ORDER BY id ASC`,
     [input.omsOrderId],
   );
