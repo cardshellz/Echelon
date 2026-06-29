@@ -197,6 +197,47 @@ describe("DropshipCatalogExposureService", () => {
     expect(result.rows[0].productVariantId).toBe(20);
     expect(result.rows[0].decision.exposed).toBe(true);
   });
+
+  it("filters exposed product-line rows before paginating", async () => {
+    const repository = new FakeCatalogExposureRepository();
+    repository.rules = [{
+      id: 1,
+      revisionId: 1001,
+      scopeType: "product_line",
+      action: "include",
+      productLineId: 30,
+      productId: null,
+      productVariantId: null,
+      category: null,
+      priority: 0,
+      isActive: true,
+      startsAt: null,
+      endsAt: null,
+      notes: null,
+      metadata: {},
+      createdAt: now,
+      updatedAt: now,
+    }];
+    repository.candidates = [
+      makePreviewCandidate(20, true, { productLineIds: [30], productLineNames: ["Allowed line"] }),
+      makePreviewCandidate(21, true, { productLineIds: [99], productLineNames: ["Blocked line"] }),
+      makePreviewCandidate(22, true, { productLineIds: [30], productLineNames: ["Allowed line"] }),
+    ];
+    const service = new DropshipCatalogExposureService({
+      clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      repository,
+    });
+
+    const result = await service.preview({ exposedOnly: true, page: 2, limit: 1 });
+
+    expect(result.total).toBe(2);
+    expect(result.page).toBe(2);
+    expect(result.limit).toBe(1);
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].productVariantId).toBe(22);
+    expect(result.rows[0].decision.exposed).toBe(true);
+  });
 });
 
 class FakeCatalogExposureRepository implements DropshipCatalogExposureRepository {
@@ -235,6 +276,7 @@ class FakeCatalogExposureRepository implements DropshipCatalogExposureRepository
 function makePreviewCandidate(
   productVariantId: number,
   active: boolean,
+  overrides: Partial<DropshipCatalogPreviewCandidate> = {},
 ): DropshipCatalogPreviewCandidate {
   return {
     ...activeCandidate,
@@ -245,5 +287,6 @@ function makePreviewCandidate(
     variantName: `Variant ${productVariantId}`,
     productLineNames: ["Line"],
     variantIsActive: active,
+    ...overrides,
   };
 }

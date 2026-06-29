@@ -9,6 +9,8 @@ import {
   Boxes,
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   ChevronsUpDown,
   CircleDollarSign,
   ClipboardList,
@@ -276,7 +278,15 @@ interface DropshipSelectOption {
   search?: string;
 }
 
+interface CatalogRuleTargetLabels {
+  productLineNamesById: Map<number, string>;
+  productLabelsById: Map<number, string>;
+  variantLabelsById: Map<number, string>;
+  categoryLabelsByKey: Map<string, string>;
+}
+
 const NO_DEFAULT_WAREHOUSE_VALUE = "__none__";
+const CATALOG_PREVIEW_PAGE_SIZE = 50;
 
 const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "overview",
@@ -3148,6 +3158,7 @@ function CatalogExposureTab() {
     exposedOnly: "false",
     includeInactiveCatalog: "false",
   });
+  const [previewPage, setPreviewPage] = useState(1);
   const [draftRules, setDraftRules] = useState<DropshipAdminCatalogExposureRuleInput[]>([]);
   const [loadedRulesKey, setLoadedRulesKey] = useState("");
   const [ruleForm, setRuleForm] = useState<CatalogRuleFormState>(emptyCatalogRuleForm);
@@ -3160,7 +3171,9 @@ function CatalogExposureTab() {
     search: appliedFilters.search,
     exposedOnly: appliedFilters.exposedOnly === "true",
     includeInactiveCatalog: appliedFilters.includeInactiveCatalog === "true",
-  }), [appliedFilters]);
+    page: previewPage,
+    limit: CATALOG_PREVIEW_PAGE_SIZE,
+  }), [appliedFilters, previewPage]);
 
   const rulesQuery = useQuery<DropshipAdminCatalogExposureRulesResponse>({
     queryKey: ["/api/dropship/admin/catalog/rules"],
@@ -3188,6 +3201,9 @@ function CatalogExposureTab() {
   });
 
   const previewRows = previewQuery.data?.rows ?? [];
+  const previewTotal = previewQuery.data?.total ?? 0;
+  const previewLimit = previewQuery.data?.limit ?? CATALOG_PREVIEW_PAGE_SIZE;
+  const previewTotalPages = Math.max(1, Math.ceil(previewTotal / previewLimit));
   const activeRuleInputs = useMemo(
     () => normalizeCatalogRuleOrder((rulesQuery.data?.rules ?? [])
       .filter((rule) => rule.isActive !== false)
@@ -3232,6 +3248,21 @@ function CatalogExposureTab() {
       }),
     [variantsQuery.data],
   );
+  const catalogRuleTargetLabels = useMemo<CatalogRuleTargetLabels>(() => ({
+    productLineNamesById: new Map(productLineOptions.map((line) => [line.id, line.name])),
+    productLabelsById: new Map(productOptions.map((product) => [
+      product.id,
+      [product.sku ?? product.baseSku, product.name].filter(Boolean).join(" - ") || `Product ${product.id}`,
+    ])),
+    variantLabelsById: new Map(variantOptions.map((variant) => [
+      variant.id,
+      [variant.sku, variant.name].filter(Boolean).join(" - ") || `Variant ${variant.id}`,
+    ])),
+    categoryLabelsByKey: new Map(categoryOptions.map((category) => [
+      normalizeCatalogRuleLabelKey(category.name),
+      category.name,
+    ])),
+  }), [categoryOptions, productLineOptions, productOptions, variantOptions]);
 
   useEffect(() => {
     if (!rulesQuery.data) return;
@@ -3240,8 +3271,14 @@ function CatalogExposureTab() {
     setLoadedRulesKey(activeRulesKey);
   }, [activeRuleInputs, activeRulesKey, loadedRulesKey, rulesQuery.data]);
 
+  useEffect(() => {
+    if (!previewQuery.data || previewPage <= previewTotalPages) return;
+    setPreviewPage(previewTotalPages);
+  }, [previewPage, previewQuery.data, previewTotalPages]);
+
   function applyCatalogFilters() {
     setAppliedFilters({ search, exposedOnly, includeInactiveCatalog });
+    setPreviewPage(1);
   }
 
   function addRuleFromForm() {
@@ -3253,7 +3290,7 @@ function CatalogExposureTab() {
       upsertDraftRule(rule);
       setRuleDialogOpen(false);
       setRuleForm(emptyCatalogRuleForm);
-      setMessage(`${catalogExposureActionLabel(rule.action)} ${catalogRuleTargetLabel(rule)} added to unsaved changes.`);
+      setMessage(`${catalogExposureActionLabel(rule.action)} ${catalogRuleTargetLabel(rule, catalogRuleTargetLabels)} added to unsaved changes.`);
       setError("");
     } catch (caught) {
       setMessage("");
@@ -3435,6 +3472,7 @@ function CatalogExposureTab() {
 
         <CatalogDraftRulesTable
           hasUnsavedChanges={hasUnsavedExposureChanges}
+          targetLabels={catalogRuleTargetLabels}
           rules={draftRules}
           isLoading={rulesQuery.isLoading}
           isSaving={saving}
@@ -3504,9 +3542,13 @@ function CatalogExposureTab() {
 
         <CatalogPreviewTable
           isLoading={previewQuery.isLoading || previewQuery.isFetching}
+          limit={previewLimit}
+          page={previewQuery.data?.page ?? previewPage}
           rows={previewRows}
-          total={previewQuery.data?.total ?? 0}
+          total={previewTotal}
+          totalPages={previewTotalPages}
           onAddPreviewRule={addPreviewRule}
+          onPageChange={setPreviewPage}
         />
       </section>
     </div>
@@ -7366,6 +7408,7 @@ function CatalogDraftRulesTable({
   onRemoveRule,
   onSaveRules,
   rules,
+  targetLabels,
 }: {
   hasUnsavedChanges: boolean;
   isLoading: boolean;
@@ -7375,6 +7418,7 @@ function CatalogDraftRulesTable({
   onRemoveRule: (rule: DropshipAdminCatalogExposureRuleInput) => void;
   onSaveRules: () => void;
   rules: DropshipAdminCatalogExposureRuleInput[];
+  targetLabels: CatalogRuleTargetLabels;
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
@@ -7454,7 +7498,7 @@ function CatalogDraftRulesTable({
                   </TableCell>
                   <TableCell>
                     <div className="font-medium">{formatStatus(rule.scopeType)}</div>
-                    <div className="text-xs text-muted-foreground">{catalogRuleTargetLabel(rule)}</div>
+                    <div className="text-xs text-muted-foreground">{catalogRuleTargetLabel(rule, targetLabels)}</div>
                   </TableCell>
                   <TableCell className="max-w-[260px] truncate text-sm text-muted-foreground">{rule.notes || "None"}</TableCell>
                   <TableCell>
@@ -7505,17 +7549,25 @@ function CatalogDraftRulesTable({
 
 function CatalogPreviewTable({
   isLoading,
+  limit,
   onAddPreviewRule,
+  onPageChange,
+  page,
   rows,
   total,
+  totalPages,
 }: {
   isLoading: boolean;
+  limit: number;
   onAddPreviewRule: (
     row: DropshipAdminCatalogExposurePreviewRow,
     action: CatalogExposureActionFilter,
   ) => void;
+  onPageChange: (page: number) => void;
+  page: number;
   rows: DropshipAdminCatalogExposurePreviewRow[];
   total: number;
+  totalPages: number;
 }) {
   if (isLoading) {
     return (
@@ -7539,10 +7591,15 @@ function CatalogPreviewTable({
     );
   }
 
+  const firstRow = total === 0 ? 0 : ((page - 1) * limit) + 1;
+  const lastRow = Math.min(total, firstRow + rows.length - 1);
+
   return (
     <div className="mt-4 rounded-md border">
       <div className="flex items-center justify-between border-b px-3 py-2 text-sm text-muted-foreground">
-        <span>{total} row{total === 1 ? "" : "s"}</span>
+        <span>
+          Showing {firstRow}-{lastRow} of {total} row{total === 1 ? "" : "s"}
+        </span>
       </div>
       <Table>
         <TableHeader>
@@ -7593,6 +7650,33 @@ function CatalogPreviewTable({
           ))}
         </TableBody>
       </Table>
+      <div className="flex flex-col gap-3 border-t px-3 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+        <span>Page {page} of {totalPages}</span>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-2"
+            disabled={page <= 1}
+            onClick={() => onPageChange(Math.max(1, page - 1))}
+          >
+            <ChevronLeft className="h-4 w-4" />
+            Previous
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-2"
+            disabled={page >= totalPages}
+            onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+          >
+            Next
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -7644,12 +7728,36 @@ function CatalogMetric({
   );
 }
 
-function catalogRuleTargetLabel(rule: DropshipAdminCatalogExposureRuleInput): string {
+function catalogRuleTargetLabel(
+  rule: DropshipAdminCatalogExposureRuleInput,
+  labels: CatalogRuleTargetLabels,
+): string {
   if (rule.scopeType === "catalog") return "Entire active catalog";
-  if (rule.scopeType === "product_line") return `Product line ${rule.productLineId}`;
-  if (rule.scopeType === "product") return `Product ${rule.productId}`;
-  if (rule.scopeType === "variant") return `Variant ${rule.productVariantId}`;
-  return rule.category || "Category";
+  if (rule.scopeType === "product_line") {
+    return targetNameLabel("Product line", rule.productLineId, labels.productLineNamesById);
+  }
+  if (rule.scopeType === "product") {
+    return targetNameLabel("Product", rule.productId, labels.productLabelsById);
+  }
+  if (rule.scopeType === "variant") {
+    return targetNameLabel("Variant", rule.productVariantId, labels.variantLabelsById);
+  }
+  if (rule.scopeType === "category") {
+    const category = rule.category?.trim();
+    if (!category) return "Category not selected";
+    return labels.categoryLabelsByKey.get(normalizeCatalogRuleLabelKey(category)) ?? category;
+  }
+  return "Unknown target";
+}
+
+function targetNameLabel(prefix: string, id: number | null | undefined, namesById: Map<number, string>): string {
+  if (typeof id !== "number") return `${prefix} not selected`;
+  const name = namesById.get(id);
+  return name ? `${prefix}: ${name}` : `${prefix} #${id}`;
+}
+
+function normalizeCatalogRuleLabelKey(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function normalizeCatalogRuleOrder(
