@@ -127,27 +127,46 @@ export class DropshipCatalogExposureService {
     limit: number;
   }> {
     const parsed = previewDropshipCatalogExposureInputSchema.parse(input);
+    const previewFilters = resolvePreviewFilters(parsed);
     const [rules, candidates] = await Promise.all([
       this.deps.repository.listRules({ includeInactive: false }),
-      this.deps.repository.listPreviewCandidates(parsed),
+      this.deps.repository.listPreviewCandidates(previewFilters),
     ]);
     const now = this.deps.clock.now();
     const evaluatedRows = candidates.map((candidate) => ({
       ...candidate,
       decision: evaluateDropshipCatalogExposure(candidate, rules, now),
     }));
-    const filteredRows = parsed.exposedOnly
-      ? evaluatedRows.filter((row) => row.decision.exposed)
-      : evaluatedRows;
-    const start = (parsed.page - 1) * parsed.limit;
+    const filteredRows = filterPreviewRowsByVisibility(evaluatedRows, previewFilters.visibility);
+    const start = (previewFilters.page - 1) * previewFilters.limit;
 
     return {
-      rows: filteredRows.slice(start, start + parsed.limit),
+      rows: filteredRows.slice(start, start + previewFilters.limit),
       total: filteredRows.length,
-      page: parsed.page,
-      limit: parsed.limit,
+      page: previewFilters.page,
+      limit: previewFilters.limit,
     };
   }
+}
+
+function resolvePreviewFilters(input: PreviewDropshipCatalogExposureInput): PreviewDropshipCatalogExposureInput & {
+  visibility: "all" | "visible" | "hidden";
+  catalogStatus: "active" | "inactive" | "all";
+} {
+  return {
+    ...input,
+    visibility: input.visibility ?? (input.exposedOnly ? "visible" : "all"),
+    catalogStatus: input.catalogStatus ?? (input.includeInactiveCatalog ? "all" : "active"),
+  };
+}
+
+function filterPreviewRowsByVisibility(
+  rows: DropshipCatalogExposurePreviewRow[],
+  visibility: "all" | "visible" | "hidden",
+): DropshipCatalogExposurePreviewRow[] {
+  if (visibility === "visible") return rows.filter((row) => row.decision.exposed);
+  if (visibility === "hidden") return rows.filter((row) => !row.decision.exposed);
+  return rows;
 }
 
 export function hashCatalogExposureRules(

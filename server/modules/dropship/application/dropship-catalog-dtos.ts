@@ -95,12 +95,17 @@ export const listDropshipCatalogExposureRulesInputSchema = z.object({
   includeInactive: z.boolean().default(false),
 }).strict();
 
+export const dropshipCatalogPreviewVisibilitySchema = z.enum(["all", "visible", "hidden"]);
+export const dropshipCatalogPreviewCatalogStatusSchema = z.enum(["active", "inactive", "all"]);
+
 export const previewDropshipCatalogExposureInputSchema = z.object({
   search: z.string().trim().min(1).max(200).optional(),
   category: z.string().trim().min(1).max(200).optional(),
   productLineId: positiveIdSchema.optional(),
-  includeInactiveCatalog: z.boolean().default(false),
-  exposedOnly: z.boolean().default(false),
+  visibility: dropshipCatalogPreviewVisibilitySchema.optional(),
+  catalogStatus: dropshipCatalogPreviewCatalogStatusSchema.optional(),
+  includeInactiveCatalog: z.boolean().optional(),
+  exposedOnly: z.boolean().optional(),
   page: z.number().int().min(1).default(1),
   limit: z.number().int().min(1).max(200).default(50),
 }).strict();

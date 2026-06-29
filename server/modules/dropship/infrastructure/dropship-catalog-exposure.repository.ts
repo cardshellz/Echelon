@@ -167,10 +167,13 @@ export class PgDropshipCatalogExposureRepository implements DropshipCatalogExpos
     try {
       const params: unknown[] = [];
       const where: string[] = [];
+      const catalogStatus = input.catalogStatus ?? (input.includeInactiveCatalog ? "all" : "active");
 
-      if (!input.includeInactiveCatalog) {
+      if (catalogStatus === "active") {
         where.push("p.is_active = true");
         where.push("pv.is_active = true");
+      } else if (catalogStatus === "inactive") {
+        where.push("(p.is_active = false OR pv.is_active = false)");
       }
 
       if (input.search) {
