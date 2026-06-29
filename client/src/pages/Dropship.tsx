@@ -131,6 +131,8 @@ import {
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
   type DropshipAdminOrderOpsProcessResponse,
+  type DropshipAdminOrderOpsStoreSummary,
+  type DropshipAdminOrderOpsVendorSummary,
   type DropshipAdminOrderOpsWmsSyncResponse,
   type DropshipOrderDetail,
   type DropshipOrderDetailResponse,
@@ -194,6 +196,7 @@ import {
   type DropshipStoreListingConfigResponse,
   type DropshipStoreOrderProcessingConfigResponse,
   type DropshipSystemReadinessCheck,
+  type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
@@ -242,6 +245,36 @@ interface DropshipProductVariantOption {
   productId: number;
   active?: number | null;
   isActive?: boolean;
+}
+
+interface DropshipProductOption {
+  id: number;
+  sku?: string | null;
+  baseSku?: string | null;
+  name: string;
+  active?: number | null;
+  status?: string | null;
+}
+
+interface DropshipProductLineOption {
+  id: number;
+  name: string;
+  status?: string | null;
+  productCount?: number | null;
+}
+
+interface DropshipProductCategoryOption {
+  id: number;
+  name: string;
+  isActive?: boolean | null;
+  productCount?: number | null;
+}
+
+interface DropshipSelectOption {
+  value: string;
+  label: string;
+  detail?: string;
+  search?: string;
 }
 
 const NO_DEFAULT_WAREHOUSE_VALUE = "__none__";
@@ -1670,6 +1703,23 @@ function ReturnOpsTab() {
     status: appliedFilters.status,
   }), [appliedFilters]);
   const returnPolicyUrl = useMemo(() => buildAdminReturnPolicyUrl(), []);
+  const returnVendorOptionsUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 250,
+  }), []);
+  const returnStoreConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 250,
+  }), []);
+  const returnOrderIntakeUrl = useMemo(() => buildAdminOrderIntakeUrl({
+    search: "",
+    status: "all",
+    limit: 250,
+  }), []);
 
   const returnsQuery = useQuery<DropshipReturnListResponse>({
     queryKey: [returnsUrl],
@@ -1687,9 +1737,48 @@ function ReturnOpsTab() {
     },
     enabled: selectedInspectionRmaId !== null,
   });
+  const returnVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
+    queryKey: [returnVendorOptionsUrl, "return-vendors"],
+    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(returnVendorOptionsUrl),
+  });
+  const returnStoreConnectionsQuery = useQuery<DropshipAdminStoreConnectionListResponse>({
+    queryKey: [returnStoreConnectionsUrl, "return-store-connections"],
+    queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(returnStoreConnectionsUrl),
+  });
+  const returnOrderIntakesQuery = useQuery<DropshipAdminOrderOpsListResponse>({
+    queryKey: [returnOrderIntakeUrl, "return-order-intakes"],
+    queryFn: () => fetchJson<DropshipAdminOrderOpsListResponse>(returnOrderIntakeUrl),
+  });
+  const returnVariantsQuery = useQuery<DropshipProductVariantOption[]>({
+    queryKey: ["/api/product-variants", "return-options"],
+    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+  });
 
   const rmas = returnsQuery.data?.items ?? [];
   const activeReturnPolicy = returnPolicyQuery.data?.policy ?? null;
+  const returnVendorOptions = useMemo(
+    () => buildVendorSelectOptions(returnVendorOptionsQuery.data?.items ?? []),
+    [returnVendorOptionsQuery.data?.items],
+  );
+  const returnStoreConnections = useMemo(
+    () => returnStoreConnectionsQuery.data?.items ?? [],
+    [returnStoreConnectionsQuery.data?.items],
+  );
+  const returnOrderIntakes = useMemo(
+    () => returnOrderIntakesQuery.data?.items ?? [],
+    [returnOrderIntakesQuery.data?.items],
+  );
+  const returnVariantOptions = useMemo(
+    () => (returnVariantsQuery.data ?? [])
+      .filter((variant) => variant.isActive !== false && variant.active !== 0)
+      .sort((first, second) => {
+        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+        if (skuCompare !== 0) return skuCompare;
+        const nameCompare = first.name.localeCompare(second.name);
+        return nameCompare !== 0 ? nameCompare : first.id - second.id;
+      }),
+    [returnVariantsQuery.data],
+  );
 
   useEffect(() => {
     const rma = returnDetailQuery.data?.rma;
@@ -1900,14 +1989,21 @@ function ReturnOpsTab() {
 
   return (
     <div className="space-y-5">
-      {(returnsQuery.error || returnPolicyQuery.error || error) && (
+      {(returnsQuery.error || returnPolicyQuery.error || returnVendorOptionsQuery.error || returnStoreConnectionsQuery.error || returnOrderIntakesQuery.error || returnVariantsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
             {error
               || (returnsQuery.error
                 ? queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")
-                : queryErrorMessage(returnPolicyQuery.error, "Unable to load dropship return policy."))}
+                : queryErrorMessage(
+                  returnPolicyQuery.error
+                    ?? returnVendorOptionsQuery.error
+                    ?? returnStoreConnectionsQuery.error
+                    ?? returnOrderIntakesQuery.error
+                    ?? returnVariantsQuery.error,
+                  "Unable to load dropship return setup data.",
+                ))}
           </AlertDescription>
         </Alert>
       )}
@@ -1976,11 +2072,19 @@ function ReturnOpsTab() {
       <ReturnCreatePanel
         form={createForm}
         isSaving={creatingRma}
+        intakes={returnOrderIntakes}
+        intakesLoading={returnOrderIntakesQuery.isLoading || returnOrderIntakesQuery.isFetching}
         onAddItem={addCreateItem}
         onChange={updateCreateForm}
         onItemChange={updateCreateItem}
         onRemoveItem={removeCreateItem}
         onSubmit={createReturn}
+        storeConnections={returnStoreConnections}
+        storeConnectionsLoading={returnStoreConnectionsQuery.isLoading || returnStoreConnectionsQuery.isFetching}
+        variants={returnVariantOptions}
+        variantsLoading={returnVariantsQuery.isLoading || returnVariantsQuery.isFetching}
+        vendorOptions={returnVendorOptions}
+        vendorsLoading={returnVendorOptionsQuery.isLoading || returnVendorOptionsQuery.isFetching}
       />
 
       <ReturnOpsTable
@@ -2665,6 +2769,46 @@ function WalletOpsTab() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const pending = pendingAction !== null;
+  const walletVendorOptionsUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 250,
+  }), []);
+  const walletVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
+    queryKey: [walletVendorOptionsUrl, "wallet-vendors"],
+    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(walletVendorOptionsUrl),
+  });
+  const selectedUsdcVendorId = usdcVendorId.trim();
+  const usdcWalletQuery = useQuery<DropshipWalletResponse>({
+    queryKey: ["/api/dropship/admin/wallet/vendors", selectedUsdcVendorId],
+    queryFn: () => fetchJson<DropshipWalletResponse>(`/api/dropship/admin/wallet/vendors/${selectedUsdcVendorId}`),
+    enabled: /^[1-9]\d*$/.test(selectedUsdcVendorId),
+  });
+  const vendorSelectOptions = useMemo(
+    () => buildVendorSelectOptions(walletVendorOptionsQuery.data?.items ?? []),
+    [walletVendorOptionsQuery.data?.items],
+  );
+  const usdcFundingMethodOptions = useMemo(
+    () => (usdcWalletQuery.data?.wallet.fundingMethods ?? [])
+      .filter((method) => method.rail === "usdc_base")
+      .sort((first, second) => {
+        if (first.isDefault !== second.isDefault) return Number(second.isDefault) - Number(first.isDefault);
+        if (first.status !== second.status) return first.status.localeCompare(second.status);
+        return first.fundingMethodId - second.fundingMethodId;
+      })
+      .map((method) => ({
+        value: String(method.fundingMethodId),
+        label: method.displayLabel || formatStatus(method.rail),
+        detail: [
+          `ID ${method.fundingMethodId}`,
+          formatStatus(method.status),
+          method.isDefault ? "default" : "",
+          method.usdcWalletAddress ? truncateMiddle(method.usdcWalletAddress, 16) : "",
+        ].filter(Boolean).join(" / "),
+      })),
+    [usdcWalletQuery.data?.wallet.fundingMethods],
+  );
 
   function resetManualCreditIdempotencyKey() {
     setManualCreditIdempotencyKey(createDropshipIdempotencyKey("admin-wallet-credit"));
@@ -2751,10 +2895,12 @@ function WalletOpsTab() {
 
   return (
     <div className="space-y-5">
-      {error && (
+      {(walletVendorOptionsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>
+            {error || queryErrorMessage(walletVendorOptionsQuery.error, "Unable to load dropship vendors.")}
+          </AlertDescription>
         </Alert>
       )}
       {message && (
@@ -2774,22 +2920,19 @@ function WalletOpsTab() {
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[0.45fr_0.45fr_1.1fr_auto] lg:items-end">
-          <div>
-            <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-vendor">
-              Vendor ID
-            </label>
-            <Input
-              id="dropship-wallet-credit-vendor"
-              className="mt-2"
-              value={vendorId}
-              onChange={(event) => {
-                setVendorId(event.target.value);
-                resetManualCreditIdempotencyKey();
-              }}
-              inputMode="numeric"
-              placeholder="10"
-            />
-          </div>
+          <SearchableOptionPicker
+            label="Vendor"
+            value={vendorId}
+            onChange={(value) => {
+              setVendorId(value);
+              resetManualCreditIdempotencyKey();
+            }}
+            options={vendorSelectOptions}
+            isLoading={walletVendorOptionsQuery.isLoading || walletVendorOptionsQuery.isFetching}
+            placeholder="Select vendor"
+            searchPlaceholder="Search vendor, email, or member..."
+            emptyText="No dropship vendors found."
+          />
           <div>
             <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-amount">
               Amount
@@ -2843,37 +2986,47 @@ function WalletOpsTab() {
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-4">
+          <SearchableOptionPicker
+            label="Vendor"
+            value={usdcVendorId}
+            onChange={(value) => {
+              setUsdcVendorId(value);
+              setUsdcFundingMethodId("");
+              resetUsdcCreditIdempotencyKey();
+            }}
+            options={vendorSelectOptions}
+            isLoading={walletVendorOptionsQuery.isLoading || walletVendorOptionsQuery.isFetching}
+            placeholder="Select vendor"
+            searchPlaceholder="Search vendor, email, or member..."
+            emptyText="No dropship vendors found."
+          />
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-usdc-credit-vendor">
-              Vendor ID
-            </label>
-            <Input
-              id="dropship-usdc-credit-vendor"
-              className="mt-2"
-              value={usdcVendorId}
-              onChange={(event) => {
-                setUsdcVendorId(event.target.value);
+            <label className="text-sm font-medium">Funding method</label>
+            <Select
+              value={usdcFundingMethodId || NO_DEFAULT_WAREHOUSE_VALUE}
+              onValueChange={(value) => {
+                setUsdcFundingMethodId(value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value);
                 resetUsdcCreditIdempotencyKey();
               }}
-              inputMode="numeric"
-              placeholder="10"
-            />
-          </div>
-          <div>
-            <label className="text-sm font-medium" htmlFor="dropship-usdc-funding-method">
-              Funding method ID
-            </label>
-            <Input
-              id="dropship-usdc-funding-method"
-              className="mt-2"
-              value={usdcFundingMethodId}
-              onChange={(event) => {
-                setUsdcFundingMethodId(event.target.value);
-                resetUsdcCreditIdempotencyKey();
-              }}
-              inputMode="numeric"
-              placeholder="Optional"
-            />
+              disabled={!selectedUsdcVendorId || usdcWalletQuery.isLoading || usdcWalletQuery.isFetching}
+            >
+              <SelectTrigger className="mt-2">
+                <SelectValue placeholder="Select funding method" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>No funding method</SelectItem>
+                {usdcFundingMethodOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label} - {option.detail}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {usdcWalletQuery.error && (
+              <p className="mt-1 text-xs text-rose-700">
+                {queryErrorMessage(usdcWalletQuery.error, "Unable to load vendor wallet.")}
+              </p>
+            )}
           </div>
           <div>
             <label className="text-sm font-medium" htmlFor="dropship-usdc-dollar-amount">
@@ -3018,10 +3171,60 @@ function CatalogExposureTab() {
     queryKey: [previewUrl],
     queryFn: () => fetchJson<DropshipAdminCatalogExposurePreviewResponse>(previewUrl),
   });
+  const productLinesQuery = useQuery<DropshipProductLineOption[]>({
+    queryKey: ["/api/product-lines", "active"],
+    queryFn: () => fetchJson<DropshipProductLineOption[]>("/api/product-lines?status=active"),
+  });
+  const categoriesQuery = useQuery<DropshipProductCategoryOption[]>({
+    queryKey: ["/api/product-categories"],
+    queryFn: () => fetchJson<DropshipProductCategoryOption[]>("/api/product-categories"),
+  });
+  const productsQuery = useQuery<DropshipProductOption[]>({
+    queryKey: ["/api/products", "active-options"],
+    queryFn: () => fetchJson<DropshipProductOption[]>("/api/products"),
+  });
+  const variantsQuery = useQuery<DropshipProductVariantOption[]>({
+    queryKey: ["/api/product-variants", "active-options"],
+    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+  });
 
   const previewRows = previewQuery.data?.rows ?? [];
   const exposedPreviewCount = previewRows.filter((row) => row.decision.exposed).length;
   const blockedPreviewCount = previewRows.length - exposedPreviewCount;
+  const productLineOptions = useMemo(
+    () => (productLinesQuery.data ?? [])
+      .filter((line) => line.status === undefined || line.status === null || line.status === "active")
+      .sort((first, second) => first.name.localeCompare(second.name)),
+    [productLinesQuery.data],
+  );
+  const categoryOptions = useMemo(
+    () => (categoriesQuery.data ?? [])
+      .filter((category) => category.isActive !== false)
+      .sort((first, second) => first.name.localeCompare(second.name)),
+    [categoriesQuery.data],
+  );
+  const productOptions = useMemo(
+    () => (productsQuery.data ?? [])
+      .filter((product) => product.status ? product.status === "active" : product.active !== 0)
+      .sort((first, second) => {
+        const firstSku = first.sku ?? first.baseSku ?? "";
+        const secondSku = second.sku ?? second.baseSku ?? "";
+        const skuCompare = firstSku.localeCompare(secondSku);
+        return skuCompare !== 0 ? skuCompare : first.name.localeCompare(second.name);
+      }),
+    [productsQuery.data],
+  );
+  const variantOptions = useMemo(
+    () => (variantsQuery.data ?? [])
+      .filter((variant) => variant.isActive !== false && variant.active !== 0)
+      .sort((first, second) => {
+        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+        if (skuCompare !== 0) return skuCompare;
+        const nameCompare = first.name.localeCompare(second.name);
+        return nameCompare !== 0 ? nameCompare : first.id - second.id;
+      }),
+    [variantsQuery.data],
+  );
 
   useEffect(() => {
     if (!rulesQuery.data) return;
@@ -3247,8 +3450,16 @@ function CatalogExposureTab() {
         open={ruleDialogOpen}
         onOpenChange={setRuleDialogOpen}
         onSubmit={addRuleFromForm}
+        categoryOptions={categoryOptions}
+        isLoadingCategories={categoriesQuery.isLoading || categoriesQuery.isFetching}
+        isLoadingProductLines={productLinesQuery.isLoading || productLinesQuery.isFetching}
+        isLoadingProducts={productsQuery.isLoading || productsQuery.isFetching}
+        isLoadingVariants={variantsQuery.isLoading || variantsQuery.isFetching}
+        productLineOptions={productLineOptions}
+        productOptions={productOptions}
         ruleForm={ruleForm}
         setRuleForm={setRuleForm}
+        variantOptions={variantOptions}
       />
 
       <section className="rounded-md border bg-card p-4">
@@ -3328,6 +3539,10 @@ function ShippingConfigTab() {
     queryKey: ["/api/product-variants"],
     queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
   });
+  const warehousesQuery = useQuery<DropshipWarehouseOption[]>({
+    queryKey: ["/api/warehouses"],
+    queryFn: () => fetchJson<DropshipWarehouseOption[]>("/api/warehouses"),
+  });
   const config = shippingQuery.data?.config;
   const productVariantOptions = useMemo(
     () => (variantsQuery.data ?? [])
@@ -3339,6 +3554,15 @@ function ShippingConfigTab() {
         return nameCompare !== 0 ? nameCompare : first.id - second.id;
       }),
     [variantsQuery.data],
+  );
+  const warehouseOptions = useMemo(
+    () => (warehousesQuery.data ?? [])
+      .filter((warehouse) => warehouse.isActive === 1 && warehouse.warehouseType !== "bulk_storage")
+      .sort((first, second) => {
+        if (first.isDefault !== second.isDefault) return second.isDefault - first.isDefault;
+        return first.name.localeCompare(second.name);
+      }),
+    [warehousesQuery.data],
   );
 
   async function runShippingAction(action: string, task: () => Promise<void>) {
@@ -3447,11 +3671,11 @@ function ShippingConfigTab() {
 
   return (
     <div className="space-y-5">
-      {(shippingQuery.error || error) && (
+      {(shippingQuery.error || warehousesQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(shippingQuery.error, "Unable to load dropship shipping config.")}
+            {error || queryErrorMessage(shippingQuery.error ?? warehousesQuery.error, "Unable to load dropship shipping config.")}
           </AlertDescription>
         </Alert>
       )}
@@ -3509,12 +3733,16 @@ function ShippingConfigTab() {
           isSaving={pendingAction === "zone"}
           onChange={setZoneForm}
           onSave={saveZoneRule}
+          warehouses={warehouseOptions}
+          warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
         />
         <ShippingRateTablePanel
           form={rateForm}
           isSaving={pendingAction === "rate"}
           onChange={setRateForm}
           onSave={saveRateTable}
+          warehouses={warehouseOptions}
+          warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
         />
         <ShippingMarkupPolicyPanel
           activePolicy={config?.activeMarkupPolicy ?? null}
@@ -3641,14 +3869,120 @@ function ShippingPackageProfilePanel({
   );
 }
 
-function ProductVariantSkuPicker({
+function SearchableOptionPicker({
+  clearLabel = "Clear selection",
+  clearable = false,
+  disabled = false,
+  emptyText,
   isLoading,
+  label,
   onChange,
+  options,
+  placeholder,
+  searchPlaceholder,
+  value,
+}: {
+  clearLabel?: string;
+  clearable?: boolean;
+  disabled?: boolean;
+  emptyText: string;
+  isLoading: boolean;
+  label: string;
+  onChange: (value: string) => void;
+  options: DropshipSelectOption[];
+  placeholder: string;
+  searchPlaceholder: string;
+  value: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedOption = options.find((option) => option.value === value) ?? null;
+
+  return (
+    <div>
+      <label className="text-sm font-medium">{label}</label>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            aria-expanded={open}
+            className="mt-2 h-10 w-full justify-between"
+            disabled={disabled}
+            role="combobox"
+            type="button"
+            variant="outline"
+          >
+            <span className={selectedOption || value ? "truncate" : "truncate text-muted-foreground"}>
+              {isLoading
+                ? "Loading..."
+                : selectedOption
+                  ? selectedOption.label
+                  : value
+                    ? `Selected ID ${value} (not found)`
+                    : placeholder}
+            </span>
+            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[360px] p-0">
+          <Command>
+            <CommandInput placeholder={searchPlaceholder} />
+            <CommandList>
+              <CommandEmpty>{emptyText}</CommandEmpty>
+              <CommandGroup>
+                {clearable && value && (
+                  <CommandItem
+                    onSelect={() => {
+                      onChange("");
+                      setOpen(false);
+                    }}
+                    value="__clear_selection__"
+                  >
+                    <MinusCircle className="mr-2 h-4 w-4" />
+                    {clearLabel}
+                  </CommandItem>
+                )}
+                {options.map((option) => (
+                  <CommandItem
+                    key={option.value}
+                    onSelect={() => {
+                      onChange(option.value);
+                      setOpen(false);
+                    }}
+                    value={option.search ?? `${option.label} ${option.detail ?? ""} ${option.value}`}
+                  >
+                    <Check className={`mr-2 h-4 w-4 ${option.value === value ? "opacity-100" : "opacity-0"}`} />
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{option.label}</div>
+                      {option.detail && (
+                        <div className="truncate text-xs text-muted-foreground">{option.detail}</div>
+                      )}
+                    </div>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
+function ProductVariantSkuPicker({
+  clearable = false,
+  disabled = false,
+  isLoading,
+  label = "SKU",
+  onChange,
+  placeholder = "Select SKU",
   value,
   variants,
 }: {
+  clearable?: boolean;
+  disabled?: boolean;
   isLoading: boolean;
+  label?: string;
   onChange: (value: string) => void;
+  placeholder?: string;
   value: string;
   variants: DropshipProductVariantOption[];
 }) {
@@ -3657,18 +3991,19 @@ function ProductVariantSkuPicker({
 
   return (
     <div>
-      <label className="text-sm font-medium">SKU</label>
+      {label && <label className="text-sm font-medium">{label}</label>}
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <Button
             aria-expanded={open}
-            className="mt-2 h-10 w-full justify-between"
+            className={`${label ? "mt-2 " : ""}h-10 w-full justify-between`}
+            disabled={disabled}
             role="combobox"
             type="button"
             variant="outline"
           >
             <span className={selectedVariant ? "truncate" : "truncate text-muted-foreground"}>
-              {isLoading ? "Loading SKUs..." : selectedVariant ? formatVariantOption(selectedVariant) : "Select SKU"}
+              {isLoading ? "Loading SKUs..." : selectedVariant ? formatVariantOption(selectedVariant) : placeholder}
             </span>
             <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
           </Button>
@@ -3679,6 +4014,18 @@ function ProductVariantSkuPicker({
             <CommandList>
               <CommandEmpty>No SKU found.</CommandEmpty>
               <CommandGroup>
+                {clearable && value && (
+                  <CommandItem
+                    onSelect={() => {
+                      onChange("");
+                      setOpen(false);
+                    }}
+                    value="__clear_variant__"
+                  >
+                    <MinusCircle className="mr-2 h-4 w-4" />
+                    Clear SKU
+                  </CommandItem>
+                )}
                 {variants.map((variant) => (
                   <CommandItem
                     key={variant.id}
@@ -3711,17 +4058,27 @@ function ShippingZoneRulePanel({
   isSaving,
   onChange,
   onSave,
+  warehouses,
+  warehousesLoading,
 }: {
   form: ShippingZoneRuleFormState;
   isSaving: boolean;
   onChange: Dispatch<SetStateAction<ShippingZoneRuleFormState>>;
   onSave: () => void;
+  warehouses: DropshipWarehouseOption[];
+  warehousesLoading: boolean;
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
       <PanelHeader title="Zones" detail="Origin warehouse and destination matching for cached rate lookups." />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <ShippingInput label="Origin warehouse ID" value={form.originWarehouseId} onChange={(value) => onChange((current) => ({ ...current, originWarehouseId: value }))} />
+        <WarehouseSelect
+          label="Origin warehouse"
+          value={form.originWarehouseId}
+          onChange={(value) => onChange((current) => ({ ...current, originWarehouseId: value }))}
+          warehouses={warehouses}
+          warehousesLoading={warehousesLoading}
+        />
         <ShippingInput label="Country" value={form.destinationCountry} onChange={(value) => onChange((current) => ({ ...current, destinationCountry: value }))} />
         <ShippingInput label="Region" value={form.destinationRegion} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, destinationRegion: value }))} />
         <ShippingInput label="Postal prefix" value={form.postalPrefix} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, postalPrefix: value }))} />
@@ -3742,11 +4099,15 @@ function ShippingRateTablePanel({
   isSaving,
   onChange,
   onSave,
+  warehouses,
+  warehousesLoading,
 }: {
   form: ShippingRateTableFormState;
   isSaving: boolean;
   onChange: Dispatch<SetStateAction<ShippingRateTableFormState>>;
   onSave: () => void;
+  warehouses: DropshipWarehouseOption[];
+  warehousesLoading: boolean;
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
@@ -3770,7 +4131,14 @@ function ShippingRateTablePanel({
         </div>
         <ShippingInput label="Effective from" value={form.effectiveFrom} placeholder="Optional ISO date" onChange={(value) => onChange((current) => ({ ...current, effectiveFrom: value }))} />
         <ShippingInput label="Effective to" value={form.effectiveTo} placeholder="Optional ISO date" onChange={(value) => onChange((current) => ({ ...current, effectiveTo: value }))} />
-        <ShippingInput label="Warehouse ID" value={form.warehouseId} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, warehouseId: value }))} />
+        <WarehouseSelect
+          label="Warehouse"
+          optional
+          value={form.warehouseId}
+          onChange={(value) => onChange((current) => ({ ...current, warehouseId: value }))}
+          warehouses={warehouses}
+          warehousesLoading={warehousesLoading}
+        />
         <ShippingInput label="Destination zone" value={form.destinationZone} onChange={(value) => onChange((current) => ({ ...current, destinationZone: value }))} />
         <ShippingInput label="Min grams" value={form.minWeightGrams} onChange={(value) => onChange((current) => ({ ...current, minWeightGrams: value }))} />
         <ShippingInput label="Max grams" value={form.maxWeightGrams} onChange={(value) => onChange((current) => ({ ...current, maxWeightGrams: value }))} />
@@ -3969,6 +4337,52 @@ function PanelHeader({ detail, title }: { detail: string; title: string }) {
     <div>
       <h2 className="text-lg font-semibold">{title}</h2>
       <p className="text-sm text-muted-foreground">{detail}</p>
+    </div>
+  );
+}
+
+function WarehouseSelect({
+  label,
+  onChange,
+  optional = false,
+  value,
+  warehouses,
+  warehousesLoading,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  optional?: boolean;
+  value: string;
+  warehouses: DropshipWarehouseOption[];
+  warehousesLoading: boolean;
+}) {
+  const selectedWarehouseKnown = value === "" || warehouses.some((warehouse) => String(warehouse.id) === value);
+
+  return (
+    <div>
+      <label className="text-sm font-medium">{label}</label>
+      <Select
+        value={value || NO_DEFAULT_WAREHOUSE_VALUE}
+        onValueChange={(nextValue) => onChange(nextValue === NO_DEFAULT_WAREHOUSE_VALUE ? "" : nextValue)}
+        disabled={warehousesLoading}
+      >
+        <SelectTrigger className="mt-2">
+          <SelectValue placeholder={warehousesLoading ? "Loading warehouses..." : "Select warehouse"} />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>
+            {optional ? "Any warehouse" : "Select warehouse"}
+          </SelectItem>
+          {!selectedWarehouseKnown && (
+            <SelectItem value={value}>Warehouse ID {value} (not found)</SelectItem>
+          )}
+          {warehouses.map((warehouse) => (
+            <SelectItem key={warehouse.id} value={String(warehouse.id)}>
+              {formatWarehouseOption(warehouse)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }
@@ -5312,21 +5726,73 @@ function ReturnPolicyPanel({
 
 function ReturnCreatePanel({
   form,
+  intakes,
+  intakesLoading,
   isSaving,
   onAddItem,
   onChange,
   onItemChange,
   onRemoveItem,
   onSubmit,
+  storeConnections,
+  storeConnectionsLoading,
+  variants,
+  variantsLoading,
+  vendorOptions,
+  vendorsLoading,
 }: {
   form: ReturnCreateFormState;
+  intakes: DropshipAdminOrderOpsIntakeListItem[];
+  intakesLoading: boolean;
   isSaving: boolean;
   onAddItem: () => void;
   onChange: (patch: Partial<ReturnCreateFormState>) => void;
   onItemChange: (index: number, patch: Partial<ReturnCreateItemFormState>) => void;
   onRemoveItem: (index: number) => void;
   onSubmit: () => void;
+  storeConnections: DropshipAdminStoreConnectionListItem[];
+  storeConnectionsLoading: boolean;
+  variants: DropshipProductVariantOption[];
+  variantsLoading: boolean;
+  vendorOptions: DropshipSelectOption[];
+  vendorsLoading: boolean;
 }) {
+  const storeConnectionOptions = storeConnections.map(storeConnectionSelectOption);
+  const intakeOptions = intakes.map(orderIntakeSelectOption);
+  const omsOrderOptions = buildOmsOrderSelectOptions(intakes);
+
+  function selectStoreConnection(storeConnectionId: string) {
+    const connection = storeConnections.find((candidate) => String(candidate.storeConnectionId) === storeConnectionId);
+    onChange({
+      storeConnectionId,
+      ...(connection ? { vendorId: String(connection.vendor.vendorId) } : {}),
+    });
+  }
+
+  function selectIntake(intakeId: string) {
+    const intake = intakes.find((candidate) => String(candidate.intakeId) === intakeId);
+    onChange({
+      intakeId,
+      ...(intake ? {
+        vendorId: String(intake.vendor.vendorId),
+        storeConnectionId: String(intake.storeConnection.storeConnectionId),
+        omsOrderId: intake.omsOrderId === null ? "" : String(intake.omsOrderId),
+      } : {}),
+    });
+  }
+
+  function selectOmsOrder(omsOrderId: string) {
+    const intake = intakes.find((candidate) => candidate.omsOrderId !== null && String(candidate.omsOrderId) === omsOrderId);
+    onChange({
+      omsOrderId,
+      ...(intake ? {
+        vendorId: String(intake.vendor.vendorId),
+        storeConnectionId: String(intake.storeConnection.storeConnectionId),
+        intakeId: String(intake.intakeId),
+      } : {}),
+    });
+  }
+
   return (
     <section className="rounded-md border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -5347,10 +5813,15 @@ function ReturnCreatePanel({
 
       <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_1.2fr]">
         <div className="grid gap-3 md:grid-cols-2">
-          <AdminReturnInput
-            label="Vendor ID"
+          <SearchableOptionPicker
+            label="Vendor"
             value={form.vendorId}
             disabled={isSaving}
+            options={vendorOptions}
+            isLoading={vendorsLoading}
+            placeholder="Select vendor"
+            searchPlaceholder="Search vendor, email, or member..."
+            emptyText="No dropship vendors found."
             onChange={(value) => onChange({ vendorId: value })}
           />
           <AdminReturnInput
@@ -5359,26 +5830,44 @@ function ReturnCreatePanel({
             disabled={isSaving}
             onChange={(value) => onChange({ rmaNumber: value })}
           />
-          <AdminReturnInput
-            label="Store connection ID"
+          <SearchableOptionPicker
+            label="Store connection"
             value={form.storeConnectionId}
-            placeholder="Optional"
             disabled={isSaving}
-            onChange={(value) => onChange({ storeConnectionId: value })}
+            clearable
+            clearLabel="No store connection"
+            options={storeConnectionOptions}
+            isLoading={storeConnectionsLoading}
+            placeholder="Optional"
+            searchPlaceholder="Search store, vendor, or email..."
+            emptyText="No store connections found."
+            onChange={selectStoreConnection}
           />
-          <AdminReturnInput
-            label="Intake ID"
+          <SearchableOptionPicker
+            label="Order intake"
             value={form.intakeId}
-            placeholder="Optional"
             disabled={isSaving}
-            onChange={(value) => onChange({ intakeId: value })}
+            clearable
+            clearLabel="No intake"
+            options={intakeOptions}
+            isLoading={intakesLoading}
+            placeholder="Optional"
+            searchPlaceholder="Search order, intake, vendor, or store..."
+            emptyText="No order intakes found."
+            onChange={selectIntake}
           />
-          <AdminReturnInput
-            label="OMS order ID"
+          <SearchableOptionPicker
+            label="OMS order"
             value={form.omsOrderId}
-            placeholder="Optional"
             disabled={isSaving}
-            onChange={(value) => onChange({ omsOrderId: value })}
+            clearable
+            clearLabel="No OMS order"
+            options={omsOrderOptions}
+            isLoading={intakesLoading}
+            placeholder="Optional"
+            searchPlaceholder="Search OMS order, intake, or marketplace order..."
+            emptyText="No OMS orders found."
+            onChange={selectOmsOrder}
           />
           <AdminReturnInput
             label="Return window days"
@@ -5461,11 +5950,15 @@ function ReturnCreatePanel({
                 {form.items.map((item, index) => (
                   <TableRow key={index}>
                     <TableCell>
-                      <Input
-                        value={item.productVariantId}
-                        placeholder="Optional"
+                      <ProductVariantSkuPicker
+                        clearable
                         disabled={isSaving}
-                        onChange={(event) => onItemChange(index, { productVariantId: event.target.value })}
+                        isLoading={variantsLoading}
+                        label=""
+                        placeholder="Optional SKU"
+                        variants={variants}
+                        value={item.productVariantId}
+                        onChange={(value) => onItemChange(index, { productVariantId: value })}
                       />
                     </TableCell>
                     <TableCell>
@@ -6640,43 +7133,132 @@ function compactJsonPayload(payload: Record<string, unknown>): string {
 }
 
 function CatalogRuleTargetInput({
+  categoryOptions,
+  isLoadingCategories,
+  isLoadingProductLines,
+  isLoadingProducts,
+  isLoadingVariants,
+  productLineOptions,
+  productOptions,
   ruleForm,
   setRuleForm,
+  variantOptions,
 }: {
+  categoryOptions: DropshipProductCategoryOption[];
+  isLoadingCategories: boolean;
+  isLoadingProductLines: boolean;
+  isLoadingProducts: boolean;
+  isLoadingVariants: boolean;
+  productLineOptions: DropshipProductLineOption[];
+  productOptions: DropshipProductOption[];
   ruleForm: CatalogRuleFormState;
   setRuleForm: Dispatch<SetStateAction<CatalogRuleFormState>>;
+  variantOptions: DropshipProductVariantOption[];
 }) {
-  const config = catalogRuleTargetInputConfig(ruleForm.scopeType);
-  if (!config) return null;
+  if (ruleForm.scopeType === "catalog") return null;
+
+  if (ruleForm.scopeType === "product_line") {
+    return (
+      <SearchableOptionPicker
+        label="Product line"
+        value={ruleForm.productLineId}
+        onChange={(value) => setRuleForm((current) => ({ ...current, productLineId: value }))}
+        options={productLineOptions.map((line) => ({
+          value: String(line.id),
+          label: line.name,
+          detail: typeof line.productCount === "number" ? `${line.productCount} product${line.productCount === 1 ? "" : "s"}` : undefined,
+          search: `${line.name} ${line.id}`,
+        }))}
+        isLoading={isLoadingProductLines}
+        placeholder="Select product line"
+        searchPlaceholder="Search product lines..."
+        emptyText="No product lines found."
+      />
+    );
+  }
+
+  if (ruleForm.scopeType === "product") {
+    return (
+      <SearchableOptionPicker
+        label="Product"
+        value={ruleForm.productId}
+        onChange={(value) => setRuleForm((current) => ({ ...current, productId: value }))}
+        options={productOptions.map((product) => {
+          const sku = product.sku ?? product.baseSku ?? "";
+          return {
+            value: String(product.id),
+            label: product.name,
+            detail: sku || undefined,
+            search: `${product.name} ${sku} ${product.id}`,
+          };
+        })}
+        isLoading={isLoadingProducts}
+        placeholder="Select product"
+        searchPlaceholder="Search product or SKU..."
+        emptyText="No products found."
+      />
+    );
+  }
+
+  if (ruleForm.scopeType === "variant") {
+    return (
+      <ProductVariantSkuPicker
+        isLoading={isLoadingVariants}
+        label="SKU / variant"
+        onChange={(value) => setRuleForm((current) => ({ ...current, productVariantId: value }))}
+        value={ruleForm.productVariantId}
+        variants={variantOptions}
+      />
+    );
+  }
 
   return (
-    <div>
-      <label className="text-sm font-medium" htmlFor={`dropship-catalog-rule-${config.key}`}>
-        {config.label}
-      </label>
-      <Input
-        id={`dropship-catalog-rule-${config.key}`}
-        className="mt-2"
-        value={ruleForm[config.key]}
-        onChange={(event) => setRuleForm((current) => ({ ...current, [config.key]: event.target.value }))}
-        placeholder={config.placeholder}
-      />
-    </div>
+    <SearchableOptionPicker
+      label="Category"
+      value={ruleForm.category}
+      onChange={(value) => setRuleForm((current) => ({ ...current, category: value }))}
+      options={categoryOptions.map((category) => ({
+        value: category.name,
+        label: category.name,
+        detail: typeof category.productCount === "number" ? `${category.productCount} product${category.productCount === 1 ? "" : "s"}` : undefined,
+        search: `${category.name} ${category.id}`,
+      }))}
+      isLoading={isLoadingCategories}
+      placeholder="Select category"
+      searchPlaceholder="Search categories..."
+      emptyText="No categories found."
+    />
   );
 }
 
 function CatalogRuleDialog({
+  categoryOptions,
+  isLoadingCategories,
+  isLoadingProductLines,
+  isLoadingProducts,
+  isLoadingVariants,
   onOpenChange,
   onSubmit,
   open,
+  productLineOptions,
+  productOptions,
   ruleForm,
   setRuleForm,
+  variantOptions,
 }: {
+  categoryOptions: DropshipProductCategoryOption[];
+  isLoadingCategories: boolean;
+  isLoadingProductLines: boolean;
+  isLoadingProducts: boolean;
+  isLoadingVariants: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: () => void;
   open: boolean;
+  productLineOptions: DropshipProductLineOption[];
+  productOptions: DropshipProductOption[];
   ruleForm: CatalogRuleFormState;
   setRuleForm: Dispatch<SetStateAction<CatalogRuleFormState>>;
+  variantOptions: DropshipProductVariantOption[];
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -6736,7 +7318,18 @@ function CatalogRuleDialog({
               </Select>
             </div>
 
-            <CatalogRuleTargetInput ruleForm={ruleForm} setRuleForm={setRuleForm} />
+            <CatalogRuleTargetInput
+              categoryOptions={categoryOptions}
+              isLoadingCategories={isLoadingCategories}
+              isLoadingProductLines={isLoadingProductLines}
+              isLoadingProducts={isLoadingProducts}
+              isLoadingVariants={isLoadingVariants}
+              productLineOptions={productLineOptions}
+              productOptions={productOptions}
+              ruleForm={ruleForm}
+              setRuleForm={setRuleForm}
+              variantOptions={variantOptions}
+            />
 
             <div className="md:col-span-2">
               <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-notes">Notes</label>
@@ -7082,26 +7675,6 @@ function CatalogMetric({
   );
 }
 
-function catalogRuleTargetInputConfig(scopeType: CatalogExposureScopeFilter): {
-  key: "productLineId" | "productId" | "productVariantId" | "category";
-  label: string;
-  placeholder: string;
-} | null {
-  if (scopeType === "product_line") {
-    return { key: "productLineId", label: "Product line ID", placeholder: "123" };
-  }
-  if (scopeType === "product") {
-    return { key: "productId", label: "Product ID", placeholder: "123" };
-  }
-  if (scopeType === "variant") {
-    return { key: "productVariantId", label: "Variant ID", placeholder: "123" };
-  }
-  if (scopeType === "category") {
-    return { key: "category", label: "Category", placeholder: "Sealed wax" };
-  }
-  return null;
-}
-
 function catalogRuleTargetLabel(rule: DropshipAdminCatalogExposureRuleInput): string {
   if (rule.scopeType === "catalog") return "Entire active catalog";
   if (rule.scopeType === "product_line") return `Product line ${rule.productLineId}`;
@@ -7420,6 +7993,121 @@ function storeConnectionNeedsAttention(connection: DropshipAdminStoreConnectionL
 function formatWarehouseOption(warehouse: DropshipWarehouseOption): string {
   const defaultSuffix = warehouse.isDefault === 1 ? " default" : "";
   return `${warehouse.name} (${warehouse.code}) - ID ${warehouse.id}${defaultSuffix}`;
+}
+
+function buildVendorSelectOptions(items: DropshipDogfoodReadinessItem[]): DropshipSelectOption[] {
+  const vendors = new Map<number, DropshipDogfoodReadinessItem["vendor"]>();
+  for (const item of items) {
+    vendors.set(item.vendor.vendorId, item.vendor);
+  }
+  return Array.from(vendors.values())
+    .sort((first, second) => vendorDisplayName(first).localeCompare(vendorDisplayName(second)))
+    .map((vendor) => ({
+      value: String(vendor.vendorId),
+      label: vendorDisplayName(vendor),
+      detail: [
+        vendor.email,
+        vendor.memberId,
+        formatStatus(vendor.status),
+        formatStatus(vendor.entitlementStatus),
+      ].filter(Boolean).join(" / "),
+      search: [
+        vendor.vendorId,
+        vendor.businessName,
+        vendor.email,
+        vendor.memberId,
+        vendor.status,
+        vendor.entitlementStatus,
+      ].filter(Boolean).join(" "),
+    }));
+}
+
+function vendorDisplayName(vendor: DropshipDogfoodReadinessItem["vendor"] | DropshipAdminOrderOpsVendorSummary): string {
+  return vendor.businessName || vendor.email || `Vendor ${vendor.vendorId}`;
+}
+
+function storeConnectionDisplayName(connection: DropshipAdminStoreConnectionListItem | DropshipAdminOrderOpsStoreSummary): string {
+  return connection.externalDisplayName
+    || connection.shopDomain
+    || `${formatStatus(connection.platform)} connection ${connection.storeConnectionId}`;
+}
+
+function storeConnectionSelectOption(connection: DropshipAdminStoreConnectionListItem): DropshipSelectOption {
+  const storeLabel = storeConnectionDisplayName(connection);
+  const vendorLabel = vendorDisplayName(connection.vendor);
+  return {
+    value: String(connection.storeConnectionId),
+    label: storeLabel,
+    detail: [
+      vendorLabel,
+      formatStatus(connection.platform),
+      formatStatus(connection.status),
+      `ID ${connection.storeConnectionId}`,
+    ].join(" / "),
+    search: [
+      connection.storeConnectionId,
+      storeLabel,
+      connection.externalAccountId,
+      connection.shopDomain,
+      connection.platform,
+      connection.status,
+      vendorLabel,
+      connection.vendor.email,
+      connection.vendor.memberId,
+      connection.vendor.vendorId,
+    ].filter(Boolean).join(" "),
+  };
+}
+
+function orderIntakeSelectOption(intake: DropshipAdminOrderOpsIntakeListItem): DropshipSelectOption {
+  const orderLabel = intake.externalOrderNumber || intake.externalOrderId || `Intake ${intake.intakeId}`;
+  const storeLabel = storeConnectionDisplayName(intake.storeConnection);
+  const vendorLabel = vendorDisplayName(intake.vendor);
+  return {
+    value: String(intake.intakeId),
+    label: orderLabel,
+    detail: [
+      `Intake ${intake.intakeId}`,
+      vendorLabel,
+      storeLabel,
+      intake.omsOrderId === null ? "" : `OMS ${intake.omsOrderId}`,
+      formatStatus(intake.status),
+    ].filter(Boolean).join(" / "),
+    search: [
+      intake.intakeId,
+      intake.omsOrderId,
+      intake.externalOrderId,
+      intake.externalOrderNumber,
+      intake.platform,
+      intake.status,
+      vendorLabel,
+      intake.vendor.email,
+      intake.vendor.memberId,
+      storeLabel,
+      intake.storeConnection.storeConnectionId,
+    ].filter(Boolean).join(" "),
+  };
+}
+
+function buildOmsOrderSelectOptions(intakes: DropshipAdminOrderOpsIntakeListItem[]): DropshipSelectOption[] {
+  const options = new Map<number, DropshipSelectOption>();
+  for (const intake of intakes) {
+    if (intake.omsOrderId === null) continue;
+    const intakeOption = orderIntakeSelectOption(intake);
+    options.set(intake.omsOrderId, {
+      value: String(intake.omsOrderId),
+      label: `OMS order ${intake.omsOrderId}`,
+      detail: intakeOption.detail,
+      search: `${intake.omsOrderId} ${intakeOption.search}`,
+    });
+  }
+  return Array.from(options.values()).sort((first, second) => Number(second.value) - Number(first.value));
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const sideLength = Math.max(3, Math.floor((maxLength - 3) / 2));
+  return `${value.slice(0, sideLength)}...${value.slice(-sideLength)}`;
 }
 
 function formatVariantOption(variant: DropshipProductVariantOption): string {
