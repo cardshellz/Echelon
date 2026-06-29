@@ -310,6 +310,71 @@ export class PickingUseCases {
     private readonly channelSync?: ChannelSyncLike,
   ) {}
 
+  private async logRejectedPickCommand(params: {
+    beforeItem: OrderItem;
+    order?: Order;
+    status: string;
+    pickedQuantity?: number;
+    shortReason?: string;
+    pickMethod?: string;
+    userId?: string;
+    deviceType?: string;
+    sessionId?: string;
+    rejectionCode: string;
+    message: string;
+  }): Promise<void> {
+    const currentPickedQuantity = params.beforeItem.pickedQuantity || 0;
+    const actorId = params.userId || params.order?.assignedPickerId || undefined;
+
+    try {
+      const actor = actorId ? await this.storage.getUser(actorId) : null;
+
+      await this.storage.createPickingLog({
+        actionType: "pick_command_rejected",
+        pickerId: actorId,
+        pickerName: actor?.displayName || actor?.username || actorId,
+        pickerRole: actor?.role,
+        orderId: params.beforeItem.orderId,
+        orderNumber: params.order?.orderNumber,
+        orderItemId: params.beforeItem.id,
+        productId: params.beforeItem.productId,
+        sku: params.beforeItem.sku,
+        itemName: params.beforeItem.name,
+        locationCode: params.beforeItem.location,
+        qtyRequested: params.beforeItem.quantity,
+        qtyBefore: currentPickedQuantity,
+        qtyAfter: currentPickedQuantity,
+        qtyDelta: 0,
+        reason: params.rejectionCode,
+        notes: params.message,
+        deviceType: params.deviceType || "desktop",
+        sessionId: params.sessionId,
+        pickMethod: params.pickMethod || "manual",
+        itemStatusBefore: params.beforeItem.status,
+        itemStatusAfter: params.beforeItem.status,
+        metadata: {
+          requested: {
+            status: params.status,
+            pickedQuantity: params.pickedQuantity ?? null,
+            shortReason: params.shortReason ?? null,
+            pickMethod: params.pickMethod ?? null,
+          },
+          before: {
+            status: params.beforeItem.status,
+            pickedQuantity: currentPickedQuantity,
+            quantity: params.beforeItem.quantity,
+            shortReason: params.beforeItem.shortReason ?? null,
+          },
+          rejectionCode: params.rejectionCode,
+          message: params.message,
+          commandUserId: params.userId ?? null,
+        },
+      });
+    } catch (error: any) {
+      console.warn(`[Pick] failed to log rejected pick command for item ${params.beforeItem.id}: ${error?.message || error}`);
+    }
+  }
+
   private countUomLabel(variant: any | null | undefined): string {
     const unitsPerVariant = Math.max(1, Number(variant?.unitsPerVariant ?? variant?.units_per_variant ?? 1));
     const hierarchyLevel = Number(variant?.hierarchyLevel ?? variant?.hierarchy_level ?? 0);
@@ -930,12 +995,91 @@ export class PickingUseCases {
       return { success: true, item: beforeItem as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
     }
 
+    const currentPickedQuantity = beforeItem.pickedQuantity || 0;
+    let requestedPickedQuantity: number | undefined;
+
     // Validate pickedQuantity bounds
     if (pickedQuantity !== undefined) {
       const qty = Number(pickedQuantity);
       if (!Number.isInteger(qty) || qty < 0 || qty > beforeItem.quantity) {
         throw new ValidationError(`pickedQuantity must be an integer between 0 and ${beforeItem.quantity}`);
       }
+      requestedPickedQuantity = qty;
+    }
+
+    if (status === "completed" && requestedPickedQuantity !== undefined && requestedPickedQuantity !== beforeItem.quantity) {
+      const message = `Completed picks must set pickedQuantity to the full item quantity (${beforeItem.quantity})`;
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity: requestedPickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "completion_requires_full_quantity",
+        message,
+      });
+      return {
+        success: false,
+        error: "completion_requires_full_quantity",
+        message,
+      };
+    }
+
+    if (status === "in_progress" && requestedPickedQuantity === 0) {
+      const message = "In-progress picks must have a positive pickedQuantity";
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity: requestedPickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "in_progress_requires_positive_quantity",
+        message,
+      });
+      return {
+        success: false,
+        error: "in_progress_requires_positive_quantity",
+        message,
+      };
+    }
+
+    const effectivePickedQuantity = status === "completed"
+      ? beforeItem.quantity
+      : requestedPickedQuantity ?? currentPickedQuantity;
+    const effectiveShortReason = shortReason !== undefined ? shortReason : beforeItem.shortReason;
+
+    if (
+      status === beforeItem.status &&
+      effectivePickedQuantity === currentPickedQuantity &&
+      effectiveShortReason === beforeItem.shortReason
+    ) {
+      const message = `Pick request did not change item ${itemId}`;
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity: requestedPickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "no_pick_progress",
+        message,
+      });
+      return {
+        success: false,
+        error: "no_pick_progress",
+        message,
+      };
     }
 
     let completedDeductResult:
@@ -997,7 +1141,7 @@ export class PickingUseCases {
             ? this.inventoryCore.withTx(tx)
             : this.inventoryCore;
 
-        const pickedQtyForCompletion = pickedQuantity ?? beforeItem.quantity;
+        const pickedQtyForCompletion = effectivePickedQuantity;
         const provisionalItem = {
           ...beforeItem,
           status: "completed",
@@ -1030,7 +1174,7 @@ export class PickingUseCases {
           pickedAt: deductResult.success ? new Date() : beforeItem.pickedAt,
         };
         if (deductResult.success) {
-          if (pickedQuantity !== undefined) updates.pickedQuantity = pickedQuantity;
+          updates.pickedQuantity = effectivePickedQuantity;
           if (shortReason !== undefined) updates.shortReason = shortReason;
         }
 
@@ -1057,14 +1201,14 @@ export class PickingUseCases {
     } else {
       // Atomic status update with WHERE guard on expectedCurrentStatus
       item = await this.storage.updateOrderItemStatus(
-        itemId, status as ItemStatus, pickedQuantity, shortReason, beforeItem.status as ItemStatus,
+        itemId, status as ItemStatus, requestedPickedQuantity, shortReason, beforeItem.status as ItemStatus,
       );
     }
 
     if (!item) {
       // With no status guard on completed transitions, this should only happen
       // for non-completed status updates. Log and return error.
-      console.error(`[Pick] status_conflict on item ${itemId}: status='${beforeItem.status}', requested='${status}', pickedQty=${pickedQuantity}`);
+      console.error(`[Pick] status_conflict on item ${itemId}: status='${beforeItem.status}', requested='${status}', pickedQty=${requestedPickedQuantity}`);
       return { success: false, error: "status_conflict", message: `Item ${itemId} status conflict` };
     }
 
@@ -1076,7 +1220,7 @@ export class PickingUseCases {
     let actionType = "item_picked";
     if (status === "completed") actionType = "item_picked";
     else if (status === "short") actionType = "item_shorted";
-    else if (pickedQuantity !== undefined && beforeItem.pickedQuantity !== pickedQuantity) actionType = "item_quantity_adjusted";
+    else if (requestedPickedQuantity !== undefined && currentPickedQuantity !== requestedPickedQuantity) actionType = "item_quantity_adjusted";
 
     await this.storage.createPickingLog({
       actionType,

@@ -1052,6 +1052,57 @@ export default function Picking() {
   const focusedScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const scanPickInFlightRef = useRef<Set<number>>(new Set());
 
+  const applyServerItemToLocalQueues = (updatedItem: OrderItemWithReplen) => {
+    const applyToPickItem = (item: PickItem): PickItem => {
+      if (item.id !== updatedItem.id) return item;
+
+      const fulfilled = Math.max(0, updatedItem.fulfilledQuantity || 0);
+      const remainingQty = Math.max(0, updatedItem.quantity - fulfilled);
+      const pickedRemaining = Math.min(updatedItem.pickedQuantity || 0, remainingQty);
+
+      return {
+        ...item,
+        sku: updatedItem.sku,
+        name: updatedItem.name,
+        location: updatedItem.location,
+        qty: remainingQty,
+        picked: pickedRemaining,
+        status: remainingQty <= 0 ? "completed" : updatedItem.status as PickItem["status"],
+        image: updatedItem.imageUrl || item.image,
+        barcode: updatedItem.barcode || item.barcode,
+        replenPrediction: updatedItem.replenPrediction ?? item.replenPrediction ?? null,
+      };
+    };
+
+    setLocalSingleQueue(prev => prev.map(order => {
+      if (!order.items.some(item => item.id === updatedItem.id)) return order;
+
+      const items = order.items.map(applyToPickItem).filter(item => item.qty > 0 || item.status === "short");
+      const allDone = items.length > 0 && items.every(item => item.status === "completed" || item.status === "short");
+      return {
+        ...order,
+        items,
+        status: allDone ? "completed" : order.status,
+      };
+    }));
+
+    setQueue(prev => prev.map(batch => {
+      if (!batch.items.some(item => item.id === updatedItem.id)) return batch;
+
+      const items = batch.items.map(applyToPickItem).filter(item => item.qty > 0 || item.status === "short");
+      const allDone = items.length > 0 && items.every(item => item.status === "completed" || item.status === "short");
+      return {
+        ...batch,
+        items,
+        status: allDone ? "completed" : batch.status,
+      };
+    }));
+  };
+
+  const discardOptimisticLocalOrderForItem = (itemId: number) => {
+    setLocalSingleQueue(prev => prev.filter(order => !order.items.some(item => item.id === itemId)));
+  };
+
   // Mutation for updating items
   const updateItemMutation = useMutation({
     mutationFn: ({ itemId, status, pickedQuantity, shortReason, pickMethod }: {
@@ -1072,6 +1123,7 @@ export default function Picking() {
           )
         }));
       });
+      applyServerItemToLocalQueues(updatedItem);
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
 
       const replen = inventory?.replen;
@@ -1114,13 +1166,14 @@ export default function Picking() {
         }, 500);
       }
     },
-    onError: (error: Error) => {
+    onError: (error: Error, variables) => {
       // Critical: Reset all state so scanner can work again
       binCountPendingRef.current = false;
       orderCompletedPendingRef.current = false;
       setBinCountOpen(false);
       setBinCountContext(null);
       setMultiQtyOpen(false);
+      discardOptimisticLocalOrderForItem(variables.itemId);
 
       // Show error to user
       console.error("[PICK ERROR]", error.message, "status:", error);
