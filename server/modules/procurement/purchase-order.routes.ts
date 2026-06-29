@@ -265,6 +265,10 @@ export function registerPurchaseOrderRoutes(app: Express) {
           const lineType = l.line_type ?? l.lineType ?? "product";
           const variantIdRaw = l.product_variant_id ?? l.productVariantId;
           const productIdRaw = l.product_id ?? l.productId;
+          const expectedReceiveVariantIdRaw =
+            l.expected_receive_variant_id ?? l.expectedReceiveVariantId ?? variantIdRaw;
+          const expectedReceiveUnitsPerVariantRaw =
+            l.expected_receive_units_per_variant ?? l.expectedReceiveUnitsPerVariant;
           const out: any = {
             // line_type is the dispatch key; default to 'product' for
             // back-compat callers that don't send it (matches column default).
@@ -281,6 +285,14 @@ export function registerPurchaseOrderRoutes(app: Express) {
             productVariantId:
               lineType === "product" && variantIdRaw != null
                 ? Number(variantIdRaw)
+                : null,
+            expectedReceiveVariantId:
+              lineType === "product" && expectedReceiveVariantIdRaw != null
+                ? Number(expectedReceiveVariantIdRaw)
+                : null,
+            expectedReceiveUnitsPerVariant:
+              lineType === "product" && expectedReceiveUnitsPerVariantRaw != null
+                ? Number(expectedReceiveUnitsPerVariantRaw)
                 : null,
             orderQty: Number(l.quantity_ordered ?? l.orderQty),
             vendorProductId: l.vendor_product_id ?? l.vendorProductId ?? undefined,

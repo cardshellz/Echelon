@@ -168,6 +168,38 @@ const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   platform_fee: "by_line_count",
 };
 
+function positiveIntegerOrNull(value: unknown): number | null {
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue <= 0) return null;
+  return numberValue;
+}
+
+function firstPositiveInteger(...values: unknown[]): number | null {
+  for (const value of values) {
+    const numberValue = positiveIntegerOrNull(value);
+    if (numberValue !== null) return numberValue;
+  }
+  return null;
+}
+
+function getReceiveVariantId(row: any): number | null {
+  return firstPositiveInteger(
+    row?.expectedReceiveVariantId,
+    row?.expected_receive_variant_id,
+    row?.productVariantId,
+    row?.product_variant_id,
+  );
+}
+
+function getReceiveUnitsPerVariant(row: any): number | null {
+  return firstPositiveInteger(
+    row?.expectedReceiveUnitsPerVariant,
+    row?.expected_receive_units_per_variant,
+    row?.unitsPerUom,
+    row?.units_per_uom,
+  );
+}
+
 // ── Service factory ─────────────────────────────────────────────────
 
 export type ShipmentTrackingService = ReturnType<typeof createShipmentTrackingService>;
@@ -581,24 +613,6 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         ? poLines.filter((l: any) => lineIds.includes(l.id))
         : poLines;
 
-    // Resolve dimensions + cartonCount outside the tx (read-only, not contended)
-    const lineMeta = new Map<number, { dims: any; cartonCount: number | null; qtyPieces: number }>();
-    for (const poLine of candidateLines) {
-      const dims = await resolveDimensionsForVariant(poLine.productVariantId, po.vendorId);
-      const qtyPieces = qtyMap.size > 0 ? qtyMap.get(poLine.id)! : (poLine.orderQty ?? 0);
-
-      let cartonCount: number | null = null;
-      if (poLine.productVariantId) {
-        const pv = await storage.getProductVariantById(poLine.productVariantId);
-        const unitsPerCase = pv?.unitsPerVariant ?? 1;
-        if (unitsPerCase > 1) {
-          cartonCount = Math.ceil(qtyPieces / unitsPerCase);
-        }
-      }
-
-      lineMeta.set(poLine.id, { dims, cartonCount, qtyPieces });
-    }
-
     const candidateLineIds = candidateLines.map((l: any) => l.id);
 
     if (candidateLineIds.length === 0) {
@@ -609,7 +623,17 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     const created = await db.transaction(async (tx: any) => {
       // 1. Lock candidate PO lines (serializes concurrent adds on same lines)
       const lockedRows = await tx.execute(sqlTag`
-        SELECT id, line_type, status, order_qty, cancelled_qty, sku
+        SELECT
+          id,
+          line_type,
+          status,
+          order_qty,
+          cancelled_qty,
+          sku,
+          product_variant_id,
+          expected_receive_variant_id,
+          expected_receive_units_per_variant,
+          units_per_uom
         FROM procurement.purchase_order_lines
         WHERE id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
         FOR UPDATE
@@ -695,32 +719,45 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       }
 
       // 4. Insert new lines inside the transaction
-      const newLines = linesToAdd.map((poLine: any) => {
-        const meta = lineMeta.get(poLine.id)!;
+      const newLines = await Promise.all(linesToAdd.map(async (poLine: any) => {
+        const receiveVariantId = getReceiveVariantId(poLine);
+        const qtyPieces = qtyMap.size > 0 ? qtyMap.get(poLine.id)! : (poLine.order_qty ?? 0);
+        const dims = await resolveDimensionsForVariant(receiveVariantId, po.vendorId);
+
+        let cartonCount: number | null = null;
+        let receiveUnitsPerVariant = getReceiveUnitsPerVariant(poLine);
+        if (!receiveUnitsPerVariant && receiveVariantId) {
+          const receiveVariant = await storage.getProductVariantById(receiveVariantId);
+          receiveUnitsPerVariant = positiveIntegerOrNull(receiveVariant?.unitsPerVariant);
+        }
+        if (receiveUnitsPerVariant && receiveUnitsPerVariant > 1) {
+          cartonCount = Math.ceil(qtyPieces / receiveUnitsPerVariant);
+        }
+
         const computed = computeLineTotals({
-          qtyShipped: meta.qtyPieces,
-          cartonCount: meta.cartonCount,
-          weightKg: meta.dims.weightKg,
-          lengthCm: meta.dims.lengthCm,
-          widthCm: meta.dims.widthCm,
-          heightCm: meta.dims.heightCm,
+          qtyShipped: qtyPieces,
+          cartonCount,
+          weightKg: dims.weightKg,
+          lengthCm: dims.lengthCm,
+          widthCm: dims.widthCm,
+          heightCm: dims.heightCm,
         });
 
         return {
           inboundShipmentId: shipmentId,
           purchaseOrderId,
           purchaseOrderLineId: poLine.id,
-          productVariantId: poLine.product_variant_id,
+          productVariantId: receiveVariantId,
           sku: poLine.sku || null,
-          qtyShipped: meta.qtyPieces,
-          cartonCount: meta.cartonCount,
-          weightKg: meta.dims.weightKg,
-          lengthCm: meta.dims.lengthCm,
-          widthCm: meta.dims.widthCm,
-          heightCm: meta.dims.heightCm,
+          qtyShipped: qtyPieces,
+          cartonCount,
+          weightKg: dims.weightKg,
+          lengthCm: dims.lengthCm,
+          widthCm: dims.widthCm,
+          heightCm: dims.heightCm,
           ...computed,
         };
-      });
+      }));
 
       return await tx.insert(inboundShipmentLines).values(newLines).returning();
     });

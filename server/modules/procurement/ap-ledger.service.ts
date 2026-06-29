@@ -40,6 +40,19 @@ export class ApLedgerError extends Error {
   }
 }
 
+function positiveIntegerOrNull(value: unknown): number | null {
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue <= 0) return null;
+  return numberValue;
+}
+
+function resolvePoLineReceiveVariantId(poLine: any): number | null {
+  return (
+    positiveIntegerOrNull(poLine?.expectedReceiveVariantId) ??
+    positiveIntegerOrNull(poLine?.productVariantId)
+  );
+}
+
 export type ApLedgerCommand =
   | "approve_invoice"
   | "dispute_invoice"
@@ -1354,7 +1367,7 @@ export async function importLinesFromPO(invoiceId: number, purchaseOrderId: numb
       .values({
         vendorInvoiceId: invoiceId,
         purchaseOrderLineId: pol.id,
-        productVariantId: pol.productVariantId,
+        productVariantId: resolvePoLineReceiveVariantId(pol),
         lineNumber: lineNum,
         sku: pol.sku,
         productName: pol.productName,

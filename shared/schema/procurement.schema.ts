@@ -436,13 +436,18 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   lineNumber: integer("line_number").notNull(), // Sequential for display
 
   // Product reference. Nullable since migration 0564 because non-product
-// line types (discount / fee / tax / rebate / adjustment) carry no product.
-// Service-level validation (purchasing.service.validateCreateWithLinesInput)
-// still requires both columns on product lines and forbids them on
-// non-product lines, so the integrity constraint moves from the schema to
-// the service — wider data shape, narrower runtime rule.
+  // line types (discount / fee / tax / rebate / adjustment) carry no product.
+  // Service-level validation (purchasing.service.validateCreateWithLinesInput)
+  // still requires product_id on product lines and forbids it on non-product
+  // lines, so the integrity constraint moves from the schema to the service:
+  // wider data shape, narrower runtime rule.
   productId: integer("product_id").references(() => products.id),
+  // Deprecated as purchasing identity; retained for compatibility. New receipt
+  // planning should use expected_receive_variant_id.
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
+  // Variant/configuration expected at receiving time. The PO still buys
+  // product SKU pieces through product_id + order_qty.
+  expectedReceiveVariantId: integer("expected_receive_variant_id").references(() => productVariants.id),
   vendorProductId: integer("vendor_product_id").references(() => vendorProducts.id, { onDelete: "set null" }),
   sku: varchar("sku", { length: 100 }), // Cached at creation
   productName: text("product_name"), // Cached
@@ -450,9 +455,10 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   vendorSku: varchar("vendor_sku", { length: 100 }), // Vendor's SKU
 
   // Quantities
-  unitOfMeasure: varchar("unit_of_measure", { length: 20 }), // each, pack, box, case
-  unitsPerUom: integer("units_per_uom").default(1), // For base unit conversion
-  orderQty: integer("order_qty").notNull(), // Ordered quantity (variant units)
+  unitOfMeasure: varchar("unit_of_measure", { length: 20 }), // legacy receive/display UOM
+  unitsPerUom: integer("units_per_uom").default(1), // legacy receive units per UOM
+  expectedReceiveUnitsPerVariant: integer("expected_receive_units_per_variant").default(1),
+  orderQty: integer("order_qty").notNull(), // Ordered quantity in pieces/base units
   receivedQty: integer("received_qty").default(0), // Running tally from receipts
   damagedQty: integer("damaged_qty").default(0), // Running tally
   returnedQty: integer("returned_qty").default(0), // Running tally for RMA
@@ -505,7 +511,7 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
 // ---------------------------------------------------------------------------
 // PO line taxonomy (migration 0563)
 // ---------------------------------------------------------------------------
-// product     — ordered goods. requires product_variant_id. cost_mills >= 0, qty > 0.
+// product     — ordered goods. requires product_id. cost_mills >= 0, qty > 0.
 // discount    — flat/percent discount line. no variant. cost_mills <= 0, qty == 1.
 // fee         — freight, tooling, surcharge. no variant. cost_mills >= 0, qty >= 1.
 // tax         — itemized tax. no variant. cost_mills >= 0, qty == 1.

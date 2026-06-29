@@ -136,6 +136,8 @@ type LineDraft = {
   // lines" (no specific parent_line_id stored on the server).
   parentClientId: string | null;
   productVariantId: number | null;
+  expectedReceiveVariantId: number | null;
+  expectedReceiveUnitsPerVariant: number | null;
   productId: number | null;
   productName: string;
   sku: string | null;
@@ -187,7 +189,10 @@ type CatalogSearchResponse = {
 type PreloadResponse = {
   vendor: Vendor | null;
   lines: Array<{
-    productVariantId: number;
+    productId: number;
+    productVariantId: number | null;
+    expectedReceiveVariantId: number | null;
+    expectedReceiveUnitsPerVariant: number;
     productName: string;
     sku: string | null;
     variantDescription: string | null;
@@ -511,6 +516,8 @@ function emptyLine(lineType: PoLineType = "product"): LineDraft {
     description: "",
     parentClientId: null,
     productVariantId: null,
+    expectedReceiveVariantId: null,
+    expectedReceiveUnitsPerVariant: 1,
     productId: null,
     productName: "",
     sku: null,
@@ -741,7 +748,9 @@ export default function PurchaseOrderEdit() {
           description: "",
           parentClientId: null,
           productVariantId: l.productVariantId,
-          productId: null, // filled if user re-selects; not strictly needed for submit
+          expectedReceiveVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
+          expectedReceiveUnitsPerVariant: l.expectedReceiveUnitsPerVariant ?? 1,
+          productId: l.productId,
           productName: l.productName,
           sku: l.sku,
           orderQty: l.suggestedQty > 0 ? l.suggestedQty : 1,
@@ -826,6 +835,9 @@ export default function PurchaseOrderEdit() {
             description: typeof l.description === "string" ? l.description : "",
             parentClientId: null,
             productVariantId: l.productVariantId ?? null,
+            expectedReceiveVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
+            expectedReceiveUnitsPerVariant:
+              l.expectedReceiveUnitsPerVariant ?? l.unitsPerUom ?? 1,
             productId: l.productId ?? null,
             productName: l.productName ?? "",
             sku: l.sku ?? null,
@@ -1000,7 +1012,7 @@ export default function PurchaseOrderEdit() {
   // Mirrors the server-side validateCreateWithLinesInput rules from
   // purchasing.service.ts (migration 0563 + typed lines). Each line type
   // has its own shape, so a single rule per line is wrong: e.g. a discount
-  // line has no productVariantId, has qty == 1, and cost <= 0.
+  // line has no product, has qty == 1, and cost <= 0.
   function validateForSubmit(): string | null {
     if (!selectedVendor) return "Select a vendor before saving.";
     if (lines.length === 0) return "Add at least one line.";
@@ -1068,7 +1080,7 @@ export default function PurchaseOrderEdit() {
       out.push({
         clientId: l.clientId,
         productId: l.productId,
-        productVariantId: l.productVariantId ?? null,
+        productVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
         productName: l.productName || "(unnamed)",
         sku: l.sku,
         // Dialog displays 4-decimal mills; cents derived for back-compat.
@@ -1208,11 +1220,21 @@ export default function PurchaseOrderEdit() {
           client_id: l.clientId,
           parent_client_id: l.parentClientId ?? null,
           description: l.description || null,
-          // Only send product_variant_id for product lines — the server
-          // validator rejects a non-null variant on non-product lines.
+          // Purchasing identity is product_id + piece qty. expected_receive_*
+          // tells receiving which configuration to expect.
           ...(l.lineType === "product"
-            ? { product_id: l.productId, product_variant_id: l.productVariantId }
-            : { product_id: null, product_variant_id: null }),
+            ? {
+                product_id: l.productId,
+                product_variant_id: l.expectedReceiveVariantId,
+                expected_receive_variant_id: l.expectedReceiveVariantId,
+                expected_receive_units_per_variant: l.expectedReceiveUnitsPerVariant,
+              }
+            : {
+                product_id: null,
+                product_variant_id: null,
+                expected_receive_variant_id: null,
+                expected_receive_units_per_variant: null,
+              }),
           quantity_ordered: l.orderQty,
           // Spec F Phase 1: product lines send totals (new shape).
           // Non-product lines continue sending unit_cost_mills (old shape).
@@ -1577,6 +1599,9 @@ export default function PurchaseOrderEdit() {
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-24 px-3 py-2.5">
                                 Qty
                               </TableHead>
+                              <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium w-36 px-3 py-2.5">
+                                Receive As
+                              </TableHead>
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
                                 <div>Product Cost</div>
                                 <div className="text-[10px] font-normal text-slate-400 normal-case">$ per unit shown below</div>
@@ -1616,7 +1641,7 @@ export default function PurchaseOrderEdit() {
                           </TableBody>
                           <TableFooter className="bg-slate-50/50 border-t border-slate-200">
                             <TableRow className="hover:bg-slate-50/50">
-                              <TableCell colSpan={4} className="px-5 py-3">
+                              <TableCell colSpan={5} className="px-5 py-3">
                                 <button
                                   className="text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 text-sm font-medium"
                                   onClick={() => addLine("product")}
@@ -2139,6 +2164,13 @@ function ProductLineTableRow({
   const productPerUnit = perUnitMillsFromCents(totalProduct, qty);
   const packagingPerUnit = perUnitMillsFromCents(packaging, qty);
   const totalPerUnit = perUnitMillsFromCents(totalProduct + packaging, qty);
+  const expectedReceiveUnits = Math.max(
+    1,
+    Number(line.expectedReceiveUnitsPerVariant || 1),
+  );
+  const expectedReceiveQty = qty > 0
+    ? Math.ceil(qty / expectedReceiveUnits)
+    : 0;
 
   const hasError = Boolean(error);
   const hasProduct = Boolean(line.productId);
@@ -2185,6 +2217,8 @@ function ProductLineTableRow({
                               onChange({
                                 productId: row.productId,
                                 productVariantId: row.productVariantId ?? null,
+                                expectedReceiveVariantId: row.productVariantId ?? null,
+                                expectedReceiveUnitsPerVariant: row.packSize ?? 1,
                                 productName: row.productName,
                                 sku: row.sku ?? null,
                                 unitCostMills:
@@ -2236,6 +2270,8 @@ function ProductLineTableRow({
                               onChange({
                                 productId: row.productId,
                                 productVariantId: row.productVariantId ?? null,
+                                expectedReceiveVariantId: row.productVariantId ?? null,
+                                expectedReceiveUnitsPerVariant: 1,
                                 productName: row.productName,
                                 sku: row.sku ?? null,
                                 vendorProductId: null,
@@ -2287,6 +2323,19 @@ function ProductLineTableRow({
             ariaLabel={`Line ${idx + 1} quantity`}
             className="w-full text-right font-mono tabular-nums"
           />
+        </TableCell>
+
+        <TableCell className="px-3 py-3">
+          <div className="text-sm text-slate-700">
+            {expectedReceiveUnits > 1
+              ? `${expectedReceiveQty.toLocaleString()} x ${expectedReceiveUnits.toLocaleString()} pcs`
+              : "Pieces"}
+          </div>
+          {expectedReceiveUnits > 1 && (
+            <div className="text-xs text-slate-400 mt-1">
+              {qty.toLocaleString()} pcs total
+            </div>
+          )}
         </TableCell>
 
         {/* Product Cost cell */}

@@ -700,6 +700,56 @@ describe("onReceivingOrderClosed — auto-match", () => {
     expect(mockDetectQtyVariance).toHaveBeenCalledWith(1);
   });
 
+  it("converts received configurations into PO piece quantities", async () => {
+    const productId = 42;
+    const poLine = {
+      id: 100,
+      purchaseOrderId: 1,
+      productId,
+      lineType: "product",
+      status: "open",
+      orderQty: 5000,
+      receivedQty: 0,
+      damagedQty: 0,
+      cancelledQty: 0,
+      unitCostCents: 500,
+      discountPercent: 0,
+      taxRatePercent: 0,
+      lineTotalCents: 250000,
+      expectedReceiveVariantId: 5,
+      expectedReceiveUnitsPerVariant: 1000,
+      unitsPerUom: 1000,
+    };
+
+    storage.getPurchaseOrderLineById.mockResolvedValue(poLine);
+    storage.getPurchaseOrderById.mockResolvedValue(makePo({ id: 1, status: "sent", physicalStatus: "sent" }));
+    storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
+    storage.getReceivingLineById.mockResolvedValue({
+      id: 201,
+      productId,
+      productVariantId: 5,
+    });
+    storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 1000 });
+
+    await svc.onReceivingOrderClosed(99, [
+      { receivingLineId: 201, purchaseOrderLineId: 100, receivedQty: 2, damagedQty: 1 },
+    ]);
+
+    const reconciliationCall = storage.reconcilePoReceiptLine.mock.calls.find(
+      (c: any[]) => c[0]?.purchaseOrderLineId === 100,
+    );
+    expect(reconciliationCall?.[0]?.lineUpdates).toMatchObject({
+      receivedQty: 2000,
+      damagedQty: 1000,
+      status: "partially_received",
+    });
+    expect(reconciliationCall?.[0]?.receipt).toMatchObject({
+      purchaseOrderLineId: 100,
+      receivingLineId: 201,
+      qtyReceived: 2000,
+    });
+  });
+
   it("(9) leaves unlinked when no open PO lines match the product_id", async () => {
     const unrelatedPoLine = {
       id: 100,

@@ -786,6 +786,20 @@ function formatLineUnitCost(line: {
   return formatMills(mills);
 }
 
+function createEmptyNewLine() {
+  return {
+    productId: 0,
+    productVariantId: 0,
+    expectedReceiveVariantId: 0,
+    expectedReceiveUnitsPerVariant: 1,
+    orderQty: 1,
+    unitCostCents: 0,
+    unitsPerUom: 1,
+    vendorSku: "",
+    description: "",
+  };
+}
+
 export default function PurchaseOrderDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -893,15 +907,7 @@ export default function PurchaseOrderDetail() {
     invoiceId: null as number | null,  // which invoice this payment allocates to
   });
 
-  const [newLine, setNewLine] = useState({
-    productId: 0,
-    productVariantId: 0,
-    orderQty: 1,
-    unitCostCents: 0,
-    unitsPerUom: 1,
-    vendorSku: "",
-    description: "",
-  });
+  const [newLine, setNewLine] = useState(createEmptyNewLine);
 
   // Queries
   const { data: po, isLoading } = useQuery<any>({
@@ -1068,12 +1074,15 @@ export default function PurchaseOrderDetail() {
     )
     .slice(0, 50);
 
-  // Selected variant info for case helper
+  // Selected receive configuration for the piece-to-config helper.
+  const selectedReceiveVariantId = newLine.expectedReceiveVariantId || newLine.productVariantId;
   const selectedVariant = selectedProductForLine?.variants?.find(
-    (v: any) => v.id === newLine.productVariantId
+    (v: any) => v.id === selectedReceiveVariantId
   );
-  const casesEquiv = newLine.unitsPerUom > 1 && newLine.orderQty > 0
-    ? Math.ceil(newLine.orderQty / newLine.unitsPerUom)
+  const receiveUnitsPerVariant =
+    newLine.expectedReceiveUnitsPerVariant || newLine.unitsPerUom || 1;
+  const receiveConfigQty = receiveUnitsPerVariant > 1 && newLine.orderQty > 0
+    ? Math.ceil(newLine.orderQty / receiveUnitsPerVariant)
     : null;
 
   // Mutations
@@ -1510,19 +1519,19 @@ export default function PurchaseOrderDetail() {
       // Capture before state reset
       const totalCents = dollarsToCents(totalCostDollars || "0");
       const derivedUnitCostCents = newLine.orderQty > 0 ? totalCents / newLine.orderQty : 0;
-      const catalogData = saveToVendorCatalog && po?.vendorId && newLine.productVariantId ? {
+      const catalogData = saveToVendorCatalog && po?.vendorId && selectedReceiveVariantId ? {
         vendorId: po.vendorId,
         productId: newLine.productId,
-        productVariantId: newLine.productVariantId,
+        productVariantId: selectedReceiveVariantId,
         vendorSku: newLine.vendorSku,
         unitCostCents: derivedUnitCostCents,
-        packSize: newLine.unitsPerUom,
+        packSize: receiveUnitsPerVariant,
         isPreferred: setAsPreferred,
       } : null;
 
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       setShowAddLineDialog(false);
-      setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+      setNewLine(createEmptyNewLine());
       setProductSearch("");
       setSelectedProductForLine(null);
       setTotalCostDollars("");
@@ -1599,7 +1608,8 @@ export default function PurchaseOrderDetail() {
       lineId,
       updates: {
         productVariantId: variant.id,
-        sku: variant.sku,
+        expectedReceiveVariantId: variant.id,
+        expectedReceiveUnitsPerVariant: variant.unitsPerVariant || 1,
         unitsPerUom: variant.unitsPerVariant,
       },
     });
@@ -2448,9 +2458,9 @@ export default function PurchaseOrderDetail() {
                               skuVariants.map((v) => (
                                 <div
                                   key={v.id}
-                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === line.productVariantId ? "bg-muted font-bold" : ""}`}
+                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === (line.expectedReceiveVariantId ?? line.productVariantId) ? "bg-muted font-bold" : ""}`}
                                   onClick={() => {
-                                    if (v.id !== line.productVariantId) {
+                                    if (v.id !== (line.expectedReceiveVariantId ?? line.productVariantId)) {
                                       saveSkuEdit(line.id, v);
                                     } else {
                                       cancelLineEdit();
@@ -2477,8 +2487,8 @@ export default function PurchaseOrderDetail() {
                         <div className="text-sm mt-1 truncate">{line.productName || "—"}</div>
                         <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
                           <span>
-                            {(line.unitsPerUom || 1) > 1
-                              ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)`
+                            {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
+                              ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)`
                               : `Qty: ${line.receivedQty || 0}/${line.orderQty}`}
                           </span>
                           {isEditingCostMobile ? (
@@ -2562,9 +2572,9 @@ export default function PurchaseOrderDetail() {
                               skuVariants.map((v) => (
                                 <div
                                   key={v.id}
-                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === line.productVariantId ? "bg-muted font-bold" : ""}`}
+                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === (line.expectedReceiveVariantId ?? line.productVariantId) ? "bg-muted font-bold" : ""}`}
                                   onClick={() => {
-                                    if (v.id !== line.productVariantId) {
+                                    if (v.id !== (line.expectedReceiveVariantId ?? line.productVariantId)) {
                                       saveSkuEdit(line.id, v);
                                     } else {
                                       cancelLineEdit();
@@ -2616,15 +2626,15 @@ export default function PurchaseOrderDetail() {
                             className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
                             onClick={() => canEditLines && startLineEdit(line.id, "qty", line.orderQty)}
                           >
-                            {(line.unitsPerUom || 1) > 1
-                              ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)</span></>
+                            {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
+                              ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
                               : line.orderQty}
                           </span>
                         )}
                       </TableCell>
                       <TableCell className="text-right">
-                        {(line.unitsPerUom || 1) > 1
-                          ? <span>{(line.receivedQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.receivedQty || 0) / (line.unitsPerUom || 1))} cases)</span></span>
+                        {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
+                          ? <span>{(line.receivedQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.receivedQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></span>
                           : line.receivedQty || 0}
                         {(line.damagedQty || 0) > 0 && (
                           <span className="text-red-500 ml-1">({line.damagedQty} dmg)</span>
@@ -3301,7 +3311,7 @@ export default function PurchaseOrderDetail() {
           setTotalCostDollars("");
           setSaveToVendorCatalog(true);
           setSetAsPreferred(false);
-          setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+          setNewLine(createEmptyNewLine());
           setCatalogSearch("");
           setSelectedCatalogEntry(null);
           setAddLineMode("catalog");
@@ -3330,7 +3340,7 @@ export default function PurchaseOrderDetail() {
                     setAddLineMode("catalog");
                     setSelectedProductForLine(null);
                     setSelectedCatalogEntry(null);
-                    setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                    setNewLine(createEmptyNewLine());
                     setTotalCostDollars("");
                   }}
                 >
@@ -3343,7 +3353,7 @@ export default function PurchaseOrderDetail() {
                   onClick={() => {
                     setAddLineMode("search");
                     setSelectedCatalogEntry(null);
-                    setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                    setNewLine(createEmptyNewLine());
                     setTotalCostDollars("");
                     setSelectedProductForLine(null);
                   }}
@@ -3382,7 +3392,7 @@ export default function PurchaseOrderDetail() {
                       onClick={() => {
                         setSelectedCatalogEntry(null);
                         setSelectedProductForLine(null);
-                        setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                        setNewLine(createEmptyNewLine());
                         setTotalCostDollars("");
                       }}
                     >
@@ -3448,6 +3458,8 @@ export default function PurchaseOrderDetail() {
                                     ...prev,
                                     productId: entry.productId,
                                     productVariantId: entry.productVariantId || 0,
+                                    expectedReceiveVariantId: entry.productVariantId || 0,
+                                    expectedReceiveUnitsPerVariant: entry.packSize || 1,
                                     vendorSku: entry.vendorSku || "",
                                     unitsPerUom: entry.packSize || 1,
                                   }));
@@ -3463,7 +3475,7 @@ export default function PurchaseOrderDetail() {
                                     <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5 flex-wrap">
                                       {variant && <span className="font-mono">{variant.sku}</span>}
                                       {entry.vendorSku && <span>· {entry.vendorSku}</span>}
-                                      {(entry.packSize || 1) > 1 && <span>· {entry.packSize} pcs/case</span>}
+                                      {(entry.packSize || 1) > 1 && <span>· {entry.packSize} pcs/config</span>}
                                       {entry.moq > 1 && <span>· MOQ {entry.moq}</span>}
                                     </div>
                                   </div>
@@ -3485,7 +3497,7 @@ export default function PurchaseOrderDetail() {
                 {/* If catalog entry has no variant set, show variant picker */}
                 {selectedCatalogEntry && !selectedCatalogEntry.productVariantId && selectedProductForLine && (
                   <div className="space-y-2">
-                    <Label>Variant / Case Size *</Label>
+                    <Label>Receive As *</Label>
                     <Popover open={variantOpen} onOpenChange={setVariantOpen}>
                       <PopoverTrigger asChild>
                         <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
@@ -3508,16 +3520,18 @@ export default function PurchaseOrderDetail() {
                                     setNewLine(prev => ({
                                       ...prev,
                                       productVariantId: v.id,
+                                      expectedReceiveVariantId: v.id,
+                                      expectedReceiveUnitsPerVariant: v.unitsPerVariant || 1,
                                       unitsPerUom: v.unitsPerVariant || 1,
                                     }));
                                     setVariantOpen(false);
                                   }}
                                 >
-                                  <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                  <Check className={`mr-2 h-4 w-4 ${selectedReceiveVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
                                   <span className="font-mono text-xs mr-2">{v.sku}</span>
                                   <span className="truncate">{v.name}</span>
                                   {(v.unitsPerVariant || 1) > 1 && (
-                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/case</span>
+                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/config</span>
                                   )}
                                 </CommandItem>
                               ))}
@@ -3555,7 +3569,14 @@ export default function PurchaseOrderDetail() {
                                 value={String(p.id)}
                                 onSelect={() => {
                                   setSelectedProductForLine(p);
-                                  setNewLine(prev => ({ ...prev, productId: p.id, productVariantId: 0, unitsPerUom: 1 }));
+                                  setNewLine(prev => ({
+                                    ...prev,
+                                    productId: p.id,
+                                    productVariantId: 0,
+                                    expectedReceiveVariantId: 0,
+                                    expectedReceiveUnitsPerVariant: 1,
+                                    unitsPerUom: 1,
+                                  }));
                                   setProductOpen(false);
                                   setProductSearch("");
                                 }}
@@ -3574,7 +3595,7 @@ export default function PurchaseOrderDetail() {
 
                 {selectedProductForLine && (
                   <div className="space-y-2">
-                    <Label>Variant / Case Size *</Label>
+                    <Label>Receive As *</Label>
                     <Popover open={variantOpen} onOpenChange={setVariantOpen}>
                       <PopoverTrigger asChild>
                         <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
@@ -3597,16 +3618,18 @@ export default function PurchaseOrderDetail() {
                                     setNewLine(prev => ({
                                       ...prev,
                                       productVariantId: v.id,
+                                      expectedReceiveVariantId: v.id,
+                                      expectedReceiveUnitsPerVariant: v.unitsPerVariant || 1,
                                       unitsPerUom: v.unitsPerVariant || 1,
                                     }));
                                     setVariantOpen(false);
                                   }}
                                 >
-                                  <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                  <Check className={`mr-2 h-4 w-4 ${selectedReceiveVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
                                   <span className="font-mono text-xs mr-2">{v.sku}</span>
                                   <span className="truncate">{v.name}</span>
                                   {(v.unitsPerVariant || 1) > 1 && (
-                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/case</span>
+                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/config</span>
                                   )}
                                 </CommandItem>
                               ))}
@@ -3621,7 +3644,7 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* ── COMMON FIELDS — shown once a variant is selected ── */}
-            {newLine.productVariantId > 0 && (
+            {selectedReceiveVariantId > 0 && (
               <>
                 <Separator />
                 <div className="grid grid-cols-2 gap-4">
@@ -3634,8 +3657,8 @@ export default function PurchaseOrderDetail() {
                       onChange={e => setNewLine(prev => ({ ...prev, orderQty: parseInt(e.target.value) || 0 }))}
                       className="h-10"
                     />
-                    {casesEquiv !== null && (
-                      <p className="text-xs text-muted-foreground">= {casesEquiv} cases @ {newLine.unitsPerUom} pcs/case</p>
+                    {receiveConfigQty !== null && (
+                      <p className="text-xs text-muted-foreground">= {receiveConfigQty} configs @ {receiveUnitsPerVariant} pcs/config</p>
                     )}
                   </div>
                   <div className="space-y-2">
@@ -3700,9 +3723,16 @@ export default function PurchaseOrderDetail() {
                 onClick={() => {
                   const totalCents = dollarsToCents(totalCostDollars || "0");
                   const unitCostCents = newLine.orderQty > 0 ? totalCents / newLine.orderQty : 0;
-                  addLineMutation.mutate({ ...newLine, unitCostCents });
+                  addLineMutation.mutate({
+                    ...newLine,
+                    productVariantId: selectedReceiveVariantId,
+                    expectedReceiveVariantId: selectedReceiveVariantId,
+                    expectedReceiveUnitsPerVariant: receiveUnitsPerVariant,
+                    unitsPerUom: receiveUnitsPerVariant,
+                    unitCostCents,
+                  });
                 }}
-                disabled={!newLine.productVariantId || newLine.orderQty < 1 || !totalCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
+                disabled={!selectedReceiveVariantId || newLine.orderQty < 1 || !totalCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
               >
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
               </Button>
