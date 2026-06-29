@@ -162,6 +162,83 @@ function makePickItemHarness(replenResult: { task: any; moved: number } | null) 
   return { service, db, tx, inventoryCore, storage, replenishment };
 }
 
+function makePickNoopHarness(beforeItem: any) {
+  const storage = {
+    getOrderItemById: vi.fn(async () => beforeItem),
+    getOrderById: vi.fn(async () => ({
+      id: beforeItem.orderId,
+      orderNumber: "#900",
+      warehouseId: 1,
+      assignedPickerId: "picker-1",
+    })),
+    updateOrderItemStatus: vi.fn(),
+    createPickingLog: vi.fn(),
+  };
+  const service = new PickingUseCases({} as any, {} as any, {} as any, storage as any);
+  return { service, storage };
+}
+
+describe("PickingUseCases pick progress validation", () => {
+  it("rejects a pending pick request that does not change quantity or status", async () => {
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 1 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    const result = await service.pickItem(beforeItem.id, {
+      status: "pending",
+      pickedQuantity: 0,
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: "no_pick_progress",
+      message: `Pick request did not change item ${beforeItem.id}`,
+    });
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
+  });
+
+  it("rejects an in-progress pick request that repeats the current picked quantity", async () => {
+    const beforeItem = makeItem({ status: "in_progress", pickedQuantity: 5, quantity: 6 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    const result = await service.pickItem(beforeItem.id, {
+      status: "in_progress",
+      pickedQuantity: 5,
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "no_pick_progress",
+    });
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
+  });
+
+  it("rejects completed pick requests that do not pick the full line quantity", async () => {
+    const beforeItem = makeItem({ status: "in_progress", pickedQuantity: 5, quantity: 6 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    const result = await service.pickItem(beforeItem.id, {
+      status: "completed",
+      pickedQuantity: 5,
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: "completion_requires_full_quantity",
+      message: "Completed picks must set pickedQuantity to the full item quantity (6)",
+    });
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
+  });
+});
+
 describe("PickingUseCases inventory discrepancy resolution", () => {
   it("auto-corrects an assigned bin shortage only when the pick was scan-verified", async () => {
     const { service, inventoryCore } = makeService([
