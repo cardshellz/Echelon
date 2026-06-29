@@ -171,11 +171,49 @@ function makePickNoopHarness(beforeItem: any) {
       warehouseId: 1,
       assignedPickerId: "picker-1",
     })),
+    getUser: vi.fn(async (id: string) => ({ id, username: "picker", role: "picker" })),
     updateOrderItemStatus: vi.fn(),
     createPickingLog: vi.fn(),
   };
   const service = new PickingUseCases({} as any, {} as any, {} as any, storage as any);
   return { service, storage };
+}
+
+function expectPickCommandRejectedLog(
+  storage: { createPickingLog: ReturnType<typeof vi.fn> },
+  beforeItem: any,
+  rejectionCode: string,
+  requested: Record<string, unknown>,
+) {
+  expect(storage.createPickingLog).toHaveBeenCalledWith(expect.objectContaining({
+    actionType: "pick_command_rejected",
+    pickerId: "picker-1",
+    pickerName: "picker",
+    pickerRole: "picker",
+    orderId: beforeItem.orderId,
+    orderNumber: "#900",
+    orderItemId: beforeItem.id,
+    sku: beforeItem.sku,
+    itemName: beforeItem.name,
+    locationCode: beforeItem.location,
+    qtyRequested: beforeItem.quantity,
+    qtyBefore: beforeItem.pickedQuantity || 0,
+    qtyAfter: beforeItem.pickedQuantity || 0,
+    qtyDelta: 0,
+    reason: rejectionCode,
+    itemStatusBefore: beforeItem.status,
+    itemStatusAfter: beforeItem.status,
+    metadata: expect.objectContaining({
+      requested: expect.objectContaining(requested),
+      before: expect.objectContaining({
+        status: beforeItem.status,
+        pickedQuantity: beforeItem.pickedQuantity || 0,
+        quantity: beforeItem.quantity,
+      }),
+      rejectionCode,
+      commandUserId: "picker-1",
+    }),
+  }));
 }
 
 describe("PickingUseCases pick progress validation", () => {
@@ -196,7 +234,11 @@ describe("PickingUseCases pick progress validation", () => {
       message: `Pick request did not change item ${beforeItem.id}`,
     });
     expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
-    expect(storage.createPickingLog).not.toHaveBeenCalled();
+    expectPickCommandRejectedLog(storage, beforeItem, "no_pick_progress", {
+      status: "pending",
+      pickedQuantity: 0,
+      pickMethod: "manual",
+    });
   });
 
   it("rejects an in-progress pick request that repeats the current picked quantity", async () => {
@@ -215,7 +257,35 @@ describe("PickingUseCases pick progress validation", () => {
       error: "no_pick_progress",
     });
     expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
-    expect(storage.createPickingLog).not.toHaveBeenCalled();
+    expectPickCommandRejectedLog(storage, beforeItem, "no_pick_progress", {
+      status: "in_progress",
+      pickedQuantity: 5,
+      pickMethod: "manual",
+    });
+  });
+
+  it("rejects an in-progress pick request that carries zero picked quantity", async () => {
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 6 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    const result = await service.pickItem(beforeItem.id, {
+      status: "in_progress",
+      pickedQuantity: 0,
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: "in_progress_requires_positive_quantity",
+      message: "In-progress picks must have a positive pickedQuantity",
+    });
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+    expectPickCommandRejectedLog(storage, beforeItem, "in_progress_requires_positive_quantity", {
+      status: "in_progress",
+      pickedQuantity: 0,
+      pickMethod: "manual",
+    });
   });
 
   it("rejects completed pick requests that do not pick the full line quantity", async () => {
@@ -235,7 +305,11 @@ describe("PickingUseCases pick progress validation", () => {
       message: "Completed picks must set pickedQuantity to the full item quantity (6)",
     });
     expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
-    expect(storage.createPickingLog).not.toHaveBeenCalled();
+    expectPickCommandRejectedLog(storage, beforeItem, "completion_requires_full_quantity", {
+      status: "completed",
+      pickedQuantity: 5,
+      pickMethod: "manual",
+    });
   });
 });
 
