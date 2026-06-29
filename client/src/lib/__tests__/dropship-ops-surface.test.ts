@@ -186,6 +186,13 @@ describe("dropship ops surface client helpers", () => {
       exposedOnly: true,
       includeInactiveCatalog: false,
     })).toBe("/api/dropship/admin/catalog/preview?search=pack&exposedOnly=true&includeInactiveCatalog=false&page=1&limit=50");
+    expect(buildAdminCatalogExposurePreviewUrl({
+      search: "",
+      exposedOnly: false,
+      includeInactiveCatalog: true,
+      page: 3,
+      limit: 100,
+    })).toBe("/api/dropship/admin/catalog/preview?exposedOnly=false&includeInactiveCatalog=true&page=3&limit=100");
   });
 
   it("builds admin dogfood readiness URLs with optional filters", () => {
