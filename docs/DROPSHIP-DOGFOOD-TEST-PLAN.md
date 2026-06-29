@@ -1,6 +1,6 @@
 # Dropship Dogfood Checklist
 
-Last updated: 2026-05-24
+Last updated: 2026-06-29
 
 Primary admin surface: Echelon internal admin at `/dropship`.
 
@@ -14,20 +14,20 @@ Use this document as the working checklist for the first internal dropship dogfo
 
 | Field | Value |
 | --- | --- |
-| Run date |  |
-| Tester |  |
-| Environment URL |  |
-| Echelon deploy/version/commit |  |
-| Acquisition path | New `.ops` / `.core` to `.ops` / `.club` to `.ops` |
-| Card Shellz customer email |  |
-| Starting membership plan | None / `.core` / `.club` |
+| Run date | 2026-06-28 to 2026-06-29 |
+| Tester | Brett / Codex assist |
+| Environment URL | Echelon production admin `/dropship`; customer portal `https://www.cardshellz.io/dropship-portal` |
+| Echelon deploy/version/commit | Latest merged dropship dogfood UX fixes through PR #741; confirm deployed commit before marketplace order testing |
+| Acquisition path | Existing `.core` customer upgraded to `.ops` through admin UI for dogfood setup |
+| Card Shellz customer email | `bseager6@gmail.com` for portal login; original membership row began as `nwscards@gmail.com` |
+| Starting membership plan | `.core` |
 | Target membership plan | `.ops` |
-| Checkout session / payment ID |  |
-| Subscription ID |  |
+| Checkout session / payment ID | Not tested yet; admin/manual upgrade used for current dogfood customer |
+| Subscription ID | `b92ddb72-422c-4c20-b02d-f9861b1c369f` |
 | Vendor name |  |
-| Vendor member ID |  |
-| Store connection ID |  |
-| Marketplace | eBay / Shopify |
+| Vendor member ID | Member ID `42226465-6f54-4723-9204-057a5d38657e`; `.ops` plan ID `14d8698f-09d8-4dea-8089-fa9a1ec0fb28` |
+| Store connection ID | `9f2a4919-ed4a-4130-b2fc-62ce0f91f51b` observed in portal/admin; confirm numeric DB ID if needed |
+| Marketplace | eBay |
 | Test SKU |  |
 | Product ID |  |
 | Product variant ID |  |
@@ -42,7 +42,35 @@ Use this document as the working checklist for the first internal dropship dogfo
 | Tracking push ID(s) |  |
 | Notification event ID(s) |  |
 | Return/RMA ID |  |
-| Final result | Pass / Fail / Blocked |
+| Final result | In progress; paused before final catalog exposure/listing/order test |
+
+## Current Working Status - 2026-06-29
+
+Resume point: pull latest `main` after PR #741 is merged/deployed, confirm the dropship UI shows the selector fixes, then continue at Phase 4 with a narrow catalog exposure for one test SKU.
+
+Confirmed so far:
+
+- `.ops` entitlement exists for the dogfood customer: active/current `.ops` subscription `b92ddb72-422c-4c20-b02d-f9861b1c369f`, plan ID `14d8698f-09d8-4dea-8089-fa9a1ec0fb28`, `includes_dropship=true`.
+- Portal login worked for `bseager6@gmail.com` after the auth-flow fixes and password reset flow landed.
+- eBay connection flow worked after OAuth/connect-change-store fixes. Connected store is `marzcards`; do not accept fallback labels like `eBay connection 1` as final evidence.
+- Default warehouse has been set to warehouse ID `1` for the connected store. This is the 20 Leonberg ship-from warehouse.
+- Shipping config is "ready enough" for a single-carton dogfood SKU: default warehouse, box, product shipping/profile data, zone/rate, markup, insurance, and return policy were created through the admin UI. Final quote validation is still required.
+- Latest merged UX cleanup: PR #739 redesigned admin catalog exposure rules; PR #741 replaced raw DB ID entry fields with selectors in catalog exposure, shipping, wallet, and RMA admin flows.
+
+Not yet proven:
+
+- Customer-facing `.ops` purchase/checkout path. Current dogfood customer was upgraded manually/admin-side.
+- Final dogfood readiness gate screenshot after latest deploy.
+- Narrow catalog exposure for the chosen SKU.
+- Listing push, marketplace order placement, order intake, wallet debit, OMS/WMS handoff, ShipStation fulfillment, tracking push, notifications, and returns.
+
+Next operator steps:
+
+1. Pull latest `main` on the testing computer and confirm the deployment includes PR #741.
+2. Re-open Echelon `/dropship` and verify the dogfood row for `bseager6@gmail.com` / `marzcards`.
+3. Pick one test SKU and expose only that product/variant. Do not use broad entire-catalog exposure for the first marketplace order.
+4. Validate the vendor portal catalog shows that SKU and only the intended SKU.
+5. Continue with listing push and order intake phases below.
 
 ## Severity Guide
 
@@ -60,9 +88,9 @@ Use this document as the working checklist for the first internal dropship dogfo
 | [ ] | STOP-01 | Admin dogfood launch gate is not blocked before marketplace listing or order testing starts. |  |  |
 | [ ] | STOP-02 | Token encryption and OAuth configuration are present. |  |  |
 | [ ] | STOP-03 | ShipStation credentials and webhook security are configured. |  |  |
-| [ ] | STOP-04 | Test vendor and store connection identity are known and correct. |  |  |
-| [ ] | STOP-05 | Customer acquisition path has proven an active `.ops` entitlement before store setup. | Member/subscription/plan evidence: |  |
-| [ ] | STOP-06 | Test catalog exposure is narrow. Do not use broad catalog exposure for the first pass. |  |  |
+| [x] | STOP-04 | Test vendor and store connection identity are known and correct. | eBay store `marzcards`; portal email `bseager6@gmail.com`; store connection UUID `9f2a4919-ed4a-4130-b2fc-62ce0f91f51b` observed | Reconfirm after latest deploy |
+| [x] | STOP-05 | Customer acquisition path has proven an active `.ops` entitlement before store setup. | Member `42226465-6f54-4723-9204-057a5d38657e`; subscription `b92ddb72-422c-4c20-b02d-f9861b1c369f`; plan `.ops` / `includes_dropship=true` | Customer-facing checkout path still unproven; see EX-001 |
+| [ ] | STOP-06 | Test catalog exposure is narrow. Do not use broad catalog exposure for the first pass. | Pending test SKU selection | Resume here next |
 | [ ] | STOP-07 | No unclear wallet, inventory, fulfillment, or tracking state exists before retrying any action. |  |  |
 | [ ] | STOP-08 | Manual worker sweeps are only run for a specific stuck record with captured evidence. |  |  |
 
@@ -70,12 +98,12 @@ Use this document as the working checklist for the first internal dropship dogfo
 
 | Done | Phase | Required before moving on | Blocking exception |
 | --- | --- | --- | --- |
-| [ ] | 0. Membership acquisition | Direct `.ops` signup and `.club` to `.ops` upgrade paths are understood and at least one path is proven for the dogfood customer. |  |
-| [ ] | 1. Portal bootstrap | The `.ops` customer can access the dropship portal and Echelon provisions the vendor profile. |  |
-| [ ] | 2. Store connection | Vendor OAuth, store identity, and order/listing config are correct. |  |
-| [ ] | 3. Admin readiness gate | Internal source, system readiness, launch gate, and one ready vendor/store are clean. |  |
-| [ ] | 4. Catalog exposure | Exactly the intended SKU or variant is exposed. |  |
-| [ ] | 5. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. |  |
+| [ ] | 0. Membership acquisition | Direct `.ops` signup and `.club` to `.ops` upgrade paths are understood and at least one path is proven for the dogfood customer. | Partial: `.core` to `.ops` entitlement proven by admin/manual upgrade; customer-facing checkout path still unproven |
+| [x] | 1. Portal bootstrap | The `.ops` customer can access the dropship portal and Echelon provisions the vendor profile. | Relogin worked for `bseager6@gmail.com`; vendor profile present |
+| [x] | 2. Store connection | Vendor OAuth, store identity, and order/listing config are correct. | eBay store `marzcards` connected; verify one more time after latest deploy |
+| [ ] | 3. Admin readiness gate | Internal source, system readiness, launch gate, and one ready vendor/store are clean. | Need final readiness screenshot/evidence after PR #741 deploy |
+| [ ] | 4. Catalog exposure | Exactly the intended SKU or variant is exposed. | Next phase to resume |
+| [ ] | 5. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. | Config created for single-carton test; final quote still needs validation |
 | [ ] | 6. Listing push | One marketplace listing is created and mapped back to Echelon identity. |  |
 | [ ] | 7. Order intake | One external marketplace order ingests once with correct vendor/store/line identity. |  |
 | [ ] | 8. Wallet and acceptance | Funding/hold/debit behavior is traceable and order acceptance is idempotent. |  |
@@ -104,14 +132,14 @@ This path covers a brand-new customer and an existing `.core` customer who signs
 
 | Done | ID | Check | Expected evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
-| [ ] | ACQ-DIRECT-01 | Choose the test email and confirm whether the starting state is new customer or existing `.core` customer. | Email / starting member ID: |  |
-| [ ] | ACQ-DIRECT-02 | Confirm the customer-facing purchase path lets the customer select `.ops` directly. | Page/URL/screenshot: |  |
-| [ ] | ACQ-DIRECT-03 | Confirm checkout labels the purchased plan as `.ops` and does not require `.club` first. | Checkout/session ID: |  |
-| [ ] | ACQ-DIRECT-04 | Complete the purchase or upgrade with the test payment method. | Payment/checkout ID: |  |
-| [ ] | ACQ-DIRECT-05 | Confirm the Card Shellz member email exactly matches the email used in the dropship portal. | Member email: |  |
-| [ ] | ACQ-DIRECT-06 | Confirm the customer has one intended member identity. Existing `.core` customers should not create a duplicate member. | Member ID: |  |
-| [ ] | ACQ-DIRECT-07 | Confirm the active subscription points to the `.ops` plan. | Subscription ID / plan ID: |  |
-| [ ] | ACQ-DIRECT-08 | Confirm the `.ops` plan is active and includes dropship access. | `includes_dropship=true`: |  |
+| [x] | ACQ-DIRECT-01 | Choose the test email and confirm whether the starting state is new customer or existing `.core` customer. | `bseager6@gmail.com`; existing `.core` customer/member migrated from earlier `nwscards@gmail.com` test identity |  |
+| [ ] | ACQ-DIRECT-02 | Confirm the customer-facing purchase path lets the customer select `.ops` directly. | Not tested | EX-001 |
+| [ ] | ACQ-DIRECT-03 | Confirm checkout labels the purchased plan as `.ops` and does not require `.club` first. | Not tested | EX-001 |
+| [ ] | ACQ-DIRECT-04 | Complete the purchase or upgrade with the test payment method. | Not tested; admin/manual upgrade used | EX-001 |
+| [x] | ACQ-DIRECT-05 | Confirm the Card Shellz member email exactly matches the email used in the dropship portal. | `bseager6@gmail.com` used for portal login after email correction |  |
+| [x] | ACQ-DIRECT-06 | Confirm the customer has one intended member identity. Existing `.core` customers should not create a duplicate member. | Member ID `42226465-6f54-4723-9204-057a5d38657e` | Reconfirm no duplicate after customer-facing checkout test |
+| [x] | ACQ-DIRECT-07 | Confirm the active subscription points to the `.ops` plan. | Subscription `b92ddb72-422c-4c20-b02d-f9861b1c369f`; plan `14d8698f-09d8-4dea-8089-fa9a1ec0fb28` |  |
+| [x] | ACQ-DIRECT-08 | Confirm the `.ops` plan is active and includes dropship access. | `.ops`, active/current, `includes_dropship=true` |  |
 
 Path A pass criteria:
 
@@ -153,13 +181,13 @@ Goal: prove the `.ops` customer can access the dropship portal and Echelon creat
 
 | Done | ID | Check | Evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
-| [ ] | PORTAL-01 | Open `https://www.cardshellz.io`. | Screenshot / URL: |  |
-| [ ] | PORTAL-02 | Start setup or login with the same Card Shellz customer email from Phase 0. | Email: |  |
-| [ ] | PORTAL-03 | Complete portal bootstrap or login. | Auth identity / session result: |  |
-| [ ] | PORTAL-04 | Confirm the portal identity maps to the expected Card Shellz member. | Member ID: |  |
-| [ ] | PORTAL-05 | Confirm Echelon created or synced the dropship vendor profile from that entitlement. | Vendor ID / entitlement status: |  |
-| [ ] | PORTAL-06 | Confirm the vendor profile is not lapsed, suspended, or blocked. | Vendor status: |  |
-| [ ] | PORTAL-07 | Confirm onboarding shows store connection as the next required step. | Onboarding status: |  |
+| [x] | PORTAL-01 | Open `https://www.cardshellz.io`. | Customer portal reached at `/dropship-portal` |  |
+| [x] | PORTAL-02 | Start setup or login with the same Card Shellz customer email from Phase 0. | `bseager6@gmail.com` |  |
+| [x] | PORTAL-03 | Complete portal bootstrap or login. | Relogin worked after auth flow/password reset fixes |  |
+| [x] | PORTAL-04 | Confirm the portal identity maps to the expected Card Shellz member. | Member ID `42226465-6f54-4723-9204-057a5d38657e` |  |
+| [ ] | PORTAL-05 | Confirm Echelon created or synced the dropship vendor profile from that entitlement. | Vendor profile visible; exact numeric vendor ID still needs capture | Capture in admin/db before order test |
+| [x] | PORTAL-06 | Confirm the vendor profile is not lapsed, suspended, or blocked. | Portal/admin showed active/onboarding-ready state | Reconfirm after latest deploy |
+| [x] | PORTAL-07 | Confirm onboarding shows store connection as the next required step. | Onboarding advanced to store connection before eBay OAuth |  |
 
 ### Portal Entitlement Failure Checks
 
@@ -185,15 +213,15 @@ Goal: prove the selected vendor and marketplace store are the intended dogfood t
 
 | Done | ID | Check | Evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
-| [ ] | STORE-01 | Open `Store connections` in the dropship portal. |  |  |
-| [ ] | STORE-02 | Confirm selected store connection belongs to the intended vendor. | Vendor ID / store connection ID: |  |
-| [ ] | STORE-03 | Connect the intended marketplace store. | eBay / Shopify: |  |
-| [ ] | STORE-04 | Confirm external store identity matches the vendor account. | External store/account ID: |  |
-| [ ] | STORE-05 | Confirm OAuth status is healthy. | OAuth status: |  |
-| [ ] | STORE-06 | Confirm store status is connected. | Store status: |  |
-| [ ] | STORE-07 | Confirm setup status is ready. | Setup status: |  |
-| [ ] | STORE-08 | Confirm order processing config is present. | Config ID/status: |  |
-| [ ] | STORE-09 | Confirm listing config is present if listing push is in scope. | Config ID/status: |  |
+| [x] | STORE-01 | Open `Store connections` in the dropship portal. | Store connection page opened during dogfood setup |  |
+| [x] | STORE-02 | Confirm selected store connection belongs to the intended vendor. | `bseager6@gmail.com` / store connection UUID `9f2a4919-ed4a-4130-b2fc-62ce0f91f51b` observed | Capture exact numeric ID if needed |
+| [x] | STORE-03 | Connect the intended marketplace store. | eBay connected |  |
+| [x] | STORE-04 | Confirm external store identity matches the vendor account. | eBay store name `marzcards` after store-name ingestion/reauth | Do not accept `eBay connection 1` fallback as final evidence |
+| [x] | STORE-05 | Confirm OAuth status is healthy. | Store showed connected / token status available | Reconfirm token expiry before listing push |
+| [x] | STORE-06 | Confirm store status is connected. | Status `connected` |  |
+| [x] | STORE-07 | Confirm setup status is ready. | Setup ready / launch ready shown after warehouse set | Reconfirm in Dogfood readiness |
+| [x] | STORE-08 | Confirm order processing config is present. | Default warehouse ID `1` set for 20 Leonberg |  |
+| [x] | STORE-09 | Confirm listing config is present if listing push is in scope. | Listing config active / draft-first observed | Reconfirm before listing push |
 
 Phase pass criteria:
 
@@ -212,8 +240,8 @@ Goal: prove the internal admin control surface recognizes the vendor/store row b
 | [ ] | READY-03 | Confirm `Dropship OMS source` is ready. | Source status: |  |
 | [ ] | READY-04 | If source is missing, run the source initialization action once. | Result: |  |
 | [ ] | READY-05 | Confirm `System readiness` has no blockers. | Blockers count: |  |
-| [ ] | READY-06 | Confirm launch gate is not blocked. | Gate status: |  |
-| [ ] | READY-07 | Confirm one vendor/store row is ready for dogfood. | Vendor/store row: |  |
+| [ ] | READY-06 | Confirm launch gate is not blocked. | Gate status: looked ready enough before latest UI fixes | Capture final after PR #741 deploy |
+| [ ] | READY-07 | Confirm one vendor/store row is ready for dogfood. | Vendor/store row should be `bseager6@gmail.com` / `marzcards` | Capture final after PR #741 deploy |
 | [ ] | READY-08 | Record any remaining warnings. | Warning IDs/count: |  |
 
 Phase pass criteria:
@@ -229,8 +257,8 @@ Goal: expose exactly the intended catalog item to the vendor.
 | Done | ID | Check | Evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
 | [ ] | CAT-01 | Open `Catalog exposure`. |  |  |
-| [ ] | CAT-02 | Create a narrow include rule for one product, SKU, or variant. | Rule ID/scope: |  |
-| [ ] | CAT-03 | Do not use `Entire catalog` for the first dogfood pass. | Confirmed: |  |
+| [ ] | CAT-02 | Create a narrow include rule for one product, SKU, or variant. | Rule ID/scope: pending | Resume here next |
+| [ ] | CAT-03 | Do not use `Entire catalog` for the first dogfood pass. | Confirmed: pending | The UI allows broad exposure, but first test should stay narrow |
 | [ ] | CAT-04 | Save the rule set. | Save result: |  |
 | [ ] | CAT-05 | Use preview to confirm intended row is exposed. | Product/variant/SKU: |  |
 | [ ] | CAT-06 | Confirm unrelated rows remain blocked. | Blocked count/sample: |  |
@@ -249,13 +277,13 @@ Goal: prove the test SKU can calculate shipping and use the intended policy stac
 
 | Done | ID | Check | Evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
-| [ ] | SHIPCFG-01 | Open `Shipping config`. |  |  |
-| [ ] | SHIPCFG-02 | Confirm package or carton data applies to the test SKU. | Package/profile ID: |  |
-| [ ] | SHIPCFG-03 | Confirm box configuration exists. | Box ID/name: |  |
-| [ ] | SHIPCFG-04 | Confirm rate table covers the test destination. | Rate table/zone: |  |
-| [ ] | SHIPCFG-05 | Confirm markup policy is configured. | Policy ID: |  |
-| [ ] | SHIPCFG-06 | Confirm insurance policy is configured. | Policy ID / fee: |  |
-| [ ] | SHIPCFG-07 | Confirm return policy is configured. | Policy ID: |  |
+| [x] | SHIPCFG-01 | Open `Shipping config`. | Shipping config page used during setup |  |
+| [ ] | SHIPCFG-02 | Confirm package or carton data applies to the test SKU. | Product shipping/profile data created for test setup | Needs final SKU-specific capture after test SKU selection |
+| [x] | SHIPCFG-03 | Confirm box configuration exists. | Box created through admin UI | Full view/edit boxes UI still needed; see EX-007 |
+| [ ] | SHIPCFG-04 | Confirm rate table covers the test destination. | Zone/rate table created | Needs final quote validation |
+| [x] | SHIPCFG-05 | Confirm markup policy is configured. | Markup policy created | Capture policy ID if needed |
+| [x] | SHIPCFG-06 | Confirm insurance policy is configured. | Insurance policy created | Capture policy ID if needed |
+| [x] | SHIPCFG-07 | Confirm return policy is configured. | Return policy created | Capture policy ID if needed |
 | [ ] | SHIPCFG-08 | Record the quoted or expected shipping charge. | Amount: |  |
 
 Phase pass criteria:
@@ -503,11 +531,19 @@ Use one row per issue. Reference the exception ID in the related checklist row.
 
 | Exception ID | Severity | Phase/check ID | Record IDs | What failed | Expected result | Actual result | Correction needed | Owner | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| EX-001 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
-| EX-002 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
-| EX-003 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
-| EX-004 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
-| EX-005 |  |  |  |  |  |  |  |  | Open / Fixed / Accepted |
+| EX-001 | P2 | Phase 0 / ACQ-DIRECT-02 to ACQ-DIRECT-04 | `bseager6@gmail.com` | Customer-facing `.ops` acquisition path not proven. Current dogfood customer was upgraded manually/admin-side. | Customer can choose `.ops` monthly/annual, checkout labels `.ops`, and subscription persists correctly. | Manual/admin upgrade created active `.ops`; real checkout path remains untested. | Test customer-facing `.ops` signup/upgrade; membership edit modal also needs billing interval and auto-renew controls. | Product/engineering | Open |
+| EX-002 | P3 | Portal/admin theme |  | `.ops` color scheme is inconsistent in parts of the portal/admin. | Dropship portal/admin should use `.ops` purple design tokens consistently. | Purple applied in some areas, but full theme needs verification/update. | Audit dropship portal/admin styles and align to `.ops` palette. | Frontend | Open |
+| EX-003 | P2 | Phase 1 / auth setup | PR #709, PR #715 | Login/setup flow was confusing for new/returning users; password reset was missing. | Eligible users see a clear setup vs login flow and can reset password. | Auth flow and password reset were added; relogin worked. | Verify on latest deploy with `bseager6@gmail.com` and an ineligible email. | Frontend/backend | Fixed / verify |
+| EX-004 | P2 | Phase 2 / eBay OAuth | PR #723 | eBay connection/reconnect flow was unclear and did not provide explicit change-store behavior. | User can connect first store, refresh same account, change store via marketplace login, or disconnect. | Explicit connect/refresh/change/disconnect flow added. | Verify change-store opens eBay account selection and does not silently reuse the same account. | Backend/frontend | Fixed / verify |
+| EX-005 | P2 | Phase 2 / store identity | PR #726, PR #728, PR #732 | Connected eBay store displayed as `eBay connection 1` instead of `marzcards`. | Portal/admin should show the actual connected store name. | eBay store name ingestion and pending-name fallback added; `marzcards` displayed after reauth. | Reconfirm after latest deploy and fresh eBay authorization. | Backend/frontend | Fixed / verify |
+| EX-006 | P2 | Phase 4 / catalog exposure UX | PR #739 | Admin catalog exposure rules were confusing: include/exclude language, decision column, priority number, draft rule set. | Admin can expose/hide catalog with clear rule run order and modal-based add rule flow. | Catalog exposure redesigned with expose/hide language and reorderable rules. | Verify deployed UI before setting narrow SKU exposure. | Frontend/backend | Fixed / verify |
+| EX-007 | P2 | Phase 4/5/8/14 / raw ID fields | PR #741 | Several admin modals required raw database IDs. | Operators select named records via dropdown/typeahead. | Selectors added for catalog targets, warehouses, wallet vendors/funding methods, and RMA references. | Verify deployed UI no longer asks for raw IDs in these flows. | Frontend/backend | Fixed / verify |
+| EX-008 | P2 | Phase 5 / boxes UI |  | Shipping boxes can be created, but there is no complete UI to view/edit/manage boxes. | Admin can list, edit, archive, and inspect shipping boxes. | Existing UI only surfaces created boxes in limited places. | Build full boxes management UI. | Frontend/backend | Open |
+| EX-009 | P2 | Phase 5 / cartonization |  | Current shipping setup is too simplistic for real product/box optimization. | Standalone cartonization engine chooses box(es), orientations, and packing based on ordered SKUs and dimensions; usable by dropship and other channels. | Single-carton setup is acceptable only for the first dogfood SKU. | Design/build plug-and-play cartonization service. | Architecture/engineering | Open |
+| EX-010 | P2 | Phase 5 / box code structure |  | Box `code` is free-form and the meaning versus name is unclear. | Operational code has a documented or generated structure; name remains human-readable. | Free-form code exists today. | Define box code convention/generator and validation. | Product/engineering | Open |
+| EX-011 | P2 | Phase 5 / product shipping profile model |  | Current "package profile" concept is confusing and asks for variant IDs; SKU dimensions belong in catalog and should feed shipping. | Product/SKU dimensions live in catalog; shipping engine consumes them for box optimization. | Product shipping profile UI improved to SKU picker, but model still needs architecture cleanup. | Move SKU dimensions to catalog source of truth and wire shipping engine ingestion. | Architecture/engineering | Open |
+| EX-012 | P2 | Phase 5 / rate zones strategy |  | Shipping zones/rate tables may be the wrong long-term model if carrier API rating is available. | Decide between rate table by zone/weight/package dimensions versus carrier API rating. | For dogfood, static config is created enough to continue. | Document and choose long-term carrier/rate architecture. | Product/architecture | Open |
+| EX-013 | P2 | Phase 4 / vendor catalog selection UX | PR #735, PR #737 | Vendor catalog selection UX mixed filters and selection actions; blank catalog was confusing when exposure was missing. | Filters narrow the table; selection happens in the table; product search is typeahead/search, not a dropdown. | Vendor catalog selection was redesigned. | Verify after narrow exposure that portal shows only the intended SKU. | Frontend/backend | Fixed / verify |
 
 ## Final Dogfood Exit Checklist
 
