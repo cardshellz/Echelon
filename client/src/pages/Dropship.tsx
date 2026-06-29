@@ -3188,8 +3188,16 @@ function CatalogExposureTab() {
   });
 
   const previewRows = previewQuery.data?.rows ?? [];
-  const exposedPreviewCount = previewRows.filter((row) => row.decision.exposed).length;
-  const blockedPreviewCount = previewRows.length - exposedPreviewCount;
+  const activeRuleInputs = useMemo(
+    () => normalizeCatalogRuleOrder((rulesQuery.data?.rules ?? [])
+      .filter((rule) => rule.isActive !== false)
+      .map(catalogExposureRecordToInput)),
+    [rulesQuery.data?.rules],
+  );
+  const activeRulesKey = useMemo(() => catalogExposureRulesStateKey(activeRuleInputs), [activeRuleInputs]);
+  const draftRulesKey = useMemo(() => catalogExposureRulesStateKey(draftRules), [draftRules]);
+  const hasUnsavedExposureChanges = draftRulesKey !== activeRulesKey;
+  const unsavedExposureRuleCount = hasUnsavedExposureChanges ? draftRules.length : 0;
   const productLineOptions = useMemo(
     () => (productLinesQuery.data ?? [])
       .filter((line) => line.status === undefined || line.status === null || line.status === "active")
@@ -3227,16 +3235,10 @@ function CatalogExposureTab() {
 
   useEffect(() => {
     if (!rulesQuery.data) return;
-    const activeInputs = normalizeCatalogRuleOrder(rulesQuery.data.rules
-      .filter((rule) => rule.isActive !== false)
-      .map(catalogExposureRecordToInput));
-    const nextRulesKey = activeInputs
-      .map((rule, index) => `${index}:${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`)
-      .join("|");
-    if (nextRulesKey === loadedRulesKey) return;
-    setDraftRules(activeInputs);
-    setLoadedRulesKey(nextRulesKey);
-  }, [loadedRulesKey, rulesQuery.data]);
+    if (activeRulesKey === loadedRulesKey) return;
+    setDraftRules(activeRuleInputs);
+    setLoadedRulesKey(activeRulesKey);
+  }, [activeRuleInputs, activeRulesKey, loadedRulesKey, rulesQuery.data]);
 
   function applyCatalogFilters() {
     setAppliedFilters({ search, exposedOnly, includeInactiveCatalog });
@@ -3275,8 +3277,8 @@ function CatalogExposureTab() {
   }
 
   function clearDraftRules() {
-    setDraftRules([]);
-    setMessage("Unsaved exposure changes cleared.");
+    setDraftRules(activeRuleInputs);
+    setMessage("Unsaved exposure changes reverted.");
     setError("");
   }
 
@@ -3351,6 +3353,7 @@ function CatalogExposureTab() {
     setMessage("");
     try {
       const orderedRules = normalizeCatalogRuleOrder(draftRules);
+      const orderedRulesKey = catalogExposureRulesStateKey(orderedRules);
       const result = await putJson<DropshipAdminCatalogExposureRulesReplaceResponse>(
         "/api/dropship/admin/catalog/rules",
         {
@@ -3359,6 +3362,7 @@ function CatalogExposureTab() {
         },
       );
       setDraftRules(orderedRules);
+      setLoadedRulesKey(orderedRulesKey);
       setMessage(`Catalog exposure rules published as revision ${result.revisionId}.`);
       await Promise.all([
         rulesQuery.refetch(),
@@ -3391,11 +3395,9 @@ function CatalogExposureTab() {
         </Alert>
       )}
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active rules" value={String(rulesQuery.data?.rules.length ?? 0)} />
-        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Unsaved changes" value={String(draftRules.length)} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Visible preview rows" value={String(exposedPreviewCount)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Hidden preview rows" value={String(blockedPreviewCount)} />
+      <div className="grid gap-3 md:grid-cols-2">
+        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active rules" value={String(activeRuleInputs.length)} />
+        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Unsaved changes" value={String(unsavedExposureRuleCount)} />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
@@ -3427,28 +3429,19 @@ function CatalogExposureTab() {
                 <PlusCircle className="h-4 w-4" />
                 Add exposure rule
               </Button>
-              <Button type="button" variant="outline" className="gap-2" onClick={clearDraftRules}>
-                <MinusCircle className="h-4 w-4" />
-                Clear unsaved changes
-              </Button>
-              <Button
-                type="button"
-                className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-                disabled={saving || draftRules.length === 0}
-                onClick={saveDraftRules}
-              >
-                <Save className="h-4 w-4" />
-                {saving ? "Publishing" : "Publish exposure rules"}
-              </Button>
             </div>
           </div>
         </section>
 
         <CatalogDraftRulesTable
+          hasUnsavedChanges={hasUnsavedExposureChanges}
           rules={draftRules}
           isLoading={rulesQuery.isLoading}
+          isSaving={saving}
+          onClearRules={clearDraftRules}
           onMoveRule={moveDraftRule}
           onRemoveRule={removeDraftRule}
+          onSaveRules={saveDraftRules}
         />
       </div>
 
@@ -7365,24 +7358,61 @@ function CatalogRuleDialog({
 }
 
 function CatalogDraftRulesTable({
+  hasUnsavedChanges,
   isLoading,
+  isSaving,
+  onClearRules,
   onMoveRule,
   onRemoveRule,
+  onSaveRules,
   rules,
 }: {
+  hasUnsavedChanges: boolean;
   isLoading: boolean;
+  isSaving: boolean;
+  onClearRules: () => void;
   onMoveRule: (rule: DropshipAdminCatalogExposureRuleInput, direction: -1 | 1) => void;
   onRemoveRule: (rule: DropshipAdminCatalogExposureRuleInput) => void;
+  onSaveRules: () => void;
   rules: DropshipAdminCatalogExposureRuleInput[];
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Unsaved exposure changes</h2>
-          <p className="text-sm text-muted-foreground">Publish replaces the active admin exposure rules.</p>
+          <h2 className="text-lg font-semibold">Exposure rule set</h2>
+          <p className="text-sm text-muted-foreground">
+            {hasUnsavedChanges
+              ? "Unpublished changes are staged. Publishing replaces the active admin exposure rules."
+              : "Published rules are loaded. Editing this set creates unpublished changes."}
+          </p>
         </div>
-        <Badge variant="outline">{rules.length} rule{rules.length === 1 ? "" : "s"}</Badge>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Badge variant="outline">
+            {hasUnsavedChanges ? `${rules.length} unsaved` : "Published"}
+          </Badge>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-2"
+            disabled={isSaving || !hasUnsavedChanges}
+            onClick={onClearRules}
+          >
+            <MinusCircle className="h-4 w-4" />
+            Clear changes
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            className="h-8 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+            disabled={isSaving || !hasUnsavedChanges || rules.length === 0}
+            onClick={onSaveRules}
+          >
+            <Save className="h-4 w-4" />
+            {isSaving ? "Publishing" : "Publish"}
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -7395,8 +7425,10 @@ function CatalogDraftRulesTable({
         <Empty className="mt-4 rounded-md border border-dashed p-8">
           <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
           <EmptyHeader>
-            <EmptyTitle>No unsaved changes</EmptyTitle>
-            <EmptyDescription>Add an exposure rule before publishing. No catalog is visible without at least one expose rule.</EmptyDescription>
+            <EmptyTitle>No exposure rules</EmptyTitle>
+            <EmptyDescription>
+              Add an exposure rule before publishing. No catalog is visible without at least one expose rule.
+            </EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (
@@ -7627,6 +7659,12 @@ function normalizeCatalogRuleOrder(
     ...rule,
     priority: index,
   }));
+}
+
+function catalogExposureRulesStateKey(rules: DropshipAdminCatalogExposureRuleInput[]): string {
+  return rules
+    .map((rule, index) => `${index}:${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`)
+    .join("|");
 }
 
 function catalogExposureActionLabel(action: CatalogExposureActionFilter): string {
