@@ -229,6 +229,8 @@ type DropshipOpsTabValue =
   | "audit";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
 type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
+type CatalogPreviewVisibilityFilter = "all" | "visible" | "hidden";
+type CatalogPreviewStatusFilter = "active" | "inactive" | "all";
 
 interface DropshipWarehouseOption {
   id: number;
@@ -3151,12 +3153,12 @@ function WalletOpsTab() {
 function CatalogExposureTab() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  const [exposedOnly, setExposedOnly] = useState("false");
-  const [includeInactiveCatalog, setIncludeInactiveCatalog] = useState("false");
+  const [visibilityFilter, setVisibilityFilter] = useState<CatalogPreviewVisibilityFilter>("all");
+  const [catalogStatusFilter, setCatalogStatusFilter] = useState<CatalogPreviewStatusFilter>("active");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
-    exposedOnly: "false",
-    includeInactiveCatalog: "false",
+    visibility: "all" as CatalogPreviewVisibilityFilter,
+    catalogStatus: "active" as CatalogPreviewStatusFilter,
   });
   const [previewPage, setPreviewPage] = useState(1);
   const [draftRules, setDraftRules] = useState<DropshipAdminCatalogExposureRuleInput[]>([]);
@@ -3169,8 +3171,8 @@ function CatalogExposureTab() {
 
   const previewUrl = useMemo(() => buildAdminCatalogExposurePreviewUrl({
     search: appliedFilters.search,
-    exposedOnly: appliedFilters.exposedOnly === "true",
-    includeInactiveCatalog: appliedFilters.includeInactiveCatalog === "true",
+    visibility: appliedFilters.visibility,
+    catalogStatus: appliedFilters.catalogStatus,
     page: previewPage,
     limit: CATALOG_PREVIEW_PAGE_SIZE,
   }), [appliedFilters, previewPage]);
@@ -3277,7 +3279,23 @@ function CatalogExposureTab() {
   }, [previewPage, previewQuery.data, previewTotalPages]);
 
   function applyCatalogFilters() {
-    setAppliedFilters({ search, exposedOnly, includeInactiveCatalog });
+    setAppliedFilters({
+      search,
+      visibility: visibilityFilter,
+      catalogStatus: catalogStatusFilter,
+    });
+    setPreviewPage(1);
+  }
+
+  function applyVisibilityFilter(value: CatalogPreviewVisibilityFilter) {
+    setVisibilityFilter(value);
+    setAppliedFilters((current) => ({ ...current, visibility: value }));
+    setPreviewPage(1);
+  }
+
+  function applyCatalogStatusFilter(value: CatalogPreviewStatusFilter) {
+    setCatalogStatusFilter(value);
+    setAppliedFilters((current) => ({ ...current, catalogStatus: value }));
     setPreviewPage(1);
   }
 
@@ -3515,22 +3533,30 @@ function CatalogExposureTab() {
                 placeholder="Search SKU, product, or variant"
               />
             </div>
-            <Select value={exposedOnly} onValueChange={setExposedOnly}>
+            <Select
+              value={visibilityFilter}
+              onValueChange={(value) => applyVisibilityFilter(value as CatalogPreviewVisibilityFilter)}
+            >
               <SelectTrigger className="lg:w-44">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="false">All rows</SelectItem>
-                <SelectItem value="true">Visible only</SelectItem>
+                <SelectItem value="all">All visibility</SelectItem>
+                <SelectItem value="visible">Visible only</SelectItem>
+                <SelectItem value="hidden">Hidden only</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={includeInactiveCatalog} onValueChange={setIncludeInactiveCatalog}>
+            <Select
+              value={catalogStatusFilter}
+              onValueChange={(value) => applyCatalogStatusFilter(value as CatalogPreviewStatusFilter)}
+            >
               <SelectTrigger className="lg:w-44">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="false">Active only</SelectItem>
-                <SelectItem value="true">Include inactive</SelectItem>
+                <SelectItem value="active">Active only</SelectItem>
+                <SelectItem value="inactive">Inactive only</SelectItem>
+                <SelectItem value="all">Both</SelectItem>
               </SelectContent>
             </Select>
             <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyCatalogFilters}>

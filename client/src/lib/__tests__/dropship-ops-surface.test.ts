@@ -185,14 +185,19 @@ describe("dropship ops surface client helpers", () => {
       search: " pack ",
       exposedOnly: true,
       includeInactiveCatalog: false,
-    })).toBe("/api/dropship/admin/catalog/preview?search=pack&exposedOnly=true&includeInactiveCatalog=false&page=1&limit=50");
+    })).toBe("/api/dropship/admin/catalog/preview?search=pack&visibility=visible&catalogStatus=active&page=1&limit=50");
+    expect(buildAdminCatalogExposurePreviewUrl({
+      search: "",
+      visibility: "hidden",
+      catalogStatus: "inactive",
+      page: 3,
+      limit: 100,
+    })).toBe("/api/dropship/admin/catalog/preview?visibility=hidden&catalogStatus=inactive&page=3&limit=100");
     expect(buildAdminCatalogExposurePreviewUrl({
       search: "",
       exposedOnly: false,
       includeInactiveCatalog: true,
-      page: 3,
-      limit: 100,
-    })).toBe("/api/dropship/admin/catalog/preview?exposedOnly=false&includeInactiveCatalog=true&page=3&limit=100");
+    })).toBe("/api/dropship/admin/catalog/preview?visibility=all&catalogStatus=all&page=1&limit=50");
   });
 
   it("builds admin dogfood readiness URLs with optional filters", () => {

@@ -2196,15 +2196,19 @@ export function queryErrorMessage(error: unknown, fallback: string): string {
 
 export function buildAdminCatalogExposurePreviewUrl(input: {
   search: string;
-  exposedOnly: boolean;
-  includeInactiveCatalog: boolean;
+  visibility?: "all" | "visible" | "hidden";
+  catalogStatus?: "active" | "inactive" | "all";
+  exposedOnly?: boolean;
+  includeInactiveCatalog?: boolean;
   page?: number;
   limit?: number;
 }): string {
+  const visibility = input.visibility ?? (input.exposedOnly ? "visible" : "all");
+  const catalogStatus = input.catalogStatus ?? (input.includeInactiveCatalog ? "all" : "active");
   return buildQueryUrl("/api/dropship/admin/catalog/preview", {
     search: input.search.trim(),
-    exposedOnly: input.exposedOnly,
-    includeInactiveCatalog: input.includeInactiveCatalog,
+    visibility,
+    catalogStatus,
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
