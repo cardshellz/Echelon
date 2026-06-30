@@ -166,7 +166,7 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
 });
 
 describe("ShipmentTrackingService.getEnrichedLines", () => {
-  it("returns PO SKU, PO unit cost, and allocation category breakdowns for the allocation tab", async () => {
+  it("returns PO SKU, mills unit costs, and allocation category breakdowns for the allocation tab", async () => {
     const storage = buildStorage({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
         {
@@ -175,22 +175,29 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
           purchaseOrderLineId: 21,
           productVariantId: null,
           qtyShipped: 5,
-          allocatedCostCents: 1200,
-          landedUnitCostCents: 340,
+          allocatedCostCents: 1275,
+          landedUnitCostCents: 355,
         },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
-        { id: 31, costType: "freight", actualCents: 1200 },
+        { id: 31, costType: "freight", actualCents: 1000 },
+        { id: 32, costType: "brokerage", actualCents: 200 },
+        { id: 33, costType: "insurance", actualCents: 50 },
+        { id: 34, costType: "warehousing", actualCents: 25 },
       ]),
-      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
-        { shipmentCostId: 31, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 1200 },
-      ]),
+      getInboundFreightCostAllocations: vi.fn((costId: number) => Promise.resolve(({
+        31: [{ shipmentCostId: 31, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 1000 }],
+        32: [{ shipmentCostId: 32, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 200 }],
+        33: [{ shipmentCostId: 33, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 50 }],
+        34: [{ shipmentCostId: 34, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 25 }],
+      } as Record<number, any[]>)[costId] ?? [])),
       getPurchaseOrderLineById: vi.fn().mockResolvedValue({
         id: 21,
         sku: "PO-SKU",
         productName: "PO Product",
         orderQty: 5,
         unitCostCents: 100,
+        unitCostMills: 10000,
       }),
     });
     const service = createShipmentTrackingService({} as any, storage);
@@ -202,10 +209,18 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
       productName: "PO Product",
       poQtyOrdered: 5,
       poUnitCostCents: 100,
-      freightAllocatedCents: 1200,
-      dutyAllocatedCents: 0,
-      insuranceAllocatedCents: 0,
-      otherAllocatedCents: 0,
+      poUnitCostMills: 10000,
+      allocatedCostCents: 1275,
+      freightAllocatedCents: 1000,
+      dutyAllocatedCents: 200,
+      insuranceAllocatedCents: 50,
+      otherAllocatedCents: 25,
+      freightAllocatedMillsPerUnit: 20000,
+      dutyAllocatedMillsPerUnit: 4000,
+      insuranceAllocatedMillsPerUnit: 1000,
+      otherAllocatedMillsPerUnit: 500,
+      totalAllocatedMillsPerUnit: 25500,
+      landedUnitCostMills: 35500,
     }));
   });
 });
