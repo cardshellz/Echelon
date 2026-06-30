@@ -31,6 +31,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
+import {
+  ShipmentReceiptPackResolutionDialog,
+  type ShipmentReceiptPackResolution,
+} from "@/components/purchasing/ShipmentReceiptPackResolutionDialog";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import {
@@ -823,6 +827,9 @@ export default function PurchaseOrderDetail() {
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
   const [showCreateShipmentDialog, setShowCreateShipmentDialog] = useState(false);
   const [showReceivePicker, setShowReceivePicker] = useState(false);
+  const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
+  const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
+  const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
   const [newShipmentForm, setNewShipmentForm] = useState({
     mode: "sea_fcl",
     shipmentNumber: "",
@@ -1282,6 +1289,8 @@ export default function PurchaseOrderDetail() {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] });
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       setShowReceivePicker(false);
+      setShipmentReceiptPackResolution(null);
+      setPendingShipmentReceipt(null);
       toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created from shipment` });
       navigate(`/receiving?open=${receipt.id}`);
     },
@@ -1289,6 +1298,50 @@ export default function PurchaseOrderDetail() {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
+    const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
+    const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
+    return body as ShipmentReceiptPackResolution;
+  }
+
+  async function checkAndReceiveShipment(params: { shipmentId: number; purchaseOrderId: number }) {
+    setCheckingShipmentReceiptPacks(true);
+    setPendingShipmentReceipt(params);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!resolution.canCreateReceipt) {
+        setShipmentReceiptPackResolution(resolution);
+        return;
+      }
+      setShipmentReceiptPackResolution(null);
+      createReceiptFromShipmentMutation.mutate(params);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  async function refreshShipmentReceiptPackResolution() {
+    if (!pendingShipmentReceipt) return;
+    setCheckingShipmentReceiptPacks(true);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt);
+      setShipmentReceiptPackResolution(resolution);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  function createPendingShipmentReceipt() {
+    if (!pendingShipmentReceipt) return;
+    createReceiptFromShipmentMutation.mutate(pendingShipmentReceipt);
+  }
 
   const createInvoiceMutation = useMutation({
     mutationFn: async () => {
@@ -4017,7 +4070,7 @@ export default function PurchaseOrderDetail() {
             const receivableShipments = shipmentOptions.filter((s: any) => s.receivable);
             const blockedShipments = shipmentOptions.filter((s: any) => !s.receivable);
             const poDirect = receiveOptions?.poDirect ?? { allowed: true, warning: "No receive options loaded." };
-            const busy = createReceiptMutation.isPending || createReceiptFromShipmentMutation.isPending;
+            const busy = createReceiptMutation.isPending || createReceiptFromShipmentMutation.isPending || checkingShipmentReceiptPacks;
             return (
               <div className="space-y-3">
                 {receivableShipments.length > 0 ? (
@@ -4046,13 +4099,15 @@ export default function PurchaseOrderDetail() {
                               navigate(`/receiving?open=${s.existingReceiptId}`);
                               return;
                             }
-                            createReceiptFromShipmentMutation.mutate({
+                            checkAndReceiveShipment({
                               shipmentId: s.shipmentId,
                               purchaseOrderId: s.purchaseOrderId,
                             });
                           }}
                         >
-                          {s.action === "open_existing_receipt" ? "Open receipt" : "Receive this shipment"}
+                          {checkingShipmentReceiptPacks && pendingShipmentReceipt?.shipmentId === s.shipmentId
+                            ? "Checking..."
+                            : s.action === "open_existing_receipt" ? "Open receipt" : "Receive this shipment"}
                         </Button>
                       </div>
                     ))}
@@ -4465,6 +4520,18 @@ export default function PurchaseOrderDetail() {
           </div>
         </DialogContent>
       </Dialog>
+      <ShipmentReceiptPackResolutionDialog
+        open={!!shipmentReceiptPackResolution}
+        onOpenChange={(open) => {
+          if (!open) setShipmentReceiptPackResolution(null);
+        }}
+        resolution={shipmentReceiptPackResolution}
+        creating={createReceiptFromShipmentMutation.isPending}
+        refreshing={checkingShipmentReceiptPacks}
+        onCreateReceipt={createPendingShipmentReceipt}
+        onRefresh={refreshShipmentReceiptPackResolution}
+        onOpenCatalog={() => navigate("/catalog/variants")}
+      />
     </div>
   );
 }

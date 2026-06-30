@@ -1956,6 +1956,47 @@ export function createPurchasingService(db: any, storage: Storage) {
     existingReceiptStatus: string | null;
   };
 
+  type ShipmentCartonReceivePackInspection = {
+    status: "no_carton_count" | "fractional_carton" | "pack";
+    cartonCount: number | null;
+    shippedQty: number | null;
+    unitsPerVariant: number | null;
+    issue: string | null;
+  };
+
+  type ShipmentReceiptPackResolutionLine = {
+    shipmentLineId: number | null;
+    purchaseOrderId: number | null;
+    purchaseOrderLineId: number | null;
+    sku: string | null;
+    productId: number | null;
+    productName: string | null;
+    qtyShipped: number | null;
+    cartonCount: number | null;
+    unitsPerCarton: number | null;
+    status:
+      | "resolved"
+      | "no_carton_count"
+      | "fractional_carton"
+      | "missing_product"
+      | "missing_variant"
+      | "invalid_po_line";
+    blocking: boolean;
+    issue: string | null;
+    matchedVariant: {
+      id: number;
+      sku: string | null;
+      name: string | null;
+      unitsPerVariant: number;
+    } | null;
+    activeVariants: Array<{
+      id: number;
+      sku: string | null;
+      name: string | null;
+      unitsPerVariant: number;
+    }>;
+  };
+
   function parsePositiveInteger(value: unknown): number | null {
     const parsed = Number(value);
     return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
@@ -1963,6 +2004,103 @@ export function createPurchasingService(db: any, storage: Storage) {
 
   function activeReceiptStatus(status: unknown): boolean {
     return ACTIVE_RECEIPT_STATUSES.has(String(status ?? ""));
+  }
+
+  function variantIsActive(variant: any): boolean {
+    return variant?.isActive !== false && variant?.is_active !== false;
+  }
+
+  function variantUnitsPerVariant(variant: any): number {
+    const units = Number(variant?.unitsPerVariant ?? variant?.units_per_variant);
+    return Number.isInteger(units) && units > 0 ? units : 1;
+  }
+
+  function inspectShipmentCartonReceivePack(line: any): ShipmentCartonReceivePackInspection {
+    const cartonCount = parsePositiveInteger(line?.cartonCount ?? line?.carton_count);
+    const shippedQty = parsePositiveInteger(line?.qtyShipped ?? line?.qty_shipped);
+    if (!cartonCount || !shippedQty) {
+      return {
+        status: "no_carton_count",
+        cartonCount,
+        shippedQty,
+        unitsPerVariant: null,
+        issue: null,
+      };
+    }
+    if (shippedQty % cartonCount !== 0) {
+      return {
+        status: "fractional_carton",
+        cartonCount,
+        shippedQty,
+        unitsPerVariant: null,
+        issue: `Shipment line ${line?.sku ?? line?.id ?? ""} has ${shippedQty} shipped units across ${cartonCount} cartons; units per carton must be a whole number before receiving.`,
+      };
+    }
+    return {
+      status: "pack",
+      cartonCount,
+      shippedQty,
+      unitsPerVariant: shippedQty / cartonCount,
+      issue: null,
+    };
+  }
+
+  function deriveShipmentCartonReceivePack(line: any): { cartonCount: number; unitsPerVariant: number } | null {
+    const inspected = inspectShipmentCartonReceivePack(line);
+    if (inspected.status === "no_carton_count") return null;
+    if (inspected.status === "fractional_carton") {
+      throw new PurchasingError(
+        inspected.issue ?? "Shipment carton quantity cannot be resolved.",
+        400,
+        { shipmentLineId: line?.id ?? null, qtyShipped: inspected.shippedQty, cartonCount: inspected.cartonCount },
+      );
+    }
+    return { cartonCount: inspected.cartonCount as number, unitsPerVariant: inspected.unitsPerVariant as number };
+  }
+
+  function chooseActiveVariantByUnits(variants: any[], unitsPerVariant: number): any | null {
+    return variants.find(
+      (variant) =>
+        parsePositiveInteger(variant?.id) &&
+        variantIsActive(variant) &&
+        variantUnitsPerVariant(variant) === unitsPerVariant,
+    ) ?? null;
+  }
+
+  function chooseFallbackReceiveVariant(variants: any[], qtyShipped: unknown): any | null {
+    const shippedQty = Number(qtyShipped);
+    const activeVariants = variants
+      .filter((variant) => parsePositiveInteger(variant?.id) && variantIsActive(variant))
+      .map((variant) => ({ variant, unitsPerVariant: variantUnitsPerVariant(variant) }))
+      .sort((a, b) => b.unitsPerVariant - a.unitsPerVariant);
+
+    if (activeVariants.length === 0) return null;
+
+    if (Number.isInteger(shippedQty) && shippedQty > 0) {
+      const exactFit = activeVariants.find(
+        ({ unitsPerVariant }) => unitsPerVariant <= shippedQty && shippedQty % unitsPerVariant === 0,
+      );
+      if (exactFit) return exactFit.variant;
+
+      const largestNotExceedingShipment = activeVariants.find(
+        ({ unitsPerVariant }) => unitsPerVariant <= shippedQty,
+      );
+      if (largestNotExceedingShipment) return largestNotExceedingShipment.variant;
+    }
+
+    return activeVariants[activeVariants.length - 1]?.variant ?? null;
+  }
+
+  function summarizeActiveVariants(variants: any[]): ShipmentReceiptPackResolutionLine["activeVariants"] {
+    return variants
+      .filter((variant) => parsePositiveInteger(variant?.id) && variantIsActive(variant))
+      .map((variant) => ({
+        id: parsePositiveInteger(variant.id) as number,
+        sku: variant.sku ?? null,
+        name: variant.name ?? null,
+        unitsPerVariant: variantUnitsPerVariant(variant),
+      }))
+      .sort((a, b) => b.unitsPerVariant - a.unitsPerVariant || a.id - b.id);
   }
 
   async function getReceiptForShipmentPo(
@@ -2100,6 +2238,137 @@ export function createPurchasingService(db: any, storage: Storage) {
     };
   }
 
+  async function getShipmentReceiptPackResolution(
+    inboundShipmentId: number,
+    options: { purchaseOrderId?: number } = {},
+  ) {
+    const shipment = await storage.getInboundShipmentById(inboundShipmentId);
+    if (!shipment) throw new PurchasingError("Inbound shipment not found", 404);
+
+    const shipmentLines = await storage.getInboundShipmentLines(inboundShipmentId);
+    const linkedShipmentLines = shipmentLines.filter(
+      (sl: any) => Number(sl.qtyShipped) > 0 && sl.purchaseOrderId && sl.purchaseOrderLineId,
+    );
+    const poIds = Array.from(
+      new Set(linkedShipmentLines.map((sl: any) => Number(sl.purchaseOrderId)).filter((id: number) => Number.isInteger(id) && id > 0)),
+    ).sort((a, b) => a - b);
+    const requestedPoId = parsePositiveInteger(options.purchaseOrderId);
+    if (!requestedPoId && poIds.length !== 1) {
+      throw new PurchasingError(
+        "This shipment's lines span multiple POs; choose which PO to receive.",
+        409,
+        { purchaseOrderIds: poIds },
+      );
+    }
+    const purchaseOrderId = requestedPoId ?? (poIds[0] as number | undefined);
+    if (!purchaseOrderId || !poIds.includes(purchaseOrderId)) {
+      throw new PurchasingError(
+        `Shipment ${inboundShipmentId} has no receivable lines for PO ${purchaseOrderId ?? "unknown"}.`,
+        404,
+        { purchaseOrderIds: poIds },
+      );
+    }
+
+    const po = await storage.getPurchaseOrderById(purchaseOrderId);
+    if (!po) throw new PurchasingError("Linked purchase order not found", 404);
+
+    const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
+    const poLineById = new Map<number, any>(poLines.map((line: any) => [line.id, line]));
+    const receivableShipmentLines = linkedShipmentLines.filter(
+      (sl: any) => Number(sl.purchaseOrderId) === purchaseOrderId,
+    );
+
+    const productIds = new Set<number>();
+    for (const sl of receivableShipmentLines) {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const productId = parsePositiveInteger(poLine?.productId);
+      if (productId) productIds.add(productId);
+    }
+
+    const variantsByProductId = new Map<number, any[]>();
+    if (typeof storage.getProductVariantsByProductId === "function") {
+      for (const productId of productIds) {
+        try {
+          variantsByProductId.set(productId, await storage.getProductVariantsByProductId(productId));
+        } catch {
+          variantsByProductId.set(productId, []);
+        }
+      }
+    }
+
+    const lines: ShipmentReceiptPackResolutionLine[] = receivableShipmentLines.map((sl: any) => {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const productId = parsePositiveInteger(poLine?.productId);
+      const inspectedPack = inspectShipmentCartonReceivePack(sl);
+      const activeVariants = productId
+        ? summarizeActiveVariants(variantsByProductId.get(productId) ?? [])
+        : [];
+      const matchedVariant = inspectedPack.unitsPerVariant
+        ? activeVariants.find((variant) => variant.unitsPerVariant === inspectedPack.unitsPerVariant) ?? null
+        : null;
+
+      let status: ShipmentReceiptPackResolutionLine["status"] = "resolved";
+      let blocking = false;
+      let issue: string | null = null;
+
+      if (!poLine) {
+        status = "invalid_po_line";
+        blocking = true;
+        issue = "Shipment line is linked to a PO line that was not found on this purchase order.";
+      } else if (inspectedPack.status === "fractional_carton") {
+        status = "fractional_carton";
+        blocking = true;
+        issue = inspectedPack.issue;
+      } else if (inspectedPack.status === "no_carton_count") {
+        status = "no_carton_count";
+        blocking = false;
+        issue = "Shipment line has no carton count; receipt creation will use the existing receive configuration.";
+      } else if (!productId) {
+        status = "missing_product";
+        blocking = true;
+        issue = "Shipment cartons are present, but the PO line has no product_id to resolve a receive variant.";
+      } else if (!matchedVariant) {
+        status = "missing_variant";
+        blocking = true;
+        issue = `Shipment cartons imply ${inspectedPack.cartonCount} carton${inspectedPack.cartonCount === 1 ? "" : "s"} of ${inspectedPack.unitsPerVariant} units, but product ${productId} has no active receive variant with units_per_variant=${inspectedPack.unitsPerVariant}.`;
+      }
+
+      return {
+        shipmentLineId: parsePositiveInteger(sl.id),
+        purchaseOrderId: parsePositiveInteger(sl.purchaseOrderId),
+        purchaseOrderLineId: parsePositiveInteger(sl.purchaseOrderLineId),
+        sku: poLine?.sku ?? sl.sku ?? null,
+        productId,
+        productName: poLine?.productName ?? poLine?.product_name ?? null,
+        qtyShipped: parsePositiveInteger(sl.qtyShipped ?? sl.qty_shipped),
+        cartonCount: inspectedPack.cartonCount,
+        unitsPerCarton: inspectedPack.unitsPerVariant,
+        status,
+        blocking,
+        issue,
+        matchedVariant,
+        activeVariants,
+      };
+    });
+
+    const blockingLines = lines.filter((line) => line.blocking);
+    const shipmentIsReceivable = RECEIVABLE_SHIPMENT_STATUSES.has((shipment as any).status);
+    return {
+      shipmentId: inboundShipmentId,
+      shipmentNumber: shipment.shipmentNumber ?? shipment.shipment_number ?? null,
+      status: shipment.status ?? null,
+      purchaseOrderId,
+      poNumber: po.poNumber ?? po.po_number ?? null,
+      canCreateReceipt: shipmentIsReceivable && linkedShipmentLines.length > 0 && blockingLines.length === 0,
+      unresolvedCount: blockingLines.length,
+      lineCount: lines.length,
+      issue: shipmentIsReceivable
+        ? (lines.length === 0 ? "Shipment has no positive-quantity lines linked to this PO." : null)
+        : `Cannot receive a shipment in '${(shipment as any).status}' status.`,
+      lines,
+    };
+  }
+
   /**
    * Create a receiving order against an inbound SHIPMENT (the freight-bearing
    * leg). Mirrors createReceiptFromPO's line-building, but:
@@ -2222,7 +2491,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     const unitsPerVariantById = new Map<number, number>();
-    const fallbackReceiveVariantByProductId = new Map<number, any>();
+    const fallbackVariantsByProductId = new Map<number, any[]>();
     const explicitVariantIds = new Set<number>();
     for (const sl of receivableShipmentLines) {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
@@ -2247,19 +2516,13 @@ export function createPurchasingService(db: any, storage: Storage) {
         const hasExplicitVariant = parsePositiveInteger(
           sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId,
         );
-        if (productId && !hasExplicitVariant) productIdsNeedingFallback.add(productId);
+        const shipmentReceivePack = deriveShipmentCartonReceivePack(sl);
+        if (productId && (!hasExplicitVariant || shipmentReceivePack)) productIdsNeedingFallback.add(productId);
       }
       for (const productId of productIdsNeedingFallback) {
         try {
           const variants = await storage.getProductVariantsByProductId(productId);
-          const largestVariant = [...variants].sort(
-            (a: any, b: any) => (Number(b.unitsPerVariant) || 1) - (Number(a.unitsPerVariant) || 1),
-          )[0];
-          const variantId = parsePositiveInteger(largestVariant?.id);
-          if (largestVariant && variantId) {
-            fallbackReceiveVariantByProductId.set(productId, largestVariant);
-            unitsPerVariantById.set(variantId, Math.max(1, Number(largestVariant.unitsPerVariant) || 1));
-          }
+          fallbackVariantsByProductId.set(productId, variants);
         } catch { /* non-critical: fall back to PO receive units */ }
       }
     }
@@ -2276,17 +2539,56 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     } catch { /* non-critical */ }
 
-    // Build receiving lines from SHIPMENT lines. Expected = qtyShipped scaled to
-    // the shipment line's receive variant; cost is stamped from the PO line.
+    // Build receiving lines from SHIPMENT lines. When the shipment carries a
+    // carton count, the shipment's carton math is the receipt authority; the
+    // product variant must exactly match the implied units-per-carton so
+    // inventory posting still lands in the right variant units.
     const receivingLineData = receivableShipmentLines.map((sl: any) => {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
-      const productId = poLine?.productId ?? null;
-      const fallbackVariant = productId ? fallbackReceiveVariantByProductId.get(productId) : null;
+      const productId = parsePositiveInteger(poLine?.productId);
+      const shipmentReceivePack = deriveShipmentCartonReceivePack(sl);
+      if (shipmentReceivePack && !productId) {
+        throw new PurchasingError(
+          `Shipment line ${poLine?.sku ?? sl.sku ?? sl.id} has carton count but no product_id on its PO line; cannot resolve a receive variant.`,
+          400,
+          {
+            shipmentLineId: sl.id ?? null,
+            purchaseOrderLineId: sl.purchaseOrderLineId ?? null,
+            qtyShipped: sl.qtyShipped,
+            cartonCount: shipmentReceivePack.cartonCount,
+            unitsPerVariant: shipmentReceivePack.unitsPerVariant,
+          },
+        );
+      }
+      const shipmentReceiveVariant = productId && shipmentReceivePack
+        ? chooseActiveVariantByUnits(
+            fallbackVariantsByProductId.get(productId) ?? [],
+            shipmentReceivePack.unitsPerVariant,
+          )
+        : null;
+      if (shipmentReceivePack && productId && !shipmentReceiveVariant) {
+        throw new PurchasingError(
+          `Shipment line ${poLine?.sku ?? sl.sku ?? sl.id} expects ${shipmentReceivePack.cartonCount} carton${shipmentReceivePack.cartonCount === 1 ? "" : "s"} of ${shipmentReceivePack.unitsPerVariant}, but product ${productId} has no active receive variant with units_per_variant=${shipmentReceivePack.unitsPerVariant}. Update the product receive variant before creating the receipt.`,
+          400,
+          {
+            shipmentLineId: sl.id ?? null,
+            purchaseOrderLineId: sl.purchaseOrderLineId ?? null,
+            productId,
+            qtyShipped: sl.qtyShipped,
+            cartonCount: shipmentReceivePack.cartonCount,
+            unitsPerVariant: shipmentReceivePack.unitsPerVariant,
+          },
+        );
+      }
+      const fallbackVariant = productId
+        ? chooseFallbackReceiveVariant(fallbackVariantsByProductId.get(productId) ?? [], sl.qtyShipped)
+        : null;
       const resolvedVariantId =
-        sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId ?? fallbackVariant?.id ?? null;
+        shipmentReceiveVariant?.id ?? sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId ?? fallbackVariant?.id ?? null;
       const packSize = Math.max(
         1,
-        (resolvedVariantId ? unitsPerVariantById.get(resolvedVariantId) : undefined) ??
+        shipmentReceivePack?.unitsPerVariant ??
+          (resolvedVariantId ? unitsPerVariantById.get(resolvedVariantId) : undefined) ??
           (fallbackVariant ? Number(fallbackVariant.unitsPerVariant) : undefined) ??
           poLine?.expectedReceiveUnitsPerVariant ??
           poLine?.unitsPerUom ??
@@ -2311,7 +2613,7 @@ export function createPurchasingService(db: any, storage: Storage) {
         productId,
         sku: poLine?.sku ?? sl.sku,
         productName: poLine?.productName,
-        expectedQty: Math.ceil(Number(sl.qtyShipped) / packSize),
+        expectedQty: shipmentReceivePack?.cartonCount ?? Math.ceil(Number(sl.qtyShipped) / packSize),
         receivedQty: 0,
         damagedQty: 0,
         purchaseOrderLineId: sl.purchaseOrderLineId,
@@ -3954,6 +4256,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     // Receiving integration
     createReceiptFromPO,
     createReceiptFromShipment,
+    getShipmentReceiptPackResolution,
     getPurchaseOrderReceiveOptions,
     onReceivingOrderClosed,
 

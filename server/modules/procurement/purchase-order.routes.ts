@@ -681,6 +681,24 @@ export function registerPurchaseOrderRoutes(app: Express) {
     }
   });
 
+  app.get("/api/inbound-shipments/:id/receipt-pack-resolution", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const shipmentId = Number(req.params.id);
+      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+        return res.status(400).json({ error: "Invalid shipment id" });
+      }
+      const rawPurchaseOrderId = req.query.purchaseOrderId ?? req.query.purchase_order_id;
+      const purchaseOrderId = rawPurchaseOrderId === undefined ? undefined : Number(rawPurchaseOrderId);
+      if (purchaseOrderId !== undefined && (!Number.isInteger(purchaseOrderId) || purchaseOrderId <= 0)) {
+        return res.status(400).json({ error: "Invalid purchase order id" });
+      }
+      const resolution = await purchasing.getShipmentReceiptPackResolution(shipmentId, { purchaseOrderId });
+      res.json(resolution);
+    } catch (error: any) {
+      res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to resolve shipment receipt packs" });
+    }
+  });
+
   // Receive AGAINST an inbound shipment: creates a receiving order linked to the
   // shipment (inbound_shipment_id + source_type='shipment'), lines defaulted from
   // the shipment's qtyShipped, so lots created at close inherit the shipment link
