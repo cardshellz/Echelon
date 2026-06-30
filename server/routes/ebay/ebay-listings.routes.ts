@@ -481,7 +481,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           // 6. Resolve prices via pricing rules
           const variantPrices: Map<number, number> = new Map();
           for (const v of variants) {
-            const resolved = await resolveChannelPrice(client, EBAY_CHANNEL_ID, productId, v.id, v.price_cents);
+            const resolved = await resolveChannelPrice(db, EBAY_CHANNEL_ID, productId, v.id, v.price_cents);
             variantPrices.set(v.id, resolved);
           }
 
@@ -541,7 +541,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           } catch (err: any) {
             const errMsg = `Listing push failed: ${err.message.substring(0, 500)}`;
             for (const variant of variants) {
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
                 syncStatus: "error",
                 syncError: errMsg.substring(0, 1000),
               });
@@ -566,7 +566,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               const varOfferId = offerIds.get(variant.sku) || null;
               const lastSyncedPrice = variantPrices.get(variant.id) ?? variant.price_cents ?? null;
               const lastSyncedQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
                 externalProductId: listingId,
                 externalVariantId: varOfferId,
                 externalSku: variant.sku,
@@ -684,7 +684,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           if (prodResult.rows.length === 0) {
             failed++;
             sendEvent({ type: "progress", product: `Product #${productId}`, productId, status: "error", error: "Product not found or inactive", current, total });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, "Product not found or inactive");
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, "Product not found or inactive");
             continue;
           }
           const product = prodResult.rows[0];
@@ -718,7 +718,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             failed++;
             const errMsg = "No eligible variants";
             sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
             continue;
           }
 
@@ -786,7 +786,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             failed++;
             const errMsg = "No eBay browse category configured";
             sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
             continue;
           }
 
@@ -814,7 +814,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           // Prices
           const variantPrices: Map<number, number> = new Map();
           for (const v of variants) {
-            const resolved = await resolveChannelPrice(client, EBAY_CHANNEL_ID, productId, v.id, v.price_cents);
+            const resolved = await resolveChannelPrice(db, EBAY_CHANNEL_ID, productId, v.id, v.price_cents);
             variantPrices.set(v.id, resolved);
           }
 
@@ -880,7 +880,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             }
           } catch (err: any) {
             for (const variant of variants) {
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
                 syncStatus: "error",
                 syncError: `Listing push failed: ${err.message.substring(0, 1000)}`,
               });
@@ -902,7 +902,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               total,
               variantDetails,
             });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
             continue;
           }
           // Success — update all variant listings
@@ -911,7 +911,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               const varOfferId = offerIds.get(variant.sku) || null;
               const lastSyncedPrice = variantPrices.get(variant.id) ?? variant.price_cents ?? null;
               const lastSyncedQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
                 externalProductId: listingId,
                 externalVariantId: varOfferId,
                 externalSku: variant.sku,
@@ -925,7 +925,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           }
 
           // Clear push error on success
-          await clearPushError(client, EBAY_CHANNEL_ID, productId);
+          await clearPushError(db, EBAY_CHANNEL_ID, productId);
 
           succeeded++;
           sendEvent({
@@ -1080,7 +1080,17 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           JOIN catalog.products p ON p.id = pv.product_id
           WHERE cl.channel_id = $1
-            AND cl.sync_status = 'synced'
+            AND (
+              cl.sync_status = 'synced'
+              OR (
+                cl.sync_status = 'error'
+                AND (
+                  cl.external_product_id IS NOT NULL
+                  OR cl.external_variant_id IS NOT NULL
+                  OR cl.external_sku IS NOT NULL
+                )
+              )
+            )
             ${filterClause}
           ORDER BY p.id ASC, pv.position ASC, pv.id ASC
         `, params);
@@ -1219,7 +1229,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             const variantPrices: Map<number, number> = new Map();
             for (const variant of variants) {
               const newPriceCents = await resolveChannelPrice(
-                client,
+                db,
                 EBAY_CHANNEL_ID,
                 productId,
                 variant.variant_id,
@@ -1266,7 +1276,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
 
               for (const variant of variants) {
                 if (missingOfferVariantIds.has(variant.variant_id)) {
-                  await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.variant_id, {
+                  await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
                     syncStatus: "error",
                     syncError: "eBay offer not found during existing listing sync.",
                   });
@@ -1275,7 +1285,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
 
                 const newPriceCents = variantPrices.get(variant.variant_id) ?? variant.price_cents ?? 0;
                 const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
-                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.variant_id, {
+                await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
                   lastSyncedPrice: newPriceCents,
                   lastSyncedQty: newQty,
                   syncStatus: "synced",
@@ -1286,7 +1296,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               productErrors = variants.length;
               const syncError = `Existing listing sync failed: ${err.message.substring(0, 1000)}`;
               for (const variant of variants) {
-                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.variant_id, {
+                await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
                   syncStatus: "error",
                   syncError,
                 });
