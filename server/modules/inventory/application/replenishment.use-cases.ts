@@ -923,7 +923,7 @@ export class ReplenishmentUseCases {
 
     if (!sourceLocation) {
       const { shouldAutoExecute, executionMode } = this.resolveAutoExecute(
-        autoReplen === 1 ? 1 : autoReplen === 2 ? 2 : null, null, whSettings, 0,
+        autoReplen === 1 ? 1 : autoReplen === 2 ? 2 : null, null, whSettings, 0, resolvedReplenMethod,
       );
       return {
         status: "needed_stockout",
@@ -942,7 +942,7 @@ export class ReplenishmentUseCases {
     const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
     const { shouldAutoExecute, executionMode } = this.resolveAutoExecute(
-      autoReplen === 1 ? 1 : autoReplen === 2 ? 2 : null, null, whSettings, qtyTargetUnits,
+      autoReplen === 1 ? 1 : autoReplen === 2 ? 2 : null, null, whSettings, qtyTargetUnits, resolvedReplenMethod,
     );
 
     console.log(`${_tag} RESULT: from=${sourceLocation.code} qty=${qtySourceUnits}x${sourceVariant.unitsPerVariant}=${qtyTargetUnits} method=${resolvedReplenMethod}`);
@@ -2061,6 +2061,7 @@ export class ReplenishmentUseCases {
       console.log(`${_tag} EXIT: dedup — existing task #${eval_.existingTaskId}`);
       if (
         eval_.existingTask.executionMode === "inline" &&
+        eval_.existingTask.replenMethod === "case_break" &&
         EXECUTABLE_REPLEN_TASK_STATUSES.includes(eval_.existingTask.status)
       ) {
         return (await this.executeInlineTaskAutomatically(eval_.existingTask, "system:auto-replen", _tag)).task;
@@ -2177,7 +2178,7 @@ export class ReplenishmentUseCases {
       }).catch(() => {});
     }
 
-    if (eval_.shouldAutoExecute || executionMode === "inline") {
+    if ((eval_.shouldAutoExecute || executionMode === "inline") && replenMethod === "case_break") {
       return (await this.executeInlineTaskAutomatically(task as ReplenTask, "system:auto-replen", _tag)).task;
     }
 
@@ -2343,6 +2344,7 @@ export class ReplenishmentUseCases {
       console.log(`${_tag} reusing active task ${currentTask.id} status=${currentTask.status}`);
       if (
         currentTask.executionMode === "inline" &&
+        currentTask.replenMethod === "case_break" &&
         EXECUTABLE_REPLEN_TASK_STATUSES.includes(currentTask.status)
       ) {
         return this.executeInlineTaskAutomatically(currentTask, userId, _tag);
@@ -2368,6 +2370,8 @@ export class ReplenishmentUseCases {
       console.log(`${_tag} guidance says no replen needed or stockout — skipping`);
       return null;
     }
+
+    const executionMode = guidance.replenMethod === "case_break" ? guidance.executionMode : "queue";
 
     // Load required data for movement
     const [variant] = await this.db.select().from(productVariants).where(eq(productVariants.id, pickVariantId)).limit(1);
@@ -2398,19 +2402,21 @@ export class ReplenishmentUseCases {
       status: "pending", // executeTask transitions to completed
       priority,
       triggeredBy,
-      executionMode: guidance.executionMode,
+      executionMode,
       replenMethod: guidance.replenMethod,
       autoReplen,
       ...this.replenOrderTaskFields(context),
       warehouseId: location.warehouseId ?? undefined,
       notes: this.appendOrderContextNote(
-        `${guidance.taskNotes}\nSystem auto-executed inline replen.`,
+        executionMode === "inline"
+          ? `${guidance.taskNotes}\nSystem auto-executed inline replen.`
+          : `${guidance.taskNotes}\nSystem queued replen; ${guidance.replenMethod} requires warehouse movement.`,
         context,
       ),
     } satisfies InsertReplenTask).returning();
 
     let moved = 0;
-    if (guidance.executionMode === "inline") {
+    if (executionMode === "inline") {
       console.log(`${_tag} created task ${task.id}, executing immediately...`);
       return this.executeInlineTaskAutomatically(task as ReplenTask, userId, _tag);
     } else {
@@ -3200,6 +3206,7 @@ export class ReplenishmentUseCases {
       cascadeAutoReplen,
       opts.whSettings,
       cascadeQtyTarget,
+      cascadeReplenMethod,
     );
 
     // --- Create Task A: upstream (grandparent → intermediate) at source location (in-place break) ---
@@ -3240,6 +3247,7 @@ export class ReplenishmentUseCases {
       null,
       opts.whSettings,
       downstreamQtyTarget,
+      downstreamReplenMethod,
     );
 
     const [downstreamTask] = await this.db
@@ -3532,7 +3540,14 @@ export class ReplenishmentUseCases {
     autoReplenFromTierDefault: number | null | undefined,
     settings: WarehouseSettings | null,
     qtyTargetUnits: number,
+    replenMethod: string = "case_break",
   ): { shouldAutoExecute: boolean; executionMode: "inline" | "queue" } {
+    // Reserve transfers, pallet drops, and full-case moves require explicit
+    // warehouse work; only case-break replenishment can safely run inline.
+    if (replenMethod !== "case_break") {
+      return { shouldAutoExecute: false, executionMode: "queue" };
+    }
+
     // Layer 1: SKU rule override (only 1=force-auto or 2=force-manual are overrides; 0/null = defer)
     if (autoReplenFromRule === 1) {
       return { shouldAutoExecute: true, executionMode: "inline" };
