@@ -12,7 +12,7 @@ import {
   channelProductOverrides,
   channelVariantOverrides,
 } from "@shared/schema";
-import { eq, and, sql, inArray, asc } from "drizzle-orm";
+import { eq, and, sql, inArray, asc, or, isNotNull } from "drizzle-orm";
 import { EbayMarketplaceListingConnector } from "../../modules/channels/listing-connectors/ebay-listing.connector";
 import { buildEbayRouteListingDraft } from "./ebay-listing-draft-builder";
 import {
@@ -22,8 +22,10 @@ import {
 
 export interface SyncFilter { productIds?: number[]; productTypeSlugs?: string[]; variantIds?: number[]; }
 
+type EchelonDb = typeof db;
+
 export async function upsertChannelListing(
-  dbArg: any,
+  dbArg: EchelonDb,
   channelId: number,
   productVariantId: number,
   data: {
@@ -76,7 +78,7 @@ export async function upsertChannelListing(
  * Store the last push error for a product (across all its variants).
  * Uses the first variant's channel_listing row to store the error.
  */
-export async function upsertPushError(dbArg: any, channelId: number, productId: number, error: string): Promise<void> {
+export async function upsertPushError(dbArg: EchelonDb, channelId: number, productId: number, error: string): Promise<void> {
   // Find all variant IDs for this product
   const variants = await dbArg.select({ id: productVariants.id })
     .from(productVariants)
@@ -101,7 +103,7 @@ export async function upsertPushError(dbArg: any, channelId: number, productId: 
 /**
  * Clear push error for a product (across all its variants).
  */
-export async function clearPushError(dbArg: any, channelId: number, productId: number): Promise<void> {
+export async function clearPushError(dbArg: EchelonDb, channelId: number, productId: number): Promise<void> {
   // Subquery: get all variant IDs for the product
   const variants = await dbArg.select({ id: productVariants.id })
     .from(productVariants)
@@ -130,7 +132,7 @@ export async function clearPushError(dbArg: any, channelId: number, productId: n
  * Priority: variant > product > category > channel > base price
  */
 export async function resolveChannelPrice(
-  dbArg: any,
+  dbArg: EchelonDb,
   channelId: number,
   productId: number,
   variantId: number,
@@ -318,7 +320,17 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
   // Build the filter clause for active listings
   const conditions = [
     eq(channelListings.channelId, EBAY_CHANNEL_ID),
-    eq(channelListings.syncStatus, "synced"),
+    or(
+      eq(channelListings.syncStatus, "synced"),
+      and(
+        eq(channelListings.syncStatus, "error"),
+        or(
+          isNotNull(channelListings.externalProductId),
+          isNotNull(channelListings.externalVariantId),
+          isNotNull(channelListings.externalSku),
+        ),
+      ),
+    ),
     sql`COALESCE(${products.ebayListingExcluded}, false) = false`,
     sql`COALESCE(${productVariants.ebayListingExcluded}, false) = false`,
     sql`COALESCE(${channelProductOverrides.isListed}, 1) <> 0`,
