@@ -668,6 +668,19 @@ export function registerPurchaseOrderRoutes(app: Express) {
     await handleLifecycleCommand(req, res, "create_receipt");
   });
 
+  app.get("/api/purchase-orders/:id/receive-options", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const poId = Number(req.params.id);
+      if (!Number.isInteger(poId) || poId <= 0) {
+        return res.status(400).json({ error: "Invalid purchase order id" });
+      }
+      const options = await purchasing.getPurchaseOrderReceiveOptions(poId);
+      res.json(options);
+    } catch (error: any) {
+      res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to load receive options" });
+    }
+  });
+
   // Receive AGAINST an inbound shipment: creates a receiving order linked to the
   // shipment (inbound_shipment_id + source_type='shipment'), lines defaulted from
   // the shipment's qtyShipped, so lots created at close inherit the shipment link
@@ -678,8 +691,13 @@ export function registerPurchaseOrderRoutes(app: Express) {
       if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
         return res.status(400).json({ error: "Invalid shipment id" });
       }
+      const rawPurchaseOrderId = req.body?.purchaseOrderId ?? req.body?.purchase_order_id ?? req.query.purchaseOrderId;
+      const purchaseOrderId = rawPurchaseOrderId === undefined ? undefined : Number(rawPurchaseOrderId);
+      if (purchaseOrderId !== undefined && (!Number.isInteger(purchaseOrderId) || purchaseOrderId <= 0)) {
+        return res.status(400).json({ error: "Invalid purchase order id" });
+      }
       const userId = (req as any).session?.user?.id;
-      const receipt = await purchasing.createReceiptFromShipment(shipmentId, userId);
+      const receipt = await purchasing.createReceiptFromShipment(shipmentId, userId, { purchaseOrderId });
       res.status(201).json(receipt);
     } catch (error: any) {
       res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to create receipt from shipment" });
