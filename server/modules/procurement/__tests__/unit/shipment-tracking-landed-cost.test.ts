@@ -166,7 +166,7 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
 });
 
 describe("ShipmentTrackingService.getEnrichedLines", () => {
-  it("returns PO SKU, PO unit cost, and allocation category breakdowns for the allocation tab", async () => {
+  it("returns PO SKU, mills unit costs, and allocation category breakdowns for the allocation tab", async () => {
     const storage = buildStorage({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
         {
@@ -176,7 +176,7 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
           productVariantId: null,
           qtyShipped: 5,
           allocatedCostCents: 1275,
-          landedUnitCostCents: 340,
+          landedUnitCostCents: 355,
         },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
@@ -197,6 +197,7 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
         productName: "PO Product",
         orderQty: 5,
         unitCostCents: 100,
+        unitCostMills: 10000,
       }),
     });
     const service = createShipmentTrackingService({} as any, storage);
@@ -208,6 +209,7 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
       productName: "PO Product",
       poQtyOrdered: 5,
       poUnitCostCents: 100,
+      poUnitCostMills: 10000,
       allocatedCostCents: 1275,
       freightAllocatedCents: 1000,
       dutyAllocatedCents: 200,
@@ -218,6 +220,7 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
       insuranceAllocatedMillsPerUnit: 1000,
       otherAllocatedMillsPerUnit: 500,
       totalAllocatedMillsPerUnit: 25500,
+      landedUnitCostMills: 35500,
     }));
   });
 });

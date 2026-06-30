@@ -239,6 +239,11 @@ function formatMillsPerUnit(mills: number | null | undefined): string {
   return `${formatMills(mills)}/unit`;
 }
 
+function formatMillsOrDash(mills: number | null | undefined): string {
+  if (mills === null || mills === undefined) return "—";
+  return formatMills(mills);
+}
+
 function AllocationAmountCell({
   cents,
   millsPerUnit,
@@ -1288,7 +1293,7 @@ export default function InboundShipmentDetail() {
                           </div>
                           {line.allocatedCostCents != null && (
                             <div className="text-xs mt-1">
-                              Allocated: {formatCents(line.allocatedCostCents)} ({formatMillsPerUnit(line.totalAllocatedMillsPerUnit)}) | Landed: {formatCents(line.landedUnitCostCents)}
+                              Allocated: {formatCents(line.allocatedCostCents)} ({formatMillsPerUnit(line.totalAllocatedMillsPerUnit)}) | Landed: {formatMillsOrDash(line.landedUnitCostMills)}
                             </div>
                           )}
                         </div>
@@ -1349,7 +1354,7 @@ export default function InboundShipmentDetail() {
                         <TableCell className="text-right">
                           <AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} />
                         </TableCell>
-                        <TableCell className="text-right font-mono">{line.landedUnitCostCents != null ? formatCents(line.landedUnitCostCents) : "—"}</TableCell>
+                        <TableCell className="text-right font-mono">{formatMillsOrDash(line.landedUnitCostMills)}</TableCell>
                         {isEditable && (
                           <TableCell>
                             <div className="flex gap-1">
@@ -1832,13 +1837,13 @@ export default function InboundShipmentDetail() {
                   lines.map((line: any) => (
                     <TableRow key={line.id}>
                       <TableCell className="font-mono">{line.sku || "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.poUnitCostCents != null ? formatCents(line.poUnitCostCents) : "—"}</TableCell>
+                      <TableCell className="text-right font-mono">{formatMillsOrDash(line.poUnitCostMills)}</TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.freightAllocatedCents} millsPerUnit={line.freightAllocatedMillsPerUnit} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.dutyAllocatedCents} millsPerUnit={line.dutyAllocatedMillsPerUnit} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.insuranceAllocatedCents} millsPerUnit={line.insuranceAllocatedMillsPerUnit} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.otherAllocatedCents} millsPerUnit={line.otherAllocatedMillsPerUnit} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} strong /></TableCell>
-                      <TableCell className="text-right font-mono font-medium">{line.landedUnitCostCents != null ? formatCents(line.landedUnitCostCents) : "—"}</TableCell>
+                      <TableCell className="text-right font-mono font-medium">{formatMillsOrDash(line.landedUnitCostMills)}</TableCell>
                     </TableRow>
                   ))
                 )}

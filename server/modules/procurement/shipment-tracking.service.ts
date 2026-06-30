@@ -22,7 +22,7 @@ import type {
   InventoryLot,
 } from "@shared/schema";
 import { inboundShipmentLines, inboundFreightCosts, vendors } from "@shared/schema";
-import { millsToCents, perUnitMills } from "@shared/utils/money";
+import { centsToMills, millsToCents, perUnitMills } from "@shared/utils/money";
 
 /**
  * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
@@ -175,6 +175,20 @@ function allocatedCentsPerUnitMills(allocatedCents: unknown, qtyShipped: unknown
   const qty = Number(qtyShipped);
   if (!Number.isInteger(cents) || cents < 0 || !Number.isInteger(qty) || qty <= 0) return null;
   return perUnitMills(cents * 100, qty);
+}
+
+function nonNegativeIntegerOrNull(value: unknown): number | null {
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue < 0) return null;
+  return numberValue;
+}
+
+function poUnitCostMillsFromLine(poLine: any): number | null {
+  const mills = nonNegativeIntegerOrNull(poLine?.unitCostMills);
+  if (mills !== null) return mills;
+
+  const cents = nonNegativeIntegerOrNull(poLine?.unitCostCents);
+  return cents !== null ? centsToMills(cents) : null;
 }
 
 // Cost types with hard-coded allocation method overrides
@@ -465,6 +479,12 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
           + allocationBreakdown.otherAllocatedCents
         : null;
       const allocatedCostCents = line.allocatedCostCents ?? breakdownTotalCents;
+      const poUnitCostMills = poUnitCostMillsFromLine(pol);
+      const totalAllocatedMillsPerUnit = allocatedCentsPerUnitMills(allocatedCostCents, line.qtyShipped);
+      const landedUnitCostMills =
+        poUnitCostMills !== null && totalAllocatedMillsPerUnit !== null
+          ? poUnitCostMills + totalAllocatedMillsPerUnit
+          : null;
       return {
         ...line,
         allocatedCostCents,
@@ -473,6 +493,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         productName: product?.title || product?.name || pol?.productName || pv?.name || line.sku || null,
         poQtyOrdered: pol?.orderQty ?? null,
         poUnitCostCents: pol?.unitCostCents ?? null,
+        poUnitCostMills,
         freightAllocatedCents,
         dutyAllocatedCents,
         insuranceAllocatedCents,
@@ -481,7 +502,8 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         dutyAllocatedMillsPerUnit: allocatedCentsPerUnitMills(dutyAllocatedCents, line.qtyShipped),
         insuranceAllocatedMillsPerUnit: allocatedCentsPerUnitMills(insuranceAllocatedCents, line.qtyShipped),
         otherAllocatedMillsPerUnit: allocatedCentsPerUnitMills(otherAllocatedCents, line.qtyShipped),
-        totalAllocatedMillsPerUnit: allocatedCentsPerUnitMills(allocatedCostCents, line.qtyShipped),
+        totalAllocatedMillsPerUnit,
+        landedUnitCostMills,
       };
     });
   }
