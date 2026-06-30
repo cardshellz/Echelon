@@ -68,4 +68,42 @@ describe("buildEbayRouteListingDraft", () => {
       Type: ["Toploader"],
     });
   });
+
+  it("rejects missing eBay offer prices before building marketplace payloads", () => {
+    expect(() => buildEbayRouteListingDraft({
+      productId: 232,
+      product: {
+        name: "180PT 3x4 Premium Toploader - UV Shield - Blue Hint",
+        sku: "SHLZ-TOP-180PT-BLU",
+        description: "<p>Toploader</p>",
+      },
+      variants: [
+        {
+          id: 463,
+          sku: "SHLZ-TOP-180PT-BLU-P10",
+          name: "Pack of 10",
+          option1_value: "Pack of 10",
+          price_cents: null,
+        },
+      ],
+      effectiveImageUrls: ["https://cdn.example.test/toploader.jpg"],
+      aspects: {
+        Brand: ["Cardshellz"],
+        Type: ["Toploader"],
+      },
+      isMultiVariant: false,
+      variationAspectName: "",
+      variantPrices: new Map([[463, 0]]),
+      atpByVariantId: new Map([[463, 1]]),
+      marketplaceId: "EBAY_US",
+      ebayBrowseCategoryId: "183438",
+      effectivePolicies: {
+        fulfillmentPolicyId: "fulfillment-policy",
+        returnPolicyId: "return-policy",
+        paymentPolicyId: "payment-policy",
+      },
+      storeCategoryNames: ["Toploaders"],
+      merchantLocationKey: "card-shellz-hq",
+    })).toThrow("eBay listing price is required and must be at least $0.99 for SKU SHLZ-TOP-180PT-BLU-P10.");
+  });
 });

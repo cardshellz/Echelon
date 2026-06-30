@@ -41,7 +41,12 @@ export function buildEbayRouteListingDraft(input: {
     if (!sku) continue;
 
     const availableQty = Math.max(0, input.atpByVariantId.get(variant.id) ?? 0);
-    const priceCents = input.variantPrices.get(variant.id) ?? variant.price_cents ?? 0;
+    const priceCents = normalizeCents(input.variantPrices.get(variant.id) ?? variant.price_cents);
+    if (priceCents === null || !isValidEbayFixedPriceCents(priceCents)) {
+      throw new Error(
+        `eBay listing price is required and must be at least ${formatEbayMinimumPrice()} for SKU ${sku}.`,
+      );
+    }
     const priceInDollars = centsToDecimalString(priceCents);
     const variantAspects: Record<string, string[]> = { ...input.aspects };
     if (input.isMultiVariant) {
@@ -128,4 +133,22 @@ function centsToDecimalString(cents: number): string {
   const whole = Math.floor(Math.abs(normalized) / 100);
   const fractional = String(Math.abs(normalized) % 100).padStart(2, "0");
   return `${normalized < 0 ? "-" : ""}${whole}.${fractional}`;
+}
+
+export const EBAY_MIN_FIXED_PRICE_CENTS = 99;
+
+export function normalizeCents(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = typeof value === "string" ? Number(value) : value;
+  if (typeof numeric !== "number" || !Number.isFinite(numeric)) return null;
+  return Math.trunc(numeric);
+}
+
+export function isValidEbayFixedPriceCents(value: unknown): boolean {
+  const cents = normalizeCents(value);
+  return cents !== null && cents >= EBAY_MIN_FIXED_PRICE_CENTS;
+}
+
+export function formatEbayMinimumPrice(): string {
+  return `$${centsToDecimalString(EBAY_MIN_FIXED_PRICE_CENTS)}`;
 }

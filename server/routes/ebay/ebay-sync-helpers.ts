@@ -8,7 +8,6 @@ import {
   ebayCategoryMappings,
   ebayTypeAspectDefaults,
   ebayProductAspectOverrides,
-  channelPricingRules,
   channelProductOverrides,
   channelVariantOverrides,
 } from "@shared/schema";
@@ -19,6 +18,11 @@ import {
   createEbayRouteListingClient,
   getExistingEbayInventoryImageUrls,
 } from "./ebay-listing-connector-client";
+import {
+  resolveChannelListingPrice,
+} from "../../modules/channels/channel-pricing-resolver";
+
+export { applyPricingRule } from "../../modules/channels/channel-pricing-resolver";
 
 export interface SyncFilter { productIds?: number[]; productTypeSlugs?: string[]; variantIds?: number[]; }
 
@@ -129,100 +133,23 @@ export async function clearPushError(dbArg: EchelonDb, channelId: number, produc
 
 /**
  * Resolve the effective channel price for a variant.
- * Priority: variant > product > category > channel > base price
+ * Compatibility wrapper around the shared channel listing price resolver.
  */
 export async function resolveChannelPrice(
   dbArg: EchelonDb,
   channelId: number,
   productId: number,
   variantId: number,
-  basePriceCents: number,
+  basePriceCents: number | null | undefined,
 ): Promise<number> {
-  // 1. Check variant-level rule
-  const variantRule = await dbArg.select()
-    .from(channelPricingRules)
-    .where(
-      and(
-        eq(channelPricingRules.channelId, channelId),
-        eq(channelPricingRules.scope, "variant"),
-        eq(channelPricingRules.scopeId, String(variantId))
-      )
-    );
-  if (variantRule.length > 0) {
-    return applyPricingRule(basePriceCents, variantRule[0].ruleType, parseFloat(variantRule[0].value as string));
-  }
-
-  // 2. Check product-level rule
-  const productRule = await dbArg.select()
-    .from(channelPricingRules)
-    .where(
-      and(
-        eq(channelPricingRules.channelId, channelId),
-        eq(channelPricingRules.scope, "product"),
-        eq(channelPricingRules.scopeId, String(productId))
-      )
-    );
-  if (productRule.length > 0) {
-    return applyPricingRule(basePriceCents, productRule[0].ruleType, parseFloat(productRule[0].value as string));
-  }
-
-  // 3. Check category-level rule (lookup product's product_type)
-  const productInfo = await dbArg.select({ productType: products.productType })
-    .from(products)
-    .where(eq(products.id, productId));
-
-  if (productInfo.length > 0 && productInfo[0].productType) {
-    const categoryRule = await dbArg.select()
-      .from(channelPricingRules)
-      .where(
-        and(
-          eq(channelPricingRules.channelId, channelId),
-          eq(channelPricingRules.scope, "category"),
-          eq(channelPricingRules.scopeId, productInfo[0].productType)
-        )
-      );
-    if (categoryRule.length > 0) {
-      return applyPricingRule(basePriceCents, categoryRule[0].ruleType, parseFloat(categoryRule[0].value as string));
-    }
-  }
-
-  // 4. Check channel-level rule
-  const channelRule = await dbArg.select()
-    .from(channelPricingRules)
-    .where(
-      and(
-        eq(channelPricingRules.channelId, channelId),
-        eq(channelPricingRules.scope, "channel"),
-        sql`${channelPricingRules.scopeId} IS NULL`
-      )
-    );
-  if (channelRule.length > 0) {
-    return applyPricingRule(basePriceCents, channelRule[0].ruleType, parseFloat(channelRule[0].value as string));
-  }
-
-  // 5. No rule — return base price
-  return basePriceCents;
+  const resolution = await resolveChannelListingPrice(dbArg, {
+    channelId,
+    productId,
+    variantId,
+    fallbackCatalogPriceCents: basePriceCents,
+  });
+  return resolution.priceCents ?? 0;
 }
-
-/**
- * Apply a pricing rule to a base price.
- * - percentage: basePriceCents * (1 + value/100) — value is percentage (e.g., 15.00 = 15%)
- * - fixed: basePriceCents + value*100 — value is dollars (e.g., 2.00 = $2.00)
- * - override: value*100 — value is the exact price in dollars (e.g., 39.99 = $39.99)
- */
-export function applyPricingRule(basePriceCents: number, ruleType: string, value: number): number {
-  switch (ruleType) {
-    case "percentage":
-      return Math.round(basePriceCents * (1 + value / 100));
-    case "fixed":
-      return basePriceCents + Math.round(value * 100);
-    case "override":
-      return Math.round(value * 100);
-    default:
-      return basePriceCents;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Variation Aspect Name Detection
 // ---------------------------------------------------------------------------

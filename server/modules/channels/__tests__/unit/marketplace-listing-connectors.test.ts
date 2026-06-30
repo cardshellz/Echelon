@@ -159,11 +159,16 @@ describe("marketplace listing connectors", () => {
   });
 
   it("syncs existing eBay listings by updating inventory, existing offers, and item groups", async () => {
+    const calls: string[] = [];
     const client: EbayListingConnectorClient = {
       getInventoryItem: vi.fn(async () => null),
-      createOrReplaceInventoryItem: vi.fn(async () => undefined),
-      getOffers: vi.fn(async () => ({
-        offers: [
+      createOrReplaceInventoryItem: vi.fn(async () => {
+        calls.push("put_inventory");
+      }),
+      getOffers: vi.fn(async () => {
+        calls.push("get_offers");
+        return {
+          offers: [
           {
             offerId: "offer-1",
             sku: "SKU-1",
@@ -179,11 +184,16 @@ describe("marketplace listing connectors", () => {
             merchantLocationKey: "warehouse",
             pricingSummary: { price: { value: "8.99", currency: "USD" } },
           },
-        ],
-      })),
+          ],
+        };
+      }),
       createOffer: vi.fn(async () => "new-offer"),
-      updateOffer: vi.fn(async () => undefined),
-      createOrReplaceInventoryItemGroup: vi.fn(async () => undefined),
+      updateOffer: vi.fn(async () => {
+        calls.push("update_offer");
+      }),
+      createOrReplaceInventoryItemGroup: vi.fn(async () => {
+        calls.push("put_group");
+      }),
       publishOffer: vi.fn(async () => ({ listingId: "listing-1" })),
       publishOfferByInventoryItemGroup: vi.fn(async () => ({ listingId: "listing-group" })),
     };
@@ -245,6 +255,7 @@ describe("marketplace listing connectors", () => {
     expect(client.createOffer).not.toHaveBeenCalled();
     expect(client.publishOffer).not.toHaveBeenCalled();
     expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    expect(calls).toEqual(["put_group", "put_inventory", "get_offers", "update_offer"]);
     expect(client.updateOffer).toHaveBeenCalledWith(
       "offer-1",
       expect.objectContaining({ offerId: "offer-1" }),
