@@ -590,6 +590,55 @@ interface SingleOrder {
   memberPlanColor?: string | null;
 }
 
+function getOrderPickProgress(items: PickItem[]) {
+  const totalUnits = items.reduce((sum, item) => sum + Math.max(0, item.qty), 0);
+  const pickedUnits = items.reduce((sum, item) => sum + Math.max(0, item.picked), 0);
+  const pickedLines = items.filter(
+    (item) => item.picked > 0 || item.status === "completed" || item.status === "short",
+  ).length;
+
+  return {
+    totalUnits,
+    pickedUnits,
+    totalLines: items.length,
+    pickedLines,
+    hasProgress: pickedUnits > 0 || pickedLines > 0,
+    isFullyPicked: totalUnits > 0 && pickedUnits >= totalUnits,
+  };
+}
+
+function shouldShowReleasedPickProgress(order: SingleOrder) {
+  return order.status === "ready" && !order.onHold && getOrderPickProgress(order.items).hasProgress;
+}
+
+function ReleasedPickProgressBadge({ order }: { order: SingleOrder }) {
+  if (!shouldShowReleasedPickProgress(order)) {
+    return null;
+  }
+
+  const progress = getOrderPickProgress(order.items);
+  return (
+    <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-400 text-amber-700 bg-amber-50">
+      {progress.isFullyPicked ? "PICKED" : "PARTIAL PICK"}
+    </Badge>
+  );
+}
+
+function ReleasedPickProgressNotice({ order }: { order: SingleOrder }) {
+  if (!shouldShowReleasedPickProgress(order)) {
+    return null;
+  }
+
+  const progress = getOrderPickProgress(order.items);
+  return (
+    <div className="text-[10px] font-semibold text-amber-700 flex items-center gap-1 mt-0.5">
+      Pick progress preserved: {progress.pickedUnits}/{progress.totalUnits} units
+      {" / "}
+      {progress.pickedLines}/{progress.totalLines} lines
+    </div>
+  );
+}
+
 
 // Sound and haptic imports from shared library
 import { 
@@ -3227,6 +3276,7 @@ export default function Picking() {
                   !order.isCombinedGroup && order.priority < 9999 && order.shippingServiceLevel === "expedited" && "border-l-4 border-l-amber-500",
                   !order.isCombinedGroup && order.priority < 9999 && (!order.shippingServiceLevel || order.shippingServiceLevel === "standard") && order.memberPlanName && order.memberPlanColor && "border-l-4",
                   order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
+                  shouldShowReleasedPickProgress(order) && "bg-amber-50/40 dark:bg-amber-950/20",
                   order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40",
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
                 )}
@@ -3334,6 +3384,7 @@ export default function Picking() {
                                 {order.orderDate && <><span className="opacity-40">·</span><span>{order.orderDate}</span></>}
                               </span>
                               <span className="ml-auto inline-flex gap-1 items-center">
+                                <ReleasedPickProgressBadge order={order} />
                                 <PriorityBadges
                                   shippingServiceLevel={order.shippingServiceLevel}
                                   memberPlanName={order.memberPlanName}
@@ -3350,6 +3401,7 @@ export default function Picking() {
                                 </Badge>
                               )}
                             </div>
+                            <ReleasedPickProgressNotice order={order} />
                             {/* SLA / Ship-by deadline surfaced to every picker */}
                             {(order as any).channelShipByDate && (
                               (() => {
@@ -4357,9 +4409,30 @@ export default function Picking() {
                             </Button>
                           </div>
                         ) : (
-                          <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
-                            {item.status === "completed" ? <CheckCircle2 className="h-5 w-5 md:h-6 md:w-6 text-emerald-500" /> : <AlertTriangle className="h-5 w-5 md:h-6 md:w-6 text-amber-500" />}
-                          </div>
+                          item.status === "completed" ? (
+                            <div className="flex gap-1">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-9 md:h-11 px-2 md:px-3 border-amber-300 text-amber-700 bg-white hover:bg-amber-50 flex-shrink-0 whitespace-nowrap"
+                                onClick={() => handleListItemDecrement(idx)}
+                                disabled={item.picked <= 0 || unpickItemMutation.isPending}
+                                aria-label={`Unpick one ${item.sku}`}
+                                title={`Unpick one ${item.sku}`}
+                                data-testid={`button-unpick-${item.id}`}
+                              >
+                                <RotateCcw className="h-4 w-4 mr-1" />
+                                <span className="text-xs md:text-sm font-semibold">Unpick</span>
+                              </Button>
+                              <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
+                                <CheckCircle2 className="h-5 w-5 md:h-6 md:w-6 text-emerald-500" />
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
+                              <AlertTriangle className="h-5 w-5 md:h-6 md:w-6 text-amber-500" />
+                            </div>
+                          )
                         )}
                       </div>
                     </div>
