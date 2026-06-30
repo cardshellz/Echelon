@@ -12,13 +12,14 @@ function makeService(opts: {
   claimResult: any;
   currentOrder: any;
   holder?: any;
+  items?: any[];
 }) {
   const storage = {
     getOrderById: vi.fn(async () => opts.currentOrder),
     claimOrder: vi.fn(async () => opts.claimResult),
     getUser: vi.fn(async () => opts.holder ?? null),
     createPickingLog: vi.fn(async () => ({})),
-    getOrderItems: vi.fn(async () => []),
+    getOrderItems: vi.fn(async () => opts.items ?? []),
   };
   const service = new PickingUseCases(
     {} as any,
@@ -35,6 +36,57 @@ describe("claimOrder failure reasons", () => {
     const { service } = makeService({ claimResult: claimed, currentOrder: claimed });
     const result = await service.claimOrder(1, "me");
     expect(result.order).toEqual(claimed);
+  });
+
+  it("rejects generic claims for ready orders with preserved pick progress", async () => {
+    const { service, storage } = makeService({
+      claimResult: { id: 1, orderNumber: "59542", warehouseStatus: "in_progress", assignedPickerId: "me" },
+      currentOrder: { id: 1, orderNumber: "59542", warehouseStatus: "ready", onHold: 0, assignedPickerId: null },
+      items: [
+        { id: 11, quantity: 1, pickedQuantity: 1, status: "completed" },
+        { id: 12, quantity: 4, pickedQuantity: 0, status: "pending" },
+      ],
+    });
+
+    await expect(service.claimOrder(1, "me")).rejects.toMatchObject({
+      context: {
+        reason: "preserved_progress_requires_resume",
+        orderId: 1,
+        claimSource: null,
+        pickedUnits: 1,
+        progressLines: 1,
+      },
+      statusCode: 409,
+    });
+    expect(storage.claimOrder).not.toHaveBeenCalled();
+  });
+
+  it("allows explicit preserved-progress resume claims", async () => {
+    const claimed = { id: 1, orderNumber: "59542", warehouseStatus: "in_progress", assignedPickerId: "me" };
+    const { service, storage } = makeService({
+      claimResult: claimed,
+      currentOrder: { id: 1, orderNumber: "59542", warehouseStatus: "ready", onHold: 0, assignedPickerId: null },
+      items: [
+        { id: 11, quantity: 1, pickedQuantity: 1, status: "completed" },
+        { id: 12, quantity: 4, pickedQuantity: 0, status: "pending" },
+      ],
+    });
+
+    const result = await service.claimOrder(
+      1,
+      "me",
+      "desktop",
+      "session-1",
+      "preserved_progress_resume",
+    );
+
+    expect(result.order).toEqual(claimed);
+    expect(storage.claimOrder).toHaveBeenCalledWith(1, "me");
+    expect(storage.createPickingLog).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { claimSource: "preserved_progress_resume" },
+      orderStatusBefore: "ready",
+      orderStatusAfter: "in_progress",
+    }));
   });
 
   it("throws not_found when the order does not exist", async () => {

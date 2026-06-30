@@ -104,6 +104,9 @@ type ReplenOrderContext = {
   blocksShipment?: boolean;
 };
 
+const PRESERVED_PROGRESS_RESUME_CLAIM_SOURCE = "preserved_progress_resume";
+const PROGRESS_ITEM_STATUSES = new Set<ItemStatus>(["completed", "in_progress", "short"]);
+
 /** Minimal storage interface — only the methods picking needs. */
 type Storage = {
   getOrderItemById: (id: number) => Promise<OrderItem | undefined>;
@@ -304,6 +307,22 @@ function emptyPickInventoryContext(sku: string): PickInventoryContext {
       qtyToMove: null,
     },
   };
+}
+
+function getPreservedPickProgress(items: OrderItem[]) {
+  let pickedUnits = 0;
+  let progressLines = 0;
+
+  for (const item of items) {
+    const pickedQuantity = Math.max(0, Number(item.pickedQuantity || 0));
+    const hasProgressStatus = PROGRESS_ITEM_STATUSES.has(item.status as ItemStatus);
+    if (pickedQuantity > 0 || hasProgressStatus) {
+      progressLines += 1;
+      pickedUnits += pickedQuantity;
+    }
+  }
+
+  return { pickedUnits, progressLines };
 }
 
 // ---------------------------------------------------------------------------
@@ -2280,6 +2299,22 @@ export class PickingUseCases {
     if (!pickerId) throw new ValidationError("pickerId is required");
 
     const orderBefore = await this.storage.getOrderById(orderId);
+    if (
+      orderBefore?.warehouseStatus === "ready" &&
+      claimSource !== PRESERVED_PROGRESS_RESUME_CLAIM_SOURCE
+    ) {
+      const currentItems = await this.storage.getOrderItems(orderId);
+      const progress = getPreservedPickProgress(currentItems);
+      if (progress.pickedUnits > 0 || progress.progressLines > 0) {
+        throw new IntegrityError("Order has preserved pick progress and requires explicit resume", {
+          reason: "preserved_progress_requires_resume",
+          orderId,
+          claimSource: claimSource || null,
+          pickedUnits: progress.pickedUnits,
+          progressLines: progress.progressLines,
+        });
+      }
+    }
 
     const order = await this.storage.claimOrder(orderId, pickerId);
     if (!order) {
