@@ -276,10 +276,9 @@ describe("dropship ops surface client helpers", () => {
 
   it("builds admin shipping config URLs with bounded list parameters", () => {
     expect(buildAdminShippingConfigUrl({
-      search: "  sku-1 ",
       packageProfileLimit: 25,
       rateTableLimit: 10,
-    })).toBe("/api/dropship/admin/shipping/config?search=sku-1&packageProfileLimit=25&rateTableLimit=10");
+    })).toBe("/api/dropship/admin/shipping/config?packageProfileLimit=25&rateTableLimit=10");
   });
 
   it("builds admin order intake URLs without forcing default status filters", () => {

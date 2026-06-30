@@ -2505,12 +2505,10 @@ export function buildAdminOmsChannelConfigureInput(input: {
 }
 
 export function buildAdminShippingConfigUrl(input: {
-  search?: string;
   packageProfileLimit?: number;
   rateTableLimit?: number;
 } = {}): string {
   return buildQueryUrl("/api/dropship/admin/shipping/config", {
-    search: input.search?.trim() || undefined,
     packageProfileLimit: input.packageProfileLimit ?? 50,
     rateTableLimit: input.rateTableLimit ?? 25,
   });
