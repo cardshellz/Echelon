@@ -34,6 +34,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import { useToast } from "@/hooks/use-toast";
 import {
   Plus,
@@ -580,7 +586,7 @@ function ProductsTable({
   );
 
   return (
-    <section className="flex flex-col border rounded-lg bg-background overflow-hidden">
+    <section className="flex min-h-0 flex-1 flex-col border rounded-lg bg-background overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b">
         <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
           Products in:{" "}
@@ -921,7 +927,7 @@ function MoveToLinePopover({
 }
 
 // ---------------------------------------------------------------------------
-// Right drawer: line detail, stats, quick filters, activity
+// Main summary: selected line facts, details, quick filters, activity
 // ---------------------------------------------------------------------------
 
 interface ActivityEntry {
@@ -930,11 +936,10 @@ interface ActivityEntry {
   when: number;
 }
 
-function LineDrawer({
+function LineSummaryPanel({
   selection,
   line,
   stats,
-  lines,
   onQuickSelect,
   activity,
   onEditLine,
@@ -942,7 +947,6 @@ function LineDrawer({
   selection: Selection;
   line: ProductLine | null;
   stats: LineStats | null;
-  lines: ProductLine[];
   onQuickSelect: (chip: QuickFilter) => void;
   activity: ActivityEntry[];
   onEditLine: () => void;
@@ -962,19 +966,19 @@ function LineDrawer({
       : line?.code ?? "";
 
   return (
-    <aside className="flex flex-col border rounded-lg bg-background overflow-hidden">
-      <div className="px-4 py-3 border-b">
+    <section className="border rounded-lg bg-background overflow-hidden">
+      <div className="flex flex-col gap-4 p-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
         <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
           Selected line
         </div>
-        <div className="text-lg font-semibold mt-0.5">{title}</div>
+        <div className="text-xl font-semibold mt-0.5 truncate">{title}</div>
         <div className="text-xs font-mono text-muted-foreground mt-0.5">
           {code}
         </div>
       </div>
 
-      {/* Stats grid */}
-      <div className="grid grid-cols-3 bg-border gap-px">
+      <div className="grid grid-cols-3 gap-2 min-w-full sm:min-w-[420px] lg:min-w-[460px]">
         <StatTile
           label="Products"
           value={stats?.productCount.toLocaleString() ?? "—"}
@@ -992,123 +996,95 @@ function LineDrawer({
           value={stats?.channelCount.toLocaleString() ?? "—"}
         />
       </div>
+      </div>
+      {isUnassigned && stats && stats.productCount > 0 && (
+        <div className="border-t bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+          <span className="font-semibold">Action needed:</span>{" "}
+          {stats.productCount.toLocaleString()} products are not assigned to any
+          product line. Select rows below, then use <strong>Move to Line</strong>.
+        </div>
+      )}
 
-      <div className="flex-1 overflow-y-auto">
-        {/* Action card */}
-        {isUnassigned && stats && stats.productCount > 0 && (
-          <div className="p-4 border-b bg-amber-50 dark:bg-amber-950/40">
-            <div className="text-[11px] uppercase tracking-wide text-amber-700 dark:text-amber-400 font-bold mb-1">
-              Action needed
-            </div>
-            <p className="text-xs text-amber-900 dark:text-amber-200 mb-2">
-              {stats.productCount.toLocaleString()} products aren't assigned to
-              any product line. Bulk-assign them to reveal channel routing and
-              fulfillment rules.
-            </p>
-            <p className="text-[11px] text-amber-700 dark:text-amber-300">
-              Select rows in the center table, then use{" "}
-              <strong>→ Move to Line</strong>.
-            </p>
+      {(isUnassigned || isAll) && (
+        <div className="border-t px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+              Quick select
+            </span>
+            {QUICK_FILTERS.map((q) => (
+              <Button
+                key={q.id}
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                onClick={() => onQuickSelect(q)}
+              >
+                {q.label}
+              </Button>
+            ))}
           </div>
-        )}
+        </div>
+      )}
 
+      <Accordion
+        type="multiple"
+        defaultValue={selection.kind === "line" ? ["details"] : []}
+        className="border-t"
+      >
         {!isUnassigned && !isAll && line && (
-          <div className="p-4 border-b">
-            <div className="text-[11px] uppercase tracking-wide text-muted-foreground font-bold mb-2">
-              Details
-            </div>
-            {line.description && (
-              <p className="text-sm text-muted-foreground mb-3">
-                {line.description}
-              </p>
-            )}
-            <Button size="sm" variant="outline" onClick={onEditLine}>
-              Edit line…
-            </Button>
-          </div>
-        )}
-
-        {/* Quick filters */}
-        {(isUnassigned || isAll) && (
-          <div className="p-4 border-b">
-            <div className="text-[11px] uppercase tracking-wide text-muted-foreground font-bold mb-2">
-              Quick filters
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {QUICK_FILTERS.map((q) => (
+          <AccordionItem value="details" className="border-b-0">
+            <AccordionTrigger className="px-4 py-3 text-sm">
+              Line details
+            </AccordionTrigger>
+            <AccordionContent className="px-4 pb-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <p className="max-w-3xl text-sm text-muted-foreground">
+                  {line.description || "No description has been set for this product line."}
+                </p>
                 <Button
-                  key={q.id}
                   size="sm"
                   variant="outline"
-                  className="h-7 text-xs"
-                  onClick={() => onQuickSelect(q)}
+                  onClick={onEditLine}
+                  className="shrink-0"
                 >
-                  {q.label}
+                  Edit line...
                 </Button>
-              ))}
-            </div>
-            <p className="text-[11px] text-muted-foreground mt-2">
-              One click filters and auto-selects matching products for bulk
-              move.
-            </p>
-          </div>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
         )}
 
-        {/* Available lines shortcut */}
-        {!isAll && (
-          <div className="p-4 border-b">
-            <div className="text-[11px] uppercase tracking-wide text-muted-foreground font-bold mb-2">
-              Jump to line
-            </div>
-            <div className="flex flex-wrap gap-1">
-              {lines.slice(0, 8).map((l) => (
-                <Badge
-                  key={l.id}
-                  variant="secondary"
-                  className="text-[11px] font-normal"
-                >
-                  {l.name} · {l.productCount}
-                </Badge>
-              ))}
-              {lines.length > 8 && (
-                <Badge variant="outline" className="text-[11px] font-normal">
-                  +{lines.length - 8} more
-                </Badge>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Recent activity */}
-        <div className="p-4">
-          <div className="text-[11px] uppercase tracking-wide text-muted-foreground font-bold mb-2">
-            Recent activity
-          </div>
-          {activity.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              No activity yet this session.
-            </p>
-          ) : (
-            <ul className="space-y-1.5 text-xs text-muted-foreground">
-              {activity.slice(0, 8).map((a) => (
-                <li key={a.id} className="flex justify-between gap-2">
-                  <span className="truncate">{a.text}</span>
-                  <span className="shrink-0 text-[11px] opacity-70">
-                    {formatRelative(a.when)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-    </aside>
+        <AccordionItem value="activity" className="border-b-0">
+          <AccordionTrigger className="px-4 py-3 text-sm">
+            Session activity
+          </AccordionTrigger>
+          <AccordionContent className="px-4 pb-4">
+            {activity.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No activity yet this session.
+              </p>
+            ) : (
+              <ul className="space-y-1.5 text-xs text-muted-foreground">
+                {activity.slice(0, 8).map((a) => (
+                  <li key={a.id} className="flex justify-between gap-2">
+                    <span className="truncate">{a.text}</span>
+                    <span className="shrink-0 text-[11px] opacity-70">
+                      {formatRelative(a.when)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </AccordionContent>
+        </AccordionItem>
+      </Accordion>
+    </section>
   );
 }
 
 function StatTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-background p-3">
+    <div className="rounded-md border bg-muted/20 p-3">
       <div className="text-lg font-bold leading-tight">{value}</div>
       <div className="text-[11px] uppercase tracking-wide text-muted-foreground mt-0.5">
         {label}
@@ -1738,7 +1714,7 @@ export default function ProductLinesPage() {
         </div>
       </div>
 
-      <div className="grid flex-1 min-h-0 gap-3 [grid-template-columns:280px_minmax(0,1fr)_380px]">
+      <div className="grid flex-1 min-h-0 gap-3 [grid-template-columns:280px_minmax(0,1fr)]">
         <LineSidebar
           lines={lines}
           selection={selection}
@@ -1750,38 +1726,39 @@ export default function ProductLinesPage() {
           unassignedCount={unassignedStats?.productCount ?? 0}
         />
 
-        <ProductsTable
-          selection={selection}
-          lines={lines}
-          search={search}
-          setSearch={setSearch}
-          vendor={vendor}
-          setVendor={setVendor}
-          status={status}
-          setStatus={setStatus}
-          page={page}
-          setPage={setPage}
-          selectedIds={selectedIds}
-          setSelectedIds={setSelectedIds}
-          data={productsData}
-          isLoading={productsLoading || linesLoading}
-          onMoveToLine={handleMoveToLine}
-          onDuplicateToLine={handleDuplicateToLine}
-          onUnassign={handleUnassign}
-        />
+        <main className="flex min-h-0 flex-col gap-3">
+          <LineSummaryPanel
+            selection={selection}
+            line={viewingLine}
+            stats={allStats}
+            onQuickSelect={handleQuickFilter}
+            activity={activity}
+            onEditLine={onEditLine}
+          />
 
-        <LineDrawer
-          selection={selection}
-          line={viewingLine}
-          stats={allStats}
-          lines={lines}
-          onQuickSelect={handleQuickFilter}
-          activity={activity}
-          onEditLine={onEditLine}
-        />
+          <ProductsTable
+            selection={selection}
+            lines={lines}
+            search={search}
+            setSearch={setSearch}
+            vendor={vendor}
+            setVendor={setVendor}
+            status={status}
+            setStatus={setStatus}
+            page={page}
+            setPage={setPage}
+            selectedIds={selectedIds}
+            setSelectedIds={setSelectedIds}
+            data={productsData}
+            isLoading={productsLoading || linesLoading}
+            onMoveToLine={handleMoveToLine}
+            onDuplicateToLine={handleDuplicateToLine}
+            onUnassign={handleUnassign}
+          />
+        </main>
       </div>
 
-      {/* Hidden edit dialog, triggered from the drawer */}
+      {/* Hidden edit dialog, triggered from the selected-line summary */}
       {viewingLine && (
         <ProductLineDialog
           line={viewingLine}
