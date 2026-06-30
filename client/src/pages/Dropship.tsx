@@ -3583,8 +3583,6 @@ function CatalogExposureTab() {
 
 function ShippingConfigTab() {
   const queryClient = useQueryClient();
-  const [search, setSearch] = useState("");
-  const [appliedSearch, setAppliedSearch] = useState("");
   const [boxForm, setBoxForm] = useState<ShippingBoxFormState>(emptyShippingBoxForm);
   const [profileForm, setProfileForm] = useState<ShippingPackageProfileFormState>(emptyShippingPackageProfileForm);
   const [zoneForm, setZoneForm] = useState<ShippingZoneRuleFormState>(emptyShippingZoneRuleForm);
@@ -3595,8 +3593,8 @@ function ShippingConfigTab() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const shippingConfigUrl = useMemo(
-    () => buildAdminShippingConfigUrl({ search: appliedSearch, packageProfileLimit: 75, rateTableLimit: 25 }),
-    [appliedSearch],
+    () => buildAdminShippingConfigUrl({ packageProfileLimit: 250, rateTableLimit: 100 }),
+    [],
   );
   const shippingQuery = useQuery<DropshipAdminShippingConfigResponse>({
     queryKey: [shippingConfigUrl],
@@ -3647,10 +3645,6 @@ function ShippingConfigTab() {
     } finally {
       setPendingAction(null);
     }
-  }
-
-  function applySearch() {
-    setAppliedSearch(search.trim());
   }
 
   async function saveBox() {
@@ -3766,16 +3760,6 @@ function ShippingConfigTab() {
             <h2 className="text-lg font-semibold">Shipping configuration</h2>
             <p className="text-sm text-muted-foreground">Manage package data, zones, cached rates, markup, and insurance pool fees used by dropship quotes.</p>
           </div>
-          <Input
-            className="lg:w-72"
-            placeholder="Search product shipping profiles"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-          <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applySearch}>
-            <Search className="h-4 w-4" />
-            Apply
-          </Button>
         </div>
       </section>
 
