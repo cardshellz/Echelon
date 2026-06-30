@@ -1,5 +1,5 @@
 import { dollarsToCents } from "@shared/utils/money";
-import { useState, useRef } from "react";
+import { useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -179,6 +179,22 @@ const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
   allocated: "Allocated",
 };
 
+function compareShipmentLinesByEntryOrder(a: any, b: any): number {
+  const aCreatedAt = Date.parse(a?.createdAt ?? "");
+  const bCreatedAt = Date.parse(b?.createdAt ?? "");
+  const aHasCreatedAt = Number.isFinite(aCreatedAt);
+  const bHasCreatedAt = Number.isFinite(bCreatedAt);
+
+  if (aHasCreatedAt && bHasCreatedAt && aCreatedAt !== bCreatedAt) {
+    return aCreatedAt - bCreatedAt;
+  }
+  if (aHasCreatedAt !== bHasCreatedAt) {
+    return aHasCreatedAt ? -1 : 1;
+  }
+
+  return Number(a?.id ?? 0) - Number(b?.id ?? 0);
+}
+
 const LANDED_COST_SKIP_LABELS: Record<string, string> = {
   ambiguous_variant_landed_cost: "Ambiguous same-SKU landed cost",
   invalid_lot_variant: "Invalid lot variant",
@@ -229,6 +245,8 @@ export default function InboundShipmentDetail() {
   const [, navigate] = useLocation();
   const [, params] = useRoute("/shipments/:id");
   const shipmentId = params?.id ? Number(params.id) : null;
+  const shipmentDetailQueryKey = [`/api/inbound-shipments/${shipmentId}`] as const;
+  const shipmentAllocationStatusQueryKey = [`/api/inbound-shipments/${shipmentId}/allocation-status`] as const;
 
   const [activeTab, setActiveTab] = useState("lines");
 
@@ -302,7 +320,7 @@ export default function InboundShipmentDetail() {
   // ── Queries ──
 
   const { data: shipment, isLoading } = useQuery<any>({
-    queryKey: [`/api/inbound-shipments/${shipmentId}`],
+    queryKey: shipmentDetailQueryKey,
     enabled: !!shipmentId,
   });
 
@@ -317,7 +335,7 @@ export default function InboundShipmentDetail() {
   });
 
   const { data: allocationStatus } = useQuery<AllocationStatus>({
-    queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`],
+    queryKey: shipmentAllocationStatusQueryKey,
     // Loaded whenever the shipment is open so the missing-dimensions banner + fix modal
     // (and the close-blocked auto-open) always have allocation data, regardless of tab.
     enabled: !!shipmentId,
@@ -332,7 +350,10 @@ export default function InboundShipmentDetail() {
     enabled: !!shipmentId,
   });
 
-  const lines = shipment?.lines ?? [];
+  const lines = useMemo(
+    () => (Array.isArray(shipment?.lines) ? [...shipment.lines].sort(compareShipmentLinesByEntryOrder) : []),
+    [shipment?.lines],
+  );
   const costs = shipment?.costs ?? [];
   const paymentStatus = shipment?.paymentStatus ?? null;
   const statusHistory = shipment?.statusHistory ?? [];
@@ -372,13 +393,22 @@ export default function InboundShipmentDetail() {
       predicate: (q) =>
         typeof q.queryKey[0] === "string" && q.queryKey[0].startsWith("/api/purchase-orders/"),
     });
-  const invalidateShipmentDetail = () =>
-    queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-  const invalidateAllocationStatus = () =>
-    queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
-  const invalidateShipmentCostingViews = () => {
-    invalidateShipmentDetail();
-    invalidateAllocationStatus();
+  const refreshActiveQuery = async (queryKey: readonly [string]) => {
+    await queryClient.invalidateQueries({ queryKey });
+    await queryClient.refetchQueries({ queryKey, type: "active" });
+  };
+  const refreshShipmentCostingViews = async () => {
+    const results = await Promise.allSettled([
+      refreshActiveQuery(shipmentDetailQueryKey),
+      refreshActiveQuery(shipmentAllocationStatusQueryKey),
+    ]);
+    const failedRefreshes = results.filter((result) => result.status === "rejected");
+    if (failedRefreshes.length > 0) {
+      console.error("Failed to refresh shipment costing views after mutation", {
+        shipmentId,
+        failedRefreshes: failedRefreshes.map((result) => String((result as PromiseRejectedResult).reason)),
+      });
+    }
   };
 
   function createTransitionMutation(endpoint: string) {
@@ -430,8 +460,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("PATCH", `/api/inbound-shipments/${shipmentId}`, data);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
       invalidatePoViews();
       setShowEditDialog(false);
@@ -448,8 +478,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/from-po`, data);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setShowAddFromPoDialog(false);
       setSelectedPoId(null);
       setSelectedPoLineIds([]);
@@ -466,8 +496,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/import-packing-list`, { rows });
       return res.json();
     },
-    onSuccess: (result) => {
-      invalidateShipmentCostingViews();
+    onSuccess: async (result) => {
+      await refreshShipmentCostingViews();
       setShowImportDialog(false);
       resetImportState();
       toast({ title: "Import complete", description: `${result.imported ?? "Lines"} imported successfully` });
@@ -482,8 +512,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/resolve-dimensions`);
       return res.json();
     },
-    onSuccess: (result) => {
-      invalidateShipmentCostingViews();
+    onSuccess: async (result) => {
+      await refreshShipmentCostingViews();
       toast({ title: "Dimensions resolved", description: `${result.resolved ?? "Lines"} updated from product data` });
     },
     onError: (err: Error) => {
@@ -496,8 +526,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("PATCH", `/api/inbound-shipments/lines/${lineId}`, data);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setEditDialogLine(null);
       toast({ title: "Line updated" });
     },
@@ -511,8 +541,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("DELETE", `/api/inbound-shipments/lines/${lineId}`);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       toast({ title: "Line removed" });
     },
     onError: (err: Error) => {
@@ -535,8 +565,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/costs`, payload);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setShowAddCostDialog(false);
       setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByName: "", costDate: "" });
       setCostVendorSearch("");
@@ -561,8 +591,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("PATCH", `/api/inbound-shipments/costs/${costId}`, payload);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setShowEditCostDialog(false);
       setEditingCost(null);
       toast({ title: "Cost updated" });
@@ -577,8 +607,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("DELETE", `/api/inbound-shipments/costs/${costId}`);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       toast({ title: "Cost removed" });
     },
     onError: (err: Error) => {
@@ -614,8 +644,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/allocate`);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       toast({ title: "Allocation complete", description: "Costs allocated to shipment lines" });
     },
     onError: (err: Error) => {
@@ -628,8 +658,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/finalize`);
       return res.json();
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       toast({ title: "Finalized", description: "Landed costs finalized and snapshotted" });
     },
     onError: (err: Error) => {
@@ -642,9 +672,9 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/push-costs-to-lots`);
       return res.json();
     },
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       setLastLandedCostPush(result);
-      invalidateShipmentCostingViews();
+      await refreshShipmentCostingViews();
       const skippedCount = result.skipped?.length ?? 0;
       toast({
         title: skippedCount > 0 ? "Landed cost push needs review" : "Landed costs pushed",
@@ -673,8 +703,8 @@ export default function InboundShipmentDetail() {
         })
       ));
     },
-    onSuccess: () => {
-      invalidateShipmentCostingViews();
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setShowDimFixModal(false);
       toast({ title: "Dimensions saved", description: "Lines updated — you can close the shipment now." });
     },
