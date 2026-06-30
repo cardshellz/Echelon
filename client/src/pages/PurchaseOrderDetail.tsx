@@ -10,7 +10,7 @@ import {
 } from "@shared/schema/procurement.schema";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRoute, useLocation } from "wouter";
+import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +34,7 @@ import { Separator } from "@/components/ui/separator";
 import {
   ShipmentReceiptPackResolutionDialog,
   type ShipmentReceiptPackResolution,
+  type ShipmentReceiptPackResolutionLine,
 } from "@/components/purchasing/ShipmentReceiptPackResolutionDialog";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
@@ -804,10 +805,17 @@ function createEmptyNewLine() {
   };
 }
 
+function parsePositiveInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 export default function PurchaseOrderDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
+  const searchStr = useSearch();
   const [, params] = useRoute("/purchase-orders/:id");
   const poId = params?.id ? Number(params.id) : null;
 
@@ -830,6 +838,7 @@ export default function PurchaseOrderDetail() {
   const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
   const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
   const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
+  const resumeShipmentReceiptHandled = React.useRef<string | null>(null);
   const [newShipmentForm, setNewShipmentForm] = useState({
     mode: "sea_fcl",
     shipmentNumber: "",
@@ -1294,7 +1303,9 @@ export default function PurchaseOrderDetail() {
       toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created from shipment` });
       navigate(`/receiving?open=${receipt.id}`);
     },
-    onError: (err: Error) => {
+    onError: async (err: Error, variables) => {
+      const openedBlocker = await openShipmentReceiptPackBlocker(variables);
+      if (openedBlocker) return;
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
@@ -1305,6 +1316,24 @@ export default function PurchaseOrderDetail() {
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
     return body as ShipmentReceiptPackResolution;
+  }
+
+  async function openShipmentReceiptPackBlocker(params: { shipmentId: number; purchaseOrderId: number } | undefined | null): Promise<boolean> {
+    if (!params) return false;
+    setCheckingShipmentReceiptPacks(true);
+    setPendingShipmentReceipt(params);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!resolution.canCreateReceipt) {
+        setShipmentReceiptPackResolution(resolution);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
   }
 
   async function checkAndReceiveShipment(params: { shipmentId: number; purchaseOrderId: number }) {
@@ -1342,6 +1371,58 @@ export default function PurchaseOrderDetail() {
     if (!pendingShipmentReceipt) return;
     createReceiptFromShipmentMutation.mutate(pendingShipmentReceipt);
   }
+
+  function openReceiptVariantSetup(line?: ShipmentReceiptPackResolutionLine) {
+    const context = pendingShipmentReceipt ?? (shipmentReceiptPackResolution
+      ? {
+          shipmentId: shipmentReceiptPackResolution.shipmentId,
+          purchaseOrderId: shipmentReceiptPackResolution.purchaseOrderId,
+        }
+      : null);
+    const returnTo = context && poId
+      ? `/purchase-orders/${poId}?resumeShipmentReceipt=1&shipmentId=${context.shipmentId}&purchaseOrderId=${context.purchaseOrderId}`
+      : `/purchase-orders/${poId ?? ""}`;
+    const setupParams = new URLSearchParams({
+      receiptSetup: "1",
+      returnTo,
+    });
+    if (line?.unitsPerCarton && Number(line.unitsPerCarton) > 0) {
+      setupParams.set("unitsPerVariant", String(line.unitsPerCarton));
+      setupParams.set("hierarchyLevel", "3");
+    }
+    if (line?.sku) setupParams.set("shipmentSku", line.sku);
+
+    if (line?.productId) {
+      navigate(`/products/${line.productId}?${setupParams.toString()}`);
+      return;
+    }
+
+    navigate(`/catalog/variants?${setupParams.toString()}`);
+  }
+
+  useEffect(() => {
+    if (!poId) return;
+    const searchParams = new URLSearchParams(searchStr);
+    if (searchParams.get("resumeShipmentReceipt") !== "1") return;
+
+    const shipmentId = parsePositiveInt(searchParams.get("shipmentId"));
+    const purchaseOrderId = parsePositiveInt(searchParams.get("purchaseOrderId")) ?? poId;
+    if (!shipmentId || purchaseOrderId !== poId) {
+      toast({
+        title: "Cannot resume receipt",
+        description: "The return link is missing the shipment or PO context.",
+        variant: "destructive",
+      });
+      navigate(`/purchase-orders/${poId}`, { replace: true });
+      return;
+    }
+
+    const resumeKey = `${shipmentId}:${purchaseOrderId}`;
+    if (resumeShipmentReceiptHandled.current === resumeKey) return;
+    resumeShipmentReceiptHandled.current = resumeKey;
+    navigate(`/purchase-orders/${poId}`, { replace: true });
+    void checkAndReceiveShipment({ shipmentId, purchaseOrderId });
+  }, [poId, searchStr]);
 
   const createInvoiceMutation = useMutation({
     mutationFn: async () => {
@@ -4530,7 +4611,7 @@ export default function PurchaseOrderDetail() {
         refreshing={checkingShipmentReceiptPacks}
         onCreateReceipt={createPendingShipmentReceipt}
         onRefresh={refreshShipmentReceiptPackResolution}
-        onOpenCatalog={() => navigate("/catalog/variants")}
+        onOpenCatalog={openReceiptVariantSetup}
       />
     </div>
   );

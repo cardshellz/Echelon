@@ -1,7 +1,7 @@
 import { dollarsToCents } from "@shared/utils/money";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRoute, useLocation } from "wouter";
+import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -71,6 +71,17 @@ function getHierarchyLabel(level: number) {
 
 function getHierarchyPrefix(level: number) {
   return HIERARCHY_TYPES.find((t) => t.level === level)?.prefix || "X";
+}
+
+function parsePositiveInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function safeInternalPath(path: string | null): string | null {
+  if (!path || !path.startsWith("/") || path.startsWith("//")) return null;
+  return path;
 }
 
 interface ProductVariantRow {
@@ -773,6 +784,7 @@ function ProductInventoryTab({ productId }: { productId: number }) {
 export default function ProductDetail() {
   const [, params] = useRoute("/products/:id");
   const [, setLocation] = useLocation();
+  const searchStr = useSearch();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const productId = params?.id ? parseInt(params.id) : null;
@@ -796,6 +808,7 @@ export default function ProductDetail() {
   const [transferTargetVariant, setTransferTargetVariant] = useState<{ id: number; sku: string; name: string; unitsPerVariant: number } | null>(null);
   const [variantSearchOpen, setVariantSearchOpen] = useState(false);
   const [variantSearchQuery, setVariantSearchQuery] = useState("");
+  const receiptSetupAutoOpenRef = useRef<string | null>(null);
 
   // --- Product data ---
   const { data: product, isLoading, error } = useQuery<ProductDetailData>({
@@ -1409,6 +1422,40 @@ export default function ProductDetail() {
     setVariantDialogOpen(true);
   }, [computeAutoSku, computeAutoName]);
 
+  useEffect(() => {
+    if (!product?.productId) return;
+    const searchParams = new URLSearchParams(searchStr);
+    if (searchParams.get("receiptSetup") !== "1") return;
+
+    const unitsPerVariant = parsePositiveInt(searchParams.get("unitsPerVariant"));
+    if (!unitsPerVariant) return;
+
+    const setupKey = `${product.productId}:${searchParams.toString()}`;
+    if (receiptSetupAutoOpenRef.current === setupKey) return;
+    receiptSetupAutoOpenRef.current = setupKey;
+
+    const hierarchyLevel = parsePositiveInt(searchParams.get("hierarchyLevel")) ?? 3;
+    setActiveTab("variants");
+    setEditingVariant(null);
+    setSkuManuallyEdited(false);
+    setNameManuallyEdited(false);
+    setUnitsInputRaw(null);
+    setVariantForm({
+      hierarchyLevel,
+      unitsPerVariant,
+      sku: computeAutoSku(hierarchyLevel, unitsPerVariant),
+      name: computeAutoName(hierarchyLevel, unitsPerVariant),
+      barcode: "",
+      parentVariantId: null,
+      isBaseUnit: false,
+    });
+    setVariantDialogOpen(true);
+    toast({
+      title: "Receipt variant setup",
+      description: `Create or activate a receive variant with ${unitsPerVariant} units per variant, then save to resume the receipt.`,
+    });
+  }, [searchStr, product?.productId, computeAutoSku, computeAutoName, toast]);
+
   const openEditVariant = useCallback((variant: ProductVariantRow) => {
     setEditingVariant(variant);
     setSkuManuallyEdited(true);
@@ -1446,8 +1493,14 @@ export default function ProductDetail() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
-      toast({ title: "Variant created" });
       setVariantDialogOpen(false);
+      const returnTo = safeInternalPath(new URLSearchParams(searchStr).get("returnTo"));
+      if (returnTo) {
+        toast({ title: "Variant created", description: "Returning to shipment receipt setup." });
+        setLocation(returnTo);
+        return;
+      }
+      toast({ title: "Variant created" });
     },
     onError: () => {
       toast({ title: "Failed to create variant", variant: "destructive" });
@@ -1492,8 +1545,14 @@ export default function ProductDetail() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
-      toast({ title: "Variant updated" });
       setVariantDialogOpen(false);
+      const returnTo = safeInternalPath(new URLSearchParams(searchStr).get("returnTo"));
+      if (returnTo) {
+        toast({ title: "Variant updated", description: "Returning to shipment receipt setup." });
+        setLocation(returnTo);
+        return;
+      }
+      toast({ title: "Variant updated" });
     },
     onError: () => {
       toast({ title: "Failed to update variant", variant: "destructive" });
