@@ -1,4 +1,4 @@
-import { dollarsToCents } from "@shared/utils/money";
+import { dollarsToCents, formatMills } from "@shared/utils/money";
 import { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
@@ -174,6 +174,7 @@ const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
   zero_amount: "Zero Amount",
   needs_allocation: "Needs Allocation",
   stale_allocation: "Stale Allocation",
+  stale_allocation_basis: "Stale Basis",
   allocation_mismatch: "Mismatch",
   allocated_with_fallback: "Even Split",
   allocated: "Allocated",
@@ -209,6 +210,35 @@ function formatCents(cents: number | null | undefined, opts?: { unitCost?: boole
     return `$${String(n)}`;
   }
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatSignedCents(cents: number | null | undefined): string {
+  const n = Number(cents || 0);
+  if (n < 0) return `-${formatCents(Math.abs(n))}`;
+  return formatCents(n);
+}
+
+function formatMillsPerUnit(mills: number | null | undefined): string {
+  if (mills === null || mills === undefined) return "—";
+  return `${formatMills(mills)}/unit`;
+}
+
+function AllocationAmountCell({
+  cents,
+  millsPerUnit,
+  strong = false,
+}: {
+  cents: number | string | null | undefined;
+  millsPerUnit?: number | null;
+  strong?: boolean;
+}) {
+  if (cents === null || cents === undefined) return <>—</>;
+  return (
+    <div className={`font-mono ${strong ? "font-medium" : ""}`}>
+      <div>{formatCents(Number(cents))}</div>
+      <div className="text-xs font-normal text-muted-foreground">{formatMillsPerUnit(millsPerUnit)}</div>
+    </div>
+  );
 }
 
 function formatNumber(val: string | number | null | undefined, decimals = 2): string {
@@ -338,6 +368,15 @@ export default function InboundShipmentDetail() {
   const statusHistory = shipment?.statusHistory ?? [];
   const purchaseOrders = posData?.pos ?? posData?.purchaseOrders ?? [];
   const poLines = selectedPo?.lines ?? [];
+  const lineAllocatedTotalCents = lines.reduce(
+    (sum: number, line: any) => sum + Number(line.allocatedCostCents || 0),
+    0,
+  );
+  const allocatableCostTotalCents = allocationStatus?.effectiveCostCents ?? costs.reduce(
+    (sum: number, cost: any) => sum + Number(cost.actualCents ?? cost.estimatedCents ?? 0),
+    0,
+  );
+  const allocationChecksumDeltaCents = allocatableCostTotalCents - lineAllocatedTotalCents;
 
   // Track which PO line IDs are already on this shipment (for duplicate detection)
   const existingPoLineIds = new Set(
@@ -664,14 +703,14 @@ export default function InboundShipmentDetail() {
   // totalVolumeCbm/Weight so the by-volume/by-weight gate clears.
   const saveDimFixMutation = useMutation({
     mutationFn: async () => {
-      await Promise.all(dimFixRows.map((r) =>
-        apiRequest("PATCH", `/api/inbound-shipments/lines/${r.lineId}`, {
+      for (const r of dimFixRows) {
+        await apiRequest("PATCH", `/api/inbound-shipments/lines/${r.lineId}`, {
           lengthCm: r.lengthCm || null,
           widthCm: r.widthCm || null,
           heightCm: r.heightCm || null,
           weightKg: r.weightPerCarton || null,
-        })
-      ));
+        });
+      }
     },
     onSuccess: () => {
       invalidateShipmentCostingViews();
@@ -1219,7 +1258,7 @@ export default function InboundShipmentDetail() {
                           </div>
                           {line.allocatedCostCents != null && (
                             <div className="text-xs mt-1">
-                              Allocated: {formatCents(line.allocatedCostCents)} | Landed: {formatCents(line.landedUnitCostCents)}
+                              Allocated: {formatCents(line.allocatedCostCents)} ({formatMillsPerUnit(line.totalAllocatedMillsPerUnit)}) | Landed: {formatCents(line.landedUnitCostCents)}
                             </div>
                           )}
                         </div>
@@ -1277,7 +1316,9 @@ export default function InboundShipmentDetail() {
                         <TableCell className="text-right">{formatNumber(line.weightKg, 2)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>
-                        <TableCell className="text-right font-mono">{line.allocatedCostCents != null ? formatCents(line.allocatedCostCents) : "—"}</TableCell>
+                        <TableCell className="text-right">
+                          <AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} />
+                        </TableCell>
                         <TableCell className="text-right font-mono">{line.landedUnitCostCents != null ? formatCents(line.landedUnitCostCents) : "—"}</TableCell>
                         {isEditable && (
                           <TableCell>
@@ -1307,6 +1348,24 @@ export default function InboundShipmentDetail() {
               </TableBody>
             </Table>
           </Card>
+          {lines.length > 0 && (
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 text-sm md:grid-cols-3">
+              <div>
+                <div className="text-xs text-muted-foreground">Allocatable cost total</div>
+                <div className="font-mono font-medium">{formatCents(allocatableCostTotalCents)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Allocated to lines</div>
+                <div className="font-mono font-medium">{formatCents(lineAllocatedTotalCents)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Checksum delta</div>
+                <div className={`font-mono font-medium ${allocationChecksumDeltaCents === 0 ? "" : "text-destructive"}`}>
+                  {formatSignedCents(allocationChecksumDeltaCents)}
+                </div>
+              </div>
+            </div>
+          )}
         </TabsContent>
 
         {/* ══ Tab 2: Costs ══ */}
@@ -1673,7 +1732,7 @@ export default function InboundShipmentDetail() {
                           </TableCell>
                           <TableCell>
                             <Badge
-                              variant={["needs_allocation", "stale_allocation", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
+                              variant={["needs_allocation", "stale_allocation", "stale_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
                               className={cost.status === "allocated_with_fallback" ? "border-amber-500 text-amber-700" : undefined}
                             >
                               {ALLOCATION_COST_STATUS_LABELS[cost.status] || cost.status.replace(/_/g, " ")}
@@ -1725,7 +1784,7 @@ export default function InboundShipmentDetail() {
                   <TableHead>SKU</TableHead>
                   <TableHead className="text-right">PO $/unit</TableHead>
                   <TableHead className="text-right">Freight</TableHead>
-                  <TableHead className="text-right">Duty</TableHead>
+                  <TableHead className="text-right">Duty/Customs</TableHead>
                   <TableHead className="text-right">Insurance</TableHead>
                   <TableHead className="text-right">Other</TableHead>
                   <TableHead className="text-right">Total Allocated</TableHead>
@@ -1744,11 +1803,11 @@ export default function InboundShipmentDetail() {
                     <TableRow key={line.id}>
                       <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                       <TableCell className="text-right font-mono">{line.poUnitCostCents != null ? formatCents(line.poUnitCostCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.freightAllocatedCents != null ? formatCents(line.freightAllocatedCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.dutyAllocatedCents != null ? formatCents(line.dutyAllocatedCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.insuranceAllocatedCents != null ? formatCents(line.insuranceAllocatedCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.otherAllocatedCents != null ? formatCents(line.otherAllocatedCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono font-medium">{line.allocatedCostCents != null ? formatCents(line.allocatedCostCents) : "—"}</TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.freightAllocatedCents} millsPerUnit={line.freightAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.dutyAllocatedCents} millsPerUnit={line.dutyAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.insuranceAllocatedCents} millsPerUnit={line.insuranceAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.otherAllocatedCents} millsPerUnit={line.otherAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} strong /></TableCell>
                       <TableCell className="text-right font-mono font-medium">{line.landedUnitCostCents != null ? formatCents(line.landedUnitCostCents) : "—"}</TableCell>
                     </TableRow>
                   ))
