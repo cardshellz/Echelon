@@ -65,7 +65,7 @@ type Props = {
   refreshing?: boolean;
   onCreateReceipt: () => void;
   onRefresh: () => void;
-  onOpenCatalog: () => void;
+  onOpenCatalog: (line?: ShipmentReceiptPackResolutionLine) => void;
 };
 
 function statusLabel(line: ShipmentReceiptPackResolutionLine): string {
@@ -84,6 +84,12 @@ function formatVariantList(line: ShipmentReceiptPackResolutionLine): string {
     .join(", ");
 }
 
+function requiredSetupText(line: ShipmentReceiptPackResolutionLine): string {
+  if (!line.productId) return "Link this shipment line to a product before creating the receipt.";
+  if (!line.unitsPerCarton) return "Set the shipment carton count and units per carton before creating the receipt.";
+  return `Create or activate a receive variant for Product ${line.productId} with ${line.unitsPerCarton} units per variant.`;
+}
+
 export function ShipmentReceiptPackResolutionDialog({
   open,
   onOpenChange,
@@ -96,6 +102,8 @@ export function ShipmentReceiptPackResolutionDialog({
 }: Props) {
   const unresolvedCount = resolution?.unresolvedCount ?? 0;
   const canCreate = Boolean(resolution?.canCreateReceipt);
+  const blockingLines = (resolution?.lines ?? []).filter((line) => line.blocking);
+  const primaryBlockingLine = blockingLines[0];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -122,8 +130,19 @@ export function ShipmentReceiptPackResolutionDialog({
         )}
 
         {!canCreate && unresolvedCount > 0 && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-            {unresolvedCount} line{unresolvedCount === 1 ? "" : "s"} need catalog receive-pack configuration before this receipt can be created.
+          <div className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            <div className="font-medium">
+              {unresolvedCount} line{unresolvedCount === 1 ? "" : "s"} need receive-pack setup before this receipt can be created.
+            </div>
+            <div>
+              Fix the blocking line below, then return here and refresh. The receipt will not be created until the shipment carton pack size maps to an active product variant.
+            </div>
+            {primaryBlockingLine && (
+              <div className="rounded border border-red-200 bg-white/70 p-2 text-red-900">
+                <div className="font-medium">{primaryBlockingLine.sku ?? primaryBlockingLine.productName ?? "Blocking line"}</div>
+                <div>{requiredSetupText(primaryBlockingLine)}</div>
+              </div>
+            )}
           </div>
         )}
 
@@ -168,7 +187,21 @@ export function ShipmentReceiptPackResolutionDialog({
                         </div>
                       </div>
                     ) : (
-                      <div className="max-w-sm text-xs text-muted-foreground">{formatVariantList(line)}</div>
+                      <div className="space-y-2">
+                        <div className="max-w-sm text-xs text-muted-foreground">{formatVariantList(line)}</div>
+                        {line.blocking && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => onOpenCatalog(line)}
+                            className="h-8"
+                          >
+                            <ExternalLink className="mr-2 h-3.5 w-3.5" />
+                            Fix variant
+                          </Button>
+                        )}
+                      </div>
                     )}
                   </TableCell>
                 </TableRow>
@@ -178,9 +211,9 @@ export function ShipmentReceiptPackResolutionDialog({
         </div>
 
         <DialogFooter className="gap-2 sm:space-x-0">
-          <Button variant="outline" onClick={onOpenCatalog}>
+          <Button variant="outline" onClick={() => onOpenCatalog(primaryBlockingLine)}>
             <ExternalLink className="mr-2 h-4 w-4" />
-            Open variants
+            {primaryBlockingLine?.productId ? "Open product variants" : "Open variants"}
           </Button>
           <Button variant="outline" onClick={onRefresh} disabled={refreshing}>
             <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />

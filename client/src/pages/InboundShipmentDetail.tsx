@@ -1,7 +1,7 @@
 import { dollarsToCents, formatMills } from "@shared/utils/money";
-import { useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRoute, useLocation } from "wouter";
+import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +22,7 @@ import { AddInvoiceFromCostsModal } from "@/components/shipment/AddInvoiceFromCo
 import {
   ShipmentReceiptPackResolutionDialog,
   type ShipmentReceiptPackResolution,
+  type ShipmentReceiptPackResolutionLine,
 } from "@/components/purchasing/ShipmentReceiptPackResolutionDialog";
 import { format } from "date-fns";
 import Papa from "papaparse";
@@ -121,6 +122,12 @@ const ALLOCATION_METHOD_OPTIONS = [
   { value: "by_value", label: "By Value" },
   { value: "by_line_count", label: "By Line Count" },
 ];
+
+function parsePositiveInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
 
 type LandedCostPushResult = {
   updated: number;
@@ -282,6 +289,7 @@ export default function InboundShipmentDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
+  const searchStr = useSearch();
   const [, params] = useRoute("/shipments/:id");
   const shipmentId = params?.id ? Number(params.id) : null;
   const shipmentDetailQueryKey = [`/api/inbound-shipments/${shipmentId}`] as const;
@@ -302,6 +310,7 @@ export default function InboundShipmentDetail() {
   const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
   const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
   const [creatingShipmentReceipt, setCreatingShipmentReceipt] = useState(false);
+  const resumeShipmentReceiptHandled = useRef<string | null>(null);
 
   // Edit line dialog state
   const [editDialogLine, setEditDialogLine] = useState<any | null>(null);
@@ -495,9 +504,29 @@ export default function InboundShipmentDetail() {
       invalidatePoViews();
       navigate(`/receiving?open=${body.id}`);
     } catch (err: any) {
+      const openedBlocker = await openShipmentReceiptPackBlocker(params);
+      if (openedBlocker) return;
       toast({ title: "Error", description: err.message, variant: "destructive" });
     } finally {
       setCreatingShipmentReceipt(false);
+    }
+  }
+
+  async function openShipmentReceiptPackBlocker(params: { shipmentId: number; purchaseOrderId: number } | undefined | null): Promise<boolean> {
+    if (!params) return false;
+    setCheckingShipmentReceiptPacks(true);
+    setPendingShipmentReceipt(params);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!resolution.canCreateReceipt) {
+        setShipmentReceiptPackResolution(resolution);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
     }
   }
 
@@ -535,6 +564,57 @@ export default function InboundShipmentDetail() {
     if (!pendingShipmentReceipt) return;
     createReceiptForShipment(pendingShipmentReceipt);
   }
+
+  function openReceiptVariantSetup(line?: ShipmentReceiptPackResolutionLine) {
+    const context = pendingShipmentReceipt ?? (shipmentReceiptPackResolution
+      ? {
+          shipmentId: shipmentReceiptPackResolution.shipmentId,
+          purchaseOrderId: shipmentReceiptPackResolution.purchaseOrderId,
+        }
+      : null);
+    const returnTo = context
+      ? `/shipments/${context.shipmentId}?resumeShipmentReceipt=1&purchaseOrderId=${context.purchaseOrderId}`
+      : `/shipments/${shipmentId ?? ""}`;
+    const setupParams = new URLSearchParams({
+      receiptSetup: "1",
+      returnTo,
+    });
+    if (line?.unitsPerCarton && Number(line.unitsPerCarton) > 0) {
+      setupParams.set("unitsPerVariant", String(line.unitsPerCarton));
+      setupParams.set("hierarchyLevel", "3");
+    }
+    if (line?.sku) setupParams.set("shipmentSku", line.sku);
+
+    if (line?.productId) {
+      navigate(`/products/${line.productId}?${setupParams.toString()}`);
+      return;
+    }
+
+    navigate(`/catalog/variants?${setupParams.toString()}`);
+  }
+
+  useEffect(() => {
+    if (!shipmentId) return;
+    const searchParams = new URLSearchParams(searchStr);
+    if (searchParams.get("resumeShipmentReceipt") !== "1") return;
+
+    const purchaseOrderId = parsePositiveInt(searchParams.get("purchaseOrderId"));
+    if (!purchaseOrderId) {
+      toast({
+        title: "Cannot resume receipt",
+        description: "The return link is missing the PO context.",
+        variant: "destructive",
+      });
+      navigate(`/shipments/${shipmentId}`, { replace: true });
+      return;
+    }
+
+    const resumeKey = `${shipmentId}:${purchaseOrderId}`;
+    if (resumeShipmentReceiptHandled.current === resumeKey) return;
+    resumeShipmentReceiptHandled.current = resumeKey;
+    navigate(`/shipments/${shipmentId}`, { replace: true });
+    void checkAndCreateReceiptForShipment({ shipmentId, purchaseOrderId });
+  }, [shipmentId, searchStr]);
 
   function createTransitionMutation(endpoint: string) {
     return useMutation({
@@ -1161,7 +1241,7 @@ export default function InboundShipmentDetail() {
           )}
 
           {/* Create Receipt from shipment lines — available once delivered */}
-          {["delivered", "costing"].includes(shipment.status) && lines.length > 0 && (
+          {["delivered", "costing", "closed"].includes(shipment.status) && lines.length > 0 && (
             <Button
               variant="outline"
               onClick={async () => {
@@ -3267,7 +3347,7 @@ export default function InboundShipmentDetail() {
         refreshing={checkingShipmentReceiptPacks}
         onCreateReceipt={createPendingShipmentReceipt}
         onRefresh={refreshShipmentReceiptPackResolution}
-        onOpenCatalog={() => navigate("/catalog/variants")}
+        onOpenCatalog={openReceiptVariantSetup}
       />
     </div>
   );
