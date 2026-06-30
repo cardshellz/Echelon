@@ -237,7 +237,7 @@ export const receivingOrders = procurementSchema.table("receiving_orders", {
   uniqueIndex("receiving_orders_receipt_number_active_uidx").on(table.receiptNumber).where(sql`status <> 'cancelled'`),
   uniqueIndex("receiving_orders_shipment_po_active_uidx")
     .on(table.inboundShipmentId, table.purchaseOrderId)
-    .where(sql`inbound_shipment_id IS NOT NULL AND purchase_order_id IS NOT NULL AND status <> 'cancelled'`),
+    .where(sql`inbound_shipment_id IS NOT NULL AND purchase_order_id IS NOT NULL AND status IN ('draft', 'open', 'receiving', 'verified')`),
 ]);
 
 export const insertReceivingOrderSchema = createInsertSchema(receivingOrders).omit({
