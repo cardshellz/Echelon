@@ -527,11 +527,25 @@ async function resolveAcceptanceLinesWithClient(
        p.is_active AS product_is_active,
        pv.is_active AS variant_is_active,
        pv.dropship_eligible,
-       pv.price_cents AS catalog_retail_price_cents
+       COALESCE((ROUND(retail_cache.price::numeric * 100))::bigint, pv.price_cents) AS catalog_retail_price_cents
      FROM dropship.dropship_vendor_listings dl
      INNER JOIN catalog.product_variants pv ON pv.id = dl.product_variant_id
      INNER JOIN catalog.products p ON p.id = pv.product_id
      LEFT JOIN catalog.product_line_products plp ON plp.product_id = p.id
+     LEFT JOIN LATERAL (
+       SELECT sv.price
+       FROM public.shopify_variants sv
+       WHERE (
+           pv.shopify_variant_id IS NOT NULL
+           AND sv.id::text = pv.shopify_variant_id::text
+         )
+         OR (
+           NULLIF(BTRIM(pv.sku), '') IS NOT NULL
+           AND UPPER(sv.sku) = UPPER(pv.sku)
+         )
+       ORDER BY CASE WHEN sv.id::text = pv.shopify_variant_id::text THEN 0 ELSE 1 END
+       LIMIT 1
+     ) retail_cache ON true
      WHERE dl.vendor_id = $1
        AND dl.store_connection_id = $2
        AND (
@@ -541,7 +555,7 @@ async function resolveAcceptanceLinesWithClient(
          OR UPPER(pv.sku) = ANY($6::text[])
          OR UPPER(p.sku) = ANY($6::text[])
        )
-     GROUP BY dl.id, p.id, pv.id`,
+     GROUP BY dl.id, p.id, pv.id, retail_cache.price`,
     [
       input.vendor.vendorId,
       input.storeConnectionId,

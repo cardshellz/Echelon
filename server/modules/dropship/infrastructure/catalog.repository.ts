@@ -26,7 +26,7 @@ export class CatalogRepository {
           pv.sku,
           p.name as product_name,
           pv.name as variant_name,
-          pv.price_cents,
+          COALESCE((ROUND(retail_cache.price::numeric * 100))::bigint, pv.price_cents) AS retail_price_cents,
           (
             SELECT COALESCE(SUM(quantity), 0)
             FROM wms_inventory
@@ -42,9 +42,24 @@ export class CatalogRepository {
           ) as image_url
         FROM catalog.products p
         JOIN product_variants pv ON pv.product_id = p.id
+        LEFT JOIN LATERAL (
+          SELECT sv.price
+          FROM public.shopify_variants sv
+          WHERE (
+              pv.shopify_variant_id IS NOT NULL
+              AND sv.id::text = pv.shopify_variant_id::text
+            )
+            OR (
+              NULLIF(BTRIM(pv.sku), '') IS NOT NULL
+              AND UPPER(sv.sku) = UPPER(pv.sku)
+            )
+          ORDER BY CASE WHEN sv.id::text = pv.shopify_variant_id::text THEN 0 ELSE 1 END
+          LIMIT 1
+        ) retail_cache ON true
         WHERE p.is_active = true 
           AND pv.is_active = true 
           AND pv.dropship_eligible = true
+          AND COALESCE((ROUND(retail_cache.price::numeric * 100))::bigint, pv.price_cents) IS NOT NULL
         ORDER BY p.name ASC, pv.position ASC
       `);
 
@@ -53,7 +68,7 @@ export class CatalogRepository {
         variantId: row.variant_id,
         sku: row.sku,
         name: row.variant_name ? `${row.product_name} - ${row.variant_name}` : row.product_name,
-        retailPriceCents: parseInt(row.price_cents, 10),
+        retailPriceCents: parseInt(row.retail_price_cents, 10),
         atpUnits: Math.max(0, parseInt(row.atp_units, 10)),
         imageUrl: row.image_url
       }));
