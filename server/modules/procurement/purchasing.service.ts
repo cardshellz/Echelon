@@ -118,15 +118,22 @@ interface Storage {
 
   // Products
   getProductVariantById(id: number): Promise<any>;
+  getProductVariantsByProductId?(productId: number): Promise<any[]>;
   getProductById(id: number): Promise<any>;
 
   // Receiving
   createReceivingOrder(data: any): Promise<any>;
   getReceivingOrdersForPurchaseOrder?(purchaseOrderId: number): Promise<any[]>;
+  getReceivingLines?(receivingOrderId: number): Promise<any[]>;
   generateReceiptNumber(): Promise<string>;
   bulkCreateReceivingLines(lines: any[]): Promise<any[]>;
   getReceivingLineById(id: number): Promise<any>;
   getReceivingOrderById(id: number): Promise<any>;
+
+  // Inbound shipments
+  getInboundShipmentById(id: number): Promise<any>;
+  getInboundShipmentLines(inboundShipmentId: number): Promise<any[]>;
+  getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<any[]>;
 
   // Settings
   getSetting(key: string): Promise<string | null>;
@@ -150,6 +157,8 @@ const EDITABLE_STATUSES = new Set(["draft"]);
 const LINE_AMENDABLE_STATUSES = new Set(["draft", "pending_approval", "approved", "sent", "acknowledged", "partially_received"]);
 const CANCELLABLE_FROM = new Set(["draft", "pending_approval", "approved"]);
 const VOIDABLE_FROM = new Set(["sent", "acknowledged"]);
+const RECEIVABLE_SHIPMENT_STATUSES = new Set(["at_port", "customs_clearance", "delivered", "costing", "closed"]);
+const ACTIVE_RECEIPT_STATUSES = new Set(["draft", "open", "receiving", "verified"]);
 const PHYSICAL_LIFECYCLE_EVENTS: Partial<Record<PoPhysicalStatus, string>> = {
   sent: "sent_to_vendor",
   acknowledged: "vendor_acknowledged",
@@ -1924,6 +1933,173 @@ export function createPurchasingService(db: any, storage: Storage) {
     return receivingOrder;
   }
 
+  type ShipmentReceiptExistingState =
+    | { kind: "none" }
+    | { kind: "active"; receipt: any }
+    | { kind: "closed"; receipt: any };
+
+  type ShipmentReceiveOption = {
+    shipmentId: number;
+    shipmentNumber: string | null;
+    status: string | null;
+    purchaseOrderId: number;
+    lineCount: number;
+    qtyShipped: number;
+    missingPurchaseOrderLineCount: number;
+    receivable: boolean;
+    action: "create_receipt" | "open_existing_receipt" | "blocked";
+    reason: string | null;
+    freightWillCarry: boolean;
+    estimatedTotalCostCents: number | null;
+    actualTotalCostCents: number | null;
+    existingReceiptId: number | null;
+    existingReceiptStatus: string | null;
+  };
+
+  function parsePositiveInteger(value: unknown): number | null {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function activeReceiptStatus(status: unknown): boolean {
+    return ACTIVE_RECEIPT_STATUSES.has(String(status ?? ""));
+  }
+
+  async function getReceiptForShipmentPo(
+    purchaseOrderId: number,
+    inboundShipmentId: number,
+  ): Promise<ShipmentReceiptExistingState> {
+    const receipts =
+      typeof storage.getReceivingOrdersForPurchaseOrder === "function"
+        ? await storage.getReceivingOrdersForPurchaseOrder(purchaseOrderId)
+        : [];
+    const receipt = receipts.find(
+      (candidate: any) =>
+        Number(candidate.inboundShipmentId) === inboundShipmentId &&
+        candidate.status !== "cancelled",
+    );
+    if (!receipt) return { kind: "none" };
+    if (activeReceiptStatus(receipt.status)) return { kind: "active", receipt };
+    return { kind: "closed", receipt };
+  }
+
+  function buildShipmentReceiveOption(params: {
+    shipment: any | null;
+    purchaseOrderId: number;
+    inboundShipmentId: number;
+    shipmentLines: any[];
+    existing: ShipmentReceiptExistingState;
+  }): ShipmentReceiveOption {
+    const { shipment, purchaseOrderId, inboundShipmentId, shipmentLines, existing } = params;
+    const status = shipment?.status ?? null;
+    const missingPurchaseOrderLineCount = shipmentLines.filter((line: any) => !line.purchaseOrderLineId).length;
+    const shipmentIsReceivable = status ? RECEIVABLE_SHIPMENT_STATUSES.has(status) : false;
+    const lineCount = shipmentLines.length;
+    const qtyShipped = shipmentLines.reduce((sum, line: any) => sum + (Number(line.qtyShipped) || 0), 0);
+
+    let action: ShipmentReceiveOption["action"] = "create_receipt";
+    let reason: string | null = null;
+    let receivable = true;
+
+    if (!shipment) {
+      receivable = false;
+      action = "blocked";
+      reason = `Shipment ${inboundShipmentId} was referenced by PO lines but no shipment row was found.`;
+    } else if (!shipmentIsReceivable) {
+      receivable = false;
+      action = "blocked";
+      reason = `Shipment is ${String(status).replace(/_/g, " ")}, so it is not physically receivable yet.`;
+    } else if (lineCount === 0) {
+      receivable = false;
+      action = "blocked";
+      reason = "Shipment has no positive-quantity lines for this PO.";
+    } else if (missingPurchaseOrderLineCount > 0) {
+      receivable = false;
+      action = "blocked";
+      reason = `${missingPurchaseOrderLineCount} shipment line(s) are missing PO line links.`;
+    } else if (existing.kind === "active") {
+      action = "open_existing_receipt";
+      reason = "A receipt is already open for this shipment and PO.";
+    } else if (existing.kind === "closed") {
+      receivable = false;
+      action = "blocked";
+      reason = "This shipment has already been received for this PO.";
+    }
+
+    const existingReceipt = existing.kind === "none" ? null : existing.receipt;
+    return {
+      shipmentId: inboundShipmentId,
+      shipmentNumber: shipment?.shipmentNumber ?? null,
+      status,
+      purchaseOrderId,
+      lineCount,
+      qtyShipped,
+      missingPurchaseOrderLineCount,
+      receivable,
+      action,
+      reason,
+      freightWillCarry: receivable && action !== "blocked",
+      estimatedTotalCostCents: shipment?.estimatedTotalCostCents ?? null,
+      actualTotalCostCents: shipment?.actualTotalCostCents ?? null,
+      existingReceiptId: existingReceipt?.id ?? null,
+      existingReceiptStatus: existingReceipt?.status ?? null,
+    };
+  }
+
+  async function getPurchaseOrderReceiveOptions(purchaseOrderId: number) {
+    const po = await storage.getPurchaseOrderById(purchaseOrderId);
+    if (!po) throw new PurchasingError("Purchase order not found", 404);
+
+    const shipmentLines = await storage.getInboundShipmentLinesByPo(purchaseOrderId);
+    const positiveShipmentLines = shipmentLines.filter((line: any) => Number(line.qtyShipped) > 0);
+    const linesByShipment = new Map<number, any[]>();
+    for (const line of positiveShipmentLines) {
+      const shipmentId = parsePositiveInteger(line.inboundShipmentId);
+      if (!shipmentId) continue;
+      const lines = linesByShipment.get(shipmentId) ?? [];
+      lines.push(line);
+      linesByShipment.set(shipmentId, lines);
+    }
+
+    const shipmentOptions: ShipmentReceiveOption[] = [];
+    for (const [shipmentId, lines] of linesByShipment) {
+      const [shipment, existing] = await Promise.all([
+        storage.getInboundShipmentById(shipmentId),
+        getReceiptForShipmentPo(purchaseOrderId, shipmentId),
+      ]);
+      shipmentOptions.push(buildShipmentReceiveOption({
+        shipment,
+        purchaseOrderId,
+        inboundShipmentId: shipmentId,
+        shipmentLines: lines,
+        existing,
+      }));
+    }
+
+    shipmentOptions.sort((a, b) => {
+      const rank = Number(b.receivable) - Number(a.receivable);
+      if (rank !== 0) return rank;
+      return b.shipmentId - a.shipmentId;
+    });
+
+    const poDirectAllowed = ["sent", "acknowledged", "partially_received"].includes(po.status);
+    const linkedShipmentCount = shipmentOptions.length;
+    return {
+      purchaseOrderId,
+      poNumber: po.poNumber,
+      status: po.status,
+      physicalStatus: po.physicalStatus ?? null,
+      shipmentOptions,
+      poDirect: {
+        allowed: poDirectAllowed,
+        reason: poDirectAllowed ? null : `Cannot create receipt for PO in '${po.status}' status`,
+        warning: linkedShipmentCount > 0
+          ? "PO-direct receiving does not attach shipment freight to the received lots."
+          : "No inbound shipment exists for this PO. PO-direct receiving is appropriate for no-freight or domestic receipts.",
+      },
+    };
+  }
+
   /**
    * Create a receiving order against an inbound SHIPMENT (the freight-bearing
    * leg). Mirrors createReceiptFromPO's line-building, but:
@@ -1937,54 +2113,82 @@ export function createPurchasingService(db: any, storage: Storage) {
    * NOTE: cost stamping mirrors createReceiptFromPO. Shipment lines already
    * carry the resolved receive variant.
    */
-  async function createReceiptFromShipment(inboundShipmentId: number, userId?: string) {
-    const shipment = await (storage as any).getInboundShipmentById(inboundShipmentId);
+  async function createReceiptFromShipment(
+    inboundShipmentId: number,
+    userId?: string,
+    options: { purchaseOrderId?: number } = {},
+  ) {
+    const shipment = await storage.getInboundShipmentById(inboundShipmentId);
     if (!shipment) throw new PurchasingError("Inbound shipment not found", 404);
 
     // Goods must be physically here (or being costed/closed) to receive them.
-    const receivableStatuses = ["at_port", "customs_clearance", "delivered", "costing", "closed"];
-    if (!receivableStatuses.includes((shipment as any).status)) {
+    if (!RECEIVABLE_SHIPMENT_STATUSES.has((shipment as any).status)) {
       throw new PurchasingError(`Cannot receive a shipment in '${(shipment as any).status}' status`, 400);
     }
 
-    const shipmentLines = await (storage as any).getInboundShipmentLines(inboundShipmentId);
-    const receivableShipmentLines = shipmentLines.filter(
-      (sl: any) => Number(sl.qtyShipped) > 0 && sl.purchaseOrderLineId,
+    const shipmentLines = await storage.getInboundShipmentLines(inboundShipmentId);
+    const linkedShipmentLines = shipmentLines.filter(
+      (sl: any) => Number(sl.qtyShipped) > 0 && sl.purchaseOrderId && sl.purchaseOrderLineId,
     );
-    if (receivableShipmentLines.length === 0) {
+    if (linkedShipmentLines.length === 0) {
       throw new PurchasingError("Shipment has no receivable lines", 400);
     }
 
-    // PR3a handles single-PO shipments (the common case). A multi-PO shipment
-    // makes the receiving order's PO link ambiguous for reconciliation; receive
-    // those per PO until that's modeled.
     const poIds = Array.from(
-      new Set(receivableShipmentLines.map((sl: any) => sl.purchaseOrderId).filter(Boolean)),
-    );
-    if (poIds.length !== 1) {
+      new Set(linkedShipmentLines.map((sl: any) => Number(sl.purchaseOrderId)).filter((id: number) => Number.isInteger(id) && id > 0)),
+    ).sort((a, b) => a - b);
+    const requestedPoId = parsePositiveInteger(options.purchaseOrderId);
+    if (!requestedPoId && poIds.length !== 1) {
       throw new PurchasingError(
-        "This shipment's lines span multiple POs; receiving multi-PO shipments isn't supported yet.",
-        400,
+        "This shipment's lines span multiple POs; choose which PO to receive.",
+        409,
+        { purchaseOrderIds: poIds },
       );
     }
-    const purchaseOrderId = poIds[0] as number;
+    const purchaseOrderId = requestedPoId ?? (poIds[0] as number);
+    if (!poIds.includes(purchaseOrderId)) {
+      throw new PurchasingError(
+        `Shipment ${inboundShipmentId} has no receivable lines for PO ${purchaseOrderId}.`,
+        404,
+        { purchaseOrderIds: poIds },
+      );
+    }
+
+    const receivableShipmentLines = linkedShipmentLines.filter(
+      (sl: any) => Number(sl.purchaseOrderId) === purchaseOrderId,
+    );
     const po = await storage.getPurchaseOrderById(purchaseOrderId);
     if (!po) throw new PurchasingError("Linked purchase order not found", 404);
 
-    // Reuse: if an open receipt is already linked to THIS shipment, return it
-    // instead of spawning a duplicate (idempotent on repeat clicks).
-    const findOpenForShipment = async () =>
-      (await (storage as any).getReceivingOrdersForPurchaseOrder(purchaseOrderId)).find(
-        (r: any) =>
-          Number(r.inboundShipmentId) === inboundShipmentId &&
-          r.status !== "closed" &&
-          r.status !== "cancelled",
+    const existingReceipt = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
+    if (existingReceipt.kind === "active") return { ...existingReceipt.receipt, reusedExisting: true };
+    if (existingReceipt.kind === "closed") {
+      throw new PurchasingError(
+        "This shipment has already been received for this PO.",
+        409,
+        { receivingOrderId: existingReceipt.receipt.id, purchaseOrderId, inboundShipmentId },
       );
-    const reusable = await findOpenForShipment();
-    if (reusable) return { ...reusable, reusedExisting: true };
+    }
 
     const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
     const poLineById = new Map<number, any>(poLines.map((l: any) => [l.id, l]));
+    const invalidLinkedLine = receivableShipmentLines.find((sl: any) => {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const linePurchaseOrderId = parsePositiveInteger(poLine?.purchaseOrderId);
+      return !poLine || (linePurchaseOrderId !== null && linePurchaseOrderId !== purchaseOrderId);
+    });
+    if (invalidLinkedLine) {
+      throw new PurchasingError(
+        "Shipment line PO links are inconsistent; receiving is blocked until the line links are repaired.",
+        409,
+        {
+          inboundShipmentId,
+          inboundShipmentLineId: invalidLinkedLine.id,
+          purchaseOrderId,
+          purchaseOrderLineId: invalidLinkedLine.purchaseOrderLineId ?? null,
+        },
+      );
+    }
 
     const receiptNumber = await storage.generateReceiptNumber();
     let receivingOrder;
@@ -2003,26 +2207,61 @@ export function createPurchasingService(db: any, storage: Storage) {
       });
     } catch (error: any) {
       if (error?.code === "23505") {
-        const conflict = await findOpenForShipment();
-        if (conflict) return { ...conflict, reusedExisting: true };
+        const conflict = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
+        if (conflict.kind === "active") return { ...conflict.receipt, reusedExisting: true };
+        if (conflict.kind === "closed") {
+          throw new PurchasingError(
+            "This shipment has already been received for this PO.",
+            409,
+            { receivingOrderId: conflict.receipt.id, purchaseOrderId, inboundShipmentId },
+          );
+        }
         throw new PurchasingError(`Receipt number '${receiptNumber}' already in use by an active record.`, 409);
       }
       throw error;
     }
 
     const unitsPerVariantById = new Map<number, number>();
-    const shipmentVariantIds = Array.from(new Set(
-      receivableShipmentLines
-        .map((sl: any) => sl.productVariantId)
-        .filter(Boolean),
-    )) as number[];
-    for (const variantId of shipmentVariantIds) {
+    const fallbackReceiveVariantByProductId = new Map<number, any>();
+    const explicitVariantIds = new Set<number>();
+    for (const sl of receivableShipmentLines) {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const variantId = parsePositiveInteger(
+        sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId,
+      );
+      if (variantId) explicitVariantIds.add(variantId);
+    }
+    for (const variantId of explicitVariantIds) {
       try {
         const variant = await storage.getProductVariantById(variantId);
         if (variant) {
           unitsPerVariantById.set(variantId, Math.max(1, variant.unitsPerVariant || 1));
         }
       } catch { /* non-critical: fall back to PO receive units */ }
+    }
+    if (typeof storage.getProductVariantsByProductId === "function") {
+      const productIdsNeedingFallback = new Set<number>();
+      for (const sl of receivableShipmentLines) {
+        const poLine = poLineById.get(sl.purchaseOrderLineId);
+        const productId = parsePositiveInteger(poLine?.productId);
+        const hasExplicitVariant = parsePositiveInteger(
+          sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId,
+        );
+        if (productId && !hasExplicitVariant) productIdsNeedingFallback.add(productId);
+      }
+      for (const productId of productIdsNeedingFallback) {
+        try {
+          const variants = await storage.getProductVariantsByProductId(productId);
+          const largestVariant = [...variants].sort(
+            (a: any, b: any) => (Number(b.unitsPerVariant) || 1) - (Number(a.unitsPerVariant) || 1),
+          )[0];
+          const variantId = parsePositiveInteger(largestVariant?.id);
+          if (largestVariant && variantId) {
+            fallbackReceiveVariantByProductId.set(productId, largestVariant);
+            unitsPerVariantById.set(variantId, Math.max(1, Number(largestVariant.unitsPerVariant) || 1));
+          }
+        } catch { /* non-critical: fall back to PO receive units */ }
+      }
     }
     // Primary putaway locations keyed by receive variant.
     const productLocationMap = new Map<number, number>();
@@ -2042,11 +2281,13 @@ export function createPurchasingService(db: any, storage: Storage) {
     const receivingLineData = receivableShipmentLines.map((sl: any) => {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
       const productId = poLine?.productId ?? null;
+      const fallbackVariant = productId ? fallbackReceiveVariantByProductId.get(productId) : null;
       const resolvedVariantId =
-        sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId ?? null;
+        sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId ?? fallbackVariant?.id ?? null;
       const packSize = Math.max(
         1,
         (resolvedVariantId ? unitsPerVariantById.get(resolvedVariantId) : undefined) ??
+          (fallbackVariant ? Number(fallbackVariant.unitsPerVariant) : undefined) ??
           poLine?.expectedReceiveUnitsPerVariant ??
           poLine?.unitsPerUom ??
           1,
@@ -3713,6 +3954,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     // Receiving integration
     createReceiptFromPO,
     createReceiptFromShipment,
+    getPurchaseOrderReceiveOptions,
     onReceivingOrderClosed,
 
     // Dual-track lifecycle (migration 0565)

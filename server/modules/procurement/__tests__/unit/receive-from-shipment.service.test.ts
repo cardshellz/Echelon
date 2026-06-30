@@ -23,6 +23,10 @@ function build(overrides: Record<string, any> = {}) {
       { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, productVariantId: null, sku: "COGS-TEST-001", qtyShipped: 20 },
       { id: 2, purchaseOrderLineId: 229, purchaseOrderId: 140, productVariantId: null, sku: "COGS-TEST-002", qtyShipped: 150 },
     ]),
+    getInboundShipmentLinesByPo: vi.fn().mockResolvedValue([
+      { id: 1, inboundShipmentId: 84, purchaseOrderLineId: 228, purchaseOrderId: 140, productVariantId: null, sku: "COGS-TEST-001", qtyShipped: 20 },
+      { id: 2, inboundShipmentId: 84, purchaseOrderLineId: 229, purchaseOrderId: 140, productVariantId: null, sku: "COGS-TEST-002", qtyShipped: 150 },
+    ]),
     getPurchaseOrderById: vi.fn().mockResolvedValue({
       id: 140, poNumber: "PO-20260617-002", vendorId: 101, warehouseId: 1,
       expectedDeliveryDate: null, confirmedDeliveryDate: null,
@@ -85,13 +89,92 @@ describe("createReceiptFromShipment", () => {
     await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/status/);
   });
 
-  it("rejects a shipment whose lines span multiple POs", async () => {
+  it("accepts closed shipments as physically receivable", async () => {
+    const { svc, captured } = build({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 84, status: "closed" }),
+    });
+    const order: any = await svc.createReceiptFromShipment(84, "u1");
+    expect(order).toMatchObject({ id: 999 });
+    expect(captured.order).toMatchObject({ inboundShipmentId: 84, purchaseOrderId: 140 });
+  });
+
+  it("rejects an unscoped shipment whose lines span multiple POs", async () => {
     const { svc } = build({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
         { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 20 },
         { id: 2, purchaseOrderLineId: 300, purchaseOrderId: 141, qtyShipped: 10 },
       ]),
     });
-    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/multiple POs/);
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/choose which PO/);
+  });
+
+  it("creates a receipt for one PO in a multi-PO shipment when purchaseOrderId is supplied", async () => {
+    const { svc, captured } = build({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 20 },
+        { id: 2, purchaseOrderLineId: 300, purchaseOrderId: 141, qtyShipped: 10 },
+      ]),
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 141,
+        poNumber: "PO-20260617-003",
+        vendorId: 101,
+        warehouseId: 1,
+        expectedDeliveryDate: null,
+        confirmedDeliveryDate: null,
+      }),
+      getPurchaseOrderLines: vi.fn().mockResolvedValue([
+        { id: 300, purchaseOrderId: 141, productId: 329, sku: "COGS-TEST-003", productName: "Widget C", unitCostMills: 5000, unitCostCents: 50 },
+      ]),
+      getProductVariantsByProductId: vi.fn().mockResolvedValue([{ id: 472, unitsPerVariant: 1 }]),
+    });
+
+    const order: any = await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 141 });
+
+    expect(order).toMatchObject({ id: 999 });
+    expect(captured.order).toMatchObject({
+      sourceType: "shipment",
+      inboundShipmentId: 84,
+      purchaseOrderId: 141,
+      poNumber: "PO-20260617-003",
+    });
+    expect(captured.lines).toHaveLength(1);
+    expect(captured.lines[0]).toMatchObject({ purchaseOrderLineId: 300, expectedQty: 10 });
+  });
+
+  it("blocks duplicate shipment receipts after the shipment/PO pair was already closed", async () => {
+    const { svc, storage } = build({
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([
+        { id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 },
+      ]),
+    });
+
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/already been received/);
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("reports backend receive options using the same closed-shipment predicate", async () => {
+    const { svc } = build({
+      getInboundShipmentById: vi.fn().mockResolvedValue({
+        id: 84,
+        shipmentNumber: "SHP-84",
+        status: "closed",
+        actualTotalCostCents: 12345,
+      }),
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([]),
+    });
+
+    const options: any = await svc.getPurchaseOrderReceiveOptions(140);
+
+    expect(options.shipmentOptions).toHaveLength(1);
+    expect(options.shipmentOptions[0]).toMatchObject({
+      shipmentId: 84,
+      shipmentNumber: "SHP-84",
+      status: "closed",
+      purchaseOrderId: 140,
+      receivable: true,
+      action: "create_receipt",
+      freightWillCarry: true,
+      actualTotalCostCents: 12345,
+    });
   });
 });
