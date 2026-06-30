@@ -242,6 +242,17 @@ export interface DropshipStoreConnectionRepository {
     graceEndsAt: Date;
     idempotencyKey: string;
   }): Promise<DropshipStoreConnectionProfile>;
+  disconnectStoreForAdmin(input: {
+    storeConnectionId: number;
+    reason: string;
+    disconnectedAt: Date;
+    graceEndsAt: Date;
+    idempotencyKey: string;
+    actor: {
+      actorType: "admin" | "system";
+      actorId?: string;
+    };
+  }): Promise<DropshipStoreConnectionProfile>;
   updateOrderProcessingConfig(input: {
     storeConnectionId: number;
     defaultWarehouseId: number | null;
@@ -470,6 +481,48 @@ export class DropshipStoreConnectionService {
       context: {
         vendorId: vendor.vendorId,
         storeConnectionId,
+        idempotencyKey: input.idempotencyKey,
+      },
+    });
+
+    if (isFreshDisconnect(connection, disconnectedAt)) {
+      await this.notifyStoreDisconnectStarted({
+        connection,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey,
+      });
+    }
+
+    return connection;
+  }
+
+  async disconnectForAdmin(input: {
+    storeConnectionId: number;
+    reason: string;
+    idempotencyKey: string;
+    actor: {
+      actorType: "admin" | "system";
+      actorId?: string;
+    };
+  }): Promise<DropshipStoreConnectionProfile> {
+    const disconnectedAt = this.deps.clock.now();
+    const connection = await this.deps.repository.disconnectStoreForAdmin({
+      storeConnectionId: input.storeConnectionId,
+      reason: input.reason,
+      disconnectedAt,
+      graceEndsAt: calculateDisconnectGraceEndsAt(disconnectedAt, this.disconnectGraceHours),
+      idempotencyKey: input.idempotencyKey,
+      actor: input.actor,
+    });
+
+    this.deps.logger.info({
+      code: "DROPSHIP_ADMIN_STORE_DISCONNECT_STARTED",
+      message: "Admin moved dropship store connection into disconnect grace.",
+      context: {
+        vendorId: connection.vendorId,
+        storeConnectionId: input.storeConnectionId,
+        actorType: input.actor.actorType,
+        actorId: input.actor.actorId,
         idempotencyKey: input.idempotencyKey,
       },
     });

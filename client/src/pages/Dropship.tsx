@@ -57,10 +57,6 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  allDropshipListingInventoryModes,
-  allDropshipListingModes,
-  allDropshipListingPriceModes,
-  allDropshipListingRequiredProductFields,
   allDropshipOrderCancellationStatuses,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
@@ -97,8 +93,7 @@ import {
   buildShippingPackageProfileInput,
   buildShippingRateTableInput,
   buildShippingZoneRuleInput,
-  buildStoreListingConfigInput,
-  buildStoreOrderProcessingConfigInput,
+  buildStoreConnectionDisconnectInput,
   countByKey,
   catalogExposureRecordToInput,
   catalogExposureRuleKey,
@@ -189,13 +184,9 @@ import {
   type DropshipTrackingPushStatus,
   type DropshipSeverity,
   type DropshipShippingConfigOverview,
-  type DropshipListingInventoryMode,
-  type DropshipListingMode,
-  type DropshipListingPriceMode,
   type DropshipStoreConnectionLifecycleStatus,
+  type DropshipStoreConnectionDisconnectResponse,
   type DropshipStorePlatform,
-  type DropshipStoreListingConfigResponse,
-  type DropshipStoreOrderProcessingConfigResponse,
   type DropshipSystemReadinessCheck,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
@@ -310,17 +301,6 @@ interface DropshipOpsSearchSignal {
   search: string;
   platform?: StoreConnectionPlatformFilter;
   nonce: number;
-}
-
-interface ListingConfigFormState {
-  storeConnectionId: number;
-  listingMode: DropshipListingMode;
-  inventoryMode: DropshipListingInventoryMode;
-  priceMode: DropshipListingPriceMode;
-  marketplaceConfigJson: string;
-  requiredConfigKeys: string;
-  requiredProductFields: string;
-  isActive: boolean;
 }
 
 interface CatalogRuleFormState {
@@ -2156,11 +2136,9 @@ function StoreConnectionOpsTab() {
     status: "all" as StoreConnectionStatusFilter,
     platform: "all" as StoreConnectionPlatformFilter,
   });
-  const [warehouseInputs, setWarehouseInputs] = useState<Record<number, string>>({});
-  const [listingConfigForm, setListingConfigForm] = useState<ListingConfigFormState | null>(null);
-  const [loadingListingConfigId, setLoadingListingConfigId] = useState<number | null>(null);
-  const [savingListingConfigId, setSavingListingConfigId] = useState<number | null>(null);
-  const [savingConnectionId, setSavingConnectionId] = useState<number | null>(null);
+  const [disableTarget, setDisableTarget] = useState<DropshipAdminStoreConnectionListItem | null>(null);
+  const [disableReason, setDisableReason] = useState("Disabled by Card Shellz admin.");
+  const [disablingConnectionId, setDisablingConnectionId] = useState<number | null>(null);
   const [repairingWebhookConnectionId, setRepairingWebhookConnectionId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -2176,71 +2154,48 @@ function StoreConnectionOpsTab() {
     queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(storeConnectionsUrl),
   });
 
-  const warehousesQuery = useQuery<DropshipWarehouseOption[]>({
-    queryKey: ["/api/warehouses"],
-    queryFn: () => fetchJson<DropshipWarehouseOption[]>("/api/warehouses"),
-  });
-
   const connections = useMemo(
     () => storeConnectionsQuery.data?.items ?? [],
     [storeConnectionsQuery.data?.items],
   );
-  const warehouseOptions = useMemo(
-    () => (warehousesQuery.data ?? [])
-      .filter((warehouse) => warehouse.isActive === 1 && warehouse.warehouseType !== "bulk_storage")
-      .sort((a, b) => {
-        if (a.isDefault !== b.isDefault) return b.isDefault - a.isDefault;
-        return a.name.localeCompare(b.name);
-      }),
-    [warehousesQuery.data],
-  );
-  const attentionCount = connections.filter((connection) => storeConnectionNeedsAttention(connection)).length;
-  const listingConfigActiveCount = connections.filter((connection) => connection.listingConfig.isActive).length;
-  const selectedListingConfigConnection = connections.find(
-    (connection) => connection.storeConnectionId === listingConfigForm?.storeConnectionId,
-  ) ?? null;
-
-  useEffect(() => {
-    setWarehouseInputs((current) => {
-      const next = { ...current };
-      for (const connection of connections) {
-        if (next[connection.storeConnectionId] === undefined) {
-          next[connection.storeConnectionId] = connection.orderProcessingConfig.defaultWarehouseId === null
-            ? ""
-            : String(connection.orderProcessingConfig.defaultWarehouseId);
-        }
-      }
-      return next;
-    });
-  }, [connections]);
+  const summary = useMemo(() => buildStoreConnectionSummary(connections), [connections]);
 
   function applyStoreFilters() {
     setAppliedFilters({ search, status, platform });
   }
 
-  async function saveWarehouseConfig(connection: DropshipAdminStoreConnectionListItem) {
-    setSavingConnectionId(connection.storeConnectionId);
+  function openDisableStoreDialog(connection: DropshipAdminStoreConnectionListItem) {
+    setDisableTarget(connection);
+    setDisableReason(`Disabled by Card Shellz admin for ${storeConnectionDisplayName(connection)}.`);
+    setError("");
+    setMessage("");
+  }
+
+  async function confirmDisableStoreConnection() {
+    if (!disableTarget) return;
+    setDisablingConnectionId(disableTarget.storeConnectionId);
     setError("");
     setMessage("");
     try {
-      const input = buildStoreOrderProcessingConfigInput({
-        defaultWarehouseId: warehouseInputs[connection.storeConnectionId] ?? "",
-        idempotencyKey: createDropshipIdempotencyKey(`admin-store-${connection.storeConnectionId}-warehouse`),
-      });
-      const response = await putJson<DropshipStoreOrderProcessingConfigResponse>(
-        `/api/dropship/admin/store-connections/${connection.storeConnectionId}/order-processing-config`,
-        input,
+      await postJson<DropshipStoreConnectionDisconnectResponse>(
+        `/api/dropship/admin/store-connections/${disableTarget.storeConnectionId}/disconnect`,
+        buildStoreConnectionDisconnectInput({
+          reason: disableReason,
+          idempotencyKey: createDropshipIdempotencyKey(`admin-store-${disableTarget.storeConnectionId}-disconnect`),
+        }),
       );
-      setMessage(`Store connection ${response.connection.storeConnectionId} warehouse config saved.`);
+      setMessage(`${storeConnectionDisplayName(disableTarget)} was disabled. Intake and listing pushes are paused during the disconnect grace period.`);
+      setDisableTarget(null);
       await Promise.all([
         storeConnectionsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Store connection config update failed.");
+      setError(caught instanceof Error ? caught.message : "Store disable request failed.");
     } finally {
-      setSavingConnectionId(null);
+      setDisablingConnectionId(null);
     }
   }
 
@@ -2269,53 +2224,6 @@ function StoreConnectionOpsTab() {
     }
   }
 
-  async function editListingConfig(connection: DropshipAdminStoreConnectionListItem) {
-    setLoadingListingConfigId(connection.storeConnectionId);
-    setError("");
-    setMessage("");
-    try {
-      const response = await fetchJson<DropshipStoreListingConfigResponse>(
-        `/api/dropship/admin/store-connections/${connection.storeConnectionId}/listing-config`,
-      );
-      setListingConfigForm(listingConfigResponseToForm(response));
-      await storeConnectionsQuery.refetch();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to load listing config.");
-    } finally {
-      setLoadingListingConfigId(null);
-    }
-  }
-
-  async function saveListingConfig() {
-    if (!listingConfigForm) return;
-    setSavingListingConfigId(listingConfigForm.storeConnectionId);
-    setError("");
-    setMessage("");
-    try {
-      const input = buildStoreListingConfigInput(listingConfigForm);
-      const response = await putJson<DropshipStoreListingConfigResponse>(
-        `/api/dropship/admin/store-connections/${listingConfigForm.storeConnectionId}/listing-config`,
-        input,
-      );
-      setListingConfigForm(listingConfigResponseToForm(response));
-      setMessage(`Store connection ${response.storeConnection.storeConnectionId} listing config saved.`);
-      await Promise.all([
-        storeConnectionsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
-      ]);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Listing config update failed.");
-    } finally {
-      setSavingListingConfigId(null);
-    }
-  }
-
-  function updateListingConfigForm(patch: Partial<ListingConfigFormState>) {
-    setListingConfigForm((current) => current ? { ...current, ...patch } : current);
-  }
-
   return (
     <div className="space-y-5">
       {(storeConnectionsQuery.error || error) && (
@@ -2336,9 +2244,9 @@ function StoreConnectionOpsTab() {
       <section className="rounded-md border bg-card p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h2 className="text-lg font-semibold">Store connection health</h2>
+            <h2 className="text-lg font-semibold">Customer store connections</h2>
             <p className="text-sm text-muted-foreground">
-              Review connected vendor stores, token health, setup checks, sync recency, and order-processing warehouse config.
+              Monitor connected dropship stores, owner identity, setup progress, sync recency, and operator actions.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -2348,7 +2256,7 @@ function StoreConnectionOpsTab() {
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 className="pl-9"
-                placeholder="Vendor, store, domain, or member"
+                placeholder="Store, owner, email, or domain"
               />
             </div>
             <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
@@ -2382,185 +2290,83 @@ function StoreConnectionOpsTab() {
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching connections" value={String(storeConnectionsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible needing attention" value={String(attentionCount)} />
-        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Connected visible" value={String(connections.filter((connection) => connection.status === "connected").length)} />
-        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Warehouse configured" value={String(connections.filter((connection) => connection.orderProcessingConfig.defaultWarehouseId !== null).length)} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Listing config active" value={String(listingConfigActiveCount)} />
+        <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching stores" value={String(storeConnectionsQuery.data?.total ?? 0)} />
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Ready for dogfood" value={String(summary.ready)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Setup incomplete" value={String(summary.setupIncomplete)} />
+        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Auth attention" value={String(summary.authAttention)} />
+        <CatalogMetric icon={<MinusCircle className="h-4 w-4" />} label="Disabled" value={String(summary.disabled)} />
       </section>
-
-      {listingConfigForm && selectedListingConfigConnection && (
-        <ListingConfigEditorPanel
-          connection={selectedListingConfigConnection}
-          form={listingConfigForm}
-          isSaving={savingListingConfigId === listingConfigForm.storeConnectionId}
-          onCancel={() => setListingConfigForm(null)}
-          onChange={updateListingConfigForm}
-          onSave={saveListingConfig}
-        />
-      )}
 
       <StoreConnectionsTable
         connections={connections}
         isLoading={storeConnectionsQuery.isLoading || storeConnectionsQuery.isFetching}
-        loadingListingConfigId={loadingListingConfigId}
-        onEditListingConfig={editListingConfig}
+        onDisableStoreConnection={openDisableStoreDialog}
         onRepairShopifyWebhooks={repairShopifyWebhooks}
-        savingConnectionId={savingConnectionId}
+        disablingConnectionId={disablingConnectionId}
         repairingWebhookConnectionId={repairingWebhookConnectionId}
         total={storeConnectionsQuery.data?.total ?? 0}
-        warehouses={warehouseOptions}
-        warehousesLoading={warehousesQuery.isLoading}
-        warehouseInputs={warehouseInputs}
-        onSaveWarehouseConfig={saveWarehouseConfig}
-        onWarehouseInputChange={(storeConnectionId, value) => setWarehouseInputs((current) => ({
-          ...current,
-          [storeConnectionId]: value,
-        }))}
       />
-    </div>
-  );
-}
 
-function ListingConfigEditorPanel({
-  connection,
-  form,
-  isSaving,
-  onCancel,
-  onChange,
-  onSave,
-}: {
-  connection: DropshipAdminStoreConnectionListItem;
-  form: ListingConfigFormState;
-  isSaving: boolean;
-  onCancel: () => void;
-  onChange: (patch: Partial<ListingConfigFormState>) => void;
-  onSave: () => void;
-}) {
-  return (
-    <section className="rounded-md border bg-card p-4">
-      <div className="flex flex-col gap-3 border-b pb-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h3 className="font-semibold">Listing config</h3>
-          <div className="text-sm text-muted-foreground">
-            {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
-            {" / "}
-            {connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`}
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={onCancel} disabled={isSaving}>
-            Cancel
-          </Button>
-          <Button type="button" size="sm" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={onSave} disabled={isSaving}>
-            <Save className={isSaving ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-            {isSaving ? "Saving" : "Save"}
-          </Button>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-4">
-        <ListingConfigSelect
-          label="Listing mode"
-          value={form.listingMode}
-          options={allDropshipListingModes}
-          onChange={(value) => onChange({ listingMode: value as DropshipListingMode })}
-        />
-        <ListingConfigSelect
-          label="Inventory mode"
-          value={form.inventoryMode}
-          options={allDropshipListingInventoryModes}
-          onChange={(value) => onChange({ inventoryMode: value as DropshipListingInventoryMode })}
-        />
-        <ListingConfigSelect
-          label="Price mode"
-          value={form.priceMode}
-          options={allDropshipListingPriceModes}
-          onChange={(value) => onChange({ priceMode: value as DropshipListingPriceMode })}
-        />
-        <div>
-          <label className="text-sm font-medium">Status</label>
-          <Select value={form.isActive ? "active" : "inactive"} onValueChange={(value) => onChange({ isActive: value === "active" })}>
-            <SelectTrigger className="mt-2">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="active">Active</SelectItem>
-              <SelectItem value="inactive">Inactive</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <div>
-          <label className="text-sm font-medium" htmlFor="dropship-listing-required-config-keys">
-            Required config keys
-          </label>
-          <Input
-            id="dropship-listing-required-config-keys"
-            value={form.requiredConfigKeys}
-            onChange={(event) => onChange({ requiredConfigKeys: event.target.value })}
-            className="mt-2"
-            placeholder="marketplaceId, categoryId"
-          />
-        </div>
-        <div>
-          <label className="text-sm font-medium" htmlFor="dropship-listing-required-product-fields">
-            Required product fields
-          </label>
-          <Input
-            id="dropship-listing-required-product-fields"
-            value={form.requiredProductFields}
-            onChange={(event) => onChange({ requiredProductFields: event.target.value })}
-            className="mt-2"
-            placeholder={allDropshipListingRequiredProductFields.slice(0, 4).join(", ")}
-          />
-        </div>
-      </div>
-
-      <div className="mt-4">
-        <label className="text-sm font-medium" htmlFor="dropship-listing-marketplace-config">
-          Marketplace config JSON
-        </label>
-        <Textarea
-          id="dropship-listing-marketplace-config"
-          value={form.marketplaceConfigJson}
-          onChange={(event) => onChange({ marketplaceConfigJson: event.target.value })}
-          className="mt-2 min-h-44 font-mono text-xs"
-          spellCheck={false}
-        />
-      </div>
-    </section>
-  );
-}
-
-function ListingConfigSelect({
-  label,
-  options,
-  value,
-  onChange,
-}: {
-  label: string;
-  options: string[];
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div>
-      <label className="text-sm font-medium">{label}</label>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="mt-2">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((option) => (
-            <SelectItem key={option} value={option}>
-              {formatStatus(option)}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <Dialog
+        open={disableTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && disablingConnectionId === null) {
+            setDisableTarget(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Disable store connection</DialogTitle>
+            <DialogDescription>
+              This moves the store into disconnect grace, clears marketplace tokens, and pauses dropship intake and listing pushes for this store.
+            </DialogDescription>
+          </DialogHeader>
+          {disableTarget && (
+            <div className="space-y-4">
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="font-medium">{storeConnectionDisplayName(disableTarget)}</div>
+                <div className="text-sm text-muted-foreground">
+                  {formatStatus(disableTarget.platform)} / {storeConnectionOwnerLabel(disableTarget)}
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium" htmlFor="dropship-store-disable-reason">
+                  Reason
+                </label>
+                <Textarea
+                  id="dropship-store-disable-reason"
+                  value={disableReason}
+                  onChange={(event) => setDisableReason(event.target.value)}
+                  className="mt-2 min-h-28"
+                  maxLength={500}
+                />
+                <div className="mt-1 text-xs text-muted-foreground">
+                  This reason is saved to audit history and included in the vendor notification.
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={disablingConnectionId !== null}
+              onClick={() => setDisableTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={disablingConnectionId !== null || disableReason.trim().length === 0}
+              onClick={confirmDisableStoreConnection}
+            >
+              {disablingConnectionId !== null ? "Disabling" : "Disable store"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -6757,32 +6563,20 @@ function ReturnOpsTable({
 
 function StoreConnectionsTable({
   connections,
+  disablingConnectionId,
   isLoading,
-  loadingListingConfigId,
-  onEditListingConfig,
+  onDisableStoreConnection,
   onRepairShopifyWebhooks,
-  onSaveWarehouseConfig,
-  onWarehouseInputChange,
   repairingWebhookConnectionId,
-  savingConnectionId,
   total,
-  warehouses,
-  warehousesLoading,
-  warehouseInputs,
 }: {
   connections: DropshipAdminStoreConnectionListItem[];
+  disablingConnectionId: number | null;
   isLoading: boolean;
-  loadingListingConfigId: number | null;
-  onEditListingConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
+  onDisableStoreConnection: (connection: DropshipAdminStoreConnectionListItem) => void;
   onRepairShopifyWebhooks: (connection: DropshipAdminStoreConnectionListItem) => void;
-  onSaveWarehouseConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
-  onWarehouseInputChange: (storeConnectionId: number, value: string) => void;
   repairingWebhookConnectionId: number | null;
-  savingConnectionId: number | null;
   total: number;
-  warehouses: DropshipWarehouseOption[];
-  warehousesLoading: boolean;
-  warehouseInputs: Record<number, string>;
 }) {
   if (isLoading) {
     return (
@@ -6815,149 +6609,90 @@ function StoreConnectionsTable({
         <TableHeader>
           <TableRow>
             <TableHead>Store</TableHead>
-            <TableHead>Vendor</TableHead>
+            <TableHead>Owner</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Tokens</TableHead>
-            <TableHead>Sync</TableHead>
-            <TableHead>Setup checks</TableHead>
-            <TableHead className="w-[230px]">Listing config</TableHead>
-            <TableHead className="w-[340px]">Default warehouse</TableHead>
-            <TableHead className="w-[190px]">Actions</TableHead>
+            <TableHead className="min-w-[360px]">Config journey</TableHead>
+            <TableHead>Last activity</TableHead>
+            <TableHead className="w-[210px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {connections.map((connection) => {
+            const disabled = storeConnectionIsDisabled(connection);
             const canRepairShopifyWebhooks = connection.platform === "shopify" && connection.status === "connected";
-            const selectedWarehouseId = warehouseInputs[connection.storeConnectionId] ?? "";
-            const selectedWarehouseKnown = selectedWarehouseId === ""
-              || warehouses.some((warehouse) => String(warehouse.id) === selectedWarehouseId);
+            const ownerDetail = storeConnectionOwnerDetail(connection);
             return (
               <TableRow key={connection.storeConnectionId}>
                 <TableCell>
-                  <div className="font-medium">
-                    {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
+                  <div className="flex flex-col gap-1">
+                    <div className="font-medium">{storeConnectionDisplayName(connection)}</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+                        {formatStatus(connection.platform)}
+                      </Badge>
+                      {connection.shopDomain && (
+                        <span className="max-w-[220px] truncate text-xs text-muted-foreground">{connection.shopDomain}</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    {formatStatus(connection.platform)} connection {connection.storeConnectionId}
-                  </div>
-                  {connection.externalAccountId && (
-                    <div className="max-w-[220px] truncate text-xs text-muted-foreground">{connection.externalAccountId}</div>
-                  )}
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`}</div>
-                  <div className="text-xs text-muted-foreground">{connection.vendor.memberId}</div>
+                  <div className="font-medium">{storeConnectionOwnerLabel(connection)}</div>
+                  {ownerDetail && <div className="text-xs text-muted-foreground">{ownerDetail}</div>}
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Entitlement {formatStatus(connection.vendor.entitlementStatus)}
+                  </div>
                 </TableCell>
                 <TableCell>
                   <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
                     {formatStatus(connection.status)}
                   </Badge>
-                  <div className="mt-1 text-xs text-muted-foreground">Setup {formatStatus(connection.setupStatus)}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {connection.launchReady ? "Ready for dogfood" : disabled ? "Disabled from program flow" : "Setup not complete"}
+                  </div>
                   {connection.disconnectReason && (
                     <div className="mt-1 max-w-[200px] truncate text-xs text-muted-foreground">{connection.disconnectReason}</div>
                   )}
                 </TableCell>
                 <TableCell>
-                  <div className="flex flex-wrap gap-1">
-                    <Badge variant="outline" className={connection.hasAccessToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"}>
-                      Access
-                    </Badge>
-                    <Badge variant="outline" className={connection.hasRefreshToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-600"}>
-                      Refresh
-                    </Badge>
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {buildStoreConnectionJourney(connection).map((item) => (
+                      <StoreConnectionJourneyPill key={item.key} item={item} />
+                    ))}
                   </div>
-                  <div className="mt-1 text-xs text-muted-foreground">Expires {formatDateTime(connection.tokenExpiresAt)}</div>
                 </TableCell>
                 <TableCell>
                   <div className="text-sm">Orders {formatDateTime(connection.lastOrderSyncAt)}</div>
                   <div className="text-xs text-muted-foreground">Inventory {formatDateTime(connection.lastInventorySyncAt)}</div>
+                  <div className="text-xs text-muted-foreground">Any sync {formatDateTime(connection.lastSyncAt)}</div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={connection.setupCheckSummary.errorCount > 0
-                    ? "border-rose-200 bg-rose-50 text-rose-800"
-                    : connection.setupCheckSummary.warningCount > 0
-                      ? "border-amber-200 bg-amber-50 text-amber-900"
-                      : "border-zinc-200 bg-zinc-50 text-zinc-700"}
-                  >
-                    {connection.setupCheckSummary.openCount} open
-                  </Badge>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {connection.setupCheckSummary.errorCount} error / {connection.setupCheckSummary.warningCount} warning
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline" className={listingConfigSummaryTone(connection)}>
-                    {listingConfigSummaryLabel(connection)}
-                  </Badge>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {connection.listingConfig.listingMode ? formatStatus(connection.listingConfig.listingMode) : "No mode"}
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mt-2 h-9 gap-2"
-                    disabled={loadingListingConfigId !== null}
-                    onClick={() => onEditListingConfig(connection)}
-                  >
-                    <FileSearch className={loadingListingConfigId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                    {loadingListingConfigId === connection.storeConnectionId ? "Loading" : "Edit"}
-                  </Button>
-                </TableCell>
-                <TableCell>
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <Select
-                      value={selectedWarehouseId || NO_DEFAULT_WAREHOUSE_VALUE}
-                      onValueChange={(value) => onWarehouseInputChange(
-                        connection.storeConnectionId,
-                        value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value,
-                      )}
-                      disabled={warehousesLoading}
-                    >
-                      <SelectTrigger className="h-9 min-w-[220px]">
-                        <SelectValue placeholder={warehousesLoading ? "Loading warehouses..." : "Select warehouse"} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>Not assigned</SelectItem>
-                        {!selectedWarehouseKnown && (
-                          <SelectItem value={selectedWarehouseId}>Warehouse ID {selectedWarehouseId} (not found)</SelectItem>
-                        )}
-                        {warehouses.map((warehouse) => (
-                          <SelectItem key={warehouse.id} value={String(warehouse.id)}>
-                            {formatWarehouseOption(warehouse)}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                  <div className="flex flex-col gap-2">
+                    {canRepairShopifyWebhooks && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-9 gap-2"
+                        disabled={repairingWebhookConnectionId !== null}
+                        onClick={() => onRepairShopifyWebhooks(connection)}
+                      >
+                        <RefreshCw className={repairingWebhookConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                        {repairingWebhookConnectionId === connection.storeConnectionId ? "Repairing" : "Repair webhooks"}
+                      </Button>
+                    )}
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-9 gap-2"
-                      disabled={savingConnectionId !== null}
-                      onClick={() => onSaveWarehouseConfig(connection)}
+                      className="h-9 gap-2 border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                      disabled={disabled || disablingConnectionId !== null}
+                      onClick={() => onDisableStoreConnection(connection)}
                     >
-                      <Save className="h-4 w-4" />
-                      {savingConnectionId === connection.storeConnectionId ? "Saving" : "Save"}
+                      <ShieldAlert className={disablingConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      {disabled ? "Disabled" : disablingConnectionId === connection.storeConnectionId ? "Disabling" : "Disable store"}
                     </Button>
                   </div>
-                </TableCell>
-                <TableCell>
-                  {canRepairShopifyWebhooks ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-9 gap-2"
-                      disabled={repairingWebhookConnectionId !== null}
-                      onClick={() => onRepairShopifyWebhooks(connection)}
-                    >
-                      <RefreshCw className={repairingWebhookConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                      {repairingWebhookConnectionId === connection.storeConnectionId ? "Repairing" : "Repair webhooks"}
-                    </Button>
-                  ) : (
-                    <span className="text-sm text-muted-foreground">Unavailable</span>
-                  )}
                 </TableCell>
               </TableRow>
             );
@@ -6965,6 +6700,16 @@ function StoreConnectionsTable({
         </TableBody>
       </Table>
     </section>
+  );
+}
+
+function StoreConnectionJourneyPill({ item }: { item: StoreConnectionJourneyItem }) {
+  return (
+    <div className={`rounded-md border px-3 py-2 ${storeConnectionJourneyTone(item.state)}`}>
+      <div className="text-xs font-medium uppercase tracking-wide">{item.label}</div>
+      <div className="text-sm font-semibold">{item.value}</div>
+      {item.detail && <div className="text-xs opacity-80">{item.detail}</div>}
+    </div>
   );
 }
 
@@ -8335,14 +8080,115 @@ function returnOpsStatusTone(status: DropshipRmaStatus): string {
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 
-function storeConnectionNeedsAttention(connection: DropshipAdminStoreConnectionListItem): boolean {
-  return connection.status !== "connected"
-    || connection.setupStatus !== "ready"
-    || connection.setupCheckSummary.errorCount > 0
-    || connection.setupCheckSummary.warningCount > 0
+type StoreConnectionJourneyState = "ready" | "warning" | "blocked" | "disabled";
+
+interface StoreConnectionJourneyItem {
+  key: string;
+  label: string;
+  value: string;
+  detail?: string;
+  state: StoreConnectionJourneyState;
+}
+
+function buildStoreConnectionSummary(connections: DropshipAdminStoreConnectionListItem[]): {
+  ready: number;
+  setupIncomplete: number;
+  authAttention: number;
+  disabled: number;
+} {
+  return {
+    ready: connections.filter((connection) => connection.launchReady).length,
+    setupIncomplete: connections.filter((connection) => !connection.launchReady && !storeConnectionIsDisabled(connection)).length,
+    authAttention: connections.filter((connection) => !storeConnectionIsDisabled(connection) && storeConnectionNeedsAuthAttention(connection)).length,
+    disabled: connections.filter((connection) => storeConnectionIsDisabled(connection)).length,
+  };
+}
+
+function storeConnectionIsDisabled(connection: DropshipAdminStoreConnectionListItem): boolean {
+  return connection.status === "grace_period"
+    || connection.status === "paused"
+    || connection.status === "disconnected";
+}
+
+function storeConnectionNeedsAuthAttention(connection: DropshipAdminStoreConnectionListItem): boolean {
+  return connection.status === "needs_reauth"
+    || connection.status === "refresh_failed"
     || !connection.hasAccessToken
-    || !connection.listingConfig.isConfigured
-    || !connection.listingConfig.isActive;
+    || (connection.platform === "ebay" && !connection.hasRefreshToken);
+}
+
+function buildStoreConnectionJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem[] {
+  return [
+    buildStoreConnectionAuthJourney(connection),
+    buildStoreConnectionSetupJourney(connection),
+    buildStoreConnectionWarehouseJourney(connection),
+    buildStoreConnectionListingJourney(connection),
+  ];
+}
+
+function buildStoreConnectionAuthJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  if (storeConnectionIsDisabled(connection)) {
+    return { key: "auth", label: "Auth", value: "Disabled", detail: "Authorization removed", state: "disabled" };
+  }
+  if (connection.status === "needs_reauth" || connection.status === "refresh_failed") {
+    return { key: "auth", label: "Auth", value: "Reconnect", detail: formatStatus(connection.status), state: "blocked" };
+  }
+  if (!connection.hasAccessToken) {
+    return { key: "auth", label: "Auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
+  }
+  if (connection.platform === "ebay" && !connection.hasRefreshToken) {
+    return { key: "auth", label: "Auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
+  }
+  return { key: "auth", label: "Auth", value: "Authorized", state: "ready" };
+}
+
+function buildStoreConnectionSetupJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  if (connection.setupCheckSummary.errorCount > 0) {
+    return {
+      key: "setup",
+      label: "Setup",
+      value: `${connection.setupCheckSummary.errorCount} blocker${connection.setupCheckSummary.errorCount === 1 ? "" : "s"}`,
+      detail: `${connection.setupCheckSummary.openCount} open check${connection.setupCheckSummary.openCount === 1 ? "" : "s"}`,
+      state: "blocked",
+    };
+  }
+  if (connection.setupCheckSummary.warningCount > 0) {
+    return {
+      key: "setup",
+      label: "Setup",
+      value: `${connection.setupCheckSummary.warningCount} warning${connection.setupCheckSummary.warningCount === 1 ? "" : "s"}`,
+      detail: `${connection.setupCheckSummary.openCount} open check${connection.setupCheckSummary.openCount === 1 ? "" : "s"}`,
+      state: "warning",
+    };
+  }
+  if (connection.setupStatus === "ready") {
+    return { key: "setup", label: "Setup", value: "Ready", state: "ready" };
+  }
+  return { key: "setup", label: "Setup", value: formatStatus(connection.setupStatus), state: "warning" };
+}
+
+function buildStoreConnectionWarehouseJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  if (connection.orderProcessingConfig.defaultWarehouseId !== null) {
+    return { key: "warehouse", label: "Warehouse", value: "Set", state: "ready" };
+  }
+  return { key: "warehouse", label: "Warehouse", value: "Missing", detail: "Order routing not assigned", state: "blocked" };
+}
+
+function buildStoreConnectionListingJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  if (!connection.listingConfig.isConfigured) {
+    return { key: "listing", label: "Listing", value: "Missing", detail: "Push policy not configured", state: "blocked" };
+  }
+  if (!connection.listingConfig.isActive) {
+    return { key: "listing", label: "Listing", value: "Inactive", detail: "Pushes disabled", state: "warning" };
+  }
+  return { key: "listing", label: "Listing", value: "Ready", state: "ready" };
+}
+
+function storeConnectionJourneyTone(state: StoreConnectionJourneyState): string {
+  if (state === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-900";
+  if (state === "warning") return "border-amber-200 bg-amber-50 text-amber-950";
+  if (state === "blocked") return "border-rose-200 bg-rose-50 text-rose-900";
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 
 function formatWarehouseOption(warehouse: DropshipWarehouseOption): string {
@@ -8384,7 +8230,18 @@ function vendorDisplayName(vendor: DropshipDogfoodReadinessItem["vendor"] | Drop
 function storeConnectionDisplayName(connection: DropshipAdminStoreConnectionListItem | DropshipAdminOrderOpsStoreSummary): string {
   return connection.externalDisplayName
     || connection.shopDomain
-    || `${formatStatus(connection.platform)} connection ${connection.storeConnectionId}`;
+    || `${formatStatus(connection.platform)} store`;
+}
+
+function storeConnectionOwnerLabel(connection: DropshipAdminStoreConnectionListItem): string {
+  return connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`;
+}
+
+function storeConnectionOwnerDetail(connection: DropshipAdminStoreConnectionListItem): string {
+  if (connection.vendor.businessName && connection.vendor.email) {
+    return connection.vendor.email;
+  }
+  return "";
 }
 
 function storeConnectionSelectOption(connection: DropshipAdminStoreConnectionListItem): DropshipSelectOption {
@@ -8509,32 +8366,6 @@ function formatGramsAsPounds(value: number): string {
 
 function formatMeasurement(value: number): string {
   return value.toFixed(2).replace(/\.?0+$/, "");
-}
-
-function listingConfigResponseToForm(response: DropshipStoreListingConfigResponse): ListingConfigFormState {
-  return {
-    storeConnectionId: response.storeConnection.storeConnectionId,
-    listingMode: response.config.listingMode,
-    inventoryMode: response.config.inventoryMode,
-    priceMode: response.config.priceMode,
-    marketplaceConfigJson: JSON.stringify(response.config.marketplaceConfig ?? {}, null, 2),
-    requiredConfigKeys: response.config.requiredConfigKeys.join(", "),
-    requiredProductFields: response.config.requiredProductFields.join(", "),
-    isActive: response.config.isActive,
-  };
-}
-
-function listingConfigSummaryLabel(connection: DropshipAdminStoreConnectionListItem): string {
-  if (!connection.listingConfig.isConfigured) return "Missing";
-  if (!connection.listingConfig.isActive) return "Inactive";
-  return "Active";
-}
-
-function listingConfigSummaryTone(connection: DropshipAdminStoreConnectionListItem): string {
-  if (!connection.listingConfig.isConfigured || !connection.listingConfig.isActive) {
-    return "border-rose-200 bg-rose-50 text-rose-800";
-  }
-  return "border-emerald-200 bg-emerald-50 text-emerald-800";
 }
 
 function storeConnectionStatusTone(status: DropshipStoreConnectionLifecycleStatus): string {
