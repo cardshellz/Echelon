@@ -1136,7 +1136,11 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]> {
-    return await db.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.inboundShipmentId, inboundShipmentId));
+    return await db
+      .select()
+      .from(inboundShipmentLines)
+      .where(eq(inboundShipmentLines.inboundShipmentId, inboundShipmentId))
+      .orderBy(asc(inboundShipmentLines.createdAt), asc(inboundShipmentLines.id));
   },
 
   async getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined> {
