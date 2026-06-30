@@ -4412,15 +4412,17 @@ export default function Picking() {
                           item.status === "completed" ? (
                             <div className="flex gap-1">
                               <Button
-                                size="icon"
+                                size="sm"
                                 variant="outline"
-                                className="h-9 w-9 md:h-11 md:w-11 border-slate-300 text-slate-600 flex-shrink-0"
+                                className="h-9 md:h-11 px-2 md:px-3 border-amber-300 text-amber-700 bg-white hover:bg-amber-50 flex-shrink-0 whitespace-nowrap"
                                 onClick={() => handleListItemDecrement(idx)}
                                 disabled={item.picked <= 0 || unpickItemMutation.isPending}
                                 aria-label={`Unpick one ${item.sku}`}
+                                title={`Unpick one ${item.sku}`}
                                 data-testid={`button-unpick-${item.id}`}
                               >
-                                <Minus className="h-4 w-4 md:h-5 md:w-5" />
+                                <RotateCcw className="h-4 w-4 mr-1" />
+                                <span className="text-xs md:text-sm font-semibold">Unpick</span>
                               </Button>
                               <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
                                 <CheckCircle2 className="h-5 w-5 md:h-6 md:w-6 text-emerald-500" />
