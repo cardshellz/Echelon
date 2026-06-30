@@ -372,6 +372,14 @@ export default function InboundShipmentDetail() {
       predicate: (q) =>
         typeof q.queryKey[0] === "string" && q.queryKey[0].startsWith("/api/purchase-orders/"),
     });
+  const invalidateShipmentDetail = () =>
+    queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+  const invalidateAllocationStatus = () =>
+    queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+  const invalidateShipmentCostingViews = () => {
+    invalidateShipmentDetail();
+    invalidateAllocationStatus();
+  };
 
   function createTransitionMutation(endpoint: string) {
     return useMutation({
@@ -423,7 +431,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
       invalidatePoViews();
       setShowEditDialog(false);
@@ -441,7 +449,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       setShowAddFromPoDialog(false);
       setSelectedPoId(null);
       setSelectedPoLineIds([]);
@@ -459,7 +467,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       setShowImportDialog(false);
       resetImportState();
       toast({ title: "Import complete", description: `${result.imported ?? "Lines"} imported successfully` });
@@ -475,7 +483,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       toast({ title: "Dimensions resolved", description: `${result.resolved ?? "Lines"} updated from product data` });
     },
     onError: (err: Error) => {
@@ -489,7 +497,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       setEditDialogLine(null);
       toast({ title: "Line updated" });
     },
@@ -504,7 +512,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       toast({ title: "Line removed" });
     },
     onError: (err: Error) => {
@@ -528,7 +536,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       setShowAddCostDialog(false);
       setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByName: "", costDate: "" });
       setCostVendorSearch("");
@@ -554,7 +562,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       setShowEditCostDialog(false);
       setEditingCost(null);
       toast({ title: "Cost updated" });
@@ -570,7 +578,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      invalidateShipmentCostingViews();
       toast({ title: "Cost removed" });
     },
     onError: (err: Error) => {
@@ -607,8 +615,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+      invalidateShipmentCostingViews();
       toast({ title: "Allocation complete", description: "Costs allocated to shipment lines" });
     },
     onError: (err: Error) => {
@@ -622,8 +629,7 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+      invalidateShipmentCostingViews();
       toast({ title: "Finalized", description: "Landed costs finalized and snapshotted" });
     },
     onError: (err: Error) => {
@@ -638,8 +644,7 @@ export default function InboundShipmentDetail() {
     },
     onSuccess: (result) => {
       setLastLandedCostPush(result);
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+      invalidateShipmentCostingViews();
       const skippedCount = result.skipped?.length ?? 0;
       toast({
         title: skippedCount > 0 ? "Landed cost push needs review" : "Landed costs pushed",
@@ -669,8 +674,7 @@ export default function InboundShipmentDetail() {
       ));
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+      invalidateShipmentCostingViews();
       setShowDimFixModal(false);
       toast({ title: "Dimensions saved", description: "Lines updated — you can close the shipment now." });
     },
