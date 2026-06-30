@@ -7,7 +7,8 @@ import {
   productVariants,
 } from "@shared/schema";
 import { db, pool } from "../../db";
-import { EBAY_CHANNEL_ID, ebayApiRequest, getAuthService } from "./ebay-utils";
+import { EBAY_CHANNEL_ID, getAuthService, getChannelConnection } from "./ebay-utils";
+import { createEbayRouteListingLifecycleClient } from "./ebay-listing-connector-client";
 export {
   isProductEffectivelyListed,
   isVariantEffectivelyListed,
@@ -36,6 +37,14 @@ function assertPositiveId(value: number, label: string): void {
 
 function normalizeError(err: unknown): string {
   return err instanceof Error ? err.message.substring(0, 1000) : String(err).substring(0, 1000);
+}
+
+async function getEbayMarketplaceId(): Promise<string> {
+  const connection = await getChannelConnection();
+  const metadata = (connection?.metadata as Record<string, unknown>) || {};
+  return typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+    ? metadata.marketplaceId.trim()
+    : "EBAY_US";
 }
 
 export async function setEbayProductListingIntent(
@@ -244,17 +253,14 @@ export async function withdrawEbayProductListings(productId: number): Promise<Eb
   }
 
   const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+  const marketplaceId = await getEbayMarketplaceId();
+  const ebayClient = createEbayRouteListingLifecycleClient({ accessToken });
   const groupKey = row.sku || `PROD-${productId}`;
   const activeVariantCount = Number(row.active_variant_count ?? 0);
 
   try {
     if (activeVariantCount > 1) {
-      await ebayApiRequest(
-        "POST",
-        "/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
-        accessToken,
-        { inventoryItemGroupKey: groupKey, marketplaceId: "EBAY_US" },
-      );
+      await ebayClient.withdrawOfferByInventoryItemGroup(groupKey, marketplaceId);
       await markProductListingsEnded(productId);
       return {
         action: "withdraw_inventory_item_group",
@@ -264,7 +270,7 @@ export async function withdrawEbayProductListings(productId: number): Promise<Eb
     }
 
     for (const offerId of offerIds) {
-      await ebayApiRequest("POST", `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/withdraw`, accessToken);
+      await ebayClient.withdrawOffer(offerId);
     }
     await markProductListingsEnded(productId);
     return {
@@ -317,22 +323,18 @@ export async function zeroEbayVariantListing(variantId: number): Promise<EbayRem
   }
 
   const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+  const ebayClient = createEbayRouteListingLifecycleClient({ accessToken });
   try {
     if (offerId) {
-      await ebayApiRequest(
-        "POST",
-        "/sell/inventory/v1/bulk_update_price_quantity",
-        accessToken,
-        {
-          requests: [
-            {
-              sku,
-              shipToLocationAvailability: { quantity: 0 },
-              offers: [{ offerId, availableQuantity: 0 }],
-            },
-          ],
-        },
-      );
+      await ebayClient.bulkUpdatePriceQuantity({
+        requests: [
+          {
+            sku,
+            shipToLocationAvailability: { quantity: 0 },
+            offers: [{ offerId, availableQuantity: 0 }],
+          },
+        ],
+      });
       await markVariantListingZeroed(variantId);
       return {
         action: "zero_variant_offer",
@@ -342,16 +344,18 @@ export async function zeroEbayVariantListing(variantId: number): Promise<EbayRem
     }
 
     try {
-      const inventoryItem = await ebayApiRequest(
-        "GET",
-        `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
-        accessToken,
-      );
+      const inventoryItem = await ebayClient.getInventoryItem(sku);
+      if (!inventoryItem) {
+        await markVariantListingZeroed(variantId);
+        return {
+          action: "none",
+          affectedListings: 0,
+          detail: `No active eBay offer or inventory item found for SKU ${sku}`,
+        };
+      }
       const { sku: _skuFromEbay, ...inventoryItemBody } = inventoryItem ?? {};
-      await ebayApiRequest(
-        "PUT",
-        `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
-        accessToken,
+      await ebayClient.createOrReplaceInventoryItem(
+        sku,
         {
           ...inventoryItemBody,
           availability: {
