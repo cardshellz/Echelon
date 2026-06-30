@@ -19,6 +19,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { AddInvoiceFromCostsModal } from "@/components/shipment/AddInvoiceFromCostsModal";
+import {
+  ShipmentReceiptPackResolutionDialog,
+  type ShipmentReceiptPackResolution,
+} from "@/components/purchasing/ShipmentReceiptPackResolutionDialog";
 import { format } from "date-fns";
 import Papa from "papaparse";
 import {
@@ -294,6 +298,10 @@ export default function InboundShipmentDetail() {
   const [showEditCostDialog, setShowEditCostDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [lastLandedCostPush, setLastLandedCostPush] = useState<LandedCostPushResult | null>(null);
+  const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
+  const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
+  const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
+  const [creatingShipmentReceipt, setCreatingShipmentReceipt] = useState(false);
 
   // Edit line dialog state
   const [editDialogLine, setEditDialogLine] = useState<any | null>(null);
@@ -454,6 +462,79 @@ export default function InboundShipmentDetail() {
       });
     }
   };
+
+  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
+    const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
+    const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
+    return body as ShipmentReceiptPackResolution;
+  }
+
+  async function createReceiptForShipment(params: { shipmentId: number; purchaseOrderId: number }) {
+    setCreatingShipmentReceipt(true);
+    try {
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `shipment-receipt-${params.shipmentId}-${params.purchaseOrderId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
+      const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/create-receipt`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({ purchaseOrderId: params.purchaseOrderId }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Failed to create receipt");
+      setShipmentReceiptPackResolution(null);
+      setPendingShipmentReceipt(null);
+      toast({ title: "Receipt created", description: `${body.receiptNumber} created from shipment` });
+      invalidatePoViews();
+      navigate(`/receiving?open=${body.id}`);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCreatingShipmentReceipt(false);
+    }
+  }
+
+  async function checkAndCreateReceiptForShipment(params: { shipmentId: number; purchaseOrderId: number }) {
+    setCheckingShipmentReceiptPacks(true);
+    setPendingShipmentReceipt(params);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!resolution.canCreateReceipt) {
+        setShipmentReceiptPackResolution(resolution);
+        return;
+      }
+      await createReceiptForShipment(params);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  async function refreshShipmentReceiptPackResolution() {
+    if (!pendingShipmentReceipt) return;
+    setCheckingShipmentReceiptPacks(true);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt);
+      setShipmentReceiptPackResolution(resolution);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  function createPendingShipmentReceipt() {
+    if (!pendingShipmentReceipt) return;
+    createReceiptForShipment(pendingShipmentReceipt);
+  }
 
   function createTransitionMutation(endpoint: string) {
     return useMutation({
@@ -1084,41 +1165,37 @@ export default function InboundShipmentDetail() {
             <Button
               variant="outline"
               onClick={async () => {
-                // Find linked PO IDs from shipment lines
-                const poLineIds = lines.map((sl: any) => sl.purchaseOrderLineId).filter(Boolean);
-                if (poLineIds.length === 0) {
-                  toast({ title: "No PO lines linked", description: "Shipment lines must be linked to PO lines to create a receipt.", variant: "destructive" });
+                const positiveLines = lines.filter((sl: any) => Number(sl.qtyShipped) > 0);
+                const unlinkedLineCount = positiveLines.filter((sl: any) => !sl.purchaseOrderId || !sl.purchaseOrderLineId).length;
+                if (positiveLines.length === 0) {
+                  toast({ title: "No receivable lines", description: "Shipment has no positive-quantity lines to receive.", variant: "destructive" });
                   return;
                 }
-                // Get unique PO IDs — create receipt from the first linked PO
-                const poIds = [...new Set(lines.map((sl: any) => sl.purchaseOrderId).filter(Boolean))];
+                if (unlinkedLineCount > 0) {
+                  toast({ title: "PO links required", description: `${unlinkedLineCount} positive shipment line(s) are missing PO links. Link every line before creating a receipt from the shipment page.`, variant: "destructive" });
+                  return;
+                }
+                // Shipment-level creation is only safe when all lines belong to one PO.
+                const poIds = [...new Set(positiveLines.map((sl: any) => Number(sl.purchaseOrderId)).filter((id: number) => Number.isInteger(id) && id > 0))];
                 if (poIds.length === 0) {
                   toast({ title: "No PO linked", description: "Link shipment lines to a PO first.", variant: "destructive" });
                   return;
                 }
-                try {
-                  const idempotencyKey = (
-                    typeof crypto !== "undefined" && "randomUUID" in crypto
-                      ? (crypto as any).randomUUID()
-                      : `shipment-receipt-${poIds[0]}-${Date.now()}-${Math.random().toString(36).slice(2)}`
-                  ) as string;
-                  const res = await fetch(`/api/inbound-shipments/${shipment.id}/create-receipt`, {
-                    method: "POST",
-                    headers: { "Idempotency-Key": idempotencyKey },
+                if (poIds.length > 1) {
+                  toast({
+                    title: "Choose a PO first",
+                    description: "This shipment contains multiple POs. Open the PO detail and receive this shipment for the specific PO.",
+                    variant: "destructive",
                   });
-                  if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed"); }
-                  const receipt = await res.json();
-                  toast({ title: "Receipt created", description: `${receipt.receiptNumber} created from shipment` });
-                  invalidatePoViews();
-                  navigate(`/receiving?open=${receipt.id}`);
-                } catch (err: any) {
-                  toast({ title: "Error", description: err.message, variant: "destructive" });
+                  return;
                 }
+                await checkAndCreateReceiptForShipment({ shipmentId: shipment.id, purchaseOrderId: poIds[0] });
               }}
+              disabled={checkingShipmentReceiptPacks || creatingShipmentReceipt}
               className="flex-1 sm:flex-none min-h-[44px]"
             >
               <Truck className="h-4 w-4 mr-2" />
-              Create Receipt
+              {checkingShipmentReceiptPacks ? "Checking..." : creatingShipmentReceipt ? "Creating..." : "Create Receipt"}
             </Button>
           )}
 
@@ -3180,6 +3257,18 @@ export default function InboundShipmentDetail() {
           })()}
         </DialogContent>
       </Dialog>
+      <ShipmentReceiptPackResolutionDialog
+        open={!!shipmentReceiptPackResolution}
+        onOpenChange={(open) => {
+          if (!open) setShipmentReceiptPackResolution(null);
+        }}
+        resolution={shipmentReceiptPackResolution}
+        creating={creatingShipmentReceipt}
+        refreshing={checkingShipmentReceiptPacks}
+        onCreateReceipt={createPendingShipmentReceipt}
+        onRefresh={refreshShipmentReceiptPackResolution}
+        onOpenCatalog={() => navigate("/catalog/variants")}
+      />
     </div>
   );
 }

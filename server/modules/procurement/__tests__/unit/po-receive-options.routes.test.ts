@@ -37,6 +37,7 @@ import { registerPurchasingRoutes } from "../../procurement.routes";
 function buildPurchasingMock(overrides: Record<string, any> = {}) {
   return {
     getPurchaseOrderReceiveOptions: vi.fn(),
+    getShipmentReceiptPackResolution: vi.fn(),
     createReceiptFromShipment: vi.fn(),
     ...overrides,
   } as any;
@@ -121,6 +122,48 @@ describe("PO receive option routes", () => {
     expect(status).toBe(201);
     expect(body).toEqual(receipt);
     expect(purchasing.createReceiptFromShipment).toHaveBeenCalledWith(84, "test-user", { purchaseOrderId: 140 });
+  });
+
+  it("returns shipment receipt pack resolution for a scoped PO", async () => {
+    const resolution = {
+      shipmentId: 84,
+      purchaseOrderId: 140,
+      canCreateReceipt: false,
+      unresolvedCount: 1,
+      lines: [
+        {
+          shipmentLineId: 132,
+          purchaseOrderLineId: 176,
+          sku: "SHLZ-TOP-TOB",
+          status: "missing_variant",
+          unitsPerCarton: 500,
+          blocking: true,
+        },
+      ],
+    };
+    purchasing.getShipmentReceiptPackResolution.mockResolvedValue(resolution);
+
+    const { status, body } = await requestJson(
+      server.url,
+      "GET",
+      "/api/inbound-shipments/84/receipt-pack-resolution?purchaseOrderId=140",
+    );
+
+    expect(status).toBe(200);
+    expect(body).toEqual(resolution);
+    expect(purchasing.getShipmentReceiptPackResolution).toHaveBeenCalledWith(84, { purchaseOrderId: 140 });
+  });
+
+  it("rejects invalid purchaseOrderId before resolving shipment receipt packs", async () => {
+    const { status, body } = await requestJson(
+      server.url,
+      "GET",
+      "/api/inbound-shipments/84/receipt-pack-resolution?purchaseOrderId=not-a-number",
+    );
+
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/invalid purchase order id/i);
+    expect(purchasing.getShipmentReceiptPackResolution).not.toHaveBeenCalled();
   });
 
   it("rejects invalid purchaseOrderId before creating a shipment receipt", async () => {
