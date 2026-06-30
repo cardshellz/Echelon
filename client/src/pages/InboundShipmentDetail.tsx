@@ -174,6 +174,7 @@ const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
   zero_amount: "Zero Amount",
   needs_allocation: "Needs Allocation",
   stale_allocation: "Stale Allocation",
+  stale_allocation_basis: "Stale Basis",
   allocation_mismatch: "Mismatch",
   allocated_with_fallback: "Even Split",
   allocated: "Allocated",
@@ -694,14 +695,14 @@ export default function InboundShipmentDetail() {
   // totalVolumeCbm/Weight so the by-volume/by-weight gate clears.
   const saveDimFixMutation = useMutation({
     mutationFn: async () => {
-      await Promise.all(dimFixRows.map((r) =>
-        apiRequest("PATCH", `/api/inbound-shipments/lines/${r.lineId}`, {
+      for (const r of dimFixRows) {
+        await apiRequest("PATCH", `/api/inbound-shipments/lines/${r.lineId}`, {
           lengthCm: r.lengthCm || null,
           widthCm: r.widthCm || null,
           heightCm: r.heightCm || null,
           weightKg: r.weightPerCarton || null,
-        })
-      ));
+        });
+      }
     },
     onSuccess: async () => {
       await refreshShipmentCostingViews();
@@ -1703,7 +1704,7 @@ export default function InboundShipmentDetail() {
                           </TableCell>
                           <TableCell>
                             <Badge
-                              variant={["needs_allocation", "stale_allocation", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
+                              variant={["needs_allocation", "stale_allocation", "stale_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
                               className={cost.status === "allocated_with_fallback" ? "border-amber-500 text-amber-700" : undefined}
                             >
                               {ALLOCATION_COST_STATUS_LABELS[cost.status] || cost.status.replace(/_/g, " ")}
