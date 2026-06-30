@@ -1965,6 +1965,39 @@ export function createPurchasingService(db: any, storage: Storage) {
     return ACTIVE_RECEIPT_STATUSES.has(String(status ?? ""));
   }
 
+  function variantIsActive(variant: any): boolean {
+    return variant?.isActive !== false && variant?.is_active !== false;
+  }
+
+  function variantUnitsPerVariant(variant: any): number {
+    const units = Number(variant?.unitsPerVariant ?? variant?.units_per_variant);
+    return Number.isInteger(units) && units > 0 ? units : 1;
+  }
+
+  function chooseFallbackReceiveVariant(variants: any[], qtyShipped: unknown): any | null {
+    const shippedQty = Number(qtyShipped);
+    const activeVariants = variants
+      .filter((variant) => parsePositiveInteger(variant?.id) && variantIsActive(variant))
+      .map((variant) => ({ variant, unitsPerVariant: variantUnitsPerVariant(variant) }))
+      .sort((a, b) => b.unitsPerVariant - a.unitsPerVariant);
+
+    if (activeVariants.length === 0) return null;
+
+    if (Number.isInteger(shippedQty) && shippedQty > 0) {
+      const exactFit = activeVariants.find(
+        ({ unitsPerVariant }) => unitsPerVariant <= shippedQty && shippedQty % unitsPerVariant === 0,
+      );
+      if (exactFit) return exactFit.variant;
+
+      const largestNotExceedingShipment = activeVariants.find(
+        ({ unitsPerVariant }) => unitsPerVariant <= shippedQty,
+      );
+      if (largestNotExceedingShipment) return largestNotExceedingShipment.variant;
+    }
+
+    return activeVariants[activeVariants.length - 1]?.variant ?? null;
+  }
+
   async function getReceiptForShipmentPo(
     purchaseOrderId: number,
     inboundShipmentId: number,
@@ -2222,7 +2255,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     const unitsPerVariantById = new Map<number, number>();
-    const fallbackReceiveVariantByProductId = new Map<number, any>();
+    const fallbackVariantsByProductId = new Map<number, any[]>();
     const explicitVariantIds = new Set<number>();
     for (const sl of receivableShipmentLines) {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
@@ -2252,14 +2285,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       for (const productId of productIdsNeedingFallback) {
         try {
           const variants = await storage.getProductVariantsByProductId(productId);
-          const largestVariant = [...variants].sort(
-            (a: any, b: any) => (Number(b.unitsPerVariant) || 1) - (Number(a.unitsPerVariant) || 1),
-          )[0];
-          const variantId = parsePositiveInteger(largestVariant?.id);
-          if (largestVariant && variantId) {
-            fallbackReceiveVariantByProductId.set(productId, largestVariant);
-            unitsPerVariantById.set(variantId, Math.max(1, Number(largestVariant.unitsPerVariant) || 1));
-          }
+          fallbackVariantsByProductId.set(productId, variants);
         } catch { /* non-critical: fall back to PO receive units */ }
       }
     }
@@ -2281,7 +2307,9 @@ export function createPurchasingService(db: any, storage: Storage) {
     const receivingLineData = receivableShipmentLines.map((sl: any) => {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
       const productId = poLine?.productId ?? null;
-      const fallbackVariant = productId ? fallbackReceiveVariantByProductId.get(productId) : null;
+      const fallbackVariant = productId
+        ? chooseFallbackReceiveVariant(fallbackVariantsByProductId.get(productId) ?? [], sl.qtyShipped)
+        : null;
       const resolvedVariantId =
         sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId ?? fallbackVariant?.id ?? null;
       const packSize = Math.max(

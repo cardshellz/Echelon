@@ -4,8 +4,8 @@ import { createPurchasingService } from "../../purchasing.service";
 // ─────────────────────────────────────────────────────────────────────────────
 // PR3a: createReceiptFromShipment — receive AGAINST an inbound shipment.
 // Verifies the receiving order is stamped with the shipment link + source, and
-// lines are defaulted from each shipment line's qtyShipped (scaled to the
-// product's largest pack), with cost stamped from the PO line.
+// lines are defaulted from each shipment line's qtyShipped (scaled to an active
+// receive pack), with cost stamped from the PO line.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function build(overrides: Record<string, any> = {}) {
@@ -38,8 +38,8 @@ function build(overrides: Record<string, any> = {}) {
     ]),
     getProductVariantsByProductId: vi.fn(async (pid: number) =>
       pid === 327
-        ? [{ id: 467, unitsPerVariant: 1 }, { id: 469, unitsPerVariant: 10 }]
-        : [{ id: 470, unitsPerVariant: 1 }, { id: 471, unitsPerVariant: 50 }]),
+        ? [{ id: 467, unitsPerVariant: 1, isActive: true }, { id: 469, unitsPerVariant: 10, isActive: true }]
+        : [{ id: 470, unitsPerVariant: 1, isActive: true }, { id: 471, unitsPerVariant: 50, isActive: true }]),
     getAllProductLocations: vi.fn().mockResolvedValue([]),
     generateReceiptNumber: vi.fn().mockResolvedValue("RCV-TEST-001"),
     createReceivingOrder: vi.fn(async (o: any) => { captured.order = o; return { id: 999, ...o }; }),
@@ -64,7 +64,7 @@ describe("createReceiptFromShipment", () => {
       poNumber: "PO-20260617-002",
       status: "draft",
     });
-    // Lines: Expected = ceil(qtyShipped / largest-pack units); cost from PO line (mills-first).
+    // Lines: Expected = ceil(qtyShipped / active receive-pack units); cost from PO line (mills-first).
     expect(captured.lines).toHaveLength(2);
     expect(captured.lines[0]).toMatchObject({
       productVariantId: 469, purchaseOrderLineId: 228, expectedQty: 2, unitCostMills: 26000, unitCost: 260,
@@ -139,6 +139,55 @@ describe("createReceiptFromShipment", () => {
     });
     expect(captured.lines).toHaveLength(1);
     expect(captured.lines[0]).toMatchObject({ purchaseOrderLineId: 300, expectedQty: 10 });
+  });
+
+  it("does not choose inactive oversized variants when deriving a shipment receipt pack", async () => {
+    const { svc, captured } = build({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        {
+          id: 132,
+          purchaseOrderLineId: 176,
+          purchaseOrderId: 117,
+          productVariantId: null,
+          sku: "SHLZ-TOP-TOB",
+          qtyShipped: 5000,
+          cartonCount: 10,
+        },
+      ]),
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 117,
+        poNumber: "PO-20260511-004",
+        vendorId: 2,
+        warehouseId: 1,
+        expectedDeliveryDate: null,
+        confirmedDeliveryDate: null,
+      }),
+      getPurchaseOrderLines: vi.fn().mockResolvedValue([
+        {
+          id: 176,
+          purchaseOrderId: 117,
+          productId: 1,
+          sku: "SHLZ-TOP-TOB",
+          productName: "2\"x3\" Tobacco/Mini Toploader - Blue UV Hint",
+          unitCostMills: 604,
+          unitCostCents: 6,
+        },
+      ]),
+      getProductVariantsByProductId: vi.fn().mockResolvedValue([
+        { id: 1, productId: 1, sku: "SHLZ-TOP-TOB-P25", name: "1 Pack of 25", unitsPerVariant: 25, isActive: true },
+        { id: 2, productId: 1, sku: "SHLZ-TOP-TOB-C1000", name: "Case of 1000", unitsPerVariant: 1000, isActive: true },
+        { id: 213, productId: 1, sku: "SHLZ-TOP-TOB-SK100000", name: "Skid of 10000", unitsPerVariant: 10000, isActive: false },
+      ]),
+    });
+
+    await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 117 });
+
+    expect(captured.lines).toHaveLength(1);
+    expect(captured.lines[0]).toMatchObject({
+      purchaseOrderLineId: 176,
+      productVariantId: 2,
+      expectedQty: 5,
+    });
   });
 
   it("blocks duplicate shipment receipts after the shipment/PO pair was already closed", async () => {
