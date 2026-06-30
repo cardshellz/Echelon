@@ -453,6 +453,95 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     }
   }
 
+  async disconnectStoreForAdmin(input: {
+    storeConnectionId: number;
+    reason: string;
+    disconnectedAt: Date;
+    graceEndsAt: Date;
+    idempotencyKey: string;
+    actor: {
+      actorType: "admin" | "system";
+      actorId?: string;
+    };
+  }): Promise<DropshipStoreConnectionProfile> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const vendorId = await findConnectionVendorId(client, input.storeConnectionId);
+      if (vendorId === null) {
+        throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_FOUND", "Dropship store connection was not found.", {
+          storeConnectionId: input.storeConnectionId,
+        });
+      }
+      await lockVendorConnections(client, vendorId);
+
+      const existing = await findConnectionByIdForUpdate(client, vendorId, input.storeConnectionId);
+      if (!existing) {
+        throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_FOUND", "Dropship store connection was not found.", {
+          storeConnectionId: input.storeConnectionId,
+        });
+      }
+
+      if (existing.status === "disconnected" || existing.status === "grace_period") {
+        await client.query("COMMIT");
+        return mapStoreConnectionRow(existing);
+      }
+
+      const result = await client.query<StoreConnectionRow>(
+        `UPDATE dropship.dropship_store_connections
+         SET status = 'grace_period',
+             setup_status = 'attention_required',
+             access_token_ref = NULL,
+             refresh_token_ref = NULL,
+             token_expires_at = NULL,
+             disconnect_reason = $2,
+             disconnected_at = $3,
+             grace_ends_at = $4,
+             updated_at = $3
+         WHERE id = $1
+         RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+                   access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
+                   disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
+                   last_inventory_sync_at, config, created_at, updated_at`,
+        [
+          input.storeConnectionId,
+          input.reason,
+          input.disconnectedAt,
+          input.graceEndsAt,
+        ],
+      );
+      await client.query(
+        `DELETE FROM dropship.dropship_store_connection_tokens WHERE store_connection_id = $1`,
+        [input.storeConnectionId],
+      );
+
+      const updated = requiredRow(result.rows[0], "Admin dropship store disconnect did not return a row.");
+      await recordAuditEvent(client, {
+        vendorId,
+        storeConnectionId: updated.id,
+        eventType: "store_connection_admin_disconnect_started",
+        actor: input.actor,
+        severity: "warning",
+        payload: {
+          reason: input.reason,
+          graceEndsAt: input.graceEndsAt.toISOString(),
+          idempotencyKey: input.idempotencyKey,
+          previousStatus: existing.status,
+        },
+        occurredAt: input.disconnectedAt,
+      });
+
+      await client.query("COMMIT");
+      return mapStoreConnectionRow(updated);
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async updateOrderProcessingConfig(input: {
     storeConnectionId: number;
     defaultWarehouseId: number | null;
@@ -672,6 +761,19 @@ async function findConnectionByIdForUpdate(
     [vendorId, storeConnectionId],
   );
   return result.rows[0] ?? null;
+}
+
+async function findConnectionVendorId(
+  client: PoolClient,
+  storeConnectionId: number,
+): Promise<number | null> {
+  const result = await client.query<{ vendor_id: number }>(
+    `SELECT vendor_id
+     FROM dropship.dropship_store_connections
+     WHERE id = $1`,
+    [storeConnectionId],
+  );
+  return result.rows[0]?.vendor_id ?? null;
 }
 
 async function findConnectionByIdAnyVendorForUpdate(

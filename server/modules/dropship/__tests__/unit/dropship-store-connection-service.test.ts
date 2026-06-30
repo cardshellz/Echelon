@@ -688,6 +688,46 @@ describe("DropshipStoreConnectionService", () => {
     ]));
   });
 
+  it("disconnects a store connection from the admin surface", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, status: "connected" })];
+
+    const result = await service.disconnectForAdmin({
+      storeConnectionId: 21,
+      reason: "Fraud risk review",
+      idempotencyKey: "admin-disconnect-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.status).toBe("grace_period");
+    expect(result.hasAccessToken).toBe(false);
+    expect(result.disconnectReason).toBe("Fraud risk review");
+    expect(repository.lastAdminDisconnectInput).toMatchObject({
+      storeConnectionId: 21,
+      reason: "Fraud risk review",
+      idempotencyKey: "admin-disconnect-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+      disconnectedAt: now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_ADMIN_STORE_DISCONNECT_STARTED",
+      context: expect.objectContaining({
+        vendorId: 10,
+        storeConnectionId: 21,
+        actorType: "admin",
+        actorId: "admin-1",
+      }),
+    });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_store_disconnected",
+      idempotencyKey: "store-disconnect:21:admin-disconnect-1",
+      payload: expect.objectContaining({
+        reason: "Fraud risk review",
+        status: "grace_period",
+      }),
+    });
+  });
+
   it("updates admin order processing warehouse config", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21 })];
 
@@ -870,6 +910,7 @@ class FakeTokenCipher implements DropshipStoreTokenCipher {
 class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository {
   connections: DropshipStoreConnectionProfile[] = [];
   lastConnectInput: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0] | null = null;
+  lastAdminDisconnectInput: Parameters<DropshipStoreConnectionRepository["disconnectStoreForAdmin"]>[0] | null = null;
   lastListForAdminInput: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0] | null = null;
   lastOrderProcessingConfigInput: Parameters<DropshipStoreConnectionRepository["updateOrderProcessingConfig"]>[0] | null = null;
 
@@ -962,6 +1003,27 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     const updated = {
       ...connection,
       status: "grace_period" as const,
+      hasAccessToken: false,
+      hasRefreshToken: false,
+      launchReady: false,
+      disconnectReason: input.reason,
+      disconnectedAt: input.disconnectedAt,
+      graceEndsAt: input.graceEndsAt,
+    };
+    this.connections = [updated];
+    return updated;
+  }
+
+  async disconnectStoreForAdmin(
+    input: Parameters<DropshipStoreConnectionRepository["disconnectStoreForAdmin"]>[0],
+  ): Promise<DropshipStoreConnectionProfile> {
+    this.lastAdminDisconnectInput = input;
+    const connection = this.connections.find((item) => item.storeConnectionId === input.storeConnectionId);
+    if (!connection) throw new Error("missing fake connection");
+    const updated = {
+      ...connection,
+      status: "grace_period" as const,
+      setupStatus: "attention_required",
       hasAccessToken: false,
       hasRefreshToken: false,
       launchReady: false,
