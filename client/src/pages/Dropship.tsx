@@ -55,7 +55,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   allDropshipListingInventoryModes,
   allDropshipListingModes,
@@ -450,6 +450,25 @@ interface ShippingInsurancePolicyFormState {
   effectiveFrom: string;
   effectiveTo: string;
 }
+
+type ShippingConfigSectionKey =
+  | "overview"
+  | "boxes"
+  | "profiles"
+  | "zones"
+  | "rates"
+  | "markup"
+  | "insurance";
+
+const shippingConfigSections: Array<{ key: ShippingConfigSectionKey; label: string }> = [
+  { key: "overview", label: "Overview" },
+  { key: "boxes", label: "Boxes" },
+  { key: "profiles", label: "Product profiles" },
+  { key: "zones", label: "Zones" },
+  { key: "rates", label: "Rate tables" },
+  { key: "markup", label: "Markup" },
+  { key: "insurance", label: "Insurance" },
+];
 
 const emptyCatalogRuleForm: CatalogRuleFormState = {
   scopeType: "catalog",
@@ -3590,6 +3609,7 @@ function ShippingConfigTab() {
   const [markupForm, setMarkupForm] = useState<ShippingMarkupPolicyFormState>(emptyShippingMarkupPolicyForm);
   const [insuranceForm, setInsuranceForm] = useState<ShippingInsurancePolicyFormState>(emptyShippingInsurancePolicyForm);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<ShippingConfigSectionKey>("overview");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const shippingConfigUrl = useMemo(
@@ -3747,71 +3767,110 @@ function ShippingConfigTab() {
         </Alert>
       )}
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active boxes" value={String(activeCount(config?.boxes))} />
-        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Product profiles" value={String(config?.packageProfiles.length ?? 0)} />
-        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Zone rules" value={String(activeCount(config?.zoneRules))} />
-        <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Active rate tables" value={String(activeRateTableCount(config))} />
-      </section>
+      <Tabs
+        value={activeSection}
+        onValueChange={(value) => setActiveSection(value as ShippingConfigSectionKey)}
+        className="space-y-5"
+      >
+        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-md border bg-muted/50 p-1">
+          {shippingConfigSections.map((section) => (
+            <TabsTrigger key={section.key} value={section.key} className="shrink-0 px-4 py-2">
+              {section.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
 
-      <section className="rounded-md border bg-card p-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-lg font-semibold">Shipping configuration</h2>
-            <p className="text-sm text-muted-foreground">Manage package data, zones, cached rates, markup, and insurance pool fees used by dropship quotes.</p>
+        <TabsContent value="overview" className="m-0 space-y-5">
+          <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active boxes" value={String(activeCount(config?.boxes))} />
+            <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Product profiles" value={String(config?.packageProfiles.length ?? 0)} />
+            <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Zone rules" value={String(activeCount(config?.zoneRules))} />
+            <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Active rate tables" value={String(activeRateTableCount(config))} />
+          </section>
+          <ShippingConfigOverviewDashboard config={config ?? null} isLoading={shippingQuery.isLoading} />
+        </TabsContent>
+
+        <TabsContent value="boxes" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingBoxPanel
+              form={boxForm}
+              isSaving={pendingAction === "box"}
+              onChange={setBoxForm}
+              onSave={saveBox}
+            />
+            <ShippingBoxesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
           </div>
-        </div>
-      </section>
+        </TabsContent>
 
-      <div className="grid gap-5 xl:grid-cols-2">
-        <ShippingBoxPanel
-          form={boxForm}
-          isSaving={pendingAction === "box"}
-          onChange={setBoxForm}
-          onSave={saveBox}
-        />
-        <ShippingPackageProfilePanel
-          boxes={config?.boxes ?? []}
-          form={profileForm}
-          isSaving={pendingAction === "profile"}
-          onChange={setProfileForm}
-          onSave={savePackageProfile}
-          variants={productVariantOptions}
-          variantsLoading={variantsQuery.isLoading}
-        />
-        <ShippingZoneRulePanel
-          form={zoneForm}
-          isSaving={pendingAction === "zone"}
-          onChange={setZoneForm}
-          onSave={saveZoneRule}
-          warehouses={warehouseOptions}
-          warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
-        />
-        <ShippingRateTablePanel
-          form={rateForm}
-          isSaving={pendingAction === "rate"}
-          onChange={setRateForm}
-          onSave={saveRateTable}
-          warehouses={warehouseOptions}
-          warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
-        />
-        <ShippingMarkupPolicyPanel
-          activePolicy={config?.activeMarkupPolicy ?? null}
-          form={markupForm}
-          isSaving={pendingAction === "markup"}
-          onChange={setMarkupForm}
-          onSave={saveMarkupPolicy}
-        />
-        <ShippingInsurancePolicyPanel
-          activePolicy={config?.activeInsurancePolicy ?? null}
-          form={insuranceForm}
-          isSaving={pendingAction === "insurance"}
-          onChange={setInsuranceForm}
-          onSave={saveInsurancePolicy}
-        />
-      </div>
+        <TabsContent value="profiles" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingPackageProfilePanel
+              boxes={config?.boxes ?? []}
+              form={profileForm}
+              isSaving={pendingAction === "profile"}
+              onChange={setProfileForm}
+              onSave={savePackageProfile}
+              variants={productVariantOptions}
+              variantsLoading={variantsQuery.isLoading}
+            />
+            <ShippingProductProfilesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
 
-      <ShippingConfigTables config={config ?? null} isLoading={shippingQuery.isLoading} />
+        <TabsContent value="zones" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingZoneRulePanel
+              form={zoneForm}
+              isSaving={pendingAction === "zone"}
+              onChange={setZoneForm}
+              onSave={saveZoneRule}
+              warehouses={warehouseOptions}
+              warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
+            />
+            <ShippingZonesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="rates" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingRateTablePanel
+              form={rateForm}
+              isSaving={pendingAction === "rate"}
+              onChange={setRateForm}
+              onSave={saveRateTable}
+              warehouses={warehouseOptions}
+              warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
+            />
+            <ShippingRateTablesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="markup" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingMarkupPolicyPanel
+              activePolicy={config?.activeMarkupPolicy ?? null}
+              form={markupForm}
+              isSaving={pendingAction === "markup"}
+              onChange={setMarkupForm}
+              onSave={saveMarkupPolicy}
+            />
+            <ShippingMarkupPolicyTable activePolicy={config?.activeMarkupPolicy ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="insurance" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingInsurancePolicyPanel
+              activePolicy={config?.activeInsurancePolicy ?? null}
+              form={insuranceForm}
+              isSaving={pendingAction === "insurance"}
+              onChange={setInsuranceForm}
+              onSave={saveInsurancePolicy}
+            />
+            <ShippingInsurancePolicyTable activePolicy={config?.activeInsurancePolicy ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -4266,7 +4325,7 @@ function ShippingInsurancePolicyPanel({
   );
 }
 
-function ShippingConfigTables({
+function ShippingConfigOverviewDashboard({
   config,
   isLoading,
 }: {
@@ -4275,62 +4334,258 @@ function ShippingConfigTables({
 }) {
   if (isLoading) {
     return (
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Skeleton className="h-48 w-full" />
-        <Skeleton className="h-48 w-full" />
-      </div>
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-6 w-64" />
+        <Skeleton className="mt-4 h-52 w-full" />
+      </section>
     );
   }
   if (!config) {
     return <EmptyState title="No shipping config" description="Dropship shipping configuration is not loaded." />;
   }
+
+  const rows = [
+    {
+      section: "Boxes",
+      configured: `${activeCount(config.boxes)} active / ${config.boxes.length} loaded`,
+      ready: activeCount(config.boxes) > 0,
+      detail: "Physical boxes and mailers available for package selection.",
+    },
+    {
+      section: "Product shipping profiles",
+      configured: `${activeCount(config.packageProfiles)} active / ${config.packageProfiles.length} loaded`,
+      ready: activeCount(config.packageProfiles) > 0,
+      detail: "SKU-level dimensions and package behavior used before quoting.",
+    },
+    {
+      section: "Zones",
+      configured: `${activeCount(config.zoneRules)} active / ${config.zoneRules.length} loaded`,
+      ready: activeCount(config.zoneRules) > 0,
+      detail: "Warehouse and destination matching rules for rate lookup.",
+    },
+    {
+      section: "Rate tables",
+      configured: `${activeRateTableCount(config)} active / ${config.rateTables.length} loaded`,
+      ready: activeRateTableCount(config) > 0,
+      detail: "Cached carrier/service rates used when a quote is requested.",
+    },
+    {
+      section: "Markup",
+      configured: config.activeMarkupPolicy ? config.activeMarkupPolicy.name : "No active policy",
+      ready: Boolean(config.activeMarkupPolicy),
+      detail: "Shipping charge markup applied after base rate lookup.",
+    },
+    {
+      section: "Insurance pool",
+      configured: config.activeInsurancePolicy ? config.activeInsurancePolicy.name : "No active policy",
+      ready: Boolean(config.activeInsurancePolicy),
+      detail: "Configurable fee funding carrier-fault reimbursements.",
+    },
+  ];
+
   return (
-    <div className="grid gap-5 xl:grid-cols-2">
-      <ShippingSimpleTable
-        title="Boxes"
-        emptyTitle="No boxes"
-        headers={["Code", "Size", "Weight", "Status"]}
-        rows={config.boxes.map((box) => [
-          box.code,
-          `${formatMmAsInches(box.lengthMm)} x ${formatMmAsInches(box.widthMm)} x ${formatMmAsInches(box.heightMm)} in`,
-          `${formatGramsAsPounds(box.tareWeightGrams)} lb tare${box.maxWeightGrams ? ` / ${formatGramsAsPounds(box.maxWeightGrams)} lb max` : ""}`,
-          box.isActive ? "Active" : "Inactive",
-        ])}
-      />
-      <ShippingSimpleTable
-        title="Product shipping profiles"
-        emptyTitle="No product shipping profiles"
-        headers={["SKU", "Size", "Weight", "Status"]}
-        rows={config.packageProfiles.map((profile) => [
-          profile.variantSku || String(profile.productVariantId),
-          `${formatMmAsInches(profile.lengthMm)} x ${formatMmAsInches(profile.widthMm)} x ${formatMmAsInches(profile.heightMm)} in`,
-          `${formatGramsAsPounds(profile.weightGrams)} lb`,
-          profile.isActive ? "Active" : "Inactive",
-        ])}
-      />
-      <ShippingSimpleTable
-        title="Zones"
-        emptyTitle="No zone rules"
-        headers={["Warehouse", "Destination", "Zone", "Status"]}
-        rows={config.zoneRules.map((rule) => [
-          String(rule.originWarehouseId),
-          [rule.destinationCountry, rule.destinationRegion, rule.postalPrefix].filter(Boolean).join(" / "),
-          rule.zone,
-          rule.isActive ? "Active" : "Inactive",
-        ])}
-      />
-      <ShippingSimpleTable
-        title="Rate tables"
-        emptyTitle="No rate tables"
-        headers={["Carrier/service", "Status", "Rows", "Effective"]}
-        rows={config.rateTables.map((table) => [
-          `${table.carrier} ${table.service}`,
-          table.status,
-          String(table.rows.length),
-          formatDateTime(table.effectiveFrom),
-        ])}
-      />
-    </div>
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Shipping configuration dashboard</h2>
+          <p className="text-sm text-muted-foreground">
+            Current shipping quote inputs loaded from the admin shipping config API.
+          </p>
+        </div>
+        <Badge variant="outline">Generated {formatDateTime(config.generatedAt)}</Badge>
+      </div>
+      <div className="mt-4 overflow-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Area</TableHead>
+              <TableHead>Configured</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Purpose</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow key={row.section}>
+                <TableCell className="font-medium">{row.section}</TableCell>
+                <TableCell className="text-sm text-muted-foreground">{row.configured}</TableCell>
+                <TableCell>
+                  <Badge
+                    variant="outline"
+                    className={row.ready
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : "border-amber-200 bg-amber-50 text-amber-800"}
+                  >
+                    {row.ready ? "Ready" : "Missing"}
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">{row.detail}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </section>
+  );
+}
+
+function ShippingBoxesTable({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  if (!config) return <EmptyState title="No boxes" description="Dropship shipping boxes are not loaded." />;
+  return (
+    <ShippingSimpleTable
+      title="Boxes and mailers"
+      emptyTitle="No boxes"
+      headers={["Code", "Size", "Weight", "Status"]}
+      rows={config.boxes.map((box) => [
+        box.code,
+        `${formatMmAsInches(box.lengthMm)} x ${formatMmAsInches(box.widthMm)} x ${formatMmAsInches(box.heightMm)} in`,
+        `${formatGramsAsPounds(box.tareWeightGrams)} lb tare${box.maxWeightGrams ? ` / ${formatGramsAsPounds(box.maxWeightGrams)} lb max` : ""}`,
+        box.isActive ? "Active" : "Inactive",
+      ])}
+    />
+  );
+}
+
+function ShippingProductProfilesTable({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  if (!config) return <EmptyState title="No product profiles" description="Dropship product shipping profiles are not loaded." />;
+  return (
+    <ShippingSimpleTable
+      title="Product shipping profiles"
+      emptyTitle="No product shipping profiles"
+      headers={["SKU", "Size", "Weight", "Defaults", "Status"]}
+      rows={config.packageProfiles.map((profile) => [
+        profile.variantSku || String(profile.productVariantId),
+        `${formatMmAsInches(profile.lengthMm)} x ${formatMmAsInches(profile.widthMm)} x ${formatMmAsInches(profile.heightMm)} in`,
+        `${formatGramsAsPounds(profile.weightGrams)} lb`,
+        [
+          profile.defaultCarrier,
+          profile.defaultService,
+          profile.defaultBoxId ? `Box ${profile.defaultBoxId}` : null,
+          profile.shipAlone ? "Ships alone" : null,
+        ].filter(Boolean).join(" / ") || "None",
+        profile.isActive ? "Active" : "Inactive",
+      ])}
+    />
+  );
+}
+
+function ShippingZonesTable({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  if (!config) return <EmptyState title="No zones" description="Dropship shipping zones are not loaded." />;
+  return (
+    <ShippingSimpleTable
+      title="Zones"
+      emptyTitle="No zone rules"
+      headers={["Warehouse", "Destination", "Zone", "Priority", "Status"]}
+      rows={config.zoneRules.map((rule) => [
+        String(rule.originWarehouseId),
+        [rule.destinationCountry, rule.destinationRegion, rule.postalPrefix].filter(Boolean).join(" / "),
+        rule.zone,
+        String(rule.priority),
+        rule.isActive ? "Active" : "Inactive",
+      ])}
+    />
+  );
+}
+
+function ShippingRateTablesTable({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  if (!config) return <EmptyState title="No rate tables" description="Dropship rate tables are not loaded." />;
+  return (
+    <ShippingSimpleTable
+      title="Rate tables"
+      emptyTitle="No rate tables"
+      headers={["Carrier/service", "Status", "Rows", "Effective", "Expires"]}
+      rows={config.rateTables.map((table) => [
+        `${table.carrier} ${table.service}`,
+        table.status,
+        String(table.rows.length),
+        formatDateTime(table.effectiveFrom),
+        table.effectiveTo ? formatDateTime(table.effectiveTo) : "Open",
+      ])}
+    />
+  );
+}
+
+function ShippingMarkupPolicyTable({
+  activePolicy,
+  isLoading,
+}: {
+  activePolicy: DropshipShippingConfigOverview["activeMarkupPolicy"];
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  return (
+    <ShippingSimpleTable
+      title="Active markup policy"
+      emptyTitle="No active markup policy"
+      headers={["Name", "Variable", "Fixed", "Range", "Effective"]}
+      rows={activePolicy ? [[
+        activePolicy.name,
+        `${activePolicy.markupBps} bps`,
+        formatCents(activePolicy.fixedMarkupCents),
+        formatShippingMoneyRange(activePolicy.minMarkupCents, activePolicy.maxMarkupCents),
+        formatDateTime(activePolicy.effectiveFrom),
+      ]] : []}
+    />
+  );
+}
+
+function ShippingInsurancePolicyTable({
+  activePolicy,
+  isLoading,
+}: {
+  activePolicy: DropshipShippingConfigOverview["activeInsurancePolicy"];
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  return (
+    <ShippingSimpleTable
+      title="Active insurance pool policy"
+      emptyTitle="No active insurance pool policy"
+      headers={["Name", "Fee", "Range", "Effective"]}
+      rows={activePolicy ? [[
+        activePolicy.name,
+        `${activePolicy.feeBps} bps`,
+        formatShippingMoneyRange(activePolicy.minFeeCents, activePolicy.maxFeeCents),
+        formatDateTime(activePolicy.effectiveFrom),
+      ]] : []}
+    />
+  );
+}
+
+function ShippingTableSkeleton() {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <Skeleton className="h-6 w-48" />
+      <Skeleton className="mt-4 h-44 w-full" />
+    </section>
   );
 }
 
@@ -4491,6 +4746,13 @@ function activeCount(items: Array<{ isActive: boolean }> | undefined): number {
 
 function activeRateTableCount(config: DropshipShippingConfigOverview | undefined): number {
   return config?.rateTables.filter((table) => table.status === "active").length ?? 0;
+}
+
+function formatShippingMoneyRange(minCents: number | null, maxCents: number | null): string {
+  if (minCents === null && maxCents === null) return "No min/max";
+  if (minCents !== null && maxCents !== null) return `${formatCents(minCents)} - ${formatCents(maxCents)}`;
+  if (minCents !== null) return `Min ${formatCents(minCents)}`;
+  return `Max ${formatCents(maxCents ?? 0)}`;
 }
 
 function dropshipOmsSourceLabel(channel: DropshipOmsChannelOption): string {
