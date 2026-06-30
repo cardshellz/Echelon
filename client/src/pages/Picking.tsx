@@ -1204,6 +1204,12 @@ export default function Picking() {
 
       const replen = inventory?.replen;
       binCountPendingRef.current = false;
+      if (inventory?.resolution?.autoResolved && inventory.resolution.reviewRequired) {
+        toast({
+          title: "Inventory variance recorded",
+          description: inventory.resolution.message || "System inventory was corrected and queued for review.",
+        });
+      }
       if (replen?.triggered) {
         if (replen.autoExecutedFailed) {
           toast({

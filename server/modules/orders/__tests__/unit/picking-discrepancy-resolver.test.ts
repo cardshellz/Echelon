@@ -4,6 +4,7 @@ import { PickingUseCases } from "../../picking.use-cases";
 function makeService(
   levels: Array<{ warehouseLocationId: number; variantQty: number }>,
   locationOverrides?: Array<Record<string, unknown>>,
+  replenishmentOverrides?: Record<string, unknown>,
 ) {
   const locations = locationOverrides ?? [
     { id: 1, code: "A-01", isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" },
@@ -19,6 +20,12 @@ function makeService(
     })),
     getInventoryLevelsByProductVariantId: vi.fn(async () => levels),
     getAllWarehouseLocations: vi.fn(async () => locations),
+    getOrderById: vi.fn(async () => ({
+      id: 900,
+      orderNumber: "#900",
+      warehouseId: 1,
+      assignedPickerId: "picker-1",
+    })),
     getPendingReplenTasksForLocation: vi.fn(async () => []),
     updateReplenTask: vi.fn(async () => ({})),
   };
@@ -42,8 +49,23 @@ function makeService(
     logTransaction: vi.fn(async () => ({})),
   };
 
-  const service = new PickingUseCases({} as any, inventoryCore as any, {} as any, storage as any);
-  return { service, storage, inventoryCore };
+  const replenishment = {
+    checkReplenNeeded: vi.fn(async () => ({
+      needed: false,
+      stockout: false,
+      sourceLocationCode: null,
+      sourceVariantSku: null,
+      sourceVariantName: null,
+      qtyTargetUnits: 0,
+      replenMethod: "full_case",
+      executionMode: "queue",
+    })),
+    createAndExecuteReplen: vi.fn(async () => null),
+    ...replenishmentOverrides,
+  };
+
+  const service = new PickingUseCases({} as any, inventoryCore as any, replenishment as any, storage as any);
+  return { service, storage, inventoryCore, replenishment };
 }
 
 function makeItem(overrides: Record<string, unknown> = {}) {
@@ -347,7 +369,7 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
     }));
   });
 
-  it("does not auto-correct a shortage for manual or button picks", async () => {
+  it("records a picker-confirmed variance for manual or button picks", async () => {
     const { service, inventoryCore } = makeService([
       { warehouseLocationId: 1, variantQty: 0 },
       { warehouseLocationId: 2, variantQty: 10 },
@@ -359,14 +381,74 @@ describe("PickingUseCases inventory discrepancy resolution", () => {
     });
 
     expect(result).toMatchObject({
-      success: false,
-      error: "insufficient_inventory",
+      success: true,
       locationId: 1,
-      pickerBlocking: false,
-      shipmentBlocking: true,
+      autoResolved: {
+        code: "picker_confirmed_bin_shortage",
+        adjustment: 1,
+        systemQtyBefore: 0,
+        pickedQty: 1,
+      },
     });
+    expect(inventoryCore.adjustInventory).toHaveBeenCalledWith(expect.objectContaining({
+      warehouseLocationId: 1,
+      qtyDelta: 1,
+      userId: "picker-1",
+    }));
+    expect(inventoryCore.pickItem).toHaveBeenCalledWith(expect.objectContaining({
+      warehouseLocationId: 1,
+      qty: 1,
+    }));
+  });
+
+  it("executes inline case-break replen before picker-confirmed variance correction", async () => {
+    const levels = [
+      { warehouseLocationId: 1, variantQty: 0 },
+    ];
+    const { service, inventoryCore, replenishment } = makeService(
+      levels,
+      undefined,
+      {
+        checkReplenNeeded: vi.fn(async () => ({
+          needed: true,
+          stockout: false,
+          sourceLocationCode: "R-01",
+          sourceVariantSku: "SKU-CASE",
+          sourceVariantName: "Case",
+          qtyTargetUnits: 12,
+          replenMethod: "case_break",
+          executionMode: "inline",
+        })),
+        createAndExecuteReplen: vi.fn(async () => {
+          levels[0].variantQty += 12;
+          return { task: { id: 300, status: "completed", replenMethod: "case_break" }, moved: 12 };
+        }),
+      },
+    );
+
+    const result = await (service as any)._deductInventory(makeItem(), makeItem(), {
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      locationId: 1,
+      prePickReplen: {
+        task: { id: 300, status: "completed" },
+        moved: 12,
+      },
+    });
+    expect(replenishment.createAndExecuteReplen).toHaveBeenCalledWith(100, 1, "picker-1", expect.objectContaining({
+      blocksShipment: false,
+      forceWhenAtOrBelowZero: true,
+      triggeredBy: "pick_shortage_case_break",
+    }));
     expect(inventoryCore.adjustInventory).not.toHaveBeenCalled();
-    expect(inventoryCore.pickItem).not.toHaveBeenCalled();
+    expect(inventoryCore.pickItem).toHaveBeenCalledWith(expect.objectContaining({
+      warehouseLocationId: 1,
+      qty: 1,
+    }));
   });
 
   it("resolves duplicate location codes within the order warehouse", async () => {
@@ -990,6 +1072,41 @@ describe("PickingUseCases allocation blocker idempotency", () => {
       status: "blocked",
       metadata: expect.objectContaining({ shipmentBlocking: true }),
     }));
+  });
+
+  it("casts nullable blocker lookup parameters so Postgres can infer types", async () => {
+    const returning = vi.fn(async () => [{ id: 73 }]);
+    const values = vi.fn(() => ({ returning }));
+    const tx = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] }),
+      insert: vi.fn(() => ({ values })),
+    };
+    const db = {
+      transaction: vi.fn(async (callback: (txArg: any) => Promise<any>) => callback(tx)),
+      execute: vi.fn(),
+    };
+    const service = new PickingUseCases(db as any, {} as any, {} as any, {} as any);
+
+    await expect((service as any).createBlockingAllocationException({
+      ...blockerInput,
+      selectedLocationId: null,
+      selectedLocationCode: null,
+    })).resolves.toMatchObject({
+      created: true,
+      exception: { id: 73 },
+    });
+
+    const exactLookupSql = (tx.execute.mock.calls[0]?.[0]?.queryChunks ?? [])
+      .flatMap((chunk: any) => Array.isArray(chunk?.value) ? chunk.value : [])
+      .join("");
+    expect(exactLookupSql).toContain("COALESCE(selected_location_id, -1) = COALESCE(");
+    expect(exactLookupSql).toContain("::integer, -1)");
+    expect(exactLookupSql).toContain("COALESCE(selected_location_code, '') = COALESCE(");
+    expect(exactLookupSql).toContain("::text, '')");
+    expect(exactLookupSql).toContain("COALESCE(review_reason, '') = ");
+    expect(exactLookupSql).toContain("::text");
   });
 });
 

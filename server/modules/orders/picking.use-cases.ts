@@ -65,7 +65,7 @@ type InventoryCore = {
 
 type ReplenishmentService = {
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number, triggeredBy?: string, context?: ReplenOrderContext) => Promise<any>;
-  checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
+  checkReplenNeeded: (productVariantId: number, warehouseLocationId: number, options?: { forceWhenAtOrBelowZero?: boolean; currentQtyOverride?: number }) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
   predictReplenAfterPick: (productVariantId: number, warehouseLocationId: number, pickedQty: number) => Promise<{
     systemQty: number;
     postPickQty: number;
@@ -102,6 +102,8 @@ type ReplenOrderContext = {
   orderItemId?: number | null;
   orderNumber?: string | null;
   blocksShipment?: boolean;
+  forceWhenAtOrBelowZero?: boolean;
+  triggeredBy?: string;
 };
 
 /** Minimal storage interface — only the methods picking needs. */
@@ -186,12 +188,17 @@ export type BinCountResult = {
   inferredReplenMoved: number | null;
 };
 
-type ScanAutoResolvedInventory = {
-  code: "picker_scan_bin_shortage";
+type InventoryAutoResolved = {
+  code: "picker_scan_bin_shortage" | "picker_confirmed_bin_shortage";
   adjustment: number;
   systemQtyBefore: number;
   pickedQty: number;
   message: string;
+};
+
+type PrePickReplenResult = {
+  task: any;
+  moved: number;
 };
 
 type DeductInventoryResult =
@@ -202,7 +209,8 @@ type DeductInventoryResult =
       locationId: number;
       locationCode: string;
       systemQtyAfter: number;
-      autoResolved?: ScanAutoResolvedInventory;
+      autoResolved?: InventoryAutoResolved;
+      prePickReplen?: PrePickReplenResult;
     }
   | {
       success: false;
@@ -460,9 +468,9 @@ export class PickingUseCases {
               OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
             )
             AND exception_type = ${params.exceptionType}
-            AND COALESCE(selected_location_id, -1) = COALESCE(${selectedLocationId}, -1)
-            AND COALESCE(selected_location_code, '') = COALESCE(${selectedLocationCode}, '')
-            AND COALESCE(review_reason, '') = ${params.reviewReason}
+            AND COALESCE(selected_location_id, -1) = COALESCE(${selectedLocationId}::integer, -1)
+            AND COALESCE(selected_location_code, '') = COALESCE(${selectedLocationCode}::text, '')
+            AND COALESCE(review_reason, '') = ${params.reviewReason}::text
           ORDER BY created_at DESC, id DESC
           LIMIT 1
           FOR UPDATE
@@ -1399,7 +1407,7 @@ export class PickingUseCases {
         // Auto-execute replen in background — no picker confirmation needed.
         // Fire-and-forget: returns result to caller so UI can show dismissible notification.
         try {
-          const replenResult = await this.replenishment.createAndExecuteReplen(
+          const replenResult = deductResult.prePickReplen ?? await this.replenishment.createAndExecuteReplen(
             deductResult.productVariantId,
             deductResult.locationId,
             userId,
@@ -1656,7 +1664,7 @@ export class PickingUseCases {
     productVariantId: number;
     locationId: number;
     locationCode: string;
-    resolution: ScanAutoResolvedInventory;
+    resolution: InventoryAutoResolved;
     userId?: string;
     deviceType?: string;
     sessionId?: string;
@@ -1672,7 +1680,9 @@ export class PickingUseCases {
       requestedQty: params.resolution.pickedQty,
       selectedLocationId: params.locationId,
       selectedLocationCode: params.locationCode,
-      resolution: "picker_scan_count_correction",
+      resolution: params.resolution.code === "picker_scan_bin_shortage"
+        ? "picker_scan_count_correction"
+        : "picker_confirmed_count_correction",
       autoFixedSetup: false,
       reviewReason: params.resolution.message,
       resolvedBy: params.userId || null,
@@ -1680,7 +1690,9 @@ export class PickingUseCases {
       metadata: {
         pickerNonBlocking: true,
         shipmentBlocking: false,
-        observation: "validated_item_scan",
+        observation: params.resolution.code === "picker_scan_bin_shortage"
+          ? "validated_item_scan"
+          : "picker_confirmed_physical_stock",
         adjustment: params.resolution.adjustment,
         systemQtyBefore: params.resolution.systemQtyBefore,
         pickedQty: params.resolution.pickedQty,
@@ -1706,13 +1718,14 @@ export class PickingUseCases {
       reason: params.resolution.message,
       deviceType: params.deviceType || "desktop",
       sessionId: params.sessionId,
-      pickMethod: "scan",
+      pickMethod: params.resolution.code === "picker_scan_bin_shortage" ? "scan" : "manual",
       itemStatusBefore: params.item.status,
       itemStatusAfter: params.item.status,
       metadata: {
         exceptionId: exception.id,
         pickerNonBlocking: true,
         shipmentBlocking: false,
+        resolutionCode: params.resolution.code,
       },
     });
 
@@ -1915,9 +1928,11 @@ export class PickingUseCases {
     }
     const currentLevel = levels.find((l: any) => l.warehouseLocationId === pickLocationId);
     const systemQtyBeforePick = currentLevel?.variantQty ?? 0;
-    let scanAutoResolved: ScanAutoResolvedInventory | undefined;
+    let systemQtyAvailableForPick = systemQtyBeforePick;
+    let autoResolvedInventory: InventoryAutoResolved | undefined;
+    let prePickReplen: PrePickReplenResult | undefined;
 
-    if (systemQtyBeforePick < pickedQty) {
+    if (systemQtyAvailableForPick < pickedQty) {
       const isScanVerified = opts.pickMethod === "scan";
       const canTrustLocation = locationResolution === "assigned" || locationResolution === "explicit";
       const locationIsPickerSafe =
@@ -1925,41 +1940,61 @@ export class PickingUseCases {
         pickLocation?.isActive === 1 &&
         !pickLocation?.cycleCountFreezeId;
 
-      if (isScanVerified && canTrustLocation && locationIsPickerSafe) {
-        const adjustment = pickedQty - systemQtyBeforePick;
-        const locationCode = pickLocation?.code || assignedLocationCode || String(pickLocationId);
-        const message =
-          `Picker scan found ${pickedQty} ${productVariant.sku} at ${locationCode}; ` +
-          `system had ${systemQtyBeforePick}. Added ${adjustment} before pick and queued review.`;
-
-        await inventoryCore.adjustInventory({
+      if (canTrustLocation && locationIsPickerSafe) {
+        prePickReplen = await this.tryInlineCaseBreakReplenBeforePick({
           productVariantId: productVariant.id,
-          warehouseLocationId: pickLocationId,
-          qtyDelta: adjustment,
-          reason: message,
+          locationId: pickLocationId,
+          item,
+          order: await this.storage.getOrderById(item.orderId),
           userId: opts.userId,
         });
 
-        scanAutoResolved = {
-          code: "picker_scan_bin_shortage",
-          adjustment,
-          systemQtyBefore: systemQtyBeforePick,
-          pickedQty,
-          message,
-        };
-      } else {
-        const locationCode = pickLocation?.code || assignedLocationCode || null;
-        return {
-          success: false,
-          error: "insufficient_inventory",
-          message: `Bin ${locationCode || pickLocationId} has ${systemQtyBeforePick} for ${item.sku}, but ${pickedQty} is needed`,
-          productVariantId: productVariant.id,
-          locationId: pickLocationId,
-          locationCode,
-          systemQty: systemQtyBeforePick,
-          pickerBlocking: false,
-          shipmentBlocking: true,
-        };
+        if (prePickReplen) {
+          const afterReplenLevel = await inventoryCore.getLevel(productVariant.id, pickLocationId);
+          systemQtyAvailableForPick = afterReplenLevel?.variantQty ?? systemQtyAvailableForPick;
+        }
+      }
+
+      if (systemQtyAvailableForPick < pickedQty) {
+        if (canTrustLocation && locationIsPickerSafe) {
+          const adjustment = pickedQty - systemQtyAvailableForPick;
+          const resolutionCode = isScanVerified ? "picker_scan_bin_shortage" : "picker_confirmed_bin_shortage";
+          const locationCode = pickLocation?.code || assignedLocationCode || String(pickLocationId);
+          const observation = isScanVerified ? "Picker scan" : "Picker confirmation";
+          const message =
+            `${observation} found ${pickedQty} ${productVariant.sku} at ${locationCode}; ` +
+            `system had ${systemQtyAvailableForPick}. Added ${adjustment} before pick and queued review.`;
+
+          await inventoryCore.adjustInventory({
+            productVariantId: productVariant.id,
+            warehouseLocationId: pickLocationId,
+            qtyDelta: adjustment,
+            reason: message,
+            userId: opts.userId,
+          });
+
+          autoResolvedInventory = {
+            code: resolutionCode,
+            adjustment,
+            systemQtyBefore: systemQtyAvailableForPick,
+            pickedQty,
+            message,
+          };
+          systemQtyAvailableForPick += adjustment;
+        } else {
+          const locationCode = pickLocation?.code || assignedLocationCode || null;
+          return {
+            success: false,
+            error: "insufficient_inventory",
+            message: `Bin ${locationCode || pickLocationId} has ${systemQtyBeforePick} for ${item.sku}, but ${pickedQty} is needed`,
+            productVariantId: productVariant.id,
+            locationId: pickLocationId,
+            locationCode,
+            systemQty: systemQtyBeforePick,
+            pickerBlocking: false,
+            shipmentBlocking: true,
+          };
+        }
       }
     }
 
@@ -1973,7 +2008,7 @@ export class PickingUseCases {
     });
 
     if (!picked) {
-      const level = levels.find((l: any) => l.warehouseLocationId === pickLocationId);
+      const level = await inventoryCore.getLevel(productVariant.id, pickLocationId);
       const loc = allLocations.find(l => l.id === pickLocationId);
       return {
         success: false,
@@ -2007,8 +2042,54 @@ export class PickingUseCases {
       locationId: pickLocationId,
       locationCode: loc?.code || assignedLocationCode || "",
       systemQtyAfter: updatedLevel?.variantQty ?? 0,
-      autoResolved: scanAutoResolved,
+      autoResolved: autoResolvedInventory,
+      prePickReplen,
     };
+  }
+
+  private async tryInlineCaseBreakReplenBeforePick(params: {
+    productVariantId: number;
+    locationId: number;
+    item: OrderItem;
+    order: Order | undefined;
+    userId?: string;
+  }): Promise<PrePickReplenResult | undefined> {
+    const guidance = await this.replenishment.checkReplenNeeded(params.productVariantId, params.locationId, {
+      forceWhenAtOrBelowZero: true,
+    }).catch((err: any) => {
+      console.warn(`[Replen] pre-pick guidance failed for item=${params.item.id} sku=${params.item.sku}:`, err?.message || err);
+      return null;
+    });
+
+    if (
+      !guidance?.needed ||
+      guidance.stockout ||
+      guidance.replenMethod !== "case_break" ||
+      guidance.executionMode !== "inline" ||
+      !guidance.sourceLocationCode
+    ) {
+      return undefined;
+    }
+
+    const replenResult = await this.replenishment.createAndExecuteReplen(
+      params.productVariantId,
+      params.locationId,
+      params.userId,
+      {
+        orderId: params.item.orderId,
+        orderItemId: params.item.id,
+        orderNumber: params.order?.orderNumber ?? null,
+        blocksShipment: false,
+        forceWhenAtOrBelowZero: true,
+        triggeredBy: "pick_shortage_case_break",
+      },
+    );
+
+    if (!replenResult || replenResult.task?.status !== "completed") {
+      return undefined;
+    }
+
+    return replenResult;
   }
 
   /** Check if any non-pick location has stock for this variant OR its fungible source (e.g. case variant) */
