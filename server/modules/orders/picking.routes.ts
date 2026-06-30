@@ -218,7 +218,15 @@ export function registerPickingRoutes(app: Express) {
       const id = parseInt(req.params.id);
       const pickerId = req.session.user?.id;
       if (!pickerId) return res.status(401).json({ error: "Authentication required" });
-      const result = await picking.claimOrder(id, pickerId, req.headers["x-device-type"] as string, req.sessionID);
+      const rawClaimSource = typeof req.body?.claimSource === "string" ? req.body.claimSource : undefined;
+      const claimSource = rawClaimSource?.slice(0, 64);
+      const result = await picking.claimOrder(
+        id,
+        pickerId,
+        req.headers["x-device-type"] as string,
+        req.sessionID,
+        claimSource,
+      );
 
       res.json({ ...result.order, items: result.items });
     } catch (error: any) {

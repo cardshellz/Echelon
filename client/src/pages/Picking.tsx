@@ -90,10 +90,18 @@ async function fetchPickingQueue(): Promise<OrderWithItems[]> {
   return res.json();
 }
 
-async function claimOrder(orderId: number): Promise<OrderWithItems> {
+type ClaimSource =
+  | "card_click"
+  | "grab_next"
+  | "active_resume"
+  | "preserved_progress_resume"
+  | "combined_group";
+
+async function claimOrder(orderId: number, claimSource: ClaimSource): Promise<OrderWithItems> {
   const res = await fetch(`/api/picking/orders/${orderId}/claim`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ claimSource }),
   });
   if (!res.ok) {
     // Prefer the server's structured reason so the picker sees the truth
@@ -994,7 +1002,8 @@ export default function Picking() {
   
   // Mutation for claiming orders
   const claimMutation = useMutation({
-    mutationFn: ({ orderId }: { orderId: number }) => claimOrder(orderId),
+    mutationFn: ({ orderId, claimSource }: { orderId: number; claimSource: ClaimSource }) =>
+      claimOrder(orderId, claimSource),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
     },
@@ -1688,7 +1697,10 @@ export default function Picking() {
   const [claimError, setClaimError] = useState<string | null>(null);
   
   // Start picking a batch or order
-  const handleStartPicking = async (id: string) => {
+  const handleStartPicking = async (
+    id: string,
+    options: { allowPreservedProgress?: boolean; claimSource?: ClaimSource } = {},
+  ) => {
     setClaimError(null);
     setDebugLog([]); // Clear debug log for new order
     
@@ -1713,11 +1725,23 @@ export default function Picking() {
         }
         
         try {
+          if (shouldShowReleasedPickProgress(combinedOrder) && !options.allowPreservedProgress) {
+            toast({
+              title: "Pick progress preserved",
+              description: "Use Resume to continue this partially picked order.",
+              variant: "default",
+            });
+            return;
+          }
+
           // Claim all orders in the combined group
           for (const subOrder of combinedOrder.combinedOrders) {
             const subOrderId = parseInt(subOrder.id);
             if (!isNaN(subOrderId)) {
-              await claimMutation.mutateAsync({ orderId: subOrderId });
+              await claimMutation.mutateAsync({
+                orderId: subOrderId,
+                claimSource: options.claimSource || "combined_group",
+              });
             }
           }
           
@@ -1752,8 +1776,20 @@ export default function Picking() {
       const numericId = parseInt(id);
       
       try {
-        await claimMutation.mutateAsync({ orderId: numericId });
         const orderToPick = ordersFromApi.find(o => o.id === id);
+        if (orderToPick && shouldShowReleasedPickProgress(orderToPick) && !options.allowPreservedProgress) {
+          toast({
+            title: "Pick progress preserved",
+            description: "Use Resume to continue this partially picked order.",
+            variant: "default",
+          });
+          return;
+        }
+
+        await claimMutation.mutateAsync({
+          orderId: numericId,
+          claimSource: options.claimSource || "card_click",
+        });
         if (orderToPick) {
           setLocalSingleQueue(prev => {
             const existing = prev.find(o => o.id === id);
@@ -1839,14 +1875,20 @@ export default function Picking() {
       }
     } else {
       // Use fresh data from API, filtering out orders we just completed locally
-      const freshQueue = ordersFromApi.filter(o => 
-        o.status === "ready" && !o.onHold
+      const freshQueue = ordersFromApi.filter(o =>
+        o.status === "ready" && !o.onHold && !shouldShowReleasedPickProgress(o)
       );
       // Apply the same sorting as the displayed queue
       const sortedQueue = applySortToOrders(freshQueue);
       const nextOrder = sortedQueue[0];
       if (nextOrder) {
-        handleStartPicking(nextOrder.id);
+        handleStartPicking(nextOrder.id, { claimSource: "grab_next" });
+      } else if (ordersFromApi.some(o => o.status === "ready" && !o.onHold && shouldShowReleasedPickProgress(o))) {
+        toast({
+          title: "Only preserved-progress orders are ready",
+          description: "Use Resume on a partially picked order to continue it.",
+          variant: "default",
+        });
       }
     }
   };
@@ -3294,7 +3336,15 @@ export default function Picking() {
                 onClick={() => {
                   console.log("Card clicked:", order.id, "status:", order.status, "onHold:", order.onHold, "assignee:", order.assignee);
                   if (order.status === "ready" && !order.onHold) {
-                    handleStartPicking(order.id);
+                    if (shouldShowReleasedPickProgress(order)) {
+                      toast({
+                        title: "Pick progress preserved",
+                        description: "Use Resume to continue this partially picked order.",
+                        variant: "default",
+                      });
+                      return;
+                    }
+                    handleStartPicking(order.id, { claimSource: "card_click" });
                   } else if (order.status === "completed") {
                     console.log("Opening completed order dialog:", order.orderNumber, order);
                     toast({ title: "Opening order details", description: order.orderNumber });
@@ -3304,7 +3354,7 @@ export default function Picking() {
                     const isMyOrder = order.assignee === pickerId || !order.assignee;
                     if (isMyOrder) {
                       // Resume picking own order
-                      handleStartPicking(order.id);
+                      handleStartPicking(order.id, { claimSource: "active_resume" });
                     } else if (isAdminOrLead) {
                       // Admin/lead can force release and take over
                       toast({
@@ -3530,10 +3580,28 @@ export default function Picking() {
                         {order.status === "completed" && order.c2p && (
                           <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
                         )}
-                        {(order.status === "ready" && !order.onHold && !isAdminOrLead) && (
+                        {shouldShowReleasedPickProgress(order) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-9 px-2 border-amber-300 text-amber-700 bg-white hover:bg-amber-50"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleStartPicking(order.id, {
+                                allowPreservedProgress: true,
+                                claimSource: "preserved_progress_resume",
+                              });
+                            }}
+                            data-testid={`button-resume-preserved-${order.id}`}
+                          >
+                            <Play className="h-4 w-4 mr-1" />
+                            Resume
+                          </Button>
+                        )}
+                        {(order.status === "ready" && !order.onHold && !isAdminOrLead && !shouldShowReleasedPickProgress(order)) && (
                           <ChevronRight className="h-5 w-5 text-muted-foreground" />
                         )}
-                        {isAdminOrLead && order.status === "ready" && !order.onHold && (
+                        {isAdminOrLead && order.status === "ready" && !order.onHold && !shouldShowReleasedPickProgress(order) && (
                           <ChevronRight className="h-5 w-5 text-muted-foreground" />
                         )}
                       </div>
