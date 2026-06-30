@@ -43,6 +43,7 @@ export const pickingActionTypeEnum = [
   "order_released",     // Picker released an order back to queue
   "order_completed",    // All items picked, order completed
   "item_picked",        // Individual item scanned/picked
+  "item_unpicked",      // Picker explicitly reversed picked inventory
   "item_shorted",       // Item marked as short
   "item_quantity_adjusted", // Picker changed picked quantity
   "order_held",         // Admin put order on hold

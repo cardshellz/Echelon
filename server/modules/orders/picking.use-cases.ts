@@ -51,6 +51,15 @@ type InventoryCore = {
     orderItemId?: number;
     userId?: string;
   }) => Promise<boolean>;
+  unpickItem?: (params: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    qty: number;
+    orderId: number;
+    orderItemId?: number;
+    userId?: string;
+    reason?: string;
+  }) => Promise<boolean>;
   withTx?: (tx: any) => InventoryCore;
 };
 
@@ -158,6 +167,10 @@ export type PickInventoryContext = {
 };
 
 export type PickItemResult =
+  | { success: true; item: OrderItem; inventory: PickInventoryContext }
+  | { success: false; error: string; message: string };
+
+export type UnpickItemResult =
   | { success: true; item: OrderItem; inventory: PickInventoryContext }
   | { success: false; error: string; message: string };
 
@@ -989,6 +1002,42 @@ export class PickingUseCases {
     }
     const orderForPick = await this.storage.getOrderById(beforeItem.orderId);
 
+    if (orderForPick?.onHold === 1) {
+      const message = `Cannot pick item ${itemId}: order ${beforeItem.orderId} is on hold`;
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "order_on_hold",
+        message,
+      });
+      return { success: false, error: "order_on_hold", message };
+    }
+
+    if (orderForPick && ["cancelled", "shipped"].includes(orderForPick.warehouseStatus)) {
+      const message = `Cannot pick item ${itemId}: order ${beforeItem.orderId} is ${orderForPick.warehouseStatus}`;
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "order_not_pickable",
+        message,
+      });
+      return { success: false, error: "order_not_pickable", message };
+    }
+
     // Prevent double-pick — if already completed, treat as success (idempotent)
     if (status === "completed" && beforeItem.status === "completed") {
       console.log(`[Pick] Item ${itemId} already completed — returning success (idempotent)`);
@@ -1110,6 +1159,12 @@ export class PickingUseCases {
         if (blockedStatuses.includes(orderState.warehouse_status)) {
           throw new IntegrityError(
             `Cannot pick item ${itemId}: order ${beforeItem.orderId} is ${orderState.warehouse_status}`,
+          );
+        }
+        if (Number(orderState.on_hold) === 1) {
+          throw new IntegrityError(
+            `Cannot pick item ${itemId}: order ${beforeItem.orderId} is on hold`,
+            { reason: "order_on_hold", orderId: beforeItem.orderId, orderItemId: itemId },
           );
         }
 
@@ -1986,6 +2041,235 @@ export class PickingUseCases {
   // 2. claimOrder
   // -------------------------------------------------------------------------
 
+  async unpickItem(itemId: number, params: {
+    qty: number;
+    userId?: string;
+    reason?: string;
+    deviceType?: string;
+    sessionId?: string;
+  }): Promise<UnpickItemResult> {
+    const requestedQty = Number(params.qty);
+    if (!Number.isInteger(requestedQty) || requestedQty <= 0) {
+      throw new ValidationError("qty must be a positive integer");
+    }
+
+    const beforeItem = await this.storage.getOrderItemById(itemId);
+    if (!beforeItem) {
+      throw new IntegrityError(`Item ${itemId} not found`);
+    }
+
+    const orderBefore = await this.storage.getOrderById(beforeItem.orderId);
+    if (!orderBefore) {
+      throw new IntegrityError(`Order ${beforeItem.orderId} not found`);
+    }
+
+    if (orderBefore.onHold === 1) {
+      return {
+        success: false,
+        error: "order_on_hold",
+        message: `Cannot unpick item ${itemId}: order ${beforeItem.orderId} is on hold`,
+      };
+    }
+
+    if (!["ready", "in_progress"].includes(orderBefore.warehouseStatus)) {
+      return {
+        success: false,
+        error: "order_not_unpickable",
+        message: `Cannot unpick item ${itemId}: order ${beforeItem.orderId} is ${orderBefore.warehouseStatus}`,
+      };
+    }
+
+    const beforePickedQty = beforeItem.pickedQuantity || 0;
+    if (beforePickedQty <= 0) {
+      return { success: true, item: beforeItem, inventory: emptyPickInventoryContext(beforeItem.sku) };
+    }
+
+    let variant: any | undefined;
+    let location: WarehouseLocation | undefined;
+
+    if (beforeItem.status === "completed") {
+      variant = await this.storage.getProductVariantBySku(beforeItem.sku);
+      if (!variant?.id) {
+        throw new ValidationError(`No variant found for SKU ${beforeItem.sku}`);
+      }
+
+      const locations = await this.storage.getAllWarehouseLocations();
+      const locationCode = (beforeItem.location || "").trim().toUpperCase();
+      location = locations.find(loc => loc.code.toUpperCase() === locationCode);
+      if (!location) {
+        throw new ValidationError(`Pick bin ${beforeItem.location || "(blank)"} was not found`);
+      }
+    }
+
+    const result = await this.db.transaction(async (tx: any) => {
+      const lockedOrder = await tx.execute(sql`
+        SELECT warehouse_status, on_hold
+        FROM wms.orders
+        WHERE id = ${beforeItem.orderId}
+        FOR UPDATE
+      `);
+
+      if (!lockedOrder.rows?.length) {
+        throw new IntegrityError(`Order ${beforeItem.orderId} not found`);
+      }
+
+      const orderState = lockedOrder.rows[0];
+      if (Number(orderState.on_hold) === 1) {
+        throw new IntegrityError(
+          `Cannot unpick item ${itemId}: order ${beforeItem.orderId} is on hold`,
+          { reason: "order_on_hold", orderId: beforeItem.orderId, orderItemId: itemId },
+        );
+      }
+      if (!["ready", "in_progress"].includes(orderState.warehouse_status)) {
+        throw new IntegrityError(
+          `Cannot unpick item ${itemId}: order ${beforeItem.orderId} is ${orderState.warehouse_status}`,
+          { reason: "order_not_unpickable", orderId: beforeItem.orderId, orderItemId: itemId },
+        );
+      }
+
+      const lockedItem = await tx.execute(sql`
+        SELECT id, status, picked_quantity, quantity
+        FROM wms.order_items
+        WHERE id = ${itemId}
+        FOR UPDATE
+      `);
+
+      if (!lockedItem.rows?.length) {
+        throw new IntegrityError(`Item ${itemId} not found`);
+      }
+
+      const itemState = lockedItem.rows[0];
+      const lockedPickedQty = Number(itemState.picked_quantity || 0);
+      if (lockedPickedQty <= 0) {
+        return {
+          item: beforeItem,
+          inventory: emptyPickInventoryContext(beforeItem.sku),
+          qtyBefore: beforePickedQty,
+          qtyAfter: beforePickedQty,
+          qtyDelta: 0,
+        };
+      }
+
+      const lockedActualUnpickQty = Math.min(requestedQty, lockedPickedQty);
+
+      if (itemState.status === "completed") {
+        const txInventoryCore =
+          typeof this.inventoryCore.withTx === "function"
+            ? this.inventoryCore.withTx(tx)
+            : this.inventoryCore;
+
+        if (typeof txInventoryCore.unpickItem !== "function") {
+          throw new IntegrityError("Inventory unpick service is not configured");
+        }
+
+        const reversed = await txInventoryCore.unpickItem({
+          productVariantId: variant.id,
+          warehouseLocationId: location!.id,
+          qty: lockedActualUnpickQty,
+          orderId: beforeItem.orderId,
+          orderItemId: beforeItem.id,
+          userId: params.userId,
+          reason: params.reason || "Picker unpick",
+        });
+
+        if (!reversed) {
+          throw new IntegrityError(
+            `Cannot unpick item ${itemId}: picked inventory was not available to reverse`,
+            { reason: "picked_inventory_unavailable", orderId: beforeItem.orderId, orderItemId: itemId },
+          );
+        }
+      }
+
+      const newPickedQty = lockedPickedQty - lockedActualUnpickQty;
+      const newStatus: ItemStatus = newPickedQty <= 0 ? "pending" : "in_progress";
+      const itemUpdates: Record<string, any> = {
+        status: newStatus,
+        pickedQuantity: newPickedQty,
+      };
+      if (newStatus === "pending") {
+        itemUpdates.pickedAt = null;
+      }
+
+      const [updatedItem] = await tx
+        .update(orderItems)
+        .set(itemUpdates)
+        .where(eq(orderItems.id, itemId))
+        .returning();
+
+      const siblingItems = await tx
+        .select()
+        .from(orderItems)
+        .where(eq(orderItems.orderId, beforeItem.orderId));
+
+      const shippableItems = siblingItems.filter((item: OrderItem) => item.requiresShipping === 1);
+      const pickedCount = shippableItems.reduce((sum: number, item: OrderItem) => sum + (item.pickedQuantity || 0), 0);
+      const itemCount = siblingItems.length;
+      const unitCount = siblingItems.reduce((sum: number, item: OrderItem) => sum + item.quantity, 0);
+      const allShippableDone = shippableItems.length === 0 ||
+        shippableItems.every((item: OrderItem) => item.status === "completed" || item.status === "short");
+
+      const orderUpdates: Record<string, any> = {
+        pickedCount,
+        itemCount,
+        unitCount,
+      };
+      if (!allShippableDone) {
+        orderUpdates.warehouseStatus = "in_progress" as OrderStatus;
+        orderUpdates.completedAt = null;
+        orderUpdates.exceptionAt = null;
+      }
+
+      await tx
+        .update(orders)
+        .set(orderUpdates)
+        .where(eq(orders.id, beforeItem.orderId));
+
+      const inventory = emptyPickInventoryContext(beforeItem.sku);
+      if (variant?.id && location?.id) {
+        inventory.locationId = location.id;
+        inventory.locationCode = location.code;
+        inventory.resolution.autoResolved = true;
+        inventory.resolution.code = "unpick_reversed";
+        inventory.resolution.message = "Picked inventory was returned to on-hand";
+      }
+
+      return {
+        item: updatedItem as OrderItem,
+        inventory,
+        qtyBefore: lockedPickedQty,
+        qtyAfter: newPickedQty,
+        qtyDelta: -lockedActualUnpickQty,
+      };
+    });
+
+    const actorId = params.userId || orderBefore.assignedPickerId || undefined;
+    const actor = actorId ? await this.storage.getUser(actorId) : null;
+    await this.storage.createPickingLog({
+      actionType: "item_unpicked",
+      pickerId: actorId,
+      pickerName: actor?.displayName || actor?.username || actorId,
+      pickerRole: actor?.role,
+      orderId: beforeItem.orderId,
+      orderNumber: orderBefore.orderNumber,
+      orderItemId: beforeItem.id,
+      sku: beforeItem.sku,
+      itemName: beforeItem.name,
+      locationCode: beforeItem.location,
+      qtyRequested: beforeItem.quantity,
+      qtyBefore: result.qtyBefore,
+      qtyAfter: result.qtyAfter,
+      qtyDelta: result.qtyDelta,
+      reason: params.reason || "Picker unpick",
+      itemStatusBefore: beforeItem.status,
+      itemStatusAfter: result.item.status,
+      deviceType: params.deviceType || "desktop",
+      sessionId: params.sessionId,
+      pickMethod: "unpick",
+    });
+
+    return { success: true, item: result.item, inventory: result.inventory };
+  }
+
   async claimOrder(orderId: number, pickerId: string, deviceType?: string, sessionId?: string): Promise<{ order: Order; items: OrderItem[] }> { 
     if (!pickerId) throw new ValidationError("pickerId is required");
 
@@ -2051,17 +2335,21 @@ export class PickingUseCases {
   async releaseOrder(orderId: number, options?: {
     resetProgress?: boolean;
     reason?: string;
+    userId?: string;
     deviceType?: string;
     sessionId?: string;
   }): Promise<Order | null> {
-    const resetProgress = options?.resetProgress ?? true;
+    const resetProgress = options?.resetProgress ?? false;
+    if (resetProgress) {
+      throw new ValidationError("Picker release cannot reset pick progress; use the admin repair reset workflow");
+    }
 
     const orderBefore = await this.storage.getOrderById(orderId);
-    const order = await this.storage.releaseOrder(orderId, resetProgress);
+    const order = await this.storage.releaseOrder(orderId, false);
     if (!order) return null;
 
     // Audit log
-    const pickerId = orderBefore?.assignedPickerId;
+    const pickerId = options?.userId || orderBefore?.assignedPickerId;
     const picker = pickerId ? await this.storage.getUser(pickerId) : null;
     await this.storage.createPickingLog({
       actionType: "order_released",
@@ -2072,7 +2360,7 @@ export class PickingUseCases {
       orderNumber: order.orderNumber,
       orderStatusBefore: orderBefore?.warehouseStatus,
       orderStatusAfter: order.warehouseStatus,
-      reason: options?.reason || (resetProgress ? "Progress reset" : "Progress preserved"),
+      reason: options?.reason || "Progress preserved",
       deviceType: options?.deviceType || "desktop",
       sessionId: options?.sessionId,
     });
