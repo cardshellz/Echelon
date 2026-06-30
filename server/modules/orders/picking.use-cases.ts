@@ -2270,7 +2270,13 @@ export class PickingUseCases {
     return { success: true, item: result.item, inventory: result.inventory };
   }
 
-  async claimOrder(orderId: number, pickerId: string, deviceType?: string, sessionId?: string): Promise<{ order: Order; items: OrderItem[] }> { 
+  async claimOrder(
+    orderId: number,
+    pickerId: string,
+    deviceType?: string,
+    sessionId?: string,
+    claimSource?: string,
+  ): Promise<{ order: Order; items: OrderItem[] }> {
     if (!pickerId) throw new ValidationError("pickerId is required");
 
     const orderBefore = await this.storage.getOrderById(orderId);
@@ -2322,6 +2328,7 @@ export class PickingUseCases {
       orderStatusAfter: order.warehouseStatus,
       deviceType: deviceType || "desktop",
       sessionId,
+      metadata: claimSource ? { claimSource } : undefined,
     });
 
     const items = await this.storage.getOrderItems(orderId);
