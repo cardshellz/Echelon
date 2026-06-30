@@ -154,6 +154,15 @@ export class EbayMarketplaceListingConnector {
     const updatedOfferIds: Record<number, string> = {};
     const missingOfferVariantIds: number[] = [];
     const policyChangedVariantIds: number[] = [];
+    let itemGroupUpdated = false;
+
+    if (input.draft.itemGroup) {
+      await input.client.createOrReplaceInventoryItemGroup(
+        input.draft.itemGroup.groupKey,
+        input.draft.itemGroup.payload,
+      );
+      itemGroupUpdated = true;
+    }
 
     for (const item of input.draft.inventoryItems) {
       await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
@@ -176,15 +185,6 @@ export class EbayMarketplaceListingConnector {
       await input.client.updateOffer(existingOffer.offerId, offer.payload);
       updatedOfferIds[offer.variantId] = existingOffer.offerId;
       await this.delay(this.offerDelayMs);
-    }
-
-    let itemGroupUpdated = false;
-    if (input.draft.itemGroup) {
-      await input.client.createOrReplaceInventoryItemGroup(
-        input.draft.itemGroup.groupKey,
-        input.draft.itemGroup.payload,
-      );
-      itemGroupUpdated = true;
     }
 
     return {

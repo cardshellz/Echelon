@@ -17,7 +17,11 @@ import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
 import { isProductEffectivelyListed, isVariantEffectivelyListed } from "./ebay-listing-state";
 import { EbayMarketplaceListingConnector } from "../../modules/channels/listing-connectors/ebay-listing.connector";
-import { buildEbayRouteListingDraft } from "./ebay-listing-draft-builder";
+import {
+  buildEbayRouteListingDraft,
+  isValidEbayFixedPriceCents,
+  normalizeCents,
+} from "./ebay-listing-draft-builder";
 import {
   createEbayRouteListingClient,
   getExistingEbayInventoryImageUrls,
@@ -188,7 +192,8 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
         }
 
         // Determine readiness for each product
-        const feed = result.rows.map((row: any) => {
+        const feed: any[] = [];
+        for (const row of result.rows) {
           // Effective category: product override wins, then type mapping
           const effectiveCategoryId = row.product_ebay_browse_category_id || row.ebay_browse_category_id || null;
           const effectiveCategoryName = row.product_ebay_browse_category_name || row.ebay_browse_category_name || null;
@@ -214,6 +219,37 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           const isExcluded = productExcludedByIntent;
           const isTypeDisabled = row.type_listing_enabled === false;
 
+          const variants = (variantsByProduct.get(row.id) || []).map((v: any) => {
+            const effectivelyListed = isVariantEffectivelyListed({
+              productExcluded: row.ebay_listing_excluded === true,
+              productOverrideIsListed: row.product_override_is_listed,
+              typeListingEnabled: row.type_listing_enabled,
+              variantExcluded: v.explicitlyExcluded,
+            });
+            return {
+              ...v,
+              excludedByProduct: !productEffectivelyListed,
+              effectivelyListed,
+            };
+          });
+          const includedVariants = variants.filter((v: any) => v.effectivelyListed);
+          const includedVariantCount = includedVariants.length;
+          const missingPriceSkus: string[] = [];
+          for (const variant of includedVariants) {
+            const basePriceCents = normalizeCents(variant.priceCents);
+            const effectivePriceCents = await resolveChannelPrice(
+              db,
+              EBAY_CHANNEL_ID,
+              row.id,
+              variant.id,
+              basePriceCents ?? 0,
+            );
+            if (!isValidEbayFixedPriceCents(effectivePriceCents)) {
+              missingPriceSkus.push(variant.sku);
+            }
+          }
+          const hasValidEbayPrices = includedVariantCount > 0 && missingPriceSkus.length === 0;
+
           // Check for missing required aspects
           const missingAspects: string[] = [];
           if (effectiveCategoryId) {
@@ -234,15 +270,14 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           let status: string;
           if (isExcluded) status = "excluded";
           else if (isTypeDisabled) status = "type_disabled";
-          else if (isListed) status = "listed";
-          else if (isError) status = "error";
+          else if (!hasCategoryMapping || !hasVariants || !hasImages || !hasValidEbayPrices) status = "missing_config";
           else if (isEnded) {
             // Ended/deleted listings are re-pushable — treat as ready if they meet all requirements
-            if (!hasCategoryMapping || !hasVariants || !hasImages) status = "missing_config";
-            else if (missingAspects.length > 0) status = "missing_specifics";
+            if (missingAspects.length > 0) status = "missing_specifics";
             else status = "ready"; // Can be re-listed
           }
-          else if (!hasCategoryMapping || !hasVariants || !hasImages) status = "missing_config";
+          else if (isListed) status = "listed";
+          else if (isError) status = "error";
           else if (missingAspects.length > 0) status = "missing_specifics";
           else status = "ready";
 
@@ -250,23 +285,9 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           if (!hasCategoryMapping) missingItems.push("eBay category");
           if (!hasVariants) missingItems.push("variants");
           if (!hasImages) missingItems.push("images");
+          if (!hasValidEbayPrices) missingItems.push("valid eBay prices");
 
-          const variants = (variantsByProduct.get(row.id) || []).map((v: any) => {
-            const effectivelyListed = isVariantEffectivelyListed({
-              productExcluded: row.ebay_listing_excluded === true,
-              productOverrideIsListed: row.product_override_is_listed,
-              typeListingEnabled: row.type_listing_enabled,
-              variantExcluded: v.explicitlyExcluded,
-            });
-            return {
-              ...v,
-              excludedByProduct: !productEffectivelyListed,
-              effectivelyListed,
-            };
-          });
-          const includedVariantCount = variants.filter((v: any) => v.effectivelyListed).length;
-
-          return {
+          feed.push({
             id: row.id,
             name: row.name,
             sku: row.sku,
@@ -279,6 +300,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             ebayStoreCategoryName: row.ebay_store_category_name,
             status,
             missingItems,
+            missingPriceSkus,
             missingAspects,
             isListed,
             isExcluded,
@@ -291,8 +313,8 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             fulfillmentPolicyOverride: row.product_fulfillment_override || null,
             returnPolicyOverride: row.product_return_override || null,
             paymentPolicyOverride: row.product_payment_override || null,
-          };
-        });
+          });
+        }
 
         res.json({ feed, total: feed.length });
       } finally {
@@ -495,22 +517,41 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             atpByVariantId.set(va.productVariantId, va.atpUnits);
           }
 
-          const routeDraft = buildEbayRouteListingDraft({
-            productId,
-            product,
-            variants,
-            effectiveImageUrls,
-            aspects,
-            isMultiVariant,
-            variationAspectName,
-            variantPrices,
-            atpByVariantId,
-            marketplaceId,
-            ebayBrowseCategoryId,
-            effectivePolicies,
-            storeCategoryNames,
-            merchantLocationKey,
-          });
+          let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
+          try {
+            routeDraft = buildEbayRouteListingDraft({
+              productId,
+              product,
+              variants,
+              effectiveImageUrls,
+              aspects,
+              isMultiVariant,
+              variationAspectName,
+              variantPrices,
+              atpByVariantId,
+              marketplaceId,
+              ebayBrowseCategoryId,
+              effectivePolicies,
+              storeCategoryNames,
+              merchantLocationKey,
+            });
+          } catch (err: any) {
+            const errMsg = String(err?.message || "Invalid eBay listing payload");
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
+            results.push({
+              productId,
+              productName: product.name,
+              variantCount: variants.length,
+              success: false,
+              error: errMsg,
+              variantDetails: variants.map((variant: any) => ({
+                sku: variant.sku,
+                success: false,
+                error: errMsg,
+              })),
+            });
+            continue;
+          }
 
           let listingId: string | null = null;
           const offerIds: Map<string, string> = new Map();
@@ -825,22 +866,31 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             atpByVariantId.set(va.productVariantId, va.atpUnits);
           }
 
-          const routeDraft = buildEbayRouteListingDraft({
-            productId,
-            product,
-            variants,
-            effectiveImageUrls,
-            aspects,
-            isMultiVariant,
-            variationAspectName,
-            variantPrices,
-            atpByVariantId,
-            marketplaceId,
-            ebayBrowseCategoryId,
-            effectivePolicies,
-            storeCategoryNames,
-            merchantLocationKey,
-          });
+          let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
+          try {
+            routeDraft = buildEbayRouteListingDraft({
+              productId,
+              product,
+              variants,
+              effectiveImageUrls,
+              aspects,
+              isMultiVariant,
+              variationAspectName,
+              variantPrices,
+              atpByVariantId,
+              marketplaceId,
+              ebayBrowseCategoryId,
+              effectivePolicies,
+              storeCategoryNames,
+              merchantLocationKey,
+            });
+          } catch (err: any) {
+            failed++;
+            const errMsg = String(err?.message || "Invalid eBay listing payload");
+            sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total });
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
+            continue;
+          }
 
           if (cancelled) break;
 
