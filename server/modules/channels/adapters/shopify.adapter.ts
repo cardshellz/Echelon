@@ -31,6 +31,7 @@ import type {
   CancellationPayload,
   CancellationPushResult,
 } from "../channel-adapter.interface";
+import { ShopifyMarketplaceListingConnector } from "../listing-connectors/shopify-listing.connector";
 
 import crypto from "crypto";
 
@@ -64,6 +65,7 @@ const RATE_LIMIT_DELAY_MS = 1000;
 export class ShopifyAdapter implements IChannelAdapter {
   readonly adapterName = "Shopify";
   readonly providerKey = "shopify";
+  private readonly listingConnector = new ShopifyMarketplaceListingConnector();
 
   constructor(private readonly db: DrizzleDb) {}
 
@@ -100,131 +102,15 @@ export class ShopifyAdapter implements IChannelAdapter {
     creds: ShopifyCredentials,
     listing: ChannelListingPayload,
   ): Promise<ListingPushResult> {
-    // Build Shopify product payload
-    const variants = listing.variants
-      .filter((v) => v.isListed)
-      .map((v) => {
-        const variant: any = {
-          sku: v.sku,
-          title: v.name,
-          barcode: v.barcode || v.gtin,
-        };
-        if (v.priceCents != null) {
-          variant.price = (v.priceCents / 100).toFixed(2);
-        }
-        if (v.compareAtPriceCents != null) {
-          variant.compare_at_price = (v.compareAtPriceCents / 100).toFixed(2);
-        }
-        if (v.weightGrams != null) {
-          variant.weight = v.weightGrams;
-          variant.weight_unit = "g";
-        }
-        if (v.externalVariantId) {
-          variant.id = Number(v.externalVariantId);
-        }
-        return variant;
-      });
-
-    const images = listing.images.map((img) => {
-      const image: any = {
-        src: img.url,
-        position: img.position + 1, // Shopify is 1-based
-      };
-      if (img.altText) image.alt = img.altText;
-      return image;
+    return await this.listingConnector.pushChannelListing({
+      credentials: {
+        shopDomain: creds.shopDomain,
+        accessToken: creds.accessToken,
+        apiVersion: creds.apiVersion,
+      },
+      listing,
     });
-
-    const payload = {
-      title: listing.title,
-      body_html: listing.description || "",
-      product_type: listing.category || "",
-      tags: listing.tags?.join(", ") || "",
-      // Don't push status to Shopify — preserve merchant's manual status
-      // status: listing.status === "active" ? "active" : "draft",
-      variants,
-      images,
-    };
-
-    // Determine if create or update
-    const hasExternalIds = listing.variants.some((v) => v.externalVariantId);
-
-    if (hasExternalIds) {
-      // Find the Shopify product ID from any variant
-      // In Shopify, all variants share a product ID — use metadata or first variant
-      const existingVariant = listing.variants.find((v) => v.externalVariantId);
-      if (!existingVariant?.externalVariantId) {
-        return { productId: listing.productId, status: "error", error: "No external variant ID for update" };
-      }
-
-      // Get product ID from Shopify by fetching the variant
-      const variantData = await this.shopifyGet(
-        creds,
-        `/variants/${existingVariant.externalVariantId}.json`,
-      );
-      const shopifyProductId = String(variantData?.variant?.product_id);
-
-      if (!shopifyProductId) {
-        return { productId: listing.productId, status: "error", error: "Could not resolve Shopify product ID" };
-      }
-
-      // UPDATE
-      const updatePayload = { ...payload, id: Number(shopifyProductId) };
-      delete (updatePayload as any).images; // Safety Omission: Never push images to Shopify during an update to prevent wiping.
-
-      const response = await this.shopifyPut(
-        creds,
-        `/products/${shopifyProductId}.json`,
-        { product: updatePayload },
-      );
-
-      const variantIdMap: Record<number, string> = {};
-      for (const v of listing.variants) {
-        const shopifyVariant = response?.product?.variants?.find(
-          (sv: any) => sv.sku === v.sku,
-        );
-        if (shopifyVariant) {
-          variantIdMap[v.variantId] = String(shopifyVariant.id);
-        }
-      }
-
-      return {
-        productId: listing.productId,
-        status: "updated",
-        externalProductId: shopifyProductId,
-        externalVariantIds: variantIdMap,
-      };
-    } else {
-      // CREATE
-      const response = await this.shopifyPost(
-        creds,
-        "/products.json",
-        { product: payload },
-      );
-
-      const shopifyProduct = response?.product;
-      if (!shopifyProduct) {
-        return { productId: listing.productId, status: "error", error: "No product in Shopify response" };
-      }
-
-      const variantIdMap: Record<number, string> = {};
-      for (const v of listing.variants) {
-        const shopifyVariant = shopifyProduct.variants?.find(
-          (sv: any) => sv.sku === v.sku,
-        );
-        if (shopifyVariant) {
-          variantIdMap[v.variantId] = String(shopifyVariant.id);
-        }
-      }
-
-      return {
-        productId: listing.productId,
-        status: "created",
-        externalProductId: String(shopifyProduct.id),
-        externalVariantIds: variantIdMap,
-      };
-    }
   }
-
   // -------------------------------------------------------------------------
   // Inventory
   // -------------------------------------------------------------------------
