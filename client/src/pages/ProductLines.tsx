@@ -61,6 +61,10 @@ import {
   filterContextKey,
   parseDraggedProductIds,
 } from "./product-lines/selection";
+import {
+  buildAssignmentFeedback,
+  type ProductLineAssignmentResult,
+} from "./product-lines/assignmentFeedback";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1396,55 +1400,29 @@ export default function ProductLinesPage() {
 
   // ---------- Mutations ----------
 
-  const invalidateCore = () => {
-    queryClient.invalidateQueries({ queryKey: ["/api/product-lines"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/product-lines/products"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/product-lines/stats"] });
-  };
+  const invalidateCore = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["/api/product-lines"] }),
+      queryClient.invalidateQueries({
+        queryKey: ["/api/product-lines/products"],
+      }),
+      queryClient.invalidateQueries({ queryKey: ["/api/product-lines/stats"] }),
+    ]);
 
   /**
    * Optimistic update strategy:
-   * - Before the mutation we snapshot lines + current products page cache.
-   * - We bump the target line's productCount (+delta) and, for moves,
-   *   decrement the source's by the same delta.
+   * - Before the mutation we snapshot the current products page cache.
    * - We remove moved rows from the currently-visible table if the view
    *   no longer includes them (unassigned → after move the rows disappear).
-   * - On success we still invalidate to reconcile server truth.
+   * - Totals refetch after success because only the server knows whether the
+   *   target assignment already existed.
    */
 
-  const applyOptimisticMove = (
+  const applyOptimisticProductPageMove = (
     productIds: number[],
-    fromLineId: number | "unassigned" | "any",
     toLineId: number,
     mode: "move" | "duplicate",
   ) => {
-    // Lines list: bump counts.
-    // The query key now includes `status`, so we match by key prefix
-    // instead of an exact key so every cached variant (active / draft /
-    // archived / all) gets the same optimistic patch.
-    queryClient.setQueriesData<ProductLine[]>(
-      { queryKey: ["/api/product-lines"] },
-      (prev) => {
-        if (!prev) return prev;
-        return prev.map((l) => {
-          if (l.id === toLineId) {
-            return { ...l, productCount: l.productCount + productIds.length };
-          }
-          if (
-            mode === "move" &&
-            typeof fromLineId === "number" &&
-            l.id === fromLineId
-          ) {
-            return {
-              ...l,
-              productCount: Math.max(0, l.productCount - productIds.length),
-            };
-          }
-          return l;
-        });
-      },
-    );
-
     // Current products page: if moving (not duplicating) and we are NOT
     // looking at the target line, remove the rows that no longer belong here.
     if (mode === "move") {
@@ -1479,7 +1457,16 @@ export default function ProductLinesPage() {
     }
   };
 
-  const bulkMoveMutation = useMutation({
+  const bulkMoveMutation = useMutation<
+    ProductLineAssignmentResult,
+    Error,
+    {
+      productIds: number[];
+      fromLineId: number | "unassigned" | "any";
+      toLineId: number;
+      mode: "move" | "duplicate";
+    }
+  >({
     mutationFn: async (args: {
       productIds: number[];
       fromLineId: number | "unassigned" | "any";
@@ -1522,27 +1509,39 @@ export default function ProductLinesPage() {
       return res.json();
     },
     onMutate: (args) => {
-      applyOptimisticMove(
+      applyOptimisticProductPageMove(
         args.productIds,
-        args.fromLineId,
         args.toLineId,
         args.mode,
       );
     },
     onSuccess: (result, args) => {
       const target = lines.find((l) => l.id === args.toLineId);
-      const verb = args.mode === "duplicate" ? "duplicated to" : "moved to";
+      const targetName = target?.name ?? "line";
+      const sourceName =
+        typeof args.fromLineId === "number"
+          ? lines.find((l) => l.id === args.fromLineId)?.name ?? "source"
+          : args.fromLineId === "unassigned"
+            ? "Unassigned"
+            : "existing line assignments";
+      const feedback = buildAssignmentFeedback({
+        result,
+        mode: args.mode,
+        requestedFallback: args.productIds.length,
+        targetName,
+        sourceName,
+      });
+      const verb = args.mode === "duplicate" ? "assigned to" : "moved to";
       toast({
-        title: `${args.productIds.length} product${
-          args.productIds.length === 1 ? "" : "s"
-        } ${verb} ${target?.name ?? "line"}`,
+        title: feedback.title,
+        description: feedback.description,
       });
       pushActivity(
         <>
-          {args.productIds.length} {verb} <strong>{target?.name}</strong>
+          {args.productIds.length} {verb} <strong>{targetName}</strong>
         </>,
       );
-      invalidateCore();
+      void invalidateCore();
       // Clear selection after a successful move
       if (args.mode === "move") {
         setSelectedIdsRaw(new Set());
@@ -1550,7 +1549,7 @@ export default function ProductLinesPage() {
     },
     onError: (err: Error) => {
       toast({ title: err.message, variant: "destructive" });
-      invalidateCore();
+      void invalidateCore();
     },
   });
 
@@ -1595,12 +1594,12 @@ export default function ProductLinesPage() {
         } unassigned`,
       });
       pushActivity(<>{productIds.length} unassigned</>);
-      invalidateCore();
+      void invalidateCore();
       setSelectedIdsRaw(new Set());
     },
     onError: (err: Error) => {
       toast({ title: err.message, variant: "destructive" });
-      invalidateCore();
+      void invalidateCore();
     },
   });
 
@@ -1705,7 +1704,7 @@ export default function ProductLinesPage() {
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
-            onClick={() => invalidateCore()}
+            onClick={() => void invalidateCore()}
             title="Reload"
           >
             <RefreshCw className="h-4 w-4 mr-2" /> Refresh
