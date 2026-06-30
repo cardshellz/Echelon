@@ -55,11 +55,11 @@ export interface CanonicalAuditResult {
 }
 
 const ACTIVE_LEGACY_SHIPMENT_FILTER = `
-  COALESCE(s.status, '') NOT IN ('cancelled', 'voided', 'returned')
+  COALESCE(s.status::text, '') NOT IN ('cancelled', 'voided', 'returned')
 `;
 
 const SHIPPED_LEGACY_SHIPMENT_FILTER = `
-  s.status = 'shipped'
+  s.status::text = 'shipped'
   AND NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '') IS NOT NULL
 `;
 

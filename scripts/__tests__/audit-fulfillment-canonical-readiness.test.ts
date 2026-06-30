@@ -78,6 +78,18 @@ describe("audit-fulfillment-canonical-readiness", () => {
     }
   });
 
+  it("casts shipment status enums to text before blank fallbacks", async () => {
+    const { buildCanonicalReadinessChecks } = await loadAuditModule();
+    const allSql = buildCanonicalReadinessChecks()
+      .map((check) => check.sql)
+      .join("\n");
+
+    expect(allSql).not.toContain("COALESCE(s.status, '')");
+    expect(allSql).not.toContain("s.status = 'shipped'");
+    expect(allSql).toContain("COALESCE(s.status::text, '')");
+    expect(allSql).toContain("s.status::text = 'shipped'");
+  });
+
   it("does not invent physical shipment identities from provider order ids", async () => {
     const { buildCanonicalReadinessChecks } = await loadAuditModule();
     const physicalIdentityChecks = buildCanonicalReadinessChecks()
