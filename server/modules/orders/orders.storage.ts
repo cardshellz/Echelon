@@ -11,6 +11,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../db";
 import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
+import { ValidationError } from "../../../shared/errors";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
@@ -923,7 +924,11 @@ export const orderMethods: IOrderStorage = {
     return result[0] || null;
   },
 
-  async releaseOrder(orderId: number, resetProgress: boolean = true): Promise<Order | null> {
+  async releaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order | null> {
+    if (resetProgress) {
+      throw new ValidationError("releaseOrder cannot reset pick progress; use forceReleaseOrder admin repair");
+    }
+
     const beforeOrder = await db.select().from(orders).where(eq(orders.id, orderId));
     console.log(`[RELEASE] Order ${orderId} before release:`, {
       warehouseStatus: beforeOrder[0]?.warehouseStatus,
@@ -937,11 +942,6 @@ export const orderMethods: IOrderStorage = {
       startedAt: null,
     };
     
-    if (resetProgress) {
-      orderUpdates.pickedCount = 0;
-      orderUpdates.completedAt = null;
-    }
-    
     const result = await db
       .update(orders)
       .set(orderUpdates)
@@ -953,17 +953,21 @@ export const orderMethods: IOrderStorage = {
       assignedPickerId: result[0]?.assignedPickerId
     });
     
-    if (resetProgress) {
-      await db
-        .update(orderItems)
-        .set({ status: "pending" as ItemStatus, pickedQuantity: 0, shortReason: null })
-        .where(eq(orderItems.orderId, orderId));
-    }
-    
     return result[0] || null;
   },
 
   async forceReleaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order | null> {
+    if (resetProgress) {
+      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
+      const pickedItem = items.find(item => (item.pickedQuantity || 0) > 0);
+      if (pickedItem) {
+        throw new ValidationError(
+          "Cannot reset pick progress after picking has started; use the explicit unpick workflow",
+          { orderId, orderItemId: pickedItem.id, pickedQuantity: pickedItem.pickedQuantity },
+        );
+      }
+    }
+
     const orderUpdates: any = {
       warehouseStatus: "ready" as OrderStatus,
       assignedPickerId: null,
