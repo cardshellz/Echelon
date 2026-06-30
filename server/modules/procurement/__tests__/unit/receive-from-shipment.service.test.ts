@@ -141,7 +141,7 @@ describe("createReceiptFromShipment", () => {
     expect(captured.lines[0]).toMatchObject({ purchaseOrderLineId: 300, expectedQty: 10 });
   });
 
-  it("does not choose inactive oversized variants when deriving a shipment receipt pack", async () => {
+  it("uses shipment carton count as expected qty when cartons imply an active receive pack", async () => {
     const { svc, captured } = build({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
         {
@@ -152,6 +152,98 @@ describe("createReceiptFromShipment", () => {
           sku: "SHLZ-TOP-TOB",
           qtyShipped: 5000,
           cartonCount: 10,
+        },
+      ]),
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 117,
+        poNumber: "PO-20260511-004",
+        vendorId: 2,
+        warehouseId: 1,
+        expectedDeliveryDate: null,
+        confirmedDeliveryDate: null,
+      }),
+      getPurchaseOrderLines: vi.fn().mockResolvedValue([
+        {
+          id: 176,
+          purchaseOrderId: 117,
+          productId: 1,
+          sku: "SHLZ-TOP-TOB",
+          productName: "2\"x3\" Tobacco/Mini Toploader - Blue UV Hint",
+          unitCostMills: 604,
+          unitCostCents: 6,
+        },
+      ]),
+      getProductVariantsByProductId: vi.fn().mockResolvedValue([
+        { id: 1, productId: 1, sku: "SHLZ-TOP-TOB-P25", name: "1 Pack of 25", unitsPerVariant: 25, isActive: true },
+        { id: 500, productId: 1, sku: "SHLZ-TOP-TOB-C500", name: "Case of 500", unitsPerVariant: 500, isActive: true },
+        { id: 2, productId: 1, sku: "SHLZ-TOP-TOB-C1000", name: "Case of 1000", unitsPerVariant: 1000, isActive: true },
+        { id: 213, productId: 1, sku: "SHLZ-TOP-TOB-SK100000", name: "Skid of 10000", unitsPerVariant: 10000, isActive: false },
+      ]),
+    });
+
+    await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 117 });
+
+    expect(captured.lines).toHaveLength(1);
+    expect(captured.lines[0]).toMatchObject({
+      purchaseOrderLineId: 176,
+      productVariantId: 500,
+      expectedQty: 10,
+    });
+  });
+
+  it("rejects shipment cartons when the implied receive pack has no active variant", async () => {
+    const { svc } = build({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        {
+          id: 132,
+          purchaseOrderLineId: 176,
+          purchaseOrderId: 117,
+          productVariantId: null,
+          sku: "SHLZ-TOP-TOB",
+          qtyShipped: 5000,
+          cartonCount: 10,
+        },
+      ]),
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 117,
+        poNumber: "PO-20260511-004",
+        vendorId: 2,
+        warehouseId: 1,
+        expectedDeliveryDate: null,
+        confirmedDeliveryDate: null,
+      }),
+      getPurchaseOrderLines: vi.fn().mockResolvedValue([
+        {
+          id: 176,
+          purchaseOrderId: 117,
+          productId: 1,
+          sku: "SHLZ-TOP-TOB",
+          productName: "2\"x3\" Tobacco/Mini Toploader - Blue UV Hint",
+          unitCostMills: 604,
+          unitCostCents: 6,
+        },
+      ]),
+      getProductVariantsByProductId: vi.fn().mockResolvedValue([
+        { id: 1, productId: 1, sku: "SHLZ-TOP-TOB-P25", name: "1 Pack of 25", unitsPerVariant: 25, isActive: true },
+        { id: 2, productId: 1, sku: "SHLZ-TOP-TOB-C1000", name: "Case of 1000", unitsPerVariant: 1000, isActive: true },
+        { id: 213, productId: 1, sku: "SHLZ-TOP-TOB-SK100000", name: "Skid of 10000", unitsPerVariant: 10000, isActive: false },
+      ]),
+    });
+
+    await expect(svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 117 }))
+      .rejects.toThrow(/units_per_variant=500/);
+  });
+
+  it("does not choose inactive oversized variants when no shipment carton pack exists", async () => {
+    const { svc, captured } = build({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        {
+          id: 132,
+          purchaseOrderLineId: 176,
+          purchaseOrderId: 117,
+          productVariantId: null,
+          sku: "SHLZ-TOP-TOB",
+          qtyShipped: 5000,
         },
       ]),
       getPurchaseOrderById: vi.fn().mockResolvedValue({
