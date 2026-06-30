@@ -2350,7 +2350,7 @@ function StoreConnectionOpsTab() {
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching stores" value={String(storeConnectionsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Ready stores" value={String(summary.ready)} />
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Live-ready stores" value={String(summary.ready)} />
         <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Needs setup" value={String(summary.setupIncomplete)} />
         <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Auth attention" value={String(summary.authAttention)} />
         <CatalogMetric icon={<MinusCircle className="h-4 w-4" />} label="Disabled" value={String(summary.disabled)} />
@@ -6749,11 +6749,12 @@ function StoreConnectionsTable({
             <TableHead>Owner</TableHead>
             <TableHead>Subscription</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Marketplace auth</TableHead>
-            <TableHead className="w-[190px]">Warehouse</TableHead>
-            <TableHead>Listing</TableHead>
-            <TableHead>Setup status</TableHead>
-            <TableHead className="w-[210px]">Actions</TableHead>
+            <TableHead>Store auth</TableHead>
+            <TableHead>Warehouse</TableHead>
+            <TableHead>Listing policy</TableHead>
+            <TableHead>Setup checks</TableHead>
+            <TableHead>Store gate</TableHead>
+            <TableHead className="w-[260px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -6781,12 +6782,12 @@ function StoreConnectionsTable({
                   {ownerDetail && <div className="text-xs text-muted-foreground">{ownerDetail}</div>}
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={subscriptionStatusTone(connection.vendor.entitlementStatus)}>
+                  <Badge variant="outline" className={storeConnectionBadgeClass(subscriptionStatusTone(connection.vendor.entitlementStatus))}>
                     {subscriptionStatusLabel(connection.vendor.entitlementStatus)}
                   </Badge>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
+                  <Badge variant="outline" className={storeConnectionBadgeClass(storeConnectionStatusTone(connection.status))}>
                     {formatStatus(connection.status)}
                   </Badge>
                 </TableCell>
@@ -6794,20 +6795,7 @@ function StoreConnectionsTable({
                   <StoreConnectionStatusPill item={buildStoreConnectionAuthJourney(connection)} />
                 </TableCell>
                 <TableCell>
-                  <div className="space-y-2">
-                    <StoreConnectionStatusPill item={buildStoreConnectionWarehouseJourney(connection)} />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-8 w-full gap-2"
-                      disabled={disabled || savingWarehouseConnectionId !== null}
-                      onClick={() => onOpenWarehouseConfig(connection)}
-                    >
-                      <Truck className={savingWarehouseConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                      {connection.orderProcessingConfig.defaultWarehouseId === null ? "Assign" : "Change"}
-                    </Button>
-                  </div>
+                  <StoreConnectionStatusPill item={buildStoreConnectionWarehouseJourney(connection)} />
                 </TableCell>
                 <TableCell>
                   <StoreConnectionStatusPill item={buildStoreConnectionListingJourney(connection)} />
@@ -6816,13 +6804,27 @@ function StoreConnectionsTable({
                   <StoreConnectionStatusPill item={buildStoreConnectionSetupJourney(connection)} />
                 </TableCell>
                 <TableCell>
-                  <div className="flex flex-col gap-2">
+                  <StoreConnectionStatusPill item={buildStoreConnectionGateJourney(connection)} />
+                </TableCell>
+                <TableCell>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2 px-3"
+                      disabled={disabled || savingWarehouseConnectionId !== null}
+                      onClick={() => onOpenWarehouseConfig(connection)}
+                    >
+                      <Truck className={savingWarehouseConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      {connection.orderProcessingConfig.defaultWarehouseId === null ? "Assign warehouse" : "Change warehouse"}
+                    </Button>
                     {canRepairShopifyWebhooks && (
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
-                        className="h-9 gap-2"
+                        className="h-8 gap-2 px-3"
                         disabled={repairingWebhookConnectionId !== null}
                         onClick={() => onRepairShopifyWebhooks(connection)}
                       >
@@ -6834,7 +6836,7 @@ function StoreConnectionsTable({
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-9 gap-2 border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                      className="h-8 gap-2 border-rose-200 px-3 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
                       disabled={disabled || disablingConnectionId !== null}
                       onClick={() => onDisableStoreConnection(connection)}
                     >
@@ -6853,11 +6855,16 @@ function StoreConnectionsTable({
 }
 
 function StoreConnectionStatusPill({ item }: { item: StoreConnectionJourneyItem }) {
+  const title = [item.label, item.value, item.detail].filter(Boolean).join(": ");
   return (
-    <div className={`rounded-md border px-3 py-2 ${storeConnectionJourneyTone(item.state)}`}>
-      <div className="text-sm font-semibold">{item.value}</div>
-      {item.detail && <div className="text-xs opacity-80">{item.detail}</div>}
-    </div>
+    <Badge
+      variant="outline"
+      className={storeConnectionBadgeClass(storeConnectionJourneyTone(item.state))}
+      title={title}
+      aria-label={title}
+    >
+      {item.value}
+    </Badge>
   );
 }
 
@@ -8245,8 +8252,8 @@ function buildStoreConnectionSummary(connections: DropshipAdminStoreConnectionLi
   disabled: number;
 } {
   return {
-    ready: connections.filter((connection) => connection.launchReady).length,
-    setupIncomplete: connections.filter((connection) => !connection.launchReady && !storeConnectionIsDisabled(connection)).length,
+    ready: connections.filter((connection) => buildStoreConnectionGateJourney(connection).state === "ready").length,
+    setupIncomplete: connections.filter((connection) => buildStoreConnectionGateJourney(connection).state !== "ready" && !storeConnectionIsDisabled(connection)).length,
     authAttention: connections.filter((connection) => !storeConnectionIsDisabled(connection) && storeConnectionNeedsAuthAttention(connection)).length,
     disabled: connections.filter((connection) => storeConnectionIsDisabled(connection)).length,
   };
@@ -8267,18 +8274,18 @@ function storeConnectionNeedsAuthAttention(connection: DropshipAdminStoreConnect
 
 function buildStoreConnectionAuthJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
   if (storeConnectionIsDisabled(connection)) {
-    return { key: "auth", label: "Auth", value: "Disabled", detail: "Authorization removed", state: "disabled" };
+    return { key: "auth", label: "Store auth", value: "Disabled", detail: "Authorization removed", state: "disabled" };
   }
   if (connection.status === "needs_reauth" || connection.status === "refresh_failed") {
-    return { key: "auth", label: "Auth", value: "Reconnect", detail: formatStatus(connection.status), state: "blocked" };
+    return { key: "auth", label: "Store auth", value: "Reconnect", detail: formatStatus(connection.status), state: "blocked" };
   }
   if (!connection.hasAccessToken) {
-    return { key: "auth", label: "Auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
+    return { key: "auth", label: "Store auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
   }
   if (connection.platform === "ebay" && !connection.hasRefreshToken) {
-    return { key: "auth", label: "Auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
+    return { key: "auth", label: "Store auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
   }
-  return { key: "auth", label: "Auth", value: "Authorized", state: "ready" };
+  return { key: "auth", label: "Store auth", value: "Authorized", detail: "Customer marketplace authorization is valid", state: "ready" };
 }
 
 function buildStoreConnectionSetupJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
@@ -8301,26 +8308,85 @@ function buildStoreConnectionSetupJourney(connection: DropshipAdminStoreConnecti
     };
   }
   if (connection.setupStatus === "ready") {
-    return { key: "setup", label: "Setup", value: "Ready", state: "ready" };
+    return { key: "setup", label: "Setup checks", value: "Passed", state: "ready" };
   }
-  return { key: "setup", label: "Setup", value: formatStatus(connection.setupStatus), state: "warning" };
+  return { key: "setup", label: "Setup checks", value: formatStatus(connection.setupStatus), state: "warning" };
 }
 
 function buildStoreConnectionWarehouseJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
   if (connection.orderProcessingConfig.defaultWarehouseId !== null) {
-    return { key: "warehouse", label: "Warehouse", value: "Set", state: "ready" };
+    return { key: "warehouse", label: "Warehouse", value: "Assigned", state: "ready" };
   }
   return { key: "warehouse", label: "Warehouse", value: "Missing", detail: "Order routing not assigned", state: "blocked" };
 }
 
 function buildStoreConnectionListingJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
   if (!connection.listingConfig.isConfigured) {
-    return { key: "listing", label: "Listing", value: "Missing", detail: "Push policy not configured", state: "blocked" };
+    return { key: "listing", label: "Listing policy", value: "Missing", detail: "Push policy not configured", state: "blocked" };
   }
   if (!connection.listingConfig.isActive) {
-    return { key: "listing", label: "Listing", value: "Inactive", detail: "Pushes disabled", state: "warning" };
+    return { key: "listing", label: "Listing policy", value: "Paused", detail: "Push policy disabled", state: "warning" };
   }
-  return { key: "listing", label: "Listing", value: "Ready", state: "ready" };
+  return { key: "listing", label: "Listing policy", value: "Active", detail: "Push policy enabled; not a live-listing coverage count", state: "ready" };
+}
+
+function buildStoreConnectionGateJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+
+  if (!storeConnectionSubscriptionCanOperate(connection)) {
+    blockers.push("subscription");
+  } else if (connection.vendor.entitlementStatus === "grace") {
+    warnings.push("subscription grace");
+  }
+
+  if (storeConnectionIsDisabled(connection)) {
+    blockers.push("store status");
+  } else if (storeConnectionNeedsAuthAttention(connection)) {
+    blockers.push("store auth");
+  }
+
+  if (connection.orderProcessingConfig.defaultWarehouseId === null) {
+    blockers.push("warehouse");
+  }
+
+  if (!connection.listingConfig.isConfigured || !connection.listingConfig.isActive) {
+    blockers.push("listing policy");
+  }
+
+  if (connection.setupCheckSummary.errorCount > 0 || connection.setupStatus !== "ready") {
+    blockers.push("setup checks");
+  } else if (connection.setupCheckSummary.warningCount > 0) {
+    warnings.push("setup warnings");
+  }
+
+  if (blockers.length > 0) {
+    return {
+      key: "gate",
+      label: "Store gate",
+      value: "Blocked",
+      detail: `Needs ${blockers.join(", ")}`,
+      state: "blocked",
+    };
+  }
+
+  if (warnings.length > 0) {
+    return {
+      key: "gate",
+      label: "Store gate",
+      value: "Warning",
+      detail: warnings.join(", "),
+      state: "warning",
+    };
+  }
+
+  return {
+    key: "gate",
+    label: "Store gate",
+    value: "Live-ready",
+    detail: "Subscription, auth, warehouse, listing policy, and setup checks are ready",
+    state: "ready",
+  };
 }
 
 function storeConnectionJourneyTone(state: StoreConnectionJourneyState): string {
@@ -8328,6 +8394,14 @@ function storeConnectionJourneyTone(state: StoreConnectionJourneyState): string 
   if (state === "warning") return "border-amber-200 bg-amber-50 text-amber-950";
   if (state === "blocked") return "border-rose-200 bg-rose-50 text-rose-900";
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function storeConnectionBadgeClass(tone: string): string {
+  return `inline-flex h-7 min-w-[72px] justify-center rounded-md px-3 text-xs font-medium ${tone}`;
+}
+
+function storeConnectionSubscriptionCanOperate(connection: DropshipAdminStoreConnectionListItem): boolean {
+  return connection.vendor.entitlementStatus === "active" || connection.vendor.entitlementStatus === "grace";
 }
 
 function subscriptionStatusLabel(status: string): string {
