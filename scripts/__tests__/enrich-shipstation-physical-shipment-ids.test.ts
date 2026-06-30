@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 async function loadModule() {
   process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
@@ -8,6 +8,10 @@ async function loadModule() {
 }
 
 describe("enrich-shipstation-physical-shipment-ids", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("parses flags with dry-run and bounded defaults", async () => {
     const { parseFlags } = await loadModule();
 
@@ -16,6 +20,8 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       mode: "dry-run",
       limit: 25,
       delayMs: 250,
+      requestTimeoutMs: 20000,
+      progressEvery: 25,
       orderNumber: null,
       wmsShipmentId: null,
       json: false,
@@ -25,6 +31,8 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       "--execute",
       "--limit=all",
       "--delay-ms=0",
+      "--request-timeout-ms=1234",
+      "--progress-every=10",
       "--order-number=#59453",
       "--wms-shipment-id=4313",
       "--json",
@@ -32,6 +40,8 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       mode: "execute",
       limit: null,
       delayMs: 0,
+      requestTimeoutMs: 1234,
+      progressEvery: 10,
       orderNumber: "#59453",
       wmsShipmentId: 4313,
       json: true,
@@ -44,6 +54,8 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(() => parseFlags(["--dry-run", "--execute"])).toThrow(/Cannot pass both/);
     expect(() => parseFlags(["--limit=0"])).toThrow(/positive integer or all/);
     expect(() => parseFlags(["--delay-ms=-1"])).toThrow(/non-negative integer/);
+    expect(() => parseFlags(["--request-timeout-ms=0"])).toThrow(/positive integer/);
+    expect(() => parseFlags(["--progress-every=-1"])).toThrow(/non-negative integer/);
     expect(() => parseFlags(["--order-number="])).toThrow(/cannot be blank/);
     expect(() => parseFlags(["--wms-shipment-id=abc"])).toThrow(/positive integer/);
     expect(() => parseFlags(["--bogus"])).toThrow(/Unknown flag/);
@@ -55,6 +67,30 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(shipStationShipmentExternalFulfillmentId(435425332)).toBe("shipstation_shipment:435425332");
     expect(shipStationShipmentExternalFulfillmentId(0)).toBeNull();
     expect(shipStationShipmentExternalFulfillmentId(1.5)).toBeNull();
+  });
+
+  it("aborts stalled ShipStation HTTP requests with a bounded error", async () => {
+    const { fetchShipStationJsonWithTimeout } = await loadModule();
+
+    vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) {
+        reject(new Error("missing abort signal"));
+        return;
+      }
+
+      signal.addEventListener("abort", () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        reject(err);
+      }, { once: true });
+    })));
+
+    await expect(fetchShipStationJsonWithTimeout(
+      "https://ssapi.shipstation.com/shipments",
+      "Basic test",
+      1,
+    )).rejects.toThrow(/timed out after 1ms/);
   });
 
   it("builds ShipStation shipment paths with includeShipmentItems=true", async () => {

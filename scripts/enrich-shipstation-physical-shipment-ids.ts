@@ -26,6 +26,8 @@ export interface Flags {
   mode: Mode;
   limit: number | null;
   delayMs: number;
+  requestTimeoutMs: number;
+  progressEvery: number;
   orderNumber: string | null;
   wmsShipmentId: number | null;
   json: boolean;
@@ -92,6 +94,8 @@ interface EnrichmentResult {
 
 const DEFAULT_LIMIT = 25;
 const DEFAULT_DELAY_MS = 250;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+const DEFAULT_PROGRESS_EVERY = 25;
 const DEFAULT_BASE_URL = "https://ssapi.shipstation.com";
 
 function usage(): string {
@@ -106,6 +110,8 @@ function usage(): string {
     "  --execute              Persist exact one-to-one matches.",
     "  --limit=N|all          Max WMS shipment rows to inspect. Default 25.",
     "  --delay-ms=N           Delay between ShipStation lookups. Default 250.",
+    "  --request-timeout-ms=N Abort each ShipStation HTTP request after N ms. Default 20000.",
+    "  --progress-every=N     Print aggregate progress every N rows. Use 0 to disable. Default 25.",
     "  --order-number=TEXT    Restrict to one WMS order number.",
     "  --wms-shipment-id=N    Restrict to one WMS outbound shipment id.",
     "  --json                 Print machine-readable JSON summary.",
@@ -122,7 +128,7 @@ export function parseFlags(argv: string[]): Flags {
     throw new Error("Cannot pass both --execute and --dry-run");
   }
 
-  const knownFlag = /^(--help|-h|--dry-run|--execute|--limit=|--delay-ms=|--order-number=|--wms-shipment-id=|--json$)/;
+  const knownFlag = /^(--help|-h|--dry-run|--execute|--limit=|--delay-ms=|--request-timeout-ms=|--progress-every=|--order-number=|--wms-shipment-id=|--json$)/;
   const unknown = argv.find((arg) => !knownFlag.test(arg));
   if (unknown) {
     throw new Error(`Unknown flag: ${unknown}`);
@@ -130,6 +136,16 @@ export function parseFlags(argv: string[]): Flags {
 
   const limit = parseOptionalPositiveIntegerFlag(argv, "--limit=", DEFAULT_LIMIT, true);
   const delayMs = parseOptionalNonnegativeIntegerFlag(argv, "--delay-ms=", DEFAULT_DELAY_MS);
+  const requestTimeoutMs = parseOptionalPositiveIntegerFlag(
+    argv,
+    "--request-timeout-ms=",
+    DEFAULT_REQUEST_TIMEOUT_MS,
+    false,
+  );
+  if (requestTimeoutMs == null) {
+    throw new Error("--request-timeout-ms must be a positive integer");
+  }
+  const progressEvery = parseOptionalNonnegativeIntegerFlag(argv, "--progress-every=", DEFAULT_PROGRESS_EVERY);
   const orderNumberArg = argv.find((arg) => arg.startsWith("--order-number="));
   const orderNumber = orderNumberArg == null ? null : orderNumberArg.slice("--order-number=".length).trim();
   if (orderNumber !== null && orderNumber.length === 0) {
@@ -143,6 +159,8 @@ export function parseFlags(argv: string[]): Flags {
     mode: execute ? "execute" : "dry-run",
     limit,
     delayMs,
+    requestTimeoutMs,
+    progressEvery,
     orderNumber,
     wmsShipmentId,
     json,
@@ -367,9 +385,46 @@ function shipStationAuthHeaderFromEnv(): string {
   return `Basic ${Buffer.from(`${apiKey}:${apiSecret}`).toString("base64")}`;
 }
 
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
+export async function fetchShipStationJsonWithTimeout<T>(
+  url: string,
+  authHeader: string,
+  requestTimeoutMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      signal: controller.signal,
+      headers: {
+        Authorization: authHeader,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`ShipStation GET ${url} failed ${res.status}: ${text.slice(0, 500)}`);
+    }
+    return await res.json() as T;
+  } catch (err) {
+    if (isAbortError(err)) {
+      throw new Error(`ShipStation GET ${url} timed out after ${requestTimeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function fetchShipStationShipmentsByOrder(
   candidate: CandidateRow,
   authHeader: string,
+  requestTimeoutMs: number,
 ): Promise<ShipStationShipmentCandidate[]> {
   const baseUrl = process.env.SHIPSTATION_API_BASE_URL || DEFAULT_BASE_URL;
   const urls = [
@@ -381,18 +436,11 @@ async function fetchShipStationShipmentsByOrder(
 
   const shipments: ShipStationShipmentCandidate[] = [];
   for (const url of urls) {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: authHeader,
-        "Content-Type": "application/json",
-      },
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`ShipStation GET ${url} failed ${res.status}: ${text.slice(0, 500)}`);
-    }
-    const body = await res.json() as { shipments?: ShipStationShipmentCandidate[] };
+    const body = await fetchShipStationJsonWithTimeout<{ shipments?: ShipStationShipmentCandidate[] }>(
+      url,
+      authHeader,
+      requestTimeoutMs,
+    );
     shipments.push(...(Array.isArray(body.shipments) ? body.shipments : []));
   }
 
@@ -495,6 +543,44 @@ function summarizeOutcomes(runId: string, mode: Mode, outcomes: CandidateOutcome
   };
 }
 
+function printCandidateLookup(index: number, total: number, candidate: CandidateRow): void {
+  console.log(
+    `[ShipStation physical id enrich] LOOKUP ${index}/${total} wms=${candidate.legacy_shipment_id} ` +
+    `order=${candidate.order_number ?? "unknown"} ssOrder=${candidate.shipstation_order_id} ` +
+    `tracking=${candidate.tracking_number}`,
+  );
+}
+
+function shouldPrintProgress(progressEvery: number, processed: number, total: number): boolean {
+  return progressEvery > 0 && (processed % progressEvery === 0 || processed === total);
+}
+
+function printProgress(
+  runId: string,
+  mode: Mode,
+  outcomes: CandidateOutcome[],
+  errors: number,
+  total: number,
+  startedAtMs: number,
+): void {
+  const summary = summarizeOutcomes(runId, mode, outcomes, errors);
+  console.log(
+    `[ShipStation physical id enrich] PROGRESS ${JSON.stringify({
+      runId,
+      processed: summary.candidates,
+      total,
+      matched: summary.matched,
+      updated: summary.updated,
+      noMatch: summary.noMatch,
+      ambiguous: summary.ambiguous,
+      invalidCandidate: summary.invalidCandidate,
+      updateSkipped: summary.updateSkipped,
+      errors: summary.errors,
+      elapsedMs: Date.now() - startedAtMs,
+    })}`,
+  );
+}
+
 function sleep(delayMs: number): Promise<void> {
   return delayMs <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, delayMs));
 }
@@ -509,13 +595,18 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
   const runId = crypto.randomUUID();
   const outcomes: CandidateOutcome[] = [];
   let errors = 0;
+  const startedAtMs = Date.now();
 
   try {
     const candidates = await fetchCandidates(pool, flags);
     for (let index = 0; index < candidates.length; index += 1) {
       const candidate = candidates[index];
+      if (!flags.json) {
+        printCandidateLookup(index + 1, candidates.length, candidate);
+      }
+
       try {
-        const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader);
+        const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags.requestTimeoutMs);
         const decision = decideShipStationPhysicalMatch(candidate, shipments);
         let updated = false;
         let updateSkippedReason: string | null = null;
@@ -550,6 +641,10 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
         if (!flags.json) printOutcome(outcome, flags.mode);
       }
 
+      if (!flags.json && shouldPrintProgress(flags.progressEvery, index + 1, candidates.length)) {
+        printProgress(runId, flags.mode, outcomes, errors, candidates.length, startedAtMs);
+      }
+
       if (index < candidates.length - 1) {
         await sleep(flags.delayMs);
       }
@@ -571,6 +666,7 @@ async function main(): Promise<void> {
   if (!flags.json) {
     console.log(
       `[ShipStation physical id enrich] mode=${flags.mode} limit=${flags.limit ?? "all"} delayMs=${flags.delayMs}` +
+      ` requestTimeoutMs=${flags.requestTimeoutMs} progressEvery=${flags.progressEvery}` +
       `${flags.orderNumber ? ` orderNumber=${flags.orderNumber}` : ""}` +
       `${flags.wmsShipmentId ? ` wmsShipmentId=${flags.wmsShipmentId}` : ""}`,
     );
