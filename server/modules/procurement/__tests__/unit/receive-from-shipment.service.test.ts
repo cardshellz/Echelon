@@ -44,6 +44,8 @@ function build(overrides: Record<string, any> = {}) {
     generateReceiptNumber: vi.fn().mockResolvedValue("RCV-TEST-001"),
     createReceivingOrder: vi.fn(async (o: any) => { captured.order = o; return { id: 999, ...o }; }),
     bulkCreateReceivingLines: vi.fn(async (l: any) => { captured.lines = l; return l; }),
+    getReceivingLines: vi.fn().mockResolvedValue([{ id: 1, receivingOrderId: 555 }]),
+    deleteReceivingOrder: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
   const svc = createPurchasingService(db, storage as any);
@@ -82,6 +84,27 @@ describe("createReceiptFromShipment", () => {
     const order: any = await svc.createReceiptFromShipment(84, "u1");
     expect(order).toMatchObject({ id: 555, reusedExisting: true });
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse an active shipment receipt that has no lines", async () => {
+    const existing = { id: 556, status: "draft", inboundShipmentId: 84, purchaseOrderId: 140 };
+    const { svc, storage } = build({
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([existing]),
+      getReceivingLines: vi.fn().mockResolvedValue([]),
+    });
+
+    await expect(svc.createReceiptFromShipment(84, "u1"))
+      .rejects.toMatchObject({
+        statusCode: 409,
+        details: {
+          code: "EMPTY_SHIPMENT_RECEIPT",
+          receivingOrderId: 556,
+          purchaseOrderId: 140,
+          inboundShipmentId: 84,
+        },
+      });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+    expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
   });
 
   it("rejects receiving a shipment that isn't physically here yet", async () => {
@@ -192,7 +215,7 @@ describe("createReceiptFromShipment", () => {
   });
 
   it("rejects shipment cartons when the implied receive pack has no active variant", async () => {
-    const { svc } = build({
+    const { svc, storage } = build({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
         {
           id: 132,
@@ -232,6 +255,8 @@ describe("createReceiptFromShipment", () => {
 
     await expect(svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 117 }))
       .rejects.toThrow(/units_per_variant=500/);
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+    expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
   });
 
   it("reports unresolved shipment receipt packs before receipt creation", async () => {
@@ -434,5 +459,37 @@ describe("createReceiptFromShipment", () => {
       freightWillCarry: true,
       actualTotalCostCents: 12345,
     });
+  });
+
+  it("reports empty active shipment receipts as repairable receive options", async () => {
+    const { svc } = build({
+      getInboundShipmentById: vi.fn().mockResolvedValue({
+        id: 84,
+        shipmentNumber: "SHP-84",
+        status: "closed",
+        actualTotalCostCents: 12345,
+      }),
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([
+        { id: 556, status: "draft", inboundShipmentId: 84, purchaseOrderId: 140 },
+      ]),
+      getReceivingLines: vi.fn().mockResolvedValue([]),
+    });
+
+    const options: any = await svc.getPurchaseOrderReceiveOptions(140);
+
+    expect(options.shipmentOptions).toHaveLength(1);
+    expect(options.shipmentOptions[0]).toMatchObject({
+      shipmentId: 84,
+      shipmentNumber: "SHP-84",
+      status: "closed",
+      purchaseOrderId: 140,
+      receivable: false,
+      action: "repair_empty_receipt",
+      existingReceiptId: 556,
+      existingReceiptStatus: "draft",
+      existingReceiptLineCount: 0,
+      freightWillCarry: false,
+    });
+    expect(options.shipmentOptions[0].reason).toMatch(/no lines/i);
   });
 });

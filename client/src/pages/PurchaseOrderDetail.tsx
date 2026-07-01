@@ -1310,6 +1310,42 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  const cleanupEmptyShipmentReceiptMutation = useMutation({
+    mutationFn: async ({
+      receiptId,
+    }: {
+      receiptId: number;
+      shipmentId: number;
+      purchaseOrderId: number;
+    }) => {
+      const res = await fetch(`/api/receiving-orders/${receiptId}/discard`, {
+        method: "DELETE",
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Failed to clean up empty receipt");
+      return body;
+    },
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/receiving"] }),
+      ]);
+      toast({
+        title: "Empty receipt cleaned up",
+        description: "Rechecking this shipment before creating a new receipt.",
+      });
+      checkAndReceiveShipment({
+        shipmentId: variables.shipmentId,
+        purchaseOrderId: variables.purchaseOrderId,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
     const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
     const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
@@ -4151,7 +4187,44 @@ export default function PurchaseOrderDetail() {
             const receivableShipments = shipmentOptions.filter((s: any) => s.receivable);
             const blockedShipments = shipmentOptions.filter((s: any) => !s.receivable);
             const poDirect = receiveOptions?.poDirect ?? { allowed: true, warning: "No receive options loaded." };
-            const busy = createReceiptMutation.isPending || createReceiptFromShipmentMutation.isPending || checkingShipmentReceiptPacks;
+            const busy =
+              createReceiptMutation.isPending ||
+              createReceiptFromShipmentMutation.isPending ||
+              cleanupEmptyShipmentReceiptMutation.isPending ||
+              checkingShipmentReceiptPacks;
+            const renderBlockedShipment = (s: any) => {
+              const cleaningThisReceipt =
+                cleanupEmptyShipmentReceiptMutation.isPending &&
+                cleanupEmptyShipmentReceiptMutation.variables?.receiptId === s.existingReceiptId;
+              return (
+                <div key={s.shipmentId} className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="font-mono text-sm font-medium flex items-center gap-1.5">
+                        <Ship className="h-4 w-4 text-amber-700" /> {s.shipmentNumber || `Shipment #${s.shipmentId}`}
+                      </div>
+                      <div className="mt-1 text-xs text-amber-800">
+                        {s.reason || "This shipment is blocked from receiving."}
+                      </div>
+                    </div>
+                    {s.action === "repair_empty_receipt" && s.existingReceiptId ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => cleanupEmptyShipmentReceiptMutation.mutate({
+                          receiptId: s.existingReceiptId,
+                          shipmentId: s.shipmentId,
+                          purchaseOrderId: s.purchaseOrderId,
+                        })}
+                      >
+                        {cleaningThisReceipt ? "Cleaning..." : "Clean up and continue"}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            };
             return (
               <div className="space-y-3">
                 {receivableShipments.length > 0 ? (
@@ -4192,11 +4265,7 @@ export default function PurchaseOrderDetail() {
                         </Button>
                       </div>
                     ))}
-                    {blockedShipments.length > 0 && (
-                      <div className="rounded-lg border p-3 text-xs text-muted-foreground">
-                        {blockedShipments.length} linked shipment{blockedShipments.length === 1 ? "" : "s"} not currently receivable.
-                      </div>
-                    )}
+                    {blockedShipments.map(renderBlockedShipment)}
                     <div className="rounded-lg border p-3">
                       <div className="font-medium text-sm flex items-center gap-1.5">
                         <FileText className="h-4 w-4 text-muted-foreground" /> Receive against the PO directly
@@ -4214,6 +4283,7 @@ export default function PurchaseOrderDetail() {
                   </>
                 ) : (
                   <>
+                    {blockedShipments.map(renderBlockedShipment)}
                     <div className="rounded-lg border p-3">
                       <div className="font-medium text-sm">Receive against the PO directly</div>
                       <div className="text-xs text-muted-foreground mt-1">
