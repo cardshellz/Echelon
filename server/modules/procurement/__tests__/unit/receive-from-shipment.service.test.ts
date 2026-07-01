@@ -8,6 +8,41 @@ import { createPurchasingService } from "../../purchasing.service";
 // product's largest pack), with cost stamped from the PO line.
 // ─────────────────────────────────────────────────────────────────────────────
 
+function sqlToStr(query: any): string {
+  if (Array.isArray(query?.queryChunks)) {
+    return query.queryChunks
+      .map((chunk: any) => (Array.isArray(chunk.value) ? chunk.value.join("") : ""))
+      .join(" ")
+      .toLowerCase();
+  }
+  return String(query?.sql ?? query ?? "").toLowerCase();
+}
+
+function shipmentReceiptDbRows(input: {
+  posting?: Record<string, unknown>;
+  coverage?: Array<Record<string, unknown>>;
+} = {}) {
+  return vi.fn(async (query: any) => {
+    const text = sqlToStr(query);
+    if (text.includes("received_base_qty")) {
+      return { rows: input.coverage ?? [] };
+    }
+    if (text.includes("as line_count") && text.includes("po_receipt_count")) {
+      return {
+        rows: [input.posting ?? {
+          line_count: 2,
+          expected_qty: 5,
+          received_qty: 5,
+          po_receipt_count: 1,
+          inventory_lot_count: 1,
+          inventory_transaction_count: 1,
+        }],
+      };
+    }
+    return { rows: [] };
+  });
+}
+
 function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, any> = {}) {
   const captured: { order: any; lines: any } = { order: null, lines: null };
   const db: any = {
@@ -430,10 +465,41 @@ describe("createReceiptFromShipment", () => {
       getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([
         { id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 },
       ]),
+    }, {
+      execute: shipmentReceiptDbRows({
+        coverage: [
+          { purchase_order_line_id: 228, received_base_qty: 20 },
+          { purchase_order_line_id: 229, received_base_qty: 150 },
+        ],
+      }),
     });
 
     await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/already been received/);
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("creates a follow-up shipment receipt only for remaining short-received shipment quantity", async () => {
+    const { svc, captured } = build({
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([
+        { id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 },
+      ]),
+    }, {
+      execute: shipmentReceiptDbRows({
+        coverage: [
+          { purchase_order_line_id: 228, received_base_qty: 10 },
+          { purchase_order_line_id: 229, received_base_qty: 150 },
+        ],
+      }),
+    });
+
+    await svc.createReceiptFromShipment(84, "u1");
+
+    expect(captured.lines).toHaveLength(1);
+    expect(captured.lines[0]).toMatchObject({
+      purchaseOrderLineId: 228,
+      productVariantId: 469,
+      expectedQty: 1,
+    });
   });
 
   it("reports closed zero-post shipment receipts as voidable receive options", async () => {
@@ -448,15 +514,15 @@ describe("createReceiptFromShipment", () => {
         { id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 },
       ]),
     }, {
-      execute: vi.fn().mockResolvedValue({
-        rows: [{
+      execute: shipmentReceiptDbRows({
+        posting: {
           line_count: 2,
           expected_qty: 15,
           received_qty: 0,
           po_receipt_count: 0,
           inventory_lot_count: 0,
           inventory_transaction_count: 0,
-        }],
+        },
       }),
     });
 
@@ -478,21 +544,60 @@ describe("createReceiptFromShipment", () => {
     expect(options.shipmentOptions[0].reason).toMatch(/zero received quantity/i);
   });
 
+  it("reports closed short shipment receipts as receivable for remaining quantity", async () => {
+    const { svc } = build({
+      getInboundShipmentById: vi.fn().mockResolvedValue({
+        id: 84,
+        shipmentNumber: "SHP-84",
+        status: "closed",
+        actualTotalCostCents: 12345,
+      }),
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([
+        { id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 },
+      ]),
+    }, {
+      execute: shipmentReceiptDbRows({
+        coverage: [
+          { purchase_order_line_id: 228, received_base_qty: 10 },
+          { purchase_order_line_id: 229, received_base_qty: 150 },
+        ],
+      }),
+    });
+
+    const options: any = await svc.getPurchaseOrderReceiveOptions(140);
+
+    expect(options.shipmentOptions).toHaveLength(1);
+    expect(options.shipmentOptions[0]).toMatchObject({
+      shipmentId: 84,
+      shipmentNumber: "SHP-84",
+      status: "closed",
+      purchaseOrderId: 140,
+      receivable: true,
+      action: "create_receipt",
+      existingReceiptId: 555,
+      existingReceiptStatus: "closed",
+      receivedBaseQty: 160,
+      remainingBaseQty: 10,
+      freightWillCarry: true,
+    });
+    expect(options.shipmentOptions[0].reason).toMatch(/prior shipment receipt was short/i);
+  });
+
   it("does not create over a closed zero-post shipment receipt until it is voided", async () => {
     const { svc, storage } = build({
       getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([
         { id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 },
       ]),
     }, {
-      execute: vi.fn().mockResolvedValue({
-        rows: [{
+      execute: shipmentReceiptDbRows({
+        posting: {
           line_count: 2,
           expected_qty: 15,
           received_qty: 0,
           po_receipt_count: 0,
           inventory_lot_count: 0,
           inventory_transaction_count: 0,
-        }],
+        },
       }),
     });
 

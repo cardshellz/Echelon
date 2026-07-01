@@ -256,6 +256,62 @@ describe("ReceivingService - close reconciliation semantics", () => {
       message: "PO reconcile failed",
     }));
   });
+
+  it("finalizes shipment receipt line statuses from received quantity on close", async () => {
+    const order = {
+      id: 11,
+      status: "open",
+      sourceType: "shipment",
+      receiptNumber: "RCV-11",
+      inboundShipmentId: 84,
+    };
+    const lines = [
+      { id: 701, expectedQty: 10, receivedQty: 4, productVariantId: 5, putawayLocationId: 12, status: "partial" },
+      { id: 702, expectedQty: 5, receivedQty: 0, productVariantId: 6, putawayLocationId: 13, status: "pending" },
+      { id: 703, expectedQty: 3, receivedQty: 3, productVariantId: 7, putawayLocationId: 14, status: "complete" },
+    ];
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [{ units_per_variant: 1 }] }) };
+    const mockStorage = {
+      getReceivingOrderById: vi.fn().mockResolvedValue(order),
+      getReceivingLines: vi.fn()
+        .mockResolvedValueOnce(lines)
+        .mockResolvedValueOnce([
+          { ...lines[0], status: "short" },
+          { ...lines[1], status: "short" },
+          { ...lines[2], status: "complete" },
+        ]),
+      updateReceivingLine: vi.fn().mockResolvedValue({}),
+      updateReceivingOrder: vi.fn().mockResolvedValue({
+        ...order,
+        status: "closed",
+        receivedLineCount: 2,
+        receivedTotalUnits: 7,
+      }),
+    };
+    const db = {
+      transaction: vi.fn(async (fn) => fn(tx)),
+    };
+    const inventoryCore = { receiveInventory: vi.fn().mockResolvedValue(undefined) };
+    const channelSync = { queueSyncAfterInventoryChange: vi.fn().mockResolvedValue(undefined) };
+    const service = new ReceivingService(
+      db as any,
+      inventoryCore as any,
+      channelSync as any,
+      mockStorage as any,
+    );
+
+    const result = await service.close(11, "user-1");
+
+    expect(inventoryCore.receiveInventory).toHaveBeenCalledTimes(2);
+    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(701, expect.objectContaining({ status: "short" }), tx);
+    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(702, { status: "short" }, tx);
+    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(703, expect.objectContaining({ status: "complete" }), tx);
+    expect(result).toMatchObject({
+      success: true,
+      linesProcessed: 2,
+      unitsReceived: 7,
+    });
+  });
 });
 
 describe("ReceivingService - zero-post closed receipt recovery", () => {
