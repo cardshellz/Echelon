@@ -156,6 +156,26 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     )).rejects.toBeInstanceOf(ShipStationHttpError);
   });
 
+  it("opens the run-level rate-limit circuit after total 429 responses", async () => {
+    const {
+      createShipStationRateLimitCircuit,
+      recordShipStationRateLimitResponse,
+    } = await loadModule();
+
+    const circuit = createShipStationRateLimitCircuit();
+    expect(recordShipStationRateLimitResponse(circuit, 3)).toBeNull();
+    expect(recordShipStationRateLimitResponse(circuit, 3)).toBeNull();
+    expect(recordShipStationRateLimitResponse(circuit, 3))
+      .toBe("stopped after 3 ShipStation 429 responses during this run");
+    expect(circuit).toMatchObject({
+      rateLimitResponses: 3,
+      stoppedEarlyReason: "stopped after 3 ShipStation 429 responses during this run",
+    });
+    expect(recordShipStationRateLimitResponse(circuit, 3))
+      .toBe("stopped after 3 ShipStation 429 responses during this run");
+    expect(circuit.rateLimitResponses).toBe(4);
+  });
+
   it("builds ShipStation shipment paths with includeShipmentItems=true", async () => {
     const { buildShipStationShipmentsPath, buildShipStationShipmentsUrl } = await loadModule();
 

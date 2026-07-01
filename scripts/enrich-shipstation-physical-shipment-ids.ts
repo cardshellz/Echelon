@@ -89,6 +89,11 @@ interface ProcessedCandidate {
   providerStatus: number | null;
 }
 
+export interface ShipStationRateLimitCircuit {
+  rateLimitResponses: number;
+  stoppedEarlyReason: string | null;
+}
+
 interface EnrichmentResult {
   runId: string;
   mode: Mode;
@@ -101,6 +106,7 @@ interface EnrichmentResult {
   lookupErrors: number;
   updateSkipped: number;
   errors: number;
+  rateLimitResponses: number;
   stoppedEarlyReason: string | null;
   outcomes: CandidateOutcome[];
 }
@@ -133,7 +139,7 @@ function usage(): string {
     "  --request-timeout-ms=N Abort each ShipStation HTTP request after N ms. Default 20000.",
     "  --max-retries=N        Retry transient ShipStation lookup failures N times. Default 3.",
     "  --retry-base-delay-ms=N Base exponential retry delay. Default 2000, max delay 60000.",
-    "  --max-rate-limit-errors=N Stop after N consecutive exhausted 429 lookups. Default 25; 0 disables.",
+    "  --max-rate-limit-errors=N Stop after N ShipStation 429 responses during the run. Default 25; 0 disables.",
     "  --progress-every=N     Print aggregate progress every N rows. Use 0 to disable. Default 25.",
     "  --order-number=TEXT    Restrict to one WMS order number.",
     "  --wms-shipment-id=N    Restrict to one WMS outbound shipment id.",
@@ -478,6 +484,15 @@ export class ShipStationTimeoutError extends Error {
   }
 }
 
+export class ShipStationRateLimitCircuitOpenError extends Error {
+  readonly providerStatus = 429;
+
+  constructor(reason: string) {
+    super(reason);
+    this.name = "ShipStationRateLimitCircuitOpenError";
+  }
+}
+
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
@@ -510,7 +525,35 @@ function isRetryableShipStationLookupError(err: unknown): boolean {
 }
 
 function providerStatusFromError(err: unknown): number | null {
+  if (err instanceof ShipStationRateLimitCircuitOpenError) return err.providerStatus;
   return err instanceof ShipStationHttpError ? err.status : null;
+}
+
+function isShipStationRateLimitError(err: unknown): boolean {
+  return err instanceof ShipStationHttpError && err.status === 429;
+}
+
+export function createShipStationRateLimitCircuit(): ShipStationRateLimitCircuit {
+  return {
+    rateLimitResponses: 0,
+    stoppedEarlyReason: null,
+  };
+}
+
+export function recordShipStationRateLimitResponse(
+  circuit: ShipStationRateLimitCircuit,
+  maxRateLimitErrors: number,
+): string | null {
+  circuit.rateLimitResponses += 1;
+  if (
+    circuit.stoppedEarlyReason === null &&
+    maxRateLimitErrors > 0 &&
+    circuit.rateLimitResponses >= maxRateLimitErrors
+  ) {
+    circuit.stoppedEarlyReason =
+      `stopped after ${circuit.rateLimitResponses} ShipStation 429 responses during this run`;
+  }
+  return circuit.stoppedEarlyReason;
 }
 
 function retryDelayMs(err: unknown, retryIndex: number, baseDelayMs: number): number {
@@ -564,12 +607,24 @@ export async function fetchShipStationJsonWithTimeout<T>(
 async function fetchShipStationJsonWithRetries<T>(
   url: string,
   authHeader: string,
-  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "json">,
+  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "maxRateLimitErrors" | "json">,
+  rateLimitCircuit: ShipStationRateLimitCircuit,
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
+    if (rateLimitCircuit.stoppedEarlyReason !== null) {
+      throw new ShipStationRateLimitCircuitOpenError(rateLimitCircuit.stoppedEarlyReason);
+    }
+
     try {
       return await fetchShipStationJsonWithTimeout<T>(url, authHeader, flags.requestTimeoutMs);
     } catch (err) {
+      if (isShipStationRateLimitError(err)) {
+        const stopReason = recordShipStationRateLimitResponse(rateLimitCircuit, flags.maxRateLimitErrors);
+        if (stopReason !== null) {
+          throw new ShipStationRateLimitCircuitOpenError(stopReason);
+        }
+      }
+
       if (attempt >= flags.maxRetries || !isRetryableShipStationLookupError(err)) {
         throw err;
       }
@@ -589,7 +644,8 @@ async function fetchShipStationJsonWithRetries<T>(
 async function fetchShipStationShipmentsByOrder(
   candidate: CandidateRow,
   authHeader: string,
-  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "json">,
+  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "maxRateLimitErrors" | "json">,
+  rateLimitCircuit: ShipStationRateLimitCircuit,
 ): Promise<ShipStationShipmentCandidate[]> {
   const baseUrl = process.env.SHIPSTATION_API_BASE_URL || DEFAULT_BASE_URL;
   const urls = [
@@ -605,6 +661,7 @@ async function fetchShipStationShipmentsByOrder(
       url,
       authHeader,
       flags,
+      rateLimitCircuit,
     );
     shipments.push(...(Array.isArray(body.shipments) ? body.shipments : []));
   }
@@ -698,6 +755,7 @@ function summarizeOutcomes(
   mode: Mode,
   outcomes: CandidateOutcome[],
   errors: number,
+  rateLimitResponses: number,
   stoppedEarlyReason: string | null = null,
 ): EnrichmentResult {
   return {
@@ -712,6 +770,7 @@ function summarizeOutcomes(
     lookupErrors: outcomes.filter((outcome) => outcome.decision.kind === "lookup_error").length,
     updateSkipped: outcomes.filter((outcome) => outcome.updateSkippedReason !== null).length,
     errors,
+    rateLimitResponses,
     stoppedEarlyReason,
     outcomes,
   };
@@ -722,9 +781,10 @@ async function enrichCandidate(
   candidate: CandidateRow,
   authHeader: string,
   flags: Flags,
+  rateLimitCircuit: ShipStationRateLimitCircuit,
 ): Promise<ProcessedCandidate> {
   try {
-    const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags);
+    const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags, rateLimitCircuit);
     const decision = decideShipStationPhysicalMatch(candidate, shipments);
     let updated = false;
     let updateSkippedReason: string | null = null;
@@ -790,10 +850,11 @@ function printProgress(
   mode: Mode,
   outcomes: CandidateOutcome[],
   errors: number,
+  rateLimitResponses: number,
   total: number,
   startedAtMs: number,
 ): void {
-  const summary = summarizeOutcomes(runId, mode, outcomes, errors);
+  const summary = summarizeOutcomes(runId, mode, outcomes, errors, rateLimitResponses);
   console.log(
     `[ShipStation physical id enrich] PROGRESS ${JSON.stringify({
       runId,
@@ -805,6 +866,7 @@ function printProgress(
       ambiguous: summary.ambiguous,
       invalidCandidate: summary.invalidCandidate,
       lookupErrors: summary.lookupErrors,
+      rateLimitResponses: summary.rateLimitResponses,
       updateSkipped: summary.updateSkipped,
       errors: summary.errors,
       elapsedMs: Date.now() - startedAtMs,
@@ -827,8 +889,7 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
   const outcomes: CandidateOutcome[] = [];
   let errors = 0;
   const startedAtMs = Date.now();
-  let stoppedEarlyReason: string | null = null;
-  let consecutiveRateLimitErrors = 0;
+  const rateLimitCircuit = createShipStationRateLimitCircuit();
 
   try {
     const candidates = await fetchCandidates(pool, flags);
@@ -839,7 +900,7 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
     const workerCount = Math.min(flags.concurrency, candidates.length);
     const worker = async (): Promise<void> => {
       while (true) {
-        if (stoppedEarlyReason !== null) return;
+        if (rateLimitCircuit.stoppedEarlyReason !== null) return;
         const index = nextIndex;
         nextIndex += 1;
         if (index >= candidates.length) return;
@@ -849,31 +910,28 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
           printCandidateLookup(index + 1, candidates.length, candidate);
         }
 
-        const processedCandidate = await enrichCandidate(pool, candidate, authHeader, flags);
+        const processedCandidate = await enrichCandidate(pool, candidate, authHeader, flags, rateLimitCircuit);
         outcomesByIndex[index] = processedCandidate.outcome;
         if (processedCandidate.error) errors += 1;
-        if (processedCandidate.providerStatus === 429) {
-          consecutiveRateLimitErrors += 1;
-        } else {
-          consecutiveRateLimitErrors = 0;
-        }
         outcomes.push(processedCandidate.outcome);
         processed += 1;
 
         if (!flags.json) printOutcome(processedCandidate.outcome, flags.mode);
         if (!flags.json && shouldPrintProgress(flags.progressEvery, processed, candidates.length)) {
-          printProgress(runId, flags.mode, outcomes, errors, candidates.length, startedAtMs);
+          printProgress(
+            runId,
+            flags.mode,
+            outcomes,
+            errors,
+            rateLimitCircuit.rateLimitResponses,
+            candidates.length,
+            startedAtMs,
+          );
         }
 
-        if (
-          stoppedEarlyReason === null &&
-          flags.maxRateLimitErrors > 0 &&
-          consecutiveRateLimitErrors >= flags.maxRateLimitErrors
-        ) {
-          stoppedEarlyReason =
-            `stopped after ${consecutiveRateLimitErrors} consecutive exhausted ShipStation 429 lookup errors`;
+        if (rateLimitCircuit.stoppedEarlyReason !== null) {
           if (!flags.json) {
-            console.error(`[ShipStation physical id enrich] STOP ${stoppedEarlyReason}`);
+            console.error(`[ShipStation physical id enrich] STOP ${rateLimitCircuit.stoppedEarlyReason}`);
           }
           return;
         }
@@ -886,7 +944,14 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
 
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
     const orderedOutcomes = outcomesByIndex.filter((outcome): outcome is CandidateOutcome => outcome !== undefined);
-    return summarizeOutcomes(runId, flags.mode, orderedOutcomes, errors, stoppedEarlyReason);
+    return summarizeOutcomes(
+      runId,
+      flags.mode,
+      orderedOutcomes,
+      errors,
+      rateLimitCircuit.rateLimitResponses,
+      rateLimitCircuit.stoppedEarlyReason,
+    );
   } finally {
     await pool.end();
   }
@@ -925,6 +990,7 @@ async function main(): Promise<void> {
         ambiguous: result.ambiguous,
         invalidCandidate: result.invalidCandidate,
         lookupErrors: result.lookupErrors,
+        rateLimitResponses: result.rateLimitResponses,
         updateSkipped: result.updateSkipped,
         errors: result.errors,
         stoppedEarlyReason: result.stoppedEarlyReason,
