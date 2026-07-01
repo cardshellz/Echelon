@@ -79,7 +79,9 @@ const SHIPMENT_SAMPLE_COLUMNS = `
   s.shopify_fulfillment_id,
   s.tracking_number,
   s.carrier,
-  s.shipped_at
+  s.shipped_at,
+  s.requires_review,
+  s.review_reason
 `;
 
 function usage(): string {
@@ -247,6 +249,7 @@ export function buildCanonicalReadinessChecks(): CanonicalReadinessCheck[] {
         LEFT JOIN wms.orders o ON o.id = s.order_id
         WHERE ${SHIPPED_LEGACY_SHIPMENT_FILTER}
           AND NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL
+          AND COALESCE(s.requires_review, false) = false
           AND NOT EXISTS (
             SELECT 1
             FROM wms.outbound_shipments sibling
@@ -257,6 +260,22 @@ export function buildCanonicalReadinessChecks(): CanonicalReadinessCheck[] {
                 NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '')
               AND NULLIF(BTRIM(COALESCE(sibling.external_fulfillment_id, '')), '') IS NOT NULL
           )
+        ORDER BY s.shipped_at DESC NULLS LAST, s.id DESC
+      `,
+    },
+    {
+      id: "shipped_physical_identity_review_exception",
+      severity: "warning",
+      description: "A shipped legacy row still lacks a provider physical shipment id, but is explicitly classified for review instead of deterministic canonical backfill.",
+      canonicalTarget: "wms.physical_shipments review exception",
+      sql: `
+        SELECT
+          ${SHIPMENT_SAMPLE_COLUMNS}
+        FROM wms.outbound_shipments s
+        LEFT JOIN wms.orders o ON o.id = s.order_id
+        WHERE ${SHIPPED_LEGACY_SHIPMENT_FILTER}
+          AND NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL
+          AND COALESCE(s.requires_review, false) = true
         ORDER BY s.shipped_at DESC NULLS LAST, s.id DESC
       `,
     },
