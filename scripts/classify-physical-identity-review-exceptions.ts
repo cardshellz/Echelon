@@ -27,6 +27,7 @@ interface Flags {
   help: boolean;
   limit: number | null;
   operator: string;
+  includeNotFoundAfterEnrichment: boolean;
 }
 
 interface ReviewCandidate {
@@ -59,6 +60,7 @@ export function parseFlags(argv: string[]): Flags {
   const help = argv.includes("--help") || argv.includes("-h");
   const execute = argv.includes("--execute");
   const dryRun = argv.includes("--dry-run");
+  const includeNotFoundAfterEnrichment = argv.includes("--include-not-found-after-enrichment");
   if (execute && dryRun) {
     throw new Error("Cannot pass both --execute and --dry-run");
   }
@@ -68,6 +70,7 @@ export function parseFlags(argv: string[]): Flags {
     arg === "-h" ||
     arg === "--execute" ||
     arg === "--dry-run" ||
+    arg === "--include-not-found-after-enrichment" ||
     arg.startsWith("--limit=") ||
     arg.startsWith("--operator=")
   ));
@@ -91,6 +94,7 @@ export function parseFlags(argv: string[]): Flags {
     help,
     limit,
     operator,
+    includeNotFoundAfterEnrichment,
   };
 }
 
@@ -116,6 +120,8 @@ function usage(): string {
     "  --execute          Stamp review exceptions transactionally with audit snapshots.",
     "  --limit=N|all      Max candidates. Default 100.",
     "  --operator=TEXT    Audit operator label.",
+    "  --include-not-found-after-enrichment",
+    "                     Also classify generic missing physical-id rows after a fresh enrichment run.",
   ].join("\n");
 }
 
@@ -123,9 +129,14 @@ function limitClause(limit: number | null): string {
   return limit == null ? "" : `LIMIT ${limit}`;
 }
 
-export function physicalIdentityReviewCandidateSql(limit: number | null, forUpdate = false): string {
-  return `
-    WITH missing_physical_identity_candidates AS (
+export function physicalIdentityReviewCandidateSql(
+  limit: number | null,
+  forUpdate = false,
+  includeNotFoundAfterEnrichment = false,
+): string {
+  const missingPhysicalIdentityCte = includeNotFoundAfterEnrichment
+    ? `
+    missing_physical_identity_candidates AS (
       SELECT
         s.id::int AS source_id,
         CASE
@@ -176,7 +187,14 @@ export function physicalIdentityReviewCandidateSql(limit: number | null, forUpda
             AND NULLIF(BTRIM(COALESCE(sibling.external_fulfillment_id, '')), '') IS NOT NULL
         )
       ${forUpdate ? "FOR UPDATE OF s" : ""}
-    ),
+    ),`
+    : "";
+  const missingPhysicalIdentityUnion = includeNotFoundAfterEnrichment
+    ? "SELECT * FROM missing_physical_identity_candidates\n      UNION ALL\n      "
+    : "";
+
+  return `
+    WITH${missingPhysicalIdentityCte}
     legacy_aggregate_covered_candidates AS (
       SELECT
         s.id::int AS source_id,
@@ -270,9 +288,7 @@ export function physicalIdentityReviewCandidateSql(limit: number | null, forUpda
       ${forUpdate ? "FOR UPDATE OF s" : ""}
     ),
     candidates AS (
-      SELECT * FROM missing_physical_identity_candidates
-      UNION ALL
-      SELECT * FROM legacy_aggregate_covered_candidates
+      ${missingPhysicalIdentityUnion}SELECT * FROM legacy_aggregate_covered_candidates
     )
     SELECT
       source_id,
@@ -340,8 +356,13 @@ async function fetchCandidates(
   client: PoolClient,
   limit: number | null,
   forUpdate: boolean,
+  includeNotFoundAfterEnrichment: boolean,
 ): Promise<ReviewCandidate[]> {
-  const result = await client.query(physicalIdentityReviewCandidateSql(limit, forUpdate));
+  const result = await client.query(physicalIdentityReviewCandidateSql(
+    limit,
+    forUpdate,
+    includeNotFoundAfterEnrichment,
+  ));
   return coerceCandidates(result.rows);
 }
 
@@ -436,7 +457,12 @@ async function runClassifier(flags: Flags): Promise<ClassificationSummary> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const candidates = await fetchCandidates(client, flags.limit, flags.mode === "execute");
+    const candidates = await fetchCandidates(
+      client,
+      flags.limit,
+      flags.mode === "execute",
+      flags.includeNotFoundAfterEnrichment,
+    );
     printPlan(candidates, flags);
 
     let classified = 0;
