@@ -1,0 +1,68 @@
+import { describe, expect, it } from "vitest";
+
+async function loadModule() {
+  process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+  return await import("../classify-physical-identity-review-exceptions");
+}
+
+describe("classify-physical-identity-review-exceptions", () => {
+  it("parses CLI flags with dry-run defaults", async () => {
+    const { parseFlags } = await loadModule();
+
+    expect(parseFlags([])).toEqual({
+      mode: "dry-run",
+      help: false,
+      limit: 100,
+      operator: "script:classify-physical-identity-review-exceptions",
+    });
+    expect(parseFlags(["--execute", "--limit=all", "--operator=ops"])).toEqual({
+      mode: "execute",
+      help: false,
+      limit: null,
+      operator: "ops",
+    });
+  });
+
+  it("rejects invalid CLI input", async () => {
+    const { parseFlags } = await loadModule();
+
+    expect(() => parseFlags(["--execute", "--dry-run"])).toThrow(/Cannot pass both/);
+    expect(() => parseFlags(["--limit=0"])).toThrow(/positive integer or all/);
+    expect(() => parseFlags(["--limit=nope"])).toThrow(/positive integer or all/);
+    expect(() => parseFlags(["--operator="])).toThrow(/operator cannot be blank/);
+    expect(() => parseFlags(["--operation=all"])).toThrow(/Unknown flag/);
+    expect(() => parseFlags(["--helpfully"])).toThrow(/Unknown flag/);
+  });
+
+  it("keeps review reason values within the outbound shipment column limit", async () => {
+    const {
+      TRACKING_COLLISION_REVIEW_REASON,
+      NOT_FOUND_REVIEW_REASON,
+    } = await loadModule();
+
+    expect(TRACKING_COLLISION_REVIEW_REASON.length).toBeLessThanOrEqual(100);
+    expect(NOT_FOUND_REVIEW_REASON.length).toBeLessThanOrEqual(100);
+  });
+
+  it("selects only unclassified shipped rows that lack physical identity", async () => {
+    const { physicalIdentityReviewCandidateSql } = await loadModule();
+    const sql = physicalIdentityReviewCandidateSql(25, true);
+
+    expect(sql).toContain("s.status::text = 'shipped'");
+    expect(sql).toContain("NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '') IS NOT NULL");
+    expect(sql).toContain("NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL");
+    expect(sql).toContain("COALESCE(s.requires_review, false) = false");
+    expect(sql).toContain("FOR UPDATE OF s");
+    expect(sql).toContain("physical_owner.external_fulfillment_id");
+    expect(sql).toContain("sibling.shipstation_order_id = s.shipstation_order_id");
+  });
+
+  it("does not invent provider physical shipment ids in classifier SQL", async () => {
+    const { physicalIdentityReviewCandidateSql } = await loadModule();
+    const sql = physicalIdentityReviewCandidateSql(null, false);
+
+    expect(sql).not.toContain("SET external_fulfillment_id");
+    expect(sql).not.toContain("shipstation_order_id::text AS provider_physical_shipment_id");
+    expect(sql).not.toContain("engine_order_ref AS provider_physical_shipment_id");
+  });
+});

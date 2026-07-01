@@ -51,6 +51,7 @@ describe("audit-fulfillment-canonical-readiness", () => {
       "nonpositive_shipment_item_quantity",
       "duplicate_physical_shipment_identity",
       "shipped_missing_physical_identity",
+      "shipped_physical_identity_review_exception",
       "provider_order_identity_collision",
       "shopify_shipped_without_channel_fulfillment_id",
     ]);
@@ -116,6 +117,20 @@ describe("audit-fulfillment-canonical-readiness", () => {
     expect(missingPhysicalIdentityCheck!.sql).toContain("sibling.shipstation_order_id = s.shipstation_order_id");
     expect(missingPhysicalIdentityCheck!.sql).toContain("sibling.tracking_number");
     expect(missingPhysicalIdentityCheck!.sql).toContain("sibling.external_fulfillment_id");
+  });
+
+  it("keeps classified physical identity review exceptions out of blockers", async () => {
+    const { buildCanonicalReadinessChecks } = await loadAuditModule();
+    const checks = buildCanonicalReadinessChecks();
+    const blocker = checks.find((check) => check.id === "shipped_missing_physical_identity");
+    const reviewWarning = checks.find((check) => check.id === "shipped_physical_identity_review_exception");
+
+    expect(blocker).toBeDefined();
+    expect(reviewWarning).toBeDefined();
+    expect(blocker!.severity).toBe("blocker");
+    expect(reviewWarning!.severity).toBe("warning");
+    expect(blocker!.sql).toContain("COALESCE(s.requires_review, false) = false");
+    expect(reviewWarning!.sql).toContain("COALESCE(s.requires_review, false) = true");
   });
 
   it("separates blockers from warnings in the summary", async () => {
