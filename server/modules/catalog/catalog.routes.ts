@@ -1340,6 +1340,50 @@ export async function registerProductRoutes(app: Express) {
     }
   });
 
+  app.put("/api/product-variants/package-attributes/bulk", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const rows = parsePackageAttributeBulkRows(req.body?.rows);
+
+      const requestedIds = [...new Set(rows.map((row) => row.variantId))];
+      const variantRows = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(inArray(productVariants.id, requestedIds));
+      const existingVariantIds = new Set(variantRows.map((row) => row.id));
+      const missingVariantIds = requestedIds.filter((id) => !existingVariantIds.has(id));
+      if (missingVariantIds.length > 0) {
+        return res.status(400).json({
+          error: "One or more variants do not exist",
+          missingVariantIds,
+        });
+      }
+
+      const updatedVariants = await db.transaction(async (tx) => {
+        const updated = [];
+        for (const row of rows) {
+          const [variant] = await tx
+            .update(productVariants)
+            .set({ ...row.updates, updatedAt: new Date() })
+            .where(eq(productVariants.id, row.variantId))
+            .returning();
+          if (!variant) {
+            throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
+          }
+          updated.push(variant);
+        }
+        return updated;
+      });
+
+      res.json({ updated: updatedVariants.length, variants: updatedVariants });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      console.error("Error bulk updating catalog variant package attributes:", error);
+      res.status(500).json({ error: "Failed to bulk update variant package attributes" });
+    }
+  });
+
   app.get("/api/product-variants/:id/shopify-candidates", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
