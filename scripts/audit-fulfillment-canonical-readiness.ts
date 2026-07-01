@@ -84,6 +84,8 @@ const SHIPMENT_SAMPLE_COLUMNS = `
   s.review_reason
 `;
 
+const LEGACY_AGGREGATE_COVERED_REVIEW_REASON = "legacy_aggregate_covered_by_physical_shipments";
+
 function usage(): string {
   return [
     "Usage:",
@@ -303,6 +305,10 @@ export function buildCanonicalReadinessChecks(): CanonicalReadinessCheck[] {
           FROM wms.outbound_shipments s
           LEFT JOIN wms.orders o ON o.id = s.order_id
           WHERE ${ACTIVE_LEGACY_SHIPMENT_FILTER}
+            AND NOT (
+              COALESCE(s.requires_review, false) = true
+              AND s.review_reason = '${LEGACY_AGGREGATE_COVERED_REVIEW_REASON}'
+            )
         )
         SELECT
           provider,

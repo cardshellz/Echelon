@@ -53,6 +53,7 @@ const ACTION = "update";
 
 export const TRACKING_COLLISION_REVIEW_REASON = "physical_identity_tracking_collision";
 export const NOT_FOUND_REVIEW_REASON = "physical_identity_not_found_after_enrichment";
+export const LEGACY_AGGREGATE_COVERED_REVIEW_REASON = "legacy_aggregate_covered_by_physical_shipments";
 
 export function parseFlags(argv: string[]): Flags {
   const help = argv.includes("--help") || argv.includes("-h");
@@ -124,25 +125,39 @@ function limitClause(limit: number | null): string {
 
 export function physicalIdentityReviewCandidateSql(limit: number | null, forUpdate = false): string {
   return `
-    WITH candidates AS (
+    WITH missing_physical_identity_candidates AS (
       SELECT
         s.id::int AS source_id,
-        s.order_id,
-        o.order_number,
-        s.shipstation_order_id,
-        s.shipstation_order_key,
-        s.tracking_number,
-        s.carrier,
-        s.shipped_at,
-        EXISTS (
-          SELECT 1
-          FROM wms.outbound_shipments physical_owner
-          WHERE physical_owner.id <> s.id
-            AND NULLIF(BTRIM(COALESCE(physical_owner.tracking_number, '')), '') =
-              NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '')
-            AND NULLIF(BTRIM(COALESCE(physical_owner.external_fulfillment_id, '')), '') IS NOT NULL
-        ) AS has_existing_physical_id_for_tracking,
-        to_jsonb(s) AS before_row
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipments physical_owner
+            WHERE physical_owner.id <> s.id
+              AND NULLIF(BTRIM(COALESCE(physical_owner.tracking_number, '')), '') =
+                NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '')
+              AND NULLIF(BTRIM(COALESCE(physical_owner.external_fulfillment_id, '')), '') IS NOT NULL
+          ) THEN '${TRACKING_COLLISION_REVIEW_REASON}'
+          ELSE '${NOT_FOUND_REVIEW_REASON}'
+        END AS review_reason,
+        to_jsonb(s) AS before_row,
+        jsonb_build_object(
+          'wms_order_id', s.order_id,
+          'order_number', o.order_number,
+          'shipstation_order_id', s.shipstation_order_id,
+          'shipstation_order_key', s.shipstation_order_key,
+          'tracking_number', s.tracking_number,
+          'carrier', s.carrier,
+          'shipped_at', s.shipped_at,
+          'has_existing_physical_id_for_tracking', EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipments physical_owner
+            WHERE physical_owner.id <> s.id
+              AND NULLIF(BTRIM(COALESCE(physical_owner.tracking_number, '')), '') =
+                NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '')
+              AND NULLIF(BTRIM(COALESCE(physical_owner.external_fulfillment_id, '')), '') IS NOT NULL
+          )
+        ) AS summary,
+        s.shipped_at
       FROM wms.outbound_shipments s
       JOIN wms.orders o ON o.id = s.order_id
       WHERE s.status::text = 'shipped'
@@ -160,36 +175,117 @@ export function physicalIdentityReviewCandidateSql(limit: number | null, forUpda
               NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '')
             AND NULLIF(BTRIM(COALESCE(sibling.external_fulfillment_id, '')), '') IS NOT NULL
         )
-      ORDER BY s.shipped_at DESC NULLS LAST, s.id DESC
-      ${limitClause(limit)}
       ${forUpdate ? "FOR UPDATE OF s" : ""}
+    ),
+    legacy_aggregate_covered_candidates AS (
+      SELECT
+        s.id::int AS source_id,
+        '${LEGACY_AGGREGATE_COVERED_REVIEW_REASON}' AS review_reason,
+        to_jsonb(s) AS before_row,
+        jsonb_build_object(
+          'wms_order_id', s.order_id,
+          'order_number', o.order_number,
+          'shipstation_order_id', s.shipstation_order_id,
+          'shipstation_order_key', s.shipstation_order_key,
+          'tracking_number', s.tracking_number,
+          'carrier', s.carrier,
+          'shipped_at', s.shipped_at,
+          'covered_by_physical_shipments', true,
+          'item_coverage', (
+            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+              'order_item_id', aggregate_si.order_item_id,
+              'aggregate_qty', aggregate_si.qty,
+              'covered_qty', coverage.covered_qty,
+              'covering_shipments', coverage.covering_shipments
+            ) ORDER BY aggregate_si.order_item_id), '[]'::jsonb)
+            FROM wms.outbound_shipment_items aggregate_si
+            CROSS JOIN LATERAL (
+              SELECT
+                COALESCE(SUM(physical_si.qty), 0)::int AS covered_qty,
+                COALESCE(
+                  to_jsonb(array_agg(DISTINCT physical_s.id) FILTER (WHERE physical_s.id IS NOT NULL)),
+                  '[]'::jsonb
+                ) AS covering_shipments
+              FROM wms.outbound_shipments physical_s
+              JOIN wms.outbound_shipment_items physical_si ON physical_si.shipment_id = physical_s.id
+              WHERE physical_s.id <> s.id
+                AND physical_s.order_id = s.order_id
+                AND physical_s.status::text = 'shipped'
+                AND NULLIF(BTRIM(COALESCE(physical_s.external_fulfillment_id, '')), '') IS NOT NULL
+                AND physical_si.order_item_id = aggregate_si.order_item_id
+            ) coverage
+            WHERE aggregate_si.shipment_id = s.id
+          )
+        ) AS summary,
+        s.shipped_at
+      FROM wms.outbound_shipments s
+      JOIN wms.orders o ON o.id = s.order_id
+      WHERE s.status::text = 'shipped'
+        AND NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '') IS NOT NULL
+        AND NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL
+        AND COALESCE(s.requires_review, false) = false
+        AND COALESCE(NULLIF(BTRIM(s.shipping_engine), ''), 'shipstation') = 'shipstation'
+        AND COALESCE(
+          NULLIF(BTRIM(s.engine_order_ref), ''),
+          NULLIF(s.shipstation_order_id::text, ''),
+          NULLIF(BTRIM(s.shipstation_order_key), '')
+        ) IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipments sibling
+          WHERE sibling.id <> s.id
+            AND COALESCE(sibling.status::text, '') NOT IN ('cancelled', 'voided', 'returned')
+            AND COALESCE(NULLIF(BTRIM(sibling.shipping_engine), ''), 'shipstation') =
+              COALESCE(NULLIF(BTRIM(s.shipping_engine), ''), 'shipstation')
+            AND COALESCE(
+              NULLIF(BTRIM(sibling.engine_order_ref), ''),
+              NULLIF(sibling.shipstation_order_id::text, ''),
+              NULLIF(BTRIM(sibling.shipstation_order_key), '')
+            ) = COALESCE(
+              NULLIF(BTRIM(s.engine_order_ref), ''),
+              NULLIF(s.shipstation_order_id::text, ''),
+              NULLIF(BTRIM(s.shipstation_order_key), '')
+            )
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipment_items aggregate_si
+          WHERE aggregate_si.shipment_id = s.id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipment_items aggregate_si
+          WHERE aggregate_si.shipment_id = s.id
+            AND COALESCE((
+              SELECT SUM(physical_si.qty)::int
+              FROM wms.outbound_shipments physical_s
+              JOIN wms.outbound_shipment_items physical_si ON physical_si.shipment_id = physical_s.id
+              WHERE physical_s.id <> s.id
+                AND physical_s.order_id = s.order_id
+                AND physical_s.status::text = 'shipped'
+                AND NULLIF(BTRIM(COALESCE(physical_s.external_fulfillment_id, '')), '') IS NOT NULL
+                AND physical_si.order_item_id = aggregate_si.order_item_id
+            ), 0) < aggregate_si.qty
+        )
+      ${forUpdate ? "FOR UPDATE OF s" : ""}
+    ),
+    candidates AS (
+      SELECT * FROM missing_physical_identity_candidates
+      UNION ALL
+      SELECT * FROM legacy_aggregate_covered_candidates
     )
     SELECT
       source_id,
-      CASE
-        WHEN has_existing_physical_id_for_tracking THEN '${TRACKING_COLLISION_REVIEW_REASON}'
-        ELSE '${NOT_FOUND_REVIEW_REASON}'
-      END AS review_reason,
+      review_reason,
       before_row,
       before_row || jsonb_build_object(
         'requires_review', true,
-        'review_reason', CASE
-          WHEN has_existing_physical_id_for_tracking THEN '${TRACKING_COLLISION_REVIEW_REASON}'
-          ELSE '${NOT_FOUND_REVIEW_REASON}'
-        END
+        'review_reason', review_reason
       ) AS after_row,
-      jsonb_build_object(
-        'wms_order_id', order_id,
-        'order_number', order_number,
-        'shipstation_order_id', shipstation_order_id,
-        'shipstation_order_key', shipstation_order_key,
-        'tracking_number', tracking_number,
-        'carrier', carrier,
-        'shipped_at', shipped_at,
-        'has_existing_physical_id_for_tracking', has_existing_physical_id_for_tracking
-      ) AS summary
+      summary
     FROM candidates
     ORDER BY shipped_at DESC NULLS LAST, source_id DESC
+    ${limitClause(limit)}
   `;
 }
 
