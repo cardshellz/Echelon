@@ -1,6 +1,57 @@
 import { describe, it, expect, vi } from "vitest";
 import { ReceivingService } from "../../../../modules/procurement/receiving.service";
 
+function sqlToStr(query: any): string {
+  if (Array.isArray(query?.queryChunks)) {
+    return query.queryChunks
+      .map((chunk: any) => (Array.isArray(chunk.value) ? chunk.value.join("") : ""))
+      .join(" ")
+      .toLowerCase();
+  }
+  return String(query?.sql ?? query ?? "").toLowerCase();
+}
+
+function makeZeroPostVoidTx(input: {
+  order?: any;
+  summary?: any;
+  po?: any;
+}) {
+  const order = input.order ?? {
+    id: 190,
+    receipt_number: "RCV-20260701-001",
+    status: "closed",
+    purchase_order_id: 117,
+  };
+  const summary = input.summary ?? {
+    line_count: 2,
+    expected_qty: 15,
+    received_qty: 0,
+    po_receipt_count: 0,
+    inventory_lot_count: 0,
+    inventory_transaction_count: 0,
+  };
+  const po = input.po ?? { physical_status: "draft", status: "sent" };
+
+  return {
+    execute: vi.fn(async (query: any) => {
+      const text = sqlToStr(query);
+      if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
+        return { rows: order ? [order] : [] };
+      }
+      if (text.includes("as line_count") && text.includes("po_receipt_count")) {
+        return { rows: [summary] };
+      }
+      if (text.includes("update procurement.receiving_orders")) {
+        return { rows: [{ id: order.id, receipt_number: order.receipt_number, status: "cancelled" }] };
+      }
+      if (text.includes("from procurement.purchase_orders")) {
+        return { rows: po ? [po] : [] };
+      }
+      return { rows: [] };
+    }),
+  };
+}
+
 describe("ReceivingService - completeAllLines semantics", () => {
   it("should preserve existing partial entries and backfill untouched lines with expectedQty", async () => {
     // Mock the storage layer
@@ -46,6 +97,43 @@ describe("ReceivingService - completeAllLines semantics", () => {
 });
 
 describe("ReceivingService - close reconciliation semantics", () => {
+  it("blocks closing a shipment receipt when all lines have zero received quantity", async () => {
+    const order = {
+      id: 190,
+      status: "open",
+      sourceType: "shipment",
+      purchaseOrderId: 117,
+    };
+    const lines = [
+      { id: 2648, expectedQty: 10, receivedQty: 0, productVariantId: 472, putawayLocationId: 1387 },
+      { id: 2649, expectedQty: 5, receivedQty: 0, productVariantId: 104, putawayLocationId: 1387 },
+    ];
+    const mockStorage = {
+      getReceivingOrderById: vi.fn().mockResolvedValue(order),
+      getReceivingLines: vi.fn().mockResolvedValue(lines),
+    };
+    const db = { transaction: vi.fn() };
+    const inventoryCore = { receiveInventory: vi.fn() };
+    const service = new ReceivingService(
+      db as any,
+      inventoryCore as any,
+      {} as any,
+      mockStorage as any,
+    );
+
+    await expect(service.close(190, "user-1")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({
+        code: "ZERO_SHIPMENT_RECEIPT_NOT_CLOSABLE",
+        receivingOrderId: 190,
+        expectedLineCount: 2,
+        expectedTotalUnits: 15,
+      }),
+    });
+    expect(inventoryCore.receiveInventory).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   it("retries PO reconciliation for an already closed receipt without reposting inventory", async () => {
     const lines = [
       {
@@ -167,5 +255,60 @@ describe("ReceivingService - close reconciliation semantics", () => {
       userId: "user-1",
       message: "PO reconcile failed",
     }));
+  });
+});
+
+describe("ReceivingService - zero-post closed receipt recovery", () => {
+  it("voids a closed receipt only when no inventory or PO receipt rows were posted", async () => {
+    const tx = makeZeroPostVoidTx({});
+    const db = {
+      transaction: vi.fn(async (fn) => fn(tx)),
+      execute: vi.fn(),
+    };
+    const service = new ReceivingService(db as any, {} as any, {} as any, {} as any);
+
+    const result = await service.voidZeroPostClosedReceivingOrder(190, "user-1");
+
+    expect(result).toMatchObject({
+      success: true,
+      receivingOrderId: 190,
+      receiptNumber: "RCV-20260701-001",
+      previousStatus: "closed",
+      status: "cancelled",
+      lineCount: 2,
+      expectedQty: 15,
+    });
+    const executedSql = tx.execute.mock.calls.map(([query]) => sqlToStr(query)).join("\n");
+    expect(executedSql).toContain("update procurement.receiving_lines");
+    expect(executedSql).toContain("set status = 'cancelled'");
+    expect(executedSql).toContain("insert into procurement.po_status_history");
+  });
+
+  it("refuses zero-post recovery when ledger or inventory side effects exist", async () => {
+    const tx = makeZeroPostVoidTx({
+      summary: {
+        line_count: 2,
+        expected_qty: 15,
+        received_qty: 0,
+        po_receipt_count: 1,
+        inventory_lot_count: 0,
+        inventory_transaction_count: 0,
+      },
+    });
+    const db = {
+      transaction: vi.fn(async (fn) => fn(tx)),
+      execute: vi.fn(),
+    };
+    const service = new ReceivingService(db as any, {} as any, {} as any, {} as any);
+
+    await expect(service.voidZeroPostClosedReceivingOrder(190, "user-1")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({
+        code: "RECEIPT_HAS_POSTED_EFFECTS",
+        receivingOrderId: 190,
+      }),
+    });
+    const executedSql = tx.execute.mock.calls.map(([query]) => sqlToStr(query)).join("\n");
+    expect(executedSql).not.toContain("update procurement.receiving_orders");
   });
 });

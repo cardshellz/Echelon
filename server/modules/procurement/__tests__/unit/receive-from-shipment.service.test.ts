@@ -8,7 +8,7 @@ import { createPurchasingService } from "../../purchasing.service";
 // product's largest pack), with cost stamped from the PO line.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function build(overrides: Record<string, any> = {}) {
+function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, any> = {}) {
   const captured: { order: any; lines: any } = { order: null, lines: null };
   const db: any = {
     execute: vi.fn(),
@@ -16,6 +16,7 @@ function build(overrides: Record<string, any> = {}) {
     insert: vi.fn(),
     update: vi.fn(),
     transaction: vi.fn(async (fn: any) => fn({ execute: vi.fn() })),
+    ...dbOverrides,
   };
   const storage: any = {
     getInboundShipmentById: vi.fn().mockResolvedValue({ id: 84, status: "customs_clearance" }),
@@ -49,7 +50,7 @@ function build(overrides: Record<string, any> = {}) {
     ...overrides,
   };
   const svc = createPurchasingService(db, storage as any);
-  return { svc, storage, captured };
+  return { svc, storage, captured, db };
 }
 
 describe("createReceiptFromShipment", () => {
@@ -432,6 +433,73 @@ describe("createReceiptFromShipment", () => {
     });
 
     await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/already been received/);
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("reports closed zero-post shipment receipts as voidable receive options", async () => {
+    const { svc } = build({
+      getInboundShipmentById: vi.fn().mockResolvedValue({
+        id: 84,
+        shipmentNumber: "SHP-84",
+        status: "closed",
+        actualTotalCostCents: 12345,
+      }),
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([
+        { id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 },
+      ]),
+    }, {
+      execute: vi.fn().mockResolvedValue({
+        rows: [{
+          line_count: 2,
+          expected_qty: 15,
+          received_qty: 0,
+          po_receipt_count: 0,
+          inventory_lot_count: 0,
+          inventory_transaction_count: 0,
+        }],
+      }),
+    });
+
+    const options: any = await svc.getPurchaseOrderReceiveOptions(140);
+
+    expect(options.shipmentOptions).toHaveLength(1);
+    expect(options.shipmentOptions[0]).toMatchObject({
+      shipmentId: 84,
+      shipmentNumber: "SHP-84",
+      status: "closed",
+      purchaseOrderId: 140,
+      receivable: false,
+      action: "void_zero_post_receipt",
+      existingReceiptId: 555,
+      existingReceiptStatus: "closed",
+      existingReceiptLineCount: 2,
+      freightWillCarry: false,
+    });
+    expect(options.shipmentOptions[0].reason).toMatch(/zero received quantity/i);
+  });
+
+  it("does not create over a closed zero-post shipment receipt until it is voided", async () => {
+    const { svc, storage } = build({
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([
+        { id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 },
+      ]),
+    }, {
+      execute: vi.fn().mockResolvedValue({
+        rows: [{
+          line_count: 2,
+          expected_qty: 15,
+          received_qty: 0,
+          po_receipt_count: 0,
+          inventory_lot_count: 0,
+          inventory_transaction_count: 0,
+        }],
+      }),
+    });
+
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({ code: "ZERO_POST_SHIPMENT_RECEIPT", receivingOrderId: 555 }),
+    });
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
   });
 
