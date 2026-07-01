@@ -12,10 +12,15 @@ import {
   EbayMarketplaceListingConnector,
   type EbayListingConnectorClient,
 } from "../../channels/listing-connectors/ebay-listing.connector";
+import {
+  EbayListingBuilder,
+  type EbayListingConfig as SharedEbayListingConfig,
+} from "../../channels/adapters/ebay/ebay-listing-builder";
 import type {
   EbayInventoryItem,
   EbayOffer,
 } from "../../channels/adapters/ebay/ebay-types";
+import type { ChannelListingPayload } from "../../channels/channel-adapter.interface";
 
 type FetchLike = typeof fetch;
 interface Clock {
@@ -69,6 +74,7 @@ const EBAY_SELLING_SCOPES = [
 
 export class EbayDropshipListingPushProvider implements DropshipMarketplaceListingPushProvider {
   private readonly listingConnector = new EbayMarketplaceListingConnector();
+  private readonly listingBuilder = new EbayListingBuilder();
 
   constructor(
     private readonly credentials: DropshipMarketplaceCredentialRepository,
@@ -87,24 +93,15 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
 
     assertEbayReady(input, config);
     const baseUrl = EBAY_BASE_URLS[config.environment];
+    const draft = buildDropshipEbayListingDraft(input, config, this.listingBuilder);
     const connectorResult = await this.listingConnector.pushListing({
       client: this.createConnectorClient({ credential, config, baseUrl }),
       draft: {
         productId: input.productVariantId,
         marketplaceId: config.marketplaceId,
-        inventoryItems: [
-          {
-            sku: input.listingIntent.sku!,
-            payload: buildInventoryItemPayload(input),
-          },
-        ],
-        offers: [
-          {
-            sku: input.listingIntent.sku!,
-            variantId: input.productVariantId,
-            payload: buildOfferPayload(input, config, input.existingExternalOfferId),
-          },
-        ],
+        inventoryItems: draft.inventoryItems,
+        offers: draft.offers,
+        itemGroup: draft.itemGroup,
         publishMode: input.listingIntent.listingMode === "live" ? "publish" : "stage",
         hasExistingExternalIds: Boolean(input.existingExternalListingId || input.existingExternalOfferId),
         existingExternalProductId: input.existingExternalListingId,
@@ -449,56 +446,68 @@ function assertEbayReady(input: DropshipMarketplaceListingPushRequest, config: E
   }
 }
 
-function buildInventoryItemPayload(input: DropshipMarketplaceListingPushRequest): Omit<EbayInventoryItem, "sku"> {
-  const intent = input.listingIntent;
-  return {
-    product: {
-      title: intent.title,
-      description: intent.description ?? intent.title,
-      aspects: buildEbayAspects(input),
-      imageUrls: intent.imageUrls.slice(0, 12),
-      ...(intent.brand ? { brand: intent.brand } : {}),
-      ...(intent.mpn ? { mpn: intent.mpn } : {}),
-      ...(intent.gtin ? { upc: [intent.gtin] } : {}),
-    },
-    condition: mapEbayCondition(intent.condition),
-    availability: {
-      shipToLocationAvailability: {
-        quantity: intent.quantity,
-      },
-    },
-  };
-}
-
-function buildOfferPayload(
+function buildDropshipEbayListingDraft(
   input: DropshipMarketplaceListingPushRequest,
   config: EbayListingConfig,
-  offerId: string | null,
-): EbayOffer {
-  const sku = input.listingIntent.sku;
+  listingBuilder: EbayListingBuilder,
+) {
+  const intent = input.listingIntent;
+  const sku = intent.sku?.trim();
   if (!sku) {
     throw new DropshipError("DROPSHIP_EBAY_SKU_REQUIRED", "eBay listing push requires a SKU.", {
       retryable: false,
     });
   }
-
-  return {
-    ...(offerId ? { offerId } : {}),
-    sku,
-    marketplaceId: config.marketplaceId as EbayOffer["marketplaceId"],
-    format: "FIXED_PRICE",
-    availableQuantity: input.listingIntent.quantity,
-    categoryId: config.categoryId,
-    merchantLocationKey: config.merchantLocationKey,
-    listingDescription: input.listingIntent.description ?? input.listingIntent.title,
-    listingPolicies: config.businessPolicies,
-    pricingSummary: {
-      price: {
-        value: centsToDecimalString(input.listingIntent.priceCents),
-        currency: "USD",
+  const listing: ChannelListingPayload = {
+    productId: input.productVariantId,
+    title: intent.title,
+    description: intent.description ?? intent.title,
+    category: intent.category,
+    tags: null,
+    status: "active",
+    variants: [
+      {
+        variantId: input.productVariantId,
+        sku,
+        name: intent.title,
+        barcode: null,
+        gtin: intent.gtin,
+        mpn: intent.mpn,
+        weightGrams: null,
+        priceCents: intent.priceCents,
+        compareAtPriceCents: null,
+        isListed: true,
+        externalVariantId: input.existingExternalOfferId,
+        externalInventoryItemId: null,
       },
+    ],
+    images: intent.imageUrls.slice(0, 12).map((url, index) => ({
+      url,
+      altText: null,
+      position: index + 1,
+      variantSku: sku,
+    })),
+    metadata: {
+      itemSpecifics: buildEbayAspects(input),
     },
   };
+  const sharedConfig: SharedEbayListingConfig = {
+    merchantLocationKey: config.merchantLocationKey,
+    marketplaceId: config.marketplaceId,
+    listingPolicies: config.businessPolicies,
+    channelOverrides: {
+      marketplaceCategoryId: config.categoryId,
+    },
+  };
+  const quantityByVariantId = new Map([[input.productVariantId, intent.quantity]]);
+
+  return listingBuilder.buildListingDraft(listing, sharedConfig, {
+    availableQuantityByVariantId: quantityByVariantId,
+    categoryIdOverride: config.categoryId,
+    conditionOverride: mapEbayCondition(intent.condition),
+    descriptionHtmlOverride: intent.description ?? intent.title,
+    includeOfferTax: false,
+  });
 }
 
 function buildEbayAspects(input: DropshipMarketplaceListingPushRequest): Record<string, string[]> {
@@ -566,15 +575,6 @@ function recordFromConfig(config: Record<string, unknown>, key: string): Record<
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-}
-
-function centsToDecimalString(cents: number): string {
-  const normalized = Math.trunc(cents);
-  const sign = normalized < 0 ? "-" : "";
-  const absolute = Math.abs(normalized);
-  const whole = Math.floor(absolute / 100);
-  const fractional = String(absolute % 100).padStart(2, "0");
-  return `${sign}${whole}.${fractional}`;
 }
 
 function parseEbayJson<T>(input: {

@@ -67,11 +67,48 @@ export interface BuiltItemGroup {
   payload: Omit<EbayInventoryItemGroup, "inventoryItemGroupKey">;
 }
 
+export interface EbayListingBuildOptions {
+  availableQuantityByVariantId?: ReadonlyMap<number, number>;
+  requirePackageWeight?: boolean;
+  titleMaxLength?: number;
+  descriptionHtmlOverride?: string;
+  categoryIdOverride?: string;
+  conditionOverride?: EbayConditionEnum;
+  variantListingPoliciesByVariantId?: ReadonlyMap<number, Partial<EbayListingPolicies>>;
+  storeCategoryNames?: string[];
+  variationAspectName?: string;
+  variationValueByVariantId?: ReadonlyMap<number, string>;
+  itemGroupKey?: string;
+  itemGroupAspects?: Record<string, string[]>;
+  includeVariantSkusInGroup?: boolean;
+  includeEmptyAspectsImageVariesBy?: boolean;
+  includeOfferListingDescription?: boolean;
+  includeOfferTax?: boolean;
+}
+
+export interface BuiltEbayListingDraft {
+  inventoryItems: BuiltInventoryItem[];
+  offers: BuiltOffer[];
+  itemGroup: BuiltItemGroup | null;
+}
+
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
 
 export class EbayListingBuilder {
+  buildListingDraft(
+    listing: ChannelListingPayload,
+    config: EbayListingConfig,
+    options: EbayListingBuildOptions = {},
+  ): BuiltEbayListingDraft {
+    return {
+      inventoryItems: this.buildInventoryItems(listing, config, options),
+      offers: this.buildOffers(listing, config, options),
+      itemGroup: this.buildItemGroup(listing, config, options),
+    };
+  }
+
   /**
    * Build eBay InventoryItem payloads from listing data.
    * One InventoryItem per active variant SKU.
@@ -79,6 +116,7 @@ export class EbayListingBuilder {
   buildInventoryItems(
     listing: ChannelListingPayload,
     config: EbayListingConfig,
+    options: EbayListingBuildOptions = {},
   ): BuiltInventoryItem[] {
     const categoryMapping = this.resolveCategoryMapping(listing, config);
     const productAspects = buildItemSpecifics(
@@ -95,7 +133,7 @@ export class EbayListingBuilder {
           variant,
           listing,
           productAspects,
-          categoryMapping,
+          options,
         ),
       }));
   }
@@ -107,9 +145,11 @@ export class EbayListingBuilder {
   buildOffers(
     listing: ChannelListingPayload,
     config: EbayListingConfig,
+    options: EbayListingBuildOptions = {},
   ): BuiltOffer[] {
     const categoryMapping = this.resolveCategoryMapping(listing, config);
     const categoryId =
+      options.categoryIdOverride ||
       config.channelOverrides?.marketplaceCategoryId ||
       categoryMapping.categoryId;
 
@@ -123,6 +163,7 @@ export class EbayListingBuilder {
           listing,
           config,
           categoryId,
+          options,
         ),
       }));
   }
@@ -136,6 +177,7 @@ export class EbayListingBuilder {
   buildItemGroup(
     listing: ChannelListingPayload,
     config: EbayListingConfig,
+    options: EbayListingBuildOptions = {},
   ): BuiltItemGroup | null {
     const activeVariants = listing.variants.filter(
       (v) => v.isListed && v.sku,
@@ -146,15 +188,14 @@ export class EbayListingBuilder {
 
     // Determine variation aspect name and values
     const { aspectName, aspectValues } =
-      this.extractVariationAspect(activeVariants);
+      this.extractVariationAspect(activeVariants, options);
 
     const title =
-      config.channelOverrides?.titleOverride ||
-      listing.title;
+      this.formatTitle(config.channelOverrides?.titleOverride || listing.title, options);
 
     const description =
       config.channelOverrides?.descriptionOverride ||
-      this.buildDescriptionHtml(listing);
+      this.resolveDescriptionHtml(listing, options);
 
     const imageUrls = listing.images
       .sort((a, b) => a.position - b.position)
@@ -162,27 +203,36 @@ export class EbayListingBuilder {
       .slice(0, 12); // eBay max 12 for groups
 
     // Group key = product SKU or product ID
-    const groupKey = listing.metadata?.groupKey as string
+    const groupKey = options.itemGroupKey
+      || (listing.metadata?.groupKey as string | undefined)
       || `ECHELON-P${listing.productId}`;
+    const aspects = options.itemGroupAspects
+      ? { ...options.itemGroupAspects }
+      : {
+          [aspectName]: aspectValues,
+        };
+    const payload: Omit<EbayInventoryItemGroup, "inventoryItemGroupKey"> & { variantSKUs?: string[] } = {
+      title,
+      description,
+      imageUrls,
+      aspects,
+      variesBy: {
+        ...(options.includeEmptyAspectsImageVariesBy ? { aspectsImageVariesBy: [] } : {}),
+        specifications: [
+          {
+            name: aspectName,
+            values: aspectValues,
+          },
+        ],
+      },
+    };
+    if (options.includeVariantSkusInGroup) {
+      payload.variantSKUs = activeVariants.map((variant) => variant.sku!).filter(Boolean);
+    }
 
     return {
       groupKey,
-      payload: {
-        title,
-        description,
-        imageUrls,
-        aspects: {
-          [aspectName]: aspectValues,
-        },
-        variesBy: {
-          specifications: [
-            {
-              name: aspectName,
-              values: aspectValues,
-            },
-          ],
-        },
-      },
+      payload,
     };
   }
 
@@ -194,7 +244,7 @@ export class EbayListingBuilder {
     variant: ChannelVariantPayload,
     listing: ChannelListingPayload,
     aspects: Record<string, string[]>,
-    categoryMapping: CategoryMapping,
+    options: EbayListingBuildOptions,
   ): Omit<EbayInventoryItem, "sku"> {
     const imageUrls = listing.images
       .sort((a, b) => a.position - b.position)
@@ -212,15 +262,20 @@ export class EbayListingBuilder {
       variantAspects["MPN"] = [variant.mpn];
     }
 
-    // Add pack size aspect for variation differentiation
-    const packSizeLabel = this.extractPackSizeLabel(variant);
-    if (packSizeLabel) {
-      variantAspects["Number of Items"] = [packSizeLabel];
+    if (options.variationAspectName) {
+      const variationValue = this.resolveVariationValue(variant, options);
+      variantAspects[options.variationAspectName] = [variationValue];
+    } else {
+      // Add pack size aspect for variation differentiation
+      const packSizeLabel = this.extractPackSizeLabel(variant);
+      if (packSizeLabel) {
+        variantAspects["Number of Items"] = [packSizeLabel];
+      }
     }
 
     const product: EbayInventoryItem["product"] = {
-      title: listing.title,
-      description: this.buildDescriptionHtml(listing),
+      title: this.formatTitle(listing.title, options),
+      description: this.resolveDescriptionHtml(listing, options),
       aspects: variantAspects,
       imageUrls,
     };
@@ -230,7 +285,7 @@ export class EbayListingBuilder {
     if (variant.mpn) product.mpn = variant.mpn;
     if (variant.gtin) product.upc = [variant.gtin];
 
-    const condition = this.mapCondition(
+    const condition = options.conditionOverride ?? this.mapCondition(
       listing.metadata?.conditionId as number | undefined,
     );
 
@@ -244,6 +299,8 @@ export class EbayListingBuilder {
         },
       },
     };
+    item.availability.shipToLocationAvailability.quantity =
+      this.resolveAvailableQuantity(variant, options);
 
     // Add weight if available
     if (variant.weightGrams) {
@@ -253,6 +310,10 @@ export class EbayListingBuilder {
           unit: "GRAM",
         },
       };
+    } else if (options.requirePackageWeight) {
+      throw new Error(
+        `eBay package weight is required for SKU ${variant.sku}. Set catalog.product_variants.weight_grams or channels.channel_variant_overrides.weight_override before pushing this listing.`,
+      );
     }
 
     return item;
@@ -263,18 +324,19 @@ export class EbayListingBuilder {
     listing: ChannelListingPayload,
     config: EbayListingConfig,
     categoryId: string,
+    options: EbayListingBuildOptions,
   ): EbayOffer {
     const priceCents = variant.priceCents || 0;
     const price = (priceCents / 100).toFixed(2);
+    const listingPolicies = this.resolveListingPolicies(variant, config, options);
 
     const offer: EbayOffer = {
       sku: variant.sku!,
       marketplaceId: (config.marketplaceId || "EBAY_US") as any,
       format: "FIXED_PRICE",
-      availableQuantity: 0, // Set by inventory push
+      availableQuantity: this.resolveAvailableQuantity(variant, options),
       categoryId,
-      listingDescription: this.buildDescriptionHtml(listing),
-      listingPolicies: config.listingPolicies,
+      listingPolicies,
       merchantLocationKey: config.merchantLocationKey,
       pricingSummary: {
         price: {
@@ -282,10 +344,18 @@ export class EbayListingBuilder {
           currency: "USD",
         },
       },
-      tax: {
-        applyTax: true,
-      },
     };
+    if (options.includeOfferListingDescription !== false) {
+      offer.listingDescription = this.resolveDescriptionHtml(listing, options);
+    }
+    if (options.includeOfferTax !== false) {
+      offer.tax = {
+        applyTax: true,
+      };
+    }
+    if (options.storeCategoryNames && options.storeCategoryNames.length > 0) {
+      offer.storeCategoryNames = options.storeCategoryNames;
+    }
 
     // Add compare-at price as original retail price
     if (variant.compareAtPriceCents) {
@@ -328,12 +398,15 @@ export class EbayListingBuilder {
    */
   private extractVariationAspect(
     variants: ChannelVariantPayload[],
+    options: EbayListingBuildOptions = {},
   ): { aspectName: string; aspectValues: string[] } {
-    const aspectName = "Pack Size";
+    const aspectName = options.variationAspectName || "Pack Size";
     const aspectValues: string[] = [];
 
     for (const variant of variants) {
-      const label = this.extractPackSizeLabel(variant);
+      const label = options.variationAspectName
+        ? this.resolveVariationValue(variant, options)
+        : this.extractPackSizeLabel(variant);
       if (label && !aspectValues.includes(label)) {
         aspectValues.push(label);
       }
@@ -449,6 +522,51 @@ export class EbayListingBuilder {
     };
 
     return map[conditionId] || "NEW";
+  }
+
+  private resolveAvailableQuantity(
+    variant: ChannelVariantPayload,
+    options: EbayListingBuildOptions,
+  ): number {
+    const rawQuantity = options.availableQuantityByVariantId?.get(variant.variantId);
+    if (rawQuantity === undefined || rawQuantity === null) return 0;
+    if (!Number.isFinite(rawQuantity)) return 0;
+    return Math.max(0, Math.trunc(rawQuantity));
+  }
+
+  private resolveListingPolicies(
+    variant: ChannelVariantPayload,
+    config: EbayListingConfig,
+    options: EbayListingBuildOptions,
+  ): EbayListingPolicies {
+    const variantPolicies = options.variantListingPoliciesByVariantId?.get(variant.variantId) ?? {};
+    return {
+      paymentPolicyId: variantPolicies.paymentPolicyId ?? config.listingPolicies.paymentPolicyId,
+      returnPolicyId: variantPolicies.returnPolicyId ?? config.listingPolicies.returnPolicyId,
+      fulfillmentPolicyId: variantPolicies.fulfillmentPolicyId ?? config.listingPolicies.fulfillmentPolicyId,
+    };
+  }
+
+  private resolveVariationValue(
+    variant: ChannelVariantPayload,
+    options: EbayListingBuildOptions,
+  ): string {
+    const explicitValue = options.variationValueByVariantId?.get(variant.variantId);
+    const fallbackValue = variant.name || variant.sku || `Variant ${variant.variantId}`;
+    return explicitValue || fallbackValue;
+  }
+
+  private resolveDescriptionHtml(
+    listing: ChannelListingPayload,
+    options: EbayListingBuildOptions,
+  ): string {
+    return options.descriptionHtmlOverride ?? this.buildDescriptionHtml(listing);
+  }
+
+  private formatTitle(title: string, options: EbayListingBuildOptions): string {
+    const maxLength = options.titleMaxLength;
+    if (!maxLength || title.length <= maxLength) return title;
+    return `${title.substring(0, maxLength - 3)}...`;
   }
 }
 

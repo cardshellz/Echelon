@@ -402,6 +402,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           const varResult = await client.query(
             `SELECT pv.id, pv.sku, pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
                     pv.price_cents, pv.compare_at_price_cents, pv.weight_grams, pv.barcode,
+                    COALESCE(cvo.weight_override, pv.weight_grams) AS ebay_weight_grams,
                     pv.units_per_variant, pv.hierarchy_level,
                     pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override
              FROM product_variants pv
@@ -744,6 +745,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           const varResult = await client.query(
             `SELECT pv.id, pv.sku, pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
                     pv.price_cents, pv.compare_at_price_cents, pv.weight_grams, pv.barcode,
+                    COALESCE(cvo.weight_override, pv.weight_grams) AS ebay_weight_grams,
                     pv.units_per_variant, pv.hierarchy_level,
                     pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override
              FROM product_variants pv
@@ -1111,6 +1113,8 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
             pv.sku AS variant_sku,
             pv.name AS variant_name,
             pv.price_cents,
+            pv.weight_grams,
+            cvo.weight_override AS channel_weight_override,
             pv.option1_name,
             pv.option1_value,
             pv.ebay_fulfillment_policy_override AS variant_fulfillment_override,
@@ -1129,6 +1133,8 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
           FROM channels.channel_listings cl
           JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           JOIN catalog.products p ON p.id = pv.product_id
+          LEFT JOIN channels.channel_variant_overrides cvo
+            ON cvo.product_variant_id = pv.id AND cvo.channel_id = cl.channel_id
           WHERE cl.channel_id = $1
             AND (
               cl.sync_status = 'synced'
@@ -1271,6 +1277,7 @@ const ebayListingConnector = new EbayMarketplaceListingConnector();
               name: variant.variant_name,
               option1_value: variant.option1_value,
               price_cents: variant.price_cents,
+              ebay_weight_grams: variant.channel_weight_override ?? variant.weight_grams,
               ebay_fulfillment_policy_override: variant.variant_fulfillment_override,
               ebay_return_policy_override: variant.variant_return_override,
               ebay_payment_policy_override: variant.variant_payment_override,
