@@ -48,6 +48,7 @@ export function buildEbayRouteListingDraft(input: {
       );
     }
     const priceInDollars = centsToDecimalString(priceCents);
+    const weightGrams = resolveEbayPackageWeightGrams(variant, sku);
     const variantAspects: Record<string, string[]> = { ...input.aspects };
     if (input.isMultiVariant) {
       const variationValue = variant.option1_value || variant.name || sku;
@@ -66,6 +67,12 @@ export function buildEbayRouteListingDraft(input: {
         },
         availability: {
           shipToLocationAvailability: { quantity: availableQty },
+        },
+        packageWeightAndSize: {
+          weight: {
+            value: weightGrams,
+            unit: "GRAM",
+          },
         },
       } satisfies Omit<EbayInventoryItem, "sku">,
     });
@@ -151,4 +158,27 @@ export function isValidEbayFixedPriceCents(value: unknown): boolean {
 
 export function formatEbayMinimumPrice(): string {
   return `$${centsToDecimalString(EBAY_MIN_FIXED_PRICE_CENTS)}`;
+}
+
+function resolveEbayPackageWeightGrams(variant: any, sku: string): number {
+  const rawWeight =
+    variant.ebay_weight_grams
+    ?? variant.weight_override
+    ?? variant.weight_grams
+    ?? variant.weightGrams
+    ?? null;
+
+  const parsed = typeof rawWeight === "number"
+    ? rawWeight
+    : typeof rawWeight === "string" && rawWeight.trim()
+      ? Number(rawWeight)
+      : NaN;
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `eBay package weight is required for SKU ${sku}. Set catalog.product_variants.weight_grams or channels.channel_variant_overrides.weight_override before pushing this listing.`,
+    );
+  }
+
+  return parsed;
 }
