@@ -118,8 +118,8 @@ type InboundShipment = {
   destinationCountry: string | null;
   warehouseId: number | null;
   eta: string | null;
-  estimatedCostCents: number | null;
-  actualCostCents: number | null;
+  estimatedTotalCostCents: number | null;
+  actualTotalCostCents: number | null;
   lineCount: number;
   notes: string | null;
   createdAt: string;
@@ -213,10 +213,10 @@ export default function InboundShipments() {
     deliveredCosting: shipments.filter(s => ["delivered", "costing"].includes(s.status)).length,
     estimatedTotal: shipments
       .filter(s => !["closed", "cancelled"].includes(s.status))
-      .reduce((sum, s) => sum + (Number(s.estimatedCostCents) || 0), 0),
+      .reduce((sum, s) => sum + (Number(s.estimatedTotalCostCents) || 0), 0),
     actualTotal: shipments
       .filter(s => !["closed", "cancelled"].includes(s.status))
-      .reduce((sum, s) => sum + (Number(s.actualCostCents) || 0), 0),
+      .reduce((sum, s) => sum + (Number(s.actualTotalCostCents) || 0), 0),
   };
 
   // Create mutation
@@ -607,8 +607,8 @@ export default function InboundShipments() {
                     </div>
                     <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
                       {shipment.eta && <span>ETA {format(new Date(shipment.eta), "MMM d, yyyy")}</span>}
-                      <span>Est. {formatCents(shipment.estimatedCostCents)}</span>
-                      <span>Act. {formatCents(shipment.actualCostCents)}</span>
+                      <span>Est. {formatCents(shipment.estimatedTotalCostCents)}</span>
+                      <span>Act. {formatCents(shipment.actualTotalCostCents)}</span>
                     </div>
                   </div>
                 </div>
@@ -668,8 +668,8 @@ export default function InboundShipments() {
                     </Badge>
                   </TableCell>
                   <TableCell>{renderLandedCostFollowupBadges(shipment.id) || <span className="text-muted-foreground">-</span>}</TableCell>
-                  <TableCell className="text-right font-mono">{formatCents(shipment.estimatedCostCents)}</TableCell>
-                  <TableCell className="text-right font-mono">{formatCents(shipment.actualCostCents)}</TableCell>
+                  <TableCell className="text-right font-mono">{formatCents(shipment.estimatedTotalCostCents)}</TableCell>
+                  <TableCell className="text-right font-mono">{formatCents(shipment.actualTotalCostCents)}</TableCell>
                 </TableRow>
               ))
             )}
