@@ -25,6 +25,7 @@ export interface Flags {
   help: boolean;
   mode: Mode;
   limit: number | null;
+  concurrency: number;
   delayMs: number;
   requestTimeoutMs: number;
   progressEvery: number;
@@ -78,6 +79,11 @@ interface CandidateOutcome {
   updateSkippedReason: string | null;
 }
 
+interface ProcessedCandidate {
+  outcome: CandidateOutcome;
+  error: boolean;
+}
+
 interface EnrichmentResult {
   runId: string;
   mode: Mode;
@@ -93,6 +99,8 @@ interface EnrichmentResult {
 }
 
 const DEFAULT_LIMIT = 25;
+const DEFAULT_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 8;
 const DEFAULT_DELAY_MS = 250;
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_PROGRESS_EVERY = 25;
@@ -109,6 +117,7 @@ function usage(): string {
     "  --dry-run              Fetch and classify only. Default.",
     "  --execute              Persist exact one-to-one matches.",
     "  --limit=N|all          Max WMS shipment rows to inspect. Default 25.",
+    "  --concurrency=N        Number of rows to process in parallel. Default 1, max 8.",
     "  --delay-ms=N           Delay between ShipStation lookups. Default 250.",
     "  --request-timeout-ms=N Abort each ShipStation HTTP request after N ms. Default 20000.",
     "  --progress-every=N     Print aggregate progress every N rows. Use 0 to disable. Default 25.",
@@ -128,13 +137,19 @@ export function parseFlags(argv: string[]): Flags {
     throw new Error("Cannot pass both --execute and --dry-run");
   }
 
-  const knownFlag = /^(--help|-h|--dry-run|--execute|--limit=|--delay-ms=|--request-timeout-ms=|--progress-every=|--order-number=|--wms-shipment-id=|--json$)/;
+  const knownFlag = /^(--help|-h|--dry-run|--execute|--limit=|--concurrency=|--delay-ms=|--request-timeout-ms=|--progress-every=|--order-number=|--wms-shipment-id=|--json$)/;
   const unknown = argv.find((arg) => !knownFlag.test(arg));
   if (unknown) {
     throw new Error(`Unknown flag: ${unknown}`);
   }
 
   const limit = parseOptionalPositiveIntegerFlag(argv, "--limit=", DEFAULT_LIMIT, true);
+  const concurrency = parseOptionalBoundedPositiveIntegerFlag(
+    argv,
+    "--concurrency=",
+    DEFAULT_CONCURRENCY,
+    MAX_CONCURRENCY,
+  );
   const delayMs = parseOptionalNonnegativeIntegerFlag(argv, "--delay-ms=", DEFAULT_DELAY_MS);
   const requestTimeoutMs = parseOptionalPositiveIntegerFlag(
     argv,
@@ -158,6 +173,7 @@ export function parseFlags(argv: string[]): Flags {
     help,
     mode: execute ? "execute" : "dry-run",
     limit,
+    concurrency,
     delayMs,
     requestTimeoutMs,
     progressEvery,
@@ -180,6 +196,22 @@ function parseOptionalPositiveIntegerFlag(
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`${prefix.slice(0, -1)} must be a positive integer${allowAll ? " or all" : ""}`);
+  }
+  return parsed;
+}
+
+function parseOptionalBoundedPositiveIntegerFlag(
+  argv: string[],
+  prefix: string,
+  defaultValue: number,
+  maxValue: number,
+): number {
+  const arg = argv.find((value) => value.startsWith(prefix));
+  if (arg == null) return defaultValue;
+  const raw = arg.slice(prefix.length).trim();
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > maxValue) {
+    throw new Error(`${prefix.slice(0, -1)} must be a positive integer no greater than ${maxValue}`);
   }
   return parsed;
 }
@@ -389,6 +421,10 @@ function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
+export function isPostgresUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "23505";
+}
+
 export async function fetchShipStationJsonWithTimeout<T>(
   url: string,
   authHeader: string,
@@ -543,6 +579,58 @@ function summarizeOutcomes(runId: string, mode: Mode, outcomes: CandidateOutcome
   };
 }
 
+async function enrichCandidate(
+  pool: Pool,
+  candidate: CandidateRow,
+  authHeader: string,
+  flags: Flags,
+): Promise<ProcessedCandidate> {
+  try {
+    const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags.requestTimeoutMs);
+    const decision = decideShipStationPhysicalMatch(candidate, shipments);
+    let updated = false;
+    let updateSkippedReason: string | null = null;
+
+    if (flags.mode === "execute" && decision.kind === "match") {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const update = await applyExternalFulfillmentId(client, candidate, decision.externalFulfillmentId);
+        updated = update.updated;
+        updateSkippedReason = update.skippedReason;
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        if (isPostgresUniqueViolation(err)) {
+          updateSkippedReason = "external fulfillment id already belongs to another shipment";
+        } else {
+          throw err;
+        }
+      } finally {
+        client.release();
+      }
+    }
+
+    return {
+      outcome: { candidate, decision, updated, updateSkippedReason },
+      error: false,
+    };
+  } catch (err: any) {
+    return {
+      outcome: {
+        candidate,
+        decision: {
+          kind: "no_match",
+          reason: err?.message || String(err),
+        },
+        updated: false,
+        updateSkippedReason: "lookup failed",
+      },
+      error: true,
+    };
+  }
+}
+
 function printCandidateLookup(index: number, total: number, candidate: CandidateRow): void {
   console.log(
     `[ShipStation physical id enrich] LOOKUP ${index}/${total} wms=${candidate.legacy_shipment_id} ` +
@@ -599,58 +687,42 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
 
   try {
     const candidates = await fetchCandidates(pool, flags);
-    for (let index = 0; index < candidates.length; index += 1) {
-      const candidate = candidates[index];
-      if (!flags.json) {
-        printCandidateLookup(index + 1, candidates.length, candidate);
-      }
+    const outcomesByIndex = new Array<CandidateOutcome | undefined>(candidates.length);
+    let nextIndex = 0;
+    let processed = 0;
 
-      try {
-        const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags.requestTimeoutMs);
-        const decision = decideShipStationPhysicalMatch(candidate, shipments);
-        let updated = false;
-        let updateSkippedReason: string | null = null;
+    const workerCount = Math.min(flags.concurrency, candidates.length);
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= candidates.length) return;
 
-        if (flags.mode === "execute" && decision.kind === "match") {
-          const client = await pool.connect();
-          try {
-            await client.query("BEGIN");
-            const update = await applyExternalFulfillmentId(client, candidate, decision.externalFulfillmentId);
-            updated = update.updated;
-            updateSkippedReason = update.skippedReason;
-            await client.query("COMMIT");
-          } catch (err) {
-            await client.query("ROLLBACK").catch(() => undefined);
-            throw err;
-          } finally {
-            client.release();
-          }
+        const candidate = candidates[index];
+        if (!flags.json) {
+          printCandidateLookup(index + 1, candidates.length, candidate);
         }
 
-        const outcome = { candidate, decision, updated, updateSkippedReason };
-        outcomes.push(outcome);
-        if (!flags.json) printOutcome(outcome, flags.mode);
-      } catch (err: any) {
-        errors += 1;
-        const decision: MatchDecision = {
-          kind: "no_match",
-          reason: err?.message || String(err),
-        };
-        const outcome = { candidate, decision, updated: false, updateSkippedReason: "lookup failed" };
-        outcomes.push(outcome);
-        if (!flags.json) printOutcome(outcome, flags.mode);
-      }
+        const processedCandidate = await enrichCandidate(pool, candidate, authHeader, flags);
+        outcomesByIndex[index] = processedCandidate.outcome;
+        if (processedCandidate.error) errors += 1;
+        outcomes.push(processedCandidate.outcome);
+        processed += 1;
 
-      if (!flags.json && shouldPrintProgress(flags.progressEvery, index + 1, candidates.length)) {
-        printProgress(runId, flags.mode, outcomes, errors, candidates.length, startedAtMs);
-      }
+        if (!flags.json) printOutcome(processedCandidate.outcome, flags.mode);
+        if (!flags.json && shouldPrintProgress(flags.progressEvery, processed, candidates.length)) {
+          printProgress(runId, flags.mode, outcomes, errors, candidates.length, startedAtMs);
+        }
 
-      if (index < candidates.length - 1) {
-        await sleep(flags.delayMs);
+        if (flags.delayMs > 0 && processed < candidates.length) {
+          await sleep(flags.delayMs);
+        }
       }
-    }
+    };
 
-    return summarizeOutcomes(runId, flags.mode, outcomes, errors);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    const orderedOutcomes = outcomesByIndex.filter((outcome): outcome is CandidateOutcome => outcome !== undefined);
+    return summarizeOutcomes(runId, flags.mode, orderedOutcomes, errors);
   } finally {
     await pool.end();
   }
@@ -665,7 +737,8 @@ async function main(): Promise<void> {
 
   if (!flags.json) {
     console.log(
-      `[ShipStation physical id enrich] mode=${flags.mode} limit=${flags.limit ?? "all"} delayMs=${flags.delayMs}` +
+      `[ShipStation physical id enrich] mode=${flags.mode} limit=${flags.limit ?? "all"} ` +
+      `concurrency=${flags.concurrency} delayMs=${flags.delayMs}` +
       ` requestTimeoutMs=${flags.requestTimeoutMs} progressEvery=${flags.progressEvery}` +
       `${flags.orderNumber ? ` orderNumber=${flags.orderNumber}` : ""}` +
       `${flags.wmsShipmentId ? ` wmsShipmentId=${flags.wmsShipmentId}` : ""}`,
