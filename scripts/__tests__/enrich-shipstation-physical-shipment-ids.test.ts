@@ -19,6 +19,7 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       help: false,
       mode: "dry-run",
       limit: 25,
+      concurrency: 1,
       delayMs: 250,
       requestTimeoutMs: 20000,
       progressEvery: 25,
@@ -30,6 +31,7 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(parseFlags([
       "--execute",
       "--limit=all",
+      "--concurrency=4",
       "--delay-ms=0",
       "--request-timeout-ms=1234",
       "--progress-every=10",
@@ -39,6 +41,7 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     ])).toMatchObject({
       mode: "execute",
       limit: null,
+      concurrency: 4,
       delayMs: 0,
       requestTimeoutMs: 1234,
       progressEvery: 10,
@@ -53,6 +56,8 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
 
     expect(() => parseFlags(["--dry-run", "--execute"])).toThrow(/Cannot pass both/);
     expect(() => parseFlags(["--limit=0"])).toThrow(/positive integer or all/);
+    expect(() => parseFlags(["--concurrency=0"])).toThrow(/positive integer no greater than 8/);
+    expect(() => parseFlags(["--concurrency=9"])).toThrow(/positive integer no greater than 8/);
     expect(() => parseFlags(["--delay-ms=-1"])).toThrow(/non-negative integer/);
     expect(() => parseFlags(["--request-timeout-ms=0"])).toThrow(/positive integer/);
     expect(() => parseFlags(["--progress-every=-1"])).toThrow(/non-negative integer/);
@@ -67,6 +72,14 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(shipStationShipmentExternalFulfillmentId(435425332)).toBe("shipstation_shipment:435425332");
     expect(shipStationShipmentExternalFulfillmentId(0)).toBeNull();
     expect(shipStationShipmentExternalFulfillmentId(1.5)).toBeNull();
+  });
+
+  it("classifies PostgreSQL unique conflicts for parallel idempotency races", async () => {
+    const { isPostgresUniqueViolation } = await loadModule();
+
+    expect(isPostgresUniqueViolation({ code: "23505" })).toBe(true);
+    expect(isPostgresUniqueViolation({ code: "23503" })).toBe(false);
+    expect(isPostgresUniqueViolation(new Error("duplicate key"))).toBe(false);
   });
 
   it("aborts stalled ShipStation HTTP requests with a bounded error", async () => {
