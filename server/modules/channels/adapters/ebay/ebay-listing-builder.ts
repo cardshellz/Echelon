@@ -73,6 +73,7 @@ export interface EbayListingBuildOptions {
   titleMaxLength?: number;
   descriptionHtmlOverride?: string;
   categoryIdOverride?: string;
+  conditionOverride?: EbayConditionEnum;
   variantListingPoliciesByVariantId?: ReadonlyMap<number, Partial<EbayListingPolicies>>;
   storeCategoryNames?: string[];
   variationAspectName?: string;
@@ -284,7 +285,7 @@ export class EbayListingBuilder {
     if (variant.mpn) product.mpn = variant.mpn;
     if (variant.gtin) product.upc = [variant.gtin];
 
-    const condition = this.mapCondition(
+    const condition = options.conditionOverride ?? this.mapCondition(
       listing.metadata?.conditionId as number | undefined,
     );
 
