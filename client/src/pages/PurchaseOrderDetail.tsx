@@ -1346,6 +1346,42 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  const voidZeroPostShipmentReceiptMutation = useMutation({
+    mutationFn: async ({
+      receiptId,
+    }: {
+      receiptId: number;
+      shipmentId: number;
+      purchaseOrderId: number;
+    }) => {
+      const res = await fetch(`/api/receiving-orders/${receiptId}/void-zero-post`, {
+        method: "POST",
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Failed to void zero-post receipt");
+      return body;
+    },
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/receiving"] }),
+      ]);
+      toast({
+        title: "Zero-post receipt voided",
+        description: "Rechecking this shipment before creating a new receipt.",
+      });
+      checkAndReceiveShipment({
+        shipmentId: variables.shipmentId,
+        purchaseOrderId: variables.purchaseOrderId,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
     const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
     const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
@@ -4191,11 +4227,15 @@ export default function PurchaseOrderDetail() {
               createReceiptMutation.isPending ||
               createReceiptFromShipmentMutation.isPending ||
               cleanupEmptyShipmentReceiptMutation.isPending ||
+              voidZeroPostShipmentReceiptMutation.isPending ||
               checkingShipmentReceiptPacks;
             const renderBlockedShipment = (s: any) => {
               const cleaningThisReceipt =
                 cleanupEmptyShipmentReceiptMutation.isPending &&
                 cleanupEmptyShipmentReceiptMutation.variables?.receiptId === s.existingReceiptId;
+              const voidingThisReceipt =
+                voidZeroPostShipmentReceiptMutation.isPending &&
+                voidZeroPostShipmentReceiptMutation.variables?.receiptId === s.existingReceiptId;
               return (
                 <div key={s.shipmentId} className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -4219,6 +4259,19 @@ export default function PurchaseOrderDetail() {
                         })}
                       >
                         {cleaningThisReceipt ? "Cleaning..." : "Clean up and continue"}
+                      </Button>
+                    ) : s.action === "void_zero_post_receipt" && s.existingReceiptId ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => voidZeroPostShipmentReceiptMutation.mutate({
+                          receiptId: s.existingReceiptId,
+                          shipmentId: s.shipmentId,
+                          purchaseOrderId: s.purchaseOrderId,
+                        })}
+                      >
+                        {voidingThisReceipt ? "Voiding..." : "Void and continue"}
                       </Button>
                     ) : null}
                   </div>

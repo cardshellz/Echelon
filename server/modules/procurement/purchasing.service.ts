@@ -1938,6 +1938,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     | { kind: "none" }
     | { kind: "active"; receipt: any }
     | { kind: "empty_active"; receipt: any; lineCount: 0 }
+    | { kind: "zero_post_closed"; receipt: any; summary: ShipmentReceiptPostingSummary }
     | { kind: "closed"; receipt: any };
 
   type ShipmentReceiveOption = {
@@ -1949,7 +1950,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     qtyShipped: number;
     missingPurchaseOrderLineCount: number;
     receivable: boolean;
-    action: "create_receipt" | "open_existing_receipt" | "repair_empty_receipt" | "blocked";
+    action: "create_receipt" | "open_existing_receipt" | "repair_empty_receipt" | "void_zero_post_receipt" | "blocked";
     reason: string | null;
     freightWillCarry: boolean;
     estimatedTotalCostCents: number | null;
@@ -1957,6 +1958,16 @@ export function createPurchasingService(db: any, storage: Storage) {
     existingReceiptId: number | null;
     existingReceiptStatus: string | null;
     existingReceiptLineCount: number | null;
+  };
+
+  type ShipmentReceiptPostingSummary = {
+    lineCount: number;
+    expectedQty: number;
+    receivedQty: number;
+    poReceiptCount: number;
+    inventoryLotCount: number;
+    inventoryTransactionCount: number;
+    postingStateKnown: boolean;
   };
 
   type ShipmentCartonReceivePackInspection = {
@@ -2007,6 +2018,61 @@ export function createPurchasingService(db: any, storage: Storage) {
 
   function activeReceiptStatus(status: unknown): boolean {
     return ACTIVE_RECEIPT_STATUSES.has(String(status ?? ""));
+  }
+
+  async function getShipmentReceiptPostingSummary(receivingOrderId: number): Promise<ShipmentReceiptPostingSummary> {
+    const fallback: ShipmentReceiptPostingSummary = {
+      lineCount: 0,
+      expectedQty: 0,
+      receivedQty: 0,
+      poReceiptCount: 0,
+      inventoryLotCount: 0,
+      inventoryTransactionCount: 0,
+      postingStateKnown: false,
+    };
+
+    try {
+      const result = await db.execute(sql`
+        SELECT
+          (SELECT COUNT(*)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS line_count,
+          (SELECT COALESCE(SUM(expected_qty), 0)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS expected_qty,
+          (SELECT COALESCE(SUM(received_qty), 0)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS received_qty,
+          (SELECT COUNT(*)::int FROM procurement.po_receipts WHERE receiving_order_id = ${receivingOrderId}) AS po_receipt_count,
+          (SELECT COUNT(*)::int FROM inventory.inventory_lots WHERE receiving_order_id = ${receivingOrderId}) AS inventory_lot_count,
+          (
+            SELECT COUNT(*)::int
+            FROM inventory.inventory_transactions
+            WHERE receiving_order_id = ${receivingOrderId}
+              AND voided_at IS NULL
+          ) AS inventory_transaction_count
+      `);
+      const row = result?.rows?.[0];
+      if (!row) return fallback;
+      return {
+        lineCount: Number(row.line_count ?? 0),
+        expectedQty: Number(row.expected_qty ?? 0),
+        receivedQty: Number(row.received_qty ?? 0),
+        poReceiptCount: Number(row.po_receipt_count ?? 0),
+        inventoryLotCount: Number(row.inventory_lot_count ?? 0),
+        inventoryTransactionCount: Number(row.inventory_transaction_count ?? 0),
+        postingStateKnown: true,
+      };
+    } catch (error) {
+      console.warn("[Procurement] Failed to inspect shipment receipt posting summary", {
+        receivingOrderId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return fallback;
+    }
+  }
+
+  function isZeroPostClosedShipmentReceipt(summary: ShipmentReceiptPostingSummary): boolean {
+    return summary.postingStateKnown &&
+      summary.lineCount > 0 &&
+      summary.receivedQty === 0 &&
+      summary.poReceiptCount === 0 &&
+      summary.inventoryLotCount === 0 &&
+      summary.inventoryTransactionCount === 0;
   }
 
   function variantIsActive(variant: any): boolean {
@@ -2144,6 +2210,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
       return { kind: "active", receipt };
     }
+    const summary = await getShipmentReceiptPostingSummary(receipt.id);
+    if (isZeroPostClosedShipmentReceipt(summary)) {
+      return { kind: "zero_post_closed", receipt, summary };
+    }
     return { kind: "closed", receipt };
   }
 
@@ -2188,6 +2258,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       receivable = false;
       action = "repair_empty_receipt";
       reason = "A draft shipment receipt exists but has no lines. Clean it up, then receive this shipment again so the pack checks can run.";
+    } else if (existing.kind === "zero_post_closed") {
+      receivable = false;
+      action = "void_zero_post_receipt";
+      reason = "A closed receipt exists for this shipment and PO, but it posted zero received quantity. Void that zero-post receipt, then receive this shipment again.";
     } else if (existing.kind === "closed") {
       receivable = false;
       action = "blocked";
@@ -2195,7 +2269,10 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     const existingReceipt = existing.kind === "none" ? null : existing.receipt;
-    const existingReceiptLineCount = existing.kind === "empty_active" ? existing.lineCount : null;
+    const existingReceiptLineCount =
+      existing.kind === "empty_active" ? existing.lineCount :
+      existing.kind === "zero_post_closed" ? existing.summary.lineCount :
+      null;
     return {
       shipmentId: inboundShipmentId,
       shipmentNumber: shipment?.shipmentNumber ?? null,
@@ -2466,6 +2543,18 @@ export function createPurchasingService(db: any, storage: Storage) {
     if (existingReceipt.kind === "empty_active") {
       throw emptyShipmentReceiptError(existingReceipt.receipt, purchaseOrderId, inboundShipmentId);
     }
+    if (existingReceipt.kind === "zero_post_closed") {
+      throw new PurchasingError(
+        "A closed zero-post receipt already exists for this shipment and PO. Void that receipt, then receive the shipment again.",
+        409,
+        {
+          code: "ZERO_POST_SHIPMENT_RECEIPT",
+          receivingOrderId: existingReceipt.receipt.id,
+          purchaseOrderId,
+          inboundShipmentId,
+        },
+      );
+    }
     if (existingReceipt.kind === "closed") {
       throw new PurchasingError(
         "This shipment has already been received for this PO.",
@@ -2663,6 +2752,18 @@ export function createPurchasingService(db: any, storage: Storage) {
         if (conflict.kind === "active") return { ...conflict.receipt, reusedExisting: true };
         if (conflict.kind === "empty_active") {
           throw emptyShipmentReceiptError(conflict.receipt, purchaseOrderId, inboundShipmentId);
+        }
+        if (conflict.kind === "zero_post_closed") {
+          throw new PurchasingError(
+            "A closed zero-post receipt already exists for this shipment and PO. Void that receipt, then receive the shipment again.",
+            409,
+            {
+              code: "ZERO_POST_SHIPMENT_RECEIPT",
+              receivingOrderId: conflict.receipt.id,
+              purchaseOrderId,
+              inboundShipmentId,
+            },
+          );
         }
         if (conflict.kind === "closed") {
           throw new PurchasingError(
