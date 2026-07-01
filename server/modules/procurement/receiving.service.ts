@@ -338,6 +338,15 @@ export class ReceivingService {
     };
   }
 
+  private getClosedReceivingLineStatus(line: any): "complete" | "overage" | "short" {
+    const expectedQty = Number(line.expectedQty) || 0;
+    const receivedQty = Number(line.receivedQty) || 0;
+
+    if (expectedQty > 0 && receivedQty < expectedQty) return "short";
+    if (expectedQty > 0 && receivedQty > expectedQty) return "overage";
+    return "complete";
+  }
+
   private async getZeroPostSummary(receivingOrderId: number, executor: { execute: (query: any) => Promise<{ rows: any[] }> }) {
     const result = await executor.execute(sql`
       SELECT
@@ -819,7 +828,7 @@ export class ReceivingService {
         // (don't overwrite null → 0 on a costless receipt).
         const lineUpdates: Record<string, unknown> = {
           putawayComplete: 1,
-          status: "complete",
+          status: this.getClosedReceivingLineStatus(line),
         };
         if (typeof unitCostCents === "number") {
           lineUpdates.unitCost = unitCostCents;
@@ -833,6 +842,14 @@ export class ReceivingService {
         linesReceived++;
         receivedVariantIds.add(line.productVariantId);
         putawayLocationIds.add(line.putawayLocationId);
+      }
+    }
+
+    for (const line of lines) {
+      if ((Number(line.receivedQty) || 0) > 0) continue;
+      const status = this.getClosedReceivingLineStatus(line);
+      if (line.status !== status) {
+        await this.storage.updateReceivingLine(line.id, { status }, tx);
       }
     }
 

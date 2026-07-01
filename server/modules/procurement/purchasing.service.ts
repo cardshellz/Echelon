@@ -1948,6 +1948,8 @@ export function createPurchasingService(db: any, storage: Storage) {
     purchaseOrderId: number;
     lineCount: number;
     qtyShipped: number;
+    receivedBaseQty: number;
+    remainingBaseQty: number;
     missingPurchaseOrderLineCount: number;
     receivable: boolean;
     action: "create_receipt" | "open_existing_receipt" | "repair_empty_receipt" | "void_zero_post_receipt" | "blocked";
@@ -1968,6 +1970,13 @@ export function createPurchasingService(db: any, storage: Storage) {
     inventoryLotCount: number;
     inventoryTransactionCount: number;
     postingStateKnown: boolean;
+  };
+
+  type ShipmentReceiptCoverageSummary = {
+    totalExpectedBaseQty: number;
+    totalReceivedBaseQty: number;
+    totalRemainingBaseQty: number;
+    remainingLines: any[];
   };
 
   type ShipmentCartonReceivePackInspection = {
@@ -2073,6 +2082,82 @@ export function createPurchasingService(db: any, storage: Storage) {
       summary.poReceiptCount === 0 &&
       summary.inventoryLotCount === 0 &&
       summary.inventoryTransactionCount === 0;
+  }
+
+  async function getClosedShipmentReceivedBaseQtyByPoLine(
+    purchaseOrderId: number,
+    inboundShipmentId: number,
+  ): Promise<Map<number, number>> {
+    const result = await db.execute(sql`
+      SELECT
+        rl.purchase_order_line_id,
+        COALESCE(SUM(rl.received_qty * COALESCE(pv.units_per_variant, 1)), 0)::int AS received_base_qty
+      FROM procurement.receiving_orders ro
+      JOIN procurement.receiving_lines rl ON rl.receiving_order_id = ro.id
+      LEFT JOIN catalog.product_variants pv ON pv.id = rl.product_variant_id
+      WHERE ro.purchase_order_id = ${purchaseOrderId}
+        AND ro.inbound_shipment_id = ${inboundShipmentId}
+        AND ro.status = 'closed'
+        AND rl.purchase_order_line_id IS NOT NULL
+      GROUP BY rl.purchase_order_line_id
+    `);
+
+    const receivedByPoLine = new Map<number, number>();
+    for (const row of result?.rows ?? []) {
+      const poLineId = parsePositiveInteger(row.purchase_order_line_id);
+      if (!poLineId) continue;
+      receivedByPoLine.set(poLineId, Number(row.received_base_qty ?? 0));
+    }
+    return receivedByPoLine;
+  }
+
+  function adjustShipmentLineToRemainingBaseQty(line: any, remainingBaseQty: number): any {
+    const adjusted = { ...line, qtyShipped: remainingBaseQty, qty_shipped: remainingBaseQty };
+    const pack = deriveShipmentCartonReceivePack(line);
+    if (pack) {
+      adjusted.cartonCount =
+        remainingBaseQty > 0 && remainingBaseQty % pack.unitsPerVariant === 0
+          ? remainingBaseQty / pack.unitsPerVariant
+          : null;
+      adjusted.carton_count = adjusted.cartonCount;
+    }
+    return adjusted;
+  }
+
+  function summarizeShipmentReceiptCoverage(
+    shipmentLines: any[],
+    receivedBaseQtyByPoLine: Map<number, number>,
+  ): ShipmentReceiptCoverageSummary {
+    const unappliedReceivedByPoLine = new Map(receivedBaseQtyByPoLine);
+    const remainingLines: any[] = [];
+    let totalExpectedBaseQty = 0;
+    let totalReceivedBaseQty = 0;
+
+    for (const line of shipmentLines) {
+      const expectedBaseQty = Number(line.qtyShipped ?? line.qty_shipped) || 0;
+      if (expectedBaseQty <= 0) continue;
+      totalExpectedBaseQty += expectedBaseQty;
+
+      const poLineId = parsePositiveInteger(line.purchaseOrderLineId ?? line.purchase_order_line_id);
+      const availableReceived = poLineId ? (unappliedReceivedByPoLine.get(poLineId) ?? 0) : 0;
+      const appliedReceived = Math.min(Math.max(availableReceived, 0), expectedBaseQty);
+      if (poLineId) {
+        unappliedReceivedByPoLine.set(poLineId, Math.max(0, availableReceived - appliedReceived));
+      }
+      totalReceivedBaseQty += appliedReceived;
+
+      const remainingBaseQty = expectedBaseQty - appliedReceived;
+      if (remainingBaseQty > 0) {
+        remainingLines.push(adjustShipmentLineToRemainingBaseQty(line, remainingBaseQty));
+      }
+    }
+
+    return {
+      totalExpectedBaseQty,
+      totalReceivedBaseQty,
+      totalRemainingBaseQty: Math.max(0, totalExpectedBaseQty - totalReceivedBaseQty),
+      remainingLines,
+    };
   }
 
   function variantIsActive(variant: any): boolean {
@@ -2197,24 +2282,30 @@ export function createPurchasingService(db: any, storage: Storage) {
       typeof storage.getReceivingOrdersForPurchaseOrder === "function"
         ? await storage.getReceivingOrdersForPurchaseOrder(purchaseOrderId)
         : [];
-    const receipt = receipts.find(
+    const matchingReceipts = receipts.filter(
       (candidate: any) =>
         Number(candidate.inboundShipmentId) === inboundShipmentId &&
         candidate.status !== "cancelled",
     );
-    if (!receipt) return { kind: "none" };
-    if (activeReceiptStatus(receipt.status)) {
+    if (matchingReceipts.length === 0) return { kind: "none" };
+
+    const activeReceipt = matchingReceipts.find((candidate: any) => activeReceiptStatus(candidate.status));
+    if (activeReceipt) {
       if (typeof storage.getReceivingLines === "function") {
-        const lines = await storage.getReceivingLines(receipt.id);
-        if (lines.length === 0) return { kind: "empty_active", receipt, lineCount: 0 };
+        const lines = await storage.getReceivingLines(activeReceipt.id);
+        if (lines.length === 0) return { kind: "empty_active", receipt: activeReceipt, lineCount: 0 };
       }
-      return { kind: "active", receipt };
+      return { kind: "active", receipt: activeReceipt };
     }
-    const summary = await getShipmentReceiptPostingSummary(receipt.id);
-    if (isZeroPostClosedShipmentReceipt(summary)) {
-      return { kind: "zero_post_closed", receipt, summary };
+
+    for (const receipt of matchingReceipts) {
+      const summary = await getShipmentReceiptPostingSummary(receipt.id);
+      if (isZeroPostClosedShipmentReceipt(summary)) {
+        return { kind: "zero_post_closed", receipt, summary };
+      }
     }
-    return { kind: "closed", receipt };
+
+    return { kind: "closed", receipt: matchingReceipts[0] };
   }
 
   function buildShipmentReceiveOption(params: {
@@ -2223,8 +2314,9 @@ export function createPurchasingService(db: any, storage: Storage) {
     inboundShipmentId: number;
     shipmentLines: any[];
     existing: ShipmentReceiptExistingState;
+    coverage: ShipmentReceiptCoverageSummary;
   }): ShipmentReceiveOption {
-    const { shipment, purchaseOrderId, inboundShipmentId, shipmentLines, existing } = params;
+    const { shipment, purchaseOrderId, inboundShipmentId, shipmentLines, existing, coverage } = params;
     const status = shipment?.status ?? null;
     const missingPurchaseOrderLineCount = shipmentLines.filter((line: any) => !line.purchaseOrderLineId).length;
     const shipmentIsReceivable = status ? RECEIVABLE_SHIPMENT_STATUSES.has(status) : false;
@@ -2262,10 +2354,13 @@ export function createPurchasingService(db: any, storage: Storage) {
       receivable = false;
       action = "void_zero_post_receipt";
       reason = "A closed receipt exists for this shipment and PO, but it posted zero received quantity. Void that zero-post receipt, then receive this shipment again.";
-    } else if (existing.kind === "closed") {
+    } else if (existing.kind === "closed" && coverage.totalRemainingBaseQty <= 0) {
       receivable = false;
       action = "blocked";
       reason = "This shipment has already been received for this PO.";
+    } else if (existing.kind === "closed") {
+      action = "create_receipt";
+      reason = `A prior shipment receipt was short; ${coverage.totalRemainingBaseQty} of ${coverage.totalExpectedBaseQty} shipped base units remain to receive.`;
     }
 
     const existingReceipt = existing.kind === "none" ? null : existing.receipt;
@@ -2280,6 +2375,8 @@ export function createPurchasingService(db: any, storage: Storage) {
       purchaseOrderId,
       lineCount,
       qtyShipped,
+      receivedBaseQty: coverage.totalReceivedBaseQty,
+      remainingBaseQty: coverage.totalRemainingBaseQty,
       missingPurchaseOrderLineCount,
       receivable,
       action,
@@ -2310,16 +2407,19 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     const shipmentOptions: ShipmentReceiveOption[] = [];
     for (const [shipmentId, lines] of linesByShipment) {
-      const [shipment, existing] = await Promise.all([
+      const [shipment, existing, receivedBaseQtyByPoLine] = await Promise.all([
         storage.getInboundShipmentById(shipmentId),
         getReceiptForShipmentPo(purchaseOrderId, shipmentId),
+        getClosedShipmentReceivedBaseQtyByPoLine(purchaseOrderId, shipmentId),
       ]);
+      const coverage = summarizeShipmentReceiptCoverage(lines, receivedBaseQtyByPoLine);
       shipmentOptions.push(buildShipmentReceiveOption({
         shipment,
         purchaseOrderId,
         inboundShipmentId: shipmentId,
         shipmentLines: lines,
         existing,
+        coverage,
       }));
     }
 
@@ -2535,6 +2635,12 @@ export function createPurchasingService(db: any, storage: Storage) {
     const receivableShipmentLines = linkedShipmentLines.filter(
       (sl: any) => Number(sl.purchaseOrderId) === purchaseOrderId,
     );
+    const receivedBaseQtyByPoLine = await getClosedShipmentReceivedBaseQtyByPoLine(
+      purchaseOrderId,
+      inboundShipmentId,
+    );
+    const coverage = summarizeShipmentReceiptCoverage(receivableShipmentLines, receivedBaseQtyByPoLine);
+    const receiptShipmentLines = coverage.remainingLines;
     const po = await storage.getPurchaseOrderById(purchaseOrderId);
     if (!po) throw new PurchasingError("Linked purchase order not found", 404);
 
@@ -2555,11 +2661,24 @@ export function createPurchasingService(db: any, storage: Storage) {
         },
       );
     }
-    if (existingReceipt.kind === "closed") {
+    if (existingReceipt.kind === "closed" && coverage.totalRemainingBaseQty <= 0) {
       throw new PurchasingError(
         "This shipment has already been received for this PO.",
         409,
         { receivingOrderId: existingReceipt.receipt.id, purchaseOrderId, inboundShipmentId },
+      );
+    }
+    if (receiptShipmentLines.length === 0) {
+      throw new PurchasingError(
+        "This shipment has no remaining quantity to receive for this PO.",
+        409,
+        {
+          code: "SHIPMENT_ALREADY_FULLY_RECEIVED",
+          purchaseOrderId,
+          inboundShipmentId,
+          receivedBaseQty: coverage.totalReceivedBaseQty,
+          expectedBaseQty: coverage.totalExpectedBaseQty,
+        },
       );
     }
 
@@ -2586,7 +2705,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     const unitsPerVariantById = new Map<number, number>();
     const fallbackVariantsByProductId = new Map<number, any[]>();
     const explicitVariantIds = new Set<number>();
-    for (const sl of receivableShipmentLines) {
+    for (const sl of receiptShipmentLines) {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
       const variantId = parsePositiveInteger(
         sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId,
@@ -2603,7 +2722,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
     if (typeof storage.getProductVariantsByProductId === "function") {
       const productIdsNeedingFallback = new Set<number>();
-      for (const sl of receivableShipmentLines) {
+      for (const sl of receiptShipmentLines) {
         const poLine = poLineById.get(sl.purchaseOrderLineId);
         const productId = parsePositiveInteger(poLine?.productId);
         const hasExplicitVariant = parsePositiveInteger(
@@ -2636,7 +2755,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     // carton count, the shipment's carton math is the receipt authority; the
     // product variant must exactly match the implied units-per-carton so
     // inventory posting still lands in the right variant units.
-    const receivingLineData = receivableShipmentLines.map((sl: any) => {
+    const receivingLineData = receiptShipmentLines.map((sl: any) => {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
       const productId = parsePositiveInteger(poLine?.productId);
       const shipmentReceivePack = deriveShipmentCartonReceivePack(sl);
