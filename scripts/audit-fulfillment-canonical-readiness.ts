@@ -247,6 +247,16 @@ export function buildCanonicalReadinessChecks(): CanonicalReadinessCheck[] {
         LEFT JOIN wms.orders o ON o.id = s.order_id
         WHERE ${SHIPPED_LEGACY_SHIPMENT_FILTER}
           AND NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipments sibling
+            WHERE sibling.id <> s.id
+              AND sibling.shipstation_order_id IS NOT NULL
+              AND sibling.shipstation_order_id = s.shipstation_order_id
+              AND NULLIF(BTRIM(COALESCE(sibling.tracking_number, '')), '') =
+                NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '')
+              AND NULLIF(BTRIM(COALESCE(sibling.external_fulfillment_id, '')), '') IS NOT NULL
+          )
         ORDER BY s.shipped_at DESC NULLS LAST, s.id DESC
       `,
     },

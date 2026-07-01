@@ -183,6 +183,8 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       .toBe("/shipments?orderId=755010744&includeShipmentItems=true");
     expect(buildShipStationShipmentsPath({ orderNumber: "#59381" }))
       .toBe("/shipments?orderNumber=%2359381&includeShipmentItems=true");
+    expect(buildShipStationShipmentsPath({ trackingNumber: " 1ZABC " }))
+      .toBe("/shipments?trackingNumber=1ZABC&includeShipmentItems=true");
     expect(buildShipStationShipmentsUrl("https://ssapi.shipstation.com/", { orderId: 1 }))
       .toBe("https://ssapi.shipstation.com/shipments?orderId=1&includeShipmentItems=true");
   });
@@ -249,7 +251,8 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(query.sql).toContain("JOIN wms.orders o ON o.id = s.order_id");
     expect(query.sql).toContain("s.status::text = 'shipped'");
     expect(query.sql).not.toContain("s.status = 'shipped'");
-    expect(query.sql).toContain("s.shipstation_order_id IS NOT NULL");
+    expect(query.sql).toContain("s.shipstation_order_id");
+    expect(query.sql).not.toContain("s.shipstation_order_id IS NOT NULL");
     expect(query.sql).toContain("external_fulfillment_id");
     expect(query.params).toEqual(["#59453", 4313]);
   });

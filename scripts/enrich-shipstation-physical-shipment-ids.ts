@@ -4,8 +4,8 @@
  *
  * This script is intentionally conservative:
  * - dry-run by default
- * - fetches ShipStation by both orderId and orderNumber because split
- *   ShipStation children may not be returned by parent orderId alone
+ * - fetches ShipStation by orderId, orderNumber, and trackingNumber because
+ *   legacy rows can have stale or missing ShipStation order identity
  * - only accepts an exact one-to-one tracking-number match
  * - refuses to overwrite any existing external_fulfillment_id
  *
@@ -45,7 +45,7 @@ interface CandidateRow {
   shipping_engine: string | null;
   engine_order_ref: string | null;
   engine_shipment_ref: string | null;
-  shipstation_order_id: number;
+  shipstation_order_id: number | null;
   shipstation_order_key: string | null;
   tracking_number: string;
   carrier: string | null;
@@ -276,11 +276,18 @@ function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
 }
 
-export function buildShipStationShipmentsPath(params: { orderId?: number; orderNumber?: string | null }): string {
+export function buildShipStationShipmentsPath(params: {
+  orderId?: number | null;
+  orderNumber?: string | null;
+  trackingNumber?: string | null;
+}): string {
   const search = new URLSearchParams();
   if (params.orderId != null) search.set("orderId", String(params.orderId));
   if (params.orderNumber != null && params.orderNumber.trim().length > 0) {
     search.set("orderNumber", params.orderNumber.trim());
+  }
+  if (params.trackingNumber != null && params.trackingNumber.trim().length > 0) {
+    search.set("trackingNumber", params.trackingNumber.trim());
   }
   search.set("includeShipmentItems", "true");
   return `/shipments?${search.toString()}`;
@@ -288,7 +295,7 @@ export function buildShipStationShipmentsPath(params: { orderId?: number; orderN
 
 export function buildShipStationShipmentsUrl(
   baseUrl: string,
-  params: { orderId?: number; orderNumber?: string | null },
+  params: { orderId?: number | null; orderNumber?: string | null; trackingNumber?: string | null },
 ): string {
   return `${normalizeBaseUrl(baseUrl)}${buildShipStationShipmentsPath(params)}`;
 }
@@ -367,7 +374,6 @@ export function buildCandidateSql(flags: Pick<Flags, "limit" | "orderNumber" | "
 } {
   const where: string[] = [
     "s.status::text = 'shipped'",
-    "s.shipstation_order_id IS NOT NULL",
     "NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '') IS NOT NULL",
     "NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL",
     "COALESCE(NULLIF(BTRIM(s.shipping_engine), ''), 'shipstation') = 'shipstation'",
@@ -648,15 +654,17 @@ async function fetchShipStationShipmentsByOrder(
   rateLimitCircuit: ShipStationRateLimitCircuit,
 ): Promise<ShipStationShipmentCandidate[]> {
   const baseUrl = process.env.SHIPSTATION_API_BASE_URL || DEFAULT_BASE_URL;
-  const urls = [
-    buildShipStationShipmentsUrl(baseUrl, { orderId: candidate.shipstation_order_id }),
-  ];
+  const urls: string[] = [];
+  if (candidate.shipstation_order_id !== null) {
+    urls.push(buildShipStationShipmentsUrl(baseUrl, { orderId: candidate.shipstation_order_id }));
+  }
   if (candidate.order_number) {
     urls.push(buildShipStationShipmentsUrl(baseUrl, { orderNumber: candidate.order_number }));
   }
+  urls.push(buildShipStationShipmentsUrl(baseUrl, { trackingNumber: candidate.tracking_number }));
 
   const shipments: ShipStationShipmentCandidate[] = [];
-  for (const url of urls) {
+  for (const url of [...new Set(urls)]) {
     const body = await fetchShipStationJsonWithRetries<{ shipments?: ShipStationShipmentCandidate[] }>(
       url,
       authHeader,
@@ -709,7 +717,7 @@ async function applyExternalFulfillmentId(
           updated_at = NOW()
       WHERE id = $2
         AND status::text = 'shipped'
-        AND shipstation_order_id = $3
+        AND shipstation_order_id IS NOT DISTINCT FROM $3::bigint
         AND tracking_number = $4
         AND NULLIF(BTRIM(COALESCE(external_fulfillment_id, '')), '') IS NULL
       RETURNING id
@@ -736,7 +744,7 @@ function printOutcome(outcome: CandidateOutcome, mode: Mode): void {
       : "PLAN";
     console.log(
       `[ShipStation physical id enrich] ${action} wms=${c.legacy_shipment_id} order=${c.order_number ?? "unknown"} ` +
-      `ssOrder=${c.shipstation_order_id} tracking=${c.tracking_number} -> ${outcome.decision.externalFulfillmentId}` +
+      `ssOrder=${c.shipstation_order_id ?? "unknown"} tracking=${c.tracking_number} -> ${outcome.decision.externalFulfillmentId}` +
       `${outcome.updateSkippedReason ? ` reason="${outcome.updateSkippedReason}"` : ""}`,
     );
     return;
@@ -744,7 +752,7 @@ function printOutcome(outcome: CandidateOutcome, mode: Mode): void {
 
   console.log(
     `[ShipStation physical id enrich] ${outcome.decision.kind.toUpperCase()} wms=${c.legacy_shipment_id} ` +
-    `order=${c.order_number ?? "unknown"} ssOrder=${c.shipstation_order_id} tracking=${c.tracking_number} ` +
+    `order=${c.order_number ?? "unknown"} ssOrder=${c.shipstation_order_id ?? "unknown"} tracking=${c.tracking_number} ` +
     `${outcome.decision.providerStatus != null ? `status=${outcome.decision.providerStatus} ` : ""}` +
     `reason="${outcome.decision.reason}"`,
   );
@@ -836,7 +844,7 @@ async function enrichCandidate(
 function printCandidateLookup(index: number, total: number, candidate: CandidateRow): void {
   console.log(
     `[ShipStation physical id enrich] LOOKUP ${index}/${total} wms=${candidate.legacy_shipment_id} ` +
-    `order=${candidate.order_number ?? "unknown"} ssOrder=${candidate.shipstation_order_id} ` +
+    `order=${candidate.order_number ?? "unknown"} ssOrder=${candidate.shipstation_order_id ?? "unknown"} ` +
     `tracking=${candidate.tracking_number}`,
   );
 }
