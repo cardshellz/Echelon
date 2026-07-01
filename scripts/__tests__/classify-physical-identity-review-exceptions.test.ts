@@ -38,10 +38,12 @@ describe("classify-physical-identity-review-exceptions", () => {
     const {
       TRACKING_COLLISION_REVIEW_REASON,
       NOT_FOUND_REVIEW_REASON,
+      LEGACY_AGGREGATE_COVERED_REVIEW_REASON,
     } = await loadModule();
 
     expect(TRACKING_COLLISION_REVIEW_REASON.length).toBeLessThanOrEqual(100);
     expect(NOT_FOUND_REVIEW_REASON.length).toBeLessThanOrEqual(100);
+    expect(LEGACY_AGGREGATE_COVERED_REVIEW_REASON.length).toBeLessThanOrEqual(100);
   });
 
   it("selects only unclassified shipped rows that lack physical identity", async () => {
@@ -55,6 +57,24 @@ describe("classify-physical-identity-review-exceptions", () => {
     expect(sql).toContain("FOR UPDATE OF s");
     expect(sql).toContain("physical_owner.external_fulfillment_id");
     expect(sql).toContain("sibling.shipstation_order_id = s.shipstation_order_id");
+  });
+
+  it("classifies only aggregate rows fully covered by physical shipment siblings", async () => {
+    const {
+      physicalIdentityReviewCandidateSql,
+      LEGACY_AGGREGATE_COVERED_REVIEW_REASON,
+    } = await loadModule();
+    const sql = physicalIdentityReviewCandidateSql(null, false);
+
+    expect(sql).toContain(LEGACY_AGGREGATE_COVERED_REVIEW_REASON);
+    expect(sql).toContain("legacy_aggregate_covered_candidates");
+    expect(sql).toContain("covered_by_physical_shipments");
+    expect(sql).toContain("physical_s.order_id = s.order_id");
+    expect(sql).toContain("physical_s.status::text = 'shipped'");
+    expect(sql).toContain("physical_s.external_fulfillment_id");
+    expect(sql).toContain("physical_si.order_item_id = aggregate_si.order_item_id");
+    expect(sql).toContain("COALESCE((\n              SELECT SUM(physical_si.qty)::int");
+    expect(sql).toContain(") < aggregate_si.qty");
   });
 
   it("does not invent provider physical shipment ids in classifier SQL", async () => {

@@ -119,6 +119,17 @@ describe("audit-fulfillment-canonical-readiness", () => {
     expect(missingPhysicalIdentityCheck!.sql).toContain("sibling.external_fulfillment_id");
   });
 
+  it("keeps covered legacy aggregate rows out of provider order collision warnings", async () => {
+    const { buildCanonicalReadinessChecks } = await loadAuditModule();
+    const collisionCheck = buildCanonicalReadinessChecks()
+      .find((check) => check.id === "provider_order_identity_collision");
+
+    expect(collisionCheck).toBeDefined();
+    expect(collisionCheck!.sql).toContain("legacy_aggregate_covered_by_physical_shipments");
+    expect(collisionCheck!.sql).toContain("COALESCE(s.requires_review, false) = true");
+    expect(collisionCheck!.sql).toContain("AND NOT (");
+  });
+
   it("keeps classified physical identity review exceptions out of blockers", async () => {
     const { buildCanonicalReadinessChecks } = await loadAuditModule();
     const checks = buildCanonicalReadinessChecks();
