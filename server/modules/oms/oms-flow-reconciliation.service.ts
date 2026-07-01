@@ -386,6 +386,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.engine_order_ref IS NULL
+          -- A held shipment (line-item hold) is intentionally unpushed.
+          AND COALESCE(os.held, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -417,6 +419,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.engine_order_ref IS NULL
+          -- A held shipment (line-item hold) is intentionally unpushed.
+          AND COALESCE(os.held, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1

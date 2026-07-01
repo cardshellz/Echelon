@@ -6,6 +6,10 @@ const ROUTES_SRC = readFileSync(resolve(__dirname, "../../picking.routes.ts"), "
 const STORAGE_SRC = readFileSync(resolve(__dirname, "../../orders.storage.ts"), "utf8");
 const SPLIT_SRC = readFileSync(resolve(__dirname, "../../../wms/line-item-hold.ts"), "utf8");
 const SHIPSTATION_SRC = readFileSync(resolve(__dirname, "../../../oms/shipstation.service.ts"), "utf8");
+const PICKING_SRC = readFileSync(resolve(__dirname, "../../picking.use-cases.ts"), "utf8");
+const FLOW_WATERFALL_SRC = readFileSync(resolve(__dirname, "../../../oms/flow-waterfall.service.ts"), "utf8");
+const OPS_HEALTH_SRC = readFileSync(resolve(__dirname, "../../../oms/ops-health.service.ts"), "utf8");
+const RECON_SRC = readFileSync(resolve(__dirname, "../../../oms/oms-flow-reconciliation.service.ts"), "utf8");
 
 // Line-item hold, Phase 1 (LINE-ITEM-HOLD-DESIGN.md): a lead/admin can hold a
 // single pre-order line so the rest of the order ships. P1 records the hold +
@@ -65,5 +69,23 @@ describe("line-item hold (P2a — held line does not ship)", () => {
     expect(SPLIT_SRC).toMatch(/releaseLineItemFromHold/);
     expect(SPLIT_SRC).toMatch(/SET held = false, held_at = NULL/);
     expect(ROUTES_SRC).toMatch(/enqueueShipStationShipmentPushRetry\(db, released\.heldShipmentId/);
+  });
+});
+
+// P2b: held shipments/lines must not look like stuck work or block the rest.
+describe("line-item hold (P2b — held-aware readers)", () => {
+  it("the ready-to-ship gate ignores held lines (so the rest of the order can ship)", () => {
+    expect(PICKING_SRC).toMatch(/requiresShipping === 1 && !item\.onHold/);
+  });
+
+  it("a held line cannot be picked", () => {
+    expect(PICKING_SRC).toMatch(/beforeItem\.onHold && status !== "pending"/);
+    expect(PICKING_SRC).toMatch(/on hold and cannot be picked/);
+  });
+
+  it("the 'not pushed to ShipStation' detectors all skip held shipments", () => {
+    expect(FLOW_WATERFALL_SRC).toMatch(/COALESCE\(os\.held, false\) = false/);
+    expect(OPS_HEALTH_SRC).toMatch(/COALESCE\(os\.held, false\) = false/);
+    expect(RECON_SRC).toMatch(/COALESCE\(os\.held, false\) = false/);
   });
 });
