@@ -26,6 +26,7 @@ describe("buildEbayRouteListingDraft", () => {
           option1_value: "Case of 500 (50 packs of 10)",
           price_cents: 49999,
           weight_grams: 4200,
+          ebay_return_policy_override: "variant-return-policy",
         },
       ],
       effectiveImageUrls: ["https://cdn.example.test/toploader.jpg"],
@@ -73,6 +74,17 @@ describe("buildEbayRouteListingDraft", () => {
       value: 120,
       unit: "GRAM",
     });
+    expect(draft.inventoryItems[0].payload.availability.shipToLocationAvailability.quantity).toBe(10);
+    expect(draft.offers[0].payload.availableQuantity).toBe(10);
+    expect(draft.offers[0].payload.categoryId).toBe("183438");
+    expect(draft.offers[0].payload.storeCategoryNames).toEqual(["Toploaders"]);
+    expect(draft.offers[0].payload).not.toHaveProperty("listingDescription");
+    expect(draft.offers[1].payload.listingPolicies.returnPolicyId).toBe("variant-return-policy");
+    expect((draft.itemGroup?.payload as any).variantSKUs).toEqual([
+      "SHLZ-TOP-130PT-P10",
+      "SHLZ-TOP-130PT-C500",
+    ]);
+    expect(draft.itemGroup?.payload.variesBy.aspectsImageVariesBy).toEqual([]);
   });
 
   it("rejects missing eBay offer prices before building marketplace payloads", () => {
