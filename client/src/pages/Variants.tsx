@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
@@ -39,8 +39,11 @@ import {
   MILLIMETERS_PER_INCH,
   normalizeCsvHeader,
   parseCsvRows,
+  variantPackageInputFromVariant,
+  type VariantPackageAttributeKey,
   type VariantPackageBulkRow,
   type VariantPackageInput,
+  type VariantPackagePayload,
 } from "@/lib/variant-package";
 
 interface Product {
@@ -74,6 +77,51 @@ interface ProductVariant {
   heightMm: number | null;
 }
 
+const PACKAGE_EDITOR_FIELDS: Array<{
+  inputKey: keyof VariantPackageInput;
+  outputKey: VariantPackageAttributeKey;
+  label: string;
+  placeholder: string;
+}> = [
+  { inputKey: "weightLb", outputKey: "weightGrams", label: "Weight (lb)", placeholder: "0.000" },
+  { inputKey: "lengthIn", outputKey: "lengthMm", label: "Length (in)", placeholder: "0.000" },
+  { inputKey: "widthIn", outputKey: "widthMm", label: "Width (in)", placeholder: "0.000" },
+  { inputKey: "heightIn", outputKey: "heightMm", label: "Height (in)", placeholder: "0.000" },
+];
+
+function packageInputsEqual(left: VariantPackageInput, right: VariantPackageInput): boolean {
+  return PACKAGE_EDITOR_FIELDS.every((field) => left[field.inputKey].trim() === right[field.inputKey].trim());
+}
+
+function buildVariantPackageDiffPayload(
+  draft: VariantPackageInput,
+  original: VariantPackageInput,
+): VariantPackagePayload {
+  const updates: VariantPackagePayload = {};
+
+  for (const field of PACKAGE_EDITOR_FIELDS) {
+    const draftValue = draft[field.inputKey].trim();
+    const originalValue = original[field.inputKey].trim();
+    if (draftValue === originalValue) continue;
+
+    if (!draftValue) {
+      updates[field.outputKey] = null;
+      continue;
+    }
+
+    const singleFieldInput = emptyVariantPackageInput();
+    singleFieldInput[field.inputKey] = draftValue;
+    const singleFieldPayload = buildVariantPackagePayload(singleFieldInput, "omit");
+    const parsedValue = singleFieldPayload[field.outputKey];
+    if (parsedValue === undefined) {
+      throw new Error(`${field.label} could not be parsed.`);
+    }
+    updates[field.outputKey] = parsedValue;
+  }
+
+  return updates;
+}
+
 interface ShopifyCandidate {
   variantId: string;
   productId: string;
@@ -100,9 +148,11 @@ export default function Variants() {
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [productLineFilter, setProductLineFilter] = useState<string>("all");
   const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>([]);
-  const [bulkPackageDialogOpen, setBulkPackageDialogOpen] = useState(false);
-  const [bulkPackageForm, setBulkPackageForm] = useState<VariantPackageInput>(emptyVariantPackageInput());
-  const [bulkPackageClearBlanks, setBulkPackageClearBlanks] = useState(false);
+  const [packageEditorOpen, setPackageEditorOpen] = useState(false);
+  const [packageEditorScope, setPackageEditorScope] = useState<"filtered" | "selected">("filtered");
+  const [packageEditorVariantIds, setPackageEditorVariantIds] = useState<number[]>([]);
+  const [packageEditorDrafts, setPackageEditorDrafts] = useState<Record<number, VariantPackageInput>>({});
+  const [packageEditorErrors, setPackageEditorErrors] = useState<Record<number, string>>({});
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
@@ -353,9 +403,11 @@ export default function Variants() {
     },
     onSuccess: (result: { updated: number }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
-      setBulkPackageDialogOpen(false);
-      setBulkPackageForm(emptyVariantPackageInput());
-      setBulkPackageClearBlanks(false);
+      setPackageEditorOpen(false);
+      setPackageEditorScope("filtered");
+      setPackageEditorVariantIds([]);
+      setPackageEditorDrafts({});
+      setPackageEditorErrors({});
       setSelectedVariantIds([]);
       toast({
         title: "Package attributes updated",
@@ -551,6 +603,122 @@ export default function Variants() {
     return matchesSearch && matchesLink && matchesStatus && matchesCategory && matchesProductLine;
   });
 
+  const variantsById = new Map(allVariants.map((variant) => [variant.id, variant]));
+  const packageEditorVariants = packageEditorVariantIds
+    .map((variantId) => variantsById.get(variantId))
+    .filter((variant): variant is ProductVariant => Boolean(variant));
+  const packageEditorDirtyCount = packageEditorVariants.filter((variant) => {
+    const original = variantPackageInputFromVariant(variant);
+    const draft = packageEditorDrafts[variant.id] ?? original;
+    return !packageInputsEqual(draft, original);
+  }).length;
+
+  const openPackageEditor = (variantIds: number[], scope: "filtered" | "selected") => {
+    const uniqueVariantIds = Array.from(new Set(variantIds));
+    const scopedVariants = uniqueVariantIds
+      .map((variantId) => variantsById.get(variantId))
+      .filter((variant): variant is ProductVariant => Boolean(variant));
+
+    if (scopedVariants.length === 0) {
+      toast({ title: "No variants available for package editing", variant: "destructive" });
+      return;
+    }
+
+    setPackageEditorVariantIds(scopedVariants.map((variant) => variant.id));
+    setPackageEditorScope(scope);
+    setPackageEditorDrafts(
+      scopedVariants.reduce<Record<number, VariantPackageInput>>((drafts, variant) => {
+        drafts[variant.id] = variantPackageInputFromVariant(variant);
+        return drafts;
+      }, {}),
+    );
+    setPackageEditorErrors({});
+    setPackageEditorOpen(true);
+  };
+
+  const closePackageEditor = () => {
+    setPackageEditorOpen(false);
+    setPackageEditorScope("filtered");
+    setPackageEditorVariantIds([]);
+    setPackageEditorDrafts({});
+    setPackageEditorErrors({});
+  };
+
+  const updatePackageEditorDraft = (
+    variantId: number,
+    field: keyof VariantPackageInput,
+    value: string,
+  ) => {
+    setPackageEditorDrafts((previousDrafts) => {
+      const variant = variantsById.get(variantId);
+      const currentDraft = previousDrafts[variantId] ?? (
+        variant ? variantPackageInputFromVariant(variant) : emptyVariantPackageInput()
+      );
+      return {
+        ...previousDrafts,
+        [variantId]: {
+          ...currentDraft,
+          [field]: value,
+        },
+      };
+    });
+    setPackageEditorErrors((previousErrors) => {
+      if (!previousErrors[variantId]) return previousErrors;
+      const nextErrors = { ...previousErrors };
+      delete nextErrors[variantId];
+      return nextErrors;
+    });
+  };
+
+  const resetPackageEditorRow = (variant: ProductVariant) => {
+    setPackageEditorDrafts((previousDrafts) => ({
+      ...previousDrafts,
+      [variant.id]: variantPackageInputFromVariant(variant),
+    }));
+    setPackageEditorErrors((previousErrors) => {
+      if (!previousErrors[variant.id]) return previousErrors;
+      const nextErrors = { ...previousErrors };
+      delete nextErrors[variant.id];
+      return nextErrors;
+    });
+  };
+
+  const submitPackageEditor = () => {
+    const rowsToUpdate: VariantPackageBulkRow[] = [];
+    const nextErrors: Record<number, string> = {};
+
+    for (const variant of packageEditorVariants) {
+      const original = variantPackageInputFromVariant(variant);
+      const draft = packageEditorDrafts[variant.id] ?? original;
+      if (packageInputsEqual(draft, original)) continue;
+
+      try {
+        const updates = buildVariantPackageDiffPayload(draft, original);
+        if (Object.keys(updates).length > 0) {
+          rowsToUpdate.push({ variantId: variant.id, updates });
+        }
+      } catch (error) {
+        nextErrors[variant.id] = error instanceof Error ? error.message : "Invalid package values.";
+      }
+    }
+
+    setPackageEditorErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) {
+      toast({
+        title: "Package editor has invalid rows",
+        description: "Fix the highlighted SKU rows before saving.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (rowsToUpdate.length === 0) {
+      toast({ title: "No package changes to save" });
+      return;
+    }
+
+    bulkPackageMutation.mutate(rowsToUpdate);
+  };
+
   const exportPackageCsv = () => {
     const header = [
       "variant_id",
@@ -658,20 +826,6 @@ export default function Variants() {
     }
   };
 
-  const submitBulkPackageEdit = () => {
-    try {
-      const updates = buildVariantPackagePayload(bulkPackageForm, bulkPackageClearBlanks ? "null" : "omit");
-      if (Object.keys(updates).length === 0) {
-        toast({ title: "No package changes entered", variant: "destructive" });
-        return;
-      }
-      bulkPackageMutation.mutate(selectedVariantIds.map((variantId) => ({ variantId, updates })));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Package update failed";
-      toast({ title: "Package update failed", description: message, variant: "destructive" });
-    }
-  };
-
   const openVariantEditor = (variant: ProductVariant) => {
     if (variant.productId) {
       navigate(`/products/${variant.productId}?tab=variants&variantId=${variant.id}`);
@@ -770,6 +924,16 @@ export default function Variants() {
           <Button variant="outline" onClick={exportPackageCsv} className="min-h-[44px]" title="Export package weight and dimensions CSV">
             <Download className="h-4 w-4 mr-1" />
             <span className="hidden md:inline">Package CSV</span>
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => openPackageEditor(filteredVariants.map((variant) => variant.id), "filtered")}
+            className="min-h-[44px]"
+            disabled={isLoading || filteredVariants.length === 0}
+            title="Edit package weight and dimensions line by line"
+          >
+            <Package className="h-4 w-4 mr-1" />
+            <span className="hidden md:inline">Package Editor</span>
           </Button>
           <Button
             variant="outline"
@@ -893,7 +1057,160 @@ export default function Variants() {
         </div>
       </div>
 
-      {isLoading ? (
+      {packageEditorOpen ? (
+        <Card>
+          <CardContent className="p-4 md:p-6 space-y-4">
+            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold flex items-center gap-2">
+                  <Package className="h-5 w-5" />
+                  Package editor
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Edit package weight and dimensions per SKU. Saving writes only rows and fields that changed.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={closePackageEditor} disabled={bulkPackageMutation.isPending}>
+                  Back to variants
+                </Button>
+                <Button
+                  onClick={submitPackageEditor}
+                  disabled={bulkPackageMutation.isPending || packageEditorDirtyCount === 0}
+                >
+                  {bulkPackageMutation.isPending ? "Saving..." : `Save ${packageEditorDirtyCount} change${packageEditorDirtyCount === 1 ? "" : "s"}`}
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="rounded-md border p-3">
+                <div className="text-xl font-semibold">{packageEditorVariants.length}</div>
+                <div className="text-xs text-muted-foreground">Rows in editor</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xl font-semibold">{packageEditorDirtyCount}</div>
+                <div className="text-xs text-muted-foreground">Changed rows</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xl font-semibold text-red-600">{Object.keys(packageEditorErrors).length}</div>
+                <div className="text-xs text-muted-foreground">Invalid rows</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xl font-semibold">
+                  {packageEditorScope === "selected" ? "Selected" : "Filtered"}
+                </div>
+                <div className="text-xs text-muted-foreground">Editor scope</div>
+              </div>
+            </div>
+
+            <div className="rounded-md border overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="min-w-[260px]">Variant</TableHead>
+                    <TableHead className="min-w-[150px]">Product</TableHead>
+                    {PACKAGE_EDITOR_FIELDS.map((field) => (
+                      <TableHead key={field.inputKey} className="min-w-[130px]">{field.label}</TableHead>
+                    ))}
+                    <TableHead className="min-w-[150px]">Package status</TableHead>
+                    <TableHead className="w-36">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {packageEditorVariants.map((variant) => {
+                    const originalInput = variantPackageInputFromVariant(variant);
+                    const draftInput = packageEditorDrafts[variant.id] ?? originalInput;
+                    const rowDirty = !packageInputsEqual(draftInput, originalInput);
+                    const rowError = packageEditorErrors[variant.id];
+                    const packageDisplay = buildVariantPackageDisplay(variant);
+
+                    return (
+                      <TableRow key={variant.id} className={rowError ? "bg-red-50/60" : undefined}>
+                        <TableCell>
+                          <div className="space-y-1">
+                            <div className="font-mono text-sm">{variant.sku || "-"}</div>
+                            <div className="text-sm font-medium">{variant.name}</div>
+                            <div className="flex items-center gap-2">
+                              <Badge variant="outline" className="text-xs">{getHierarchyLabel(variant.hierarchyLevel)}</Badge>
+                              <span className="text-xs text-muted-foreground">{variant.unitsPerVariant} units</span>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {variant.productId ? (
+                            <div>
+                              <p className="text-sm font-medium">{getProductName(variant.productId)}</p>
+                              <p className="font-mono text-xs text-muted-foreground">{getProductSku(variant.productId)}</p>
+                            </div>
+                          ) : (
+                            <Badge variant="secondary">Unlinked</Badge>
+                          )}
+                        </TableCell>
+                        {PACKAGE_EDITOR_FIELDS.map((field) => (
+                          <TableCell key={field.inputKey}>
+                            <Input
+                              type="number"
+                              min="0"
+                              step="0.001"
+                              value={draftInput[field.inputKey]}
+                              onChange={(event) => updatePackageEditorDraft(variant.id, field.inputKey, event.target.value)}
+                              placeholder={field.placeholder}
+                              className="h-9"
+                              aria-label={`${field.label} for ${variant.sku || variant.name}`}
+                            />
+                          </TableCell>
+                        ))}
+                        <TableCell>
+                          {rowError ? (
+                            <div>
+                              <Badge variant="outline" className="bg-red-50 text-red-700 border-red-300">Invalid</Badge>
+                              <p className="mt-1 text-xs text-red-700">{rowError}</p>
+                            </div>
+                          ) : rowDirty ? (
+                            <div>
+                              <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-300">Changed</Badge>
+                              <p className="mt-1 text-xs text-muted-foreground">Not saved</p>
+                            </div>
+                          ) : (
+                            <div>
+                              <Badge variant="outline" className={`text-[10px] ${packageDisplay.className}`}>
+                                {packageDisplay.label}
+                              </Badge>
+                              <p className="mt-1 text-xs text-muted-foreground">{packageDisplay.detail}</p>
+                            </div>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => resetPackageEditorRow(variant)}
+                              disabled={!rowDirty || bulkPackageMutation.isPending}
+                            >
+                              Reset
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-9 w-9"
+                              onClick={() => openVariantEditor(variant)}
+                              title="Open variant"
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : isLoading ? (
         <div className="text-center py-12">Loading variants...</div>
       ) : filteredVariants.length === 0 ? (
         <Card>
@@ -1124,7 +1441,7 @@ export default function Variants() {
         Showing {filteredVariants.length} of {allVariants.length} variants
       </div>
 
-      {selectedVariantIds.length > 0 && (
+      {selectedVariantIds.length > 0 && !packageEditorOpen && (
         <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-3 z-50 border border-slate-700 animate-in slide-in-from-bottom-10 fade-in duration-300">
           <span className="text-sm font-medium">{selectedVariantIds.length} Variants Selected</span>
           <div className="h-4 w-px bg-slate-600"></div>
@@ -1132,14 +1449,10 @@ export default function Variants() {
             size="sm"
             variant="ghost"
             className="hover:bg-slate-800 text-white hover:text-white transition-colors"
-            onClick={() => {
-              setBulkPackageForm(emptyVariantPackageInput());
-              setBulkPackageClearBlanks(false);
-              setBulkPackageDialogOpen(true);
-            }}
+            onClick={() => openPackageEditor(selectedVariantIds, "selected")}
             disabled={bulkPackageMutation.isPending}
           >
-            Edit Package
+            Package Editor
           </Button>
           <Button 
             size="sm" 
@@ -1169,92 +1482,6 @@ export default function Variants() {
           </Button>
         </div>
       )}
-
-      <Dialog open={bulkPackageDialogOpen} onOpenChange={setBulkPackageDialogOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Bulk Edit Package Details</DialogTitle>
-            <DialogDescription>
-              Apply package weight and dimensions to {selectedVariantIds.length} selected catalog variant{selectedVariantIds.length === 1 ? "" : "s"}.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Weight (lb)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value={bulkPackageForm.weightLb}
-                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, weightLb: e.target.value }))}
-                  placeholder="Leave unchanged"
-                  className="h-11"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Length (in)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value={bulkPackageForm.lengthIn}
-                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, lengthIn: e.target.value }))}
-                  placeholder="Leave unchanged"
-                  className="h-11"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Width (in)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value={bulkPackageForm.widthIn}
-                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, widthIn: e.target.value }))}
-                  placeholder="Leave unchanged"
-                  className="h-11"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Height (in)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value={bulkPackageForm.heightIn}
-                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, heightIn: e.target.value }))}
-                  placeholder="Leave unchanged"
-                  className="h-11"
-                />
-              </div>
-            </div>
-            <div className="flex items-start gap-2 rounded-md border bg-muted/30 p-3">
-              <Checkbox
-                id="variant-page-bulk-clear-blank-package-fields"
-                checked={bulkPackageClearBlanks}
-                onCheckedChange={(checked) => setBulkPackageClearBlanks(checked === true)}
-              />
-              <div>
-                <label htmlFor="variant-page-bulk-clear-blank-package-fields" className="text-sm font-medium cursor-pointer">
-                  Blank fields clear existing values
-                </label>
-                <p className="text-xs text-muted-foreground">
-                  Leave this off when only updating one package attribute.
-                </p>
-              </div>
-            </div>
-          </div>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => setBulkPackageDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={submitBulkPackageEdit} disabled={bulkPackageMutation.isPending}>
-              {bulkPackageMutation.isPending ? "Saving..." : "Apply to selected"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
