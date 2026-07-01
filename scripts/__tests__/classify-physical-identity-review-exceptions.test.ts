@@ -14,12 +14,19 @@ describe("classify-physical-identity-review-exceptions", () => {
       help: false,
       limit: 100,
       operator: "script:classify-physical-identity-review-exceptions",
+      includeNotFoundAfterEnrichment: false,
     });
-    expect(parseFlags(["--execute", "--limit=all", "--operator=ops"])).toEqual({
+    expect(parseFlags([
+      "--execute",
+      "--limit=all",
+      "--operator=ops",
+      "--include-not-found-after-enrichment",
+    ])).toEqual({
       mode: "execute",
       help: false,
       limit: null,
       operator: "ops",
+      includeNotFoundAfterEnrichment: true,
     });
   });
 
@@ -46,7 +53,7 @@ describe("classify-physical-identity-review-exceptions", () => {
     expect(LEGACY_AGGREGATE_COVERED_REVIEW_REASON.length).toBeLessThanOrEqual(100);
   });
 
-  it("selects only unclassified shipped rows that lack physical identity", async () => {
+  it("selects only unclassified shipped aggregate rows that lack physical identity by default", async () => {
     const { physicalIdentityReviewCandidateSql } = await loadModule();
     const sql = physicalIdentityReviewCandidateSql(25, true);
 
@@ -55,8 +62,24 @@ describe("classify-physical-identity-review-exceptions", () => {
     expect(sql).toContain("NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL");
     expect(sql).toContain("COALESCE(s.requires_review, false) = false");
     expect(sql).toContain("FOR UPDATE OF s");
+    expect(sql).not.toContain("missing_physical_identity_candidates");
+    expect(sql).not.toContain("physical_identity_not_found_after_enrichment");
+    expect(sql).toContain("NULLIF(sibling.shipstation_order_id::text, '')");
+    expect(sql).toContain("NULLIF(s.shipstation_order_id::text, '')");
+  });
+
+  it("requires explicit opt-in before classifying generic not-found rows", async () => {
+    const {
+      physicalIdentityReviewCandidateSql,
+      NOT_FOUND_REVIEW_REASON,
+      TRACKING_COLLISION_REVIEW_REASON,
+    } = await loadModule();
+    const sql = physicalIdentityReviewCandidateSql(25, false, true);
+
+    expect(sql).toContain("missing_physical_identity_candidates");
+    expect(sql).toContain(NOT_FOUND_REVIEW_REASON);
+    expect(sql).toContain(TRACKING_COLLISION_REVIEW_REASON);
     expect(sql).toContain("physical_owner.external_fulfillment_id");
-    expect(sql).toContain("sibling.shipstation_order_id = s.shipstation_order_id");
   });
 
   it("classifies only aggregate rows fully covered by physical shipment siblings", async () => {

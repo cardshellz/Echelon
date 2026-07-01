@@ -122,6 +122,7 @@ const DEFAULT_MAX_RATE_LIMIT_ERRORS = 25;
 const MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_PROGRESS_EVERY = 25;
 const DEFAULT_BASE_URL = "https://ssapi.shipstation.com";
+export const NOT_FOUND_REVIEW_REASON = "physical_identity_not_found_after_enrichment";
 
 function usage(): string {
   return [
@@ -701,6 +702,28 @@ async function hasExternalFulfillmentConflict(
   return result.rowCount > 0;
 }
 
+export function applyExternalFulfillmentIdSql(): string {
+  return `
+      UPDATE wms.outbound_shipments
+      SET external_fulfillment_id = $1,
+          requires_review = CASE
+            WHEN review_reason = $5 THEN false
+            ELSE requires_review
+          END,
+          review_reason = CASE
+            WHEN review_reason = $5 THEN NULL
+            ELSE review_reason
+          END,
+          updated_at = NOW()
+      WHERE id = $2
+        AND status::text = 'shipped'
+        AND shipstation_order_id IS NOT DISTINCT FROM $3::bigint
+        AND tracking_number = $4
+        AND NULLIF(BTRIM(COALESCE(external_fulfillment_id, '')), '') IS NULL
+      RETURNING id
+    `;
+}
+
 async function applyExternalFulfillmentId(
   client: PoolClient,
   candidate: CandidateRow,
@@ -711,22 +734,13 @@ async function applyExternalFulfillmentId(
   }
 
   const result = await client.query(
-    `
-      UPDATE wms.outbound_shipments
-      SET external_fulfillment_id = $1,
-          updated_at = NOW()
-      WHERE id = $2
-        AND status::text = 'shipped'
-        AND shipstation_order_id IS NOT DISTINCT FROM $3::bigint
-        AND tracking_number = $4
-        AND NULLIF(BTRIM(COALESCE(external_fulfillment_id, '')), '') IS NULL
-      RETURNING id
-    `,
+    applyExternalFulfillmentIdSql(),
     [
       externalFulfillmentId,
       candidate.legacy_shipment_id,
       candidate.shipstation_order_id,
       candidate.tracking_number,
+      NOT_FOUND_REVIEW_REASON,
     ],
   );
 

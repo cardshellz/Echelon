@@ -256,4 +256,19 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(query.sql).toContain("external_fulfillment_id");
     expect(query.params).toEqual(["#59453", 4313]);
   });
+
+  it("clears stale not-found review flags when enrichment writes a physical id", async () => {
+    const {
+      applyExternalFulfillmentIdSql,
+      NOT_FOUND_REVIEW_REASON,
+    } = await loadModule();
+    const sql = applyExternalFulfillmentIdSql();
+
+    expect(NOT_FOUND_REVIEW_REASON).toBe("physical_identity_not_found_after_enrichment");
+    expect(sql).toContain("SET external_fulfillment_id = $1");
+    expect(sql).toContain("WHEN review_reason = $5 THEN false");
+    expect(sql).toContain("WHEN review_reason = $5 THEN NULL");
+    expect(sql).toContain("AND NULLIF(BTRIM(COALESCE(external_fulfillment_id, '')), '') IS NULL");
+    expect(sql).not.toContain("requires_review = false,");
+  });
 });
