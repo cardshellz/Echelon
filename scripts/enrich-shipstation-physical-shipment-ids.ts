@@ -4,8 +4,8 @@
  *
  * This script is intentionally conservative:
  * - dry-run by default
- * - fetches ShipStation by both orderId and orderNumber because split
- *   ShipStation children may not be returned by parent orderId alone
+ * - fetches ShipStation by orderId, orderNumber, and trackingNumber because
+ *   legacy rows can have stale or missing ShipStation order identity
  * - only accepts an exact one-to-one tracking-number match
  * - refuses to overwrite any existing external_fulfillment_id
  *
@@ -45,7 +45,7 @@ interface CandidateRow {
   shipping_engine: string | null;
   engine_order_ref: string | null;
   engine_shipment_ref: string | null;
-  shipstation_order_id: number;
+  shipstation_order_id: number | null;
   shipstation_order_key: string | null;
   tracking_number: string;
   carrier: string | null;
@@ -89,6 +89,11 @@ interface ProcessedCandidate {
   providerStatus: number | null;
 }
 
+export interface ShipStationRateLimitCircuit {
+  rateLimitResponses: number;
+  stoppedEarlyReason: string | null;
+}
+
 interface EnrichmentResult {
   runId: string;
   mode: Mode;
@@ -101,6 +106,7 @@ interface EnrichmentResult {
   lookupErrors: number;
   updateSkipped: number;
   errors: number;
+  rateLimitResponses: number;
   stoppedEarlyReason: string | null;
   outcomes: CandidateOutcome[];
 }
@@ -133,7 +139,7 @@ function usage(): string {
     "  --request-timeout-ms=N Abort each ShipStation HTTP request after N ms. Default 20000.",
     "  --max-retries=N        Retry transient ShipStation lookup failures N times. Default 3.",
     "  --retry-base-delay-ms=N Base exponential retry delay. Default 2000, max delay 60000.",
-    "  --max-rate-limit-errors=N Stop after N consecutive exhausted 429 lookups. Default 25; 0 disables.",
+    "  --max-rate-limit-errors=N Stop after N ShipStation 429 responses during the run. Default 25; 0 disables.",
     "  --progress-every=N     Print aggregate progress every N rows. Use 0 to disable. Default 25.",
     "  --order-number=TEXT    Restrict to one WMS order number.",
     "  --wms-shipment-id=N    Restrict to one WMS outbound shipment id.",
@@ -270,11 +276,18 @@ function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
 }
 
-export function buildShipStationShipmentsPath(params: { orderId?: number; orderNumber?: string | null }): string {
+export function buildShipStationShipmentsPath(params: {
+  orderId?: number | null;
+  orderNumber?: string | null;
+  trackingNumber?: string | null;
+}): string {
   const search = new URLSearchParams();
   if (params.orderId != null) search.set("orderId", String(params.orderId));
   if (params.orderNumber != null && params.orderNumber.trim().length > 0) {
     search.set("orderNumber", params.orderNumber.trim());
+  }
+  if (params.trackingNumber != null && params.trackingNumber.trim().length > 0) {
+    search.set("trackingNumber", params.trackingNumber.trim());
   }
   search.set("includeShipmentItems", "true");
   return `/shipments?${search.toString()}`;
@@ -282,7 +295,7 @@ export function buildShipStationShipmentsPath(params: { orderId?: number; orderN
 
 export function buildShipStationShipmentsUrl(
   baseUrl: string,
-  params: { orderId?: number; orderNumber?: string | null },
+  params: { orderId?: number | null; orderNumber?: string | null; trackingNumber?: string | null },
 ): string {
   return `${normalizeBaseUrl(baseUrl)}${buildShipStationShipmentsPath(params)}`;
 }
@@ -361,7 +374,6 @@ export function buildCandidateSql(flags: Pick<Flags, "limit" | "orderNumber" | "
 } {
   const where: string[] = [
     "s.status::text = 'shipped'",
-    "s.shipstation_order_id IS NOT NULL",
     "NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '') IS NOT NULL",
     "NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL",
     "COALESCE(NULLIF(BTRIM(s.shipping_engine), ''), 'shipstation') = 'shipstation'",
@@ -478,6 +490,15 @@ export class ShipStationTimeoutError extends Error {
   }
 }
 
+export class ShipStationRateLimitCircuitOpenError extends Error {
+  readonly providerStatus = 429;
+
+  constructor(reason: string) {
+    super(reason);
+    this.name = "ShipStationRateLimitCircuitOpenError";
+  }
+}
+
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
@@ -510,7 +531,35 @@ function isRetryableShipStationLookupError(err: unknown): boolean {
 }
 
 function providerStatusFromError(err: unknown): number | null {
+  if (err instanceof ShipStationRateLimitCircuitOpenError) return err.providerStatus;
   return err instanceof ShipStationHttpError ? err.status : null;
+}
+
+function isShipStationRateLimitError(err: unknown): boolean {
+  return err instanceof ShipStationHttpError && err.status === 429;
+}
+
+export function createShipStationRateLimitCircuit(): ShipStationRateLimitCircuit {
+  return {
+    rateLimitResponses: 0,
+    stoppedEarlyReason: null,
+  };
+}
+
+export function recordShipStationRateLimitResponse(
+  circuit: ShipStationRateLimitCircuit,
+  maxRateLimitErrors: number,
+): string | null {
+  circuit.rateLimitResponses += 1;
+  if (
+    circuit.stoppedEarlyReason === null &&
+    maxRateLimitErrors > 0 &&
+    circuit.rateLimitResponses >= maxRateLimitErrors
+  ) {
+    circuit.stoppedEarlyReason =
+      `stopped after ${circuit.rateLimitResponses} ShipStation 429 responses during this run`;
+  }
+  return circuit.stoppedEarlyReason;
 }
 
 function retryDelayMs(err: unknown, retryIndex: number, baseDelayMs: number): number {
@@ -564,12 +613,24 @@ export async function fetchShipStationJsonWithTimeout<T>(
 async function fetchShipStationJsonWithRetries<T>(
   url: string,
   authHeader: string,
-  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "json">,
+  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "maxRateLimitErrors" | "json">,
+  rateLimitCircuit: ShipStationRateLimitCircuit,
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
+    if (rateLimitCircuit.stoppedEarlyReason !== null) {
+      throw new ShipStationRateLimitCircuitOpenError(rateLimitCircuit.stoppedEarlyReason);
+    }
+
     try {
       return await fetchShipStationJsonWithTimeout<T>(url, authHeader, flags.requestTimeoutMs);
     } catch (err) {
+      if (isShipStationRateLimitError(err)) {
+        const stopReason = recordShipStationRateLimitResponse(rateLimitCircuit, flags.maxRateLimitErrors);
+        if (stopReason !== null) {
+          throw new ShipStationRateLimitCircuitOpenError(stopReason);
+        }
+      }
+
       if (attempt >= flags.maxRetries || !isRetryableShipStationLookupError(err)) {
         throw err;
       }
@@ -589,22 +650,26 @@ async function fetchShipStationJsonWithRetries<T>(
 async function fetchShipStationShipmentsByOrder(
   candidate: CandidateRow,
   authHeader: string,
-  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "json">,
+  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "maxRateLimitErrors" | "json">,
+  rateLimitCircuit: ShipStationRateLimitCircuit,
 ): Promise<ShipStationShipmentCandidate[]> {
   const baseUrl = process.env.SHIPSTATION_API_BASE_URL || DEFAULT_BASE_URL;
-  const urls = [
-    buildShipStationShipmentsUrl(baseUrl, { orderId: candidate.shipstation_order_id }),
-  ];
+  const urls: string[] = [];
+  if (candidate.shipstation_order_id !== null) {
+    urls.push(buildShipStationShipmentsUrl(baseUrl, { orderId: candidate.shipstation_order_id }));
+  }
   if (candidate.order_number) {
     urls.push(buildShipStationShipmentsUrl(baseUrl, { orderNumber: candidate.order_number }));
   }
+  urls.push(buildShipStationShipmentsUrl(baseUrl, { trackingNumber: candidate.tracking_number }));
 
   const shipments: ShipStationShipmentCandidate[] = [];
-  for (const url of urls) {
+  for (const url of [...new Set(urls)]) {
     const body = await fetchShipStationJsonWithRetries<{ shipments?: ShipStationShipmentCandidate[] }>(
       url,
       authHeader,
       flags,
+      rateLimitCircuit,
     );
     shipments.push(...(Array.isArray(body.shipments) ? body.shipments : []));
   }
@@ -652,7 +717,7 @@ async function applyExternalFulfillmentId(
           updated_at = NOW()
       WHERE id = $2
         AND status::text = 'shipped'
-        AND shipstation_order_id = $3
+        AND shipstation_order_id IS NOT DISTINCT FROM $3::bigint
         AND tracking_number = $4
         AND NULLIF(BTRIM(COALESCE(external_fulfillment_id, '')), '') IS NULL
       RETURNING id
@@ -679,7 +744,7 @@ function printOutcome(outcome: CandidateOutcome, mode: Mode): void {
       : "PLAN";
     console.log(
       `[ShipStation physical id enrich] ${action} wms=${c.legacy_shipment_id} order=${c.order_number ?? "unknown"} ` +
-      `ssOrder=${c.shipstation_order_id} tracking=${c.tracking_number} -> ${outcome.decision.externalFulfillmentId}` +
+      `ssOrder=${c.shipstation_order_id ?? "unknown"} tracking=${c.tracking_number} -> ${outcome.decision.externalFulfillmentId}` +
       `${outcome.updateSkippedReason ? ` reason="${outcome.updateSkippedReason}"` : ""}`,
     );
     return;
@@ -687,7 +752,7 @@ function printOutcome(outcome: CandidateOutcome, mode: Mode): void {
 
   console.log(
     `[ShipStation physical id enrich] ${outcome.decision.kind.toUpperCase()} wms=${c.legacy_shipment_id} ` +
-    `order=${c.order_number ?? "unknown"} ssOrder=${c.shipstation_order_id} tracking=${c.tracking_number} ` +
+    `order=${c.order_number ?? "unknown"} ssOrder=${c.shipstation_order_id ?? "unknown"} tracking=${c.tracking_number} ` +
     `${outcome.decision.providerStatus != null ? `status=${outcome.decision.providerStatus} ` : ""}` +
     `reason="${outcome.decision.reason}"`,
   );
@@ -698,6 +763,7 @@ function summarizeOutcomes(
   mode: Mode,
   outcomes: CandidateOutcome[],
   errors: number,
+  rateLimitResponses: number,
   stoppedEarlyReason: string | null = null,
 ): EnrichmentResult {
   return {
@@ -712,6 +778,7 @@ function summarizeOutcomes(
     lookupErrors: outcomes.filter((outcome) => outcome.decision.kind === "lookup_error").length,
     updateSkipped: outcomes.filter((outcome) => outcome.updateSkippedReason !== null).length,
     errors,
+    rateLimitResponses,
     stoppedEarlyReason,
     outcomes,
   };
@@ -722,9 +789,10 @@ async function enrichCandidate(
   candidate: CandidateRow,
   authHeader: string,
   flags: Flags,
+  rateLimitCircuit: ShipStationRateLimitCircuit,
 ): Promise<ProcessedCandidate> {
   try {
-    const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags);
+    const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags, rateLimitCircuit);
     const decision = decideShipStationPhysicalMatch(candidate, shipments);
     let updated = false;
     let updateSkippedReason: string | null = null;
@@ -776,7 +844,7 @@ async function enrichCandidate(
 function printCandidateLookup(index: number, total: number, candidate: CandidateRow): void {
   console.log(
     `[ShipStation physical id enrich] LOOKUP ${index}/${total} wms=${candidate.legacy_shipment_id} ` +
-    `order=${candidate.order_number ?? "unknown"} ssOrder=${candidate.shipstation_order_id} ` +
+    `order=${candidate.order_number ?? "unknown"} ssOrder=${candidate.shipstation_order_id ?? "unknown"} ` +
     `tracking=${candidate.tracking_number}`,
   );
 }
@@ -790,10 +858,11 @@ function printProgress(
   mode: Mode,
   outcomes: CandidateOutcome[],
   errors: number,
+  rateLimitResponses: number,
   total: number,
   startedAtMs: number,
 ): void {
-  const summary = summarizeOutcomes(runId, mode, outcomes, errors);
+  const summary = summarizeOutcomes(runId, mode, outcomes, errors, rateLimitResponses);
   console.log(
     `[ShipStation physical id enrich] PROGRESS ${JSON.stringify({
       runId,
@@ -805,6 +874,7 @@ function printProgress(
       ambiguous: summary.ambiguous,
       invalidCandidate: summary.invalidCandidate,
       lookupErrors: summary.lookupErrors,
+      rateLimitResponses: summary.rateLimitResponses,
       updateSkipped: summary.updateSkipped,
       errors: summary.errors,
       elapsedMs: Date.now() - startedAtMs,
@@ -827,8 +897,7 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
   const outcomes: CandidateOutcome[] = [];
   let errors = 0;
   const startedAtMs = Date.now();
-  let stoppedEarlyReason: string | null = null;
-  let consecutiveRateLimitErrors = 0;
+  const rateLimitCircuit = createShipStationRateLimitCircuit();
 
   try {
     const candidates = await fetchCandidates(pool, flags);
@@ -839,7 +908,7 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
     const workerCount = Math.min(flags.concurrency, candidates.length);
     const worker = async (): Promise<void> => {
       while (true) {
-        if (stoppedEarlyReason !== null) return;
+        if (rateLimitCircuit.stoppedEarlyReason !== null) return;
         const index = nextIndex;
         nextIndex += 1;
         if (index >= candidates.length) return;
@@ -849,31 +918,28 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
           printCandidateLookup(index + 1, candidates.length, candidate);
         }
 
-        const processedCandidate = await enrichCandidate(pool, candidate, authHeader, flags);
+        const processedCandidate = await enrichCandidate(pool, candidate, authHeader, flags, rateLimitCircuit);
         outcomesByIndex[index] = processedCandidate.outcome;
         if (processedCandidate.error) errors += 1;
-        if (processedCandidate.providerStatus === 429) {
-          consecutiveRateLimitErrors += 1;
-        } else {
-          consecutiveRateLimitErrors = 0;
-        }
         outcomes.push(processedCandidate.outcome);
         processed += 1;
 
         if (!flags.json) printOutcome(processedCandidate.outcome, flags.mode);
         if (!flags.json && shouldPrintProgress(flags.progressEvery, processed, candidates.length)) {
-          printProgress(runId, flags.mode, outcomes, errors, candidates.length, startedAtMs);
+          printProgress(
+            runId,
+            flags.mode,
+            outcomes,
+            errors,
+            rateLimitCircuit.rateLimitResponses,
+            candidates.length,
+            startedAtMs,
+          );
         }
 
-        if (
-          stoppedEarlyReason === null &&
-          flags.maxRateLimitErrors > 0 &&
-          consecutiveRateLimitErrors >= flags.maxRateLimitErrors
-        ) {
-          stoppedEarlyReason =
-            `stopped after ${consecutiveRateLimitErrors} consecutive exhausted ShipStation 429 lookup errors`;
+        if (rateLimitCircuit.stoppedEarlyReason !== null) {
           if (!flags.json) {
-            console.error(`[ShipStation physical id enrich] STOP ${stoppedEarlyReason}`);
+            console.error(`[ShipStation physical id enrich] STOP ${rateLimitCircuit.stoppedEarlyReason}`);
           }
           return;
         }
@@ -886,7 +952,14 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
 
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
     const orderedOutcomes = outcomesByIndex.filter((outcome): outcome is CandidateOutcome => outcome !== undefined);
-    return summarizeOutcomes(runId, flags.mode, orderedOutcomes, errors, stoppedEarlyReason);
+    return summarizeOutcomes(
+      runId,
+      flags.mode,
+      orderedOutcomes,
+      errors,
+      rateLimitCircuit.rateLimitResponses,
+      rateLimitCircuit.stoppedEarlyReason,
+    );
   } finally {
     await pool.end();
   }
@@ -925,6 +998,7 @@ async function main(): Promise<void> {
         ambiguous: result.ambiguous,
         invalidCandidate: result.invalidCandidate,
         lookupErrors: result.lookupErrors,
+        rateLimitResponses: result.rateLimitResponses,
         updateSkipped: result.updateSkipped,
         errors: result.errors,
         stoppedEarlyReason: result.stoppedEarlyReason,

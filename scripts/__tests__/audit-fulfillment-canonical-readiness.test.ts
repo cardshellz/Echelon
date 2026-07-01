@@ -106,6 +106,18 @@ describe("audit-fulfillment-canonical-readiness", () => {
     }
   });
 
+  it("does not double-count duplicate rows already represented by a sibling physical shipment id", async () => {
+    const { buildCanonicalReadinessChecks } = await loadAuditModule();
+    const missingPhysicalIdentityCheck = buildCanonicalReadinessChecks()
+      .find((check) => check.id === "shipped_missing_physical_identity");
+
+    expect(missingPhysicalIdentityCheck).toBeDefined();
+    expect(missingPhysicalIdentityCheck!.sql).toContain("NOT EXISTS");
+    expect(missingPhysicalIdentityCheck!.sql).toContain("sibling.shipstation_order_id = s.shipstation_order_id");
+    expect(missingPhysicalIdentityCheck!.sql).toContain("sibling.tracking_number");
+    expect(missingPhysicalIdentityCheck!.sql).toContain("sibling.external_fulfillment_id");
+  });
+
   it("separates blockers from warnings in the summary", async () => {
     const { buildCanonicalReadinessChecks, summarizeCanonicalResults } = await loadAuditModule();
     const checks = buildCanonicalReadinessChecks();
