@@ -125,6 +125,7 @@ interface Storage {
   createReceivingOrder(data: any): Promise<any>;
   getReceivingOrdersForPurchaseOrder?(purchaseOrderId: number): Promise<any[]>;
   getReceivingLines?(receivingOrderId: number): Promise<any[]>;
+  deleteReceivingOrder?(id: number): Promise<boolean>;
   generateReceiptNumber(): Promise<string>;
   bulkCreateReceivingLines(lines: any[]): Promise<any[]>;
   getReceivingLineById(id: number): Promise<any>;
@@ -1936,6 +1937,7 @@ export function createPurchasingService(db: any, storage: Storage) {
   type ShipmentReceiptExistingState =
     | { kind: "none" }
     | { kind: "active"; receipt: any }
+    | { kind: "empty_active"; receipt: any; lineCount: 0 }
     | { kind: "closed"; receipt: any };
 
   type ShipmentReceiveOption = {
@@ -1947,13 +1949,14 @@ export function createPurchasingService(db: any, storage: Storage) {
     qtyShipped: number;
     missingPurchaseOrderLineCount: number;
     receivable: boolean;
-    action: "create_receipt" | "open_existing_receipt" | "blocked";
+    action: "create_receipt" | "open_existing_receipt" | "repair_empty_receipt" | "blocked";
     reason: string | null;
     freightWillCarry: boolean;
     estimatedTotalCostCents: number | null;
     actualTotalCostCents: number | null;
     existingReceiptId: number | null;
     existingReceiptStatus: string | null;
+    existingReceiptLineCount: number | null;
   };
 
   type ShipmentCartonReceivePackInspection = {
@@ -2103,6 +2106,23 @@ export function createPurchasingService(db: any, storage: Storage) {
       .sort((a, b) => b.unitsPerVariant - a.unitsPerVariant || a.id - b.id);
   }
 
+  function emptyShipmentReceiptError(
+    receipt: any,
+    purchaseOrderId: number,
+    inboundShipmentId: number,
+  ): PurchasingError {
+    return new PurchasingError(
+      "An empty draft receipt already exists for this shipment and PO. Clean up that draft receipt, then receive the shipment again.",
+      409,
+      {
+        code: "EMPTY_SHIPMENT_RECEIPT",
+        receivingOrderId: receipt?.id ?? null,
+        purchaseOrderId,
+        inboundShipmentId,
+      },
+    );
+  }
+
   async function getReceiptForShipmentPo(
     purchaseOrderId: number,
     inboundShipmentId: number,
@@ -2117,7 +2137,13 @@ export function createPurchasingService(db: any, storage: Storage) {
         candidate.status !== "cancelled",
     );
     if (!receipt) return { kind: "none" };
-    if (activeReceiptStatus(receipt.status)) return { kind: "active", receipt };
+    if (activeReceiptStatus(receipt.status)) {
+      if (typeof storage.getReceivingLines === "function") {
+        const lines = await storage.getReceivingLines(receipt.id);
+        if (lines.length === 0) return { kind: "empty_active", receipt, lineCount: 0 };
+      }
+      return { kind: "active", receipt };
+    }
     return { kind: "closed", receipt };
   }
 
@@ -2158,6 +2184,10 @@ export function createPurchasingService(db: any, storage: Storage) {
     } else if (existing.kind === "active") {
       action = "open_existing_receipt";
       reason = "A receipt is already open for this shipment and PO.";
+    } else if (existing.kind === "empty_active") {
+      receivable = false;
+      action = "repair_empty_receipt";
+      reason = "A draft shipment receipt exists but has no lines. Clean it up, then receive this shipment again so the pack checks can run.";
     } else if (existing.kind === "closed") {
       receivable = false;
       action = "blocked";
@@ -2165,6 +2195,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     const existingReceipt = existing.kind === "none" ? null : existing.receipt;
+    const existingReceiptLineCount = existing.kind === "empty_active" ? existing.lineCount : null;
     return {
       shipmentId: inboundShipmentId,
       shipmentNumber: shipment?.shipmentNumber ?? null,
@@ -2181,6 +2212,7 @@ export function createPurchasingService(db: any, storage: Storage) {
       actualTotalCostCents: shipment?.actualTotalCostCents ?? null,
       existingReceiptId: existingReceipt?.id ?? null,
       existingReceiptStatus: existingReceipt?.status ?? null,
+      existingReceiptLineCount,
     };
   }
 
@@ -2431,6 +2463,9 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     const existingReceipt = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
     if (existingReceipt.kind === "active") return { ...existingReceipt.receipt, reusedExisting: true };
+    if (existingReceipt.kind === "empty_active") {
+      throw emptyShipmentReceiptError(existingReceipt.receipt, purchaseOrderId, inboundShipmentId);
+    }
     if (existingReceipt.kind === "closed") {
       throw new PurchasingError(
         "This shipment has already been received for this PO.",
@@ -2457,37 +2492,6 @@ export function createPurchasingService(db: any, storage: Storage) {
           purchaseOrderLineId: invalidLinkedLine.purchaseOrderLineId ?? null,
         },
       );
-    }
-
-    const receiptNumber = await storage.generateReceiptNumber();
-    let receivingOrder;
-    try {
-      receivingOrder = await storage.createReceivingOrder({
-        receiptNumber,
-        poNumber: po.poNumber,
-        purchaseOrderId: po.id,
-        inboundShipmentId,
-        sourceType: "shipment",
-        vendorId: po.vendorId,
-        warehouseId: po.warehouseId,
-        status: "draft",
-        expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
-        createdBy: userId,
-      });
-    } catch (error: any) {
-      if (error?.code === "23505") {
-        const conflict = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
-        if (conflict.kind === "active") return { ...conflict.receipt, reusedExisting: true };
-        if (conflict.kind === "closed") {
-          throw new PurchasingError(
-            "This shipment has already been received for this PO.",
-            409,
-            { receivingOrderId: conflict.receipt.id, purchaseOrderId, inboundShipmentId },
-          );
-        }
-        throw new PurchasingError(`Receipt number '${receiptNumber}' already in use by an active record.`, 409);
-      }
-      throw error;
     }
 
     const unitsPerVariantById = new Map<number, number>();
@@ -2608,7 +2612,6 @@ export function createPurchasingService(db: any, storage: Storage) {
         ? millsToCents(poLine.unitCostMills as number)
         : (typeof poLine?.unitCostCents === "number" ? poLine.unitCostCents : null);
       return {
-        receivingOrderId: receivingOrder!.id,
         productVariantId: resolvedVariantId,
         productId,
         sku: poLine?.sku ?? sl.sku,
@@ -2624,7 +2627,76 @@ export function createPurchasingService(db: any, storage: Storage) {
       };
     });
 
-    await storage.bulkCreateReceivingLines(receivingLineData as any);
+    if (receivingLineData.length === 0) {
+      throw new PurchasingError("Shipment has no receivable lines for this PO.", 400, {
+        purchaseOrderId,
+        inboundShipmentId,
+      });
+    }
+
+    const expectedLineCount = receivingLineData.length;
+    const expectedTotalUnits = receivingLineData.reduce(
+      (sum: number, line: any) => sum + (Number(line.expectedQty) || 0),
+      0,
+    );
+
+    const receiptNumber = await storage.generateReceiptNumber();
+    let receivingOrder;
+    try {
+      receivingOrder = await storage.createReceivingOrder({
+        receiptNumber,
+        poNumber: po.poNumber,
+        purchaseOrderId: po.id,
+        inboundShipmentId,
+        sourceType: "shipment",
+        vendorId: po.vendorId,
+        warehouseId: po.warehouseId,
+        status: "draft",
+        expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
+        expectedLineCount,
+        expectedTotalUnits,
+        createdBy: userId,
+      });
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        const conflict = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
+        if (conflict.kind === "active") return { ...conflict.receipt, reusedExisting: true };
+        if (conflict.kind === "empty_active") {
+          throw emptyShipmentReceiptError(conflict.receipt, purchaseOrderId, inboundShipmentId);
+        }
+        if (conflict.kind === "closed") {
+          throw new PurchasingError(
+            "This shipment has already been received for this PO.",
+            409,
+            { receivingOrderId: conflict.receipt.id, purchaseOrderId, inboundShipmentId },
+          );
+        }
+        throw new PurchasingError(`Receipt number '${receiptNumber}' already in use by an active record.`, 409);
+      }
+      throw error;
+    }
+
+    const receivingLinesToCreate = receivingLineData.map((line: any) => ({
+      ...line,
+      receivingOrderId: receivingOrder.id,
+    }));
+    try {
+      await storage.bulkCreateReceivingLines(receivingLinesToCreate as any);
+    } catch (error) {
+      if (typeof storage.deleteReceivingOrder === "function") {
+        try {
+          await storage.deleteReceivingOrder(receivingOrder.id);
+        } catch (cleanupError) {
+          console.error("[Purchasing] Failed to clean up shipment receipt header after line creation failed:", {
+            receivingOrderId: receivingOrder.id,
+            inboundShipmentId,
+            purchaseOrderId,
+            cleanupError,
+          });
+        }
+      }
+      throw error;
+    }
     return receivingOrder;
   }
 
