@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
@@ -28,6 +29,19 @@ import {
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  buildVariantPackageDisplay,
+  buildVariantPackagePayload,
+  emptyVariantPackageInput,
+  escapeCsvCell,
+  formatMeasurementInput,
+  GRAMS_PER_POUND,
+  MILLIMETERS_PER_INCH,
+  normalizeCsvHeader,
+  parseCsvRows,
+  type VariantPackageBulkRow,
+  type VariantPackageInput,
+} from "@/lib/variant-package";
 
 interface Product {
   id: number;
@@ -54,6 +68,10 @@ interface ProductVariant {
   shopifyInventoryItemId?: string | null;
   isActive: boolean;
   dropshipEligible?: boolean;
+  weightGrams: number | null;
+  lengthMm: number | null;
+  widthMm: number | null;
+  heightMm: number | null;
 }
 
 interface ShopifyCandidate {
@@ -74,12 +92,17 @@ interface ShopifyCandidate {
 export default function Variants() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
+  const packageCsvInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [linkFilter, setLinkFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [productLineFilter, setProductLineFilter] = useState<string>("all");
   const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>([]);
+  const [bulkPackageDialogOpen, setBulkPackageDialogOpen] = useState(false);
+  const [bulkPackageForm, setBulkPackageForm] = useState<VariantPackageInput>(emptyVariantPackageInput());
+  const [bulkPackageClearBlanks, setBulkPackageClearBlanks] = useState(false);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
@@ -315,6 +338,36 @@ export default function Variants() {
     },
   });
 
+  const bulkPackageMutation = useMutation({
+    mutationFn: async (rows: VariantPackageBulkRow[]) => {
+      const res = await fetch("/api/product-variants/package-attributes/bulk", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || "Failed to update package attributes");
+      }
+      return res.json();
+    },
+    onSuccess: (result: { updated: number }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
+      setBulkPackageDialogOpen(false);
+      setBulkPackageForm(emptyVariantPackageInput());
+      setBulkPackageClearBlanks(false);
+      setSelectedVariantIds([]);
+      toast({
+        title: "Package attributes updated",
+        description: `${result.updated} variant${result.updated === 1 ? "" : "s"} updated.`,
+      });
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : "Failed to update package attributes";
+      toast({ title: "Package update failed", description: message, variant: "destructive" });
+    },
+  });
+
   const createVariantMutation = useMutation({
     mutationFn: async (data: typeof newVariant) => {
       const res = await fetch(`/api/products/${data.productId}/variants`, {
@@ -498,6 +551,137 @@ export default function Variants() {
     return matchesSearch && matchesLink && matchesStatus && matchesCategory && matchesProductLine;
   });
 
+  const exportPackageCsv = () => {
+    const header = [
+      "variant_id",
+      "sku",
+      "product_sku",
+      "product_name",
+      "weight_lb",
+      "length_in",
+      "width_in",
+      "height_in",
+    ];
+    const rows = filteredVariants.map((variant) => {
+      const product = products.find((p) => p.id === variant.productId);
+      return [
+        variant.id,
+        variant.sku || "",
+        product?.sku || "",
+        product?.name || "",
+        formatMeasurementInput(variant.weightGrams, GRAMS_PER_POUND),
+        formatMeasurementInput(variant.lengthMm, MILLIMETERS_PER_INCH),
+        formatMeasurementInput(variant.widthMm, MILLIMETERS_PER_INCH),
+        formatMeasurementInput(variant.heightMm, MILLIMETERS_PER_INCH),
+      ];
+    });
+    const csv = [header, ...rows]
+      .map((row) => row.map((value) => escapeCsvCell(value)).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "variant-package-attributes.csv";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePackageCsvImport = async (file: File) => {
+    try {
+      const parsedRows = parseCsvRows(await file.text());
+      if (parsedRows.length < 2) {
+        throw new Error("CSV must include a header row and at least one data row.");
+      }
+
+      const headers = parsedRows[0].map(normalizeCsvHeader);
+      const findHeader = (...names: string[]) => names.map(normalizeCsvHeader).map((name) => headers.indexOf(name)).find((index) => index >= 0) ?? -1;
+      const variantIdIndex = findHeader("variant_id", "id");
+      const skuIndex = findHeader("sku");
+      const weightIndex = findHeader("weight_lb", "weight_lbs", "weight");
+      const lengthIndex = findHeader("length_in", "length");
+      const widthIndex = findHeader("width_in", "width");
+      const heightIndex = findHeader("height_in", "height");
+
+      if (variantIdIndex < 0 && skuIndex < 0) {
+        throw new Error("CSV must include variant_id or sku.");
+      }
+
+      const variantsById = new Map(allVariants.map((variant) => [variant.id, variant]));
+      const variantsBySku = new Map(
+        allVariants
+          .filter((variant) => variant.sku)
+          .map((variant) => [variant.sku!.trim().toUpperCase(), variant]),
+      );
+      const rowsToUpdate: VariantPackageBulkRow[] = [];
+      const errors: string[] = [];
+
+      for (let rowIndex = 1; rowIndex < parsedRows.length; rowIndex += 1) {
+        const row = parsedRows[rowIndex];
+        const getCell = (index: number) => (index >= 0 ? (row[index] || "").trim() : "");
+        const variantIdRaw = getCell(variantIdIndex);
+        const skuRaw = getCell(skuIndex);
+        const variantId = variantIdRaw ? Number(variantIdRaw) : null;
+        const variant = variantId && Number.isInteger(variantId)
+          ? variantsById.get(variantId)
+          : variantsBySku.get(skuRaw.toUpperCase());
+
+        if (!variant) {
+          errors.push(`Row ${rowIndex + 1}: no matching variant for ${variantIdRaw || skuRaw || "blank identifier"}.`);
+          continue;
+        }
+
+        const updates = buildVariantPackagePayload({
+          weightLb: getCell(weightIndex),
+          lengthIn: getCell(lengthIndex),
+          widthIn: getCell(widthIndex),
+          heightIn: getCell(heightIndex),
+        }, "omit");
+        if (Object.keys(updates).length === 0) continue;
+
+        rowsToUpdate.push({ variantId: variant.id, updates });
+      }
+
+      if (errors.length > 0) {
+        throw new Error(errors.slice(0, 3).join(" "));
+      }
+      if (rowsToUpdate.length === 0) {
+        throw new Error("No package values were found to update.");
+      }
+
+      bulkPackageMutation.mutate(rowsToUpdate);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "CSV import failed";
+      toast({ title: "CSV import failed", description: message, variant: "destructive" });
+    }
+  };
+
+  const submitBulkPackageEdit = () => {
+    try {
+      const updates = buildVariantPackagePayload(bulkPackageForm, bulkPackageClearBlanks ? "null" : "omit");
+      if (Object.keys(updates).length === 0) {
+        toast({ title: "No package changes entered", variant: "destructive" });
+        return;
+      }
+      bulkPackageMutation.mutate(selectedVariantIds.map((variantId) => ({ variantId, updates })));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Package update failed";
+      toast({ title: "Package update failed", description: message, variant: "destructive" });
+    }
+  };
+
+  const openVariantEditor = (variant: ProductVariant) => {
+    if (variant.productId) {
+      navigate(`/products/${variant.productId}?tab=variants&variantId=${variant.id}`);
+      return;
+    }
+    setSelectedVariant(variant);
+    setSelectedProductId("");
+    setLinkDialogOpen(true);
+  };
+
   const categories = Array.from(new Set(products
     .map(p => p.category)
     .filter((c): c is string => Boolean(c))
@@ -539,6 +723,10 @@ export default function Variants() {
     needsConfig: allVariants.filter(v => !v.parentVariantId && v.hierarchyLevel > 1).length,
   };
 
+  const selectedVariantIdSet = new Set(selectedVariantIds);
+  const allFilteredVariantsSelected =
+    filteredVariants.length > 0 && filteredVariants.every((variant) => selectedVariantIdSet.has(variant.id));
+
   const openShopifyLinkDialog = (variant: ProductVariant) => {
     setShopifyLinkVariant(variant);
     setShopifyVariantRef("");
@@ -567,16 +755,40 @@ export default function Variants() {
             Manage sellable SKUs and link them to products
           </p>
         </div>
-        <div className="flex gap-2 w-full md:w-auto">
+        <div className="flex flex-wrap gap-2 w-full md:w-auto">
+          <input
+            ref={packageCsvInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void handlePackageCsvImport(file);
+              event.currentTarget.value = "";
+            }}
+          />
+          <Button variant="outline" onClick={exportPackageCsv} className="min-h-[44px]" title="Export package weight and dimensions CSV">
+            <Download className="h-4 w-4 mr-1" />
+            <span className="hidden md:inline">Package CSV</span>
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => packageCsvInputRef.current?.click()}
+            className="min-h-[44px]"
+            title="Import package weight and dimensions CSV"
+          >
+            <Upload className="h-4 w-4 mr-1" />
+            <span className="hidden md:inline">Import Packages</span>
+          </Button>
           <Button variant="outline" onClick={handleCsvExport} className="min-h-[44px]" title="Export parent assignments CSV">
             <Download className="h-4 w-4 mr-1" />
-            <span className="hidden md:inline">Export</span>
+            <span className="hidden md:inline">Hierarchy CSV</span>
           </Button>
           <label>
             <Button variant="outline" className="min-h-[44px] cursor-pointer" asChild disabled={csvUploading}>
               <span>
                 <Upload className="h-4 w-4 mr-1" />
-                <span className="hidden md:inline">{csvUploading ? "Importing..." : "Import"}</span>
+                <span className="hidden md:inline">{csvUploading ? "Importing..." : "Import Hierarchy"}</span>
               </span>
             </Button>
             <input type="file" accept=".csv" className="hidden" onChange={handleCsvImport} />
@@ -699,9 +911,11 @@ export default function Variants() {
       ) : (
         <>
           <div className="md:hidden space-y-2">
-            {filteredVariants.map((variant) => (
+            {filteredVariants.map((variant) => {
+              const packageDisplay = buildVariantPackageDisplay(variant);
+              return (
               <Card key={variant.id} data-testid={`variant-card-mobile-${variant.id}`}>
-                <CardContent className="p-3">
+                <CardContent className="p-3" onClick={() => openVariantEditor(variant)}>
                   <div className="flex items-start justify-between gap-2 mb-2">
                     <div className="min-w-0 flex-1">
                       <p className="font-mono text-sm truncate">{variant.sku || '-'}</p>
@@ -723,12 +937,19 @@ export default function Variants() {
                   ) : (
                     <Badge variant="secondary" className="text-xs mb-2">Unlinked</Badge>
                   )}
+                  <div className="mb-2">
+                    <Badge variant="outline" className={`text-[10px] ${packageDisplay.className}`}>
+                      {packageDisplay.label}
+                    </Badge>
+                    <p className="mt-1 text-xs text-muted-foreground">{packageDisplay.detail}</p>
+                  </div>
                   <div className="flex gap-2">
                     <Button
                       variant="outline"
                       size="sm"
                       className="min-h-[44px] flex-1"
-                      onClick={() => {
+                      onClick={(event) => {
+                        event.stopPropagation();
                         setSelectedVariant(variant);
                         setSelectedProductId(variant.productId?.toString() || "");
                         setLinkDialogOpen(true);
@@ -742,7 +963,10 @@ export default function Variants() {
                       variant={variant.shopifyVariantId ? "secondary" : "outline"}
                       size="sm"
                       className="min-h-[44px] flex-1"
-                      onClick={() => openShopifyLinkDialog(variant)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openShopifyLinkDialog(variant);
+                      }}
                       data-testid={`btn-shopify-link-mobile-${variant.id}`}
                     >
                       <Store className="h-4 w-4 mr-1" />
@@ -751,7 +975,8 @@ export default function Variants() {
                   </div>
                 </CardContent>
               </Card>
-            ))}
+              );
+            })}
           </div>
           <Card className="hidden md:block">
             <Table>
@@ -759,7 +984,7 @@ export default function Variants() {
                 <TableRow>
                   <TableHead className="w-12">
                     <Checkbox 
-                      checked={filteredVariants.length > 0 && selectedVariantIds.length === filteredVariants.length}
+                      checked={allFilteredVariantsSelected}
                       onCheckedChange={(checked) => {
                         if (checked) {
                           setSelectedVariantIds(filteredVariants.map(v => v.id));
@@ -775,7 +1000,7 @@ export default function Variants() {
                   <TableHead>Type</TableHead>
                   <TableHead>Breaks Into</TableHead>
                   <TableHead>Linked Product</TableHead>
-                  <TableHead>Shopify</TableHead>
+                  <TableHead>Package</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Dropship</TableHead>
                   <TableHead className="w-40">Actions</TableHead>
@@ -785,11 +1010,17 @@ export default function Variants() {
                 {filteredVariants.map((variant) => {
                   const parentSku = variant.parentVariantId ? variantSkuMap.get(variant.parentVariantId) : null;
                   const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1;
+                  const packageDisplay = buildVariantPackageDisplay(variant);
                   return (
-                  <TableRow key={variant.id} data-testid={`variant-row-${variant.id}`}>
+                  <TableRow
+                    key={variant.id}
+                    className="cursor-pointer"
+                    onClick={() => openVariantEditor(variant)}
+                    data-testid={`variant-row-${variant.id}`}
+                  >
                     <TableCell>
                       <Checkbox 
-                        checked={selectedVariantIds.includes(variant.id)}
+                        checked={selectedVariantIdSet.has(variant.id)}
                         onCheckedChange={(checked) => {
                           if (checked) {
                             setSelectedVariantIds(prev => [...prev, variant.id]);
@@ -797,6 +1028,7 @@ export default function Variants() {
                             setSelectedVariantIds(prev => prev.filter(id => id !== variant.id));
                           }
                         }}
+                        onClick={(event) => event.stopPropagation()}
                       />
                     </TableCell>
                     <TableCell className="font-mono text-sm">{variant.sku || '-'}</TableCell>
@@ -828,16 +1060,10 @@ export default function Variants() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {variant.shopifyVariantId ? (
-                        <div className="space-y-1">
-                          <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300">
-                            Linked
-                          </Badge>
-                          <p className="text-xs text-muted-foreground font-mono">{variant.shopifyVariantId}</p>
-                        </div>
-                      ) : (
-                        <Badge variant="secondary">Unmapped</Badge>
-                      )}
+                      <Badge variant="outline" className={`text-[10px] ${packageDisplay.className}`}>
+                        {packageDisplay.label}
+                      </Badge>
+                      <p className="mt-1 text-xs text-muted-foreground">{packageDisplay.detail}</p>
                     </TableCell>
                     <TableCell>
                       <Badge variant={variant.isActive ? "default" : "secondary"}>
@@ -847,6 +1073,7 @@ export default function Variants() {
                     <TableCell>
                       <Switch
                         checked={!!variant.dropshipEligible}
+                        onClick={(event) => event.stopPropagation()}
                         onCheckedChange={(checked) => {
                           dropshipMutation.mutate({ variantId: variant.id, eligible: checked });
                         }}
@@ -858,7 +1085,8 @@ export default function Variants() {
                           variant="outline"
                           size="icon"
                           className="min-h-[44px] min-w-[44px]"
-                          onClick={() => {
+                          onClick={(event) => {
+                            event.stopPropagation();
                             setSelectedVariant(variant);
                             setSelectedProductId(variant.productId?.toString() || "");
                             setLinkDialogOpen(true);
@@ -872,7 +1100,10 @@ export default function Variants() {
                           variant={variant.shopifyVariantId ? "secondary" : "outline"}
                           size="icon"
                           className="min-h-[44px] min-w-[44px]"
-                          onClick={() => openShopifyLinkDialog(variant)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openShopifyLinkDialog(variant);
+                          }}
                           title={variant.shopifyVariantId ? "Change Shopify variant link" : "Link Shopify variant"}
                           data-testid={`btn-shopify-link-${variant.id}`}
                         >
@@ -894,9 +1125,22 @@ export default function Variants() {
       </div>
 
       {selectedVariantIds.length > 0 && (
-        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-4 z-50 border border-slate-700 animate-in slide-in-from-bottom-10 fade-in duration-300">
+        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-3 z-50 border border-slate-700 animate-in slide-in-from-bottom-10 fade-in duration-300">
           <span className="text-sm font-medium">{selectedVariantIds.length} Variants Selected</span>
           <div className="h-4 w-px bg-slate-600"></div>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="hover:bg-slate-800 text-white hover:text-white transition-colors"
+            onClick={() => {
+              setBulkPackageForm(emptyVariantPackageInput());
+              setBulkPackageClearBlanks(false);
+              setBulkPackageDialogOpen(true);
+            }}
+            disabled={bulkPackageMutation.isPending}
+          >
+            Edit Package
+          </Button>
           <Button 
             size="sm" 
             variant="ghost" 
@@ -915,8 +1159,102 @@ export default function Variants() {
           >
             Disable Dropship
           </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="hover:bg-slate-800 text-slate-300 hover:text-white transition-colors"
+            onClick={() => setSelectedVariantIds([])}
+          >
+            Clear
+          </Button>
         </div>
       )}
+
+      <Dialog open={bulkPackageDialogOpen} onOpenChange={setBulkPackageDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Bulk Edit Package Details</DialogTitle>
+            <DialogDescription>
+              Apply package weight and dimensions to {selectedVariantIds.length} selected catalog variant{selectedVariantIds.length === 1 ? "" : "s"}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Weight (lb)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.001"
+                  value={bulkPackageForm.weightLb}
+                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, weightLb: e.target.value }))}
+                  placeholder="Leave unchanged"
+                  className="h-11"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Length (in)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.001"
+                  value={bulkPackageForm.lengthIn}
+                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, lengthIn: e.target.value }))}
+                  placeholder="Leave unchanged"
+                  className="h-11"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Width (in)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.001"
+                  value={bulkPackageForm.widthIn}
+                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, widthIn: e.target.value }))}
+                  placeholder="Leave unchanged"
+                  className="h-11"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Height (in)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.001"
+                  value={bulkPackageForm.heightIn}
+                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, heightIn: e.target.value }))}
+                  placeholder="Leave unchanged"
+                  className="h-11"
+                />
+              </div>
+            </div>
+            <div className="flex items-start gap-2 rounded-md border bg-muted/30 p-3">
+              <Checkbox
+                id="variant-page-bulk-clear-blank-package-fields"
+                checked={bulkPackageClearBlanks}
+                onCheckedChange={(checked) => setBulkPackageClearBlanks(checked === true)}
+              />
+              <div>
+                <label htmlFor="variant-page-bulk-clear-blank-package-fields" className="text-sm font-medium cursor-pointer">
+                  Blank fields clear existing values
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  Leave this off when only updating one package attribute.
+                </p>
+              </div>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setBulkPackageDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={submitBulkPackageEdit} disabled={bulkPackageMutation.isPending}>
+              {bulkPackageMutation.isPending ? "Saving..." : "Apply to selected"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">

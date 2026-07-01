@@ -89,7 +89,6 @@ const MILLIMETERS_PER_INCH = 25.4;
 
 type VariantPackageAttributeKey = "weightGrams" | "lengthMm" | "widthMm" | "heightMm";
 type VariantPackagePayload = Partial<Record<VariantPackageAttributeKey, number | null>>;
-type VariantPackageBulkRow = { variantId: number; updates: VariantPackagePayload };
 
 type VariantPackageInput = {
   weightLb: string;
@@ -191,55 +190,6 @@ function buildVariantPackageDisplay(variant: ProductVariantRow) {
     detail: `${weight} lb · ${length} x ${width} x ${height} in`,
     className: "bg-green-50 text-green-700 border-green-300",
   };
-}
-
-function escapeCsvCell(value: string | number | null | undefined): string {
-  const raw = value === null || value === undefined ? "" : String(value);
-  return /[",\r\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
-}
-
-function parseCsvRows(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i];
-    const next = text[i + 1];
-
-    if (char === '"' && inQuotes && next === '"') {
-      cell += '"';
-      i += 1;
-      continue;
-    }
-    if (char === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (char === "," && !inQuotes) {
-      row.push(cell);
-      cell = "";
-      continue;
-    }
-    if ((char === "\n" || char === "\r") && !inQuotes) {
-      if (char === "\r" && next === "\n") i += 1;
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = "";
-      continue;
-    }
-    cell += char;
-  }
-
-  row.push(cell);
-  rows.push(row);
-  return rows.filter((parsedRow) => parsedRow.some((value) => value.trim() !== ""));
-}
-
-function normalizeCsvHeader(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
 }
 
 interface ProductVariantRow {
@@ -971,7 +921,7 @@ export default function ProductDetail() {
   const [variantSearchOpen, setVariantSearchOpen] = useState(false);
   const [variantSearchQuery, setVariantSearchQuery] = useState("");
   const receiptSetupAutoOpenRef = useRef<string | null>(null);
-  const variantPackageCsvInputRef = useRef<HTMLInputElement>(null);
+  const variantDeepLinkAutoOpenRef = useRef<string | null>(null);
 
   // --- Product data ---
   const { data: product, isLoading, error } = useQuery<ProductDetailData>({
@@ -1523,10 +1473,6 @@ export default function ProductDetail() {
     isBaseUnit: false,
     package: emptyVariantPackageInput(),
   });
-  const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>([]);
-  const [bulkPackageDialogOpen, setBulkPackageDialogOpen] = useState(false);
-  const [bulkPackageForm, setBulkPackageForm] = useState<VariantPackageInput>(emptyVariantPackageInput());
-  const [bulkPackageClearBlanks, setBulkPackageClearBlanks] = useState(false);
   const [skuManuallyEdited, setSkuManuallyEdited] = useState(false);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
 
@@ -1643,6 +1589,33 @@ export default function ProductDetail() {
     setVariantDialogOpen(true);
   }, []);
 
+  useEffect(() => {
+    const searchParams = new URLSearchParams(searchStr);
+    const tab = searchParams.get("tab");
+    const validTabs = new Set(["overview", "content", "images", "variants", "channels", "suppliers", "inventory"]);
+    if (tab && validTabs.has(tab)) {
+      setActiveTab(tab);
+    }
+  }, [searchStr]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(searchStr);
+    if (searchParams.get("tab") !== "variants") return;
+
+    const variantId = parsePositiveInt(searchParams.get("variantId"));
+    if (!variantId || !product?.productId) return;
+
+    const autoOpenKey = `${product.productId}:${variantId}`;
+    if (variantDeepLinkAutoOpenRef.current === autoOpenKey) return;
+
+    const variant = product.variants.find((candidate) => candidate.id === variantId);
+    if (!variant) return;
+
+    variantDeepLinkAutoOpenRef.current = autoOpenKey;
+    setActiveTab("variants");
+    openEditVariant(variant);
+  }, [searchStr, product?.productId, product?.variants, openEditVariant]);
+
   // --- Variant mutations ---
   const createVariantMutation = useMutation({
     mutationFn: async (data: typeof variantForm) => {
@@ -1737,33 +1710,6 @@ export default function ProductDetail() {
     },
     onError: (err: Error) => {
       toast({ title: "Failed to update variant", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const bulkPackageMutation = useMutation({
-    mutationFn: async (rows: VariantPackageBulkRow[]) => {
-      if (!product?.productId) throw new Error("Product is not loaded.");
-      const res = await fetch(`/api/products/${product.productId}/variants/package-attributes/bulk`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || "Failed to update package attributes");
-      }
-      return res.json();
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
-      setBulkPackageDialogOpen(false);
-      setBulkPackageForm(emptyVariantPackageInput());
-      setBulkPackageClearBlanks(false);
-      setSelectedVariantIds([]);
-      toast({ title: "Package attributes updated", description: `${result.updated} variant${result.updated === 1 ? "" : "s"} updated.` });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Package update failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -1939,125 +1885,6 @@ export default function ProductDetail() {
   const archivedVariants = product?.variants
     ? [...product.variants].filter(v => v.isActive === false).sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)
     : [];
-  const selectedVariantIdSet = new Set(selectedVariantIds);
-  const allVisibleVariantsSelected = sortedVariants.length > 0 && sortedVariants.every((variant) => selectedVariantIdSet.has(variant.id));
-
-  useEffect(() => {
-    const activeVariantIds = new Set((product?.variants || []).filter((variant) => variant.isActive !== false).map((variant) => variant.id));
-    setSelectedVariantIds((current) => current.filter((id) => activeVariantIds.has(id)));
-  }, [product?.variants]);
-
-  const toggleVariantSelection = useCallback((variantId: number, selected: boolean) => {
-    setSelectedVariantIds((current) => {
-      if (selected) return current.includes(variantId) ? current : [...current, variantId];
-      return current.filter((id) => id !== variantId);
-    });
-  }, []);
-
-  const toggleAllVisibleVariants = useCallback((selected: boolean) => {
-    setSelectedVariantIds(selected ? sortedVariants.map((variant) => variant.id) : []);
-  }, [sortedVariants]);
-
-  const submitBulkPackageEdit = useCallback(() => {
-    try {
-      const updates = buildVariantPackagePayload(bulkPackageForm, bulkPackageClearBlanks ? "null" : "omit");
-      if (Object.keys(updates).length === 0) {
-        toast({ title: "No package changes entered", variant: "destructive" });
-        return;
-      }
-      bulkPackageMutation.mutate(selectedVariantIds.map((variantId) => ({ variantId, updates })));
-    } catch (err: any) {
-      toast({ title: "Package update failed", description: err.message, variant: "destructive" });
-    }
-  }, [bulkPackageClearBlanks, bulkPackageForm, bulkPackageMutation, selectedVariantIds, toast]);
-
-  const exportVariantPackageCsv = useCallback(() => {
-    const header = ["variant_id", "sku", "weight_lb", "length_in", "width_in", "height_in"];
-    const rows = sortedVariants.map((variant) => [
-      variant.id,
-      variant.sku || "",
-      formatMeasurementInput(variant.weightGrams, GRAMS_PER_POUND),
-      formatMeasurementInput(variant.lengthMm, MILLIMETERS_PER_INCH),
-      formatMeasurementInput(variant.widthMm, MILLIMETERS_PER_INCH),
-      formatMeasurementInput(variant.heightMm, MILLIMETERS_PER_INCH),
-    ]);
-    const csv = [header, ...rows]
-      .map((row) => row.map((value) => escapeCsvCell(value)).join(","))
-      .join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${product?.sku || `product-${productId}`}-variant-packages.csv`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
-  }, [product?.sku, productId, sortedVariants]);
-
-  const handleVariantPackageCsvFile = useCallback(async (file: File) => {
-    try {
-      const parsedRows = parseCsvRows(await file.text());
-      if (parsedRows.length < 2) {
-        throw new Error("CSV must include a header row and at least one data row.");
-      }
-
-      const headers = parsedRows[0].map(normalizeCsvHeader);
-      const findHeader = (...names: string[]) => names.map(normalizeCsvHeader).map((name) => headers.indexOf(name)).find((index) => index >= 0) ?? -1;
-      const variantIdIndex = findHeader("variant_id", "id");
-      const skuIndex = findHeader("sku");
-      const weightIndex = findHeader("weight_lb", "weight_lbs", "weight");
-      const lengthIndex = findHeader("length_in", "length");
-      const widthIndex = findHeader("width_in", "width");
-      const heightIndex = findHeader("height_in", "height");
-
-      if (variantIdIndex < 0 && skuIndex < 0) {
-        throw new Error("CSV must include variant_id or sku.");
-      }
-
-      const variantsById = new Map(sortedVariants.map((variant) => [variant.id, variant]));
-      const variantsBySku = new Map(sortedVariants.filter((variant) => variant.sku).map((variant) => [variant.sku.trim().toUpperCase(), variant]));
-      const rowsToUpdate: VariantPackageBulkRow[] = [];
-      const errors: string[] = [];
-
-      for (let rowIndex = 1; rowIndex < parsedRows.length; rowIndex += 1) {
-        const row = parsedRows[rowIndex];
-        const getCell = (index: number) => (index >= 0 ? (row[index] || "").trim() : "");
-        const variantIdRaw = getCell(variantIdIndex);
-        const skuRaw = getCell(skuIndex);
-        const variantId = variantIdRaw ? Number(variantIdRaw) : null;
-        const variant = variantId && Number.isInteger(variantId)
-          ? variantsById.get(variantId)
-          : variantsBySku.get(skuRaw.toUpperCase());
-
-        if (!variant) {
-          errors.push(`Row ${rowIndex + 1}: no matching active variant for ${variantIdRaw || skuRaw || "blank identifier"}.`);
-          continue;
-        }
-
-        const updates = buildVariantPackagePayload({
-          weightLb: getCell(weightIndex),
-          lengthIn: getCell(lengthIndex),
-          widthIn: getCell(widthIndex),
-          heightIn: getCell(heightIndex),
-        }, "omit");
-        if (Object.keys(updates).length === 0) continue;
-
-        rowsToUpdate.push({ variantId: variant.id, updates });
-      }
-
-      if (errors.length > 0) {
-        throw new Error(errors.slice(0, 3).join(" "));
-      }
-      if (rowsToUpdate.length === 0) {
-        throw new Error("No package values were found to update.");
-      }
-
-      bulkPackageMutation.mutate(rowsToUpdate);
-    } catch (err: any) {
-      toast({ title: "CSV import failed", description: err.message, variant: "destructive" });
-    }
-  }, [bulkPackageMutation, sortedVariants, toast]);
 
   // --- Render ---
   if (!productId) {
@@ -2919,25 +2746,6 @@ export default function ProductDetail() {
                     </CardDescription>
                   </div>
                   <div className="flex flex-wrap justify-end gap-2">
-                    <input
-                      ref={variantPackageCsvInputRef}
-                      type="file"
-                      accept=".csv,text/csv"
-                      className="hidden"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (file) void handleVariantPackageCsvFile(file);
-                        event.currentTarget.value = "";
-                      }}
-                    />
-                    <Button size="sm" variant="outline" onClick={exportVariantPackageCsv} className="min-h-[44px]">
-                      <Download className="h-4 w-4 mr-1" />
-                      Export CSV
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={() => variantPackageCsvInputRef.current?.click()} className="min-h-[44px]">
-                      <Upload className="h-4 w-4 mr-1" />
-                      Import CSV
-                    </Button>
                     <Button size="sm" onClick={openCreateVariant} className="min-h-[44px]">
                       <Plus className="h-4 w-4 mr-1" />
                       Add Variant
@@ -2947,30 +2755,6 @@ export default function ProductDetail() {
                 <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
                   {sortedVariants.length > 0 ? (
                     <>
-                      {selectedVariantIds.length > 0 && (
-                        <div className="mb-3 flex flex-col gap-2 rounded-md border bg-muted/30 p-3 sm:flex-row sm:items-center sm:justify-between">
-                          <span className="text-sm font-medium">
-                            {selectedVariantIds.length} variant{selectedVariantIds.length === 1 ? "" : "s"} selected
-                          </span>
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                setBulkPackageForm(emptyVariantPackageInput());
-                                setBulkPackageClearBlanks(false);
-                                setBulkPackageDialogOpen(true);
-                              }}
-                            >
-                              <Package className="h-4 w-4 mr-1" />
-                              Bulk edit package
-                            </Button>
-                            <Button size="sm" variant="ghost" onClick={() => setSelectedVariantIds([])}>
-                              Clear selection
-                            </Button>
-                          </div>
-                        </div>
-                      )}
                       {/* Mobile cards */}
                       <div className="md:hidden space-y-2">
                         {sortedVariants.map((variant) => {
@@ -2986,14 +2770,7 @@ export default function ProductDetail() {
                             data-testid={`variant-card-mobile-${variant.id}`}
                           >
                             <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center gap-2">
-                                <Checkbox
-                                  checked={selectedVariantIdSet.has(variant.id)}
-                                  onCheckedChange={(checked) => toggleVariantSelection(variant.id, checked === true)}
-                                  aria-label={`Select variant ${variant.sku || variant.name}`}
-                                />
-                                <span className="font-mono text-sm text-primary">{variant.sku}</span>
-                              </div>
+                              <span className="font-mono text-sm text-primary">{variant.sku}</span>
                               <div className="flex items-center gap-1.5">
                                 {needsConfig && (
                                   <Badge variant="outline" className="text-[10px] bg-yellow-50 text-yellow-700 border-yellow-300">
@@ -3054,13 +2831,6 @@ export default function ProductDetail() {
                         <Table>
                           <TableHeader>
                             <TableRow>
-                              <TableHead className="w-[44px]">
-                                <Checkbox
-                                  checked={allVisibleVariantsSelected}
-                                  onCheckedChange={(checked) => toggleAllVisibleVariants(checked === true)}
-                                  aria-label="Select all visible variants"
-                                />
-                              </TableHead>
                               <TableHead>SKU</TableHead>
                               <TableHead>Name</TableHead>
                               <TableHead>Type</TableHead>
@@ -3084,13 +2854,6 @@ export default function ProductDetail() {
                                 key={variant.id}
                                 data-testid={`variant-row-${variant.id}`}
                               >
-                                <TableCell>
-                                  <Checkbox
-                                    checked={selectedVariantIdSet.has(variant.id)}
-                                    onCheckedChange={(checked) => toggleVariantSelection(variant.id, checked === true)}
-                                    aria-label={`Select variant ${variant.sku || variant.name}`}
-                                  />
-                                </TableCell>
                                 <TableCell className="font-mono">{variant.sku}</TableCell>
                                 <TableCell>{variant.name}</TableCell>
                                 <TableCell>
@@ -3424,93 +3187,6 @@ export default function ProductDetail() {
           </Card>
         </div>
       </div>
-
-      {/* ===== BULK PACKAGE EDIT DIALOG ===== */}
-      <Dialog open={bulkPackageDialogOpen} onOpenChange={setBulkPackageDialogOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Bulk Edit Package Details</DialogTitle>
-            <DialogDescription>
-              Apply package attributes to {selectedVariantIds.length} selected variant{selectedVariantIds.length === 1 ? "" : "s"}.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Weight (lb)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value={bulkPackageForm.weightLb}
-                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, weightLb: e.target.value }))}
-                  placeholder="Leave unchanged"
-                  className="h-11"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Length (in)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value={bulkPackageForm.lengthIn}
-                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, lengthIn: e.target.value }))}
-                  placeholder="Leave unchanged"
-                  className="h-11"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Width (in)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value={bulkPackageForm.widthIn}
-                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, widthIn: e.target.value }))}
-                  placeholder="Leave unchanged"
-                  className="h-11"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Height (in)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  value={bulkPackageForm.heightIn}
-                  onChange={(e) => setBulkPackageForm((prev) => ({ ...prev, heightIn: e.target.value }))}
-                  placeholder="Leave unchanged"
-                  className="h-11"
-                />
-              </div>
-            </div>
-            <div className="flex items-start gap-2 rounded-md border bg-muted/30 p-3">
-              <Checkbox
-                id="bulk-clear-blank-package-fields"
-                checked={bulkPackageClearBlanks}
-                onCheckedChange={(checked) => setBulkPackageClearBlanks(checked === true)}
-              />
-              <div>
-                <label htmlFor="bulk-clear-blank-package-fields" className="text-sm font-medium cursor-pointer">
-                  Blank fields clear existing values
-                </label>
-                <p className="text-xs text-muted-foreground">
-                  Leave this off when only updating one package attribute.
-                </p>
-              </div>
-            </div>
-          </div>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => setBulkPackageDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={submitBulkPackageEdit} disabled={bulkPackageMutation.isPending}>
-              {bulkPackageMutation.isPending ? "Saving..." : "Apply to selected"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* ===== VARIANT EDITOR DIALOG ===== */}
       <Dialog open={variantDialogOpen} onOpenChange={setVariantDialogOpen}>
