@@ -28,6 +28,9 @@ export interface Flags {
   concurrency: number;
   delayMs: number;
   requestTimeoutMs: number;
+  maxRetries: number;
+  retryBaseDelayMs: number;
+  maxRateLimitErrors: number;
   progressEvery: number;
   orderNumber: string | null;
   wmsShipmentId: number | null;
@@ -67,9 +70,10 @@ type MatchDecision =
       reason: string;
     }
   | {
-      kind: "no_match" | "ambiguous" | "invalid_candidate";
+      kind: "no_match" | "ambiguous" | "invalid_candidate" | "lookup_error";
       reason: string;
       matchingShipmentIds?: number[];
+      providerStatus?: number | null;
     };
 
 interface CandidateOutcome {
@@ -82,6 +86,7 @@ interface CandidateOutcome {
 interface ProcessedCandidate {
   outcome: CandidateOutcome;
   error: boolean;
+  providerStatus: number | null;
 }
 
 interface EnrichmentResult {
@@ -93,8 +98,10 @@ interface EnrichmentResult {
   noMatch: number;
   ambiguous: number;
   invalidCandidate: number;
+  lookupErrors: number;
   updateSkipped: number;
   errors: number;
+  stoppedEarlyReason: string | null;
   outcomes: CandidateOutcome[];
 }
 
@@ -103,6 +110,10 @@ const DEFAULT_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 8;
 const DEFAULT_DELAY_MS = 250;
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_BASE_DELAY_MS = 2_000;
+const DEFAULT_MAX_RATE_LIMIT_ERRORS = 25;
+const MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_PROGRESS_EVERY = 25;
 const DEFAULT_BASE_URL = "https://ssapi.shipstation.com";
 
@@ -120,6 +131,9 @@ function usage(): string {
     "  --concurrency=N        Number of rows to process in parallel. Default 1, max 8.",
     "  --delay-ms=N           Delay between ShipStation lookups. Default 250.",
     "  --request-timeout-ms=N Abort each ShipStation HTTP request after N ms. Default 20000.",
+    "  --max-retries=N        Retry transient ShipStation lookup failures N times. Default 3.",
+    "  --retry-base-delay-ms=N Base exponential retry delay. Default 2000, max delay 60000.",
+    "  --max-rate-limit-errors=N Stop after N consecutive exhausted 429 lookups. Default 25; 0 disables.",
     "  --progress-every=N     Print aggregate progress every N rows. Use 0 to disable. Default 25.",
     "  --order-number=TEXT    Restrict to one WMS order number.",
     "  --wms-shipment-id=N    Restrict to one WMS outbound shipment id.",
@@ -137,7 +151,7 @@ export function parseFlags(argv: string[]): Flags {
     throw new Error("Cannot pass both --execute and --dry-run");
   }
 
-  const knownFlag = /^(--help|-h|--dry-run|--execute|--limit=|--concurrency=|--delay-ms=|--request-timeout-ms=|--progress-every=|--order-number=|--wms-shipment-id=|--json$)/;
+  const knownFlag = /^(--help|-h|--dry-run|--execute|--limit=|--concurrency=|--delay-ms=|--request-timeout-ms=|--max-retries=|--retry-base-delay-ms=|--max-rate-limit-errors=|--progress-every=|--order-number=|--wms-shipment-id=|--json$)/;
   const unknown = argv.find((arg) => !knownFlag.test(arg));
   if (unknown) {
     throw new Error(`Unknown flag: ${unknown}`);
@@ -160,6 +174,17 @@ export function parseFlags(argv: string[]): Flags {
   if (requestTimeoutMs == null) {
     throw new Error("--request-timeout-ms must be a positive integer");
   }
+  const maxRetries = parseOptionalNonnegativeIntegerFlag(argv, "--max-retries=", DEFAULT_MAX_RETRIES);
+  const retryBaseDelayMs = parseOptionalNonnegativeIntegerFlag(
+    argv,
+    "--retry-base-delay-ms=",
+    DEFAULT_RETRY_BASE_DELAY_MS,
+  );
+  const maxRateLimitErrors = parseOptionalNonnegativeIntegerFlag(
+    argv,
+    "--max-rate-limit-errors=",
+    DEFAULT_MAX_RATE_LIMIT_ERRORS,
+  );
   const progressEvery = parseOptionalNonnegativeIntegerFlag(argv, "--progress-every=", DEFAULT_PROGRESS_EVERY);
   const orderNumberArg = argv.find((arg) => arg.startsWith("--order-number="));
   const orderNumber = orderNumberArg == null ? null : orderNumberArg.slice("--order-number=".length).trim();
@@ -176,6 +201,9 @@ export function parseFlags(argv: string[]): Flags {
     concurrency,
     delayMs,
     requestTimeoutMs,
+    maxRetries,
+    retryBaseDelayMs,
+    maxRateLimitErrors,
     progressEvery,
     orderNumber,
     wmsShipmentId,
@@ -417,12 +445,83 @@ function shipStationAuthHeaderFromEnv(): string {
   return `Basic ${Buffer.from(`${apiKey}:${apiSecret}`).toString("base64")}`;
 }
 
+export class ShipStationHttpError extends Error {
+  readonly status: number;
+  readonly url: string;
+  readonly bodySnippet: string;
+  readonly retryAfterMs: number | null;
+
+  constructor(params: {
+    url: string;
+    status: number;
+    bodySnippet: string;
+    retryAfterMs: number | null;
+  }) {
+    super(`ShipStation GET ${params.url} failed ${params.status}: ${params.bodySnippet}`);
+    this.name = "ShipStationHttpError";
+    this.url = params.url;
+    this.status = params.status;
+    this.bodySnippet = params.bodySnippet;
+    this.retryAfterMs = params.retryAfterMs;
+  }
+}
+
+export class ShipStationTimeoutError extends Error {
+  readonly url: string;
+  readonly timeoutMs: number;
+
+  constructor(url: string, timeoutMs: number) {
+    super(`ShipStation GET ${url} timed out after ${timeoutMs}ms`);
+    this.name = "ShipStationTimeoutError";
+    this.url = url;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
 export function isPostgresUniqueViolation(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "23505";
+}
+
+export function parseRetryAfterHeader(value: string | null, nowMs = Date.now()): number | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds * 1000);
+  }
+
+  const retryAtMs = Date.parse(trimmed);
+  if (Number.isNaN(retryAtMs)) return null;
+  return Math.max(0, retryAtMs - nowMs);
+}
+
+function isRetryableShipStationLookupError(err: unknown): boolean {
+  if (err instanceof ShipStationTimeoutError) return true;
+  if (err instanceof ShipStationHttpError) {
+    return err.status === 429 || err.status >= 500;
+  }
+  return err instanceof TypeError;
+}
+
+function providerStatusFromError(err: unknown): number | null {
+  return err instanceof ShipStationHttpError ? err.status : null;
+}
+
+function retryDelayMs(err: unknown, retryIndex: number, baseDelayMs: number): number {
+  if (err instanceof ShipStationHttpError && err.retryAfterMs !== null) {
+    return Math.min(err.retryAfterMs, MAX_RETRY_DELAY_MS);
+  }
+  return Math.min(baseDelayMs * (2 ** retryIndex), MAX_RETRY_DELAY_MS);
+}
+
+function errorReason(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 export async function fetchShipStationJsonWithTimeout<T>(
@@ -444,12 +543,17 @@ export async function fetchShipStationJsonWithTimeout<T>(
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`ShipStation GET ${url} failed ${res.status}: ${text.slice(0, 500)}`);
+      throw new ShipStationHttpError({
+        url,
+        status: res.status,
+        bodySnippet: text.slice(0, 500),
+        retryAfterMs: parseRetryAfterHeader(res.headers.get("retry-after")),
+      });
     }
     return await res.json() as T;
   } catch (err) {
     if (isAbortError(err)) {
-      throw new Error(`ShipStation GET ${url} timed out after ${requestTimeoutMs}ms`);
+      throw new ShipStationTimeoutError(url, requestTimeoutMs);
     }
     throw err;
   } finally {
@@ -457,10 +561,35 @@ export async function fetchShipStationJsonWithTimeout<T>(
   }
 }
 
+async function fetchShipStationJsonWithRetries<T>(
+  url: string,
+  authHeader: string,
+  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "json">,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fetchShipStationJsonWithTimeout<T>(url, authHeader, flags.requestTimeoutMs);
+    } catch (err) {
+      if (attempt >= flags.maxRetries || !isRetryableShipStationLookupError(err)) {
+        throw err;
+      }
+
+      const waitMs = retryDelayMs(err, attempt, flags.retryBaseDelayMs);
+      if (!flags.json) {
+        console.warn(
+          `[ShipStation physical id enrich] RETRY attempt=${attempt + 1}/${flags.maxRetries} ` +
+          `waitMs=${waitMs} reason="${errorReason(err)}"`,
+        );
+      }
+      await sleep(waitMs);
+    }
+  }
+}
+
 async function fetchShipStationShipmentsByOrder(
   candidate: CandidateRow,
   authHeader: string,
-  requestTimeoutMs: number,
+  flags: Pick<Flags, "requestTimeoutMs" | "maxRetries" | "retryBaseDelayMs" | "json">,
 ): Promise<ShipStationShipmentCandidate[]> {
   const baseUrl = process.env.SHIPSTATION_API_BASE_URL || DEFAULT_BASE_URL;
   const urls = [
@@ -472,10 +601,10 @@ async function fetchShipStationShipmentsByOrder(
 
   const shipments: ShipStationShipmentCandidate[] = [];
   for (const url of urls) {
-    const body = await fetchShipStationJsonWithTimeout<{ shipments?: ShipStationShipmentCandidate[] }>(
+    const body = await fetchShipStationJsonWithRetries<{ shipments?: ShipStationShipmentCandidate[] }>(
       url,
       authHeader,
-      requestTimeoutMs,
+      flags,
     );
     shipments.push(...(Array.isArray(body.shipments) ? body.shipments : []));
   }
@@ -559,11 +688,18 @@ function printOutcome(outcome: CandidateOutcome, mode: Mode): void {
   console.log(
     `[ShipStation physical id enrich] ${outcome.decision.kind.toUpperCase()} wms=${c.legacy_shipment_id} ` +
     `order=${c.order_number ?? "unknown"} ssOrder=${c.shipstation_order_id} tracking=${c.tracking_number} ` +
+    `${outcome.decision.providerStatus != null ? `status=${outcome.decision.providerStatus} ` : ""}` +
     `reason="${outcome.decision.reason}"`,
   );
 }
 
-function summarizeOutcomes(runId: string, mode: Mode, outcomes: CandidateOutcome[], errors: number): EnrichmentResult {
+function summarizeOutcomes(
+  runId: string,
+  mode: Mode,
+  outcomes: CandidateOutcome[],
+  errors: number,
+  stoppedEarlyReason: string | null = null,
+): EnrichmentResult {
   return {
     runId,
     mode,
@@ -573,8 +709,10 @@ function summarizeOutcomes(runId: string, mode: Mode, outcomes: CandidateOutcome
     noMatch: outcomes.filter((outcome) => outcome.decision.kind === "no_match").length,
     ambiguous: outcomes.filter((outcome) => outcome.decision.kind === "ambiguous").length,
     invalidCandidate: outcomes.filter((outcome) => outcome.decision.kind === "invalid_candidate").length,
+    lookupErrors: outcomes.filter((outcome) => outcome.decision.kind === "lookup_error").length,
     updateSkipped: outcomes.filter((outcome) => outcome.updateSkippedReason !== null).length,
     errors,
+    stoppedEarlyReason,
     outcomes,
   };
 }
@@ -586,7 +724,7 @@ async function enrichCandidate(
   flags: Flags,
 ): Promise<ProcessedCandidate> {
   try {
-    const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags.requestTimeoutMs);
+    const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags);
     const decision = decideShipStationPhysicalMatch(candidate, shipments);
     let updated = false;
     let updateSkippedReason: string | null = null;
@@ -614,19 +752,23 @@ async function enrichCandidate(
     return {
       outcome: { candidate, decision, updated, updateSkippedReason },
       error: false,
+      providerStatus: null,
     };
-  } catch (err: any) {
+  } catch (err) {
+    const providerStatus = providerStatusFromError(err);
     return {
       outcome: {
         candidate,
         decision: {
-          kind: "no_match",
-          reason: err?.message || String(err),
+          kind: "lookup_error",
+          reason: errorReason(err),
+          providerStatus,
         },
         updated: false,
         updateSkippedReason: "lookup failed",
       },
       error: true,
+      providerStatus,
     };
   }
 }
@@ -662,6 +804,7 @@ function printProgress(
       noMatch: summary.noMatch,
       ambiguous: summary.ambiguous,
       invalidCandidate: summary.invalidCandidate,
+      lookupErrors: summary.lookupErrors,
       updateSkipped: summary.updateSkipped,
       errors: summary.errors,
       elapsedMs: Date.now() - startedAtMs,
@@ -684,6 +827,8 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
   const outcomes: CandidateOutcome[] = [];
   let errors = 0;
   const startedAtMs = Date.now();
+  let stoppedEarlyReason: string | null = null;
+  let consecutiveRateLimitErrors = 0;
 
   try {
     const candidates = await fetchCandidates(pool, flags);
@@ -694,6 +839,7 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
     const workerCount = Math.min(flags.concurrency, candidates.length);
     const worker = async (): Promise<void> => {
       while (true) {
+        if (stoppedEarlyReason !== null) return;
         const index = nextIndex;
         nextIndex += 1;
         if (index >= candidates.length) return;
@@ -706,12 +852,30 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
         const processedCandidate = await enrichCandidate(pool, candidate, authHeader, flags);
         outcomesByIndex[index] = processedCandidate.outcome;
         if (processedCandidate.error) errors += 1;
+        if (processedCandidate.providerStatus === 429) {
+          consecutiveRateLimitErrors += 1;
+        } else {
+          consecutiveRateLimitErrors = 0;
+        }
         outcomes.push(processedCandidate.outcome);
         processed += 1;
 
         if (!flags.json) printOutcome(processedCandidate.outcome, flags.mode);
         if (!flags.json && shouldPrintProgress(flags.progressEvery, processed, candidates.length)) {
           printProgress(runId, flags.mode, outcomes, errors, candidates.length, startedAtMs);
+        }
+
+        if (
+          stoppedEarlyReason === null &&
+          flags.maxRateLimitErrors > 0 &&
+          consecutiveRateLimitErrors >= flags.maxRateLimitErrors
+        ) {
+          stoppedEarlyReason =
+            `stopped after ${consecutiveRateLimitErrors} consecutive exhausted ShipStation 429 lookup errors`;
+          if (!flags.json) {
+            console.error(`[ShipStation physical id enrich] STOP ${stoppedEarlyReason}`);
+          }
+          return;
         }
 
         if (flags.delayMs > 0 && processed < candidates.length) {
@@ -722,7 +886,7 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
 
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
     const orderedOutcomes = outcomesByIndex.filter((outcome): outcome is CandidateOutcome => outcome !== undefined);
-    return summarizeOutcomes(runId, flags.mode, orderedOutcomes, errors);
+    return summarizeOutcomes(runId, flags.mode, orderedOutcomes, errors, stoppedEarlyReason);
   } finally {
     await pool.end();
   }
@@ -739,7 +903,9 @@ async function main(): Promise<void> {
     console.log(
       `[ShipStation physical id enrich] mode=${flags.mode} limit=${flags.limit ?? "all"} ` +
       `concurrency=${flags.concurrency} delayMs=${flags.delayMs}` +
-      ` requestTimeoutMs=${flags.requestTimeoutMs} progressEvery=${flags.progressEvery}` +
+      ` requestTimeoutMs=${flags.requestTimeoutMs} maxRetries=${flags.maxRetries}` +
+      ` retryBaseDelayMs=${flags.retryBaseDelayMs} maxRateLimitErrors=${flags.maxRateLimitErrors}` +
+      ` progressEvery=${flags.progressEvery}` +
       `${flags.orderNumber ? ` orderNumber=${flags.orderNumber}` : ""}` +
       `${flags.wmsShipmentId ? ` wmsShipmentId=${flags.wmsShipmentId}` : ""}`,
     );
@@ -758,8 +924,10 @@ async function main(): Promise<void> {
         noMatch: result.noMatch,
         ambiguous: result.ambiguous,
         invalidCandidate: result.invalidCandidate,
+        lookupErrors: result.lookupErrors,
         updateSkipped: result.updateSkipped,
         errors: result.errors,
+        stoppedEarlyReason: result.stoppedEarlyReason,
       })}`,
     );
   }

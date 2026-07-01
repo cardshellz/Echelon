@@ -22,6 +22,9 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       concurrency: 1,
       delayMs: 250,
       requestTimeoutMs: 20000,
+      maxRetries: 3,
+      retryBaseDelayMs: 2000,
+      maxRateLimitErrors: 25,
       progressEvery: 25,
       orderNumber: null,
       wmsShipmentId: null,
@@ -34,6 +37,9 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       "--concurrency=4",
       "--delay-ms=0",
       "--request-timeout-ms=1234",
+      "--max-retries=5",
+      "--retry-base-delay-ms=333",
+      "--max-rate-limit-errors=7",
       "--progress-every=10",
       "--order-number=#59453",
       "--wms-shipment-id=4313",
@@ -44,6 +50,9 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       concurrency: 4,
       delayMs: 0,
       requestTimeoutMs: 1234,
+      maxRetries: 5,
+      retryBaseDelayMs: 333,
+      maxRateLimitErrors: 7,
       progressEvery: 10,
       orderNumber: "#59453",
       wmsShipmentId: 4313,
@@ -60,6 +69,9 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(() => parseFlags(["--concurrency=9"])).toThrow(/positive integer no greater than 8/);
     expect(() => parseFlags(["--delay-ms=-1"])).toThrow(/non-negative integer/);
     expect(() => parseFlags(["--request-timeout-ms=0"])).toThrow(/positive integer/);
+    expect(() => parseFlags(["--max-retries=-1"])).toThrow(/non-negative integer/);
+    expect(() => parseFlags(["--retry-base-delay-ms=-1"])).toThrow(/non-negative integer/);
+    expect(() => parseFlags(["--max-rate-limit-errors=-1"])).toThrow(/non-negative integer/);
     expect(() => parseFlags(["--progress-every=-1"])).toThrow(/non-negative integer/);
     expect(() => parseFlags(["--order-number="])).toThrow(/cannot be blank/);
     expect(() => parseFlags(["--wms-shipment-id=abc"])).toThrow(/positive integer/);
@@ -104,6 +116,44 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       "Basic test",
       1,
     )).rejects.toThrow(/timed out after 1ms/);
+  });
+
+  it("parses ShipStation Retry-After seconds and dates", async () => {
+    const { parseRetryAfterHeader } = await loadModule();
+
+    expect(parseRetryAfterHeader("3")).toBe(3000);
+    expect(parseRetryAfterHeader("Wed, 01 Jul 2026 00:00:03 GMT", Date.parse("2026-07-01T00:00:00Z")))
+      .toBe(3000);
+    expect(parseRetryAfterHeader("not a date")).toBeNull();
+    expect(parseRetryAfterHeader(null)).toBeNull();
+  });
+
+  it("surfaces ShipStation 429 responses as typed HTTP errors", async () => {
+    const { fetchShipStationJsonWithTimeout, ShipStationHttpError } = await loadModule();
+
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 429,
+      headers: {
+        get: (name: string) => name.toLowerCase() === "retry-after" ? "2" : null,
+      },
+      text: async () => "Too Many Request",
+    })));
+
+    await expect(fetchShipStationJsonWithTimeout(
+      "https://ssapi.shipstation.com/shipments",
+      "Basic test",
+      1000,
+    )).rejects.toMatchObject({
+      name: "ShipStationHttpError",
+      status: 429,
+      retryAfterMs: 2000,
+    });
+    await expect(fetchShipStationJsonWithTimeout(
+      "https://ssapi.shipstation.com/shipments",
+      "Basic test",
+      1000,
+    )).rejects.toBeInstanceOf(ShipStationHttpError);
   });
 
   it("builds ShipStation shipment paths with includeShipmentItems=true", async () => {
