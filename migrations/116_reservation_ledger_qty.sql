@@ -1,4 +1,4 @@
--- 106: Reservation quantities become ledger-recorded (P0.1b).
+-- 116: Reservation quantities become ledger-recorded (P0.1b).
 --
 -- Problem: reserve/unreserve rows in inventory.inventory_transactions carried
 -- no quantity (variant_qty_delta is 0 by convention for reservation state
@@ -20,7 +20,7 @@ ALTER TABLE inventory.inventory_transactions
   ADD COLUMN IF NOT EXISTS reserved_qty_delta integer;
 
 COMMENT ON COLUMN inventory.inventory_transactions.reserved_qty_delta IS
-  'Reservation counter delta in variant units. reserve:+qty, unreserve:-qty, pick:-(consumed). NULL = pre-106 row.';
+  'Reservation counter delta in variant units. reserve:+qty, unreserve:-qty, pick:-(consumed). NULL = pre-116 row.';
 
 -- Order-scoped release and the ready-but-unreserved detector query the ledger
 -- by (order_id, order_item_id) filtered to reservation-affecting rows.

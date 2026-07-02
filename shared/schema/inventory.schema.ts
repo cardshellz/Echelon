@@ -139,7 +139,7 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
   variantQtyAfter: integer("variant_qty_after"), // Snapshot: variant qty after at location
   // Reservation counter delta (variant units). Reserve rows: +qty; unreserve
   // rows: -qty; pick rows: -(reservation consumed by the pick). NULL on rows
-  // written before migration 106 — order-scoped release treats NULL-era
+  // written before migration 116 — order-scoped release treats NULL-era
   // reservations via a conservative fallback (see reservation.service.ts).
   reservedQtyDelta: integer("reserved_qty_delta"),
 

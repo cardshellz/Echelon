@@ -104,7 +104,7 @@ describe("releaseOrderReservation — order-scoped + idempotent (P0.1b)", () => 
     expect(result.failed).toHaveLength(0);
   });
 
-  it("uses the conservative estimate for pre-106 (legacy) reservations", async () => {
+  it("uses the conservative estimate for pre-116 (legacy) reservations", async () => {
     const { mockInventoryCore, mockChannelSync, mockAtpService, releaseCalls } = makeHarness();
     // legacy reserve row (qty unknown), 3 picked via ledger, none unreserved:
     // estimate = max(0, 5 - 3 - 0) = 2
