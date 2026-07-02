@@ -1,0 +1,115 @@
+total route-file writes: 84
+
+server/modules/catalog/catalog.routes.ts (22)
+  537 drizzle.update catalog.products
+  562 drizzle.insert catalog.shipping_groups
+  590 drizzle.update catalog.shipping_groups
+  618 drizzle.insert catalog.product_categories
+  655 drizzle.update catalog.product_categories
+  668 drizzle.update catalog.products
+  1084 drizzle.update catalog.product_assets
+  1709 drizzle.update catalog.products
+  1724 drizzle.update catalog.product_variants
+  1730 drizzle.update channels.channel_feeds
+  1749 drizzle.insert channels.channel_feeds
+  1765 drizzle.update channels.channel_listings
+  1784 drizzle.insert channels.channel_listings
+  2269 drizzle.insert catalog.product_assets
+  2367 drizzle.delete catalog.product_assets
+  2429 drizzle.insert catalog.product_assets
+  2262 sql.UPDATE catalog.product_assets
+  2286 sql.UPDATE catalog.product_assets
+  2400 sql.UPDATE catalog.product_assets
+  2446 sql.UPDATE catalog.product_assets
+  980 sql.DELETE channels.channel_listings
+  2016 sql.DELETE channels.channel_listings
+
+server/modules/channels/channels.routes.ts (7)
+  2237 drizzle.insert channels.channel_warehouse_assignments
+  2266 drizzle.update channels.channel_warehouse_assignments
+  2286 drizzle.delete channels.channel_warehouse_assignments
+  2429 drizzle.insert channels.channel_allocation_rules
+  2481 drizzle.update channels.channel_allocation_rules
+  2511 drizzle.delete channels.channel_allocation_rules
+  1979 sql.TRUNCATE long
+
+server/routes/diagnostics.ts (6)
+  29 sql.UPDATE inventory.inventory_transactions
+  268 sql.UPDATE wms.orders
+  54 sql.DELETE wms.order_items
+  73 sql.DELETE wms.orders
+  115 sql.DELETE wms.order_items
+  130 sql.DELETE wms.orders
+
+server/routes/ebay-listing-rules.routes.ts (5)
+  154 drizzle.update catalog.products
+  253 drizzle.insert ebay.ebay_listing_rules
+  306 drizzle.update ebay.ebay_listing_rules
+  362 drizzle.delete ebay.ebay_listing_rules
+  197 sql.UPDATE catalog.products
+
+server/routes/ebay-oauth.routes.ts (1)
+  109 drizzle.insert channels.channels
+
+server/routes/ebay-settings.routes.ts (3)
+  78 drizzle.insert channels.channel_connections
+  319 drizzle.update channels.channel_connections
+  360 drizzle.update channels.channel_connections
+
+server/routes/ebay/ebay-config.routes.ts (3)
+  214 sql.INSERT ebay_category_mappings
+  446 sql.INSERT ebay_category_mappings
+  367 sql.UPDATE catalog.products
+
+server/routes/ebay/ebay-listing-state.ts (10)
+  52 drizzle.update catalog.products
+  57 drizzle.insert channels.channel_product_overrides
+  86 drizzle.update catalog.product_variants
+  91 drizzle.insert channels.channel_variant_overrides
+  113 sql.UPDATE channels.channel_listings
+  131 sql.UPDATE channels.channel_listings
+  146 sql.UPDATE channels.channel_listings
+  164 sql.UPDATE channels.channel_listings
+  180 sql.UPDATE channels.channel_listings
+  196 sql.UPDATE channels.channel_listings
+
+server/routes/ebay/ebay-listings.routes.ts (2)
+  1844 sql.UPDATE channel_listings
+  1881 sql.UPDATE channel_listings
+
+server/routes/ebay/ebay-policies.routes.ts (4)
+  90 drizzle.update catalog.products
+  122 drizzle.update catalog.product_variants
+  288 drizzle.insert catalog.product_assets
+  378 drizzle.delete channels.channel_listings
+
+server/routes/ebay/ebay-pricing.routes.ts (4)
+  94 drizzle.update channels.channel_pricing_rules
+  100 drizzle.insert channels.channel_pricing_rules
+  105 drizzle.insert channels.channel_pricing_rules
+  141 drizzle.delete channels.channel_pricing_rules
+
+server/routes/ebay/ebay-sync-helpers.ts (2)
+  34 drizzle.insert channels.channel_listings
+  108 drizzle.update channels.channel_listings
+
+server/routes/ebay/ebay-taxonomy.routes.ts (6)
+  311 drizzle.delete ebay.ebay_category_aspects
+  323 drizzle.insert ebay.ebay_category_aspects
+  393 drizzle.delete ebay.ebay_type_aspect_defaults
+  407 drizzle.insert ebay.ebay_type_aspect_defaults
+  470 drizzle.delete ebay.ebay_product_aspect_overrides
+  484 drizzle.insert ebay.ebay_product_aspect_overrides
+
+server/routes/pick-priority.routes.ts (4)
+  183 sql.INSERT warehouse.echelon_settings
+  277 sql.UPDATE membership.plans
+  294 sql.UPDATE channels.channels
+  303 sql.UPDATE channels.channels
+
+server/routes/shopify.routes.ts (5)
+  828 drizzle.update channels.channel_connections
+  1624 drizzle.insert oms.webhook_retry_queue
+  1690 drizzle.insert oms.webhook_retry_queue
+  412 sql.INSERT wms.outbound_shipments
+  647 sql.INSERT wms.outbound_shipments

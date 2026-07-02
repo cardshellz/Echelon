@@ -550,72 +550,53 @@ export function createOmsService(db: any, reservationService?: any) {
       return { reserved: 0, failed: [] };
     }
 
-    const lines = await db
-      .select()
-      .from(omsOrderLines)
-      .where(eq(omsOrderLines.orderId, orderId));
-
-    let reserved = 0;
-    const failed: string[] = [];
-    const skipped: string[] = [];
-
-    for (const line of lines) {
-      if (!line.requiresShipping) {
-        skipped.push(line.sku || "UNSHIPPABLE");
-        continue;
-      }
-
-      if (!line.productVariantId) {
-        skipped.push(line.sku || "UNMAPPED");
-        continue;
-      }
-
-      if (!reservationService) {
-        // Fallback: no reservation service wired — log warning
-        console.error(`[OMS] reserveInventory called but no ReservationService wired. Order ${orderId} line ${line.sku} not reserved.`);
-        failed.push(line.sku || "UNKNOWN");
-        continue;
-      }
-
-      try {
-        // Look up the variant to get its productId (needed by reservation service)
-        const [variant] = await db
-          .select({ id: productVariants.id, productId: productVariants.productId })
-          .from(productVariants)
-          .where(eq(productVariants.id, line.productVariantId))
-          .limit(1);
-
-        if (!variant) {
-          failed.push(line.sku || "UNKNOWN");
-          continue;
-        }
-
-        // Delegate to WMS ReservationService — gates on fungible ATP,
-        // finds assigned bin, writes audit trail, triggers channel sync
-        const result = await reservationService.reserveForOrder(
-          variant.productId,
-          variant.id,
-          line.quantity,
-          orderId,
-          line.id,
-        );
-
-        if (result.reserved > 0) {
-          reserved++;
-        }
-        if (result.shortfall > 0) {
-          failed.push(line.sku || "UNKNOWN");
-        }
-      } catch (err: any) {
-        console.error(`[OMS] Reservation failed for order ${orderId} line ${line.sku}: ${err.message}`);
-        failed.push(line.sku || "UNKNOWN");
-      }
+    // P0.1a — SINGLE-WRITER RESERVATION.
+    // This function no longer places reservations of its own. Historically it
+    // reserved keyed by (oms_order_id, oms_order_line_id) while WMS sync
+    // reserved the same demand keyed by (wms_order_id, wms_order_item_id);
+    // the per-item dedup guard cannot match across the two id schemes, so
+    // every order that hit both paths was double-reserved — and the OMS-keyed
+    // half leaked forever, because picks consume the WMS-keyed one and no
+    // release path knew about the other (prod-confirmed 2026-07-02: 5,372
+    // orphan reserves across 197 variants).
+    //
+    // Reservations now happen in exactly ONE place: the WMS-side
+    // reserveOrder(wmsOrderId), which is ATP-gated and idempotent per item.
+    // If the WMS order does not exist yet, we do nothing — WMS sync reserves
+    // as part of creating it.
+    if (!reservationService?.reserveOrder) {
+      console.error(`[OMS] reserveInventory called but no ReservationService wired. Order ${orderId} not reserved.`);
+      return { reserved: 0, failed: ["no_reservation_service"] };
     }
+
+    const wmsRows: any = await db.execute(sql`
+      SELECT id FROM wms.orders
+      WHERE (source IN ('oms', 'ebay') AND oms_fulfillment_order_id = ${String(orderId)})
+         OR (source = 'shopify' AND source_table_id = ${String(orderId)})
+      ORDER BY id DESC
+      LIMIT 1
+    `);
+    const wmsOrder = wmsRows?.rows?.[0];
+    if (!wmsOrder) {
+      console.log(
+        `[OMS] reserveInventory(${orderId}): no WMS order yet — reservation happens at WMS sync (single-writer)`,
+      );
+      return { reserved: 0, failed: [] };
+    }
+
+    const result = await reservationService.reserveOrder(Number(wmsOrder.id));
+    const reserved = Number(result?.reserved ?? 0);
+    const failed = (result?.failed ?? []).map((f: any) => f?.sku ?? String(f));
 
     await db.insert(omsOrderEvents).values({
       orderId,
       eventType: "inventory_reserved",
-      details: { reserved, failed, skipped },
+      details: {
+        delegatedToWmsOrderId: Number(wmsOrder.id),
+        reserved,
+        failed,
+        singleWriter: true,
+      },
     });
 
     return { reserved, failed };

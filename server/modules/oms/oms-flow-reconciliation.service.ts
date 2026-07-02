@@ -24,6 +24,34 @@ const REMEDIABLE_CODES = new Set([
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
 const AUTO_FLOW_REMEDIATION_LIMIT = 10;
+const AUTO_RESERVATION_REPAIR_LIMIT = 25;
+
+/**
+ * Reservation service handle for release-on-cancel and the
+ * ready-but-unreserved detector (P0.1c). Injected from the composition root
+ * via setOmsFlowReconciliationServices() — same idiom as the eBay ingestion
+ * setters. When unwired (tests, partial boots), the reconciler falls back to
+ * status-only behavior and logs that release was skipped.
+ */
+interface FlowReconciliationReservation {
+  reserveOrder(orderId: number): Promise<{
+    reserved: number;
+    failed: Array<{ sku: string; orderItemId: number; reason: string }>;
+  }>;
+  releaseOrderReservation(
+    orderId: number,
+    reason: string,
+    userId?: string,
+  ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }>;
+}
+let flowReconciliationReservation: FlowReconciliationReservation | null = null;
+
+export function setOmsFlowReconciliationServices(services: {
+  reservation: FlowReconciliationReservation;
+}): void {
+  flowReconciliationReservation = services.reservation;
+}
+
 let reconciliationSchedulerStartedAt: Date | null = null;
 let reconciliationSchedulerLastRunAt: Date | null = null;
 let reconciliationSchedulerLastSuccessAt: Date | null = null;
@@ -726,7 +754,85 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
   await autoQueueStaleTrackingPushRetries(dbArg, issues);
   await autoQueueStaleShipStationPushRetries(dbArg, issues);
   await autoQueueMissingShopifyFulfillmentRetries(dbArg, issues);
+  await remediateMissingReservations(dbArg);
   return issues;
+}
+
+/**
+ * Ready-but-unreserved detector (P0.1c).
+ *
+ * With reservation reduced to a single writer at WMS sync, a post-commit
+ * reservation failure would otherwise leave a ready order with zero
+ * reservations and nothing retrying. This sweep finds ready, unheld orders
+ * older than 15 minutes whose ledger shows NO reserve rows and re-runs the
+ * idempotent reserveOrder. Shortfalls hold the order exactly like the sync
+ * path does.
+ *
+ * Scoped to 'ready' only: 'pending' orders are unpaid (reservation happens on
+ * promotion), and 'in_progress' orders may be partially picked — reserveOrder
+ * is not pick-aware, so re-reserving them would over-reserve.
+ */
+async function remediateMissingReservations(db: any): Promise<void> {
+  const svc = flowReconciliationReservation;
+  if (!svc?.reserveOrder) return;
+
+  let rows: any;
+  try {
+    rows = await db.execute(sql`
+      SELECT w.id, w.oms_fulfillment_order_id, w.source, w.source_table_id
+      FROM wms.orders w
+      WHERE w.warehouse_status = 'ready'
+        AND COALESCE(w.on_hold, 0) = 0
+        AND w.created_at < NOW() - INTERVAL '15 minutes'
+        AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = w.id)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM inventory.inventory_transactions it
+          WHERE it.order_id = w.id
+            AND it.transaction_type = 'reserve'
+            AND it.voided_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM wms.order_items oi2
+              WHERE oi2.id = it.order_item_id AND oi2.order_id = w.id
+            )
+        )
+      ORDER BY w.id
+      LIMIT ${AUTO_RESERVATION_REPAIR_LIMIT}
+    `);
+  } catch (err: any) {
+    console.error(`${LOG_PREFIX} missing-reservation sweep query failed: ${err?.message}`);
+    return;
+  }
+
+  for (const row of rows?.rows ?? []) {
+    const wmsOrderId = Number(row.id);
+    try {
+      const result = await svc.reserveOrder(wmsOrderId);
+      if (result.failed.length > 0) {
+        console.error(
+          `${LOG_PREFIX} re-reservation shortfall for WMS order ${wmsOrderId}: ` +
+            result.failed.map((f) => `${f.sku}: ${f.reason}`).join(", ") +
+            " — holding order",
+        );
+        await db.execute(sql`
+          UPDATE wms.orders
+          SET on_hold = 1, updated_at = NOW()
+          WHERE id = ${wmsOrderId}
+            AND warehouse_status = 'ready'
+            AND on_hold = 0
+        `);
+      } else if (result.reserved > 0) {
+        console.warn(
+          `${LOG_PREFIX} re-reserved WMS order ${wmsOrderId} (${result.reserved} item(s)) — ` +
+            `original reservation was missing`,
+        );
+      }
+    } catch (err: any) {
+      console.error(
+        `${LOG_PREFIX} re-reservation failed for WMS order ${wmsOrderId}: ${err?.message} — will retry next sweep`,
+      );
+    }
+  }
 }
 
 export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<number> {
@@ -1268,6 +1374,7 @@ export async function remediateOmsFlowIssue(
   if (input.code === "OMS_FINAL_WMS_ACTIVE") {
     const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
     const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    let cancelledByThisRemediation = false;
     const updated = await withOptionalTransaction(db, async (tx) => {
       const omsResult: any = await tx.execute(sql`
         SELECT oo.status, oo.financial_status
@@ -1292,6 +1399,7 @@ export async function remediateOmsFlowIssue(
       if (transResult.transitioned) {
         if (isCancelled) {
           await tx.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${wmsOrderId}`);
+          cancelledByThisRemediation = true;
         }
         await tx.execute(sql`
           INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
@@ -1305,6 +1413,30 @@ export async function remediateOmsFlowIssue(
       }
       return transResult.transitioned;
     });
+
+    // P0.1c: a reconciler cancel must release the order's reservations —
+    // these are exactly the missed-webhook cases where no other path ever
+    // released, leaking reserved stock permanently. Order-scoped and
+    // idempotent (P0.1b), run after the status commit; failures are logged
+    // and cleaned by the drift check.
+    if (updated && cancelledByThisRemediation) {
+      if (flowReconciliationReservation) {
+        try {
+          await flowReconciliationReservation.releaseOrderReservation(
+            wmsOrderId,
+            "oms_flow_reconcile_cancel_release",
+          );
+        } catch (err: any) {
+          console.error(
+            `${LOG_PREFIX} reservation release failed for WMS order ${wmsOrderId} after reconcile-cancel: ${err?.message}`,
+          );
+        }
+      } else {
+        console.error(
+          `${LOG_PREFIX} reservation service not wired — reconcile-cancel of WMS order ${wmsOrderId} did NOT release reservations`,
+        );
+      }
+    }
 
     return {
       code: input.code,

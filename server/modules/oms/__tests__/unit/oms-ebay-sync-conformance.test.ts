@@ -64,8 +64,11 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     expect(C2_TX_AWARE_PIPELINE_TEST_SRC).toContain(
       "syncOmsOrderToWms runs reservation OUTSIDE the create transaction",
     );
-    expect(WMS_SYNC_SRC).toContain("Reservation partial failure after promotion");
-    expect(WMS_SYNC_SRC).toContain("Inventory reservation partial failure");
+    // P0.1c: both reservation call sites route through the shortfall guard,
+    // which logs the failure detail and HOLDS the order instead of letting
+    // it proceed unreserved.
+    expect(WMS_SYNC_SRC).toContain('reserveWithShortfallGuard(wmsOrderId, omsOrderId, "post_promotion")');
+    expect(WMS_SYNC_SRC).toContain("Reservation shortfall for WMS order");
     expect(ensureEbaySyncBlock).toContain("enqueueOmsWmsSyncRetry(db, omsOrderId, err)");
     expect(ensureEbaySyncBlock).toContain("sync intentionally skipped");
     expect(retryEnqueueBlock).toContain('topic: "oms_wms_sync"');

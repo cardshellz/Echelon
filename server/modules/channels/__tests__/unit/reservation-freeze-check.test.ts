@@ -47,6 +47,8 @@ describe("ReservationService.reserveForOrder freeze-check (H1)", () => {
 
     const mockDb: any = {
       select: vi.fn(() => selectChain),
+      // P0.1b: reserveForOrder takes a per-product advisory xact lock
+      execute: vi.fn().mockResolvedValue({ rows: [] }),
       transaction: async (fn: any) => fn(mockDb),
     };
 
@@ -74,6 +76,8 @@ describe("ReservationService.reserveForOrder freeze-check (H1)", () => {
 
     const mockDb: any = {
       select: vi.fn(() => selectChain),
+      // P0.1b: reserveForOrder takes a per-product advisory xact lock
+      execute: vi.fn().mockResolvedValue({ rows: [] }),
       transaction: async (fn: any) => fn(mockDb),
     };
 

@@ -1,0 +1,867 @@
+{
+ "oms.oms_orders.status": [
+  {
+   "file": "server/modules/oms/channel-fulfillment.service.ts",
+   "line": 150,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/oms-webhooks.ts",
+   "line": 1665,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/oms-webhooks.ts",
+   "line": 2005,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/oms-webhooks.ts",
+   "line": 2100,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/oms.service.ts",
+   "line": 175,
+   "method": "insert",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".insert(omsOrders)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/oms/oms.service.ts",
+   "line": 484,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/oms.service.ts",
+   "line": 506,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 2420,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 2444,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 2854,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/orders/fulfillment.service.ts",
+   "line": 523,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/orders",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 857,
+   "kind": "UPDATE",
+   "tableRef": "oms.oms_orders",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 1372,
+   "kind": "UPDATE",
+   "tableRef": "oms.oms_orders",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 1424,
+   "kind": "UPDATE",
+   "tableRef": "oms.oms_orders",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+   "line": 728,
+   "kind": "INSERT",
+   "tableRef": "oms.oms_orders",
+   "module": "modules/dropship",
+   "via": "sql.INSERT(initial)"
+  },
+  {
+   "file": "server/modules/oms/ebay-order-ingestion.ts",
+   "line": 260,
+   "kind": "UPDATE",
+   "tableRef": "oms_orders",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+   "line": 1069,
+   "kind": "UPDATE",
+   "tableRef": "oms.oms_orders",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+   "line": 1131,
+   "kind": "UPDATE",
+   "tableRef": "oms.oms_orders",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/wms-sync.service.ts",
+   "line": 1722,
+   "kind": "UPDATE",
+   "tableRef": "oms.oms_orders",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  }
+ ],
+ "oms.oms_orders.financial_status": [
+  {
+   "file": "server/modules/oms/oms-webhooks.ts",
+   "line": 1665,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/oms-webhooks.ts",
+   "line": 2005,
+   "method": "update",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".update(omsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/oms.service.ts",
+   "line": 175,
+   "method": "insert",
+   "ident": "omsOrders",
+   "table": "oms.oms_orders",
+   "module": "modules/oms",
+   "snippet": ".insert(omsOrders)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+   "line": 728,
+   "kind": "INSERT",
+   "tableRef": "oms.oms_orders",
+   "module": "modules/dropship",
+   "via": "sql.INSERT(initial)"
+  },
+  {
+   "file": "server/modules/oms/ebay-order-ingestion.ts",
+   "line": 286,
+   "kind": "UPDATE",
+   "tableRef": "oms_orders",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  }
+ ],
+ "wms.orders.warehouse_status": [
+  {
+   "file": "server/modules/oms/wms-sync.service.ts",
+   "line": 807,
+   "method": "update",
+   "ident": "wmsOrders",
+   "table": "wms.orders",
+   "module": "modules/oms",
+   "snippet": ".update(wmsOrders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/orders/combining.service.ts",
+   "line": 971,
+   "method": "update",
+   "ident": "orders",
+   "table": "wms.orders",
+   "module": "modules/orders",
+   "snippet": ".update(orders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/orders/combining.service.ts",
+   "line": 997,
+   "method": "update",
+   "ident": "orders",
+   "table": "wms.orders",
+   "module": "modules/orders",
+   "snippet": ".update(orders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 885,
+   "method": "update",
+   "ident": "wmsOrders",
+   "table": "wms.orders",
+   "module": "modules/orders",
+   "snippet": ".update(orders)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/oms-webhooks.ts",
+   "line": 1726,
+   "kind": "UPDATE",
+   "tableRef": "wms.orders",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/wms-sync.service.ts",
+   "line": 1046,
+   "kind": "UPDATE",
+   "tableRef": "wms.orders",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/order-status-core.ts",
+   "line": 178,
+   "kind": "UPDATE",
+   "tableRef": "wms.orders",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/shipment-rollup.ts",
+   "line": 843,
+   "kind": "UPDATE",
+   "tableRef": "wms.orders",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/shipment-rollup.ts",
+   "line": 876,
+   "kind": "UPDATE",
+   "tableRef": "wms.orders",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/routes/diagnostics.ts",
+   "line": 268,
+   "kind": "UPDATE",
+   "tableRef": "wms.orders",
+   "module": "server/routes/",
+   "via": "sql.UPDATE"
+  }
+ ],
+ "wms.outbound_shipments.status": [
+  {
+   "file": "server/modules/orders/fulfillment.service.ts",
+   "line": 107,
+   "method": "insert",
+   "ident": "outboundShipments",
+   "table": "wms.outbound_shipments",
+   "module": "modules/orders",
+   "snippet": ".insert(outboundShipments)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/orders/fulfillment.service.ts",
+   "line": 329,
+   "method": "insert",
+   "ident": "outboundShipments",
+   "table": "wms.outbound_shipments",
+   "module": "modules/orders",
+   "snippet": ".insert(outboundShipments)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/orders/fulfillment.service.ts",
+   "line": 654,
+   "method": "update",
+   "ident": "outboundShipments",
+   "table": "wms.outbound_shipments",
+   "module": "modules/orders",
+   "snippet": ".update(outboundShipments)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/db.ts",
+   "line": 647,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/db",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/db.ts",
+   "line": 657,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/db",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 950,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 958,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 1004,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 1115,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 1275,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 1532,
+   "kind": "INSERT",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/oms",
+   "via": "sql.INSERT(initial)"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 2746,
+   "kind": "INSERT",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/oms",
+   "via": "sql.INSERT(initial)"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 2634,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 3823,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/shipment-rollup.ts",
+   "line": 279,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/shipment-rollup.ts",
+   "line": 426,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/shipment-rollup.ts",
+   "line": 700,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/shipment-rollup.ts",
+   "line": 1007,
+   "kind": "UPDATE",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/wms/line-item-hold.ts",
+   "line": 65,
+   "kind": "INSERT",
+   "tableRef": "wms.outbound_shipments",
+   "module": "modules/wms",
+   "via": "sql.INSERT(initial)"
+  },
+  {
+   "file": "server/routes/shopify.routes.ts",
+   "line": 412,
+   "kind": "INSERT",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/routes/",
+   "via": "sql.INSERT(initial)"
+  },
+  {
+   "file": "server/routes/shopify.routes.ts",
+   "line": 647,
+   "kind": "INSERT",
+   "tableRef": "wms.outbound_shipments",
+   "module": "server/routes/",
+   "via": "sql.INSERT(initial)"
+  }
+ ],
+ "inventory.inventory_levels.variant_qty": [
+  {
+   "file": "server/modules/channels/catalog-backfill.service.ts",
+   "line": 867,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/channels",
+   "snippet": "await this.db.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 341,
+   "method": "update",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": ".update(inventoryLevels)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 359,
+   "method": "update",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": ".update(inventoryLevels)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 367,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": "await tx.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  }
+ ],
+ "inventory.inventory_levels.reserved_qty": [
+  {
+   "file": "server/modules/channels/catalog-backfill.service.ts",
+   "line": 867,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/channels",
+   "snippet": "await this.db.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 341,
+   "method": "update",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": ".update(inventoryLevels)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 359,
+   "method": "update",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": ".update(inventoryLevels)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 367,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": "await tx.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+   "line": 866,
+   "kind": "UPDATE",
+   "tableRef": "inventory.inventory_levels",
+   "module": "modules/dropship",
+   "via": "sql.UPDATE"
+  }
+ ],
+ "inventory.inventory_levels.picked_qty": [
+  {
+   "file": "server/modules/channels/catalog-backfill.service.ts",
+   "line": 867,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/channels",
+   "snippet": "await this.db.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 367,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": "await tx.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/scripts/fix_orphaned_picks.ts",
+   "line": 35,
+   "kind": "UPDATE",
+   "tableRef": "inventory.inventory_levels",
+   "module": "server/scripts",
+   "via": "sql.UPDATE"
+  }
+ ],
+ "inventory.inventory_levels.packed_qty": [
+  {
+   "file": "server/modules/channels/catalog-backfill.service.ts",
+   "line": 867,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/channels",
+   "snippet": "await this.db.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 367,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": "await tx.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  }
+ ],
+ "inventory.inventory_levels.backorder_qty": [
+  {
+   "file": "server/modules/channels/catalog-backfill.service.ts",
+   "line": 867,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/channels",
+   "snippet": "await this.db.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 367,
+   "method": "insert",
+   "ident": "inventoryLevels",
+   "table": "inventory.inventory_levels",
+   "module": "modules/inventory",
+   "snippet": "await tx.insert(inventoryLevels)",
+   "via": "drizzle.insert(initial)"
+  }
+ ],
+ "channels.channel_reservations.reserve_base_qty": [],
+ "wms.order_items.status": [
+  {
+   "file": "server/modules/oms/wms-sync.service.ts",
+   "line": 949,
+   "method": "insert",
+   "ident": "wmsOrderItems",
+   "table": "wms.order_items",
+   "module": "modules/oms",
+   "snippet": ".insert(wmsOrderItems)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/oms/wms-sync.service.ts",
+   "line": 1259,
+   "method": "update",
+   "ident": "wmsOrderItems",
+   "table": "wms.order_items",
+   "module": "modules/oms",
+   "snippet": ".update(wmsOrderItems)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/wms-sync.service.ts",
+   "line": 1346,
+   "method": "update",
+   "ident": "wmsOrderItems",
+   "table": "wms.order_items",
+   "module": "modules/oms",
+   "snippet": ".update(wmsOrderItems)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/oms/wms-sync.service.ts",
+   "line": 1392,
+   "method": "insert",
+   "ident": "wmsOrderItems",
+   "table": "wms.order_items",
+   "module": "modules/oms",
+   "snippet": "await db.insert(wmsOrderItems)",
+   "via": "drizzle.insert(initial)"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 952,
+   "method": "update",
+   "ident": "wmsOrderItems",
+   "table": "wms.order_items",
+   "module": "modules/orders",
+   "snippet": ".update(orderItems)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 982,
+   "method": "update",
+   "ident": "wmsOrderItems",
+   "table": "wms.order_items",
+   "module": "modules/orders",
+   "snippet": ".update(orderItems)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 1163,
+   "method": "update",
+   "ident": "wmsOrderItems",
+   "table": "wms.order_items",
+   "module": "modules/orders",
+   "snippet": "await db.update(orderItems)",
+   "via": "drizzle.update.set"
+  },
+  {
+   "file": "server/index.ts",
+   "line": 990,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "server/index",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/inventory/application/inventory.use-cases.ts",
+   "line": 834,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/inventory",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+   "line": 395,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/inventory",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/oms-webhooks.ts",
+   "line": 631,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 1722,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 1781,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 2664,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/oms/shipstation.service.ts",
+   "line": 2726,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/oms",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/fulfillment.service.ts",
+   "line": 475,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/fulfillment.service.ts",
+   "line": 573,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 715,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 1006,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 1030,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 1422,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 1434,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 1447,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  },
+  {
+   "file": "server/modules/orders/orders.storage.ts",
+   "line": 1610,
+   "kind": "UPDATE",
+   "tableRef": "wms.order_items",
+   "module": "modules/orders",
+   "via": "sql.UPDATE"
+  }
+ ]
+}

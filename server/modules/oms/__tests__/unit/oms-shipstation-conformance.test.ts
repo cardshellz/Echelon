@@ -51,10 +51,13 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
   });
 
   it("repairs duplicate ShipStation order-key callbacks instead of creating fake split work", () => {
+    // Merged P0 semantics: full/duplicate packages take the read-only
+    // repair/adopt branch (`!isPartialPackage`); a second row is never
+    // created for a duplicate orderKey callback.
     const duplicateRepairBlock = sourceBlock(
       SHIPSTATION_SRC,
-      "if (hasSameShipmentItemSet(parentItems, parsedShipStationItems))",
-      "const ssOrderKey = shipment.orderKey",
+      "if (!isPartialPackage) {",
+      "// Genuine partial package",
     );
 
     expect(SHIP_NOTIFY_TEST_SRC).toContain(
@@ -68,14 +71,16 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     );
     expect(duplicateRepairBlock).toContain("UPDATE wms.outbound_shipments");
     expect(duplicateRepairBlock).toContain("shipstation_duplicate_order_key_repaired");
-    expect(duplicateRepairBlock).toContain("return repairedRow");
-    expect(duplicateRepairBlock).toContain("instead of creating a split row");
+    expect(duplicateRepairBlock).toContain("Repair/adopt the mapping");
+    expect(duplicateRepairBlock).toContain(
+      "return { ...parent, shipstation_order_id: adoptedSsOrderId }",
+    );
   });
 
   it("allows legitimate shipped splits only when WMS item evidence is present", () => {
     const splitResolutionBlock = sourceBlock(
       SHIPSTATION_SRC,
-      "async function ensureSplitShipmentFromShipStation",
+      "async function resolveShipmentByOrderKey",
       "async function syncShipmentItemsFromShipStation",
     );
     const itemSyncBlock = sourceBlock(
