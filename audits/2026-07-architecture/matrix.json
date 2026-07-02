@@ -1,0 +1,5686 @@
+{
+ "public.audit_events": {
+  "server/infrastructure": [
+   {
+    "file": "server/infrastructure/auditLogger.ts",
+    "line": 34,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 165,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "public.idempotency_keys": {
+  "server/middleware": [
+   {
+    "file": "server/middleware/idempotency.ts",
+    "line": 46,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/middleware/idempotency.ts",
+    "line": 56,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "catalog.products": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 537,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 668,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 1709,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 157,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 162,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 170,
+    "op": "drizzle.delete"
+   }
+  ],
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 364,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 387,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 1163,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1880,
+    "op": "drizzle.update"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 52,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/ebay/ebay-policies.routes.ts",
+    "line": 90,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/ebay-listing-rules.routes.ts",
+    "line": 154,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/ebay/ebay-config.routes.ts",
+    "line": 367,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/ebay-listing-rules.routes.ts",
+    "line": 197,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "catalog.shipping_groups": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 562,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 590,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "catalog.product_categories": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 618,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 655,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/product-import.service.ts",
+    "line": 83,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "catalog.product_assets": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 1084,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 2269,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 2367,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 2429,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 302,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 307,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 312,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 317,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 326,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 333,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 336,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/image-sync.service.ts",
+    "line": 141,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/image-sync.service.ts",
+    "line": 277,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 2262,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 2286,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 2400,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 2446,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/catalog/image-sync.service.ts",
+    "line": 157,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/catalog/image-sync.service.ts",
+    "line": 293,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 725,
+    "op": "drizzle.insert"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-policies.routes.ts",
+    "line": 288,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "catalog.product_variants": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 1724,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 216,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 221,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 229,
+    "op": "drizzle.delete"
+   }
+  ],
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 514,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 541,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 811,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 1170,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 86,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/ebay/ebay-policies.routes.ts",
+    "line": 122,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "channels.channel_feeds": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 1730,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 1749,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 248,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 584,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 594,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 299,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 303,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 664,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 1432,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 1436,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/sync.service.ts",
+    "line": 648,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 621,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 627,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 634,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "channels.channel_listings": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 1765,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 1784,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 980,
+    "op": "sql.DELETE"
+   },
+   {
+    "file": "server/modules/catalog/catalog.routes.ts",
+    "line": 2016,
+    "op": "sql.DELETE"
+   }
+  ],
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 619,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 637,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 220,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 908,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 1103,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 1444,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 1466,
+    "op": "drizzle.update"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-policies.routes.ts",
+    "line": 378,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/routes/ebay/ebay-sync-helpers.ts",
+    "line": 34,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/routes/ebay/ebay-sync-helpers.ts",
+    "line": 108,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 113,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 131,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 146,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 164,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 180,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 196,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/ebay/ebay-listings.routes.ts",
+    "line": 1844,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/routes/ebay/ebay-listings.routes.ts",
+    "line": 1881,
+    "op": "sql.UPDATE unqualified ref"
+   }
+  ]
+ },
+ "inventory.inventory_levels": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 238,
+    "op": "drizzle.delete"
+   }
+  ],
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 867,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/application/break-assembly.use-cases.ts",
+    "line": 612,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/break-assembly.use-cases.ts",
+    "line": 632,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 141,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 162,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 168,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 190,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 208,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 341,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 359,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 367,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 681,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/inventory/application/inventory.use-cases.ts",
+    "line": 1018,
+    "op": "sql.DELETE unqualified ref"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 550,
+    "op": "sql.DELETE"
+   }
+  ],
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 866,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/scripts": [
+   {
+    "file": "server/scripts/fix_orphaned_picks.ts",
+    "line": 35,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "warehouse.product_locations": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 243,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 465,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 475,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 671,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 685,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/warehouse": [
+   {
+    "file": "server/modules/warehouse/bin-assignment.service.ts",
+    "line": 333,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/bin-assignment.service.ts",
+    "line": 369,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 321,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 335,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 347,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 349,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 351,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 355,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 370,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 372,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 374,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 392,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 405,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 410,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 423,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 426,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 436,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 442,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 446,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 477,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/bin-assignment.service.ts",
+    "line": 317,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/warehouse/bin-assignment.service.ts",
+    "line": 352,
+    "op": "sql.DELETE"
+   }
+  ],
+  "server/seed": [
+   {
+    "file": "server/seed.ts",
+    "line": 23,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "inventory.replen_rules": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 256,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 231,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 236,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 244,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "inventory.replen_tasks": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 264,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 455,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 485,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 510,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 520,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 550,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1006,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1046,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1057,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1315,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1349,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1439,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1594,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2110,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2148,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2388,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2486,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2550,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2608,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2759,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2821,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2862,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 3025,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 3207,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 3246,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 325,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 330,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 338,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/inventory/application/cycle-count.use-cases.ts",
+    "line": 457,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1881,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 1938,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2013,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 2004,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "procurement.purchase_order_lines": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 462,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 839,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 845,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 849,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 857,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 931,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 665,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2775,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2803,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "procurement.inbound_shipment_lines": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 463,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1145,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1151,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1155,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1160,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 1209,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/shipment-tracking.service.ts",
+    "line": 725,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "procurement.receiving_lines": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 464,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 359,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 364,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 372,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 378,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/receiving.service.ts",
+    "line": 380,
+    "op": "sql.DELETE"
+   }
+  ]
+ },
+ "procurement.vendor_invoice_lines": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 466,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 803,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1353,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1394,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1428,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1446,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1507,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1524,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1824,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 1218,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "wms.order_items": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 469,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 907,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 919,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 949,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1259,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1297,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1330,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1346,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1356,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1392,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1842,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1874,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 631,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1722,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1781,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2664,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2726,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 983,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 830,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 952,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 982,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1111,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1127,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1163,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1201,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1210,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1247,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 702,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 1038,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 475,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 573,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 715,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1006,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1030,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1422,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1434,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1447,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1610,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/index": [
+   {
+    "file": "server/index.ts",
+    "line": 990,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/application/inventory.use-cases.ts",
+    "line": 834,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 395,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/wms": [
+   {
+    "file": "server/modules/wms/line-item-hold.ts",
+    "line": 41,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/wms/line-item-hold.ts",
+    "line": 104,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/diagnostics.ts",
+    "line": 54,
+    "op": "sql.DELETE"
+   },
+   {
+    "file": "server/routes/diagnostics.ts",
+    "line": 115,
+    "op": "sql.DELETE"
+   }
+  ]
+ },
+ "wms.picking_logs": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 470,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/picking-logs.storage.ts",
+    "line": 58,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "oms.order_item_financials": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/catalog.storage.ts",
+    "line": 471,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1044,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "ebay.ebay_oauth_tokens": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/adapters/ebay/ebay-auth.service.ts",
+    "line": 292,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/adapters/ebay/ebay-auth.service.ts",
+    "line": 301,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "channels.allocation_audit_log": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/allocation-engine.service.ts",
+    "line": 768,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "channels.channel_pricing": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 665,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 674,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 174,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 191,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "inventory.inventory_transactions": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 878,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/reservation.service.ts",
+    "line": 509,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/application/break-assembly.use-cases.ts",
+    "line": 639,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 244,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 413,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 430,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 873,
+    "op": "sql.INSERT"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/diagnostics.ts",
+    "line": 29,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/scripts": [
+   {
+    "file": "server/scripts/fix_orphaned_picks.ts",
+    "line": 43,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "warehouse.warehouse_locations": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/catalog-backfill.service.ts",
+    "line": 1019,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/application/inventory.use-cases.ts",
+    "line": 1134,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/cycle-count.use-cases.ts",
+    "line": 442,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/application/cycle-count.use-cases.ts",
+    "line": 734,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/cycle-count-freeze-guard.scheduler.ts",
+    "line": 67,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/warehouse": [
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 175,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 196,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 201,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "channels.channel_product_overrides": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 75,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 98,
+    "op": "drizzle.delete"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 57,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "channels.channel_variant_overrides": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 127,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 145,
+    "op": "drizzle.delete"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-listing-state.ts",
+    "line": 91,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "channels.channel_asset_overrides": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 261,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 278,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "channels.channel_product_lines": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 292,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/channels/channel-catalog.storage.ts",
+    "line": 294,
+    "op": "drizzle.insert"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 291,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "channels.channel_warehouse_assignments": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.routes.ts",
+    "line": 2237,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.routes.ts",
+    "line": 2266,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/channels.routes.ts",
+    "line": 2286,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "channels.channel_allocation_rules": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.routes.ts",
+    "line": 2429,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.routes.ts",
+    "line": 2481,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/channels.routes.ts",
+    "line": 2511,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "channels.channels": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 160,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 165,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 173,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 910,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/sync-settings.service.ts",
+    "line": 146,
+    "op": "drizzle.update"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay-oauth.routes.ts",
+    "line": 109,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/routes/pick-priority.routes.ts",
+    "line": 294,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/pick-priority.routes.ts",
+    "line": 303,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-oms-channel-config.repository.ts",
+    "line": 260,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-oms-channel-config.repository.ts",
+    "line": 248,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-oms-channel-config.repository.ts",
+    "line": 303,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-oms-channel-config.repository.ts",
+    "line": 350,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/identity": [
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 155,
+    "op": "sql.INSERT unqualified ref"
+   }
+  ]
+ },
+ "channels.channel_connections": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 185,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 191,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 196,
+    "op": "drizzle.update"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay-settings.routes.ts",
+    "line": 78,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/routes/ebay-settings.routes.ts",
+    "line": 319,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/ebay-settings.routes.ts",
+    "line": 360,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/shopify.routes.ts",
+    "line": 828,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-oms-channel-config.repository.ts",
+    "line": 321,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "channels.partner_profiles": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 214,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 220,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "channels.channel_reservations": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 258,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 264,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 269,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "channels.channel_product_allocation": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 359,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 368,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 380,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "catalog.product_lines": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 458,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 473,
+    "op": "drizzle.update"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 278,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "catalog.product_line_products": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 478,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 480,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 487,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 495,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 502,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 510,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/channels/channels.storage.ts",
+    "line": 521,
+    "op": "drizzle.delete"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 284,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "channels.channel_sync_log": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/echelon-sync-orchestrator.service.ts",
+    "line": 1548,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/sync.service.ts",
+    "line": 830,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "channels.source_lock_config": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/source-lock.service.ts",
+    "line": 179,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/source-lock.service.ts",
+    "line": 192,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/source-lock.service.ts",
+    "line": 234,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "channels.sync_settings": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/sync-settings.service.ts",
+    "line": 70,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/sync-settings.service.ts",
+    "line": 86,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/channels/sync-settings.service.ts",
+    "line": 100,
+    "op": "drizzle.update"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 580,
+    "op": "sql.INSERT unqualified ref"
+   }
+  ]
+ },
+ "warehouse.warehouses": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/sync-settings.service.ts",
+    "line": 173,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/application/inventory.use-cases.ts",
+    "line": 1072,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/inventory.use-cases.ts",
+    "line": 1182,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/application/inventory.use-cases.ts",
+    "line": 1187,
+    "op": "drizzle.update"
+   }
+  ],
+  "modules/warehouse": [
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 109,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 114,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 121,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "channels.sync_log": {
+  "modules/channels": [
+   {
+    "file": "server/modules/channels/sync-settings.service.ts",
+    "line": 184,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/sync.service.ts",
+    "line": 369,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/channels/sync.service.ts",
+    "line": 392,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "identity.auth_permissions": {
+  "modules/identity": [
+   {
+    "file": "server/modules/identity/application/identity.use-cases.ts",
+    "line": 85,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "identity.auth_roles": {
+  "modules/identity": [
+   {
+    "file": "server/modules/identity/application/identity.use-cases.ts",
+    "line": 94,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 114,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 135,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "identity.auth_role_permissions": {
+  "modules/identity": [
+   {
+    "file": "server/modules/identity/application/identity.use-cases.ts",
+    "line": 101,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 116,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 124,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 126,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "identity.auth_user_roles": {
+  "modules/identity": [
+   {
+    "file": "server/modules/identity/application/identity.use-cases.ts",
+    "line": 119,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 140,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 142,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "inventory.adjustment_reasons": {
+  "modules/identity": [
+   {
+    "file": "server/modules/identity/application/identity.use-cases.ts",
+    "line": 133,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/identity/application/identity.use-cases.ts",
+    "line": 137,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 582,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/inventory.repository.ts",
+    "line": 591,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "identity.users": {
+  "modules/identity": [
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 21,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 26,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/identity/infrastructure/identity.repository.ts",
+    "line": 37,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "inventory.cycle_counts": {
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2911,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2997,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/cycle-count.repository.ts",
+    "line": 37,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/cycle-count.repository.ts",
+    "line": 42,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/cycle-count.repository.ts",
+    "line": 50,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/inventory/cycle-count-freeze-guard.scheduler.ts",
+    "line": 61,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "inventory.cycle_count_items": {
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 2925,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/replenishment.use-cases.ts",
+    "line": 3010,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/cycle-count.repository.ts",
+    "line": 64,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/cycle-count.repository.ts",
+    "line": 69,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/cycle-count.repository.ts",
+    "line": 77,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/cycle-count.repository.ts",
+    "line": 83,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/application/cycle-count.use-cases.ts",
+    "line": 821,
+    "op": "sql.INSERT unqualified ref"
+   },
+   {
+    "file": "server/modules/inventory/application/cycle-count.use-cases.ts",
+    "line": 1240,
+    "op": "sql.INSERT unqualified ref"
+   }
+  ]
+ },
+ "inventory.inventory_lots": {
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 159,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 113,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 954,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 182,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 296,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 433,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 903,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 1001,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 1010,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 1015,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 1035,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 1154,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 244,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 300,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 411,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 478,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 559,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 601,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 685,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 758,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 986,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 991,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/shipment-tracking.service.ts",
+    "line": 1646,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 802,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/db.ts",
+    "line": 834,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/db.ts",
+    "line": 872,
+    "op": "sql.UPDATE unqualified ref"
+   }
+  ]
+ },
+ "inventory.replen_tier_defaults": {
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 186,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 191,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 199,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "inventory.location_replen_config": {
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 283,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 288,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 296,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "inventory.warehouse_settings": {
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 373,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 378,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 386,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 401,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/inventory/infrastructure/replenishment.repository.ts",
+    "line": 407,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 217,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 234,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 251,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 255,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2265,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2272,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 2043,
+    "op": "sql.UPDATE unqualified ref"
+   }
+  ]
+ },
+ "oms.order_item_costs": {
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 421,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 492,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/inventory/lots.service.ts",
+    "line": 504,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 367,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1029,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/shipment-tracking.service.ts",
+    "line": 1668,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 843,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "public.notifications": {
+  "modules/notifications": [
+   {
+    "file": "server/modules/notifications/notifications.service.ts",
+    "line": 97,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/notifications/notifications.service.ts",
+    "line": 174,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/notifications/notifications.service.ts",
+    "line": 186,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "public.notification_preferences": {
+  "modules/notifications": [
+   {
+    "file": "server/modules/notifications/notifications.service.ts",
+    "line": 263,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/notifications/notifications.service.ts",
+    "line": 267,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/notifications/notifications.service.ts",
+    "line": 281,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "oms.oms_order_events": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/channel-fulfillment.service.ts",
+    "line": 108,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/fulfillment-push.service.ts",
+    "line": 499,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/fulfillment-push.service.ts",
+    "line": 605,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/fulfillment-push.service.ts",
+    "line": 764,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/fulfillment-push.service.ts",
+    "line": 1380,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 398,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 434,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 995,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 1941,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 2121,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 2277,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 268,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 313,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 469,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 488,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 524,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1934,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1995,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2041,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2085,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2145,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2491,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2872,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2967,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 731,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1492,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 820,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 898,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 984,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 1034,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 1104,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 1154,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/shipstation-sweeper.ts",
+    "line": 64,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1169,
+    "op": "sql.INSERT"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 539,
+    "op": "drizzle.insert"
+   }
+  ],
+  "server/index": [
+   {
+    "file": "server/index.ts",
+    "line": 1322,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1440,
+    "op": "sql.INSERT"
+   }
+  ],
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 791,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 903,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "oms.oms_orders": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/channel-fulfillment.service.ts",
+    "line": 150,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/member-tier-enrichment.ts",
+    "line": 64,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 1665,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 2005,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 2100,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 2268,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 175,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 303,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 484,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 506,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2420,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2444,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2854,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/ebay-order-ingestion.ts",
+    "line": 260,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/modules/oms/ebay-order-ingestion.ts",
+    "line": 286,
+    "op": "sql.UPDATE unqualified ref"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 1069,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 1131,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1722,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 523,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1497,
+    "op": "sql.UPDATE unqualified ref"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 632,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/index": [
+   {
+    "file": "server/index.ts",
+    "line": 857,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1372,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1424,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1560,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 728,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "oms.webhook_retry_queue": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 1383,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 634,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 1576,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 1620,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 1687,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 1703,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/webhook-inbox.service.ts",
+    "line": 256,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 711,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/shopify.routes.ts",
+    "line": 1624,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/routes/shopify.routes.ts",
+    "line": 1690,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "oms.oms_order_lines": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 1814,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 1839,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 1871,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 2112,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 241,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 349,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 520,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms.service.ts",
+    "line": 971,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2435,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2867,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/channel-fulfillment.service.ts",
+    "line": 173,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/fulfillment-push.service.ts",
+    "line": 1209,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2394,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 535,
+    "op": "drizzle.update"
+   }
+  ],
+  "server/index": [
+   {
+    "file": "server/index.ts",
+    "line": 1406,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 816,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "wms.orders": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 807,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/oms/oms-flow-reconciliation.service.ts",
+    "line": 1031,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 1726,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2655,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2720,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1046,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1433,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 486,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 528,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 603,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 712,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 772,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 809,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 823,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 847,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 971,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 997,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/fulfillment-router.service.ts",
+    "line": 162,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 168,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 230,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 885,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 940,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 975,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1023,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1070,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1168,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1178,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1188,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1220,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1314,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/sla-monitor.service.ts",
+    "line": 101,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 567,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/order-status-core.ts",
+    "line": 178,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1411,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1460,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1565,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 843,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 876,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/sla-monitor.service.ts",
+    "line": 120,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/sla-monitor.service.ts",
+    "line": 129,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/sla-monitor.service.ts",
+    "line": 138,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/sla-monitor.service.ts",
+    "line": 147,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/sla-monitor.service.ts",
+    "line": 157,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/wms": [
+   {
+    "file": "server/modules/wms/insert-order.ts",
+    "line": 72,
+    "op": "drizzle.insert"
+   }
+  ],
+  "server/index": [
+   {
+    "file": "server/index.ts",
+    "line": 918,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/diagnostics.ts",
+    "line": 268,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/routes/diagnostics.ts",
+    "line": 73,
+    "op": "sql.DELETE"
+   },
+   {
+    "file": "server/routes/diagnostics.ts",
+    "line": 130,
+    "op": "sql.DELETE"
+   }
+  ]
+ },
+ "wms.combined_order_groups": {
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 498,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 532,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 573,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 582,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 716,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 743,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 751,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 828,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 835,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 966,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/combining.service.ts",
+    "line": 992,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "wms.outbound_shipments": {
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 107,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 247,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 329,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 654,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 738,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 279,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 426,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 494,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 700,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 1007,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/wms": [
+   {
+    "file": "server/modules/wms/create-shipment.ts",
+    "line": 356,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/wms/create-shipment.ts",
+    "line": 523,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/wms/line-item-hold.ts",
+    "line": 65,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/wms/line-item-hold.ts",
+    "line": 121,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 639,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/db.ts",
+    "line": 647,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/db.ts",
+    "line": 657,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/db.ts",
+    "line": 668,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/index": [
+   {
+    "file": "server/index.ts",
+    "line": 950,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 958,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1004,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1115,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1263,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1275,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1286,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1298,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1311,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1469,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/index.ts",
+    "line": 1489,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/fulfillment-push.service.ts",
+    "line": 1359,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/fulfillment-push.service.ts",
+    "line": 2059,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 690,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation-sweeper.ts",
+    "line": 87,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1532,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2746,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1131,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1253,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1324,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1374,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1647,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1665,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1927,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 2634,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 3823,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 1660,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/shopify.routes.ts",
+    "line": 412,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/routes/shopify.routes.ts",
+    "line": 647,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "wms.outbound_shipment_items": {
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 156,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/fulfillment.service.ts",
+    "line": 455,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 1385,
+    "op": "sql.UPDATE"
+   }
+  ],
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 618,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1337,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1352,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1391,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/shipstation.service.ts",
+    "line": 1405,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/wms-sync.service.ts",
+    "line": 1142,
+    "op": "sql.INSERT"
+   }
+  ],
+  "modules/wms": [
+   {
+    "file": "server/modules/wms/create-shipment.ts",
+    "line": 163,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/wms/line-item-hold.ts",
+    "line": 75,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "wms.allocation_exceptions": {
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 432,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 710,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 1465,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/orders/orders.storage.ts",
+    "line": 1038,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 401,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 413,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/picking.use-cases.ts",
+    "line": 1987,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 851,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 883,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "procurement.purchase_orders": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 298,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 755,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 760,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 786,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 803,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 645,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2715,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2881,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2918,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2965,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "procurement.vendor_invoices": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 382,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 435,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 628,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 652,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 716,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 742,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1473,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1805,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 2057,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "procurement.vendor_invoice_po_links": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 467,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 766,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 787,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "procurement.ap_payments": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 893,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1019,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "procurement.ap_payment_allocations": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 912,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "procurement.vendor_invoice_attachments": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1564,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1595,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "procurement.inbound_freight_costs": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 2050,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 2070,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1174,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1179,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1184,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 1840,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "procurement.demand_events": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/demand-events.service.ts",
+    "line": 101,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/demand-events.service.ts",
+    "line": 163,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/demand-events.service.ts",
+    "line": 155,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "procurement.demand_event_lines": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/demand-events.service.ts",
+    "line": 110,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/demand-events.service.ts",
+    "line": 174,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/demand-events.service.ts",
+    "line": 197,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/demand-events.service.ts",
+    "line": 185,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "procurement.po_exceptions": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/po-exceptions.service.ts",
+    "line": 159,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/po-exceptions.service.ts",
+    "line": 177,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/po-exceptions.service.ts",
+    "line": 225,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/po-exceptions.service.ts",
+    "line": 270,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/po-exceptions.service.ts",
+    "line": 313,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "procurement.po_status_history": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/po-exceptions.service.ts",
+    "line": 666,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 793,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 873,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 652,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2809,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2890,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2930,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2973,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/receiving.service.ts",
+    "line": 405,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "procurement.vendors": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 261,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 271,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 279,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "procurement.receiving_orders": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 310,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 315,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 323,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/receiving.service.ts",
+    "line": 385,
+    "op": "sql.DELETE"
+   }
+  ]
+ },
+ "procurement.vendor_products": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 416,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 421,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 429,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 3304,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 3342,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "procurement.po_approval_tiers": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 658,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 663,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 671,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "procurement.po_revisions": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 884,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "procurement.po_receipts": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 895,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 936,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "procurement.inbound_shipments": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1100,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1105,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1110,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "procurement.inbound_freight_allocations": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1197,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1203,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1209,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "procurement.landed_cost_snapshots": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1223,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1234,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1240,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 1214,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "procurement.landed_cost_adjustments": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1228,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "procurement.inbound_shipment_status_history": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1245,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "public.reorder_exclusion_rules": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1802,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1811,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "public.auto_draft_runs": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1897,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1902,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "procurement.purchasing_recommendation_decisions": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/procurement.storage.ts",
+    "line": 1972,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "procurement.po_events": {
+  "modules/procurement": [
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2301,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/procurement/purchasing.service.ts",
+    "line": 2318,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "membership.member_subscriptions": {
+  "modules/subscriptions": [
+   {
+    "file": "server/modules/subscriptions/application/subscription.use-cases.ts",
+    "line": 141,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/subscriptions/application/subscription.use-cases.ts",
+    "line": 219,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 286,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 315,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 324,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 335,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 339,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 349,
+    "op": "drizzle.update"
+   }
+  ]
+ },
+ "membership.plans": {
+  "modules/subscriptions": [
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 84,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 115,
+    "op": "drizzle.update"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/pick-priority.routes.ts",
+    "line": 277,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "membership.selling_plan_map": {
+  "modules/subscriptions": [
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 162,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "membership.members": {
+  "modules/subscriptions": [
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 228,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 234,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "membership.subscription_billing_attempts": {
+  "modules/subscriptions": [
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 446,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "membership.subscription_events": {
+  "modules/subscriptions": [
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 517,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "warehouse.echelon_settings": {
+  "modules/warehouse": [
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 53,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 56,
+    "op": "drizzle.insert"
+   }
+  ],
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/shopify-order-reconciliation.ts",
+    "line": 343,
+    "op": "sql.INSERT unqualified ref"
+   }
+  ],
+  "server/routes/": [
+   {
+    "file": "server/routes/pick-priority.routes.ts",
+    "line": 183,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "warehouse.warehouse_zones": {
+  "modules/warehouse": [
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 135,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 140,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 145,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "oms.fulfillment_routing_rules": {
+  "modules/warehouse": [
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 214,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 219,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/modules/warehouse/infrastructure/warehouse.repository.ts",
+    "line": 224,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "channels.channel_pricing_rules": {
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-pricing.routes.ts",
+    "line": 94,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/ebay/ebay-pricing.routes.ts",
+    "line": 100,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/routes/ebay/ebay-pricing.routes.ts",
+    "line": 105,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/routes/ebay/ebay-pricing.routes.ts",
+    "line": 141,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "ebay.ebay_category_aspects": {
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-taxonomy.routes.ts",
+    "line": 311,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/routes/ebay/ebay-taxonomy.routes.ts",
+    "line": 323,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "ebay.ebay_type_aspect_defaults": {
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-taxonomy.routes.ts",
+    "line": 393,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/routes/ebay/ebay-taxonomy.routes.ts",
+    "line": 407,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "ebay.ebay_product_aspect_overrides": {
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-taxonomy.routes.ts",
+    "line": 470,
+    "op": "drizzle.delete"
+   },
+   {
+    "file": "server/routes/ebay/ebay-taxonomy.routes.ts",
+    "line": 484,
+    "op": "drizzle.insert"
+   }
+  ]
+ },
+ "ebay.ebay_listing_rules": {
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay-listing-rules.routes.ts",
+    "line": 253,
+    "op": "drizzle.insert"
+   },
+   {
+    "file": "server/routes/ebay-listing-rules.routes.ts",
+    "line": 306,
+    "op": "drizzle.update"
+   },
+   {
+    "file": "server/routes/ebay-listing-rules.routes.ts",
+    "line": 362,
+    "op": "drizzle.delete"
+   }
+  ]
+ },
+ "catalog.product_types": {
+  "server/db": [
+   {
+    "file": "server/db.ts",
+    "line": 407,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "membership.shopify_metafield_outbox": {
+  "modules/catalog": [
+   {
+    "file": "server/modules/catalog/shipping-group-sync.ts",
+    "line": 61,
+    "op": "sql.INSERT raw-only, not in drizzle schema"
+   }
+  ]
+ },
+ "dropship.dropship_auth_identities": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-auth.repository.ts",
+    "line": 95,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-auth.repository.ts",
+    "line": 133,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-auth.repository.ts",
+    "line": 369,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/shellz-club-entitlement.adapter.ts",
+    "line": 93,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_sensitive_action_challenges": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-auth.repository.ts",
+    "line": 160,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-auth.repository.ts",
+    "line": 239,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-auth.repository.ts",
+    "line": 249,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_passkey_credentials": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-auth.repository.ts",
+    "line": 311,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-auth.repository.ts",
+    "line": 350,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_catalog_rule_set_revisions": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-catalog-exposure.repository.ts",
+    "line": 110,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_catalog_rules": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-catalog-exposure.repository.ts",
+    "line": 256,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-catalog-exposure.repository.ts",
+    "line": 129,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_audit_events": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-catalog-exposure.repository.ts",
+    "line": 290,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-config.repository.ts",
+    "line": 272,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-preview.repository.ts",
+    "line": 611,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-ops.repository.ts",
+    "line": 536,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 687,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-credentials.ts",
+    "line": 517,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-tracking.repository.ts",
+    "line": 452,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-notification-ops.repository.ts",
+    "line": 380,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-notification.repository.ts",
+    "line": 366,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-oms-channel-config.repository.ts",
+    "line": 490,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 986,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 1082,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-cancellation.repository.ts",
+    "line": 233,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-intake-source.repository.ts",
+    "line": 205,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-intake.repository.ts",
+    "line": 405,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-ops.repository.ts",
+    "line": 612,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-ops.repository.ts",
+    "line": 900,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-processing-runner.ts",
+    "line": 324,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-processing.repository.ts",
+    "line": 501,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-rejection.repository.ts",
+    "line": 197,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-payment-hold-expiration.repository.ts",
+    "line": 103,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 1219,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 1333,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-selection-atp.repository.ts",
+    "line": 394,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 933,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-quote.repository.ts",
+    "line": 293,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 893,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-webhook-repair.repository.ts",
+    "line": 252,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-tracking-push-ops.repository.ts",
+    "line": 467,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-vendor-provisioning.repository.ts",
+    "line": 488,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 1593,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-worker-ops.repository.ts",
+    "line": 26,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_store_connections": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-ebay-order-intake.repository.ts",
+    "line": 45,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-credentials.ts",
+    "line": 188,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-credentials.ts",
+    "line": 239,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-intake-source.repository.ts",
+    "line": 141,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 698,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 407,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 482,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 730,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 775,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-webhook-repair.repository.ts",
+    "line": 209,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_store_listing_configs": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-config.repository.ts",
+    "line": 104,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-config.repository.ts",
+    "line": 177,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_listing_push_jobs": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-preview.repository.ts",
+    "line": 438,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-ops.repository.ts",
+    "line": 191,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 121,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 321,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 521,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_vendor_listings": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-preview.repository.ts",
+    "line": 519,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-ops.repository.ts",
+    "line": 505,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 207,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 403,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_listing_push_job_items": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-preview.repository.ts",
+    "line": 566,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-ops.repository.ts",
+    "line": 443,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-ops.repository.ts",
+    "line": 474,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 173,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 497,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 628,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_listing_sync_events": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-listing-push-worker.repository.ts",
+    "line": 659,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_store_connection_tokens": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-credentials.ts",
+    "line": 439,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-credentials.ts",
+    "line": 174,
+    "op": "sql.DELETE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-credentials.ts",
+    "line": 258,
+    "op": "sql.DELETE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-intake-source.repository.ts",
+    "line": 164,
+    "op": "sql.DELETE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 860,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 431,
+    "op": "sql.DELETE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 854,
+    "op": "sql.DELETE"
+   }
+  ]
+ },
+ "dropship.dropship_store_setup_checks": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-credentials.ts",
+    "line": 460,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-credentials.ts",
+    "line": 495,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 807,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-connection.repository.ts",
+    "line": 916,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-store-webhook-repair.repository.ts",
+    "line": 157,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_marketplace_tracking_pushes": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-tracking.repository.ts",
+    "line": 368,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-tracking.repository.ts",
+    "line": 169,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-tracking.repository.ts",
+    "line": 226,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-marketplace-tracking.repository.ts",
+    "line": 422,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-tracking-push-ops.repository.ts",
+    "line": 170,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-tracking-push-ops.repository.ts",
+    "line": 240,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_notification_events": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-notification-ops.repository.ts",
+    "line": 131,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-notification-ops.repository.ts",
+    "line": 176,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-notification.repository.ts",
+    "line": 331,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-notification.repository.ts",
+    "line": 158,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-notification.repository.ts",
+    "line": 181,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_notification_preferences": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-notification.repository.ts",
+    "line": 216,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_admin_config_commands": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-oms-channel-config.repository.ts",
+    "line": 418,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-oms-channel-config.repository.ts",
+    "line": 477,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 1246,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 1304,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 579,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 638,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_wallet_accounts": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 644,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 943,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 1011,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 1069,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 1232,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 1285,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_wallet_ledger": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 956,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 1113,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 1394,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 1144,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_order_economics_snapshots": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 1015,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_order_intake": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 695,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-acceptance.repository.ts",
+    "line": 1059,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-cancellation.repository.ts",
+    "line": 74,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-cancellation.repository.ts",
+    "line": 193,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-intake.repository.ts",
+    "line": 230,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-intake.repository.ts",
+    "line": 274,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-ops.repository.ts",
+    "line": 420,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-ops.repository.ts",
+    "line": 497,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-ops.repository.ts",
+    "line": 573,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-processing-runner.ts",
+    "line": 85,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-processing.repository.ts",
+    "line": 76,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-processing.repository.ts",
+    "line": 207,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-processing.repository.ts",
+    "line": 263,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-order-rejection.repository.ts",
+    "line": 69,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-payment-hold-expiration.repository.ts",
+    "line": 63,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_return_policy_config": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 273,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_rmas": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 320,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 413,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 516,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_rma_items": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 347,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 891,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_rma_status_updates": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 803,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_rma_inspections": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-return.repository.ts",
+    "line": 861,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_vendor_selection_rule_set_revisions": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-selection-atp.repository.ts",
+    "line": 186,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_vendor_selection_rules": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-selection-atp.repository.ts",
+    "line": 358,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-selection-atp.repository.ts",
+    "line": 206,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_box_catalog": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 196,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 174,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_package_profiles": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 262,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_zone_rules": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 360,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 339,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_rate_tables": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 409,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_rate_table_rows": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 428,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_shipping_markup_config": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 478,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_insurance_pool_config": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-config.repository.ts",
+    "line": 536,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_shipping_quote_snapshots": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-shipping-quote.repository.ts",
+    "line": 196,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_vendors": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-vendor-provisioning.repository.ts",
+    "line": 396,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-vendor-provisioning.repository.ts",
+    "line": 321,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-vendor-provisioning.repository.ts",
+    "line": 428,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship.repository.ts",
+    "line": 68,
+    "op": "sql.INSERT unqualified ref"
+   }
+  ]
+ },
+ "dropship.dropship_auto_reload_settings": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 605,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 993,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "dropship.dropship_funding_methods": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 710,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 738,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 691,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "dropship.dropship_usdc_ledger_entries": {
+  "modules/dropship": [
+   {
+    "file": "server/modules/dropship/infrastructure/dropship-wallet.repository.ts",
+    "line": 1490,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "inventory.cost_adjustment_log": {
+  "modules/inventory": [
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 313,
+    "op": "sql.INSERT raw-only, not in drizzle schema"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 446,
+    "op": "sql.INSERT raw-only, not in drizzle schema"
+   },
+   {
+    "file": "server/modules/inventory/cogs.service.ts",
+    "line": 920,
+    "op": "sql.INSERT raw-only, not in drizzle schema"
+   }
+  ]
+ },
+ "oms.order_line_adjustments": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 553,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "wms.returns": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 938,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "wms.return_items": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/oms-webhooks.ts",
+    "line": 966,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "oms.webhook_inbox": {
+  "modules/oms": [
+   {
+    "file": "server/modules/oms/webhook-inbox.service.ts",
+    "line": 144,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/oms/webhook-inbox.service.ts",
+    "line": 189,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/webhook-inbox.service.ts",
+    "line": 200,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/webhook-inbox.service.ts",
+    "line": 212,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/webhook-inbox.service.ts",
+    "line": 284,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 1722,
+    "op": "sql.UPDATE"
+   },
+   {
+    "file": "server/modules/oms/webhook-retry.worker.ts",
+    "line": 1733,
+    "op": "sql.UPDATE"
+   }
+  ]
+ },
+ "wms.shipment_tracking_history": {
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 265,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/orders/shipment-rollup.ts",
+    "line": 687,
+    "op": "sql.INSERT"
+   }
+  ]
+ },
+ "public.shopify_orders": {
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/shopify-order-reconciliation.ts",
+    "line": 227,
+    "op": "sql.INSERT raw-only legacy"
+   },
+   {
+    "file": "server/modules/orders/shopify-order-reconciliation.ts",
+    "line": 251,
+    "op": "sql.INSERT raw-only legacy"
+   }
+  ]
+ },
+ "public.shopify_order_items": {
+  "modules/orders": [
+   {
+    "file": "server/modules/orders/shopify-order-reconciliation.ts",
+    "line": 295,
+    "op": "sql.INSERT raw-only legacy"
+   }
+  ]
+ },
+ "membership.member_current_membership": {
+  "modules/subscriptions": [
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 399,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 419,
+    "op": "sql.INSERT"
+   },
+   {
+    "file": "server/modules/subscriptions/infrastructure/subscription.repository.ts",
+    "line": 408,
+    "op": "sql.DELETE"
+   }
+  ]
+ },
+ "ebay.ebay_category_mappings": {
+  "server/routes/": [
+   {
+    "file": "server/routes/ebay/ebay-config.routes.ts",
+    "line": 214,
+    "op": "sql.INSERT unqualified ref"
+   },
+   {
+    "file": "server/routes/ebay/ebay-config.routes.ts",
+    "line": 446,
+    "op": "sql.INSERT unqualified ref"
+   }
+  ]
+ }
+}
