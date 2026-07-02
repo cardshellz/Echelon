@@ -67,9 +67,11 @@ export function DropshipPortalShell({ children }: { children: React.ReactNode })
               <Button
                 key={item.href}
                 type="button"
-                variant={active ? "secondary" : "ghost"}
+                variant={active ? "outline" : "ghost"}
                 size="sm"
-                className="h-9 shrink-0 gap-2"
+                className={active
+                  ? "h-9 shrink-0 gap-2 border-[#C060E0]/30 bg-[#C060E0]/10 text-[#8c35aa] hover:bg-[#C060E0]/15"
+                  : "h-9 shrink-0 gap-2"}
                 onClick={() => setLocation(href)}
               >
                 {item.icon}

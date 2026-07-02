@@ -30,9 +30,16 @@ export interface DropshipSessionPrincipal {
   memberId: string;
   cardShellzEmail: string;
   hasPasskey: boolean;
-  authMethod: "passkey" | "password";
+  authMethod: "passkey" | "password" | "email_mfa";
   entitlementStatus: "active" | "grace";
   authenticatedAt: string;
+}
+
+export interface DropshipAuthEmailStatus {
+  status: "eligible_new" | "eligible_returning" | "ineligible";
+  eligible: boolean;
+  hasPassword: boolean;
+  hasPasskey: boolean;
 }
 
 export interface DropshipSensitiveProof {
@@ -79,14 +86,21 @@ interface DropshipAuthContextValue {
   platformPasskeyAvailable: boolean;
   refetch: () => Promise<void>;
   logout: () => Promise<void>;
+  lookupAuthEmail: (email: string) => Promise<DropshipAuthEmailStatus>;
   startBootstrap: (email: string) => Promise<void>;
   completeBootstrap: (input: {
     email: string;
     verificationCode: string;
-    password: string;
+    password?: string;
   }) => Promise<DropshipSessionPrincipal>;
   loginWithPassword: (input: {
     email: string;
+    password: string;
+  }) => Promise<DropshipSessionPrincipal>;
+  startPasswordReset: (email: string) => Promise<void>;
+  completePasswordReset: (input: {
+    email: string;
+    verificationCode: string;
     password: string;
   }) => Promise<DropshipSessionPrincipal>;
   loginWithPasskey: (email?: string) => Promise<DropshipSessionPrincipal>;
@@ -150,6 +164,12 @@ export function DropshipAuthProvider({ children }: { children: React.ReactNode }
       setPrincipal(null);
       setSensitiveProofs({});
     },
+    lookupAuthEmail: async (email: string) => {
+      return await dropshipJson<DropshipAuthEmailStatus>("/api/dropship/auth/email/status", {
+        method: "POST",
+        body: { email },
+      });
+    },
     startBootstrap: async (email: string) => {
       await dropshipJson("/api/dropship/auth/bootstrap/start", {
         method: "POST",
@@ -174,6 +194,27 @@ export function DropshipAuthProvider({ children }: { children: React.ReactNode }
     loginWithPassword: async (input) => {
       const data = await dropshipJson<{ principal: DropshipSessionPrincipal }>(
         "/api/dropship/auth/login/password",
+        {
+          method: "POST",
+          body: input,
+        },
+      );
+      setPrincipal(data.principal);
+      setSensitiveProofs({});
+      return data.principal;
+    },
+    startPasswordReset: async (email: string) => {
+      await dropshipJson("/api/dropship/auth/password-reset/start", {
+        method: "POST",
+        body: {
+          email,
+          idempotencyKey: createIdempotencyKey("password-reset"),
+        },
+      });
+    },
+    completePasswordReset: async (input) => {
+      const data = await dropshipJson<{ principal: DropshipSessionPrincipal }>(
+        "/api/dropship/auth/password-reset/complete",
         {
           method: "POST",
           body: input,

@@ -456,4 +456,19 @@ export function registerReceivingRoutes(app: Express) {
       res.status(500).json({ error: "Failed to discard receiving order" });
     }
   });
+
+  app.post("/api/receiving-orders/:id/void-zero-post", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { receiving: rcvService } = req.app.locals.services;
+      const result = await rcvService.voidZeroPostClosedReceivingOrder(
+        Number(req.params.id),
+        req.session.user?.id,
+      );
+      res.json(result);
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
+      console.error("[Receiving] Error voiding zero-post closed receiving order:", error);
+      res.status(500).json({ error: "Failed to void zero-post receiving order" });
+    }
+  });
 }

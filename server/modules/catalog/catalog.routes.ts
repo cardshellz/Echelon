@@ -15,6 +15,10 @@ import {
 import { catalogStorage } from "../catalog";
 import { createImageSyncService } from "./image-sync.service";
 import { enqueueShippingGroupMetafields } from "./shipping-group-sync";
+import {
+  coercePackageAttributesOnVariantPayload,
+  parsePackageAttributeBulkRows,
+} from "./package-attributes";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
@@ -1204,6 +1208,9 @@ export async function registerProductRoutes(app: Express) {
   app.post("/api/products/:productId/variants", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const productId = parseInt(req.params.productId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
+      }
       // Check for SKU conflict with existing active variants
       if (req.body.sku) {
         const conflict = await storage.getActiveVariantBySku(req.body.sku);
@@ -1215,12 +1222,17 @@ export async function registerProductRoutes(app: Express) {
           });
         }
       }
+      const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
       const variant = await storage.createProductVariant({
         ...req.body,
+        ...packageAttributes,
         productId,
       });
       res.json(variant);
-    } catch (error) {
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
       console.error("Error creating variant:", error);
       res.status(500).json({ error: "Failed to create variant" });
     }
@@ -1229,6 +1241,9 @@ export async function registerProductRoutes(app: Express) {
   app.put("/api/product-variants/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid variant id" });
+      }
       const newSku: string | undefined = req.body.sku;
 
       // Check for SKU conflict when SKU is being changed
@@ -1250,7 +1265,8 @@ export async function registerProductRoutes(app: Express) {
         if (existing) oldSku = existing.sku;
       }
 
-      const variant = await storage.updateProductVariant(id, req.body);
+      const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
+      const variant = await storage.updateProductVariant(id, { ...req.body, ...packageAttributes });
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
       }
@@ -1266,9 +1282,105 @@ export async function registerProductRoutes(app: Express) {
       }
 
       res.json(variant);
-    } catch (error) {
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
       console.error("Error updating variant:", error);
       res.status(500).json({ error: "Failed to update variant" });
+    }
+  });
+
+  app.put("/api/products/:productId/variants/package-attributes/bulk", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
+      }
+
+      const rows = parsePackageAttributeBulkRows(req.body?.rows);
+
+      const requestedIds = [...new Set(rows.map((row) => row.variantId))];
+      const productVariantRows = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(and(eq(productVariants.productId, productId), inArray(productVariants.id, requestedIds)));
+      const ownedVariantIds = new Set(productVariantRows.map((row) => row.id));
+      const missingVariantIds = requestedIds.filter((id) => !ownedVariantIds.has(id));
+      if (missingVariantIds.length > 0) {
+        return res.status(400).json({
+          error: "One or more variants do not belong to this product",
+          missingVariantIds,
+        });
+      }
+
+      const updatedVariants = await db.transaction(async (tx) => {
+        const updated = [];
+        for (const row of rows) {
+          const [variant] = await tx
+            .update(productVariants)
+            .set({ ...row.updates, updatedAt: new Date() })
+            .where(and(eq(productVariants.productId, productId), eq(productVariants.id, row.variantId)))
+            .returning();
+          if (!variant) {
+            throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
+          }
+          updated.push(variant);
+        }
+        return updated;
+      });
+
+      res.json({ updated: updatedVariants.length, variants: updatedVariants });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      console.error("Error bulk updating variant package attributes:", error);
+      res.status(500).json({ error: "Failed to bulk update variant package attributes" });
+    }
+  });
+
+  app.put("/api/product-variants/package-attributes/bulk", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const rows = parsePackageAttributeBulkRows(req.body?.rows);
+
+      const requestedIds = [...new Set(rows.map((row) => row.variantId))];
+      const variantRows = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(inArray(productVariants.id, requestedIds));
+      const existingVariantIds = new Set(variantRows.map((row) => row.id));
+      const missingVariantIds = requestedIds.filter((id) => !existingVariantIds.has(id));
+      if (missingVariantIds.length > 0) {
+        return res.status(400).json({
+          error: "One or more variants do not exist",
+          missingVariantIds,
+        });
+      }
+
+      const updatedVariants = await db.transaction(async (tx) => {
+        const updated = [];
+        for (const row of rows) {
+          const [variant] = await tx
+            .update(productVariants)
+            .set({ ...row.updates, updatedAt: new Date() })
+            .where(eq(productVariants.id, row.variantId))
+            .returning();
+          if (!variant) {
+            throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
+          }
+          updated.push(variant);
+        }
+        return updated;
+      });
+
+      res.json({ updated: updatedVariants.length, variants: updatedVariants });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      console.error("Error bulk updating catalog variant package attributes:", error);
+      res.status(500).json({ error: "Failed to bulk update variant package attributes" });
     }
   });
 

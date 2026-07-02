@@ -16,6 +16,7 @@ import {
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
+import { resolveChannelListingPrice } from "../../modules/channels/channel-pricing-resolver";
 
 export const router = express.Router();
 
@@ -167,13 +168,22 @@ export const router = express.Router();
       if (varResult.length === 0) { res.status(404).json({ error: "Variant not found" }); return; }
 
       const variant = varResult[0];
-      const basePrice = variant.priceCents ?? 0;
-      const effectivePrice = await resolveChannelPrice(db, EBAY_CHANNEL_ID, variant.productId, variant.id, basePrice);
+      const resolution = await resolveChannelListingPrice(db, {
+        channelId: EBAY_CHANNEL_ID,
+        productId: variant.productId,
+        variantId: variant.id,
+        fallbackCatalogPriceCents: variant.priceCents,
+      });
+      const basePrice = resolution.basePriceCents ?? 0;
+      const effectivePrice = resolution.priceCents ?? 0;
 
       res.json({
         variantId,
         basePriceCents: basePrice,
         effectivePriceCents: effectivePrice,
+        priceSource: resolution.source,
+        appliedPricingRule: resolution.appliedRule,
+        missingPrice: resolution.priceCents === null,
         basePrice: (basePrice / 100).toFixed(2),
         effectivePrice: (effectivePrice / 100).toFixed(2),
       });
@@ -195,11 +205,25 @@ export const router = express.Router();
       .innerJoin(products, eq(products.id, productVariants.productId))
       .where(and(eq(products.isActive, true), isNotNull(productVariants.sku)));
 
-      const prices: Record<number, { basePriceCents: number; effectivePriceCents: number }> = {};
+      const prices: Record<number, {
+        basePriceCents: number;
+        effectivePriceCents: number;
+        priceSource: string | null;
+        missingPrice: boolean;
+      }> = {};
       for (const v of varResult) {
-        const basePrice = v.priceCents ?? 0;
-        const effective = await resolveChannelPrice(db, EBAY_CHANNEL_ID, v.productId, v.id, basePrice);
-        prices[v.id] = { basePriceCents: basePrice, effectivePriceCents: effective };
+        const resolution = await resolveChannelListingPrice(db, {
+          channelId: EBAY_CHANNEL_ID,
+          productId: v.productId,
+          variantId: v.id,
+          fallbackCatalogPriceCents: v.priceCents,
+        });
+        prices[v.id] = {
+          basePriceCents: resolution.basePriceCents ?? 0,
+          effectivePriceCents: resolution.priceCents ?? 0,
+          priceSource: resolution.source,
+          missingPrice: resolution.priceCents === null,
+        };
       }
 
       res.json({ prices });

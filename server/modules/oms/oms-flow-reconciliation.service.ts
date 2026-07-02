@@ -160,6 +160,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     wmsReadyWithoutShipment,
     unpushedShipStationShipments,
     shopifyShipmentFulfillmentMissing,
+    partitionDuplicateLineCoverage,
+    providerFulfillmentReferenceDrift,
   ] = await Promise.all([
     countAndSample(
       db,
@@ -523,6 +525,146 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         LIMIT 10
       `,
     ),
+    countAndSample(
+      db,
+      sql`
+        WITH duplicate_line_coverage AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oi.oms_order_line_id,
+            COUNT(DISTINCT wo.id)::int AS wms_order_count
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+            AND COALESCE(oi.quantity, 0) > 0
+          GROUP BY ol.order_id, oi.oms_order_line_id
+          HAVING COUNT(DISTINCT wo.id) > 1
+        )
+        SELECT COUNT(*)::int AS count
+        FROM duplicate_line_coverage
+      `,
+      sql`
+        WITH duplicate_line_coverage AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oi.oms_order_line_id,
+            ol.sku,
+            ol.authority_fulfillable_quantity,
+            SUM(COALESCE(oi.quantity, 0))::int AS materialized_quantity,
+            COUNT(DISTINCT wo.id)::int AS wms_order_count,
+            ARRAY_AGG(DISTINCT wo.id) AS wms_order_ids,
+            ARRAY_AGG(DISTINCT COALESCE(wo.warehouse_id, 0)) AS warehouse_ids,
+            ARRAY_AGG(DISTINCT COALESCE(NULLIF(wo.fulfillment_partition_key, ''), 'default')) AS fulfillment_partition_keys,
+            ARRAY_AGG(DISTINCT oi.id) AS wms_order_item_ids
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+            AND COALESCE(oi.quantity, 0) > 0
+          GROUP BY ol.order_id, oi.oms_order_line_id, ol.sku, ol.authority_fulfillable_quantity
+          HAVING COUNT(DISTINCT wo.id) > 1
+        )
+        SELECT *
+        FROM duplicate_line_coverage
+        ORDER BY wms_order_count DESC, oms_order_line_id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        WITH provider_reference_rows AS (
+          SELECT
+            ol.id,
+            LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')) AS normalized_fulfillment_provider,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_id), '') AS provider_fulfillment_order_id,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_line_item_id), '') AS provider_fulfillment_order_line_item_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_id), '') AS shopify_fulfillment_order_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_line_item_id), '') AS shopify_fulfillment_order_line_item_id
+          FROM oms.oms_order_lines ol
+        ),
+        provider_reference_drift AS (
+          SELECT id
+          FROM provider_reference_rows
+          WHERE (
+              normalized_fulfillment_provider = 'shopify'
+              OR shopify_fulfillment_order_id IS NOT NULL
+              OR shopify_fulfillment_order_line_item_id IS NOT NULL
+            )
+            AND (
+              normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+              OR provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+              OR provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+            )
+        )
+        SELECT COUNT(*)::int AS count
+        FROM provider_reference_drift
+      `,
+      sql`
+        WITH provider_reference_rows AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oo.external_order_number,
+            ol.id AS oms_order_line_id,
+            ol.sku,
+            ol.fulfillment_provider,
+            LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')) AS normalized_fulfillment_provider,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_id), '') AS provider_fulfillment_order_id,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_line_item_id), '') AS provider_fulfillment_order_line_item_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_id), '') AS shopify_fulfillment_order_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_line_item_id), '') AS shopify_fulfillment_order_line_item_id
+          FROM oms.oms_order_lines ol
+          JOIN oms.oms_orders oo ON oo.id = ol.order_id
+        ),
+        provider_reference_drift AS (
+          SELECT
+            oms_order_id,
+            external_order_number,
+            oms_order_line_id,
+            sku,
+            fulfillment_provider,
+            normalized_fulfillment_provider,
+            provider_fulfillment_order_id,
+            provider_fulfillment_order_line_item_id,
+            shopify_fulfillment_order_id,
+            shopify_fulfillment_order_line_item_id,
+            CASE
+              WHEN normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+                THEN 'provider_context_missing_or_mismatched'
+              WHEN provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+                THEN 'fulfillment_order_id_mismatch'
+              WHEN provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+                THEN 'fulfillment_order_line_item_id_mismatch'
+              ELSE 'unknown'
+            END AS drift_reason
+          WHERE (
+              normalized_fulfillment_provider = 'shopify'
+              OR shopify_fulfillment_order_id IS NOT NULL
+              OR shopify_fulfillment_order_line_item_id IS NOT NULL
+            )
+            AND (
+              normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+              OR provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+              OR provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+            )
+        )
+        SELECT *
+        FROM provider_reference_drift
+        ORDER BY oms_order_id DESC, oms_order_line_id DESC
+        LIMIT 10
+      `,
+    ),
   ]);
 
   const issues: OmsOpsIssue[] = [
@@ -582,6 +724,20 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       message: "Shopify WMS shipments are shipped but have no Shopify fulfillment id.",
       sample: shopifyShipmentFulfillmentMissing.sample,
     },
+    {
+      code: "WMS_PARTITION_DUPLICATE_LINE_COVERAGE",
+      severity: "critical" as const,
+      count: partitionDuplicateLineCoverage.count,
+      message: "Active WMS fulfillment partitions cover the same OMS order line.",
+      sample: partitionDuplicateLineCoverage.sample,
+    },
+    {
+      code: "OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT",
+      severity: "warning" as const,
+      count: providerFulfillmentReferenceDrift.count,
+      message: "Shopify OMS line fulfillment references differ from provider-neutral references.",
+      sample: providerFulfillmentReferenceDrift.sample,
+    },
   ];
 
   return issues.filter((entry) => entry.count > 0);
@@ -593,6 +749,7 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
+  await autoCloseResolvedDeadFulfillmentRetries(dbArg);
   await autoRemediateCriticalFlowIssues(dbArg, issues);
   await autoQueueStaleTrackingPushRetries(dbArg, issues);
   await autoQueueStaleShipStationPushRetries(dbArg, issues);
@@ -676,6 +833,112 @@ async function remediateMissingReservations(db: any): Promise<void> {
       );
     }
   }
+}
+
+export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<number> {
+  const result = await db.execute(sql`
+    WITH candidates AS (
+      SELECT
+        q.id,
+        q.topic,
+        q.created_at,
+        q.updated_at AS dead_at,
+        CASE
+          WHEN q.payload->>'shipmentId' ~ '^[0-9]+$'
+            THEN (q.payload->>'shipmentId')::bigint
+          ELSE NULL
+        END AS payload_shipment_id,
+        CASE
+          WHEN q.payload->>'orderId' ~ '^[0-9]+$'
+            THEN (q.payload->>'orderId')::bigint
+          ELSE NULL
+        END AS payload_order_id,
+        CASE
+          WHEN q.payload->>'omsOrderId' ~ '^[0-9]+$'
+            THEN (q.payload->>'omsOrderId')::bigint
+          ELSE NULL
+        END AS payload_oms_order_id,
+        NULLIF(q.payload->>'trackingNumber', '') AS payload_tracking_number,
+        COALESCE(
+          NULLIF(q.payload->>'shopifyFulfillmentId', ''),
+          NULLIF(q.payload->>'fulfillmentId', '')
+        ) AS payload_fulfillment_id
+      FROM oms.webhook_retry_queue q
+      WHERE q.provider = 'internal'
+        AND q.status = 'dead'
+        AND q.topic IN ('delayed_tracking_push', 'shopify_fulfillment_push')
+    ),
+    scoped_candidates AS (
+      SELECT
+        c.*,
+        os.id AS shipment_id,
+        NULLIF(os.tracking_number, '') AS shipment_tracking_number,
+        NULLIF(os.shopify_fulfillment_id, '') AS shipment_shopify_fulfillment_id,
+        COALESCE(payload_oo.id, shipment_oo.id) AS oms_order_id,
+        (
+             c.payload_shipment_id IS NOT NULL
+          OR c.payload_tracking_number IS NOT NULL
+          OR c.payload_fulfillment_id IS NOT NULL
+          OR NULLIF(os.tracking_number, '') IS NOT NULL
+          OR NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+        ) AS has_specific_scope
+      FROM candidates c
+      LEFT JOIN wms.outbound_shipments os ON os.id = c.payload_shipment_id
+      LEFT JOIN wms.orders wo ON wo.id = os.order_id
+      LEFT JOIN oms.oms_orders shipment_oo ON (
+           (wo.source = 'oms' AND wo.oms_fulfillment_order_id = shipment_oo.id::text)
+        OR (wo.source_table_id = shipment_oo.id::text)
+      )
+      LEFT JOIN oms.oms_orders payload_oo
+        ON payload_oo.id = COALESCE(c.payload_order_id, c.payload_oms_order_id)
+    ),
+    resolved AS (
+      SELECT DISTINCT c.id
+      FROM scoped_candidates c
+      JOIN oms.oms_order_events e
+        ON e.created_at >= COALESCE(c.dead_at, c.created_at)
+       AND (
+            (c.topic = 'delayed_tracking_push'
+              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed'))
+         OR (c.topic = 'shopify_fulfillment_push'
+              AND e.event_type = 'shopify_fulfillment_pushed')
+       )
+      WHERE (c.oms_order_id IS NULL OR e.order_id = c.oms_order_id)
+        AND (
+             (c.shipment_id IS NOT NULL
+               AND e.details->>'wmsShipmentId' = c.shipment_id::text)
+          OR (c.payload_shipment_id IS NOT NULL
+               AND e.details->>'wmsShipmentId' = c.payload_shipment_id::text)
+          OR (c.shipment_tracking_number IS NOT NULL
+               AND e.details->>'trackingNumber' = c.shipment_tracking_number)
+          OR (c.payload_tracking_number IS NOT NULL
+               AND e.details->>'trackingNumber' = c.payload_tracking_number)
+          OR (c.shipment_shopify_fulfillment_id IS NOT NULL
+               AND e.details->>'shopifyFulfillmentId' = c.shipment_shopify_fulfillment_id)
+          OR (c.shipment_shopify_fulfillment_id IS NOT NULL
+               AND e.details->>'fulfillmentId' = c.shipment_shopify_fulfillment_id)
+          OR (c.payload_fulfillment_id IS NOT NULL
+               AND e.details->>'shopifyFulfillmentId' = c.payload_fulfillment_id)
+          OR (c.payload_fulfillment_id IS NOT NULL
+               AND e.details->>'fulfillmentId' = c.payload_fulfillment_id)
+          OR (c.has_specific_scope = false AND c.oms_order_id IS NOT NULL)
+        )
+    )
+    UPDATE oms.webhook_retry_queue q
+    SET status = 'success',
+        last_error = 'auto-closed: later OMS fulfillment/tracking event confirmed success',
+        updated_at = NOW()
+    FROM resolved
+    WHERE q.id = resolved.id
+      AND q.status = 'dead'
+    RETURNING q.id
+  `);
+
+  const closed = rows(result).filter((row) => row?.id != null).length;
+  if (closed > 0) {
+    console.warn(`${LOG_PREFIX} auto-closed ${closed} resolved fulfillment/tracking retry row(s)`);
+  }
+  return closed;
 }
 
 async function autoRemediateCriticalFlowIssues(

@@ -662,8 +662,11 @@ describe("pushShipment :: happy path", () => {
     const svc = createShipStationService(mock.db);
     await svc.pushShipment(shipmentRow.id);
 
-    const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
-    const [, init] = postCall as any;
+    const createOrderCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/orders/createorder"),
+    );
+    expect(createOrderCall).toBeDefined();
+    const [, init] = createOrderCall as any;
     const payload = JSON.parse(init.body);
     expect(payload.customerEmail).toBe(`no-email+wms-${orderRow.id}@cardshellz.local`);
     expect(payload.shipTo.street1).toBe(orderRow.shipping_address);
@@ -695,8 +698,11 @@ describe("pushShipment :: happy path", () => {
     const svc = createShipStationService(mock.db);
     await svc.pushShipment(shipmentRow.id);
 
-    const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
-    const [, init] = postCall as any;
+    const createOrderCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/orders/createorder"),
+    );
+    expect(createOrderCall).toBeDefined();
+    const [, init] = createOrderCall as any;
     const payload = JSON.parse(init.body);
     expect(payload.shipTo.company).toBe("Acme Card Shop");
     expect(payload.shipTo.street1).toBe("123 Main St");
@@ -795,7 +801,11 @@ describe("pushShipment :: happy path", () => {
 
     expect(result.shipstationOrderId).toBe(555000);
 
-    const [, init] = fetchMock.mock.calls[0] as any;
+    const createOrderCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/orders/createorder"),
+    );
+    expect(createOrderCall).toBeDefined();
+    const [, init] = createOrderCall as any;
     const payload = JSON.parse(init.body);
     expect(payload.orderId).toBe(555000);
     expect(payload.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);

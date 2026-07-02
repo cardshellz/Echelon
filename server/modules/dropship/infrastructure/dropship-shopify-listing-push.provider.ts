@@ -8,46 +8,33 @@ import type {
   DropshipMarketplaceCredentialRepository,
   DropshipMarketplaceStoreCredentials,
 } from "./dropship-marketplace-credentials";
+import {
+  ShopifyListingConnectorGraphqlError,
+  ShopifyListingConnectorHttpError,
+  ShopifyListingConnectorInvalidResponseError,
+  ShopifyListingConnectorUserError,
+  ShopifyMarketplaceListingConnector,
+} from "../../channels/listing-connectors/shopify-listing.connector";
 
 type FetchLike = typeof fetch;
 interface Clock {
   now(): Date;
 }
 
-interface ShopifyGraphqlResponse {
-  data?: {
-    productSet?: {
-      product?: {
-        id?: string;
-        variants?: {
-          nodes?: Array<{
-            id?: string;
-            sku?: string | null;
-            title?: string | null;
-          }>;
-        };
-      } | null;
-      userErrors?: Array<{
-        code?: string;
-        field?: string[] | null;
-        message?: string;
-      }>;
-    };
-  };
-  errors?: Array<{
-    message?: string;
-    extensions?: Record<string, unknown>;
-  }>;
-}
-
 const DEFAULT_SHOPIFY_GRAPHQL_API_VERSION = "2026-04";
 
 export class ShopifyDropshipListingPushProvider implements DropshipMarketplaceListingPushProvider {
+  private readonly listingConnector: ShopifyMarketplaceListingConnector;
+
   constructor(
     private readonly credentials: DropshipMarketplaceCredentialRepository,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly clock: Clock = { now: () => new Date() },
-  ) {}
+  ) {
+    this.listingConnector = new ShopifyMarketplaceListingConnector({
+      fetchImpl: this.fetchImpl,
+    });
+  }
 
   async pushListing(input: DropshipMarketplaceListingPushRequest): Promise<DropshipMarketplaceListingPushResult> {
     const credential = await this.credentials.loadForStoreConnection({
@@ -58,113 +45,75 @@ export class ShopifyDropshipListingPushProvider implements DropshipMarketplaceLi
     assertShopifyCredential(credential);
 
     const apiVersion = resolveShopifyApiVersion(credential);
-    const productSetInput = buildShopifyProductSetInput(input);
-    const identifier = input.existingExternalListingId
-      ? { id: toShopifyProductGid(input.existingExternalListingId) }
-      : undefined;
-    const response = await this.callGraphql(credential, apiVersion, {
-      query: PRODUCT_SET_MUTATION,
-      variables: {
-        synchronous: true,
-        productSet: productSetInput,
-        identifier,
-      },
-    });
-    const productSet = response.data?.productSet;
-    const userErrors = productSet?.userErrors ?? [];
-    if (userErrors.length > 0) {
-      throw new DropshipError(
-        "DROPSHIP_SHOPIFY_LISTING_PUSH_REJECTED",
-        "Shopify rejected the listing push.",
-        {
-          retryable: false,
-          userErrors,
+    try {
+      return await this.listingConnector.pushProductSet({
+        credentials: {
+          shopDomain: credential.shopDomain!,
+          accessToken: credential.accessToken,
+          apiVersion,
         },
-      );
-    }
-    const productId = productSet?.product?.id;
-    if (!productId) {
-      throw new DropshipError(
-        "DROPSHIP_SHOPIFY_LISTING_PUSH_MISSING_PRODUCT",
-        "Shopify listing push did not return a product id.",
-        { retryable: true },
-      );
-    }
-
-    const variantId = productSet.product?.variants?.nodes?.find((variant) => {
-      return input.listingIntent.sku ? variant.sku === input.listingIntent.sku : true;
-    })?.id ?? productSet.product?.variants?.nodes?.[0]?.id ?? null;
-
-    return {
-      status: input.existingExternalListingId ? "updated" : "created",
-      externalListingId: productId,
-      externalOfferId: variantId,
-      rawResult: {
-        provider: "shopify",
-        apiVersion,
-        productId,
-        variantId,
-      },
-    };
-  }
-
-  private async callGraphql(
-    credential: DropshipMarketplaceStoreCredentials,
-    apiVersion: string,
-    payload: {
-      query: string;
-      variables: Record<string, unknown>;
-    },
-  ): Promise<ShopifyGraphqlResponse> {
-    const response = await this.fetchImpl(
-      `https://${credential.shopDomain}/admin/api/${apiVersion}/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": credential.accessToken,
-        },
-        body: JSON.stringify(payload),
-      },
-    );
-    const text = await response.text();
-    if (!response.ok) {
-      if (isPermanentAuthFailureStatus(response.status)) {
-        await this.credentials.recordAuthFailure?.({
-          vendorId: credential.vendorId,
-          storeConnectionId: credential.storeConnectionId,
-          platform: "shopify",
-          status: "needs_reauth",
-          failureCode: "DROPSHIP_SHOPIFY_LISTING_PUSH_HTTP_ERROR",
-          message: `Shopify listing push failed with HTTP ${response.status}.`,
-          retryable: false,
-          statusCode: response.status,
-          now: this.clock.now(),
-        });
+        productSet: buildShopifyProductSetInput(input),
+        existingExternalListingId: input.existingExternalListingId,
+        sku: input.listingIntent.sku,
+      });
+    } catch (error) {
+      if (error instanceof ShopifyListingConnectorHttpError) {
+        if (isPermanentAuthFailureStatus(error.status)) {
+          await this.credentials.recordAuthFailure?.({
+            vendorId: credential.vendorId,
+            storeConnectionId: credential.storeConnectionId,
+            platform: "shopify",
+            status: "needs_reauth",
+            failureCode: "DROPSHIP_SHOPIFY_LISTING_PUSH_HTTP_ERROR",
+            message: `Shopify listing push failed with HTTP ${error.status}.`,
+            retryable: false,
+            statusCode: error.status,
+            now: this.clock.now(),
+          });
+        }
+        throw new DropshipError(
+          "DROPSHIP_SHOPIFY_LISTING_PUSH_HTTP_ERROR",
+          `Shopify listing push failed with HTTP ${error.status}.`,
+          {
+            retryable: error.retryable,
+            status: error.status,
+            body: error.body,
+          },
+        );
       }
-      throw new DropshipError(
-        "DROPSHIP_SHOPIFY_LISTING_PUSH_HTTP_ERROR",
-        `Shopify listing push failed with HTTP ${response.status}.`,
-        {
-          retryable: response.status === 429 || response.status >= 500,
-          status: response.status,
-          body: text.slice(0, 1000),
-        },
-      );
-    }
 
-    const parsed = parseShopifyGraphqlResponse(text);
-    if (parsed.errors?.length) {
-      throw new DropshipError(
-        "DROPSHIP_SHOPIFY_LISTING_PUSH_GRAPHQL_ERROR",
-        "Shopify listing push failed with GraphQL errors.",
-        {
-          retryable: false,
-          errors: parsed.errors,
-        },
-      );
+      if (error instanceof ShopifyListingConnectorGraphqlError) {
+        throw new DropshipError(
+          "DROPSHIP_SHOPIFY_LISTING_PUSH_GRAPHQL_ERROR",
+          "Shopify listing push failed with GraphQL errors.",
+          {
+            retryable: false,
+            errors: error.errors,
+          },
+        );
+      }
+
+      if (error instanceof ShopifyListingConnectorUserError) {
+        throw new DropshipError(
+          "DROPSHIP_SHOPIFY_LISTING_PUSH_REJECTED",
+          "Shopify rejected the listing push.",
+          {
+            retryable: false,
+            userErrors: error.userErrors,
+          },
+        );
+      }
+
+      if (error instanceof ShopifyListingConnectorInvalidResponseError) {
+        throw new DropshipError(
+          "DROPSHIP_SHOPIFY_LISTING_PUSH_MISSING_PRODUCT",
+          error.message,
+          { retryable: true },
+        );
+      }
+
+      throw error;
     }
-    return parsed;
   }
 }
 
@@ -255,13 +204,6 @@ function buildShopifyProductSetInput(input: DropshipMarketplaceListingPushReques
   return productSet;
 }
 
-function toShopifyProductGid(value: string): string {
-  const trimmed = value.trim();
-  return trimmed.startsWith("gid://shopify/Product/")
-    ? trimmed
-    : `gid://shopify/Product/${trimmed}`;
-}
-
 function centsToDecimalString(cents: number): string {
   const normalized = Math.trunc(cents);
   const sign = normalized < 0 ? "-" : "";
@@ -285,38 +227,3 @@ function filenameFromUrl(url: string, fallback: string): string {
     return fallback;
   }
 }
-
-function parseShopifyGraphqlResponse(text: string): ShopifyGraphqlResponse {
-  if (!text) return {};
-  try {
-    return JSON.parse(text) as ShopifyGraphqlResponse;
-  } catch {
-    throw new DropshipError(
-      "DROPSHIP_SHOPIFY_LISTING_PUSH_INVALID_RESPONSE",
-      "Shopify listing push returned invalid JSON.",
-      { retryable: true },
-    );
-  }
-}
-
-const PRODUCT_SET_MUTATION = `
-mutation DropshipProductSet($productSet: ProductSetInput!, $synchronous: Boolean!, $identifier: ProductSetIdentifiers) {
-  productSet(synchronous: $synchronous, input: $productSet, identifier: $identifier) {
-    product {
-      id
-      variants(first: 10) {
-        nodes {
-          id
-          sku
-          title
-        }
-      }
-    }
-    userErrors {
-      code
-      field
-      message
-    }
-  }
-}
-`;

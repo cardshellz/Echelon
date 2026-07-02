@@ -53,7 +53,7 @@ describe("C2 Phase 2: tx-aware pipeline structural checks", () => {
 
   it("syncOmsOrderToWms passes tx to createOrderWithItems", () => {
     expect(WMS_SYNC_SRC).toContain(
-      "ordersStorage.createOrderWithItems(wmsOrderData, wmsLineItems, tx)",
+      "ordersStorage.createOrderWithItems(txWmsOrderData, txWmsLineItems, tx)",
     );
   });
 

@@ -24,6 +24,7 @@ import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-s
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
+const SHIPSTATION_SPLIT_SOURCE = "shipstation_split";
 const SHIPSTATION_COMBINED_CHILD_SOURCE = "shipstation_combined_child";
 const SENSITIVE_URL_QUERY_PARAMS = new Set(["secret", "token", "signature", "key"]);
 
@@ -785,6 +786,63 @@ function parseWmsShipmentItemLineKey(lineItemKey: string | null | undefined): nu
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
+function parsePositiveWmsShipmentItemsFromShipStation(
+  shipment: ShipStationShipment,
+): Array<{ sourceShipmentItemId: number; qty: number }> | null {
+  const ssItems = Array.isArray(shipment.shipmentItems)
+    ? shipment.shipmentItems
+    : [];
+  if (ssItems.length === 0) return null;
+
+  const parsed: Array<{ sourceShipmentItemId: number; qty: number }> = [];
+  for (const item of ssItems) {
+    const sourceShipmentItemId = parseWmsShipmentItemLineKey(item.lineItemKey);
+    const qty = Number(item.quantity);
+    if (
+      sourceShipmentItemId === null ||
+      !Number.isInteger(qty) ||
+      qty < 0
+    ) {
+      return null;
+    }
+    parsed.push({ sourceShipmentItemId, qty });
+  }
+
+  return parsed;
+}
+
+function hasSameShipmentItemSet(
+  parentItems: Array<{ id: number; qty: number }>,
+  ssItems: Array<{ sourceShipmentItemId: number; qty: number }>,
+): boolean {
+  if (parentItems.length === 0 || parentItems.length !== ssItems.length) {
+    return false;
+  }
+
+  const parentQtyByItemId = new Map<number, number>();
+  for (const item of parentItems) {
+    const id = Number(item.id);
+    const qty = Number(item.qty);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(qty) || qty < 0) {
+      return false;
+    }
+    parentQtyByItemId.set(id, qty);
+  }
+
+  for (const item of ssItems) {
+    if (parentQtyByItemId.get(item.sourceShipmentItemId) !== item.qty) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function shipStationShipmentExternalFulfillmentId(shipmentId: number): string | null {
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) return null;
+  return `shipstation_shipment:${shipmentId}`;
+}
+
 function withShipmentItemsIncluded(baseUrl: string, path: string): string {
   const isAbsolute = path.startsWith("http");
   const parsed = new URL(isAbsolute ? path : `${baseUrl}${path}`);
@@ -1047,15 +1105,46 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   }
 
   /**
-   * Resolve a WMS shipment for an incoming SHIP_NOTIFY. READ-ONLY with
-   * one narrow exception: if the orderKey maps to an existing WMS shipment
-   * whose SS orderId drifted (duplicate-push scenario), we adopt the new
-   * SS orderId onto the existing row. We NEVER create new shipment rows —
-   * the WMS is the sole creator of its own shipments.
+   * Resolve a WMS shipment for an incoming SHIP_NOTIFY.
+   *
+   * Resolution order (most → least specific):
+   *   1. external_fulfillment_id — the physical SS shipment already mapped
+   *      to a WMS row (historical split rows and prior adoptions)
+   *   2. orderKey (echelon-wms-shp-<id>) → resolveShipmentByOrderKey, which
+   *      MUST run before the ssOrderId lookup: multi-package splits share the
+   *      parent's SS orderId, and resolving by orderId would route the second
+   *      package onto the parent and destructively rewrite its quantities.
+   *   3. shipstation_order_id column (non-wms orderKeys / legacy mappings)
    */
   async function resolveWmsShipmentForShipNotify(
     shipment: ShipStationShipment,
   ): Promise<{ row: any | null; fallback: boolean }> {
+    const externalFulfillmentId = shipStationShipmentExternalFulfillmentId(
+      shipment.shipmentId,
+    );
+    if (externalFulfillmentId) {
+      const byPhysicalShipment: any = await db.execute(sql`
+        SELECT id, order_id, status, shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE external_fulfillment_id = ${externalFulfillmentId}
+        LIMIT 1
+      `);
+      const existing = byPhysicalShipment?.rows?.[0];
+      if (existing) {
+        return { row: existing, fallback: false };
+      }
+    }
+
+    const parsed = parseEchelonOrderKey(shipment.orderKey);
+    if (parsed?.source === "wms-shipment") {
+      const resolved = await resolveShipmentByOrderKey(
+        parsed.shipmentId,
+        shipment,
+        externalFulfillmentId,
+      );
+      return { row: resolved, fallback: false };
+    }
+
     const ssOrderId = shipment.orderId;
     if (Number.isInteger(ssOrderId) && ssOrderId > 0) {
       const byOrderId: any = await db.execute(sql`
@@ -1070,33 +1159,36 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       }
     }
 
-    const parsed = parseEchelonOrderKey(shipment.orderKey);
-    if (parsed?.source !== "wms-shipment") {
-      return { row: null, fallback: true };
-    }
-
-    const resolved = await resolveShipmentByOrderKey(
-      parsed.shipmentId,
-      shipment,
-    );
-    return { row: resolved, fallback: false };
+    return { row: null, fallback: true };
   }
 
   /**
    * Match an incoming SHIP_NOTIFY to an existing WMS shipment via orderKey.
-   * NEVER creates new shipment rows. If the SS orderId drifted (duplicate
-   * push created a second SS order), adopts the incoming orderId onto the
-   * existing WMS shipment so future notifications resolve directly.
    *
-   * Returns null (caller skips + flags) when no match is possible.
+   * Hardened invariants (P0 / order 59301 class — creation from inbound
+   * engine data is forbidden for unknown or terminal parents):
+   *   - missing parent      → flag + null (never create)
+   *   - cancelled/voided    → active sibling, else review-flag + audit event
+   *   - duplicate SS order  → REPAIR the parent's mapping (adopt SS ids +
+   *     physical shipment id, review-flag on drift) — never a second row
+   *
+   * One deliberate creation case remains (merged from main): a genuine
+   * PARTIAL package — the physical shipment covers a strict subset of an
+   * ACTIVE parent's items — forks a child split row so the unshipped
+   * remainder stays tracked (without it, the parent's quantities would be
+   * destructively rewritten and the remainder would vanish from
+   * fulfillment). The child copies the WMS's OWN parent rows; guarded by
+   * the per-order advisory lock + external_fulfillment_id dedup, and
+   * unreachable for terminal/unknown parents.
    */
   async function resolveShipmentByOrderKey(
     shipmentId: number,
     shipment: ShipStationShipment,
+    externalFulfillmentId: string | null,
   ): Promise<any | null> {
-    // Look up the shipment the orderKey points to.
     const parentResult: any = await db.execute(sql`
-      SELECT id, order_id, status, shipstation_order_id, shipstation_order_key
+      SELECT id, order_id, channel_id, status, shipstation_order_id,
+             shipstation_order_key, external_fulfillment_id
       FROM wms.outbound_shipments
       WHERE id = ${shipmentId}
       LIMIT 1
@@ -1109,82 +1201,163 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       return null;
     }
 
-    // If the parent is active (not cancelled/voided), adopt the incoming
-    // SS orderId. This heals the duplicate-push gap where a failed
-    // write-back left our DB with one SS orderId while SS created a second
-    // order under a different orderId for the same key.
     const parentStatus = String(parent.status ?? "");
-    if (parentStatus !== "cancelled" && parentStatus !== "voided") {
-      const incomingSsOrderId = Number(shipment.orderId);
-      const existingSsOrderId = Number(parent.shipstation_order_id);
-      if (
-        Number.isInteger(incomingSsOrderId) &&
-        incomingSsOrderId > 0 &&
-        incomingSsOrderId !== existingSsOrderId
-      ) {
+    if (parentStatus === "cancelled" || parentStatus === "voided") {
+      // Parent is terminal — look for any active sibling shipment on the
+      // same WMS order that we can match to. NEVER create a replacement.
+      const siblingResult: any = await db.execute(sql`
+        SELECT id, order_id, status, shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE order_id = ${parent.order_id}
+          AND id <> ${shipmentId}
+          AND status NOT IN ('cancelled', 'voided')
+        ORDER BY id DESC
+        LIMIT 1
+      `);
+      const sibling = siblingResult?.rows?.[0];
+      if (sibling) {
         console.warn(
-          `[SHIP_NOTIFY resolve] Shipment ${shipmentId} SS orderId drifted: ` +
-            `DB has ${existingSsOrderId}, SHIP_NOTIFY carries ${incomingSsOrderId}. ` +
-            `Adopting incoming orderId (duplicate-push heal).`,
+          `[SHIP_NOTIFY resolve] Parent shipment ${shipmentId} is ${parentStatus}, ` +
+            `resolved to active sibling ${sibling.id} for WMS order ${parent.order_id}`,
         );
+        return sibling;
+      }
+
+      console.error(
+        `[SHIP_NOTIFY resolve] SHIP_NOTIFY for SS orderId=${shipment.orderId} ` +
+          `(orderKey=echelon-wms-shp-${shipmentId}) has no active WMS shipment. ` +
+          `Parent ${shipmentId} is '${parentStatus}', no active siblings on order ${parent.order_id}. ` +
+          `Requires manual review — WMS will NOT auto-create a shipment from inbound data.`,
+      );
+      await db.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        SELECT oo.id, 'ship_notify_unresolved',
+               ${JSON.stringify({
+                 ssOrderId: shipment.orderId,
+                 orderKey: shipment.orderKey,
+                 shipmentId,
+                 parentStatus,
+                 wmsOrderId: parent.order_id,
+                 reason: "no_active_wms_shipment",
+               })}::jsonb,
+               NOW()
+        FROM wms.orders wo
+        JOIN oms.oms_orders oo ON oo.id::text = wo.oms_fulfillment_order_id
+        WHERE wo.id = ${parent.order_id}
+        LIMIT 1
+      `);
+      return null;
+    }
+
+    // Active parent. Decide repair-vs-split by comparing the physical
+    // package's items against the parent's items.
+    const parsedShipStationItems = parsePositiveWmsShipmentItemsFromShipStation(shipment);
+    let isPartialPackage = false;
+    if (parsedShipStationItems) {
+      const parentItemsResult: any = await db.execute(sql`
+        SELECT id, qty
+        FROM wms.outbound_shipment_items
+        WHERE shipment_id = ${parent.id}
+      `);
+      const parentItems = (parentItemsResult?.rows ?? []).map((row: any) => ({
+        id: Number(row.id),
+        qty: Number(row.qty),
+      }));
+      isPartialPackage = !hasSameShipmentItemSet(parentItems, parsedShipStationItems);
+    }
+
+    if (!isPartialPackage) {
+      // Full package (or no parseable items): the notify belongs to the
+      // parent itself. Repair/adopt the mapping — heals the duplicate-push
+      // gap where a failed write-back left our DB with one SS orderId while
+      // SS created a second order under the same key.
+      const incomingSsOrderId = Number(shipment.orderId);
+      const hasIncoming = Number.isInteger(incomingSsOrderId) && incomingSsOrderId > 0;
+      const existingSsOrderId = Number(parent.shipstation_order_id);
+      const drifted =
+        hasIncoming && existingSsOrderId > 0 && incomingSsOrderId !== existingSsOrderId;
+      const adoptedSsOrderId = hasIncoming
+        ? incomingSsOrderId
+        : existingSsOrderId > 0
+          ? existingSsOrderId
+          : null;
+      const needsMappingUpdate =
+        (hasIncoming && incomingSsOrderId !== existingSsOrderId) ||
+        (Boolean(externalFulfillmentId) && !parent.external_fulfillment_id);
+
+      if (needsMappingUpdate) {
+        if (drifted) {
+          console.warn(
+            `[SHIP_NOTIFY resolve] Shipment ${shipmentId} SS orderId drifted: ` +
+              `DB has ${existingSsOrderId}, SHIP_NOTIFY carries ${incomingSsOrderId}. ` +
+              `Adopting incoming mapping and flagging for review (duplicate SS order).`,
+          );
+        }
         await db.execute(sql`
           UPDATE wms.outbound_shipments
-          SET shipstation_order_id = ${incomingSsOrderId},
-              engine_order_ref = ${String(incomingSsOrderId)},
+          SET shipstation_order_id = ${adoptedSsOrderId},
+              engine_order_ref = ${adoptedSsOrderId != null ? String(adoptedSsOrderId) : null},
+              shipstation_order_key = COALESCE(${shipment.orderKey ?? null}, shipstation_order_key),
+              external_fulfillment_id = COALESCE(external_fulfillment_id, ${externalFulfillmentId}),
+              requires_review = CASE WHEN ${drifted} THEN true ELSE requires_review END,
+              review_reason = CASE WHEN ${drifted} THEN 'shipstation_duplicate_order_key_repaired' ELSE review_reason END,
               updated_at = NOW()
           WHERE id = ${shipmentId}
         `);
       }
-      return { ...parent, shipstation_order_id: incomingSsOrderId };
+      return { ...parent, shipstation_order_id: adoptedSsOrderId };
     }
 
-    // Parent is cancelled/voided — look for any active sibling shipment on
-    // the same WMS order that we can match to.
-    const siblingResult: any = await db.execute(sql`
-      SELECT id, order_id, status, shipstation_order_id
-      FROM wms.outbound_shipments
-      WHERE order_id = ${parent.order_id}
-        AND id <> ${shipmentId}
-        AND status NOT IN ('cancelled', 'voided')
-      ORDER BY id DESC
-      LIMIT 1
-    `);
-    const sibling = siblingResult?.rows?.[0];
-    if (sibling) {
-      console.warn(
-        `[SHIP_NOTIFY resolve] Parent shipment ${shipmentId} is ${parentStatus}, ` +
-          `resolved to active sibling ${sibling.id} for WMS order ${parent.order_id}`,
+    // Genuine partial package on an ACTIVE parent: fork the WMS's own child
+    // split row so the unshipped remainder stays tracked.
+    if (!externalFulfillmentId) {
+      console.error(
+        `[SHIP_NOTIFY resolve] Partial package for shipment ${shipmentId} has no usable ` +
+          `SS shipmentId — cannot dedupe replays, refusing to create a split row`,
       );
-      return sibling;
+      return null;
     }
 
-    // No active shipment found. Flag for review — do NOT create one.
-    console.error(
-      `[SHIP_NOTIFY resolve] SHIP_NOTIFY for SS orderId=${shipment.orderId} ` +
-        `(orderKey=echelon-wms-shp-${shipmentId}) has no active WMS shipment. ` +
-        `Parent ${shipmentId} is '${parentStatus}', no active siblings on order ${parent.order_id}. ` +
-        `Requires manual review — WMS will NOT auto-create a shipment from inbound data.`,
-    );
-    await db.execute(sql`
-      INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-      SELECT oo.id, 'ship_notify_unresolved',
-             ${JSON.stringify({
-               ssOrderId: shipment.orderId,
-               orderKey: shipment.orderKey,
-               shipmentId,
-               parentStatus,
-               wmsOrderId: parent.order_id,
-               reason: "no_active_wms_shipment",
-             })}::jsonb,
-             NOW()
-      FROM wms.orders wo
-      JOIN oms.oms_orders oo ON oo.id::text = wo.oms_fulfillment_order_id
-      WHERE wo.id = ${parent.order_id}
-      LIMIT 1
-    `);
-    return null;
-  }
+    const orderId = parent.order_id;
+    await db.execute(sql`SELECT pg_advisory_lock(918406, ${orderId})`);
+    try {
+      const existingAfterLock: any = await db.execute(sql`
+        SELECT id, order_id, status, shipstation_order_id
+        FROM wms.outbound_shipments
+        WHERE external_fulfillment_id = ${externalFulfillmentId}
+        LIMIT 1
+      `);
+      if (existingAfterLock?.rows?.[0]) {
+        return existingAfterLock.rows[0];
+      }
 
+      const ssOrderKey = shipment.orderKey || parent.shipstation_order_key;
+      const inserted: any = await db.execute(sql`
+        INSERT INTO wms.outbound_shipments
+          (order_id, channel_id, external_fulfillment_id, source, status,
+           shipstation_order_id, shipstation_order_key,
+           shipping_engine, engine_order_ref, engine_shipment_ref,
+           created_at, updated_at)
+        VALUES
+          (${orderId}, ${parent.channel_id}, ${externalFulfillmentId},
+           ${SHIPSTATION_SPLIT_SOURCE}, 'queued',
+           ${shipment.orderId}, ${ssOrderKey},
+           'shipstation', ${String(shipment.orderId)}, ${ssOrderKey},
+           NOW(), NOW())
+        RETURNING id, order_id, status, shipstation_order_id
+      `);
+
+      const row = inserted?.rows?.[0];
+      if (!row) {
+        throw new Error(
+          `Failed to create WMS split shipment for ShipStation shipment ${shipment.shipmentId}`,
+        );
+      }
+      return row;
+    } finally {
+      await db.execute(sql`SELECT pg_advisory_unlock(918406, ${orderId})`);
+    }
+  }
   async function syncShipmentItemsFromShipStation(
     targetShipmentId: number,
     shipment: ShipStationShipment,
@@ -1360,24 +1533,25 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           `);
           touchedChildIds.push(Number(existingChild.id));
         } else {
-          // HARDENED: SHIP_NOTIFY must never INSERT shipment items. The WMS
-          // is the sole creator of its own shipment structure. If SS reports
-          // items we don't have, flag for review instead of creating ghost
-          // rows that diverge WMS state from its own source of truth.
-          console.error(
-            `[SHIP_NOTIFY] SS shipment ${shipment.shipmentId} references ` +
-              `source item ${item.sourceShipmentItemId} with no matching child ` +
-              `on target shipment ${targetShipmentId} — flagging for review ` +
-              `(WMS will not create shipment items from inbound data)`,
-          );
-          await db.execute(sql`
-            UPDATE wms.outbound_shipments
-            SET requires_review = true,
-                review_reason = 'ship_notify_unmapped_item',
-                updated_at = NOW()
-            WHERE id = ${targetShipmentId}
-              AND requires_review IS NOT TRUE
+          // Copy the parent's OWN item row onto the split child (quantities
+          // from the physical package). This only runs for split children
+          // created by resolveShipmentByOrderKey — an active parent's
+          // partial-package fork — never for foreign/terminal shipments
+          // (those are rejected before any row exists to sync onto).
+          const inserted: any = await db.execute(sql`
+            INSERT INTO wms.outbound_shipment_items
+              (shipment_id, order_item_id, product_variant_id, qty,
+               from_location_id, box_id, weight_oz, tracking_id)
+            VALUES
+              (${targetShipmentId}, ${sourceRow.order_item_id}, ${sourceRow.product_variant_id},
+               ${item.qty}, ${sourceRow.from_location_id}, ${sourceRow.box_id},
+               ${sourceRow.weight_oz}, ${String(shipment.shipmentId)})
+            RETURNING id
           `);
+          const insertedId = Number(inserted?.rows?.[0]?.id);
+          if (Number.isInteger(insertedId) && insertedId > 0) {
+            touchedChildIds.push(insertedId);
+          }
         }
       }
     }
@@ -2170,21 +2344,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   async function processShipNotifyV2(
     shipment: ShipStationShipment,
   ): Promise<{ processed: boolean; fallback: boolean }> {
+    const carrier = mapShipStationCarrier(shipment.carrierCode);
+    const event = deriveEventFromSSShipment(shipment, carrier);
+    if (!event) {
+      console.log(
+        `[ShipStation Webhook V2] No actionable event for ShipStation shipment ${shipment.shipmentId ?? "unknown"} (SS order ${shipment.orderId ?? "unknown"}) - skipping`,
+      );
+      return { processed: false, fallback: false };
+    }
+
     const resolved = await resolveWmsShipmentForShipNotify(shipment);
     const wmsShipmentRow: any = resolved.row;
     if (!wmsShipmentRow) {
       // Pre-cutover order (pushed via pushOrder, no shipstation_order_id
       // on outbound_shipments). Fall back to legacy orderKey path.
       return { processed: false, fallback: resolved.fallback };
-    }
-
-    const carrier = mapShipStationCarrier(shipment.carrierCode);
-    const event = deriveEventFromSSShipment(shipment, carrier);
-    if (!event) {
-      console.log(
-        `[ShipStation Webhook V2] No actionable event for shipment ${wmsShipmentRow.id} (SS order ${shipment.orderId}) — skipping`,
-      );
-      return { processed: false, fallback: false };
     }
 
     if (event.kind === "shipped") {
@@ -2502,6 +2676,94 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       }
       throw err;
     }
+  }
+
+  function nullableExternalRef(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    const text = String(value).trim();
+    return text.length > 0 ? text : null;
+  }
+
+  function buildShipNotifyNoMatchIdempotencyKey(
+    shipment: ShipStationShipment,
+  ): string {
+    const key = [
+      "shipstation_notify",
+      "ship_notify_no_match",
+      nullableExternalRef(shipment.orderId) ?? "no-order-id",
+      nullableExternalRef(shipment.shipmentId) ?? "no-shipment-id",
+      nullableExternalRef(shipment.orderKey) ?? "no-order-key",
+      nullableExternalRef(shipment.trackingNumber) ?? "no-tracking",
+    ].join(":");
+
+    return key.length <= 500 ? key : key.slice(0, 500);
+  }
+
+  async function recordShipNotifyNoMatchException(
+    shipment: ShipStationShipment,
+    v2Fallback: boolean,
+  ): Promise<void> {
+    const ssOrderRef = nullableExternalRef(shipment.orderId);
+    const ssShipmentRef = nullableExternalRef(shipment.shipmentId);
+    const details = {
+      ssShipmentId: shipment.shipmentId ?? null,
+      ssOrderId: shipment.orderId ?? null,
+      ssOrderKey: shipment.orderKey ?? null,
+      orderNumber: shipment.orderNumber ?? null,
+      trackingNumber: shipment.trackingNumber ?? null,
+      carrierCode: shipment.carrierCode ?? null,
+      serviceCode: shipment.serviceCode ?? null,
+      shipDate: shipment.shipDate ?? null,
+      v2Fallback,
+      requiresReview: true,
+      shipmentItems: Array.isArray(shipment.shipmentItems)
+        ? shipment.shipmentItems.map((item) => ({
+            orderItemId: item.orderItemId ?? null,
+            lineItemKey: item.lineItemKey ?? null,
+            sku: item.sku,
+            quantity: item.quantity,
+          }))
+        : [],
+    };
+    const summary = `Unmatched ShipStation SHIP_NOTIFY callback for order ${ssOrderRef ?? "unknown"} shipment ${ssShipmentRef ?? "unknown"}`;
+
+    await db.execute(sql`
+      INSERT INTO wms.reconciliation_exceptions (
+        source,
+        classification,
+        rule,
+        status,
+        severity,
+        external_system,
+        external_order_ref,
+        external_shipment_ref,
+        external_order_key,
+        idempotency_key,
+        summary,
+        details
+      )
+      VALUES (
+        'shipstation_notify',
+        'manual_review',
+        'ship_notify_no_match',
+        'open',
+        'review',
+        'shipstation',
+        ${ssOrderRef},
+        ${ssShipmentRef},
+        ${nullableExternalRef(shipment.orderKey)},
+        ${buildShipNotifyNoMatchIdempotencyKey(shipment)},
+        ${summary},
+        ${JSON.stringify(details)}::jsonb
+      )
+      ON CONFLICT (idempotency_key)
+        WHERE status IN ('open', 'acknowledged')
+      DO UPDATE SET
+        last_seen_at = NOW(),
+        updated_at = NOW(),
+        occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
+        details = wms.reconciliation_exceptions.details || EXCLUDED.details
+    `);
   }
 
   /**
@@ -2964,21 +3226,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     try {
-      await db.insert(omsOrderEvents).values({
-        orderId: 0,
-        eventType: "ship_notify_no_match",
-        details: {
-          ssShipmentId: shipment.shipmentId ?? null,
-          ssOrderId: shipment.orderId ?? null,
-          ssOrderKey: shipment.orderKey ?? null,
-          trackingNumber: shipment.trackingNumber ?? null,
-          carrierCode: shipment.carrierCode ?? null,
-          requiresReview: true,
-        },
-      });
-    } catch (deadLetterErr: any) {
+      await recordShipNotifyNoMatchException(shipment, v2Result.fallback);
+    } catch (exceptionErr: any) {
       console.error(
-        `[ShipStation Webhook] Failed to persist no-match dead letter for SS shipment ${shipment.shipmentId}: ${deadLetterErr?.message}`,
+        `[ShipStation Webhook] Failed to persist no-match reconciliation exception for SS shipment ${shipment.shipmentId}: ${exceptionErr?.message}`,
       );
     }
 
@@ -3386,6 +3637,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
   async function pushShipment(
     shipmentId: number,
+    opts: { overrideReview?: boolean } = {},
   ): Promise<{ shipstationOrderId: number; orderKey: string }> {
     if (
       !Number.isInteger(shipmentId) ||
@@ -3459,7 +3711,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       existingSsOrderId != null &&
       Number.isInteger(existingSsOrderId) &&
       existingSsOrderId > 0;
-    if (shipmentRow.requires_review === true) {
+    if (shipmentRow.requires_review === true && !opts.overrideReview) {
       throw new ShipStationPushError(
         `shipment requires review and cannot be pushed to ShipStation (${shipmentRow.review_reason ?? "review_required"})`,
         {
@@ -3488,7 +3740,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // cancelled order to awaiting_shipment (ENGINE-CANCEL-DIVERGENCE-DESIGN.md;
     // markAsShipped already guards this for the ship path). Only relevant on an
     // UPDATE (existing SS order) — a fresh create has nothing to resurrect.
-    if (isUpdate) {
+    // An explicit operator override (clear-review-and-push, P2) intentionally
+    // resurrects the cancelled SS order, so it skips this guard.
+    if (isUpdate && !opts.overrideReview) {
       const liveSsOrder = await getOrderById(existingSsOrderId as number);
       if (liveSsOrder?.orderStatus === "cancelled") {
         throw new ShipStationPushError(
@@ -3832,6 +4086,17 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           updated_at = ${now}
       WHERE id = ${shipmentId}
     `);
+
+    if (opts.overrideReview) {
+      // The operator explicitly resolved the review by re-pushing; clear the
+      // flag so the shipment leaves the SHIPMENT_REQUIRES_REVIEW bucket
+      // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md P2).
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments
+        SET requires_review = false, review_reason = NULL, updated_at = ${now}
+        WHERE id = ${shipmentId} AND requires_review = true
+      `);
+    }
 
     await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);
 

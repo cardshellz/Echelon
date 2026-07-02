@@ -6,8 +6,10 @@ function buildStorage(overrides: Record<string, any> = {}) {
     db: { execute: vi.fn().mockResolvedValue({}) },
     getInboundShipments: vi.fn().mockResolvedValue([]),
     getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
+    updateInboundShipment: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
     getProvisionalLotsByShipment: vi.fn().mockResolvedValue([]),
     getInboundShipmentLines: vi.fn().mockResolvedValue([]),
+    getInboundShipmentLineById: vi.fn().mockResolvedValue(undefined),
     getInboundFreightCosts: vi.fn().mockResolvedValue([]),
     getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
     deleteAllocationsForShipment: vi.fn().mockResolvedValue(undefined),
@@ -84,7 +86,7 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
         { id: 31, costType: "freight", actualCents: 1200, allocationMethod: "by_weight" },
       ]),
       getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
-        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 1200 },
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 1200 },
       ]),
     });
     const service = createShipmentTrackingService({} as any, storage);
@@ -112,7 +114,7 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
         { id: 31, costType: "freight", actualCents: 1200, allocationMethod: "by_value" },
       ]),
       getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
-        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 1200 },
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 1200 },
       ]),
       getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, unitCostCents: 0 }),
     });
@@ -125,6 +127,150 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
     expect(result.issues[0]).toEqual(expect.objectContaining({
       code: "allocation_basis_fallback",
       severity: "warning",
+    }));
+  });
+
+  it("flags allocations whose saved basis no longer matches current line basis", async () => {
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_chargeable_weight" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, sku: "SKU-1", qtyShipped: 5, chargeableWeightKg: "29" },
+        { id: 12, sku: "SKU-2", qtyShipped: 5, chargeableWeightKg: "26" },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 44660, allocationMethod: null },
+      ]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "2", allocatedCents: 22330 },
+        { shipmentCostId: 31, inboundShipmentLineId: 12, allocationBasisValue: "1", allocationBasisTotal: "2", allocatedCents: 22330 },
+      ]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getAllocationStatus(1);
+
+    expect(result.status).toBe("needs_allocation");
+    expect(result.blockerCount).toBe(1);
+    expect(result.costs[0]).toEqual(expect.objectContaining({
+      costId: 31,
+      status: "stale_allocation_basis",
+      rawBasisTotal: 55,
+      basisTotal: 55,
+    }));
+    expect(result.issues[0]).toEqual(expect.objectContaining({
+      code: "stale_allocation_basis",
+      severity: "blocker",
+      costId: 31,
+    }));
+  });
+});
+
+describe("ShipmentTrackingService.getEnrichedLines", () => {
+  it("returns PO SKU, mills unit costs, and allocation category breakdowns for the allocation tab", async () => {
+    const storage = buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        {
+          id: 11,
+          sku: null,
+          purchaseOrderLineId: 21,
+          productVariantId: null,
+          qtyShipped: 5,
+          allocatedCostCents: 1275,
+          landedUnitCostCents: 355,
+        },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 1000 },
+        { id: 32, costType: "brokerage", actualCents: 200 },
+        { id: 33, costType: "insurance", actualCents: 50 },
+        { id: 34, costType: "warehousing", actualCents: 25 },
+      ]),
+      getInboundFreightCostAllocations: vi.fn((costId: number) => Promise.resolve(({
+        31: [{ shipmentCostId: 31, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 1000 }],
+        32: [{ shipmentCostId: 32, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 200 }],
+        33: [{ shipmentCostId: 33, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 50 }],
+        34: [{ shipmentCostId: 34, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 25 }],
+      } as Record<number, any[]>)[costId] ?? [])),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({
+        id: 21,
+        sku: "PO-SKU",
+        productName: "PO Product",
+        orderQty: 5,
+        unitCostCents: 100,
+        unitCostMills: 10000,
+      }),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getEnrichedLines(1);
+
+    expect(result[0]).toEqual(expect.objectContaining({
+      sku: "PO-SKU",
+      productName: "PO Product",
+      poQtyOrdered: 5,
+      poUnitCostCents: 100,
+      poUnitCostMills: 10000,
+      allocatedCostCents: 1275,
+      freightAllocatedCents: 1000,
+      dutyAllocatedCents: 200,
+      insuranceAllocatedCents: 50,
+      otherAllocatedCents: 25,
+      freightAllocatedMillsPerUnit: 20000,
+      dutyAllocatedMillsPerUnit: 4000,
+      insuranceAllocatedMillsPerUnit: 1000,
+      otherAllocatedMillsPerUnit: 500,
+      totalAllocatedMillsPerUnit: 25500,
+      landedUnitCostMills: 35500,
+    }));
+  });
+});
+
+describe("ShipmentTrackingService.updateLineDimensions", () => {
+  it("re-runs allocation after line weight changes", async () => {
+    const originalLine = {
+      id: 11,
+      inboundShipmentId: 1,
+      sku: "SKU-1",
+      qtyShipped: 10,
+      cartonCount: null,
+      weightKg: "1",
+      lengthCm: null,
+      widthCm: null,
+      heightCm: null,
+    };
+    const updatedLine = {
+      ...originalLine,
+      weightKg: "2",
+      totalWeightKg: "20",
+      chargeableWeightKg: "20",
+    };
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_weight" }),
+      getInboundShipmentLineById: vi.fn()
+        .mockResolvedValueOnce(originalLine)
+        .mockResolvedValueOnce(updatedLine),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([updatedLine]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 1000, allocationMethod: "by_weight" },
+      ]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    await service.updateLineDimensions(11, { weightKg: "2" });
+
+    expect(storage.deleteAllocationsForShipment).toHaveBeenCalledWith(1);
+    expect(storage.bulkCreateInboundFreightCostAllocations).toHaveBeenCalledWith([
+      expect.objectContaining({
+        shipmentCostId: 31,
+        inboundShipmentLineId: 11,
+        allocationBasisValue: "20",
+        allocationBasisTotal: "20",
+        allocatedCents: 1000,
+      }),
+    ]);
+    expect(storage.updateInboundShipmentLine).toHaveBeenCalledWith(11, expect.objectContaining({
+      allocatedCostCents: 1000,
+      landedUnitCostCents: 100,
     }));
   });
 });
@@ -165,7 +311,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
         { id: 31, costType: "freight", actualCents: 500 },
       ]),
       getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
-        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 500 },
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 500 },
       ]),
       getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
         { id: 501, productVariantId: 10, costProvisional: 1 },
@@ -203,7 +349,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
         { id: 31, costType: "freight", actualCents: 500 },
       ]),
       getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
-        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 500 },
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 500 },
       ]),
       getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
         { id: 501, productVariantId: 10, costProvisional: 1 },

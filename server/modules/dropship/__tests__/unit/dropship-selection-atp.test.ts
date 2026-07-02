@@ -207,6 +207,41 @@ describe("DropshipSelectionAtpService", () => {
     expect(result.rows[0]).not.toHaveProperty("rawAtpUnits");
   });
 
+  it("returns only exposed catalog rows and builds de-duped exposed facets", async () => {
+    const repository = new FakeDropshipSelectionAtpRepository();
+    repository.catalogRules = [{ id: 1, scopeType: "category", action: "include", category: "Supplies" }];
+    repository.selectionRules = [makeSelectionRuleRecord({ id: 2, scopeType: "catalog", action: "include" })];
+    repository.candidates = [
+      {
+        ...candidate,
+        productLineIds: [30, 31],
+        productLineNames: ["Trading Card Supplies", "Trading Card Supplies"],
+      },
+      {
+        ...candidate,
+        productVariantId: 21,
+        variantSku: "V-21",
+        category: "Other",
+        productLineIds: [40],
+        productLineNames: ["Other Line"],
+      },
+    ];
+    const service = makeService(repository, new FakeAtpProvider());
+
+    const result = await service.previewCatalog({
+      vendorId: 1,
+    });
+
+    expect(result.total).toBe(1);
+    expect(result.rows.map((row) => row.productVariantId)).toEqual([20]);
+    expect(result.facets.categories).toEqual([
+      { category: "Supplies", label: "Supplies", rowCount: 1 },
+    ]);
+    expect(result.facets.productLines).toEqual([
+      { productLineIds: [30, 31], label: "Trading Card Supplies", rowCount: 1 },
+    ]);
+  });
+
   it("requires a vendor profile before catalog access", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.vendor = null;

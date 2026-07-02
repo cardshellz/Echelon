@@ -20,9 +20,9 @@ describe("Shopify orders/updated WMS reconciliation", () => {
 
   it("does not requeue WMS reconciliation after Shopify reports a final order", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/const isCancelledPayload = Boolean\(shopifyOrder\.cancelled_at\)/);
-    expect(OMS_WEBHOOKS_SRC).toMatch(/const isFinalOmsState =/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/isFinal: isFinalOmsState/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/orders\/updated skipped WMS reconcile for final order/);
-    expect(OMS_WEBHOOKS_SRC).toMatch(/else if \(!isFinalOmsState && \(shopifyOrder\.financial_status === "paid"/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/else if \([\s\S]*!isFinalOmsState[\s\S]*hasAuthorizedShippableWork[\s\S]*shopifyOrder\.financial_status === "paid"/);
   });
 
   it("persists normalized Shopify pricing when orders/updated adds or changes lines", () => {
@@ -32,6 +32,13 @@ describe("Shopify orders/updated WMS reconciliation", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/totalPriceCents: normalizedLine\?\.totalCents/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/planDiscountCents: normalizedLine\?\.planDiscountCents/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/couponDiscountCents: normalizedLine\?\.couponDiscountCents/);
+  });
+
+  it("records Shopify update-only line authority without authorizing new WMS work", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(/deriveOmsLineAuthority/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/sourceTopic: "orders\/updated"/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/authorityFulfillableQuantity/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/hasAuthorizedShippableWork/);
   });
 
   it("syncs WMS address from canonical Shopify shipping fields and handles existing shipments", () => {

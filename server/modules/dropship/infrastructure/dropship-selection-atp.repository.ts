@@ -117,7 +117,7 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
                 product_variant_id, category, starts_at, ends_at
          FROM dropship.dropship_catalog_rules
          WHERE is_active = true
-         ORDER BY priority DESC, id ASC`,
+         ORDER BY priority ASC, id ASC`,
       );
       return result.rows.map(mapCatalogExposureRuleRow);
     } finally {
@@ -264,14 +264,24 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
         where.push(`LOWER(p.category) = LOWER($${params.length})`);
       }
 
-      if (input.productLineId) {
-        params.push(input.productLineId);
+      const productLineIds = input.productLineIds?.length
+        ? input.productLineIds
+        : input.productLineId
+          ? [input.productLineId]
+          : [];
+      if (productLineIds.length > 0) {
+        params.push(productLineIds);
         where.push(`EXISTS (
           SELECT 1
           FROM catalog.product_line_products plp_filter
           WHERE plp_filter.product_id = p.id
-            AND plp_filter.product_line_id = $${params.length}
+            AND plp_filter.product_line_id = ANY($${params.length}::int[])
         )`);
+      }
+
+      if (input.productId) {
+        params.push(input.productId);
+        where.push(`p.id = $${params.length}`);
       }
 
       const result = await client.query<VendorCatalogCandidateRow>(
@@ -286,15 +296,22 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
            pv.name AS variant_name,
            pv.units_per_variant,
            pv.is_active AS variant_is_active,
-           ARRAY_REMOVE(ARRAY_AGG(DISTINCT plp.product_line_id), NULL) AS product_line_ids,
-           ARRAY_REMOVE(ARRAY_AGG(DISTINCT pl.name), NULL) AS product_line_names
+           COALESCE(line_data.product_line_ids, ARRAY[]::int[]) AS product_line_ids,
+           COALESCE(line_data.product_line_names, ARRAY[]::text[]) AS product_line_names
          FROM catalog.product_variants pv
          INNER JOIN catalog.products p ON p.id = pv.product_id
-         LEFT JOIN catalog.product_line_products plp ON plp.product_id = p.id
-         LEFT JOIN catalog.product_lines pl ON pl.id = plp.product_line_id
+         LEFT JOIN LATERAL (
+           SELECT
+             ARRAY_AGG(line_rows.product_line_id ORDER BY line_rows.product_line_name, line_rows.product_line_id) AS product_line_ids,
+             ARRAY_AGG(line_rows.product_line_name ORDER BY line_rows.product_line_name, line_rows.product_line_id) AS product_line_names
+           FROM (
+             SELECT DISTINCT plp.product_line_id, pl.name AS product_line_name
+             FROM catalog.product_line_products plp
+             INNER JOIN catalog.product_lines pl ON pl.id = plp.product_line_id
+             WHERE plp.product_id = p.id
+           ) line_rows
+         ) line_data ON true
          WHERE ${where.join(" AND ")}
-         GROUP BY p.id, p.sku, p.name, p.category, p.is_active,
-                  pv.id, pv.sku, pv.name, pv.units_per_variant, pv.is_active, pv.position
          ORDER BY p.name ASC, pv.position ASC, pv.name ASC`,
         params,
       );

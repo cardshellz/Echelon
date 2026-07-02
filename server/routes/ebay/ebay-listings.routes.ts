@@ -12,12 +12,24 @@ import {
   productTypes,
   inventoryLevels,
 } from "@shared/schema";
-import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
+import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
 import { isProductEffectivelyListed, isVariantEffectivelyListed } from "./ebay-listing-state";
+import { EbayMarketplaceListingConnector } from "../../modules/channels/listing-connectors/ebay-listing.connector";
+import {
+  buildEbayRouteListingDraft,
+  isValidEbayFixedPriceCents,
+  normalizeCents,
+} from "./ebay-listing-draft-builder";
+import {
+  createEbayRouteListingClient,
+  getExistingEbayInventoryImageUrls,
+} from "./ebay-listing-connector-client";
 
 export const router = express.Router();
+const EBAY_LISTING_DEFAULT_MARKETPLACE_ID = "EBAY_US";
+const ebayListingConnector = new EbayMarketplaceListingConnector();
 
   // GET /api/ebay/listing-feed — Products with types for listing feed
   // -----------------------------------------------------------------------
@@ -180,7 +192,8 @@ export const router = express.Router();
         }
 
         // Determine readiness for each product
-        const feed = result.rows.map((row: any) => {
+        const feed: any[] = [];
+        for (const row of result.rows) {
           // Effective category: product override wins, then type mapping
           const effectiveCategoryId = row.product_ebay_browse_category_id || row.ebay_browse_category_id || null;
           const effectiveCategoryName = row.product_ebay_browse_category_name || row.ebay_browse_category_name || null;
@@ -206,6 +219,37 @@ export const router = express.Router();
           const isExcluded = productExcludedByIntent;
           const isTypeDisabled = row.type_listing_enabled === false;
 
+          const variants = (variantsByProduct.get(row.id) || []).map((v: any) => {
+            const effectivelyListed = isVariantEffectivelyListed({
+              productExcluded: row.ebay_listing_excluded === true,
+              productOverrideIsListed: row.product_override_is_listed,
+              typeListingEnabled: row.type_listing_enabled,
+              variantExcluded: v.explicitlyExcluded,
+            });
+            return {
+              ...v,
+              excludedByProduct: !productEffectivelyListed,
+              effectivelyListed,
+            };
+          });
+          const includedVariants = variants.filter((v: any) => v.effectivelyListed);
+          const includedVariantCount = includedVariants.length;
+          const missingPriceSkus: string[] = [];
+          for (const variant of includedVariants) {
+            const basePriceCents = normalizeCents(variant.priceCents);
+            const effectivePriceCents = await resolveChannelPrice(
+              db,
+              EBAY_CHANNEL_ID,
+              row.id,
+              variant.id,
+              basePriceCents ?? 0,
+            );
+            if (!isValidEbayFixedPriceCents(effectivePriceCents)) {
+              missingPriceSkus.push(variant.sku);
+            }
+          }
+          const hasValidEbayPrices = includedVariantCount > 0 && missingPriceSkus.length === 0;
+
           // Check for missing required aspects
           const missingAspects: string[] = [];
           if (effectiveCategoryId) {
@@ -226,15 +270,14 @@ export const router = express.Router();
           let status: string;
           if (isExcluded) status = "excluded";
           else if (isTypeDisabled) status = "type_disabled";
-          else if (isListed) status = "listed";
-          else if (isError) status = "error";
+          else if (!hasCategoryMapping || !hasVariants || !hasImages || !hasValidEbayPrices) status = "missing_config";
           else if (isEnded) {
             // Ended/deleted listings are re-pushable — treat as ready if they meet all requirements
-            if (!hasCategoryMapping || !hasVariants || !hasImages) status = "missing_config";
-            else if (missingAspects.length > 0) status = "missing_specifics";
+            if (missingAspects.length > 0) status = "missing_specifics";
             else status = "ready"; // Can be re-listed
           }
-          else if (!hasCategoryMapping || !hasVariants || !hasImages) status = "missing_config";
+          else if (isListed) status = "listed";
+          else if (isError) status = "error";
           else if (missingAspects.length > 0) status = "missing_specifics";
           else status = "ready";
 
@@ -242,23 +285,9 @@ export const router = express.Router();
           if (!hasCategoryMapping) missingItems.push("eBay category");
           if (!hasVariants) missingItems.push("variants");
           if (!hasImages) missingItems.push("images");
+          if (!hasValidEbayPrices) missingItems.push("valid eBay prices");
 
-          const variants = (variantsByProduct.get(row.id) || []).map((v: any) => {
-            const effectivelyListed = isVariantEffectivelyListed({
-              productExcluded: row.ebay_listing_excluded === true,
-              productOverrideIsListed: row.product_override_is_listed,
-              typeListingEnabled: row.type_listing_enabled,
-              variantExcluded: v.explicitlyExcluded,
-            });
-            return {
-              ...v,
-              excludedByProduct: !productEffectivelyListed,
-              effectivelyListed,
-            };
-          });
-          const includedVariantCount = variants.filter((v: any) => v.effectivelyListed).length;
-
-          return {
+          feed.push({
             id: row.id,
             name: row.name,
             sku: row.sku,
@@ -271,6 +300,7 @@ export const router = express.Router();
             ebayStoreCategoryName: row.ebay_store_category_name,
             status,
             missingItems,
+            missingPriceSkus,
             missingAspects,
             isListed,
             isExcluded,
@@ -283,8 +313,8 @@ export const router = express.Router();
             fulfillmentPolicyOverride: row.product_fulfillment_override || null,
             returnPolicyOverride: row.product_return_override || null,
             paymentPolicyOverride: row.product_payment_override || null,
-          };
-        });
+          });
+        }
 
         res.json({ feed, total: feed.length });
       } finally {
@@ -319,6 +349,9 @@ export const router = express.Router();
       // Get connection metadata (default policies)
       const conn = await getChannelConnection();
       const metadata = (conn?.metadata as Record<string, any>) || {};
+      const marketplaceId = typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+        ? metadata.marketplaceId.trim()
+        : EBAY_LISTING_DEFAULT_MARKETPLACE_ID;
       const defaultPolicies = {
         fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
         returnPolicyId: metadata.returnPolicyId || null,
@@ -369,6 +402,7 @@ export const router = express.Router();
           const varResult = await client.query(
             `SELECT pv.id, pv.sku, pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
                     pv.price_cents, pv.compare_at_price_cents, pv.weight_grams, pv.barcode,
+                    COALESCE(cvo.weight_override, pv.weight_grams) AS ebay_weight_grams,
                     pv.units_per_variant, pv.hierarchy_level,
                     pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override
              FROM product_variants pv
@@ -401,13 +435,9 @@ export const router = express.Router();
             try {
               const firstSku = varResult.rows[0]?.sku;
               if (firstSku) {
-                const existingItem = await ebayApiRequest(
-                  "GET",
-                  `/sell/inventory/v1/inventory_item/${encodeURIComponent(firstSku)}`,
-                  accessToken,
-                );
-                if (existingItem?.product?.imageUrls?.length > 0) {
-                  effectiveImageUrls = existingItem.product.imageUrls;
+                const existingImageUrls = await getExistingEbayInventoryImageUrls({ accessToken, sku: firstSku });
+                if (existingImageUrls.length > 0) {
+                  effectiveImageUrls = existingImageUrls;
                   console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
                 }
               }
@@ -470,12 +500,11 @@ export const router = express.Router();
 
           const variants = varResult.rows;
           const isMultiVariant = variants.length > 1;
-          const variantDetails: Array<{ sku: string; success: boolean; error?: string }> = [];
 
           // 6. Resolve prices via pricing rules
           const variantPrices: Map<number, number> = new Map();
           for (const v of variants) {
-            const resolved = await resolveChannelPrice(client, EBAY_CHANNEL_ID, productId, v.id, v.price_cents);
+            const resolved = await resolveChannelPrice(db, EBAY_CHANNEL_ID, productId, v.id, v.price_cents);
             variantPrices.set(v.id, resolved);
           }
 
@@ -489,338 +518,103 @@ export const router = express.Router();
             atpByVariantId.set(va.productVariantId, va.atpUnits);
           }
 
-          // ---- Step A: Create/Update Inventory Items for each variant ----
-          let allItemsCreated = true;
-          for (const variant of variants) {
-            const sku = variant.sku;
-            try {
-              const availableQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
-              const priceCents = variantPrices.get(variant.id) || variant.price_cents;
-              const priceInDollars = (priceCents / 100).toFixed(2);
-
-              // Per-variant aspects: include the variation aspect value for multi-variant
-              const variantAspects: Record<string, string[]> = { ...aspects };
-              if (isMultiVariant) {
-                const variationValue = variant.option1_value || variant.name || sku;
-                variantAspects[variationAspectName] = [variationValue];
-              }
-
-              const inventoryItemBody: Record<string, any> = {
-                condition: "NEW",
-                product: {
-                  title: product.name.length > 80 ? product.name.substring(0, 77) + "..." : product.name,
-                  ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
-                  aspects: variantAspects,
-                },
-                availability: {
-                  shipToLocationAvailability: { quantity: availableQty },
-                },
-              };
-
-              // Always include description — eBay requires it on inventory items
-              inventoryItemBody.product.description = product.description || `<p>${product.name}</p>`;
-
-              console.log(`[eBay Push] Creating inventory item for SKU: ${sku}`);
-              await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, inventoryItemBody);
-              console.log(`[eBay Push] Inventory item created/updated: ${sku}`);
-
-              // Save listing record per variant
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                externalSku: sku,
-                lastSyncedPrice: priceCents,
-                lastSyncedQty: availableQty,
-                syncStatus: "pending",
-              });
-
-              variantDetails.push({ sku, success: true });
-            } catch (err: any) {
-              console.error(`[eBay Push] Inventory item failed for ${sku}:`, err.message);
-              allItemsCreated = false;
-              variantDetails.push({ sku, success: false, error: err.message.substring(0, 500) });
-
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                syncStatus: "error",
-                syncError: `Inventory item failed: ${err.message.substring(0, 1000)}`,
-              });
-            }
-          }
-
-          if (!allItemsCreated && variantDetails.every((v) => !v.success)) {
-            const firstError = variantDetails.find((v) => v.error)?.error || "Unknown error";
+          let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
+          try {
+            routeDraft = buildEbayRouteListingDraft({
+              productId,
+              product,
+              variants,
+              effectiveImageUrls,
+              aspects,
+              isMultiVariant,
+              variationAspectName,
+              variantPrices,
+              atpByVariantId,
+              marketplaceId,
+              ebayBrowseCategoryId,
+              effectivePolicies,
+              storeCategoryNames,
+              merchantLocationKey,
+            });
+          } catch (err: any) {
+            const errMsg = String(err?.message || "Invalid eBay listing payload");
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
             results.push({
-              productId, productName: product.name, variantCount: variants.length,
-              success: false, error: `Inventory items failed: ${firstError}`, variantDetails,
+              productId,
+              productName: product.name,
+              variantCount: variants.length,
+              success: false,
+              error: errMsg,
+              variantDetails: variants.map((variant: any) => ({
+                sku: variant.sku,
+                success: false,
+                error: errMsg,
+              })),
             });
             continue;
           }
 
-          const successfulSkus = variantDetails.filter((v) => v.success).map((v) => v.sku);
-
-          // ---- Step B: Multi-variant -> Create Inventory Item Group ----
-          // Use product SKU as the group key (eBay displays this as the listing's Custom Label/SKU)
-          const groupKey = product.sku || `PROD-${productId}`;
-
-          if (isMultiVariant && successfulSkus.length > 1) {
-            try {
-
-              // Build variesBy specification
-              const variationValues = variants
-                .filter((v: any) => successfulSkus.includes(v.sku))
-                .map((v: any) => v.option1_value || v.name || v.sku);
-
-              const groupBody: Record<string, any> = {
-                title: product.name.length > 80 ? product.name.substring(0, 77) + "..." : product.name,
-                description: product.description || `<p>${product.name}</p>`,
-                ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
-                aspects: aspects, // Product-level aspects (non-varying)
-                variantSKUs: successfulSkus,
-                variesBy: {
-                  aspectsImageVariesBy: [],
-                  specifications: [
-                    {
-                      name: variationAspectName,
-                      values: variationValues,
-                    },
-                  ],
-                },
-              };
-
-              console.log(`[eBay Push] Creating inventory item group: ${groupKey} with ${successfulSkus.length} SKUs`);
-              await ebayApiRequest(
-                "PUT",
-                `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
-                accessToken,
-                groupBody,
-              );
-              console.log(`[eBay Push] Inventory item group created/updated: ${groupKey}`);
-            } catch (err: any) {
-              console.error(`[eBay Push] Inventory item group failed:`, err.message);
-              results.push({
-                productId, productName: product.name, variantCount: variants.length,
-                success: false, error: `Inventory item group failed: ${err.message.substring(0, 500)}`, variantDetails,
-              });
-              continue;
-            }
-          }
-
-          // ---- Step C: Create/Update Offers ----
-          // Multi-variant: one offer PER variant SKU (no inventoryItemGroupKey on offers)
-          // Single-variant: one offer with sku + price
-          const offerIds: Map<string, string> = new Map(); // sku -> offerId
-          let offerCreationFailed = false;
-
-          if (isMultiVariant && successfulSkus.length > 1) {
-            // --- Multi-variant: create an offer for EACH variant ---
-            for (const variant of variants) {
-              if (!successfulSkus.includes(variant.sku)) continue;
-              try {
-                const priceCents = variantPrices.get(variant.id) || variant.price_cents;
-                const priceInDollars = (priceCents / 100).toFixed(2);
-
-                const availableQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
-
-                // Variant-level policy overrides win over product/category/channel
-                const variantPolicies = {
-                  fulfillmentPolicyId: variant.ebay_fulfillment_policy_override || effectivePolicies.fulfillmentPolicyId,
-                  returnPolicyId: variant.ebay_return_policy_override || effectivePolicies.returnPolicyId,
-                  paymentPolicyId: variant.ebay_payment_policy_override || effectivePolicies.paymentPolicyId,
-                };
-
-                const offerBody: Record<string, any> = {
-                  sku: variant.sku,
-                  marketplaceId: "EBAY_US",
-                  format: "FIXED_PRICE",
-                  categoryId: ebayBrowseCategoryId,
-                  listingPolicies: variantPolicies,
-                  merchantLocationKey,
-                  pricingSummary: {
-                    price: { value: priceInDollars, currency: "USD" },
-                  },
-                  availableQuantity: availableQty,
-                };
-                if (storeCategoryNames.length > 0) {
-                  offerBody.storeCategoryNames = storeCategoryNames;
-                }
-
-                console.log(`[eBay Push] Creating offer for variant SKU: ${variant.sku}`);
-                let offerId: string | null = null;
-                try {
-                  const offerData = await ebayApiRequest("POST", "/sell/inventory/v1/offer", accessToken, offerBody);
-                  offerId = offerData?.offerId || null;
-                  console.log(`[eBay Push] Offer created: offerId=${offerId} for SKU=${variant.sku}`);
-                } catch (offerErr: any) {
-                  // If duplicate (25002/409), find existing offer and update
-                  if (offerErr.message.includes("25002") || offerErr.message.includes("409")) {
-                    console.log(`[eBay Push] Duplicate offer for SKU ${variant.sku}, finding existing...`);
-                    const existingOffers = await ebayApiRequest(
-                      "GET",
-                      `/sell/inventory/v1/offer?sku=${encodeURIComponent(variant.sku)}&marketplace_id=EBAY_US`,
-                      accessToken,
-                    );
-                    if (existingOffers?.offers?.length > 0) {
-                      offerId = existingOffers.offers[0].offerId;
-                      console.log(`[eBay Push] Found existing offer: ${offerId} for SKU=${variant.sku}, updating...`);
-                      await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
-                    } else {
-                      throw offerErr;
-                    }
-                  } else {
-                    throw offerErr;
-                  }
-                }
-
-                if (offerId) {
-                  offerIds.set(variant.sku, offerId);
-                }
-              } catch (err: any) {
-                console.error(`[eBay Push] Offer creation failed for SKU ${variant.sku}:`, err.message);
-                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                  syncStatus: "error",
-                  syncError: `Offer creation failed: ${err.message.substring(0, 1000)}`,
-                });
-                // Mark variant as failed in details
-                const detailIdx = variantDetails.findIndex((d) => d.sku === variant.sku);
-                if (detailIdx >= 0) {
-                  variantDetails[detailIdx] = { sku: variant.sku, success: false, error: `Offer failed: ${err.message.substring(0, 500)}` };
-                }
-              }
-            }
-
-            if (offerIds.size === 0) {
-              offerCreationFailed = true;
-              results.push({
-                productId, productName: product.name, variantCount: variants.length,
-                success: false, error: "All variant offer creations failed", variantDetails,
-              });
-              continue;
-            }
-          } else {
-            // --- Single variant: one offer with sku + price ---
-            try {
-              const singleSku = successfulSkus[0];
-              const singleVariant = variants.find((v: any) => v.sku === singleSku);
-              const priceCents = variantPrices.get(singleVariant?.id) || singleVariant?.price_cents || 0;
-              const priceInDollars = (priceCents / 100).toFixed(2);
-
-              const singleAvailableQty = Math.max(0, atpByVariantId.get(singleVariant?.id) ?? 0);
-
-              const offerBody: Record<string, any> = {
-                sku: singleSku,
-                marketplaceId: "EBAY_US",
-                format: "FIXED_PRICE",
-                categoryId: ebayBrowseCategoryId,
-                listingPolicies: {
-                  fulfillmentPolicyId: effectivePolicies.fulfillmentPolicyId,
-                  returnPolicyId: effectivePolicies.returnPolicyId,
-                  paymentPolicyId: effectivePolicies.paymentPolicyId,
-                },
-                merchantLocationKey,
-                pricingSummary: {
-                  price: { value: priceInDollars, currency: "USD" },
-                },
-                availableQuantity: singleAvailableQty,
-              };
-              if (storeCategoryNames.length > 0) {
-                offerBody.storeCategoryNames = storeCategoryNames;
-              }
-
-              console.log(`[eBay Push] Creating offer for single-variant product ${product.name}`);
-              let offerId: string | null = null;
-              try {
-                const offerData = await ebayApiRequest("POST", "/sell/inventory/v1/offer", accessToken, offerBody);
-                offerId = offerData?.offerId || null;
-                console.log(`[eBay Push] Offer created: offerId=${offerId}`);
-              } catch (offerErr: any) {
-                if (offerErr.message.includes("25002") || offerErr.message.includes("409")) {
-                  console.log(`[eBay Push] Duplicate offer detected, finding existing...`);
-                  const existingOffers = await ebayApiRequest(
-                    "GET",
-                    `/sell/inventory/v1/offer?sku=${encodeURIComponent(singleSku)}&marketplace_id=EBAY_US`,
-                    accessToken,
-                  );
-                  if (existingOffers?.offers?.length > 0) {
-                    offerId = existingOffers.offers[0].offerId;
-                    console.log(`[eBay Push] Found existing offer: ${offerId}, updating...`);
-                    await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
-                  } else {
-                    throw offerErr;
-                  }
-                } else {
-                  throw offerErr;
-                }
-              }
-
-              if (offerId) {
-                offerIds.set(singleSku, offerId);
-              }
-            } catch (err: any) {
-              console.error(`[eBay Push] Offer creation failed:`, err.message);
-              for (const variant of variants) {
-                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                  syncStatus: "error",
-                  syncError: `Offer creation failed: ${err.message.substring(0, 1000)}`,
-                });
-              }
-              results.push({
-                productId, productName: product.name, variantCount: variants.length,
-                success: false, error: `Offer creation failed: ${err.message.substring(0, 500)}`, variantDetails,
-              });
-              continue;
-            }
-          }
-
-          // ---- Step D: Publish ----
-          // Multi-variant: publish via inventory item group (combines all variant offers into one listing)
-          // Single-variant: publish individual offer
           let listingId: string | null = null;
+          const offerIds: Map<string, string> = new Map();
+          let variantDetails: Array<{ sku: string; success: boolean; error?: string }> = [];
+          let successfulSkus: string[] = [];
+
           try {
-            if (isMultiVariant && successfulSkus.length > 1) {
-              console.log(`[eBay Push] Publishing by inventory item group: ${groupKey}`);
-              const publishData = await ebayApiRequest(
-                "POST",
-                "/sell/inventory/v1/offer/publish_by_inventory_item_group",
-                accessToken,
-                {
-                  inventoryItemGroupKey: groupKey,
-                  marketplaceId: "EBAY_US",
-                },
-              );
-              listingId = publishData?.listingId || null;
-              console.log(`[eBay Push] Published multi-variant listing: listingId=${listingId}`);
-            } else {
-              const singleOfferId = offerIds.values().next().value;
-              console.log(`[eBay Push] Publishing single offer ${singleOfferId}`);
-              const publishData = await ebayApiRequest("POST", `/sell/inventory/v1/offer/${singleOfferId}/publish`, accessToken);
-              listingId = publishData?.listingId || null;
-              console.log(`[eBay Push] Published: listingId=${listingId}`);
+            const connectorResult = await ebayListingConnector.pushListing({
+              client: createEbayRouteListingClient({ accessToken }),
+              draft: {
+                productId,
+                marketplaceId,
+                inventoryItems: routeDraft.inventoryItems,
+                offers: routeDraft.offers,
+                itemGroup: routeDraft.itemGroup,
+                publishMode: "publish",
+                hasExistingExternalIds: false,
+              },
+            });
+
+            listingId = connectorResult.externalProductId ?? null;
+            successfulSkus = routeDraft.offers.map((offer) => offer.sku);
+            variantDetails = routeDraft.offers.map((offer) => ({ sku: offer.sku, success: true }));
+            for (const offer of routeDraft.offers) {
+              const offerId = connectorResult.externalOfferIds[offer.variantId];
+              if (offerId) offerIds.set(offer.sku, offerId);
             }
           } catch (err: any) {
-            console.error(`[eBay Push] Publish failed:`, err.message);
+            const errMsg = `Listing push failed: ${err.message.substring(0, 500)}`;
             for (const variant of variants) {
-              const varOfferId = offerIds.get(variant.sku) || null;
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                externalVariantId: varOfferId,
+              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
                 syncStatus: "error",
-                syncError: `Publish failed: ${err.message.substring(0, 1000)}`,
+                syncError: errMsg.substring(0, 1000),
               });
             }
             results.push({
-              productId, productName: product.name, variantCount: variants.length,
+              productId,
+              productName: product.name,
+              variantCount: variants.length,
               success: false,
-              error: `Publish failed: ${err.message.substring(0, 500)}`, variantDetails,
+              error: errMsg,
+              variantDetails: routeDraft.offers.map((offer) => ({
+                sku: offer.sku,
+                success: false,
+                error: errMsg,
+              })),
             });
             continue;
           }
-
           // ---- Success: Update all variant listings ----
           for (const variant of variants) {
             if (successfulSkus.includes(variant.sku)) {
               const varOfferId = offerIds.get(variant.sku) || null;
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+              const lastSyncedPrice = variantPrices.get(variant.id) ?? variant.price_cents ?? null;
+              const lastSyncedQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
+              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
                 externalProductId: listingId,
                 externalVariantId: varOfferId,
                 externalSku: variant.sku,
                 externalUrl: listingId ? `https://www.ebay.com/itm/${listingId}` : null,
+                lastSyncedPrice,
+                lastSyncedQty,
                 syncStatus: "synced",
                 syncError: null,
               });
@@ -895,6 +689,9 @@ export const router = express.Router();
       const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
       const conn = await getChannelConnection();
       const metadata = (conn?.metadata as Record<string, any>) || {};
+      const marketplaceId = typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+        ? metadata.marketplaceId.trim()
+        : EBAY_LISTING_DEFAULT_MARKETPLACE_ID;
       const defaultPolicies = {
         fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
         returnPolicyId: metadata.returnPolicyId || null,
@@ -929,7 +726,7 @@ export const router = express.Router();
           if (prodResult.rows.length === 0) {
             failed++;
             sendEvent({ type: "progress", product: `Product #${productId}`, productId, status: "error", error: "Product not found or inactive", current, total });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, "Product not found or inactive");
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, "Product not found or inactive");
             continue;
           }
           const product = prodResult.rows[0];
@@ -948,6 +745,7 @@ export const router = express.Router();
           const varResult = await client.query(
             `SELECT pv.id, pv.sku, pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
                     pv.price_cents, pv.compare_at_price_cents, pv.weight_grams, pv.barcode,
+                    COALESCE(cvo.weight_override, pv.weight_grams) AS ebay_weight_grams,
                     pv.units_per_variant, pv.hierarchy_level,
                     pv.ebay_fulfillment_policy_override, pv.ebay_return_policy_override, pv.ebay_payment_policy_override
              FROM product_variants pv
@@ -963,7 +761,7 @@ export const router = express.Router();
             failed++;
             const errMsg = "No eligible variants";
             sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
             continue;
           }
 
@@ -983,13 +781,9 @@ export const router = express.Router();
             try {
               const firstSku = varResult.rows[0]?.sku;
               if (firstSku) {
-                const existingItem = await ebayApiRequest(
-                  "GET",
-                  `/sell/inventory/v1/inventory_item/${encodeURIComponent(firstSku)}`,
-                  accessToken,
-                );
-                if (existingItem?.product?.imageUrls?.length > 0) {
-                  effectiveImageUrls = existingItem.product.imageUrls;
+                const existingImageUrls = await getExistingEbayInventoryImageUrls({ accessToken, sku: firstSku });
+                if (existingImageUrls.length > 0) {
+                  effectiveImageUrls = existingImageUrls;
                   console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
                 }
               }
@@ -1035,7 +829,7 @@ export const router = express.Router();
             failed++;
             const errMsg = "No eBay browse category configured";
             sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
             continue;
           }
 
@@ -1063,7 +857,7 @@ export const router = express.Router();
           // Prices
           const variantPrices: Map<number, number> = new Map();
           for (const v of variants) {
-            const resolved = await resolveChannelPrice(client, EBAY_CHANNEL_ID, productId, v.id, v.price_cents);
+            const resolved = await resolveChannelPrice(db, EBAY_CHANNEL_ID, productId, v.id, v.price_cents);
             variantPrices.set(v.id, resolved);
           }
 
@@ -1074,273 +868,108 @@ export const router = express.Router();
             atpByVariantId.set(va.productVariantId, va.atpUnits);
           }
 
-          // Step A: Create/Update Inventory Items
-          const variantDetails: Array<{ sku: string; success: boolean; error?: string }> = [];
-          let allItemsCreated = true;
-
-          for (const variant of variants) {
-            if (cancelled) break;
-            const sku = variant.sku;
-            try {
-              const availableQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
-              const priceCents = variantPrices.get(variant.id) || variant.price_cents;
-
-              const variantAspects: Record<string, string[]> = { ...aspects };
-              if (isMultiVariant) {
-                const variationValue = variant.option1_value || variant.name || sku;
-                variantAspects[variationAspectName] = [variationValue];
-              }
-
-              const inventoryItemBody: Record<string, any> = {
-                condition: "NEW",
-                product: {
-                  title: product.name.length > 80 ? product.name.substring(0, 77) + "..." : product.name,
-                  ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
-                  aspects: variantAspects,
-                },
-                availability: {
-                  shipToLocationAvailability: { quantity: availableQty },
-                },
-              };
-              // Always include description — eBay requires it
-              inventoryItemBody.product.description = product.description || `<p>${product.name}</p>`;
-
-              await ebayApiRequestWithRateNotify(
-                "PUT",
-                `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
-                accessToken,
-                inventoryItemBody,
-                (waitSec) => sendEvent({ type: "rate_limited", waitSeconds: waitSec, product: product.name, productId }),
-              );
-              await delay(200);
-
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                externalSku: sku,
-                lastSyncedPrice: priceCents,
-                lastSyncedQty: availableQty,
-                syncStatus: "pending",
-              });
-              variantDetails.push({ sku, success: true });
-            } catch (err: any) {
-              allItemsCreated = false;
-              variantDetails.push({ sku, success: false, error: err.message.substring(0, 500) });
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                syncStatus: "error",
-                syncError: `Inventory item failed: ${err.message.substring(0, 1000)}`,
-              });
-            }
-          }
-
-          if (cancelled) break;
-
-          if (!allItemsCreated && variantDetails.every((v) => !v.success)) {
+          let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
+          try {
+            routeDraft = buildEbayRouteListingDraft({
+              productId,
+              product,
+              variants,
+              effectiveImageUrls,
+              aspects,
+              isMultiVariant,
+              variationAspectName,
+              variantPrices,
+              atpByVariantId,
+              marketplaceId,
+              ebayBrowseCategoryId,
+              effectivePolicies,
+              storeCategoryNames,
+              merchantLocationKey,
+            });
+          } catch (err: any) {
             failed++;
-            const firstError = variantDetails.find((v) => v.error)?.error || "Unknown error";
-            const errMsg = `Inventory items failed: ${firstError}`;
-            sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, variantsListed: 0, current, total, variantDetails });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
+            const errMsg = String(err?.message || "Invalid eBay listing payload");
+            sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total });
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
             continue;
           }
 
-          const successfulSkus = variantDetails.filter((v) => v.success).map((v) => v.sku);
-          const groupKey = product.sku || `PROD-${productId}`;
-
-          // Step B: Multi-variant → Create Inventory Item Group
-          if (isMultiVariant && successfulSkus.length > 1) {
-            try {
-              const variationValues = variants
-                .filter((v: any) => successfulSkus.includes(v.sku))
-                .map((v: any) => v.option1_value || v.name || v.sku);
-
-              const groupBody: Record<string, any> = {
-                title: product.name.length > 80 ? product.name.substring(0, 77) + "..." : product.name,
-                description: product.description || `<p>${product.name}</p>`,
-                ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
-                aspects,
-                variantSKUs: successfulSkus,
-                variesBy: {
-                  aspectsImageVariesBy: [],
-                  specifications: [{ name: variationAspectName, values: variationValues }],
-                },
-              };
-
-              await ebayApiRequestWithRateNotify(
-                "PUT",
-                `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
-                accessToken,
-                groupBody,
-                (waitSec) => sendEvent({ type: "rate_limited", waitSeconds: waitSec, product: product.name, productId }),
-              );
-              await delay(200);
-            } catch (err: any) {
-              failed++;
-              const errMsg = `Inventory item group failed: ${err.message.substring(0, 500)}`;
-              sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total, variantDetails });
-              await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
-              continue;
-            }
-          }
-
-          // Step C: Create/Update Offers
-          const offerIds: Map<string, string> = new Map();
-
-          if (isMultiVariant && successfulSkus.length > 1) {
-            for (const variant of variants) {
-              if (cancelled) break;
-              if (!successfulSkus.includes(variant.sku)) continue;
-              try {
-                const priceCents = variantPrices.get(variant.id) || variant.price_cents;
-                const priceInDollars = (priceCents / 100).toFixed(2);
-                const availableQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
-
-                const variantPolicies = {
-                  fulfillmentPolicyId: variant.ebay_fulfillment_policy_override || effectivePolicies.fulfillmentPolicyId,
-                  returnPolicyId: variant.ebay_return_policy_override || effectivePolicies.returnPolicyId,
-                  paymentPolicyId: variant.ebay_payment_policy_override || effectivePolicies.paymentPolicyId,
-                };
-
-                const offerBody: Record<string, any> = {
-                  sku: variant.sku,
-                  marketplaceId: "EBAY_US",
-                  format: "FIXED_PRICE",
-                  categoryId: ebayBrowseCategoryId,
-                  listingPolicies: variantPolicies,
-                  merchantLocationKey,
-                  pricingSummary: { price: { value: priceInDollars, currency: "USD" } },
-                  availableQuantity: availableQty,
-                };
-                if (storeCategoryNames.length > 0) offerBody.storeCategoryNames = storeCategoryNames;
-
-                let offerId: string | null = null;
-                try {
-                  const offerData = await ebayApiRequestWithRateNotify("POST", "/sell/inventory/v1/offer", accessToken, offerBody,
-                    (waitSec) => sendEvent({ type: "rate_limited", waitSeconds: waitSec, product: product.name, productId }));
-                  offerId = offerData?.offerId || null;
-                } catch (offerErr: any) {
-                  if (offerErr.message.includes("25002") || offerErr.message.includes("409")) {
-                    const existingOffers = await ebayApiRequest("GET", `/sell/inventory/v1/offer?sku=${encodeURIComponent(variant.sku)}&marketplace_id=EBAY_US`, accessToken);
-                    if (existingOffers?.offers?.length > 0) {
-                      offerId = existingOffers.offers[0].offerId;
-                      await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
-                    } else { throw offerErr; }
-                  } else { throw offerErr; }
-                }
-                if (offerId) offerIds.set(variant.sku, offerId);
-                await delay(200);
-              } catch (err: any) {
-                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                  syncStatus: "error",
-                  syncError: `Offer creation failed: ${err.message.substring(0, 1000)}`,
-                });
-                const detailIdx = variantDetails.findIndex((d) => d.sku === variant.sku);
-                if (detailIdx >= 0) variantDetails[detailIdx] = { sku: variant.sku, success: false, error: `Offer failed: ${err.message.substring(0, 500)}` };
-              }
-            }
-
-            if (offerIds.size === 0) {
-              failed++;
-              const errMsg = "All variant offer creations failed";
-              sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total, variantDetails });
-              await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
-              continue;
-            }
-          } else {
-            // Single variant
-            try {
-              const singleSku = successfulSkus[0];
-              const singleVariant = variants.find((v: any) => v.sku === singleSku);
-              const priceCents = variantPrices.get(singleVariant?.id) || singleVariant?.price_cents || 0;
-              const priceInDollars = (priceCents / 100).toFixed(2);
-              const singleAvailableQty = Math.max(0, atpByVariantId.get(singleVariant?.id) ?? 0);
-
-              const offerBody: Record<string, any> = {
-                sku: singleSku,
-                marketplaceId: "EBAY_US",
-                format: "FIXED_PRICE",
-                categoryId: ebayBrowseCategoryId,
-                listingPolicies: effectivePolicies,
-                merchantLocationKey,
-                pricingSummary: { price: { value: priceInDollars, currency: "USD" } },
-                availableQuantity: singleAvailableQty,
-              };
-              if (storeCategoryNames.length > 0) offerBody.storeCategoryNames = storeCategoryNames;
-
-              let offerId: string | null = null;
-              try {
-                const offerData = await ebayApiRequestWithRateNotify("POST", "/sell/inventory/v1/offer", accessToken, offerBody,
-                  (waitSec) => sendEvent({ type: "rate_limited", waitSeconds: waitSec, product: product.name, productId }));
-                offerId = offerData?.offerId || null;
-              } catch (offerErr: any) {
-                if (offerErr.message.includes("25002") || offerErr.message.includes("409")) {
-                  const existingOffers = await ebayApiRequest("GET", `/sell/inventory/v1/offer?sku=${encodeURIComponent(singleSku)}&marketplace_id=EBAY_US`, accessToken);
-                  if (existingOffers?.offers?.length > 0) {
-                    offerId = existingOffers.offers[0].offerId;
-                    await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
-                  } else { throw offerErr; }
-                } else { throw offerErr; }
-              }
-              if (offerId) offerIds.set(singleSku, offerId);
-              await delay(200);
-            } catch (err: any) {
-              for (const variant of variants) {
-                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                  syncStatus: "error",
-                  syncError: `Offer creation failed: ${err.message.substring(0, 1000)}`,
-                });
-              }
-              failed++;
-              const errMsg = `Offer creation failed: ${err.message.substring(0, 500)}`;
-              sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total, variantDetails });
-              await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
-              continue;
-            }
-          }
-
           if (cancelled) break;
 
-          // Step D: Publish
           let listingId: string | null = null;
+          const offerIds: Map<string, string> = new Map();
+          let variantDetails: Array<{ sku: string; success: boolean; error?: string }> = [];
+          let successfulSkus: string[] = [];
+
           try {
-            if (isMultiVariant && successfulSkus.length > 1) {
-              const publishData = await ebayApiRequestWithRateNotify(
-                "POST", "/sell/inventory/v1/offer/publish_by_inventory_item_group", accessToken,
-                { inventoryItemGroupKey: groupKey, marketplaceId: "EBAY_US" },
-                (waitSec) => sendEvent({ type: "rate_limited", waitSeconds: waitSec, product: product.name, productId }),
-              );
-              listingId = publishData?.listingId || null;
-            } else {
-              const singleOfferId = offerIds.values().next().value;
-              const publishData = await ebayApiRequestWithRateNotify(
-                "POST", `/sell/inventory/v1/offer/${singleOfferId}/publish`, accessToken, undefined,
-                (waitSec) => sendEvent({ type: "rate_limited", waitSeconds: waitSec, product: product.name, productId }),
-              );
-              listingId = publishData?.listingId || null;
+            const connectorResult = await ebayListingConnector.pushListing({
+              client: createEbayRouteListingClient({
+                accessToken,
+                onRateLimit: (waitSec) => sendEvent({
+                  type: "rate_limited",
+                  waitSeconds: waitSec,
+                  product: product.name,
+                  productId,
+                }),
+              }),
+              draft: {
+                productId,
+                marketplaceId,
+                inventoryItems: routeDraft.inventoryItems,
+                offers: routeDraft.offers,
+                itemGroup: routeDraft.itemGroup,
+                publishMode: "publish",
+                hasExistingExternalIds: false,
+              },
+            });
+
+            listingId = connectorResult.externalProductId ?? null;
+            successfulSkus = routeDraft.offers.map((offer) => offer.sku);
+            variantDetails = routeDraft.offers.map((offer) => ({ sku: offer.sku, success: true }));
+            for (const offer of routeDraft.offers) {
+              const offerId = connectorResult.externalOfferIds[offer.variantId];
+              if (offerId) offerIds.set(offer.sku, offerId);
             }
           } catch (err: any) {
             for (const variant of variants) {
-              const varOfferId = offerIds.get(variant.sku) || null;
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                externalVariantId: varOfferId,
+              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
                 syncStatus: "error",
-                syncError: `Publish failed: ${err.message.substring(0, 1000)}`,
+                syncError: `Listing push failed: ${err.message.substring(0, 1000)}`,
               });
             }
             failed++;
-            const errMsg = `Publish failed: ${err.message.substring(0, 500)}`;
-            sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, current, total, variantDetails });
-            await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
+            const errMsg = `Listing push failed: ${err.message.substring(0, 500)}`;
+            variantDetails = routeDraft.offers.map((offer) => ({
+              sku: offer.sku,
+              success: false,
+              error: errMsg,
+            }));
+            sendEvent({
+              type: "progress",
+              product: product.name,
+              productId,
+              status: "error",
+              error: errMsg,
+              current,
+              total,
+              variantDetails,
+            });
+            await upsertPushError(db, EBAY_CHANNEL_ID, productId, errMsg);
             continue;
           }
-
           // Success — update all variant listings
           for (const variant of variants) {
             if (successfulSkus.includes(variant.sku)) {
               const varOfferId = offerIds.get(variant.sku) || null;
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+              const lastSyncedPrice = variantPrices.get(variant.id) ?? variant.price_cents ?? null;
+              const lastSyncedQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
+              await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.id, {
                 externalProductId: listingId,
                 externalVariantId: varOfferId,
                 externalSku: variant.sku,
                 externalUrl: listingId ? `https://www.ebay.com/itm/${listingId}` : null,
+                lastSyncedPrice,
+                lastSyncedQty,
                 syncStatus: "synced",
                 syncError: null,
               });
@@ -1348,7 +977,7 @@ export const router = express.Router();
           }
 
           // Clear push error on success
-          await clearPushError(client, EBAY_CHANNEL_ID, productId);
+          await clearPushError(db, EBAY_CHANNEL_ID, productId);
 
           succeeded++;
           sendEvent({
@@ -1449,6 +1078,9 @@ export const router = express.Router();
       const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
       const conn = await getChannelConnection();
       const metadata = (conn?.metadata as Record<string, any>) || {};
+      const marketplaceId = typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+        ? metadata.marketplaceId.trim()
+        : EBAY_LISTING_DEFAULT_MARKETPLACE_ID;
       const defaultPolicies = {
         fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
         returnPolicyId: metadata.returnPolicyId || null,
@@ -1481,6 +1113,8 @@ export const router = express.Router();
             pv.sku AS variant_sku,
             pv.name AS variant_name,
             pv.price_cents,
+            pv.weight_grams,
+            cvo.weight_override AS channel_weight_override,
             pv.option1_name,
             pv.option1_value,
             pv.ebay_fulfillment_policy_override AS variant_fulfillment_override,
@@ -1499,8 +1133,20 @@ export const router = express.Router();
           FROM channels.channel_listings cl
           JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           JOIN catalog.products p ON p.id = pv.product_id
+          LEFT JOIN channels.channel_variant_overrides cvo
+            ON cvo.product_variant_id = pv.id AND cvo.channel_id = cl.channel_id
           WHERE cl.channel_id = $1
-            AND cl.sync_status = 'synced'
+            AND (
+              cl.sync_status = 'synced'
+              OR (
+                cl.sync_status = 'error'
+                AND (
+                  cl.external_product_id IS NOT NULL
+                  OR cl.external_variant_id IS NOT NULL
+                  OR cl.external_sku IS NOT NULL
+                )
+              )
+            )
             ${filterClause}
           ORDER BY p.id ASC, pv.position ASC, pv.id ASC
         `, params);
@@ -1586,13 +1232,9 @@ export const router = express.Router();
               try {
                 const firstSku = variants[0]?.variant_sku;
                 if (firstSku) {
-                  const existingItem = await ebayApiRequest(
-                    "GET",
-                    `/sell/inventory/v1/inventory_item/${encodeURIComponent(firstSku)}`,
-                    accessToken,
-                  );
-                  if (existingItem?.product?.imageUrls?.length > 0) {
-                    effectiveImageUrls = existingItem.product.imageUrls;
+                  const existingImageUrls = await getExistingEbayInventoryImageUrls({ accessToken, sku: firstSku });
+                  if (existingImageUrls.length > 0) {
+                    effectiveImageUrls = existingImageUrls;
                     console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
                   }
                 }
@@ -1624,113 +1266,100 @@ export const router = express.Router();
             let productPolicyChanged = false;
             let productErrors = 0;
 
+            const routeProduct = {
+              name: product.product_name,
+              sku: product.product_sku,
+              description: product.product_description,
+            };
+            const routeVariants = variants.map((variant: any) => ({
+              id: variant.variant_id,
+              sku: variant.variant_sku,
+              name: variant.variant_name,
+              option1_value: variant.option1_value,
+              price_cents: variant.price_cents,
+              ebay_weight_grams: variant.channel_weight_override ?? variant.weight_grams,
+              ebay_fulfillment_policy_override: variant.variant_fulfillment_override,
+              ebay_return_policy_override: variant.variant_return_override,
+              ebay_payment_policy_override: variant.variant_payment_override,
+            }));
+
+            const variantPrices: Map<number, number> = new Map();
             for (const variant of variants) {
-              if (cancelled) break;
-              const sku = variant.variant_sku;
-              try {
-                const newPriceCents = await resolveChannelPrice(client, EBAY_CHANNEL_ID, productId, variant.variant_id, variant.price_cents);
-                const priceInDollars = (newPriceCents / 100).toFixed(2);
+              const newPriceCents = await resolveChannelPrice(
+                db,
+                EBAY_CHANNEL_ID,
+                productId,
+                variant.variant_id,
+                variant.price_cents,
+              );
+              const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
+              variantPrices.set(variant.variant_id, newPriceCents);
+              if (newPriceCents !== (variant.last_synced_price || 0)) productPriceChanged = true;
+              if (newQty !== (variant.last_synced_qty || 0)) productQtyChanged = true;
+            }
+
+            const routeDraft = buildEbayRouteListingDraft({
+              productId,
+              product: routeProduct,
+              variants: routeVariants,
+              effectiveImageUrls,
+              aspects,
+              isMultiVariant,
+              variationAspectName,
+              variantPrices,
+              atpByVariantId: syncAtpByVariantId,
+              marketplaceId,
+              ebayBrowseCategoryId,
+              effectivePolicies,
+              storeCategoryNames,
+              merchantLocationKey,
+            });
+
+            try {
+              const syncResult = await ebayListingConnector.syncExistingListing({
+                client: createEbayRouteListingClient({ accessToken }),
+                draft: {
+                  productId,
+                  marketplaceId,
+                  inventoryItems: routeDraft.inventoryItems,
+                  offers: routeDraft.offers,
+                  itemGroup: routeDraft.itemGroup,
+                },
+              });
+
+              productPolicyChanged = syncResult.policyChangedVariantIds.length > 0;
+              productErrors = syncResult.missingOfferVariantIds.length;
+              const missingOfferVariantIds = new Set(syncResult.missingOfferVariantIds);
+
+              for (const variant of variants) {
+                if (missingOfferVariantIds.has(variant.variant_id)) {
+                  await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
+                    syncStatus: "error",
+                    syncError: "eBay offer not found during existing listing sync.",
+                  });
+                  continue;
+                }
+
+                const newPriceCents = variantPrices.get(variant.variant_id) ?? variant.price_cents ?? 0;
                 const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
-                const varPriceChanged = newPriceCents !== (variant.last_synced_price || 0);
-                const varQtyChanged = newQty !== (variant.last_synced_qty || 0);
-
-                const variantAspects: Record<string, string[]> = { ...aspects };
-                if (isMultiVariant) {
-                  variantAspects[variationAspectName] = [variant.option1_value || variant.variant_name || sku];
-                }
-
-                const inventoryItemBody: Record<string, any> = {
-                  condition: "NEW",
-                  product: {
-                    title: product.product_name.length > 80 ? product.product_name.substring(0, 77) + "..." : product.product_name,
-                    ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
-                    aspects: variantAspects,
-                    description: product.product_description || `<p>${product.product_name}</p>`,
-                  },
-                  availability: { shipToLocationAvailability: { quantity: newQty } },
-                };
-
-                await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, inventoryItemBody);
-                await delay(200);
-
-                let varPolicyChanged = false;
-                try {
-                  const offersResp = await ebayApiRequest("GET", `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=EBAY_US`, accessToken);
-                  await delay(200);
-                  if (offersResp?.offers?.length > 0) {
-                    const existingOffer = offersResp.offers[0];
-                    const offerId = existingOffer.offerId;
-                    const variantPolicies = {
-                      fulfillmentPolicyId: variant.variant_fulfillment_override || effectivePolicies.fulfillmentPolicyId,
-                      returnPolicyId: variant.variant_return_override || effectivePolicies.returnPolicyId,
-                      paymentPolicyId: variant.variant_payment_override || effectivePolicies.paymentPolicyId,
-                    };
-                    const oldPolicies = existingOffer.listingPolicies || {};
-                    if (
-                      oldPolicies.fulfillmentPolicyId !== variantPolicies.fulfillmentPolicyId ||
-                      oldPolicies.returnPolicyId !== variantPolicies.returnPolicyId ||
-                      oldPolicies.paymentPolicyId !== variantPolicies.paymentPolicyId
-                    ) varPolicyChanged = true;
-
-                    const offerBody: Record<string, any> = {
-                      sku,
-                      marketplaceId: "EBAY_US",
-                      format: "FIXED_PRICE",
-                      categoryId: ebayBrowseCategoryId,
-                      listingPolicies: variantPolicies,
-                      merchantLocationKey,
-                      pricingSummary: { price: { value: priceInDollars, currency: "USD" } },
-                      availableQuantity: newQty,
-                    };
-                    if (storeCategoryNames.length > 0) offerBody.storeCategoryNames = storeCategoryNames;
-                    await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
-                    await delay(200);
-                  }
-                } catch (offerErr: any) {
-                  console.error(`[eBay Sync Stream] Offer update failed for ${sku}:`, offerErr.message);
-                }
-
-                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.variant_id, {
+                await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
                   lastSyncedPrice: newPriceCents,
                   lastSyncedQty: newQty,
                   syncStatus: "synced",
                   syncError: null,
                 });
-
-                if (varPriceChanged) productPriceChanged = true;
-                if (varQtyChanged) productQtyChanged = true;
-                if (varPolicyChanged) productPolicyChanged = true;
-              } catch (err: any) {
-                console.error(`[eBay Sync Stream] Error syncing SKU ${sku}:`, err.message);
-                productErrors++;
-                await delay(200);
               }
-            }
-
-            // Update inventory item group if multi-variant
-            if (isMultiVariant && !cancelled) {
-              try {
-                const groupKey = product.product_sku || `PROD-${productId}`;
-                const successfulSkus = variants.map((v: any) => v.variant_sku);
-                const variationValues = variants.map((v: any) => v.option1_value || v.variant_name || v.variant_sku);
-                const groupBody: Record<string, any> = {
-                  title: product.product_name.length > 80 ? product.product_name.substring(0, 77) + "..." : product.product_name,
-                  description: product.product_description || `<p>${product.product_name}</p>`,
-                  ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
-                  aspects,
-                  variantSKUs: successfulSkus,
-                  variesBy: {
-                    aspectsImageVariesBy: [],
-                    specifications: [{ name: variationAspectName, values: variationValues }],
-                  },
-                };
-                await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`, accessToken, groupBody);
-                await delay(200);
-              } catch (groupErr: any) {
-                console.error(`[eBay Sync Stream] Group update failed for product ${productId}:`, groupErr.message);
+            } catch (err: any) {
+              productErrors = variants.length;
+              const syncError = `Existing listing sync failed: ${err.message.substring(0, 1000)}`;
+              for (const variant of variants) {
+                await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
+                  syncStatus: "error",
+                  syncError,
+                });
               }
+              console.error(`[eBay Sync Stream] Product sync failed for ${productId}:`, err.message);
             }
-
             if (productErrors > 0) {
               errors += productErrors;
               sendEvent({ type: "progress", product: product.product_name, productId, status: "error", error: `${productErrors} variant(s) failed to sync`, current, total });
@@ -1787,6 +1416,12 @@ export const router = express.Router();
       }
 
       const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+      const conn = await getChannelConnection();
+      const metadata = (conn?.metadata as Record<string, any>) || {};
+      const marketplaceId = typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+        ? metadata.marketplaceId.trim()
+        : EBAY_LISTING_DEFAULT_MARKETPLACE_ID;
+      const ebayClient = createEbayRouteListingClient({ accessToken });
 
       const client = await pool.connect();
       try {
@@ -1822,23 +1457,13 @@ export const router = express.Router();
           }
 
           try {
-            // Step 1: Check if inventory item exists
-            let itemExists = true;
-            try {
-              await ebayApiRequest(
-                "GET",
-                `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
-                accessToken,
-              );
-            } catch (err: any) {
-              if (err.message?.includes("404") || err.message?.includes("25710")) {
-                itemExists = false;
-              } else {
-                throw err;
-              }
-            }
+            const inspection = await ebayListingConnector.inspectListingStatus({
+              client: ebayClient,
+              sku,
+              marketplaceId,
+            });
 
-            if (!itemExists) {
+            if (!inspection.inventoryItemExists) {
               // Inventory item gone — mark as deleted
               await client.query(
                 `UPDATE channel_listings SET sync_status = 'deleted', sync_error = 'Inventory item not found on eBay', updated_at = NOW()
@@ -1850,30 +1475,7 @@ export const router = express.Router();
               continue;
             }
 
-            // Step 2: Check if offer is still active
-            let offerActive = false;
-            try {
-              const offersResp = await ebayApiRequest(
-                "GET",
-                `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=EBAY_US`,
-                accessToken,
-              );
-              if (offersResp?.offers?.length > 0) {
-                // Check offer status — PUBLISHED means active
-                const hasActiveOffer = offersResp.offers.some(
-                  (o: any) => o.status === "PUBLISHED" || o.status === "ACTIVE",
-                );
-                offerActive = hasActiveOffer;
-              }
-            } catch (err: any) {
-              if (err.message?.includes("404")) {
-                offerActive = false;
-              } else {
-                throw err;
-              }
-            }
-
-            if (offerActive) {
+            if (inspection.hasActiveOffer) {
               active++;
             } else {
               // Offer ended/withdrawn

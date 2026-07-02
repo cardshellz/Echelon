@@ -14,9 +14,13 @@ import {
   channelListings,
   productAssets,
 } from "@shared/schema";
-import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
+import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { createInventoryAtpService } from "../../modules/inventory/atp.service";
 import { upsertChannelListing, upsertPushError, clearPushError, resolveChannelPrice, applyPricingRule, determineVariationAspectName, syncActiveListings, triggerPricingRuleSync, delay } from "./ebay-sync-helpers";
+import {
+  createEbayRouteListingLifecycleClient,
+  getExistingEbayInventoryImageUrls,
+} from "./ebay-listing-connector-client";
 import {
   markEbayProductListingsPendingForRelist,
   setEbayProductListingIntent,
@@ -24,6 +28,14 @@ import {
 } from "./ebay-listing-state";
 
 export const router = express.Router();
+
+async function getEbayRouteMarketplaceId(): Promise<string> {
+  const connection = await getChannelConnection();
+  const metadata = (connection?.metadata as Record<string, unknown>) || {};
+  return typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+    ? metadata.marketplaceId.trim()
+    : "EBAY_US";
+}
 
   // -----------------------------------------------------------------------
   router.put("/api/ebay/product-exclusion/:productId", requireAuth, async (req: Request, res: Response) => {
@@ -244,13 +256,10 @@ export const router = express.Router();
 
         for (const prod of prods) {
           try {
-            const item = await ebayApiRequest(
-              "GET",
-              `/sell/inventory/v1/inventory_item/${encodeURIComponent(prod.external_sku)}`,
+            const ebayImageUrls = await getExistingEbayInventoryImageUrls({
               accessToken,
-            );
-
-            const ebayImageUrls: string[] = item?.product?.imageUrls || [];
+              sku: prod.external_sku,
+            });
             if (ebayImageUrls.length === 0) {
               skipped++;
               details.push({ productId: prod.product_id, productName: prod.product_name, status: "no_images" });
@@ -324,6 +333,8 @@ export const router = express.Router();
         return;
       }
       const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+      const marketplaceId = await getEbayRouteMarketplaceId();
+      const ebayClient = createEbayRouteListingLifecycleClient({ accessToken });
       log.push("Got eBay access token");
 
       const skus = ["HERO-GRD-PSA-P1", "HERO-GRD-PSA-B5", "HERO-GRD-PSA-C50"];
@@ -331,15 +342,11 @@ export const router = express.Router();
       // Delete offers for each SKU
       for (const sku of skus) {
         try {
-          const offers = await ebayApiRequest(
-            "GET",
-            `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&limit=100`,
-            accessToken,
-          );
+          const offers = await ebayClient.getOffers(sku, marketplaceId);
           if (offers?.offers && offers.offers.length > 0) {
             for (const offer of offers.offers) {
               try {
-                await ebayApiRequest("DELETE", `/sell/inventory/v1/offer/${offer.offerId}`, accessToken);
+                await ebayClient.deleteOffer(offer.offerId);
                 log.push(`Deleted offer ${offer.offerId} for ${sku}`);
               } catch (err: any) {
                 log.push(`Failed to delete offer ${offer.offerId}: ${err.message}`);
@@ -355,7 +362,7 @@ export const router = express.Router();
 
       // Delete the inventory item group PROD-60
       try {
-        await ebayApiRequest("DELETE", `/sell/inventory/v1/inventory_item_group/PROD-60`, accessToken);
+        await ebayClient.deleteInventoryItemGroup("PROD-60");
         log.push("Deleted inventory item group PROD-60");
       } catch (err: any) {
         log.push(`Failed to delete group PROD-60: ${err.message}`);
@@ -364,7 +371,7 @@ export const router = express.Router();
       // Delete individual inventory items
       for (const sku of skus) {
         try {
-          await ebayApiRequest("DELETE", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken);
+          await ebayClient.deleteInventoryItem(sku);
           log.push(`Deleted inventory item ${sku}`);
         } catch (err: any) {
           log.push(`Failed to delete inventory item ${sku}: ${err.message}`);

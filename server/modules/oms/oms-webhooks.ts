@@ -22,6 +22,12 @@ import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConne
 import { db } from "../../db";
 import { pushToMissionControl } from "./mc-push";
 import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
+import { buildChannelLineDisplayName, chooseBestLineDisplayName } from "./line-display-name";
+import {
+  deriveOmsLineAuthority,
+  type OmsLineAuthorityState,
+} from "./oms-line-authority";
+import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
@@ -43,6 +49,19 @@ import {
 // ---------------------------------------------------------------------------
 
 const LOG_PREFIX = "[OMS Shopify Webhook]";
+
+function authorityLinePatch(state: OmsLineAuthorityState) {
+  return {
+    channelObservedQuantity: state.channelObservedQuantity,
+    paidQuantity: state.paidQuantity,
+    authorityFulfillableQuantity: state.authorityFulfillableQuantity,
+    authorizationStatus: state.authorizationStatus,
+    authorizedAt: state.authorizedAt,
+    authorizedByEventId: state.authorizedByEventId,
+    authoritySourceTopic: state.authoritySourceTopic,
+    authoritySourceInboxId: state.authoritySourceInboxId,
+  };
+}
 
 async function ensureOmsOrderQueuedForWmsSync(
   wmsSyncService: any,
@@ -82,7 +101,7 @@ interface WmsServices {
     routeOrder: (ctx: any) => Promise<any>;
     assignWarehouseToOrder: (orderId: number, routing: any) => Promise<void>;
   };
-  slaMonitor: {
+  slaMonitor?: {
     setSLAForOrder: (orderId: number) => Promise<void>;
   };
 }
@@ -357,11 +376,11 @@ export async function cancelOrderCascade(
   const now = new Date();
   let cancelCascadeDetails: Record<string, any> | undefined;
 
-  const wmsOrderResult = await db.execute<{ id: number }>(sql`
+  const wmsOrderResult = await db.execute(sql`
     SELECT id FROM wms.orders
     WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrderId)})
        OR (source = 'shopify' AND source_table_id = ${String(omsOrderId)})
-  `);
+  `) as { rows?: Array<{ id: number }> };
   const wmsOrderRows = wmsOrderResult.rows ?? [];
 
   if (wmsOrderRows.length === 0) {
@@ -1082,6 +1101,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     externalProductId: item.externalProductId,
     sku: item.sku,
     title: item.title,
+    name: item.name,
     variantTitle: item.variantTitle,
     quantity: item.quantity,
     paidPriceCents: item.paidPriceCents,
@@ -1523,7 +1543,12 @@ export function registerOmsWebhooks(
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
       // Dedup: check OMS first
-      const orderData = mapShopifyOrderToOrderData(shopifyOrder);
+      const orderData = {
+        ...mapShopifyOrderToOrderData(shopifyOrder),
+        sourceTopic: "orders/paid",
+        sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+        sourceInboxId: inbox.receipt.id,
+      };
       const omsOrder = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
       // Check if newly created (within last 5 seconds)
@@ -1646,7 +1671,12 @@ export function registerOmsWebhooks(
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
       // Find or create existing OMS order via ingestOrder (UPSERT behavior)
-      const orderData = mapShopifyOrderToOrderData(shopifyOrder);
+      const orderData = {
+        ...mapShopifyOrderToOrderData(shopifyOrder),
+        sourceTopic: "orders/updated",
+        sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+        sourceInboxId: inbox.receipt.id,
+      };
       const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
 
@@ -1809,56 +1839,125 @@ export function registerOmsWebhooks(
               item,
               shopifyOrder.fulfillment_status,
             );
-            // Update existing line
-            await db
-              .update(omsOrderLines)
-              .set({
-                sku: item.sku || existingLine.sku,
-                title: item.title || existingLine.title,
-                quantity: item.quantity ?? existingLine.quantity,
-                fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
-                  ? Number(item.fulfillable_quantity)
-                  : existingLine.fulfillableQuantity,
-                fulfillmentStatus,
-                requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? existingLine.requiresShipping,
-                paidPriceCents: normalizedLine?.paidPriceCents ?? existingLine.paidPriceCents,
-                retailPriceCents: normalizedLine?.retailPriceCents ?? existingLine.retailPriceCents,
-                totalPriceCents: normalizedLine?.totalCents ?? existingLine.totalPriceCents,
-                totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
-                planDiscountCents: normalizedLine?.planDiscountCents ?? existingLine.planDiscountCents,
-                couponDiscountCents: normalizedLine?.couponDiscountCents ?? existingLine.couponDiscountCents,
-                productVariantId: productVariantId || existingLine.productVariantId,
-              })
-              .where(eq(omsOrderLines.id, existingLine.id));
+            const incomingDisplayName = buildChannelLineDisplayName({
+              name: normalizedLine?.name ?? item.name,
+              title: normalizedLine?.title ?? item.title,
+              variantTitle: normalizedLine?.variantTitle ?? item.variant_title,
+            });
+            const preservedTitle = chooseBestLineDisplayName(
+              existingLine.title,
+              incomingDisplayName,
+            );
+            const preservedName = chooseBestLineDisplayName(
+              existingLine.name,
+              incomingDisplayName,
+            );
+            const authority = deriveOmsLineAuthority({
+              sourceTopic: "orders/updated",
+              sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+              sourceInboxId: inbox.receipt.id,
+              financialStatus: shopifyOrder.financial_status,
+              quantity: item.quantity ?? existingLine.quantity,
+              fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                ? Number(item.fulfillable_quantity)
+                : existingLine.fulfillableQuantity,
+              previous: existingLine,
+            });
+
+            // Update existing line and authority ledger atomically.
+            await db.transaction(async (tx: any) => {
+              await tx
+                .update(omsOrderLines)
+                .set({
+                  sku: item.sku || existingLine.sku,
+                  title: preservedTitle,
+                  name: preservedName,
+                  variantTitle: (normalizedLine?.variantTitle ?? item.variant_title) || existingLine.variantTitle,
+                  quantity: item.quantity ?? existingLine.quantity,
+                  ...authorityLinePatch(authority),
+                  fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                    ? Number(item.fulfillable_quantity)
+                    : existingLine.fulfillableQuantity,
+                  fulfillmentStatus,
+                  requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? existingLine.requiresShipping,
+                  paidPriceCents: normalizedLine?.paidPriceCents ?? existingLine.paidPriceCents,
+                  retailPriceCents: normalizedLine?.retailPriceCents ?? existingLine.retailPriceCents,
+                  totalPriceCents: normalizedLine?.totalCents ?? existingLine.totalPriceCents,
+                  totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
+                  planDiscountCents: normalizedLine?.planDiscountCents ?? existingLine.planDiscountCents,
+                  couponDiscountCents: normalizedLine?.couponDiscountCents ?? existingLine.couponDiscountCents,
+                  productVariantId: productVariantId || existingLine.productVariantId,
+                })
+                .where(eq(omsOrderLines.id, existingLine.id));
+
+              await recordOmsLineAuthorityEvent({
+                db: tx,
+                orderId: existing.id,
+                orderLineId: existingLine.id,
+                eventType: "line_updated",
+                sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                previous: existingLine,
+                authority,
+              });
+            });
           } else {
             const fulfillmentStatus = mapShopifyLineFulfillmentStatus(
               item,
               shopifyOrder.fulfillment_status,
             );
-            // Insert new line
-            await db.insert(omsOrderLines).values({
-              orderId: existing.id,
-              productVariantId,
-              externalLineItemId: lineId,
-              sku: item.sku,
-              title: item.title,
-              variantTitle: item.variant_title,
-              name: normalizedLine?.name ?? item.name ?? item.title,
-              vendor: normalizedLine?.vendor ?? item.vendor,
-              externalProductId: normalizedLine?.externalProductId ?? (item.product_id ? String(item.product_id) : null),
+            const displayName = buildChannelLineDisplayName({
+              name: normalizedLine?.name ?? item.name,
+              title: normalizedLine?.title ?? item.title,
+              variantTitle: normalizedLine?.variantTitle ?? item.variant_title,
+            });
+            const authority = deriveOmsLineAuthority({
+              sourceTopic: "orders/updated",
+              sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+              sourceInboxId: inbox.receipt.id,
+              financialStatus: shopifyOrder.financial_status,
               quantity: item.quantity || 1,
               fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
                 ? Number(item.fulfillable_quantity)
                 : null,
-              fulfillmentStatus,
-              requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? true,
-              paidPriceCents: normalizedLine?.paidPriceCents ?? 0,
-              retailPriceCents: normalizedLine?.retailPriceCents ?? 0,
-              totalPriceCents: normalizedLine?.totalCents ?? 0,
-              totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
-              planDiscountCents: normalizedLine?.planDiscountCents ?? 0,
-              couponDiscountCents: normalizedLine?.couponDiscountCents ?? 0,
-            }).onConflictDoNothing();
+            });
+            // Insert new line and authority ledger atomically.
+            await db.transaction(async (tx: any) => {
+              const [insertedLine] = await tx.insert(omsOrderLines).values({
+                orderId: existing.id,
+                productVariantId,
+                externalLineItemId: lineId,
+                sku: item.sku,
+                title: displayName,
+                variantTitle: normalizedLine?.variantTitle ?? item.variant_title,
+                name: displayName,
+                vendor: normalizedLine?.vendor ?? item.vendor,
+                externalProductId: normalizedLine?.externalProductId ?? (item.product_id ? String(item.product_id) : null),
+                quantity: item.quantity || 1,
+                ...authorityLinePatch(authority),
+                fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                  ? Number(item.fulfillable_quantity)
+                  : null,
+                fulfillmentStatus,
+                requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? true,
+                paidPriceCents: normalizedLine?.paidPriceCents ?? 0,
+                retailPriceCents: normalizedLine?.retailPriceCents ?? 0,
+                totalPriceCents: normalizedLine?.totalCents ?? 0,
+                totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
+                planDiscountCents: normalizedLine?.planDiscountCents ?? 0,
+                couponDiscountCents: normalizedLine?.couponDiscountCents ?? 0,
+              }).onConflictDoNothing().returning({ id: omsOrderLines.id });
+
+              if (insertedLine) {
+                await recordOmsLineAuthorityEvent({
+                  db: tx,
+                  orderId: existing.id,
+                  orderLineId: insertedLine.id,
+                  eventType: "line_inserted",
+                  sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                  authority,
+                });
+              }
+            });
           }
         }
 
@@ -1867,16 +1966,51 @@ export function registerOmsWebhooks(
         for (const existingLine of existingLines) {
           if (existingLine.externalLineItemId && !shopifyLineIds.has(existingLine.externalLineItemId)) {
             if ((existingLine.quantity || 0) > 0) {
-              await db
-                .update(omsOrderLines)
-                .set({ quantity: 0 })
-                .where(eq(omsOrderLines.id, existingLine.id));
+              const authority = deriveOmsLineAuthority({
+                sourceTopic: "orders/updated",
+                sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                sourceInboxId: inbox.receipt.id,
+                financialStatus: shopifyOrder.financial_status,
+                quantity: 0,
+                fulfillableQuantity: 0,
+                previous: existingLine,
+              });
+              await db.transaction(async (tx: any) => {
+                await tx
+                  .update(omsOrderLines)
+                  .set({
+                    quantity: 0,
+                    fulfillableQuantity: 0,
+                    ...authorityLinePatch(authority),
+                  })
+                  .where(eq(omsOrderLines.id, existingLine.id));
+
+                await recordOmsLineAuthorityEvent({
+                  db: tx,
+                  orderId: existing.id,
+                  orderLineId: existingLine.id,
+                  eventType: "line_removed",
+                  sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                  previous: existingLine,
+                  authority,
+                });
+              });
               console.log(
                 `${LOG_PREFIX} Zeroed removed OMS line ${existingLine.externalLineItemId} (SKU: ${existingLine.sku}) for order ${shopifyOrder.name || externalOrderId}`,
               );
             }
           }
         }
+
+        const authorizedDemandResult: any = await db.execute(sql`
+          SELECT 1
+          FROM oms.oms_order_lines
+          WHERE order_id = ${existing.id}
+            AND COALESCE(authority_fulfillable_quantity, quantity, 0) > 0
+            AND requires_shipping IS DISTINCT FROM false
+          LIMIT 1
+        `);
+        const hasAuthorizedShippableWork = (authorizedDemandResult?.rows ?? []).length > 0;
 
         // Update WMS order items if they exist
         if (wmsOrderRows.length > 0) {
@@ -1920,7 +2054,11 @@ export function registerOmsWebhooks(
               new Error("orders/updated could not reconcile WMS lines because wmsSyncService is unavailable"),
             );
           }
-        } else if (!isFinalOmsState && (shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid")) {
+        } else if (
+          !isFinalOmsState &&
+          hasAuthorizedShippableWork &&
+          (shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid")
+        ) {
           if (wmsSyncService) {
             await ensureOmsOrderQueuedForWmsSync(
               wmsSyncService,
@@ -1988,7 +2126,12 @@ export function registerOmsWebhooks(
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
       // Find or create existing OMS order via ingestOrder
-      const orderData = mapShopifyOrderToOrderData(shopifyOrder);
+      const orderData = {
+        ...mapShopifyOrderToOrderData(shopifyOrder),
+        sourceTopic: "orders/cancelled",
+        sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+        sourceInboxId: inbox.receipt.id,
+      };
       const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
       if (existing.status === "cancelled") {
@@ -2059,7 +2202,12 @@ export function registerOmsWebhooks(
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
       // Find or create existing OMS order via ingestOrder
-      const orderData = mapShopifyOrderToOrderData(shopifyOrder);
+      const orderData = {
+        ...mapShopifyOrderToOrderData(shopifyOrder),
+        sourceTopic: "orders/fulfilled",
+        sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+        sourceInboxId: inbox.receipt.id,
+      };
       const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
       if (existing.status === "shipped") {

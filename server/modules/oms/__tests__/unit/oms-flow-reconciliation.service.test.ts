@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  autoCloseResolvedDeadFulfillmentRetries,
   collectOmsFlowReconciliationIssues,
   remediateOmsFlowIssue,
   runOmsFlowReconciliation,
@@ -29,7 +30,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await collectOmsFlowReconciliationIssues(db);
 
     expect(issues).toEqual([]);
-    expect(db.execute).toHaveBeenCalledTimes(16);
+    expect(db.execute).toHaveBeenCalledTimes(20);
   });
 
   it("returns critical OMS/WMS and shipment drift issues with samples", async () => {
@@ -102,6 +103,28 @@ describe("oms-flow-reconciliation.service", () => {
     expect(fulfillmentStatusGuards.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("flags active fulfillment partitions that cover the same OMS line", () => {
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("WMS_PARTITION_DUPLICATE_LINE_COVERAGE");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("duplicate_line_coverage");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("wo.fulfillment_partition_key");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("COUNT(DISTINCT wo.id) > 1");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("fulfillment_partition_keys");
+  });
+
+  it("flags Shopify fulfillment reference drift from provider-neutral OMS line columns", () => {
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_drift");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_rows");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.fulfillment_provider");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.provider_fulfillment_order_id");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("ol.shopify_fulfillment_order_id");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("normalized_fulfillment_provider");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("LOWER(NULLIF(BTRIM(ol.fulfillment_provider), ''))");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("NULLIF(BTRIM(ol.provider_fulfillment_order_id), '')");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("IS DISTINCT FROM");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_context_missing_or_mismatched");
+  });
+
   it("treats refunded OMS financial status as final for WMS reconciliation", () => {
     const refundedFinancialStatusGuards = OMS_FLOW_RECONCILIATION_SRC.match(
       /oo\.financial_status = 'refunded'/g,
@@ -136,6 +159,36 @@ describe("oms-flow-reconciliation.service", () => {
     });
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED=3"),
+    );
+    warn.mockRestore();
+  });
+
+  it("auto-closes dead fulfillment retry rows after later scoped success evidence", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db = {
+      execute: vi.fn(async () => sampleRows([{ id: 108147 }])),
+    };
+
+    const closed = await autoCloseResolvedDeadFulfillmentRetries(db);
+
+    expect(closed).toBe(1);
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("q.status = 'dead'");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
+      "q.topic IN ('delayed_tracking_push', 'shopify_fulfillment_push')",
+    );
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
+      "e.created_at >= COALESCE(c.dead_at, c.created_at)",
+    );
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("e.details->>'wmsShipmentId'");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("e.details->>'trackingNumber'");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("e.details->>'shopifyFulfillmentId'");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
+      "last_error = 'auto-closed: later OMS fulfillment/tracking event confirmed success'",
+    );
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("SET status = 'success'");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("auto-closed 1 resolved fulfillment/tracking retry"),
     );
     warn.mockRestore();
   });
@@ -176,7 +229,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await runOmsFlowReconciliation(db);
 
     expect(issues).toHaveLength(1);
-    expect(db.execute).toHaveBeenCalledTimes(20);
+    expect(db.execute).toHaveBeenCalledTimes(25);
     expect(inserts).toHaveLength(2);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("auto-queued 2 delayed tracking push retry"),
@@ -297,6 +350,14 @@ describe("oms-flow-reconciliation.service", () => {
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        // WMS_PARTITION_DUPLICATE_LINE_COVERAGE detector count + sample.
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        // OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT detector count + sample.
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        // Auto-close cleanup finds no resolved dead fulfillment/tracking retries.
         .mockResolvedValueOnce(sampleRows([]))
         // OMS_PAID_WITHOUT_WMS remediation SELECT + duplicate retry check + audit event.
         .mockResolvedValueOnce(sampleRows([{ id: 10 }]))
@@ -511,7 +572,9 @@ describe("oms-flow-reconciliation.service", () => {
     const db = {
       execute: vi
         .fn()
+        // Remediation SELECT + duplicate retry check + requires_review guard + audit event.
         .mockResolvedValueOnce(sampleRows([{ id: 30, wms_order_id: 20, oms_order_id: "10" }]))
+        .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(sampleRows([])),
       insert: vi.fn(() => ({
@@ -540,7 +603,7 @@ describe("oms-flow-reconciliation.service", () => {
     expect(inserts).toHaveLength(1);
     expect((inserts[0] as any).topic).toBe("shipstation_shipment_push");
     expect((inserts[0] as any).payload).toEqual({ shipmentId: 30 });
-    expect(db.execute).toHaveBeenCalledTimes(3);
+    expect(db.execute).toHaveBeenCalledTimes(4);
   });
 
   it("rejects unsupported remediation codes", async () => {

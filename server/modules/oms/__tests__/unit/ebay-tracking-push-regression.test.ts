@@ -155,7 +155,7 @@ const mockChannel = {
 };
 
 const mockLines = [
-  { externalLineItemId: "12345", quantity: 1 },
+  { externalLineItemId: "12345", quantity: 1, fulfillmentProvider: "ebay" },
 ];
 
 // Patch the schema imports — we need to provide table stubs that the mock
@@ -286,6 +286,40 @@ describe("eBay tracking push regression (2026-04-14)", () => {
         trackingNumber: TRACKING,
       }),
     );
+  });
+
+  it("filters explicit non-eBay provider lines from eBay fulfillment payloads", async () => {
+    mockEbayClient.createShippingFulfillment.mockResolvedValue({ fulfillmentId: "ft_1" });
+
+    const { db } = makeMockDb({
+      order: mockOrder,
+      channel: mockChannel,
+      lines: [
+        { externalLineItemId: "12345", quantity: 1, fulfillmentProvider: "ebay" },
+        { externalLineItemId: "legacy-null", quantity: 1, fulfillmentProvider: null },
+        { externalLineItemId: "drop-1", quantity: 1, fulfillmentProvider: "dropship" },
+      ],
+    });
+
+    const svc = createFulfillmentPushService(db as any, mockEbayClient);
+    await svc.pushTracking(ORDER_ID);
+
+    expect(mockEbayClient.createShippingFulfillment).toHaveBeenCalledWith(
+      EBAY_ORDER_ID,
+      expect.objectContaining({
+        lineItems: [
+          { lineItemId: "12345", quantity: 1 },
+          { lineItemId: "legacy-null", quantity: 1 },
+        ],
+      }),
+    );
+  });
+
+  it("treats blank provider rows as legacy eBay rows", () => {
+    expect(__test__.isEbayFulfillmentProvider(null)).toBe(true);
+    expect(__test__.isEbayFulfillmentProvider("")).toBe(true);
+    expect(__test__.isEbayFulfillmentProvider(" ebay ")).toBe(true);
+    expect(__test__.isEbayFulfillmentProvider("dropship")).toBe(false);
   });
 
   it("fans out order-level tracking through shipped WMS shipments when they exist", async () => {

@@ -57,6 +57,8 @@ export function registerDropshipAdminCatalogRoutes(
           search: parseOptionalStringQuery(req.query.search),
           category: parseOptionalStringQuery(req.query.category),
           productLineId: parseOptionalNumberQuery(req.query.productLineId),
+          visibility: parsePreviewVisibilityQuery(req.query.visibility),
+          catalogStatus: parsePreviewCatalogStatusQuery(req.query.catalogStatus),
           includeInactiveCatalog: parseBooleanQuery(req.query.includeInactiveCatalog, false),
           exposedOnly: parseBooleanQuery(req.query.exposedOnly, false),
           page: parseNumberQuery(req.query.page, 1),
@@ -132,6 +134,22 @@ function parseBooleanQuery(value: unknown, fallback: boolean): boolean {
     return false;
   }
   return fallback;
+}
+
+function parsePreviewVisibilityQuery(value: unknown): "all" | "visible" | "hidden" | undefined {
+  const parsed = parseOptionalStringQuery(value);
+  if (parsed === "all" || parsed === "visible" || parsed === "hidden") {
+    return parsed;
+  }
+  return undefined;
+}
+
+function parsePreviewCatalogStatusQuery(value: unknown): "active" | "inactive" | "all" | undefined {
+  const parsed = parseOptionalStringQuery(value);
+  if (parsed === "active" || parsed === "inactive" || parsed === "all") {
+    return parsed;
+  }
+  return undefined;
 }
 
 function sendDropshipCatalogError(res: Response, error: unknown) {

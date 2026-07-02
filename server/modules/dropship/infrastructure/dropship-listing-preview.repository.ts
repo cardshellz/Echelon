@@ -223,7 +223,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
                 product_variant_id, category, starts_at, ends_at
          FROM dropship.dropship_catalog_rules
          WHERE is_active = true
-         ORDER BY priority DESC, id ASC`,
+         ORDER BY priority ASC, id ASC`,
       );
       return result.rows.map(mapCatalogRuleRow);
     } finally {
@@ -274,10 +274,24 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            p.is_active AS product_is_active,
            pv.is_active AS variant_is_active,
            pv.units_per_variant,
-           pv.price_cents AS default_retail_price_cents
+           COALESCE((ROUND(retail_cache.price::numeric * 100))::bigint, pv.price_cents) AS default_retail_price_cents
          FROM catalog.product_variants pv
          INNER JOIN catalog.products p ON p.id = pv.product_id
          LEFT JOIN catalog.product_line_products plp ON plp.product_id = p.id
+         LEFT JOIN LATERAL (
+           SELECT sv.price
+           FROM public.shopify_variants sv
+           WHERE (
+               pv.shopify_variant_id IS NOT NULL
+               AND sv.id::text = pv.shopify_variant_id::text
+             )
+             OR (
+               NULLIF(BTRIM(pv.sku), '') IS NOT NULL
+               AND UPPER(sv.sku) = UPPER(pv.sku)
+             )
+           ORDER BY CASE WHEN sv.id::text = pv.shopify_variant_id::text THEN 0 ELSE 1 END
+           LIMIT 1
+         ) retail_cache ON true
          LEFT JOIN LATERAL (
            SELECT ARRAY_AGG(pa.url ORDER BY pa.is_primary DESC, pa.position ASC, pa.id ASC) AS image_urls
            FROM catalog.product_assets pa
@@ -287,7 +301,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
              AND NULLIF(BTRIM(pa.url), '') IS NOT NULL
          ) assets ON true
          WHERE pv.id = ANY($1::int[])
-         GROUP BY p.id, pv.id, assets.image_urls`,
+         GROUP BY p.id, pv.id, retail_cache.price, assets.image_urls`,
         [productVariantIds],
       );
       return result.rows.map(mapCandidateRow);

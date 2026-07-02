@@ -435,6 +435,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      setSelectedReceipt(null);
       setShowReceiptDetail(false);
       toast({ title: "Receipt discarded" });
       // Navigate back to the source PO if this receipt was PO-linked
@@ -1012,7 +1013,13 @@ DEF-456,25,,,5.00,,Location TBD`;
       const data = await res.json();
       setSelectedReceipt(data);
       setShowReceiptDetail(true);
+      return;
     }
+    toast({
+      title: "Receipt unavailable",
+      description: res.status === 404 ? "This receipt was discarded or no longer exists." : `Could not open receipt (${res.status}).`,
+      variant: "destructive",
+    });
   };
 
   // Auto-open receipt when navigated with ?open=<id>
@@ -1023,12 +1030,27 @@ DEF-456,25,,,5.00,,Location TBD`;
     const openId = params.get("open");
     if (openId && receipts.length > 0) {
       autoOpenHandled.current = true;
-      const receipt = receipts.find(r => r.id === Number(openId));
+      const openReceiptId = Number(openId);
+      if (!Number.isInteger(openReceiptId) || openReceiptId <= 0) {
+        navigate("/receiving", { replace: true });
+        return;
+      }
+      const receipt = receipts.find(r => r.id === openReceiptId);
       if (receipt) {
         loadReceiptDetail(receipt);
       } else {
         // Receipt might not be in the list yet, try direct fetch
-        fetch(`/api/receiving/${openId}`).then(r => r.json()).then(data => {
+        fetch(`/api/receiving/${openReceiptId}`).then(async (res) => {
+          if (!res.ok) {
+            toast({
+              title: "Receipt unavailable",
+              description: res.status === 404 ? "This receipt was discarded or no longer exists." : `Could not open receipt (${res.status}).`,
+              variant: "destructive",
+            });
+            return null;
+          }
+          return res.json();
+        }).then(data => {
           if (data && data.id) {
             setSelectedReceipt(data);
             setShowReceiptDetail(true);

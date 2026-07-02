@@ -121,4 +121,79 @@ describe("AP ledger invoice line imports", () => {
     expect(mocks.db.insert).toHaveBeenCalledTimes(1);
     expect(mocks.db.insert.mock.calls[0][0]).toBe(tables.vendorInvoiceLines);
   });
+
+  it("uses the PO line expected receive variant on imported invoice lines", async () => {
+    const poLines = [
+      {
+        id: 201,
+        status: "open",
+        productVariantId: 11,
+        expectedReceiveVariantId: 22,
+        sku: "EG-SLV-STD",
+        productName: "Easy Glide Soft Sleeves Standard",
+        description: null,
+        orderQty: 5000,
+        receivedQty: 0,
+        unitCostCents: 5,
+        lineTotalCents: 25000,
+      },
+    ];
+    mocks.db.select
+      .mockReturnValueOnce(selectWithOrderBy(poLines))
+      .mockReturnValueOnce(selectWhere([]))
+      .mockReturnValueOnce(selectWhere([{ maxLine: 0 }]));
+    mocks.db.insert.mockReturnValue(insertReturning({ id: 301, purchaseOrderLineId: 201 }));
+
+    const { importLinesFromPO } = await import("../../ap-ledger.service");
+
+    const lines = await importLinesFromPO(77, 9);
+
+    expect(lines).toEqual([{ id: 301, purchaseOrderLineId: 201 }]);
+    const insertBuilder = mocks.db.insert.mock.results[0].value;
+    expect(insertBuilder.values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        vendorInvoiceId: 77,
+        purchaseOrderLineId: 201,
+        productVariantId: 22,
+        sku: "EG-SLV-STD",
+        qtyInvoiced: 5000,
+        lineTotalCents: 25000,
+      }),
+    );
+  });
+
+  it("falls back to the legacy PO line variant when expected receive variant is invalid", async () => {
+    const poLines = [
+      {
+        id: 202,
+        status: "open",
+        productVariantId: 33,
+        expectedReceiveVariantId: 0,
+        sku: "LEGACY-SKU",
+        productName: "Legacy item",
+        description: null,
+        orderQty: 10,
+        receivedQty: 0,
+        unitCostCents: 100,
+        lineTotalCents: 1000,
+      },
+    ];
+    mocks.db.select
+      .mockReturnValueOnce(selectWithOrderBy(poLines))
+      .mockReturnValueOnce(selectWhere([]))
+      .mockReturnValueOnce(selectWhere([{ maxLine: 0 }]));
+    mocks.db.insert.mockReturnValue(insertReturning({ id: 302, purchaseOrderLineId: 202 }));
+
+    const { importLinesFromPO } = await import("../../ap-ledger.service");
+
+    await importLinesFromPO(78, 10);
+
+    const insertBuilder = mocks.db.insert.mock.results[0].value;
+    expect(insertBuilder.values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        purchaseOrderLineId: 202,
+        productVariantId: 33,
+      }),
+    );
+  });
 });

@@ -95,7 +95,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 0,
-        lines: [{ productVariantId: 1, orderQty: 1, unitCostCents: 100 }],
+        lines: [{ productId: 1, productVariantId: 1, orderQty: 1, unitCostCents: 100 }],
       } as any),
     ).rejects.toThrow(/vendor_id is required/);
   });

@@ -530,7 +530,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     });
   });
 
-  it("executes inline replen through the replenishment service", async () => {
+  it("executes inline case-break replen through the replenishment service", async () => {
     const { db, inserts, state } = makeDb();
     const service = new ReplenishmentUseCases(db as any, {} as any);
     vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
@@ -544,7 +544,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       pickVariantId: 100,
       qtySourceUnits: 4,
       qtyTargetUnits: 4,
-      replenMethod: "full_case",
+      replenMethod: "case_break",
       executionMode: "inline",
       taskNotes: "Below threshold",
       triggerValue: 2,
@@ -577,6 +577,46 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       productId: 10,
       qtySourceUnits: 4,
       qtyTargetUnits: 4,
+    });
+  });
+
+  it("queues full-case replenishment even when stale guidance asks for inline execution", async () => {
+    const { db, inserts } = makeDb();
+    const service = new ReplenishmentUseCases(db as any, {} as any);
+    vi.spyOn(service, "checkReplenNeeded").mockResolvedValue({
+      needed: true,
+      stockout: false,
+      sourceLocationId: 2,
+      sourceLocationCode: "B-01",
+      sourceVariantId: null,
+      sourceVariantSku: "SKU-1",
+      sourceVariantName: "Each",
+      pickVariantId: 100,
+      qtySourceUnits: 4,
+      qtyTargetUnits: 4,
+      replenMethod: "full_case",
+      executionMode: "inline",
+      taskNotes: "Below threshold",
+      triggerValue: 2,
+      autoReplen: 1,
+      evaluatedQty: 1,
+    });
+    const executeTask = vi.spyOn(service, "executeTask");
+
+    const result = await service.createAndExecuteReplen(100, 1, "picker-1");
+
+    expect(executeTask).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      moved: 0,
+      task: {
+        id: 121,
+        status: "pending",
+      },
+    });
+    expect(inserts.find(insert => insert.table === replenTasks)?.value).toMatchObject({
+      status: "pending",
+      executionMode: "queue",
+      replenMethod: "full_case",
     });
   });
 
@@ -756,6 +796,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       sourceProductVariantId: 100,
       status: "pending",
       executionMode: "inline",
+      replenMethod: "case_break",
       qtySourceUnits: 4,
       qtyTargetUnits: 4,
       qtyCompleted: 0,
@@ -1038,7 +1079,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       variant: { id: 100, sku: "SKU-1", name: "Each", productId: 10 },
       whSettings: null,
       params: {
-        replenMethod: "full_case",
+        replenMethod: "case_break",
         priority: 5,
         sourceLocationType: "pick",
         sourcePriority: "fifo",

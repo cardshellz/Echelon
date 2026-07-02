@@ -203,11 +203,12 @@ function CostUploadSection() {
         <CardHeader>
           <CardTitle>Upload lot costs (CSV)</CardTitle>
           <CardDescription>
-            Cost legacy / provisional lots in bulk by <strong>per-piece cost</strong>. <strong>Download
-            template</strong> — one row per product with un-costed lots — fill the <code>cost_per_piece</code>
-            column (dollars per piece, up to 4 decimals), then <strong>Preview</strong> and <strong>Apply</strong>.
-            Each variant's lot is costed as <strong>per-piece × pack size</strong> (e.g. $0.04/piece → a 50-pack
-            lot becomes $2.00, a 700-case lot $28.00). Real cost layers are never touched; nothing is written until Apply.
+            Cost legacy / provisional lots by <strong>per-piece cost</strong>. <strong>Download template</strong>
+            — just <code>sku</code> + <code>cost_per_piece</code>, one row per un-costed SKU — fill the
+            <code>cost_per_piece</code> column (dollars per piece, up to 4 decimals), then <strong>Preview</strong>
+            and <strong>Apply</strong>. The system multiplies by each SKU's pack size automatically (e.g.
+            $0.04/piece → a 50-pack lot = $2.00, a 700-case lot = $28.00). Real cost layers are never touched;
+            nothing is written until Apply.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -443,6 +444,7 @@ function CostExplorer() {
   const [onlyPending, setOnlyPending] = useState(false);
   const [expandedLots, setExpandedLots] = useState<Set<number>>(new Set());
   const [page, setPage] = useState(0);
+  const [recostLot, setRecostLot] = useState<any>(null);
   const pageSize = 50;
 
   const debouncedSearch = useDebounce(search, 300);
@@ -590,6 +592,7 @@ function CostExplorer() {
                             <TableHead className="text-xs text-right">Remaining</TableHead>
                             <TableHead className="text-xs">Source</TableHead>
                             <TableHead className="text-xs text-right">Age</TableHead>
+                            <TableHead className="text-xs text-right">Recost</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -632,6 +635,17 @@ function CostExplorer() {
                                 <TableCell className="text-right text-xs text-muted-foreground">
                                   {Math.round(Number(lot.age_days || 0))}d
                                 </TableCell>
+                                <TableCell className="text-right">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2"
+                                    title="Recost this lot"
+                                    onClick={() => setRecostLot(lot)}
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </Button>
+                                </TableCell>
                               </TableRow>
                             );
                           })}
@@ -667,7 +681,85 @@ function CostExplorer() {
           )}
         </div>
       )}
+      {recostLot && <RecostLotDialog lot={recostLot} onClose={() => setRecostLot(null)} />}
     </div>
+  );
+}
+
+function RecostLotDialog({ lot, onClose }: { lot: any; onClose: () => void }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const upv = Number(lot.units_per_variant) || 1;
+  const [perPiece, setPerPiece] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const dollars = Number(String(perPiece).replace(/[$,\s]/g, ""));
+  const valid = perPiece.trim() !== "" && Number.isFinite(dollars) && dollars >= 0;
+  const perVariant = valid ? dollars * upv : null;
+
+  async function save() {
+    if (!valid) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/cogs/lots/${lot.id}/recost`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cost_per_piece: dollars, reason }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Recost failed");
+      toast({ title: "Lot recosted", description: `${lot.sku} ${lot.lot_number} → $${(perVariant ?? 0).toFixed(4)}/unit` });
+      qc.invalidateQueries({ queryKey: ["/api/cogs/lots"] });
+      qc.invalidateQueries({ queryKey: ["/api/cogs/valuation"] });
+      onClose();
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Recost lot {lot.lot_number}</DialogTitle>
+          <DialogDescription>
+            {lot.sku} · pack of {upv} · current {formatCostCents(lot.total_unit_cost_cents || lot.unit_cost_cents)}/unit.
+            Enter the cost per piece; the lot is set to per-piece × {upv}. Cascades to booked COGS and is audit-logged.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div>
+            <Label className="text-xs">Cost per piece ($)</Label>
+            <Input
+              type="number"
+              inputMode="decimal"
+              step="0.0001"
+              value={perPiece}
+              placeholder="0.0000"
+              onChange={(e) => setPerPiece(e.target.value)}
+              autoFocus
+            />
+            {valid && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                → <span className="font-mono font-medium">${(perVariant ?? 0).toFixed(4)}</span> per unit (×{upv})
+              </p>
+            )}
+          </div>
+          <div>
+            <Label className="text-xs">Reason (optional)</Label>
+            <Input value={reason} placeholder="e.g. supplier invoice correction" onChange={(e) => setReason(e.target.value)} />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save} disabled={!valid || busy}>{busy ? "Saving…" : "Recost lot"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

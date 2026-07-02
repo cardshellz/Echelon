@@ -91,7 +91,7 @@ function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
       name: "case size",
       unitsPerVariant: 1,
     }),
-    getProductById: vi.fn().mockResolvedValue({ id: 1, name: "Product 1" }),
+    getProductById: vi.fn().mockResolvedValue({ id: 1, sku: "PRODUCT-SKU-1", name: "Product 1" }),
     createReceivingOrder: vi.fn(),
     generateReceiptNumber: vi.fn(),
     bulkCreateReceivingLines: vi.fn(),
@@ -147,6 +147,89 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
       expect(row.unitCostMills).toBe(639);
       // Derived cents: 1277000 / 200000 = 6.385 → 6 cents (half-up)
       expect(row.unitCostCents).toBe(6);
+    });
+
+    it("stores the product SKU on PO lines even when variant metadata is present", async () => {
+      const captureInserts: any[] = [];
+      storage = buildMockStorage({
+        getProductVariantById: vi.fn().mockResolvedValue({
+          id: 11,
+          productId: 1,
+          sku: "VARIANT-SKU-C1000",
+          name: "Case of 1000",
+          unitsPerVariant: 1000,
+        }),
+        getProductById: vi.fn().mockResolvedValue({
+          id: 1,
+          sku: "PRODUCT-SKU",
+          name: "Product 1",
+        }),
+      });
+      svc = createPurchasingService(
+        buildMockDb({ id: 42 }, captureInserts),
+        storage,
+      );
+
+      await svc.createPurchaseOrderWithLines({
+        vendorId: 1,
+        lines: [
+          {
+            productId: 1,
+            productVariantId: 11,
+            orderQty: 200000,
+            totalProductCostCents: 100000,
+            packagingCostCents: 0,
+          } as any,
+        ],
+      });
+
+      const linesInsert = captureInserts.find(
+        (c) => Array.isArray(c.rows) && c.rows[0]?.purchaseOrderId !== undefined,
+      );
+      const row = linesInsert.rows[0];
+      expect(row.productVariantId).toBe(11);
+      expect(row.expectedReceiveVariantId).toBe(11);
+      expect(row.expectedReceiveUnitsPerVariant).toBe(1000);
+      expect(row.sku).toBe("PRODUCT-SKU");
+      expect(row.sku).not.toBe("VARIANT-SKU-C1000");
+    });
+
+    it("stores the product SKU on product-level PO lines with no variant", async () => {
+      const captureInserts: any[] = [];
+      storage = buildMockStorage({
+        getProductVariantById: vi.fn(),
+        getProductById: vi.fn().mockResolvedValue({
+          id: 1,
+          sku: "PRODUCT-SKU",
+          name: "Product 1",
+        }),
+      });
+      svc = createPurchasingService(
+        buildMockDb({ id: 42 }, captureInserts),
+        storage,
+      );
+
+      await svc.createPurchaseOrderWithLines({
+        vendorId: 1,
+        lines: [
+          {
+            productId: 1,
+            productVariantId: null,
+            orderQty: 200000,
+            totalProductCostCents: 100000,
+            packagingCostCents: 0,
+          } as any,
+        ],
+      });
+
+      const linesInsert = captureInserts.find(
+        (c) => Array.isArray(c.rows) && c.rows[0]?.purchaseOrderId !== undefined,
+      );
+      const row = linesInsert.rows[0];
+      expect(row.productVariantId).toBeNull();
+      expect(row.expectedReceiveVariantId).toBeNull();
+      expect(row.expectedReceiveUnitsPerVariant).toBe(1);
+      expect(row.sku).toBe("PRODUCT-SKU");
     });
 
     it("handles packaging = 0 correctly", async () => {

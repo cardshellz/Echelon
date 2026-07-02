@@ -1,7 +1,7 @@
 import { dollarsToCents } from "@shared/utils/money";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRoute, useLocation } from "wouter";
+import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -73,6 +73,125 @@ function getHierarchyPrefix(level: number) {
   return HIERARCHY_TYPES.find((t) => t.level === level)?.prefix || "X";
 }
 
+function parsePositiveInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function safeInternalPath(path: string | null): string | null {
+  if (!path || !path.startsWith("/") || path.startsWith("//")) return null;
+  return path;
+}
+
+const GRAMS_PER_POUND = 453.59237;
+const MILLIMETERS_PER_INCH = 25.4;
+
+type VariantPackageAttributeKey = "weightGrams" | "lengthMm" | "widthMm" | "heightMm";
+type VariantPackagePayload = Partial<Record<VariantPackageAttributeKey, number | null>>;
+
+type VariantPackageInput = {
+  weightLb: string;
+  lengthIn: string;
+  widthIn: string;
+  heightIn: string;
+};
+
+function emptyVariantPackageInput(): VariantPackageInput {
+  return {
+    weightLb: "",
+    lengthIn: "",
+    widthIn: "",
+    heightIn: "",
+  };
+}
+
+function formatMeasurementInput(value: number | null | undefined, divisor: number): string {
+  if (value === null || value === undefined) return "";
+  return (value / divisor).toFixed(3).replace(/\.?0+$/, "");
+}
+
+function variantPackageInputFromVariant(variant: ProductVariantRow): VariantPackageInput {
+  return {
+    weightLb: formatMeasurementInput(variant.weightGrams, GRAMS_PER_POUND),
+    lengthIn: formatMeasurementInput(variant.lengthMm, MILLIMETERS_PER_INCH),
+    widthIn: formatMeasurementInput(variant.widthMm, MILLIMETERS_PER_INCH),
+    heightIn: formatMeasurementInput(variant.heightMm, MILLIMETERS_PER_INCH),
+  };
+}
+
+function parsePositiveMeasurement(rawValue: string, label: string): number | null {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return null;
+
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be greater than zero.`);
+  }
+  return parsed;
+}
+
+function toStoredMeasurement(rawValue: string, label: string, multiplier: number): number | null {
+  const parsed = parsePositiveMeasurement(rawValue, label);
+  if (parsed === null) return null;
+
+  const storedValue = Math.round(parsed * multiplier);
+  if (!Number.isInteger(storedValue) || storedValue <= 0) {
+    throw new Error(`${label} is too small to store.`);
+  }
+  return storedValue;
+}
+
+function buildVariantPackagePayload(
+  input: VariantPackageInput,
+  blankMode: "null" | "omit",
+): VariantPackagePayload {
+  const payload: VariantPackagePayload = {};
+  const fields: Array<{ key: VariantPackageAttributeKey; value: string; label: string; multiplier: number }> = [
+    { key: "weightGrams", value: input.weightLb, label: "Package weight", multiplier: GRAMS_PER_POUND },
+    { key: "lengthMm", value: input.lengthIn, label: "Package length", multiplier: MILLIMETERS_PER_INCH },
+    { key: "widthMm", value: input.widthIn, label: "Package width", multiplier: MILLIMETERS_PER_INCH },
+    { key: "heightMm", value: input.heightIn, label: "Package height", multiplier: MILLIMETERS_PER_INCH },
+  ];
+
+  for (const field of fields) {
+    const trimmed = field.value.trim();
+    if (!trimmed && blankMode === "omit") continue;
+    payload[field.key] = toStoredMeasurement(trimmed, field.label, field.multiplier);
+  }
+
+  return payload;
+}
+
+function buildVariantPackageDisplay(variant: ProductVariantRow) {
+  const weight = formatMeasurementInput(variant.weightGrams, GRAMS_PER_POUND);
+  const length = formatMeasurementInput(variant.lengthMm, MILLIMETERS_PER_INCH);
+  const width = formatMeasurementInput(variant.widthMm, MILLIMETERS_PER_INCH);
+  const height = formatMeasurementInput(variant.heightMm, MILLIMETERS_PER_INCH);
+
+  if (!variant.weightGrams) {
+    return {
+      label: "Missing weight",
+      detail: "Required for marketplace listing package data",
+      className: "bg-red-50 text-red-700 border-red-300",
+    };
+  }
+
+  if (!variant.lengthMm || !variant.widthMm || !variant.heightMm) {
+    return {
+      label: "Dims missing",
+      detail: `${weight} lb · add L x W x H`,
+      className: "bg-yellow-50 text-yellow-700 border-yellow-300",
+    };
+  }
+
+  return {
+    label: "Ready",
+    detail: `${weight} lb · ${length} x ${width} x ${height} in`,
+    className: "bg-green-50 text-green-700 border-green-300",
+  };
+}
+
 interface ProductVariantRow {
   id: number;
   sku: string;
@@ -80,6 +199,10 @@ interface ProductVariantRow {
   unitsPerVariant: number;
   barcode: string | null;
   imageUrl: string | null;
+  weightGrams: number | null;
+  lengthMm: number | null;
+  widthMm: number | null;
+  heightMm: number | null;
   hierarchyLevel: number;
   parentVariantId: number | null;
   isBaseUnit: boolean;
@@ -773,6 +896,7 @@ function ProductInventoryTab({ productId }: { productId: number }) {
 export default function ProductDetail() {
   const [, params] = useRoute("/products/:id");
   const [, setLocation] = useLocation();
+  const searchStr = useSearch();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const productId = params?.id ? parseInt(params.id) : null;
@@ -796,6 +920,8 @@ export default function ProductDetail() {
   const [transferTargetVariant, setTransferTargetVariant] = useState<{ id: number; sku: string; name: string; unitsPerVariant: number } | null>(null);
   const [variantSearchOpen, setVariantSearchOpen] = useState(false);
   const [variantSearchQuery, setVariantSearchQuery] = useState("");
+  const receiptSetupAutoOpenRef = useRef<string | null>(null);
+  const variantDeepLinkAutoOpenRef = useRef<string | null>(null);
 
   // --- Product data ---
   const { data: product, isLoading, error } = useQuery<ProductDetailData>({
@@ -1345,6 +1471,7 @@ export default function ProductDetail() {
     barcode: "",
     parentVariantId: null as number | null,
     isBaseUnit: false,
+    package: emptyVariantPackageInput(),
   });
   const [skuManuallyEdited, setSkuManuallyEdited] = useState(false);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
@@ -1405,9 +1532,45 @@ export default function ProductDetail() {
       barcode: "",
       parentVariantId: null,
       isBaseUnit: false,
+      package: emptyVariantPackageInput(),
     });
     setVariantDialogOpen(true);
   }, [computeAutoSku, computeAutoName]);
+
+  useEffect(() => {
+    if (!product?.productId) return;
+    const searchParams = new URLSearchParams(searchStr);
+    if (searchParams.get("receiptSetup") !== "1") return;
+
+    const unitsPerVariant = parsePositiveInt(searchParams.get("unitsPerVariant"));
+    if (!unitsPerVariant) return;
+
+    const setupKey = `${product.productId}:${searchParams.toString()}`;
+    if (receiptSetupAutoOpenRef.current === setupKey) return;
+    receiptSetupAutoOpenRef.current = setupKey;
+
+    const hierarchyLevel = parsePositiveInt(searchParams.get("hierarchyLevel")) ?? 3;
+    setActiveTab("variants");
+    setEditingVariant(null);
+    setSkuManuallyEdited(false);
+    setNameManuallyEdited(false);
+    setUnitsInputRaw(null);
+    setVariantForm({
+      hierarchyLevel,
+      unitsPerVariant,
+      sku: computeAutoSku(hierarchyLevel, unitsPerVariant),
+      name: computeAutoName(hierarchyLevel, unitsPerVariant),
+      barcode: "",
+      parentVariantId: null,
+      isBaseUnit: false,
+      package: emptyVariantPackageInput(),
+    });
+    setVariantDialogOpen(true);
+    toast({
+      title: "Receipt variant setup",
+      description: `Create or activate a receive variant with ${unitsPerVariant} units per variant, then save to resume the receipt.`,
+    });
+  }, [searchStr, product?.productId, computeAutoSku, computeAutoName, toast]);
 
   const openEditVariant = useCallback((variant: ProductVariantRow) => {
     setEditingVariant(variant);
@@ -1421,13 +1584,42 @@ export default function ProductDetail() {
       barcode: variant.barcode || "",
       parentVariantId: variant.parentVariantId,
       isBaseUnit: variant.isBaseUnit ?? false,
+      package: variantPackageInputFromVariant(variant),
     });
     setVariantDialogOpen(true);
   }, []);
 
+  useEffect(() => {
+    const searchParams = new URLSearchParams(searchStr);
+    const tab = searchParams.get("tab");
+    const validTabs = new Set(["overview", "content", "images", "variants", "channels", "suppliers", "inventory"]);
+    if (tab && validTabs.has(tab)) {
+      setActiveTab(tab);
+    }
+  }, [searchStr]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(searchStr);
+    if (searchParams.get("tab") !== "variants") return;
+
+    const variantId = parsePositiveInt(searchParams.get("variantId"));
+    if (!variantId || !product?.productId) return;
+
+    const autoOpenKey = `${product.productId}:${variantId}`;
+    if (variantDeepLinkAutoOpenRef.current === autoOpenKey) return;
+
+    const variant = product.variants.find((candidate) => candidate.id === variantId);
+    if (!variant) return;
+
+    variantDeepLinkAutoOpenRef.current = autoOpenKey;
+    setActiveTab("variants");
+    openEditVariant(variant);
+  }, [searchStr, product?.productId, product?.variants, openEditVariant]);
+
   // --- Variant mutations ---
   const createVariantMutation = useMutation({
     mutationFn: async (data: typeof variantForm) => {
+      const packageAttributes = buildVariantPackagePayload(data.package, "null");
       const res = await fetch(`/api/products/${product?.productId}/variants`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1439,18 +1631,28 @@ export default function ProductDetail() {
           barcode: data.barcode || null,
           parentVariantId: data.parentVariantId,
           isBaseUnit: data.isBaseUnit,
+          ...packageAttributes,
         }),
       });
-      if (!res.ok) throw new Error("Failed to create variant");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || "Failed to create variant");
+      }
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
-      toast({ title: "Variant created" });
       setVariantDialogOpen(false);
+      const returnTo = safeInternalPath(new URLSearchParams(searchStr).get("returnTo"));
+      if (returnTo) {
+        toast({ title: "Variant created", description: "Returning to shipment receipt setup." });
+        setLocation(returnTo);
+        return;
+      }
+      toast({ title: "Variant created" });
     },
-    onError: () => {
-      toast({ title: "Failed to create variant", variant: "destructive" });
+    onError: (err: Error) => {
+      toast({ title: "Failed to create variant", description: err.message, variant: "destructive" });
     },
   });
 
@@ -1474,6 +1676,7 @@ export default function ProductDetail() {
 
   const updateVariantMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: typeof variantForm }) => {
+      const packageAttributes = buildVariantPackagePayload(data.package, "null");
       const res = await fetch(`/api/product-variants/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1485,18 +1688,28 @@ export default function ProductDetail() {
           barcode: data.barcode || null,
           parentVariantId: data.parentVariantId,
           isBaseUnit: data.isBaseUnit,
+          ...packageAttributes,
         }),
       });
-      if (!res.ok) throw new Error("Failed to update variant");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || "Failed to update variant");
+      }
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
-      toast({ title: "Variant updated" });
       setVariantDialogOpen(false);
+      const returnTo = safeInternalPath(new URLSearchParams(searchStr).get("returnTo"));
+      if (returnTo) {
+        toast({ title: "Variant updated", description: "Returning to shipment receipt setup." });
+        setLocation(returnTo);
+        return;
+      }
+      toast({ title: "Variant updated" });
     },
-    onError: () => {
-      toast({ title: "Failed to update variant", variant: "destructive" });
+    onError: (err: Error) => {
+      toast({ title: "Failed to update variant", description: err.message, variant: "destructive" });
     },
   });
 
@@ -2525,17 +2738,19 @@ export default function ProductDetail() {
             {/* ===== VARIANTS TAB ===== */}
             <TabsContent value="variants" className="mt-4">
               <Card>
-                <CardHeader className="p-3 md:p-6 flex flex-row items-center justify-between">
+                <CardHeader className="p-3 md:p-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <CardTitle className="text-base md:text-lg">Product Variants</CardTitle>
                     <CardDescription className="text-xs md:text-sm">
                       Pack sizes and configurations
                     </CardDescription>
                   </div>
-                  <Button size="sm" onClick={openCreateVariant} className="min-h-[44px]">
-                    <Plus className="h-4 w-4 mr-1" />
-                    Add Variant
-                  </Button>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button size="sm" onClick={openCreateVariant} className="min-h-[44px]">
+                      <Plus className="h-4 w-4 mr-1" />
+                      Add Variant
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
                   {sortedVariants.length > 0 ? (
@@ -2547,6 +2762,7 @@ export default function ProductDetail() {
                             ? sortedVariants.find((v) => v.id === variant.parentVariantId)
                             : null;
                           const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1 && !variant.isBaseUnit;
+                          const packageDisplay = buildVariantPackageDisplay(variant);
                           return (
                           <div
                             key={variant.id}
@@ -2570,6 +2786,12 @@ export default function ProductDetail() {
                             <div className="flex items-center justify-between text-xs text-muted-foreground">
                               <span>Units: {variant.unitsPerVariant}{parentVariant ? ` → ${parentVariant.sku}` : ""}</span>
                               <span className="font-mono">{variant.barcode || "No barcode"}</span>
+                            </div>
+                            <div className="mt-2">
+                              <Badge variant="outline" className={`text-[10px] ${packageDisplay.className}`}>
+                                {packageDisplay.label}
+                              </Badge>
+                              <p className="mt-1 text-xs text-muted-foreground">{packageDisplay.detail}</p>
                             </div>
                             <div className="flex justify-between items-center mt-2">
                               <div className="flex items-center gap-2">
@@ -2615,6 +2837,7 @@ export default function ProductDetail() {
                               <TableHead>Units</TableHead>
                               <TableHead>Breaks Into</TableHead>
                               <TableHead>Barcode</TableHead>
+                              <TableHead>Package</TableHead>
                               <TableHead>Dropship</TableHead>
                               <TableHead className="w-[80px]"></TableHead>
                             </TableRow>
@@ -2625,6 +2848,7 @@ export default function ProductDetail() {
                                 ? sortedVariants.find((v) => v.id === variant.parentVariantId)
                                 : null;
                               const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1 && !variant.isBaseUnit;
+                              const packageDisplay = buildVariantPackageDisplay(variant);
                               return (
                               <TableRow
                                 key={variant.id}
@@ -2651,6 +2875,12 @@ export default function ProductDetail() {
                                 </TableCell>
                                 <TableCell className="font-mono text-sm">
                                   {variant.barcode || "-"}
+                                </TableCell>
+                                <TableCell>
+                                  <Badge variant="outline" className={`text-[10px] ${packageDisplay.className}`}>
+                                    {packageDisplay.label}
+                                  </Badge>
+                                  <p className="mt-1 text-xs text-muted-foreground">{packageDisplay.detail}</p>
                                 </TableCell>
                                 <TableCell>
                                   <Switch
@@ -2960,7 +3190,7 @@ export default function ProductDetail() {
 
       {/* ===== VARIANT EDITOR DIALOG ===== */}
       <Dialog open={variantDialogOpen} onOpenChange={setVariantDialogOpen}>
-        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editingVariant ? "Edit Variant" : "Add Variant"}</DialogTitle>
             <DialogDescription className="sr-only">Form to add or edit a product variant</DialogDescription>
@@ -3044,6 +3274,65 @@ export default function ProductDetail() {
                 placeholder="Optional"
                 className="h-11"
               />
+            </div>
+
+            <div className="rounded-md border p-3 space-y-3">
+              <div>
+                <Label className="text-sm font-medium">Package Details</Label>
+                <p className="text-xs text-muted-foreground">
+                  Stored on the variant and used for marketplace listing package data.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <div className="space-y-1.5">
+                  <Label>Weight (lb)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    value={variantForm.package.weightLb}
+                    onChange={(e) => setVariantForm((prev) => ({ ...prev, package: { ...prev.package, weightLb: e.target.value } }))}
+                    placeholder="0.25"
+                    className="h-11"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Length (in)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    value={variantForm.package.lengthIn}
+                    onChange={(e) => setVariantForm((prev) => ({ ...prev, package: { ...prev.package, lengthIn: e.target.value } }))}
+                    placeholder="8"
+                    className="h-11"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Width (in)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    value={variantForm.package.widthIn}
+                    onChange={(e) => setVariantForm((prev) => ({ ...prev, package: { ...prev.package, widthIn: e.target.value } }))}
+                    placeholder="4"
+                    className="h-11"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Height (in)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    value={variantForm.package.heightIn}
+                    onChange={(e) => setVariantForm((prev) => ({ ...prev, package: { ...prev.package, heightIn: e.target.value } }))}
+                    placeholder="1"
+                    className="h-11"
+                  />
+                </div>
+              </div>
             </div>
 
             <div className="space-y-1.5">

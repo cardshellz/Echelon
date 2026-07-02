@@ -40,6 +40,7 @@ import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service"
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
 import { EbayListingBuilder, createEbayListingBuilder } from "./ebay/ebay-listing-builder";
 import { mapCarrierToEbay } from "./ebay/ebay-category-map";
+import { EbayMarketplaceListingConnector } from "../listing-connectors/ebay-listing.connector";
 import type {
   EbayOrder,
   EbayOrderLineItem,
@@ -89,9 +90,15 @@ export class EbayAdapter implements IChannelAdapter {
   private authService: EbayAuthService | null = null;
   private apiClients = new Map<number, EbayApiClient>();
   private readonly listingBuilder: EbayListingBuilder;
+  private readonly listingConnector: EbayMarketplaceListingConnector;
 
   constructor(private readonly db: DrizzleDb) {
     this.listingBuilder = createEbayListingBuilder();
+    this.listingConnector = new EbayMarketplaceListingConnector({
+      delay: (ms) => this.delay(ms),
+      inventoryDelayMs: 300,
+      offerDelayMs: 300,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -169,70 +176,30 @@ export class EbayAdapter implements IChannelAdapter {
       channelOverrides: overrides || undefined,
     };
 
-    // Step 1: Create/update inventory items (one per variant SKU)
     const inventoryItems = this.listingBuilder.buildInventoryItems(listing, config);
-    for (const item of inventoryItems) {
-      await client.createOrReplaceInventoryItem(item.sku, item.payload);
-      await this.delay(300);
-    }
-
-    // Step 2: Create/update offers (one per variant)
     const offers = this.listingBuilder.buildOffers(listing, config);
-    const variantIdMap: Record<number, string> = {};
-
-    for (const offer of offers) {
-      // Check if offer already exists
-      const existingOffers = await client.getOffers(offer.sku, config.marketplaceId);
-      let offerId: string;
-
-      if (existingOffers.offers && existingOffers.offers.length > 0) {
-        // Update existing offer
-        offerId = existingOffers.offers[0].offerId;
-        offer.payload.offerId = offerId;
-        await client.updateOffer(offerId, offer.payload);
-      } else {
-        // Create new offer
-        offerId = await client.createOffer(offer.payload);
-      }
-
-      variantIdMap[offer.variantId] = offerId;
-      await this.delay(300);
-    }
-
-    // Step 3: Handle multi-variation vs single-variation listing
     const itemGroup = this.listingBuilder.buildItemGroup(listing, config);
-    let externalProductId: string | undefined;
-
-    if (itemGroup) {
-      // Multi-variation: create group and publish
-      await client.createOrReplaceInventoryItemGroup(
-        itemGroup.groupKey,
-        itemGroup.payload,
-      );
-      const publishResult = await client.publishOfferByInventoryItemGroup(
-        itemGroup.groupKey,
-        config.marketplaceId,
-      );
-      externalProductId = publishResult?.listingId;
-    } else if (offers.length === 1) {
-      // Single-variation: publish the single offer
-      const offerId = Object.values(variantIdMap)[0];
-      if (offerId) {
-        const publishResult = await client.publishOffer(offerId);
-        externalProductId = publishResult?.listingId;
-      }
-    }
-
-    // Determine if this was a create or update
     const hasExistingIds = listing.variants.some(
       (v) => v.externalVariantId,
     );
+    const pushResult = await this.listingConnector.pushListing({
+      client,
+      draft: {
+        productId: listing.productId,
+        marketplaceId: config.marketplaceId,
+        inventoryItems,
+        offers,
+        itemGroup,
+        publishMode: "publish",
+        hasExistingExternalIds: hasExistingIds,
+      },
+    });
 
     return {
       productId: listing.productId,
-      status: hasExistingIds ? "updated" : "created",
-      externalProductId,
-      externalVariantIds: variantIdMap,
+      status: pushResult.status,
+      externalProductId: pushResult.externalProductId,
+      externalVariantIds: pushResult.externalVariantIds,
     };
   }
 

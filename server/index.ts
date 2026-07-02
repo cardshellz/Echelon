@@ -46,6 +46,7 @@ import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapte
 import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
 import { requireAuth } from "./routes/middleware";
 import {
+  envFlagEnabled,
   envPositiveInteger,
   getSchedulerDisableReason,
   schedulerIsDisabled,
@@ -414,10 +415,14 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
 (async () => {
   // Run startup migrations to ensure database schema is up to date
-  try {
-    await runStartupMigrations();
-  } catch (err) {
-    console.error("Startup migrations failed, continuing anyway:", err);
+  if (envFlagEnabled("SKIP_STARTUP_MIGRATIONS")) {
+    console.warn("Startup migrations skipped (SKIP_STARTUP_MIGRATIONS=true)");
+  } else {
+    try {
+      await runStartupMigrations();
+    } catch (err) {
+      console.error("Startup migrations failed, continuing anyway:", err);
+    }
   }
 
   // Create WMS service container and attach to app for route handlers
@@ -737,12 +742,15 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     reportError(err, { action: "uncaught_exception" });
   });
 
+  const serverHost = process.env.SERVER_HOST || "0.0.0.0";
+  const listenOptions: Parameters<typeof httpServer.listen>[0] = {
+    port,
+    host: serverHost,
+    ...(process.platform === "win32" ? {} : { reusePort: true }),
+  };
+
   httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
+    listenOptions,
     () => {
       log(`serving on port ${port}`);
       

@@ -151,12 +151,27 @@ export const omsOrderLines = omsSchema.table("oms_order_lines", {
   // Fallback to live Shopify query (Path B) when null.
   shopifyFulfillmentOrderId: varchar("shopify_fulfillment_order_id", { length: 100 }),
   shopifyFulfillmentOrderLineItemId: varchar("shopify_fulfillment_order_line_item_id", { length: 100 }),
+  // Provider-neutral fulfillment references. Shopify aliases remain during migration.
+  fulfillmentProvider: varchar("fulfillment_provider", { length: 40 }),
+  providerFulfillmentOrderId: varchar("provider_fulfillment_order_id", { length: 200 }),
+  providerFulfillmentOrderLineItemId: varchar("provider_fulfillment_order_line_item_id", { length: 200 }),
   sku: varchar("sku", { length: 100 }),
   title: varchar("title", { length: 300 }),
   variantTitle: varchar("variant_title", { length: 200 }),
   name: text("name"),
   vendor: varchar("vendor", { length: 200 }),
   quantity: integer("quantity").notNull(),
+  channelObservedQuantity: integer("channel_observed_quantity").notNull().default(0),
+  paidQuantity: integer("paid_quantity").notNull().default(0),
+  authorityFulfillableQuantity: integer("authority_fulfillable_quantity").notNull().default(0),
+  cancelledQuantity: integer("cancelled_quantity").notNull().default(0),
+  refundedQuantity: integer("refunded_quantity").notNull().default(0),
+  wmsMaterializedQuantity: integer("wms_materialized_quantity").notNull().default(0),
+  authorizationStatus: varchar("authorization_status", { length: 30 }).notNull().default("authorized"),
+  authorizedAt: timestamp("authorized_at"),
+  authorizedByEventId: varchar("authorized_by_event_id", { length: 100 }),
+  authoritySourceTopic: varchar("authority_source_topic", { length: 50 }),
+  authoritySourceInboxId: integer("authority_source_inbox_id"),
   // paid_price_cents / total_price_cents are POST-discount (net) — what the
   // customer paid. retail_price_cents is the PRE-discount UNIT price (mirrors
   // Shopify line_items[].price); gross line total = retail_price_cents × qty.
@@ -194,6 +209,47 @@ export const insertOmsOrderLineSchema = createInsertSchema(omsOrderLines).omit({
 
 export type InsertOmsOrderLine = z.infer<typeof insertOmsOrderLineSchema>;
 export type OmsOrderLine = typeof omsOrderLines.$inferSelect;
+
+// ============================================
+// OMS ORDER LINE AUTHORITY EVENTS - Append-only authority audit ledger
+// ============================================
+
+export const omsOrderLineAuthorityEvents = omsSchema.table("oms_order_line_authority_events", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  eventKey: varchar("event_key", { length: 500 }).notNull(),
+  eventType: varchar("event_type", { length: 50 }).notNull(),
+  orderId: bigint("order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
+  orderLineId: bigint("order_line_id", { mode: "number" }).notNull().references(() => omsOrderLines.id, { onDelete: "cascade" }),
+  sourceTopic: varchar("source_topic", { length: 50 }).notNull(),
+  sourceEventId: varchar("source_event_id", { length: 100 }),
+  sourceInboxId: integer("source_inbox_id"),
+  previousChannelObservedQuantity: integer("previous_channel_observed_quantity"),
+  previousPaidQuantity: integer("previous_paid_quantity"),
+  previousAuthorityFulfillableQuantity: integer("previous_authority_fulfillable_quantity"),
+  previousAuthorizationStatus: varchar("previous_authorization_status", { length: 30 }),
+  channelObservedQuantity: integer("channel_observed_quantity").notNull(),
+  paidQuantity: integer("paid_quantity").notNull(),
+  authorityFulfillableQuantity: integer("authority_fulfillable_quantity").notNull(),
+  cancelledQuantity: integer("cancelled_quantity").notNull().default(0),
+  refundedQuantity: integer("refunded_quantity").notNull().default(0),
+  authorizationStatus: varchar("authorization_status", { length: 30 }).notNull(),
+  authorizedAt: timestamp("authorized_at"),
+  authorizedByEventId: varchar("authorized_by_event_id", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("oms_line_authority_events_event_key_uidx").on(table.eventKey),
+  index("idx_oms_line_authority_events_order").on(table.orderId),
+  index("idx_oms_line_authority_events_line").on(table.orderLineId),
+  index("idx_oms_line_authority_events_source").on(table.sourceTopic, table.sourceEventId),
+]);
+
+export const insertOmsOrderLineAuthorityEventSchema = createInsertSchema(omsOrderLineAuthorityEvents).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertOmsOrderLineAuthorityEvent = z.infer<typeof insertOmsOrderLineAuthorityEventSchema>;
+export type OmsOrderLineAuthorityEvent = typeof omsOrderLineAuthorityEvents.$inferSelect;
 
 // ============================================
 // OMS ORDER LINE ADJUSTMENTS - Marketplace line-level cancel/refund facts

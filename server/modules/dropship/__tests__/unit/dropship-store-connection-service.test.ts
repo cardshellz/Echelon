@@ -321,28 +321,64 @@ describe("DropshipStoreConnectionService", () => {
       memberId: "member-1",
       platform: "shopify",
       shopDomain: "vendor-test.myshopify.com",
+      intent: "connect",
       returnTo: "/dropship/settings",
+    });
+    expect(shopifyOAuthProvider.authorizationCalls[0]).toMatchObject({
+      intent: "connect",
+      shopDomain: "vendor-test.myshopify.com",
     });
   });
 
-  it("blocks new OAuth when the membership store limit is already used", async () => {
-    repository.connections = [makeConnection({ status: "connected" })];
+  it("blocks new OAuth for a different platform when the membership store limit is already used", async () => {
+    repository.connections = [makeConnection({ platform: "ebay", status: "connected" })];
 
-    await expect(service.startOAuth("member-1", { platform: "ebay" })).rejects.toMatchObject({
+    await expect(service.startOAuth("member-1", {
+      platform: "shopify",
+      shopDomain: "Vendor-Test",
+    })).rejects.toMatchObject({
       code: "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
     });
   });
 
-  it("allows OAuth to repair an unhealthy existing store connection", async () => {
-    repository.connections = [makeConnection({ storeConnectionId: 21, status: "needs_reauth" })];
+  it("blocks default OAuth connect when the same-platform store slot is already used", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
 
-    const start = await service.startOAuth("member-1", { platform: "ebay" });
+    await expect(service.startOAuth("member-1", { platform: "ebay" })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
+    });
+
+    expect(stateSigner.lastPayload).toBeNull();
+  });
+
+  it("allows OAuth to change an occupied same-platform store slot", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
+
+    const start = await service.startOAuth("member-1", { platform: "ebay", intent: "change_store" });
 
     expect(start.platform).toBe("ebay");
     expect(stateSigner.lastPayload).toMatchObject({
       vendorId: 10,
       memberId: "member-1",
       platform: "ebay",
+      intent: "change_store",
+    });
+    expect(ebayOAuthProvider.authorizationCalls[0]).toMatchObject({
+      intent: "change_store",
+    });
+  });
+
+  it("allows OAuth to repair an unhealthy existing store connection", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, status: "needs_reauth" })];
+
+    const start = await service.startOAuth("member-1", { platform: "ebay", intent: "refresh_connection" });
+
+    expect(start.platform).toBe("ebay");
+    expect(stateSigner.lastPayload).toMatchObject({
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      intent: "refresh_connection",
     });
   });
 
@@ -381,6 +417,7 @@ describe("DropshipStoreConnectionService", () => {
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
+      intent: "connect",
     };
 
     const result = await service.completeOAuthCallback({
@@ -413,6 +450,7 @@ describe("DropshipStoreConnectionService", () => {
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60000).toISOString(),
       returnTo: "/dropship/settings",
+      intent: "refresh_connection",
     };
 
     const result = await service.completeOAuthCallback({
@@ -427,6 +465,71 @@ describe("DropshipStoreConnectionService", () => {
       hasAccessToken: true,
       hasRefreshToken: true,
     });
+  });
+
+  it("completes OAuth by replacing the existing same-platform store authorization", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, platform: "ebay", status: "connected" })];
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "change_store",
+    };
+
+    const result = await service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    });
+
+    expect(result.connection).toMatchObject({
+      storeConnectionId: 21,
+      status: "connected",
+      externalAccountId: "external-ebay",
+      hasAccessToken: true,
+      hasRefreshToken: true,
+    });
+    expect(repository.lastConnectInput?.config).toMatchObject({
+      oauthIntent: "change_store",
+    });
+  });
+
+  it("rejects refresh OAuth when eBay returns a different marketplace account", async () => {
+    repository.connections = [makeConnection({
+      storeConnectionId: 21,
+      platform: "ebay",
+      status: "connected",
+      externalAccountId: "external-ebay",
+    })];
+    ebayOAuthProvider.externalAccountId = "different-ebay";
+    stateSigner.payload = {
+      version: 1,
+      vendorId: 10,
+      memberId: "member-1",
+      platform: "ebay",
+      shopDomain: null,
+      nonce: "nonce",
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60000).toISOString(),
+      returnTo: "/dropship/settings",
+      intent: "refresh_connection",
+    };
+
+    await expect(service.completeOAuthCallback({
+      state: "signed",
+      code: "auth-code",
+      platform: "ebay",
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_OAUTH_ACCOUNT_MISMATCH",
+    });
+
+    expect(repository.lastConnectInput).toBeNull();
   });
 
   it("rejects OAuth completion for a different platform when an unhealthy connection owns the launch store slot", async () => {
@@ -585,6 +688,46 @@ describe("DropshipStoreConnectionService", () => {
     ]));
   });
 
+  it("disconnects a store connection from the admin surface", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21, status: "connected" })];
+
+    const result = await service.disconnectForAdmin({
+      storeConnectionId: 21,
+      reason: "Fraud risk review",
+      idempotencyKey: "admin-disconnect-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.status).toBe("grace_period");
+    expect(result.hasAccessToken).toBe(false);
+    expect(result.disconnectReason).toBe("Fraud risk review");
+    expect(repository.lastAdminDisconnectInput).toMatchObject({
+      storeConnectionId: 21,
+      reason: "Fraud risk review",
+      idempotencyKey: "admin-disconnect-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+      disconnectedAt: now,
+    });
+    expect(logs[0]).toMatchObject({
+      code: "DROPSHIP_ADMIN_STORE_DISCONNECT_STARTED",
+      context: expect.objectContaining({
+        vendorId: 10,
+        storeConnectionId: 21,
+        actorType: "admin",
+        actorId: "admin-1",
+      }),
+    });
+    expect(notificationSender.sent[0]).toMatchObject({
+      vendorId: 10,
+      eventType: "dropship_store_disconnected",
+      idempotencyKey: "store-disconnect:21:admin-disconnect-1",
+      payload: expect.objectContaining({
+        reason: "Fraud risk review",
+        status: "grace_period",
+      }),
+    });
+  });
+
   it("updates admin order processing warehouse config", async () => {
     repository.connections = [makeConnection({ storeConnectionId: 21 })];
 
@@ -678,6 +821,8 @@ class FakeStateSigner implements DropshipOAuthStateSigner {
 }
 
 class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
+  authorizationCalls: Array<Parameters<DropshipMarketplaceOAuthProvider["createAuthorizationUrl"]>[0]> = [];
+  externalAccountId: string | null = null;
   exchangeCalls: Array<{
     code: string;
     shopDomain: string | null;
@@ -686,7 +831,10 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
 
   constructor(readonly platform: "ebay" | "shopify") {}
 
-  createAuthorizationUrl(input: { state: string; shopDomain: string | null }): DropshipStoreConnectionOAuthStart {
+  createAuthorizationUrl(
+    input: Parameters<DropshipMarketplaceOAuthProvider["createAuthorizationUrl"]>[0],
+  ): DropshipStoreConnectionOAuthStart {
+    this.authorizationCalls.push(input);
     return {
       authorizationUrl: `https://${this.platform}.example.test/oauth?state=${input.state}`,
       platform: this.platform,
@@ -707,7 +855,7 @@ class FakeOAuthProvider implements DropshipMarketplaceOAuthProvider {
       accessToken: "access-token",
       refreshToken: this.platform === "ebay" ? "refresh-token" : null,
       accessTokenExpiresAt: new Date(now.getTime() + 3600000),
-      externalAccountId: `external-${this.platform}`,
+      externalAccountId: this.externalAccountId ?? `external-${this.platform}`,
       externalDisplayName: `External ${this.platform}`,
     };
   }
@@ -762,6 +910,7 @@ class FakeTokenCipher implements DropshipStoreTokenCipher {
 class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository {
   connections: DropshipStoreConnectionProfile[] = [];
   lastConnectInput: Parameters<DropshipStoreConnectionRepository["connectStore"]>[0] | null = null;
+  lastAdminDisconnectInput: Parameters<DropshipStoreConnectionRepository["disconnectStoreForAdmin"]>[0] | null = null;
   lastListForAdminInput: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0] | null = null;
   lastOrderProcessingConfigInput: Parameters<DropshipStoreConnectionRepository["updateOrderProcessingConfig"]>[0] | null = null;
 
@@ -802,13 +951,13 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     )).length;
   }
 
-  async hasRepairableConnection(
-    input: Parameters<DropshipStoreConnectionRepository["hasRepairableConnection"]>[0],
+  async hasReconnectableConnection(
+    input: Parameters<DropshipStoreConnectionRepository["hasReconnectableConnection"]>[0],
   ): Promise<boolean> {
     return this.connections.some((connection) => (
       connection.vendorId === input.vendorId
       && connection.platform === input.platform
-      && ["needs_reauth", "refresh_failed"].includes(connection.status)
+      && ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
     ));
   }
 
@@ -817,7 +966,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     const existing = this.connections.find((connection) => (
       connection.vendorId === input.vendorId
       && connection.platform === input.platform
-      && ["needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
+      && ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status)
     ));
     const connection = makeConnection({
       storeConnectionId: existing?.storeConnectionId ?? 20,
@@ -854,6 +1003,27 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
     const updated = {
       ...connection,
       status: "grace_period" as const,
+      hasAccessToken: false,
+      hasRefreshToken: false,
+      launchReady: false,
+      disconnectReason: input.reason,
+      disconnectedAt: input.disconnectedAt,
+      graceEndsAt: input.graceEndsAt,
+    };
+    this.connections = [updated];
+    return updated;
+  }
+
+  async disconnectStoreForAdmin(
+    input: Parameters<DropshipStoreConnectionRepository["disconnectStoreForAdmin"]>[0],
+  ): Promise<DropshipStoreConnectionProfile> {
+    this.lastAdminDisconnectInput = input;
+    const connection = this.connections.find((item) => item.storeConnectionId === input.storeConnectionId);
+    if (!connection) throw new Error("missing fake connection");
+    const updated = {
+      ...connection,
+      status: "grace_period" as const,
+      setupStatus: "attention_required",
       hasAccessToken: false,
       hasRefreshToken: false,
       launchReady: false,

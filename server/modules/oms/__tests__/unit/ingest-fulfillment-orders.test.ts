@@ -47,6 +47,7 @@ interface MockDb {
     id: number;
     sku: string | null;
     quantity: number;
+    fulfillmentProvider?: string | null;
     shopifyFulfillmentOrderLineItemId: string | null;
   }>;
   updates: CapturedUpdate[];
@@ -257,10 +258,16 @@ describe("populateShopifyFulfillmentOrderIds :: happy path", () => {
 
     const byLine = new Map(dbMock.updates.map((u) => [u.whereLineId, u.set]));
     expect(byLine.get(8001)).toMatchObject({
+      fulfillmentProvider: "shopify",
+      providerFulfillmentOrderId: FO_777,
+      providerFulfillmentOrderLineItemId: `${FO_777}-li-1`,
       shopifyFulfillmentOrderId: FO_777,
       shopifyFulfillmentOrderLineItemId: `${FO_777}-li-1`,
     });
     expect(byLine.get(8002)).toMatchObject({
+      fulfillmentProvider: "shopify",
+      providerFulfillmentOrderId: FO_777,
+      providerFulfillmentOrderLineItemId: `${FO_777}-li-2`,
       shopifyFulfillmentOrderId: FO_777,
       shopifyFulfillmentOrderLineItemId: `${FO_777}-li-2`,
     });
@@ -401,6 +408,37 @@ describe("populateShopifyFulfillmentOrderIds :: edge cases", () => {
     expect(dbMock.updates[0].whereLineId).toBe(9001);
   });
 
+  it("preserves existing non-Shopify provider context instead of overwriting it", async () => {
+    const dbMock = makeDb();
+    dbMock.setSelectRows([
+      {
+        id: 9001,
+        sku: "ABC-1",
+        quantity: 1,
+        fulfillmentProvider: "dropship",
+        shopifyFulfillmentOrderLineItemId: null,
+      },
+    ]);
+    const client = makeShopifyClient([
+      fulfillmentOrdersResponse([
+        {
+          id: FO_777,
+          items: [{ id: `${FO_777}-li-1`, sku: "ABC-1", remainingQuantity: 1 }],
+        },
+      ]),
+    ]);
+
+    const svc = createOmsService(dbMock.db);
+    const summary = await svc.populateShopifyFulfillmentOrderIds(
+      OMS_ORDER_ID,
+      SHOPIFY_ORDER_GID,
+      client,
+    );
+
+    expect(summary).toEqual({ matched: 0, unmatched: 1, updates: 0 });
+    expect(dbMock.updates).toHaveLength(0);
+  });
+
   it("skips closed / cancelled fulfillment orders", async () => {
     const dbMock = makeDb();
     dbMock.setSelectRows([
@@ -486,6 +524,9 @@ describe("populateShopifyFulfillmentOrderIds :: edge cases", () => {
     expect(summary).toEqual({ matched: 1, unmatched: 0, updates: 1 });
     expect(dbMock.updates).toHaveLength(1);
     expect(dbMock.updates[0].set).toMatchObject({
+      fulfillmentProvider: "shopify",
+      providerFulfillmentOrderId: FO_777,
+      providerFulfillmentOrderLineItemId: `${FO_777}-li-1`,
       shopifyFulfillmentOrderId: FO_777,
       shopifyFulfillmentOrderLineItemId: `${FO_777}-li-1`,
     });

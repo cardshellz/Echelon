@@ -1,0 +1,6 @@
+-- Reverse migration: 112_oms_provider_fulfillment_reference_backfill
+--
+-- This is an intentionally no-op reverse migration. The forward migration is
+-- an idempotent data repair that copies Shopify compatibility alias values into
+-- the provider-neutral columns. Reversing it would erase valid neutral
+-- fulfillment references and reintroduce the drift this migration repairs.

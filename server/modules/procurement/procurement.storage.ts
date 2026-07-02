@@ -466,7 +466,7 @@ export const procurementMethods: IProcurementStorage = {
           vp.id              AS vendor_product_id,
           vp.product_id      AS product_id,
           vp.product_variant_id AS product_variant_id,
-          COALESCE(pv.sku, p.sku) AS sku,
+          p.sku              AS sku,
           p.name             AS product_name,
           pv.name            AS variant_name,
           vp.vendor_sku      AS vendor_sku,
@@ -539,9 +539,9 @@ export const procurementMethods: IProcurementStorage = {
       }> };
     }
 
-    // Build the "exclude" set: all (productId, productVariantId) pairs this
-    // vendor already stocks, not just the ones that matched q. Overlord wants
-    // the "other" section to be truly non-catalog products.
+    // Build the "exclude" set. Purchasing is product-SKU based, so any active
+    // vendor catalog row for a product means that product is already in catalog,
+    // even when the vendor row carries hidden variant metadata.
     const exclusionRows = await db.execute<{ product_id: number; product_variant_id: number | null }>(sql`
       SELECT product_id, product_variant_id
       FROM procurement.vendor_products
@@ -550,10 +550,9 @@ export const procurementMethods: IProcurementStorage = {
     const excludedVariantIds = new Set<number>();
     const excludedProductIds = new Set<number>();
     for (const row of exclusionRows.rows) {
+      excludedProductIds.add(Number(row.product_id));
       if (row.product_variant_id != null) {
         excludedVariantIds.add(Number(row.product_variant_id));
-      } else {
-        excludedProductIds.add(Number(row.product_id));
       }
     }
 
@@ -611,9 +610,8 @@ export const procurementMethods: IProcurementStorage = {
       if (outOfCatalog.length >= remaining) break;
       const pid = Number(row.product_id);
       const vid = row.product_variant_id != null ? Number(row.product_variant_id) : null;
-      // Skip rows already in this vendor's catalog. A product-level vendor
-      // entry (vid IS NULL on vendor_products) blocks every variant of that
-      // product, so check both the variant set and the product set.
+      // Skip rows already in this vendor's catalog. In the purchasing UI, the
+      // product is the selectable identity; vendor variants are metadata.
       if (vid != null && excludedVariantIds.has(vid)) continue;
       if (excludedProductIds.has(pid)) continue;
       // Dedupe on the (productId, variantId) key — a LEFT JOIN with no
@@ -859,10 +857,19 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getOpenPoLinesForVariant(productVariantId: number): Promise<PurchaseOrderLine[]> {
+    const variantRows = await db.execute<{ product_id: number }>(sql`
+      SELECT product_id
+      FROM catalog.product_variants
+      WHERE id = ${productVariantId}
+      LIMIT 1
+    `);
+    const productId = variantRows.rows[0]?.product_id;
+    if (!productId) return [];
+
     return await db.select().from(purchaseOrderLines)
       .innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id))
       .where(and(
-        eq(purchaseOrderLines.productVariantId, productVariantId),
+        eq(purchaseOrderLines.productId, Number(productId)),
         inArray(purchaseOrderLines.status, ['open', 'partially_received']),
         inArray(purchaseOrders.status, ['approved', 'sent', 'acknowledged', 'partially_received']),
       ))
@@ -1129,7 +1136,11 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]> {
-    return await db.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.inboundShipmentId, inboundShipmentId));
+    return await db
+      .select()
+      .from(inboundShipmentLines)
+      .where(eq(inboundShipmentLines.inboundShipmentId, inboundShipmentId))
+      .orderBy(asc(inboundShipmentLines.createdAt), asc(inboundShipmentLines.id));
   },
 
   async getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined> {
@@ -1566,16 +1577,16 @@ export const procurementMethods: IProcurementStorage = {
         LIMIT 1
       ) preferred_vendor ON true
       LEFT JOIN (
-        SELECT pv.product_id,
+        SELECT pol.product_id,
                SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
                COUNT(DISTINCT po.id) AS open_po_count,
                MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected
         FROM procurement.purchase_order_lines pol
         JOIN procurement.purchase_orders po ON po.id = pol.purchase_order_id
-        JOIN catalog.product_variants pv ON pv.id = pol.product_variant_id
         WHERE po.status IN ('approved', 'sent', 'acknowledged', 'partially_received')
           AND pol.status IN ('open', 'partially_received')
-        GROUP BY pv.product_id
+          AND pol.product_id IS NOT NULL
+        GROUP BY pol.product_id
       ) on_order ON on_order.product_id = p.id
       LEFT JOIN (
         SELECT del.product_id,

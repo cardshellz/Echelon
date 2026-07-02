@@ -15,3 +15,4 @@ export * from "./membership.schema";
 export * from "./dropship.schema";
 export * from "./shopify.schema";
 export * from "./audit.schema";
+export * from "./fulfillment.schema";

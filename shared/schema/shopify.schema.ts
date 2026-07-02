@@ -1,4 +1,4 @@
-import { pgSchema, integer, varchar, text, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgSchema, pgTable, integer, varchar, text, timestamp, boolean, jsonb, decimal } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products } from "./catalog.schema";
@@ -45,3 +45,21 @@ export const shopifyCollectionProducts = shopifySchema.table("shopify_collection
 }));
 
 export type ShopifyCollectionProduct = typeof shopifyCollectionProducts.$inferSelect;
+
+// Legacy public Shopify variant cache used as the retail-price source of truth.
+// The membership pricing app reads this same table for Wholesale Pricing retail
+// values; channel listing prices should resolve from it before catalog fallback.
+export const shopifyVariants = pgTable("shopify_variants", {
+  id: varchar("id", { length: 100 }).primaryKey(),
+  productId: text("product_id").notNull(),
+  title: text("title"),
+  sku: text("sku"),
+  price: decimal("price", { precision: 10, scale: 2 }),
+  compareAtPrice: decimal("compare_at_price", { precision: 10, scale: 2 }),
+  inventoryItemId: text("inventory_item_id"),
+  inventoryQuantity: integer("inventory_quantity"),
+  imageUrl: text("image_url"),
+  syncedAt: timestamp("synced_at", { withTimezone: true }),
+});
+
+export type ShopifyVariant = typeof shopifyVariants.$inferSelect;

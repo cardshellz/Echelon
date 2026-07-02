@@ -12,6 +12,7 @@ export const dropshipStoreConnectionLifecycleStatusSchema = z.enum([
 
 export const startDropshipStoreConnectionOAuthInputSchema = z.object({
   platform: z.enum(dropshipSupportedStorePlatforms),
+  intent: z.enum(["connect", "refresh_connection", "change_store"]).default("connect"),
   shopDomain: z.string().trim().min(1).max(255).optional(),
   returnTo: z.string().trim().max(500).optional(),
 });
