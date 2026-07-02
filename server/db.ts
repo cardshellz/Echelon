@@ -237,6 +237,15 @@ export async function runStartupMigrations(): Promise<void> {
     // Add aisle_filter column to cycle_counts if missing
     await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS aisle_filter VARCHAR(20)`);
 
+    // Migration 106: reservation quantities on the ledger (P0.1b).
+    // reserve:+qty, unreserve:-qty, pick:-(reservation consumed). NULL = pre-106 row.
+    await client.query(`ALTER TABLE inventory.inventory_transactions ADD COLUMN IF NOT EXISTS reserved_qty_delta integer`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_invtx_reservation_by_order_item
+        ON inventory.inventory_transactions (order_id, order_item_id)
+        WHERE transaction_type IN ('reserve', 'unreserve', 'pick') AND voided_at IS NULL
+    `);
+
     // Migration 037: Product lines
     await client.query(`
       CREATE TABLE IF NOT EXISTS catalog.product_lines (

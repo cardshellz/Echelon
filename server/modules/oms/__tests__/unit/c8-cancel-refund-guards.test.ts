@@ -34,13 +34,29 @@ function extractSyncCancelFn(): string {
 }
 
 describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
-  it("calls releaseOrderReservation before cancelWmsOrder", () => {
+  // P0.1c: the sync cancel path now delegates to the single cancel
+  // entrypoint (cancelWmsOrderAndRelease), which performs the guarded
+  // cancel transition FIRST and then the order-scoped, idempotent release.
+  // Cancel-first is deliberate: a shipped order must never be released
+  // (its reservations were consumed by picks), and the release is
+  // idempotent so a failure can be retried by the reconciler.
+  const CANCEL_HELPER_SRC = readFileSync(
+    fileURLToPath(new URL("../../../orders/cancel-wms-order.ts", import.meta.url)),
+    "utf8",
+  );
+
+  it("routes through the single cancel entrypoint", () => {
     const fnBlock = extractSyncCancelFn();
-    const releasePos = fnBlock.indexOf("releaseOrderReservation");
-    const cancelPos = fnBlock.indexOf("cancelWmsOrder(db");
-    expect(releasePos).toBeGreaterThan(-1);
+    expect(fnBlock).toContain("cancelWmsOrderAndRelease(");
+  });
+
+  it("the entrypoint releases reservations after a successful transition", () => {
+    const cancelPos = CANCEL_HELPER_SRC.indexOf("await cancelOrder(db, orderId, reason)");
+    const releasePos = CANCEL_HELPER_SRC.indexOf("releaseOrderReservation(orderId, reason");
     expect(cancelPos).toBeGreaterThan(-1);
-    expect(releasePos).toBeLessThan(cancelPos);
+    expect(releasePos).toBeGreaterThan(cancelPos);
+    // no release without a transition:
+    expect(CANCEL_HELPER_SRC).toContain("if (!trans.transitioned)");
   });
 
   it("persists cancel_release_failed event on release failure", () => {
@@ -49,12 +65,11 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
     expect(fnBlock).toContain("requiresReview: true");
   });
 
-  it("does not skip cancel transition on release failure", () => {
-    const fnBlock = extractSyncCancelFn();
-    const catchPos = fnBlock.indexOf("catch (releaseErr");
-    const cancelPos = fnBlock.indexOf("cancelWmsOrder(db");
-    expect(catchPos).toBeGreaterThan(-1);
-    expect(cancelPos).toBeGreaterThan(catchPos);
+  it("does not undo the cancel transition on release failure", () => {
+    // the helper catches release errors and reports releaseFailed instead
+    // of throwing — the cancel stands.
+    expect(CANCEL_HELPER_SRC).toContain("releaseFailed = true");
+    expect(CANCEL_HELPER_SRC).toMatch(/catch \(err: any\) \{\s*\n\s*releaseFailed = true/);
   });
 });
 

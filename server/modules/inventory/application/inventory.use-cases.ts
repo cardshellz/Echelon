@@ -245,6 +245,9 @@ export class InventoryUseCases {
         variantQtyDelta: -params.qty,
         variantQtyBefore: level.variantQty,
         variantQtyAfter: level.variantQty - params.qty,
+        // A pick consumes reservation up to the level's reserved counter —
+        // recorded so order-scoped release can compute open reservations.
+        reservedQtyDelta: reservationRelease > 0 ? -reservationRelease : 0,
         sourceState: "on_hand",
         targetState: "picked",
         orderId: params.orderId,
@@ -598,6 +601,7 @@ export class InventoryUseCases {
           variantQtyDelta: 0,
           variantQtyBefore: level.variantQty,
           variantQtyAfter: level.variantQty,
+          reservedQtyDelta: params.qty,
           sourceState: "on_hand",
           targetState: "committed",
           orderId: params.orderId,
@@ -664,6 +668,7 @@ export class InventoryUseCases {
         variantQtyDelta: 0,
         variantQtyBefore: level.variantQty,
         variantQtyAfter: level.variantQty,
+        reservedQtyDelta: -params.qty,
         sourceState: "committed",
         targetState: "on_hand",
         orderId: params.orderId,
@@ -676,6 +681,69 @@ export class InventoryUseCases {
     });
 
     this.triggerNotifyChange(params.productVariantId, "unreserve");
+  }
+
+  /**
+   * Force-release orphaned reservation quantity at a level with no owning
+   * order (e.g. a cycle count zeroed stock out from under a reservation).
+   * Clamps to the level's current reserved counter, releases matching lot
+   * reservations, and writes the ledgered unreserve — all in one transaction.
+   *
+   * Replaces the phantom `adjustLevel` call this path used to make (P0.1b).
+   *
+   * @returns units actually trimmed (0 if nothing reserved).
+   */
+  async trimOrphanedReservation(params: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    qty: number;
+    reason: string;
+    userId?: string;
+  }): Promise<number> {
+    if (params.qty <= 0) return 0;
+
+    const trimmed = await this.db.transaction(async (tx) => {
+      const level = await this.storage.lockInventoryLevel(
+        params.warehouseLocationId,
+        params.productVariantId,
+        tx
+      );
+      if (!level || level.reservedQty <= 0) return 0;
+
+      const qty = Math.min(params.qty, level.reservedQty);
+      await this.storage.adjustInventoryLevel(level.id, { reservedQty: -qty }, tx);
+
+      if (this.lotService) {
+        const lotSvc = this.lotService.withTx(tx);
+        await lotSvc.releaseFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          qty,
+        });
+      }
+
+      await this.storage.createInventoryTransaction({
+        productVariantId: params.productVariantId,
+        fromLocationId: params.warehouseLocationId,
+        transactionType: "unreserve",
+        variantQtyDelta: 0,
+        variantQtyBefore: level.variantQty,
+        variantQtyAfter: level.variantQty,
+        reservedQtyDelta: -qty,
+        sourceState: "committed",
+        targetState: "on_hand",
+        referenceType: "orphan_reallocation",
+        notes: params.reason,
+        userId: params.userId ?? null,
+      }, tx);
+
+      return qty;
+    });
+
+    if (trimmed > 0) {
+      this.triggerNotifyChange(params.productVariantId, "unreserve");
+    }
+    return trimmed;
   }
 
   // ---------------------------------------------------------------------------

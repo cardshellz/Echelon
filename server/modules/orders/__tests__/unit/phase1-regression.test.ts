@@ -434,7 +434,9 @@ describe("Migrated writers use C4 functions", () => {
     const block = src.slice(reconcilerStart, reconcilerEnd);
 
     expect(block).toContain("markOrderShipped(db,");
-    expect(block).toContain("cancelOrder(db,");
+    // P0.1c: cancels route through the single entrypoint, which wraps the
+    // guarded cancelOrder transition AND releases reservations.
+    expect(block).toContain("cancelWmsOrderAndRelease(db,");
     expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
   });
 

@@ -21,7 +21,7 @@ import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastru
 import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
-import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reconciliation.service";
+import { startOmsFlowReconciliationScheduler, setOmsFlowReconciliationServices } from "./modules/oms/oms-flow-reconciliation.service";
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import {
   startWebhookRetryWorker,
@@ -35,6 +35,7 @@ import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import { cancelOrder, markOrderShipped, completeOrder } from "./modules/orders/order-status-core";
+import { cancelWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
 import type { SafeUser } from "@shared/schema";
@@ -790,6 +791,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       }
 
       if (!schedulersDisabled("OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED")) {
+        // P0.1c: reconciler cancels must release reservations; the
+        // ready-but-unreserved detector needs the same service.
+        setOmsFlowReconciliationServices({ reservation: services.reservation });
         startOmsFlowReconciliationScheduler(db);
       } else {
         logSchedulerDisabled("scheduler", "OMS flow reconciliation scheduler", "OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED");
@@ -911,9 +915,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         `);
         const corrected: any[] = [];
         for (const row of divergent.rows as any[]) {
+          // P0.1c: cancels go through the single entrypoint so the missed-
+          // webhook cases (exactly what this sweep catches) release their
+          // reservations instead of leaking them.
           const transResult = row.oms_status === "shipped"
             ? await markOrderShipped(db, row.id, "oms_wms_reconcile")
-            : await cancelOrder(db, row.id, "oms_wms_reconcile");
+            : await cancelWmsOrderAndRelease(db, services.reservation, row.id, "oms_wms_reconcile");
           if (transResult.transitioned) {
             await db.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${row.id}`);
             corrected.push(row);
