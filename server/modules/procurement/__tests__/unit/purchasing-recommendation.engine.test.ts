@@ -7,6 +7,11 @@ import {
 describe("purchasing recommendation engine", () => {
   it("produces an explainable actionable recommendation using vendor lead time and order UOM", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {
@@ -208,6 +213,11 @@ describe("purchasing recommendation engine", () => {
 
   it("uses configurable candidate score thresholds for read-only banding", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       autoDraftSettings: {
         candidateScoreStrongThreshold: 95,
@@ -260,6 +270,11 @@ describe("purchasing recommendation engine", () => {
 
   it("can require a strong candidate band in the guarded auto-draft approval policy", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       autoDraftSettings: {
         candidateScoreStrongThreshold: 95,
@@ -310,6 +325,11 @@ describe("purchasing recommendation engine", () => {
 
   it("keeps excluded products out of visible recommendations and reports the skip", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {
@@ -352,6 +372,11 @@ describe("purchasing recommendation engine", () => {
 
   it("marks auto-draft recommendations blocked when preferred vendor is required", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 10,
       rows: [
         {
@@ -397,6 +422,11 @@ describe("purchasing recommendation engine", () => {
 
   it("explains recommendations skipped because open PO supply covers demand", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 10,
       rows: [
         {
@@ -459,6 +489,11 @@ describe("purchasing recommendation engine", () => {
 
   it("downgrades confidence and records default forecast provenance for thin history", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {
@@ -527,6 +562,11 @@ describe("purchasing recommendation engine", () => {
 
   it("downgrades confidence when current demand is falling against the prior period", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {
@@ -590,6 +630,11 @@ describe("purchasing recommendation engine", () => {
 
   it("flags possible velocity suppression when demand falls during a stockout", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {
@@ -834,6 +879,11 @@ describe("purchasing recommendation engine", () => {
 
   it("keeps zero-revenue demand in usage while requiring review before auto-draft", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {
@@ -912,6 +962,11 @@ describe("purchasing recommendation engine", () => {
 
   it("downgrades confidence and exposes stale last-purchase supplier cost fallback", () => {
     const result = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {
