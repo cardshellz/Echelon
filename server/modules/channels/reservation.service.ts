@@ -375,10 +375,10 @@ class ReservationService {
    * placed (shortfall) releases 0. Calling this twice is a no-op — it can
    * never drain other orders' reservations (the pre-P0.1 bug).
    *
-   * Legacy fallback: reserve rows written before migration 106 carry no
+   * Legacy fallback: reserve rows written before migration 116 carry no
    * quantity. For those, the open amount is estimated as
    * max(0, item.quantity − ledger picks − qty-carrying unreserves). This can
-   * over-release only for a pre-106 order that was shortfall-reserved and is
+   * over-release only for a pre-116 order that was shortfall-reserved and is
    * cancelled during the transition window — accepted and bounded; the
    * weekly drift check catches residue.
    *
