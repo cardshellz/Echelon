@@ -1,0 +1,570 @@
+{
+  "catalog.product_assets": [
+    "modules/catalog",
+    "modules/channels",
+    "server/routes/ebay/ebay-policies.routes.ts"
+  ],
+  "catalog.product_categories": [
+    "modules/catalog"
+  ],
+  "catalog.product_line_products": [
+    "modules/channels"
+  ],
+  "catalog.product_lines": [
+    "modules/channels",
+    "server/db.ts"
+  ],
+  "catalog.product_types": [
+    "server/db.ts"
+  ],
+  "catalog.product_variants": [
+    "modules/catalog",
+    "modules/channels",
+    "modules/inventory",
+    "server/routes/ebay/ebay-listing-state.ts",
+    "server/routes/ebay/ebay-policies.routes.ts"
+  ],
+  "catalog.products": [
+    "modules/catalog",
+    "modules/channels",
+    "modules/procurement",
+    "server/routes/ebay-listing-rules.routes.ts",
+    "server/routes/ebay/ebay-config.routes.ts",
+    "server/routes/ebay/ebay-listing-state.ts",
+    "server/routes/ebay/ebay-policies.routes.ts"
+  ],
+  "catalog.shipping_groups": [
+    "modules/catalog"
+  ],
+  "channels.allocation_audit_log": [
+    "modules/channels"
+  ],
+  "channels.channel_allocation_rules": [
+    "modules/channels"
+  ],
+  "channels.channel_asset_overrides": [
+    "modules/channels"
+  ],
+  "channels.channel_connections": [
+    "modules/channels",
+    "modules/dropship",
+    "server/routes/ebay-settings.routes.ts",
+    "server/routes/shopify.routes.ts"
+  ],
+  "channels.channel_feeds": [
+    "modules/catalog",
+    "modules/channels",
+    "modules/inventory"
+  ],
+  "channels.channel_listings": [
+    "modules/catalog",
+    "modules/channels",
+    "server/routes/ebay/ebay-listing-state.ts",
+    "server/routes/ebay/ebay-listings.routes.ts",
+    "server/routes/ebay/ebay-policies.routes.ts",
+    "server/routes/ebay/ebay-sync-helpers.ts"
+  ],
+  "channels.channel_pricing": [
+    "modules/channels"
+  ],
+  "channels.channel_pricing_rules": [
+    "server/routes/ebay/ebay-pricing.routes.ts"
+  ],
+  "channels.channel_product_allocation": [
+    "modules/channels"
+  ],
+  "channels.channel_product_lines": [
+    "modules/channels"
+  ],
+  "channels.channel_product_overrides": [
+    "modules/channels",
+    "server/routes/ebay/ebay-listing-state.ts"
+  ],
+  "channels.channel_reservations": [
+    "modules/channels"
+  ],
+  "channels.channel_sync_log": [
+    "modules/channels"
+  ],
+  "channels.channel_variant_overrides": [
+    "modules/channels",
+    "server/routes/ebay/ebay-listing-state.ts"
+  ],
+  "channels.channel_warehouse_assignments": [
+    "modules/channels"
+  ],
+  "channels.channels": [
+    "modules/channels",
+    "modules/dropship",
+    "modules/identity",
+    "server/routes/ebay-oauth.routes.ts",
+    "server/routes/pick-priority.routes.ts"
+  ],
+  "channels.partner_profiles": [
+    "modules/channels"
+  ],
+  "channels.source_lock_config": [
+    "modules/channels"
+  ],
+  "channels.sync_log": [
+    "modules/channels"
+  ],
+  "channels.sync_settings": [
+    "modules/channels",
+    "server/db.ts"
+  ],
+  "dropship.dropship_admin_config_commands": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_audit_events": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_auth_identities": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_auto_reload_settings": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_box_catalog": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_catalog_rule_set_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_catalog_rules": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_funding_methods": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_insurance_pool_config": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_push_job_items": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_push_jobs": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_sync_events": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_marketplace_tracking_pushes": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_notification_events": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_notification_preferences": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_order_economics_snapshots": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_order_intake": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_package_profiles": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_passkey_credentials": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_rate_table_rows": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_rate_tables": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_return_policy_config": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_rma_inspections": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_rma_items": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_rma_status_updates": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_rmas": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_sensitive_action_challenges": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_shipping_markup_config": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_shipping_quote_snapshots": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_store_connection_tokens": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_store_connections": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_store_listing_configs": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_store_setup_checks": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_usdc_ledger_entries": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_vendor_listings": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_vendor_selection_rule_set_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_vendor_selection_rules": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_vendors": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_wallet_accounts": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_wallet_ledger": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_zone_rules": [
+    "modules/dropship"
+  ],
+  "ebay.ebay_category_aspects": [
+    "server/routes/ebay/ebay-taxonomy.routes.ts"
+  ],
+  "ebay.ebay_category_mappings": [
+    "server/routes/ebay/ebay-config.routes.ts"
+  ],
+  "ebay.ebay_listing_rules": [
+    "server/routes/ebay-listing-rules.routes.ts"
+  ],
+  "ebay.ebay_oauth_tokens": [
+    "modules/channels"
+  ],
+  "ebay.ebay_product_aspect_overrides": [
+    "server/routes/ebay/ebay-taxonomy.routes.ts"
+  ],
+  "ebay.ebay_type_aspect_defaults": [
+    "server/routes/ebay/ebay-taxonomy.routes.ts"
+  ],
+  "identity.auth_permissions": [
+    "modules/identity"
+  ],
+  "identity.auth_role_permissions": [
+    "modules/identity"
+  ],
+  "identity.auth_roles": [
+    "modules/identity"
+  ],
+  "identity.auth_user_roles": [
+    "modules/identity"
+  ],
+  "identity.users": [
+    "modules/identity"
+  ],
+  "inventory.adjustment_reasons": [
+    "modules/identity",
+    "modules/inventory"
+  ],
+  "inventory.cost_adjustment_log": [
+    "modules/inventory"
+  ],
+  "inventory.cycle_count_items": [
+    "modules/inventory"
+  ],
+  "inventory.cycle_counts": [
+    "modules/inventory"
+  ],
+  "inventory.inventory_levels": [
+    "modules/catalog",
+    "modules/channels",
+    "modules/inventory",
+    "server/scripts/fix_orphaned_picks.ts"
+  ],
+  "inventory.inventory_lots": [
+    "modules/inventory",
+    "modules/procurement"
+  ],
+  "inventory.inventory_transactions": [
+    "modules/channels",
+    "modules/inventory",
+    "server/routes/diagnostics.ts",
+    "server/scripts/fix_orphaned_picks.ts"
+  ],
+  "inventory.location_replen_config": [
+    "modules/inventory"
+  ],
+  "inventory.replen_rules": [
+    "modules/catalog",
+    "modules/inventory"
+  ],
+  "inventory.replen_tasks": [
+    "modules/catalog",
+    "modules/inventory",
+    "modules/orders"
+  ],
+  "inventory.replen_tier_defaults": [
+    "modules/inventory"
+  ],
+  "inventory.warehouse_settings": [
+    "modules/inventory",
+    "modules/orders",
+    "modules/procurement"
+  ],
+  "membership.member_current_membership": [
+    "modules/subscriptions"
+  ],
+  "membership.member_subscriptions": [
+    "modules/subscriptions"
+  ],
+  "membership.members": [
+    "modules/subscriptions"
+  ],
+  "membership.plans": [
+    "modules/subscriptions",
+    "server/routes/pick-priority.routes.ts"
+  ],
+  "membership.selling_plan_map": [
+    "modules/subscriptions"
+  ],
+  "membership.shopify_metafield_outbox": [
+    "modules/catalog"
+  ],
+  "membership.subscription_billing_attempts": [
+    "modules/subscriptions"
+  ],
+  "membership.subscription_events": [
+    "modules/subscriptions"
+  ],
+  "oms.fulfillment_routing_rules": [
+    "modules/warehouse"
+  ],
+  "oms.oms_order_events": [
+    "modules/dropship",
+    "modules/oms",
+    "modules/orders",
+    "server/index.ts"
+  ],
+  "oms.oms_order_line_authority_events": [
+    "modules/oms"
+  ],
+  "oms.oms_order_lines": [
+    "modules/dropship",
+    "modules/oms",
+    "modules/orders",
+    "server/index.ts"
+  ],
+  "oms.oms_orders": [
+    "modules/dropship",
+    "modules/oms",
+    "modules/orders",
+    "server/index.ts"
+  ],
+  "oms.order_item_costs": [
+    "modules/inventory",
+    "modules/procurement"
+  ],
+  "oms.order_item_financials": [
+    "modules/catalog",
+    "modules/procurement"
+  ],
+  "oms.order_line_adjustments": [
+    "modules/oms"
+  ],
+  "oms.webhook_inbox": [
+    "modules/oms"
+  ],
+  "oms.webhook_retry_queue": [
+    "modules/oms",
+    "server/routes/shopify.routes.ts"
+  ],
+  "procurement.ap_payment_allocations": [
+    "modules/procurement"
+  ],
+  "procurement.ap_payments": [
+    "modules/procurement"
+  ],
+  "procurement.demand_event_lines": [
+    "modules/procurement"
+  ],
+  "procurement.demand_events": [
+    "modules/procurement"
+  ],
+  "procurement.inbound_freight_allocations": [
+    "modules/procurement"
+  ],
+  "procurement.inbound_freight_costs": [
+    "modules/procurement"
+  ],
+  "procurement.inbound_shipment_lines": [
+    "modules/catalog",
+    "modules/procurement"
+  ],
+  "procurement.inbound_shipment_status_history": [
+    "modules/procurement"
+  ],
+  "procurement.inbound_shipments": [
+    "modules/procurement"
+  ],
+  "procurement.landed_cost_adjustments": [
+    "modules/procurement"
+  ],
+  "procurement.landed_cost_snapshots": [
+    "modules/procurement"
+  ],
+  "procurement.po_approval_tiers": [
+    "modules/procurement"
+  ],
+  "procurement.po_events": [
+    "modules/procurement"
+  ],
+  "procurement.po_exceptions": [
+    "modules/procurement"
+  ],
+  "procurement.po_receipts": [
+    "modules/procurement"
+  ],
+  "procurement.po_revisions": [
+    "modules/procurement"
+  ],
+  "procurement.po_status_history": [
+    "modules/procurement"
+  ],
+  "procurement.purchase_order_lines": [
+    "modules/catalog",
+    "modules/procurement"
+  ],
+  "procurement.purchase_orders": [
+    "modules/procurement"
+  ],
+  "procurement.purchasing_recommendation_decisions": [
+    "modules/procurement"
+  ],
+  "procurement.receiving_lines": [
+    "modules/catalog",
+    "modules/procurement"
+  ],
+  "procurement.receiving_orders": [
+    "modules/procurement"
+  ],
+  "procurement.vendor_invoice_attachments": [
+    "modules/procurement"
+  ],
+  "procurement.vendor_invoice_lines": [
+    "modules/catalog",
+    "modules/procurement"
+  ],
+  "procurement.vendor_invoice_po_links": [
+    "modules/procurement"
+  ],
+  "procurement.vendor_invoices": [
+    "modules/procurement"
+  ],
+  "procurement.vendor_products": [
+    "modules/procurement"
+  ],
+  "procurement.vendors": [
+    "modules/procurement"
+  ],
+  "public.audit_events": [
+    "modules/procurement",
+    "server/infrastructure/auditLogger.ts"
+  ],
+  "public.auto_draft_runs": [
+    "modules/procurement"
+  ],
+  "public.idempotency_keys": [
+    "server/middleware/idempotency.ts"
+  ],
+  "public.notification_preferences": [
+    "modules/notifications"
+  ],
+  "public.notifications": [
+    "modules/notifications"
+  ],
+  "public.reorder_exclusion_rules": [
+    "modules/procurement"
+  ],
+  "warehouse.echelon_settings": [
+    "modules/orders",
+    "modules/warehouse",
+    "server/routes/pick-priority.routes.ts"
+  ],
+  "warehouse.product_locations": [
+    "modules/catalog",
+    "modules/orders",
+    "modules/warehouse",
+    "server/seed.ts"
+  ],
+  "warehouse.warehouse_locations": [
+    "modules/channels",
+    "modules/inventory",
+    "modules/warehouse"
+  ],
+  "warehouse.warehouse_zones": [
+    "modules/warehouse"
+  ],
+  "warehouse.warehouses": [
+    "modules/channels",
+    "modules/inventory",
+    "modules/warehouse"
+  ],
+  "wms.allocation_exceptions": [
+    "modules/orders"
+  ],
+  "wms.combined_order_groups": [
+    "modules/orders"
+  ],
+  "wms.order_items": [
+    "modules/catalog",
+    "modules/inventory",
+    "modules/oms",
+    "modules/orders",
+    "modules/wms",
+    "server/index.ts",
+    "server/routes/diagnostics.ts"
+  ],
+  "wms.orders": [
+    "modules/oms",
+    "modules/orders",
+    "modules/wms",
+    "server/db.ts",
+    "server/index.ts",
+    "server/routes/diagnostics.ts"
+  ],
+  "wms.outbound_shipment_items": [
+    "modules/oms",
+    "modules/orders",
+    "modules/wms"
+  ],
+  "wms.outbound_shipments": [
+    "modules/oms",
+    "modules/orders",
+    "modules/wms",
+    "server/index.ts",
+    "server/routes/shopify.routes.ts"
+  ],
+  "wms.picking_logs": [
+    "modules/catalog",
+    "modules/orders"
+  ],
+  "wms.reconciliation_exceptions": [
+    "modules/oms"
+  ],
+  "wms.return_items": [
+    "modules/oms"
+  ],
+  "wms.returns": [
+    "modules/oms"
+  ],
+  "wms.shipment_tracking_history": [
+    "modules/orders"
+  ]
+}

@@ -24,7 +24,8 @@
     "test:coverage": "vitest run unit --coverage",
     "test:db:setup": "docker compose -f docker-compose.test.yml up -d",
     "test:unit": "vitest run unit",
-    "test:integration": "vitest run integration"
+    "test:integration": "vitest run integration",
+    "writer-ratchet:baseline": "tsx scripts/writer-ratchet/generate-baseline.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
