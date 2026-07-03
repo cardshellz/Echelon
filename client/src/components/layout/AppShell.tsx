@@ -167,7 +167,8 @@ const navStructure: NavEntry[] = [
     icon: Truck,
     roles: ["admin", "lead"],
     children: [
-      { label: "Shipments", icon: Truck, href: "/shipping" },
+      // "Shipments" returns here when a real shipments page exists — /shipping
+      // is a legacy alias of the WMS Orders page, not a shipments view.
       { label: "Shipping Groups", icon: Layers, href: "/shipping-groups" },
       { label: "Settings", icon: Package, href: "/shipping-settings", roles: ["admin"] },
     ],
