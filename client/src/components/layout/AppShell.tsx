@@ -143,17 +143,33 @@ const navStructure: NavEntry[] = [
     ],
   },
   {
-    label: "Orders & Fulfillment",
+    label: "Orders (OMS)",
+    icon: Globe,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "Orders", icon: Globe, href: "/oms/orders" },
+      { label: "Flow Monitor", icon: BarChart3, href: "/oms/flow-monitor" },
+      { label: "Returns", icon: RotateCcw, href: "/returns" },
+      { label: "Order History", icon: History, href: "/order-history" },
+    ],
+  },
+  {
+    label: "Warehouse (WMS)",
     icon: ShoppingCart,
     children: [
-      { label: "Orders (OMS)", icon: Globe, href: "/oms/orders", roles: ["admin", "lead"] },
-      { label: "Flow Monitor", icon: BarChart3, href: "/oms/flow-monitor", roles: ["admin", "lead"] },
-      { label: "WMS Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
+      { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
       { label: "Picking", icon: ClipboardList, href: "/picking" },
       { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", roles: ["admin", "lead"] },
-      { label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
-      { label: "Returns", icon: RotateCcw, href: "/returns", roles: ["admin", "lead"] },
-      { label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },
+    ],
+  },
+  {
+    label: "Shipping",
+    icon: Truck,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "Shipments", icon: Truck, href: "/shipping" },
+      { label: "Shipping Groups", icon: Layers, href: "/shipping-groups" },
+      { label: "Settings", icon: Package, href: "/shipping-settings", roles: ["admin"] },
     ],
   },
   {
@@ -163,7 +179,6 @@ const navStructure: NavEntry[] = [
     children: [
       { label: "Catalog", icon: Package, href: "/catalog" },
       { label: "Product Lines", icon: Tag, href: "/product-lines" },
-      { label: "Shipping Groups", icon: Truck, href: "/shipping-groups" },
       { label: "Channels", icon: Store, href: "/channels" },
       { label: "Allocation", icon: Layers, href: "/channel-allocation" },
       { label: "Sync Log", icon: History, href: "/sync-log" },
