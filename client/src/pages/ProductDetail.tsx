@@ -86,6 +86,9 @@ function safeInternalPath(path: string | null): string | null {
 
 const GRAMS_PER_POUND = 453.59237;
 const MILLIMETERS_PER_INCH = 25.4;
+// Derived from the constants above — do not introduce new base constants.
+const GRAMS_PER_OUNCE = GRAMS_PER_POUND / 16;
+const CUBIC_CM_PER_CUBIC_INCH = Math.pow(MILLIMETERS_PER_INCH / 10, 3);
 
 type VariantPackageAttributeKey = "weightGrams" | "lengthMm" | "widthMm" | "heightMm";
 type VariantPackagePayload = Partial<Record<VariantPackageAttributeKey, number | null>>;
@@ -890,6 +893,217 @@ function ProductInventoryTab({ productId }: { productId: number }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// --- Shipping behavior (shipping-engine packing attributes) for a single variant ---
+interface VariantShippingAttrsRow {
+  productVariantId: number;
+  shipsInOwnContainer: boolean;
+  riderEligible: boolean;
+  riderVoidCm3: number | null;
+  riderVoidMaxWeightGrams: number | null;
+  riderVoidMaxItems: number | null;
+  notes: string | null;
+}
+
+function VariantShippingBehavior({
+  variantId,
+  sku,
+  name,
+}: {
+  variantId: number;
+  sku: string | null;
+  name: string;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const searchTerm = (sku || name || "").trim();
+  const attrsUrl = `/api/shipping/admin/variant-attrs?search=${encodeURIComponent(searchTerm)}`;
+  const { data } = useQuery<{ rows: VariantShippingAttrsRow[] }>({
+    queryKey: [attrsUrl],
+    queryFn: async () => {
+      const res = await fetch(attrsUrl, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch shipping attributes");
+      return res.json();
+    },
+    enabled: searchTerm.length > 0,
+  });
+  const row = data?.rows?.find((r) => r.productVariantId === variantId) || null;
+
+  const [shippingForm, setShippingForm] = useState({
+    shipsInOwnContainer: false,
+    riderEligible: false,
+    riderVoidIn3: "",
+    riderVoidMaxWeightOz: "",
+    riderVoidMaxItems: "",
+  });
+  const [shippingDirty, setShippingDirty] = useState(false);
+
+  useEffect(() => {
+    setShippingForm({
+      shipsInOwnContainer: row?.shipsInOwnContainer ?? false,
+      riderEligible: row?.riderEligible ?? false,
+      riderVoidIn3: formatMeasurementInput(row?.riderVoidCm3, CUBIC_CM_PER_CUBIC_INCH),
+      riderVoidMaxWeightOz: formatMeasurementInput(row?.riderVoidMaxWeightGrams, GRAMS_PER_OUNCE),
+      riderVoidMaxItems: row?.riderVoidMaxItems != null ? String(row.riderVoidMaxItems) : "",
+    });
+    setShippingDirty(false);
+  }, [row, variantId]);
+
+  const saveShippingMutation = useMutation({
+    mutationFn: async () => {
+      const riderVoidCm3 = shippingForm.shipsInOwnContainer
+        ? toStoredMeasurement(shippingForm.riderVoidIn3, "Rider void volume", CUBIC_CM_PER_CUBIC_INCH)
+        : null;
+      const riderVoidMaxWeightGrams = shippingForm.shipsInOwnContainer
+        ? toStoredMeasurement(shippingForm.riderVoidMaxWeightOz, "Rider void max weight", GRAMS_PER_OUNCE)
+        : null;
+      let riderVoidMaxItems: number | null = null;
+      if (shippingForm.shipsInOwnContainer && shippingForm.riderVoidMaxItems.trim()) {
+        const parsed = parseInt(shippingForm.riderVoidMaxItems.trim());
+        if (!Number.isInteger(parsed) || parsed <= 0) {
+          throw new Error("Rider void max items must be a positive whole number.");
+        }
+        riderVoidMaxItems = parsed;
+      }
+      const res = await fetch("/api/shipping/admin/variant-attrs", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          productVariantId: variantId,
+          shipsInOwnContainer: shippingForm.shipsInOwnContainer,
+          riderEligible: shippingForm.riderEligible,
+          riderVoidCm3,
+          riderVoidMaxWeightGrams,
+          riderVoidMaxItems,
+          notes: row?.notes ?? null,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Failed to save shipping behavior");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        predicate: (q) =>
+          typeof q.queryKey[0] === "string" && q.queryKey[0].startsWith("/api/shipping/admin"),
+      });
+      toast({ title: "Shipping behavior saved" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Failed to save shipping behavior", description: e.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <div className="rounded-md border p-3 space-y-3">
+      <div>
+        <Label className="text-sm font-medium">Shipping behavior</Label>
+        <p className="text-xs text-muted-foreground">
+          Packing attributes used by the shipping engine's cartonizer. Saved separately from the variant.
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="variant-shipping-sioc"
+            checked={shippingForm.shipsInOwnContainer}
+            onCheckedChange={(checked) => {
+              setShippingForm((prev) => ({ ...prev, shipsInOwnContainer: checked === true }));
+              setShippingDirty(true);
+            }}
+          />
+          <label htmlFor="variant-shipping-sioc" className="text-sm cursor-pointer">
+            Ships in own container (SIOC)
+          </label>
+        </div>
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="variant-shipping-rider"
+            checked={shippingForm.riderEligible}
+            onCheckedChange={(checked) => {
+              setShippingForm((prev) => ({ ...prev, riderEligible: checked === true }));
+              setShippingDirty(true);
+            }}
+          />
+          <label htmlFor="variant-shipping-rider" className="text-sm cursor-pointer">
+            Rider eligible
+          </label>
+        </div>
+      </div>
+      {shippingForm.shipsInOwnContainer && (
+        <div className="grid grid-cols-3 gap-3">
+          <div className="space-y-1.5">
+            <Label className="text-xs">Rider void (in³)</Label>
+            <Input
+              type="number"
+              min="0"
+              step="0.001"
+              value={shippingForm.riderVoidIn3}
+              onChange={(e) => {
+                setShippingForm((prev) => ({ ...prev, riderVoidIn3: e.target.value }));
+                setShippingDirty(true);
+              }}
+              placeholder="Optional"
+              className="h-11"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">Void max wt (oz)</Label>
+            <Input
+              type="number"
+              min="0"
+              step="0.001"
+              value={shippingForm.riderVoidMaxWeightOz}
+              onChange={(e) => {
+                setShippingForm((prev) => ({ ...prev, riderVoidMaxWeightOz: e.target.value }));
+                setShippingDirty(true);
+              }}
+              placeholder="Optional"
+              className="h-11"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">Void max items</Label>
+            <Input
+              type="number"
+              min="0"
+              step="1"
+              value={shippingForm.riderVoidMaxItems}
+              onChange={(e) => {
+                setShippingForm((prev) => ({ ...prev, riderVoidMaxItems: e.target.value }));
+                setShippingDirty(true);
+              }}
+              placeholder="Optional"
+              className="h-11"
+            />
+          </div>
+        </div>
+      )}
+      {shippingDirty && (
+        <div className="flex justify-end">
+          <Button
+            size="sm"
+            variant="outline"
+            className="min-h-[32px]"
+            onClick={() => saveShippingMutation.mutate()}
+            disabled={saveShippingMutation.isPending}
+          >
+            {saveShippingMutation.isPending ? (
+              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+            ) : (
+              <Save className="w-3.5 h-3.5 mr-1.5" />
+            )}
+            Save shipping behavior
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -3334,6 +3548,14 @@ export default function ProductDetail() {
                 </div>
               </div>
             </div>
+
+            {editingVariant && (
+              <VariantShippingBehavior
+                variantId={editingVariant.id}
+                sku={editingVariant.sku}
+                name={editingVariant.name}
+              />
+            )}
 
             <div className="space-y-1.5">
               <Label>Breaks Into (Parent Variant)</Label>
