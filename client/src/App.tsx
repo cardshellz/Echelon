@@ -61,6 +61,7 @@ import PurchaseOrderEdit from "@/pages/PurchaseOrderEdit";
 import PurchasingDashboard from "@/pages/PurchasingDashboard";
 import Returns from "@/pages/Returns";
 import InboundShipments from "@/pages/InboundShipments";
+import OutboundShipments from "@/pages/OutboundShipments";
 import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
 import CostDashboard from "@/pages/CostDashboard";
 import APDashboard from "@/pages/APDashboard";
@@ -359,6 +360,9 @@ function Router() {
         </Route>
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/outbound-shipments">
+          <ProtectedRoute component={OutboundShipments} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/enterprise"><Redirect to="/" /></Route>
         <Route path="/demand-planner">
