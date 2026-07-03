@@ -129,6 +129,71 @@ describe("Single cancel path: all handlers use cancelOrderCascade", () => {
   });
 });
 
+// ─── P0.5: refund atomicity + cancel-retry effectiveness ──────────
+
+describe("P0.5: refund financial update is atomic and serialized", () => {
+  function extractRefundHandler(): string {
+    const start = OMS_WEBHOOKS_SRC.indexOf('"/api/oms/webhooks/refunds/create"');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const next = OMS_WEBHOOKS_SRC.indexOf("app.post(", start + 1);
+    return OMS_WEBHOOKS_SRC.substring(start, next === -1 ? OMS_WEBHOOKS_SRC.length : next);
+  }
+
+  it("serializes refunds per order with an advisory xact lock", () => {
+    const handler = extractRefundHandler();
+    expect(handler).toContain("pg_advisory_xact_lock(918411");
+  });
+
+  it("increments refund_amount_cents atomically in SQL (no JS read-modify-write)", () => {
+    const handler = extractRefundHandler();
+    expect(handler).toContain(
+      "refund_amount_cents = COALESCE(refund_amount_cents, 0) + ${thisRefundCents}",
+    );
+    // the old lost-update pattern must not return:
+    expect(handler).not.toMatch(/priorRefundCents\s*\+\s*thisRefundCents/);
+  });
+
+  it("derives financial_status from the CUMULATIVE amount vs order total", () => {
+    const handler = extractRefundHandler();
+    expect(handler).toMatch(
+      /COALESCE\(refund_amount_cents, 0\) \+ \$\{thisRefundCents\} >= COALESCE\(NULLIF\(total_cents, 0\)/,
+    );
+  });
+
+  it("checks the replay marker INSIDE the locked transaction", () => {
+    const handler = extractRefundHandler();
+    const lockPos = handler.indexOf("pg_advisory_xact_lock(918411");
+    const markerPos = handler.indexOf("details->>'refundId'");
+    expect(lockPos).toBeGreaterThan(-1);
+    expect(markerPos).toBeGreaterThan(lockPos);
+  });
+});
+
+describe("P0.5: cancelled-order retries re-run an incomplete cascade", () => {
+  function extractCancelledHandler(): string {
+    const start = OMS_WEBHOOKS_SRC.indexOf('"/api/oms/webhooks/orders/cancelled"');
+    const end = OMS_WEBHOOKS_SRC.indexOf('"/api/oms/webhooks/orders/fulfilled"');
+    return OMS_WEBHOOKS_SRC.substring(start, end);
+  }
+
+  it("the already-cancelled guard consults the cascade-completion marker", () => {
+    const handler = extractCancelledHandler();
+    const guardPos = handler.indexOf('existing.status === "cancelled"');
+    const markerPos = handler.indexOf("event_type = 'cancelled'");
+    const retryCascadePos = handler.indexOf("shopify_cancel_webhook_retry");
+    expect(guardPos).toBeGreaterThan(-1);
+    expect(markerPos).toBeGreaterThan(guardPos);
+    expect(retryCascadePos).toBeGreaterThan(markerPos);
+  });
+
+  it("the cascade-completion marker premise holds: cancelOrderCascade writes the 'cancelled' event last and is its only writer", () => {
+    const cascade = extractCancelOrderCascade();
+    expect(cascade).toContain('eventType: "cancelled"');
+    const writers = OMS_WEBHOOKS_SRC.match(/eventType: "cancelled"/g) ?? [];
+    expect(writers).toHaveLength(1);
+  });
+});
+
 // ─── D-REFUNDREL structural checks ────────────────────────────────
 
 describe("D-REFUNDREL: Refund restock failure dead-letter", () => {

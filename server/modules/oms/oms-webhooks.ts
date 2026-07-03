@@ -2135,7 +2135,36 @@ export function registerOmsWebhooks(
       const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
       if (existing.status === "cancelled") {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already cancelled`);
+        // P0.5 (audit F5b): "already cancelled" must NOT blind-skip. The
+        // status is written BEFORE the cascade (deliberately — it blocks
+        // concurrent sync/push while the cascade runs), so a cascade failure
+        // followed by a webhook retry used to land here and return early —
+        // reservations/WMS cleanup never re-ran, and recovery leaned
+        // entirely on the 15-min reconciler. The completion marker is the
+        // 'cancelled' event: cancelOrderCascade writes it LAST and is its
+        // only writer, so its existence proves the cascade finished.
+        const cascadeDone: any = await db.execute(sql`
+          SELECT 1 FROM oms.oms_order_events
+          WHERE order_id = ${existing.id}
+            AND event_type = 'cancelled'
+          LIMIT 1
+        `);
+        if ((cascadeDone?.rows?.length ?? 0) > 0) {
+          console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already cancelled (cascade complete)`);
+          await markInboxSucceeded(inbox.receipt);
+          acknowledgeProcessed(req, res);
+          return;
+        }
+        console.warn(
+          `${LOG_PREFIX} Order ${shopifyOrder.name} is cancelled but the cascade never completed — re-running cascade`,
+        );
+        await cancelOrderCascade(db, existing.id, {
+          wmsServices,
+          shipStationService,
+          source: "shopify_cancel_webhook_retry",
+          reason: shopifyOrder.cancel_reason || "cancelled_by_shopify",
+          logPrefix: LOG_PREFIX,
+        });
         await markInboxSucceeded(inbox.receipt);
         acknowledgeProcessed(req, res);
         return;
@@ -2376,10 +2405,11 @@ export function registerOmsWebhooks(
         .from(omsOrderLines)
         .where(eq(omsOrderLines.orderId, existing.id));
 
-      // Check if full or partial refund
+      // This-payload full-line-refund signal (kept as a secondary trigger for
+      // 'refunded'; the primary trigger is CUMULATIVE money — see the UPDATE).
       const totalOrderQty = omsLines.reduce((s: number, l: any) => s + l.quantity, 0);
       const refundedQty = refundLineItems.reduce((s: number, l: any) => s + (l.quantity || 0), 0);
-      const financialStatus = refundedQty >= totalOrderQty ? "refunded" : "partially_refunded";
+      const fullQtyRefundedThisPayload = totalOrderQty > 0 && refundedQty >= totalOrderQty;
 
       // Compute refund amount from Shopify transactions (authoritative source)
       const transactions: any[] = Array.isArray(refundPayload.transactions) ? refundPayload.transactions : [];
@@ -2388,55 +2418,74 @@ export function registerOmsWebhooks(
         0,
       );
 
-      // Per-refund idempotency: the financial update below is INCREMENTAL
-      // (prior + this), so a replayed/retried refunds/create webhook must not
-      // re-add the same refund. The 'refunded' event row (written in the same
-      // transaction as the update) is the marker — keyed by Shopify refund id.
-      const refundAlreadyApplied: any = await db.execute(sql`
-        SELECT 1 FROM oms.oms_order_events
-        WHERE order_id = ${existing.id}
-          AND event_type = 'refunded'
-          AND details->>'refundId' = ${String(refundPayload.id)}
-        LIMIT 1
-      `);
+      // P0.5 (audit F5): refund financial updates are SERIALIZED per order and
+      // applied ATOMICALLY in SQL.
+      //  - The advisory xact lock closes both races the old JS
+      //    read-modify-write had: two DIFFERENT refunds landing concurrently
+      //    (each read the same stale prior → one amount silently lost), and
+      //    the SAME refund replayed concurrently (both passed the marker
+      //    check before either committed → double count).
+      //  - The increment is `refund_amount_cents = COALESCE(...) + this`, so
+      //    it is correct even against a stale `existing` row.
+      //  - financial_status is derived from the CUMULATIVE amount vs the
+      //    order total (not per-payload), so stacked partial refunds and
+      //    money-only refunds resolve to 'refunded' exactly when the order
+      //    is fully refunded.
+      let refundSkippedAsReplay = false;
+      let cumulative = { refundAmountCents: 0, financialStatus: "partially_refunded" };
+      await db.transaction(async (tx: any) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(918411, ${existing.id})`);
 
-      if ((refundAlreadyApplied?.rows?.length ?? 0) > 0) {
+        const refundAlreadyApplied: any = await tx.execute(sql`
+          SELECT 1 FROM oms.oms_order_events
+          WHERE order_id = ${existing.id}
+            AND event_type = 'refunded'
+            AND details->>'refundId' = ${String(refundPayload.id)}
+          LIMIT 1
+        `);
+        if ((refundAlreadyApplied?.rows?.length ?? 0) > 0) {
+          refundSkippedAsReplay = true;
+          return;
+        }
+
+        const updated: any = await tx.execute(sql`
+          UPDATE oms.oms_orders SET
+            refund_amount_cents = COALESCE(refund_amount_cents, 0) + ${thisRefundCents},
+            financial_status = CASE
+              WHEN COALESCE(refund_amount_cents, 0) + ${thisRefundCents} >= COALESCE(NULLIF(total_cents, 0), 2147483647)
+                THEN 'refunded'
+              WHEN ${fullQtyRefundedThisPayload} THEN 'refunded'
+              ELSE 'partially_refunded'
+            END,
+            refunded_at = ${now},
+            updated_at = ${now}
+          WHERE id = ${existing.id}
+          RETURNING refund_amount_cents, financial_status
+        `);
+        cumulative = {
+          refundAmountCents: Number(updated?.rows?.[0]?.refund_amount_cents ?? 0),
+          financialStatus: String(updated?.rows?.[0]?.financial_status ?? "partially_refunded"),
+        };
+
+        await tx.insert(omsOrderEvents).values({
+          orderId: existing.id,
+          eventType: "refunded",
+          details: {
+            source: "shopify_webhook",
+            refundId: refundPayload.id,
+            financialStatus: cumulative.financialStatus,
+            thisRefundCents,
+            cumulativeRefundCents: cumulative.refundAmountCents,
+            refundedLineItems: refundLineItems.length,
+            restockedItems: refundLineItems.filter((li: any) => li.restock === true).length,
+          },
+        });
+      });
+
+      if (refundSkippedAsReplay) {
         console.log(
           `${LOG_PREFIX} refund ${refundPayload.id} already applied to order ${existing.externalOrderNumber} — skipping financial update, re-running cascade only`,
         );
-      } else {
-        const priorRefundCents = existing.refundAmountCents ?? 0;
-        const newRefundAmountCents = priorRefundCents + thisRefundCents;
-
-        // One transaction: financial update + its idempotency marker commit
-        // together, so a crash between them cannot leave a counted-but-
-        // unmarked refund that a later retry would double-count.
-        await db.transaction(async (tx: any) => {
-          await tx
-            .update(omsOrders)
-            .set({
-              financialStatus,
-              refundedAt: now,
-              refundAmountCents: newRefundAmountCents,
-              updatedAt: now,
-            })
-            .where(eq(omsOrders.id, existing.id));
-
-          await tx.insert(omsOrderEvents).values({
-            orderId: existing.id,
-            eventType: "refunded",
-            details: {
-              source: "shopify_webhook",
-              refundId: refundPayload.id,
-              financialStatus,
-              refundedLineItems: refundLineItems.length,
-              restockedItems: refundLineItems.filter((li: any) => li.restock === true).length,
-              totalRefundAmount: refundPayload.transactions?.reduce(
-                (sum: number, t: any) => sum + parseFloat(t.amount || "0"), 0
-              ),
-            },
-          });
-        });
       }
 
       // C29 — record the refund as a wms.returns row (audit trail) and
@@ -2498,7 +2547,10 @@ export function registerOmsWebhooks(
             `repushed=${cascade.repushedShipments ?? 0} flagged=${cascade.flaggedShipments ?? 0}`,
       );
 
-      console.log(`${LOG_PREFIX} ✅ Processed refund for order ${existing.externalOrderNumber} → ${financialStatus}`);
+      console.log(
+        `${LOG_PREFIX} ✅ Processed refund for order ${existing.externalOrderNumber} → ` +
+          `${refundSkippedAsReplay ? "replay (financials unchanged)" : `${cumulative.financialStatus} (cumulative ${cumulative.refundAmountCents}¢)`}`,
+      );
       pushToMissionControl(existing.id, "order.refunded");
       await markInboxSucceeded(inbox.receipt);
       acknowledgeProcessed(req, res);

@@ -461,9 +461,12 @@ describe("refunds/create :: per-refund financial idempotency", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/refundAlreadyApplied/);
   });
 
-  it("writes the financial update and the marker event in one transaction", () => {
+  it("writes the financial update and the marker event in one locked transaction (P0.5)", () => {
+    // The atomic SQL increment + the 'refunded' marker event commit together
+    // inside a per-order advisory-locked transaction — replays and concurrent
+    // refunds can neither double-count nor lose an amount.
     const m = OMS_WEBHOOKS_SRC.match(
-      /await db\.transaction\(async \(tx: any\) => \{[\s\S]*?refundAmountCents: newRefundAmountCents[\s\S]*?eventType: "refunded"[\s\S]*?\}\);/,
+      /await db\.transaction\(async \(tx: any\) => \{[\s\S]*?pg_advisory_xact_lock\(918411[\s\S]*?refund_amount_cents = COALESCE\(refund_amount_cents, 0\) \+ \$\{thisRefundCents\}[\s\S]*?eventType: "refunded"[\s\S]*?\}\);/,
     );
     expect(m).not.toBeNull();
   });

@@ -28,6 +28,9 @@ function buildMockStorage(overrides: Record<string, any> = {}): any {
     getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
     getAllocationsForLine: vi.fn().mockResolvedValue([]),
     createInboundShipmentStatusHistory: vi.fn().mockResolvedValue({}),
+    // refreshAllocationsForShipment clears stale allocations when a shipment
+    // has no lines — added to the real storage after this mock was written.
+    deleteAllocationsForShipment: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

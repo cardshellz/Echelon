@@ -492,6 +492,21 @@
   "public.reorder_exclusion_rules": [
     "modules/procurement"
   ],
+  "shipping.box_catalog": [
+    "modules/shipping-engine"
+  ],
+  "shipping.box_warehouse_stock": [
+    "modules/shipping-engine"
+  ],
+  "shipping.service_level_methods": [
+    "modules/shipping-engine"
+  ],
+  "shipping.service_levels": [
+    "modules/shipping-engine"
+  ],
+  "shipping.variant_shipping_attrs": [
+    "modules/shipping-engine"
+  ],
   "warehouse.echelon_settings": [
     "modules/orders",
     "modules/warehouse",
