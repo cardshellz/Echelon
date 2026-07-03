@@ -111,7 +111,10 @@ async function main(): Promise<void> {
     console.error("EXTERNAL_DATABASE_URL / DATABASE_URL not set");
     process.exit(1);
   }
-  const pool = new Pool({ connectionString, max: 2 });
+  // ssl matches the repo's other pools/scripts (see db.ts, remediate-lot-drift):
+  // Heroku PG requires TLS; certificate verification is a known repo-wide
+  // gap tracked as P4.5 in REFACTOR-PLAN-2026-07.md.
+  const pool = new Pool({ connectionString, max: 2, ssl: { rejectUnauthorized: false } });
 
   try {
     const scope = opts.variantId ? ` AND r.variant_id = ${Number(opts.variantId)}` : "";
