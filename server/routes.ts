@@ -50,6 +50,7 @@ import { registerDropshipNotificationRoutes } from "./modules/dropship/interface
 import { registerDropshipReturnRoutes } from "./modules/dropship/interfaces/http/dropship-return.routes";
 import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/http/dropship-ops-surface.routes";
 import { registerDropshipMarketplaceOrderIntakeRoutes } from "./modules/dropship/interfaces/http/dropship-marketplace-order-intake.routes";
+import { registerShippingAdminRoutes } from "./modules/shipping-engine/shipping-admin.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -72,6 +73,7 @@ export async function registerRoutes(
   registerDropshipAdminTrackingPushOpsRoutes(app);
   registerDropshipAdminNotificationOpsRoutes(app);
   registerDropshipAdminShippingConfigRoutes(app);
+  registerShippingAdminRoutes(app);
   registerDropshipAdminOmsChannelConfigRoutes(app);
   registerDropshipAdminWorkerOpsRoutes(app);
   registerDropshipVendorCatalogRoutes(app);

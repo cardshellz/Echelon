@@ -513,6 +513,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                       Procurement
                     </Link>
                   </DropdownMenuItem>
+                  <DropdownMenuItem asChild data-testid="link-shipping-settings">
+                    <Link href="/shipping-settings" className="w-full cursor-pointer">
+                      <Package className="mr-2 h-4 w-4" />
+                      Shipping
+                    </Link>
+                  </DropdownMenuItem>
                   <DropdownMenuItem asChild data-testid="link-integrations">
                     <Link href="/integrations" className="w-full cursor-pointer">
                       <Cable className="mr-2 h-4 w-4" />
