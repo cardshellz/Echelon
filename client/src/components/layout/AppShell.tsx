@@ -167,7 +167,7 @@ const navStructure: NavEntry[] = [
     icon: Truck,
     roles: ["admin", "lead"],
     children: [
-      { label: "Shipments", icon: Truck, href: "/shipping" },
+      { label: "Shipments", icon: Truck, href: "/outbound-shipments" },
       { label: "Shipping Groups", icon: Layers, href: "/shipping-groups" },
       { label: "Settings", icon: Package, href: "/shipping-settings", roles: ["admin"] },
     ],
