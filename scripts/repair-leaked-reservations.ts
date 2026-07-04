@@ -11,51 +11,73 @@
  *   target_reserved(variant) = Σ over items of non-terminal WMS orders of
  *                              GREATEST(0, quantity − picked)
  *
- * where `picked` is the CONSERVATIVE (lower) of the item's picked_quantity
- * column and its ledger pick rows — under-counting picks raises the target
- * and makes us release LESS, never more. Only positive drift
- * (current > target) is repaired, per-variant, inside a transaction holding
- * the same advisory lock the live reserve path takes (918410), with drift
- * recomputed under the lock. Lot-level qty_reserved is trimmed to match,
- * newest lots first (mirror of releaseFromLots). Every release writes a
- * ledgered `unreserve` row (reserved_qty_delta, reference_type='manual',
- * reference_id='repair-leaked-reservations').
+ * where `picked` per item comes from TWO records that can disagree on old
+ * orders: the order-item's picked_quantity column and its ledger pick rows.
+ * `--picked` chooses the measure:
+ *
+ *   --picked=least (default) — pass-1 caution: under-counting picks raises
+ *     the target and makes us release LESS, never more. Validated in prod
+ *     2026-07-02 (96/96 variants, 1,492 units, no fallout).
+ *   --picked=max — second-tranche accuracy: a pick consumed its reservation
+ *     at pick time regardless of which record captured it, so the HIGHER
+ *     measure better reflects consumed reservations on rotted history.
+ *     Releases what `least` deliberately left behind. Compare both dry-runs
+ *     before applying; the report always prints both targets side by side.
+ *
+ * Only positive drift (current > target) is repaired, per-variant, inside a
+ * transaction holding the same advisory lock the live reserve path takes
+ * (918410), with drift recomputed under the lock. Lot-level qty_reserved is
+ * trimmed to match, newest lots first (mirror of releaseFromLots). Every
+ * release writes a ledgered `unreserve` row (reserved_qty_delta,
+ * reference_type='manual', reference_id='repair-leaked-reservations').
  *
  * KNOWN CONSERVATISM: orders held for reservation shortfall (P0.1c) count
  * toward the target even though they hold no reservation — their variants
  * under-release until the hold resolves. Re-run after holds clear.
  *
  * SAFETY: DRY-RUN by default (no writes). Idempotent — a re-run after apply
- * finds zero drift.
+ * finds zero drift (for the chosen measure).
  *
- *   npx tsx scripts/repair-leaked-reservations.ts                # dry-run report
+ *   npx tsx scripts/repair-leaked-reservations.ts                # dry-run report (least)
+ *   npx tsx scripts/repair-leaked-reservations.ts --picked=max   # dry-run, accurate measure
  *   npx tsx scripts/repair-leaked-reservations.ts --limit=50     # dry-run, wider sample
  *   npx tsx scripts/repair-leaked-reservations.ts --variant=207  # scope to one variant
- *   npx tsx scripts/repair-leaked-reservations.ts --apply        # WRITE
+ *   npx tsx scripts/repair-leaked-reservations.ts --picked=max --apply  # WRITE second tranche
  *
  * Connection: EXTERNAL_DATABASE_URL (per CLAUDE.md), falling back to DATABASE_URL.
  * Verify after apply: re-run without --apply (expect zero drift rows).
  */
 
 import pg from "pg";
+import { fileURLToPath } from "node:url";
 
 const { Pool } = pg;
 
 const RESERVATION_LOCK_NS = 918410; // must match reservation.service.ts
 
-interface CliOptions {
+export type PickedMeasure = "least" | "max";
+
+export interface CliOptions {
   apply: boolean;
   limit: number;
   variantId: number | null;
+  picked: PickedMeasure;
 }
 
-function parseCli(): CliOptions {
-  const opts: CliOptions = { apply: false, limit: 25, variantId: null };
-  for (const arg of process.argv.slice(2)) {
+export function parseCli(argv: string[]): CliOptions {
+  const opts: CliOptions = { apply: false, limit: 25, variantId: null, picked: "least" };
+  for (const arg of argv) {
     if (arg === "--apply") opts.apply = true;
     else if (arg.startsWith("--limit=")) opts.limit = Math.max(1, Number(arg.split("=")[1]) || 25);
     else if (arg.startsWith("--variant=")) opts.variantId = Number(arg.split("=")[1]) || null;
-    else {
+    else if (arg.startsWith("--picked=")) {
+      const v = arg.split("=")[1];
+      if (v !== "least" && v !== "max") {
+        console.error(`--picked must be 'least' or 'max', got '${v}'`);
+        process.exit(1);
+      }
+      opts.picked = v;
+    } else {
       console.error(`Unknown argument: ${arg}`);
       process.exit(1);
     }
@@ -63,15 +85,21 @@ function parseCli(): CliOptions {
   return opts;
 }
 
+const PICKED_LEAST = "LEAST(COALESCE(oi.picked_quantity, 0), COALESCE(lp.picked, 0))";
+const PICKED_MAX = "GREATEST(COALESCE(oi.picked_quantity, 0), COALESCE(lp.picked, 0))";
+
 /**
  * Per-variant drift: current reserved counters vs open active-order demand.
- * `picked` per item = LEAST(picked_quantity column, ledger pick rows) —
- * the conservative choice (see header).
+ * Both targets are always computed so the report shows them side by side;
+ * the chosen measure drives drift and the WHERE gate (see header).
  */
-const DRIFT_SQL = `
+export function buildDriftSql(measure: PickedMeasure): string {
+  const chosenTarget = measure === "max" ? "target_max" : "target_least";
+  return `
   WITH active_demand AS (
     SELECT pv.id AS variant_id,
-           SUM(GREATEST(0, oi.quantity - LEAST(COALESCE(oi.picked_quantity, 0), COALESCE(lp.picked, 0)))) AS target_reserved
+           SUM(GREATEST(0, oi.quantity - ${PICKED_LEAST})) AS target_least,
+           SUM(GREATEST(0, oi.quantity - ${PICKED_MAX})) AS target_max
     FROM wms.order_items oi
     JOIN wms.orders o ON o.id = oi.order_id
     JOIN catalog.product_variants pv ON pv.sku = oi.sku
@@ -96,16 +124,19 @@ const DRIFT_SQL = `
   SELECT r.variant_id,
          pv.sku,
          r.current_reserved::int,
-         COALESCE(a.target_reserved, 0)::int AS target_reserved,
-         (r.current_reserved - COALESCE(a.target_reserved, 0))::int AS drift
+         COALESCE(a.target_least, 0)::int AS target_least,
+         COALESCE(a.target_max, 0)::int AS target_max,
+         COALESCE(a.${chosenTarget}, 0)::int AS target_reserved,
+         (r.current_reserved - COALESCE(a.${chosenTarget}, 0))::int AS drift
   FROM reserved_now r
   JOIN catalog.product_variants pv ON pv.id = r.variant_id
   LEFT JOIN active_demand a ON a.variant_id = r.variant_id
-  WHERE r.current_reserved > COALESCE(a.target_reserved, 0)
+  WHERE r.current_reserved > COALESCE(a.${chosenTarget}, 0)
 `;
+}
 
 async function main(): Promise<void> {
-  const opts = parseCli();
+  const opts = parseCli(process.argv.slice(2));
   const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
   if (!connectionString) {
     console.error("EXTERNAL_DATABASE_URL / DATABASE_URL not set");
@@ -117,24 +148,23 @@ async function main(): Promise<void> {
   const pool = new Pool({ connectionString, max: 2, ssl: { rejectUnauthorized: false } });
 
   try {
+    const driftSql = buildDriftSql(opts.picked);
     const scope = opts.variantId ? ` AND r.variant_id = ${Number(opts.variantId)}` : "";
-    const driftRows = await pool.query(
-      `${DRIFT_SQL}${scope} ORDER BY (r.current_reserved - COALESCE(a.target_reserved, 0)) DESC`,
-    );
+    const driftRows = await pool.query(`${driftSql}${scope} ORDER BY drift DESC`);
 
     if (driftRows.rows.length === 0) {
-      console.log("No positive reservation drift found. Nothing to repair.");
+      console.log(`No positive reservation drift found (picked=${opts.picked}). Nothing to repair.`);
       return;
     }
 
     console.log(
-      `${opts.apply ? "APPLY" : "DRY-RUN"}: ${driftRows.rows.length} variant(s) with leaked reservations ` +
+      `${opts.apply ? "APPLY" : "DRY-RUN"} (picked=${opts.picked}): ${driftRows.rows.length} variant(s) with leaked reservations ` +
         `(showing up to ${opts.limit}):\n`,
     );
-    console.log("variant_id | sku | current_reserved | target_reserved | drift");
+    console.log("variant_id | sku | current_reserved | target_least | target_max | drift");
     for (const row of driftRows.rows.slice(0, opts.limit)) {
       console.log(
-        `${row.variant_id} | ${row.sku} | ${row.current_reserved} | ${row.target_reserved} | ${row.drift}`,
+        `${row.variant_id} | ${row.sku} | ${row.current_reserved} | ${row.target_least} | ${row.target_max} | ${row.drift}`,
       );
     }
     const totalDrift = driftRows.rows.reduce((s: number, r: any) => s + Number(r.drift), 0);
@@ -158,7 +188,7 @@ async function main(): Promise<void> {
 
         // Recompute under the lock — the world may have moved.
         const fresh = await client.query(
-          `${DRIFT_SQL} AND r.variant_id = $1`,
+          `${driftSql} AND r.variant_id = $1`,
           [variantId],
         );
         const freshRow = fresh.rows[0];
@@ -254,7 +284,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
