@@ -161,4 +161,51 @@ describe("EbayApiClient listing lifecycle", () => {
     );
     expect(getFetchHeaders(fetchMock, 0)["Accept-Language"]).toBe("en-US");
   });
+
+  // eBay Sell Inventory API rejects writes that omit Content-Language with
+  // [25709] "Invalid value for header Content-Language" — every write call
+  // must carry it, not just the two inventory-item PUTs.
+  it("sends Content-Language on bulk inventory updates (POST)", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ responses: [] }));
+
+    await makeClient().bulkUpdatePriceQuantity({
+      requests: [
+        {
+          sku: "ARM-ENV-SGL-C700",
+          shipToLocationAvailability: { quantity: 0 },
+          offers: [{ offerId: "136412217011", availableQuantity: 0 }],
+        },
+      ],
+    });
+
+    expect(getFetchHeaders(fetchMock, 0)["Content-Language"]).toBe("en-US");
+  });
+
+  it("sends Content-Language on offer updates (PUT)", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await makeClient().updateOffer("offer-123", {
+      sku: "ARM-ENV-SGL-C700",
+      marketplaceId: "EBAY_US",
+      format: "FIXED_PRICE",
+    } as any);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("PUT");
+    expect(getFetchHeaders(fetchMock, 0)["Content-Language"]).toBe("en-US");
+  });
+
+  it("does not send Content-Language on reads (GET has no body to describe)", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ offers: [] }));
+
+    await makeClient().getOffers("ARM-ENV-SGL-C700");
+
+    expect(getFetchHeaders(fetchMock, 0)["Content-Language"]).toBeUndefined();
+  });
 });
