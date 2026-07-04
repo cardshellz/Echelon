@@ -439,7 +439,11 @@ class EchelonSyncOrchestrator {
                 } else {
                   result.variantsSkipped++;
                 }
-                await this.recordNonShopifyInventorySyncSuccess(channel, item);
+                await this.recordNonShopifyInventorySyncSuccess(
+                  channel,
+                  item,
+                  pushResult?.refreshedExternalVariantId,
+                );
               } else {
                 result.variantsErrored++;
                 await this.recordChannelListingSyncError(channelId, item.variantId, error ?? "Inventory push failed");
@@ -1401,9 +1405,14 @@ class EchelonSyncOrchestrator {
   private async recordNonShopifyInventorySyncSuccess(
     channel: { id: number; provider: string },
     item: NonShopifyInventoryPushItem,
+    // Adapter re-resolved a stale external id (e.g. a relisted eBay offer);
+    // persist it or every future sync re-fails on the dead id.
+    refreshedExternalVariantId?: string,
   ): Promise<void> {
     const now = new Date();
-    const channelVariantId = item.externalVariantId ?? item.sku ?? String(item.variantId);
+    const effectiveExternalVariantId =
+      refreshedExternalVariantId ?? item.externalVariantId;
+    const channelVariantId = effectiveExternalVariantId ?? item.sku ?? String(item.variantId);
     const [existingFeed] = await this.db
       .select({ id: channelFeeds.id })
       .from(channelFeeds)
@@ -1448,6 +1457,9 @@ class EchelonSyncOrchestrator {
         syncStatus: "synced",
         syncError: null,
         updatedAt: now,
+        ...(refreshedExternalVariantId
+          ? { externalVariantId: refreshedExternalVariantId }
+          : {}),
       })
       .where(
         and(

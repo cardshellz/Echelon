@@ -80,6 +80,13 @@ export interface InventoryPushResult {
   pushedQty: number;
   status: "success" | "error" | "skipped";
   error?: string;
+  /**
+   * Set when the adapter discovered the stored externalVariantId was stale
+   * and recovered by re-resolving it on the channel (e.g. an eBay offerId
+   * that was recreated by a relist). The orchestrator must persist this so
+   * the next sync doesn't hit the same dead id.
+   */
+  refreshedExternalVariantId?: string;
 }
 
 /** Per-variant pricing to push */
