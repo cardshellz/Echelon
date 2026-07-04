@@ -46,6 +46,7 @@ import type {
   EbayOrderLineItem,
   EbayNotificationPayload,
   EbayOrderConfirmationData,
+  EbayError,
 } from "./ebay/ebay-types";
 
 import crypto from "crypto";
@@ -259,12 +260,21 @@ export class EbayAdapter implements IChannelAdapter {
                 status: "success",
               });
             } else {
-              results.push({
-                variantId: item.variantId,
-                pushedQty: 0,
-                status: "error",
-                error: offerResp?.errors?.[0]?.message || resp?.errors?.[0]?.message || `Status ${statusCode ?? "unknown"}`,
-              });
+              // A stored offerId can go stale (offer withdrawn + relisted gets
+              // a NEW id) — that surfaces as a per-offer error inside an
+              // otherwise-successful bulk response, so the catch fallback
+              // below never sees it. Re-resolve by SKU and heal the mapping.
+              const recovered = this.isStaleOfferError(statusCode, offerResp?.errors, resp?.errors)
+                ? await this.recoverStaleOffer(client, item)
+                : null;
+              results.push(
+                recovered ?? {
+                  variantId: item.variantId,
+                  pushedQty: 0,
+                  status: "error",
+                  error: offerResp?.errors?.[0]?.message || resp?.errors?.[0]?.message || `Status ${statusCode ?? "unknown"}`,
+                },
+              );
             }
           }
         } catch (err: any) {
@@ -274,12 +284,17 @@ export class EbayAdapter implements IChannelAdapter {
               const existingOffers = await client.getOffers(item.sku || "");
               if (existingOffers.offers?.[0]) {
                 const offer = existingOffers.offers[0];
-                offer.availableQuantity = item.allocatedQty;
-                await client.updateOffer(offer.offerId, offer as any);
+                await client.updateOffer(offer.offerId, {
+                  ...offer,
+                  availableQuantity: item.allocatedQty,
+                } as any);
                 results.push({
                   variantId: item.variantId,
                   pushedQty: item.allocatedQty,
                   status: "success",
+                  ...(offer.offerId !== item.externalVariantId
+                    ? { refreshedExternalVariantId: offer.offerId }
+                    : {}),
                 });
               } else {
                 results.push({
@@ -350,6 +365,60 @@ export class EbayAdapter implements IChannelAdapter {
     }
 
     return results;
+  }
+
+  /**
+   * eBay signals a dead offerId with a per-offer 404, or error 25710
+   * ("could not find the entity") / 25713 ("invalid offerId").
+   */
+  private isStaleOfferError(
+    statusCode: number | undefined,
+    ...errorLists: Array<EbayError[] | undefined>
+  ): boolean {
+    if (statusCode === 404) return true;
+    return errorLists.some((errors) =>
+      errors?.some((e) => e.errorId === 25710 || e.errorId === 25713),
+    );
+  }
+
+  /**
+   * The stored offerId no longer exists on eBay (withdraw + relist mints a
+   * new one). Re-resolve the live offer by SKU, push the quantity to it,
+   * and report the fresh offerId so the orchestrator can heal the mapping.
+   * Returns null when there is nothing fresher — caller keeps the original
+   * error result.
+   */
+  private async recoverStaleOffer(
+    client: EbayApiClient,
+    item: InventoryPushItem,
+  ): Promise<InventoryPushResult | null> {
+    if (!item.sku) return null;
+    try {
+      const existing = await client.getOffers(item.sku);
+      const fresh = existing.offers?.[0];
+      if (!fresh?.offerId || fresh.offerId === item.externalVariantId) {
+        return null;
+      }
+      await client.updateOffer(fresh.offerId, {
+        ...fresh,
+        availableQuantity: item.allocatedQty,
+      } as any);
+      console.warn(
+        `[EbayAdapter] Healed stale offerId for SKU ${item.sku}: ` +
+          `${item.externalVariantId} -> ${fresh.offerId}`,
+      );
+      return {
+        variantId: item.variantId,
+        pushedQty: item.allocatedQty,
+        status: "success",
+        refreshedExternalVariantId: fresh.offerId,
+      };
+    } catch (err: any) {
+      console.warn(
+        `[EbayAdapter] Stale-offer recovery failed for SKU ${item.sku}: ${err.message}`,
+      );
+      return null;
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -453,6 +453,172 @@ describe("eBay Listing Builder", () => {
         ],
       });
     });
+
+    // A withdrawn+relisted offer gets a NEW offerId; the stored one then
+    // fails as a per-offer error INSIDE a 200 bulk response. The adapter
+    // must re-resolve by SKU, push to the live offer, and report the fresh
+    // id so the orchestrator heals the mapping.
+    it("recovers a stale offerId by re-resolving the live offer by SKU", async () => {
+      const adapter = new EbayAdapter(createMockDb());
+      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
+        responses: [
+          {
+            sku: "SHLZ-TOP-180PT-BLU",
+            statusCode: 404,
+            offers: [
+              {
+                offerId: "offer-stale",
+                statusCode: 404,
+                errors: [
+                  {
+                    errorId: 25710,
+                    domain: "API_INVENTORY",
+                    category: "REQUEST",
+                    message: "We didn't find the entity you are requesting.",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const getOffers = vi.fn().mockResolvedValue({
+        offers: [{ offerId: "offer-fresh", sku: "SHLZ-TOP-180PT-BLU", availableQuantity: 3 }],
+      });
+      const updateOffer = vi.fn().mockResolvedValue(undefined);
+      (adapter as any).getApiClient = vi
+        .fn()
+        .mockResolvedValue({ bulkUpdatePriceQuantity, getOffers, updateOffer });
+      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
+
+      const result = await adapter.pushInventory(2, [
+        {
+          variantId: 180,
+          sku: "SHLZ-TOP-180PT-BLU",
+          externalVariantId: "offer-stale",
+          externalInventoryItemId: null,
+          allocatedQty: 12,
+        },
+      ]);
+
+      expect(getOffers).toHaveBeenCalledWith("SHLZ-TOP-180PT-BLU");
+      expect(updateOffer).toHaveBeenCalledWith(
+        "offer-fresh",
+        expect.objectContaining({ offerId: "offer-fresh", availableQuantity: 12 }),
+      );
+      expect(result).toEqual([
+        {
+          variantId: 180,
+          pushedQty: 12,
+          status: "success",
+          refreshedExternalVariantId: "offer-fresh",
+        },
+      ]);
+    });
+
+    it("keeps the original error when re-resolution finds no fresher offer", async () => {
+      const adapter = new EbayAdapter(createMockDb());
+      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
+        responses: [
+          {
+            sku: "SHLZ-TOP-180PT-BLU",
+            offers: [
+              {
+                offerId: "offer-stale",
+                statusCode: 404,
+                errors: [
+                  {
+                    errorId: 25713,
+                    domain: "API_INVENTORY",
+                    category: "REQUEST",
+                    message: "This offerId is invalid.",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      // SKU lookup returns the SAME dead offerId — nothing to heal with
+      const getOffers = vi.fn().mockResolvedValue({
+        offers: [{ offerId: "offer-stale", sku: "SHLZ-TOP-180PT-BLU" }],
+      });
+      const updateOffer = vi.fn();
+      (adapter as any).getApiClient = vi
+        .fn()
+        .mockResolvedValue({ bulkUpdatePriceQuantity, getOffers, updateOffer });
+      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
+
+      const result = await adapter.pushInventory(2, [
+        {
+          variantId: 180,
+          sku: "SHLZ-TOP-180PT-BLU",
+          externalVariantId: "offer-stale",
+          externalInventoryItemId: null,
+          allocatedQty: 12,
+        },
+      ]);
+
+      expect(updateOffer).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        {
+          variantId: 180,
+          pushedQty: 0,
+          status: "error",
+          error: "This offerId is invalid.",
+        },
+      ]);
+    });
+
+    it("does not attempt re-resolution on non-stale per-offer errors", async () => {
+      const adapter = new EbayAdapter(createMockDb());
+      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
+        responses: [
+          {
+            sku: "CS-TL35-P25",
+            offers: [
+              {
+                offerId: "offer-101",
+                statusCode: 400,
+                errors: [
+                  {
+                    errorId: 25709,
+                    domain: "API_INVENTORY",
+                    category: "REQUEST",
+                    message: "Invalid value for header Content-Language.",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const getOffers = vi.fn();
+      (adapter as any).getApiClient = vi
+        .fn()
+        .mockResolvedValue({ bulkUpdatePriceQuantity, getOffers });
+      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
+
+      const result = await adapter.pushInventory(2, [
+        {
+          variantId: 101,
+          sku: "CS-TL35-P25",
+          externalVariantId: "offer-101",
+          externalInventoryItemId: null,
+          allocatedQty: 5,
+        },
+      ]);
+
+      expect(getOffers).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        {
+          variantId: 101,
+          pushedQty: 0,
+          status: "error",
+          error: "Invalid value for header Content-Language.",
+        },
+      ]);
+    });
   });
 
   describe("pushPricing", () => {

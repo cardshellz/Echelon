@@ -299,6 +299,73 @@ describe("EchelonSyncOrchestrator", () => {
       expect(db.insert).toHaveBeenCalled();
     });
 
+    it("persists a refreshed external variant id when the adapter healed a stale offer", async () => {
+      const ebayAdapter: IChannelAdapter = {
+        ...createMockAdapter(),
+        adapterName: "MockEbay",
+        providerKey: "ebay",
+        pushInventory: vi.fn().mockResolvedValue([
+          {
+            variantId: 67,
+            pushedQty: 292,
+            status: "success",
+            // Adapter re-resolved a dead offerId to the live one — the
+            // orchestrator must write it back or every sync re-fails.
+            refreshedExternalVariantId: "999888777",
+          },
+        ]),
+      };
+      adapterRegistry.register(ebayAdapter);
+      allocationEngine.allocateProduct.mockResolvedValue({
+        productId: 33,
+        totalAtpBase: 204400,
+        allocations: [
+          {
+            channelId: 67,
+            channelName: "Ebay",
+            channelProvider: "ebay",
+            channelPriority: 0,
+            productVariantId: 67,
+            sku: "SHLZ-TOP-180PT-BLU",
+            unitsPerVariant: 700,
+            allocatedUnits: 292,
+            allocatedBase: 204400,
+            method: "mirror",
+            reason: "Mirror ATP",
+          },
+        ],
+        blocked: [],
+      });
+      db._selectQueue = [
+        [],
+        [{
+          productVariantId: 67,
+          feedId: null,
+          feedLastSyncedQty: null,
+          channelVariantId: null,
+          channelSku: null,
+          channelInventoryItemId: null,
+          listingId: 663,
+          listingExternalVariantId: "offer-stale",
+          listingExternalSku: "SHLZ-TOP-180PT-BLU",
+          listingLastSyncedQty: null,
+        }],
+        [],
+        [{ productId: 33 }],
+        [],
+      ];
+
+      const results = await orchestrator.syncInventoryForProduct(33, { dryRun: false }, "test");
+
+      expect(results[0].variantsPushed).toBe(1);
+      const updateSetValues = db.update.mock.results.flatMap((r: any) =>
+        r.value.set.mock.calls.map((c: any[]) => c[0]),
+      );
+      expect(
+        updateSetValues.some((v: any) => v.externalVariantId === "999888777"),
+      ).toBe(true);
+    });
+
     it("should skip variants without shopifyInventoryItemId", async () => {
       db._selectResult = [
         { warehouseId: 1, shopifyLocationId: "loc-1", id: 100, sku: "TEST-P50", shopifyVariantId: "ext-100", shopifyInventoryItemId: null },

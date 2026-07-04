@@ -91,7 +91,6 @@ export class EbayApiClient {
       method: "PUT",
       path: `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
       body: item,
-      headers: { "Content-Language": "en-US" },
       expectNoContent: true,
     });
   }
@@ -256,7 +255,6 @@ export class EbayApiClient {
       method: "PUT",
       path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
       body: { ...group, inventoryItemGroupKey: groupKey },
-      headers: { "Content-Language": "en-US" },
       expectNoContent: true,
     });
   }
@@ -545,6 +543,9 @@ export class EbayApiClient {
             "Content-Type": "application/json",
             Accept: "application/json",
             "Accept-Language": EBAY_US_LOCALE,
+            // eBay Sell Inventory API rejects writes that omit Content-Language
+            // with [25709] "Invalid value for header Content-Language".
+            ...(method !== "GET" ? { "Content-Language": EBAY_US_LOCALE } : {}),
             "X-EBAY-C-MARKETPLACE-ID": EBAY_US_MARKETPLACE_ID,
             ...extraHeaders,
           },

@@ -129,13 +129,16 @@ describe("D-QGUARD: recordShipment DB-level dedup", () => {
   });
 
   it("migration exists for the unique index", () => {
-    const fs = require("node:fs");
-    const migrationPath =
-      "/home/user/Echelon/migrations/0570_shipment_inventory_txn_dedup.sql";
-    const exists = fs.existsSync(migrationPath);
-    expect(exists).toBe(true);
+    // Resolve relative to this test file, not an absolute machine path —
+    // CI checks the repo out at a different root.
+    const migrationPath = fileURLToPath(
+      new URL(
+        "../../../../../migrations/0570_shipment_inventory_txn_dedup.sql",
+        import.meta.url,
+      ),
+    );
 
-    const sql = fs.readFileSync(migrationPath, "utf8");
+    const sql = readFileSync(migrationPath, "utf8");
     expect(sql).toContain("CREATE UNIQUE INDEX");
     expect(sql).toContain("uq_inventory_transactions_ship_dedup");
     expect(sql).toContain("transaction_type = 'ship'");
