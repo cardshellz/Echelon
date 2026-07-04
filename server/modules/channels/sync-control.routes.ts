@@ -6,8 +6,10 @@
 
 import type { Express } from "express";
 import { requirePermission } from "../../routes/middleware";
+import { createManualSyncRunner } from "./manual-sync-runner";
 
 export function registerSyncControlRoutes(app: Express) {
+  const manualSync = createManualSyncRunner();
   // ============================================
   // GLOBAL SYNC SETTINGS
   // ============================================
@@ -198,55 +200,38 @@ export function registerSyncControlRoutes(app: Express) {
   // MANUAL SYNC TRIGGER
   // ============================================
 
+  // Starts the sweep in the BACKGROUND and answers 202 immediately — a full
+  // sweep exceeds Heroku's 30s router limit, so the old synchronous response
+  // died as H12/503 while the sweep kept running (manual-sync-runner.ts).
   app.post("/api/sync/trigger", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { echelonOrchestrator, syncSettings: syncSettingsSvc } = req.app.locals.services;
+      const { syncSettings: syncSettingsSvc } = req.app.locals.services;
 
       const global = await syncSettingsSvc.getGlobalSettings();
       if (!global.globalEnabled) {
         return res.status(400).json({ error: "Global sync is disabled" });
       }
 
-      const startTime = Date.now();
-
-      // Run the Echelon orchestrator
-      const result = await echelonOrchestrator.runFullSync({ dryRun: false });
-
-      // Log results
-      for (const inv of result.inventory) {
-        for (const detail of (inv.details || [])) {
-          await syncSettingsSvc.writeSyncLog({
-            channelId: inv.channelId,
-            channelName: inv.channelName,
-            action: "inventory_push",
-            sku: detail.sku,
-            productVariantId: detail.variantId,
-            previousValue: detail.previousQty != null ? String(detail.previousQty) : null,
-            newValue: String(detail.allocatedQty),
-            status: detail.status === "success" ? "pushed" : detail.status === "error" ? "error" : "skipped",
-            errorMessage: detail.error || null,
-            source: "manual",
-          });
-        }
+      const outcome = manualSync.trigger(req.app.locals.services);
+      if (outcome === "already_running") {
+        return res.status(409).json({
+          error: "A manual sync is already running",
+          status: manualSync.getStatus(),
+        });
       }
 
-      const totalPushed = result.inventory.reduce((s: number, i: any) => s + i.variantsPushed, 0);
-      const totalErrors = result.inventory.reduce((s: number, i: any) => s + i.variantsErrored, 0);
-      const durationMs = Date.now() - startTime;
-      await syncSettingsSvc.updateLastSweep(durationMs);
-
-      res.json({
-        message: "Sync triggered via Echelon orchestrator",
-        result: {
-          channels: result.inventory.length,
-          pushed: totalPushed,
-          errors: totalErrors,
-          durationMs,
-        },
+      res.status(202).json({
+        message: "Sync started — progress lands in the sync log; poll /api/sync/trigger/status",
+        status: manualSync.getStatus(),
       });
     } catch (error: any) {
       console.error("Error triggering sync:", error);
       res.status(500).json({ error: error.message || "Failed to trigger sync" });
     }
+  });
+
+  // In-flight state + last outcome of the manual sweep
+  app.get("/api/sync/trigger/status", requirePermission("channels", "view"), (_req, res) => {
+    res.json(manualSync.getStatus());
   });
 }
