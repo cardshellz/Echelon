@@ -36,7 +36,11 @@
  *   npx tsx scripts/relink-shopify-variant-ids.ts                 # dry-run, all shopify channels
  *   npx tsx scripts/relink-shopify-variant-ids.ts --channel=36    # scope to one channel
  *   npx tsx scripts/relink-shopify-variant-ids.ts --sku=ARM-ENV-SGL-C700,EG-SLV-STD-C10000
- *   npx tsx scripts/relink-shopify-variant-ids.ts --apply         # WRITE
+ *   npx tsx scripts/relink-shopify-variant-ids.ts --archive-missing            # + plan retirement of
+ *                                                  # mappings whose product is GONE from the live store
+ *                                                  # (discontinued SKUs, over-broad CA backfill rows);
+ *                                                  # see planArchive() for the two safety gates
+ *   npx tsx scripts/relink-shopify-variant-ids.ts --apply         # WRITE (combine with flags above)
  *
  * Connection: EXTERNAL_DATABASE_URL (per CLAUDE.md), falling back to DATABASE_URL.
  * Verify after apply: re-run without --apply (expect zero RELINK rows), then
@@ -61,12 +65,15 @@ export interface CliOptions {
   apply: boolean;
   channelId: number | null;
   skus: string[] | null;
+  /** Also retire mappings whose product is GONE from the live store (see planArchive). */
+  archiveMissing: boolean;
 }
 
 export function parseCli(argv: string[]): CliOptions {
-  const opts: CliOptions = { apply: false, channelId: null, skus: null };
+  const opts: CliOptions = { apply: false, channelId: null, skus: null, archiveMissing: false };
   for (const arg of argv) {
     if (arg === "--apply") opts.apply = true;
+    else if (arg === "--archive-missing") opts.archiveMissing = true;
     else if (arg.startsWith("--channel=")) {
       opts.channelId = Number(arg.split("=")[1]) || null;
     } else if (arg.startsWith("--sku=")) {
@@ -120,6 +127,12 @@ export interface LiveSkuMap {
   bySku: Map<string, LiveVariantIds>;
   /** SKUs present on more than one live variant — ambiguous, never auto-relinked. */
   duplicateSkus: Set<string>;
+  /**
+   * EVERY live variant id, including SKU-less and duplicate-SKU variants.
+   * Archive safety-check: a mapping whose stored id is in here points at a
+   * LIVE product (it just can't be matched by SKU) and must never be retired.
+   */
+  liveVariantIds: Set<string>;
   variantsWithoutSku: number;
 }
 
@@ -129,10 +142,14 @@ export function buildLiveSkuMap(
 ): LiveSkuMap {
   const bySku = new Map<string, LiveVariantIds>();
   const duplicateSkus = new Set<string>();
+  const liveVariantIds = new Set<string>();
   let variantsWithoutSku = 0;
 
   for (const product of products) {
     for (const variant of product.variants ?? []) {
+      if (variant.id !== null && variant.id !== undefined) {
+        liveVariantIds.add(String(variant.id));
+      }
       const sku = normalizeSku(variant.sku);
       if (!sku) {
         variantsWithoutSku++;
@@ -152,7 +169,7 @@ export function buildLiveSkuMap(
       });
     }
   }
-  return { bySku, duplicateSkus, variantsWithoutSku };
+  return { bySku, duplicateSkus, liveVariantIds, variantsWithoutSku };
 }
 
 export interface LocalMappingRow {
@@ -255,6 +272,35 @@ export function planChannelRelink(
   });
 }
 
+/**
+ * --archive-missing: pick the plan rows whose product is truly GONE from the
+ * live store, i.e. safe to retire. Two gates, both required:
+ *
+ *   1. status is missing_in_shopify or placeholder_unlinkable (never
+ *      ambiguous — an ambiguous SKU is live, just duplicated);
+ *   2. NO stored id (feed variant id, listing variant id, pv variant id)
+ *      matches ANY live variant id — this is what protects live-but-SKU-less
+ *      products (they fail the SKU match but their stored ids are live).
+ *
+ * "Archiving" clears the dead inventory-item ids so the sweep skips the row
+ * ("No inventoryItemId") instead of 404ing forever, and flags the feed
+ * is_active=0. Ids that 404 are unusable by definition, so clearing them
+ * loses nothing; a future relist re-populates via the normal catalog flow.
+ */
+export function planArchive(plan: RelinkPlanRow[], live: LiveSkuMap): RelinkPlanRow[] {
+  return plan.filter((p) => {
+    if (p.status !== "missing_in_shopify" && p.status !== "placeholder_unlinkable") {
+      return false;
+    }
+    const storedIds = [
+      p.row.feedChannelVariantId,
+      p.row.listingExternalVariantId,
+      p.row.shopifyVariantId,
+    ].filter((id): id is string => !isAbsentExternalValue(id));
+    return storedIds.every((id) => !live.liveVariantIds.has(id));
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Shopify fetch (paginated)
 // ---------------------------------------------------------------------------
@@ -336,6 +382,7 @@ async function main(): Promise<void> {
   }
 
   let totalRelinked = 0;
+  let totalArchived = 0;
   let totalUnhealable = 0;
 
   for (const ch of channelsRes.rows) {
@@ -417,19 +464,39 @@ async function main(): Promise<void> {
     }
 
     const relinkRows = byStatus("relink");
+    const archiveRows = opts.archiveMissing ? planArchive(plan, live) : [];
+    if (opts.archiveMissing) {
+      for (const p of archiveRows) {
+        console.log(
+          `  ARCHIVE ${p.row.sku} (variant ${p.row.variantId}) — gone from live store; ` +
+            `clearing dead inventory-item id${p.row.feedId !== null ? " + feed is_active=0" : ""}`,
+        );
+      }
+      const blocked =
+        byStatus("missing_in_shopify").length +
+        byStatus("placeholder_unlinkable").length -
+        archiveRows.length;
+      if (blocked > 0) {
+        console.log(
+          `  (${blocked} missing/placeholder rows NOT archived — a stored id still matches a live variant)`,
+        );
+      }
+    }
     totalUnhealable +=
       byStatus("ambiguous_sku").length +
       byStatus("placeholder_unlinkable").length +
-      byStatus("missing_in_shopify").length;
+      byStatus("missing_in_shopify").length -
+      archiveRows.length;
 
     console.log(
       `  summary: ${byStatus("ok").length} ok, ${relinkRows.length} relink, ` +
         `${byStatus("missing_in_shopify").length} missing, ` +
         `${byStatus("placeholder_unlinkable").length} placeholder, ` +
-        `${byStatus("ambiguous_sku").length} ambiguous`,
+        `${byStatus("ambiguous_sku").length} ambiguous` +
+        (opts.archiveMissing ? `, ${archiveRows.length} to archive` : ""),
     );
 
-    if (!opts.apply || relinkRows.length === 0) continue;
+    if (!opts.apply || (relinkRows.length === 0 && archiveRows.length === 0)) continue;
 
     const client = await pool.connect();
     try {
@@ -467,9 +534,34 @@ async function main(): Promise<void> {
           );
         }
       }
+      for (const p of archiveRows) {
+        if (p.row.feedId !== null) {
+          await client.query(
+            `UPDATE channels.channel_feeds
+             SET channel_inventory_item_id = NULL, is_active = 0, updated_at = NOW()
+             WHERE id = $1`,
+            [p.row.feedId],
+          );
+        }
+        // The pv mirror columns only belong to the provider-default store;
+        // only clear an id that is provably dead (guaranteed by planArchive).
+        if (isAuthority && !isAbsentExternalValue(p.row.shopifyInventoryItemId)) {
+          await client.query(
+            `UPDATE catalog.product_variants
+             SET shopify_inventory_item_id = NULL, updated_at = NOW()
+             WHERE id = $1`,
+            [p.row.variantId],
+          );
+        }
+      }
       await client.query("COMMIT");
       totalRelinked += relinkRows.length;
-      console.log(`  APPLIED ${relinkRows.length} re-links for channel ${ch.id}`);
+      totalArchived += archiveRows.length;
+      console.log(
+        `  APPLIED ${relinkRows.length} re-links` +
+          (opts.archiveMissing ? ` + ${archiveRows.length} archives` : "") +
+          ` for channel ${ch.id}`,
+      );
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
@@ -479,8 +571,11 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `\ndone. ${opts.apply ? `${totalRelinked} variants re-linked` : "dry-run only"}; ` +
-      `${totalUnhealable} rows need manual attention (missing/placeholder/ambiguous).`,
+    `\ndone. ${
+      opts.apply
+        ? `${totalRelinked} variants re-linked, ${totalArchived} archived`
+        : "dry-run only"
+    }; ${totalUnhealable} rows need manual attention (missing/placeholder/ambiguous).`,
   );
   await pool.end();
 }

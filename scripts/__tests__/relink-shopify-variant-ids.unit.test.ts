@@ -22,10 +22,18 @@ function makeRow(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
-function makeLive(entries: Record<string, any>, duplicates: string[] = []) {
+function makeLive(
+  entries: Record<string, any>,
+  duplicates: string[] = [],
+  extraLiveVariantIds: string[] = [],
+) {
   return {
     bySku: new Map(Object.entries(entries)),
     duplicateSkus: new Set(duplicates),
+    liveVariantIds: new Set([
+      ...extraLiveVariantIds,
+      ...Object.values(entries).map((e: any) => e.variantId),
+    ]),
     variantsWithoutSku: 0,
   } as any;
 }
@@ -35,13 +43,25 @@ const FRESH = { productId: "p-new", variantId: "v-new", inventoryItemId: "inv-ne
 describe("relink-shopify-variant-ids", () => {
   it("parses CLI flags with a safe dry-run default", async () => {
     const { parseCli } = await loadModule();
-    expect(parseCli([])).toEqual({ apply: false, channelId: null, skus: null });
-    expect(parseCli(["--apply", "--channel=36", "--sku=arm-env-sgl-c700, eg-slv-std-c10000"]))
-      .toEqual({
-        apply: true,
-        channelId: 36,
-        skus: ["ARM-ENV-SGL-C700", "EG-SLV-STD-C10000"],
-      });
+    expect(parseCli([])).toEqual({
+      apply: false,
+      channelId: null,
+      skus: null,
+      archiveMissing: false,
+    });
+    expect(
+      parseCli([
+        "--apply",
+        "--channel=36",
+        "--sku=arm-env-sgl-c700, eg-slv-std-c10000",
+        "--archive-missing",
+      ]),
+    ).toEqual({
+      apply: true,
+      channelId: 36,
+      skus: ["ARM-ENV-SGL-C700", "EG-SLV-STD-C10000"],
+      archiveMissing: true,
+    });
   });
 
   it("builds the live SKU map uppercased, flags duplicates, guards missing inventory_item_id", async () => {
@@ -72,6 +92,58 @@ describe("relink-shopify-variant-ids", () => {
     expect(map.bySku.get("NO-INV-ITEM")!.inventoryItemId).toBeNull();
     expect(map.duplicateSkus.has("DUP-SKU")).toBe(true);
     expect(map.variantsWithoutSku).toBe(1);
+    // liveVariantIds must cover EVERYTHING alive — including the SKU-less
+    // variant (12) and both duplicate-SKU variants — it's the archive guard.
+    expect([...map.liveVariantIds].sort()).toEqual(["11", "12", "13", "21", "22"]);
+  });
+
+  it("archives only mappings whose product is truly gone from the live store", async () => {
+    const { planChannelRelink, planArchive } = await loadModule();
+    const live = makeLive(
+      {},
+      ["DUP-SKU"],
+      ["live-but-skuless-id", "dup-id-1"],
+    );
+    const plan = planChannelRelink(
+      [
+        // discontinued: not live by SKU, all stored ids dead → archivable
+        makeRow({ sku: "ARM-ENV-SGL-C700", variantId: 67 }),
+        // placeholder whose stored feed id still matches a LIVE variant → protected
+        makeRow({
+          sku: "SHOPIFY-1234",
+          variantId: 404,
+          feedChannelVariantId: "live-but-skuless-id",
+        }),
+        // placeholder with dead ids (CA-backfill debris) → archivable
+        makeRow({ sku: "SHOPIFY-5678", variantId: 405 }),
+        // ambiguous: SKU IS live (twice) → never archived even with dead stored ids
+        makeRow({ sku: "DUP-SKU", variantId: 3 }),
+      ],
+      live,
+      true,
+    );
+
+    const archived = planArchive(plan, live);
+    expect(archived.map((p: any) => p.row.variantId)).toEqual([67, 405]);
+  });
+
+  it("treats garbage stored ids as absent when judging archivability", async () => {
+    const { planChannelRelink, planArchive } = await loadModule();
+    const live = makeLive({}, [], ["some-live-id"]);
+    const plan = planChannelRelink(
+      [
+        makeRow({
+          sku: "GONE-SKU",
+          variantId: 80,
+          shopifyVariantId: "undefined",
+          feedChannelVariantId: null,
+          listingExternalVariantId: "",
+        }),
+      ],
+      live,
+      true,
+    );
+    expect(planArchive(plan, live).map((p: any) => p.row.variantId)).toEqual([80]);
   });
 
   it("plans a full re-link across feeds, listings, and (authority only) product_variants", async () => {
