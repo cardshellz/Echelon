@@ -164,6 +164,7 @@ interface NonShopifyInventorySyncState {
   productVariantId: number;
   feedId: number | null;
   feedLastSyncedQty: number | null;
+  feedQuarantinedAt: Date | null;
   channelVariantId: string | null;
   channelSku: string | null;
   channelInventoryItemId: string | null;
@@ -175,6 +176,30 @@ interface NonShopifyInventorySyncState {
 interface NonShopifyInventoryPushItem extends InventoryPushItem {
   previousQty: number | null;
   listingId: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Permanent-failure quarantine (CLAUDE.md §6: never retry a permanent error)
+// ---------------------------------------------------------------------------
+
+/**
+ * Consecutive permanent failures before a mapping is quarantined. >1 so a
+ * freak false-positive (e.g. Shopify eventual-consistency right after a
+ * product is created) cannot retire a healthy mapping.
+ */
+export const PERMANENT_FAILURE_QUARANTINE_THRESHOLD = 3;
+
+/**
+ * True when a push error means the EXTERNAL RESOURCE IS GONE and a retry can
+ * never succeed:
+ *  - Shopify: "... failed (404) ..." — inventory item / variant deleted
+ *  - eBay: [25710]/[25713] — offerId no longer exists AND the adapter's
+ *    by-SKU recovery found nothing fresher
+ * Rate limits (429), 5xx, and network errors are transient and never match.
+ */
+export function isPermanentInventoryPushError(error: string | null | undefined): boolean {
+  if (!error) return false;
+  return /failed \(404\)/.test(error) || /\[25710\]|\[25713\]/.test(error);
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +404,22 @@ class EchelonSyncOrchestrator {
           ?? syncState?.channelSku
           ?? a.sku;
         
+        // Quarantined mapping — the external resource is gone; skip cleanly
+        // instead of re-erroring every sweep (see recordPermanentPushFailure).
+        if (syncState?.feedQuarantinedAt) {
+          result.variantsSkipped++;
+          result.details.push({
+            productId,
+            variantId: a.productVariantId,
+            sku: a.sku,
+            previousQty,
+            allocatedQty: a.allocatedUnits,
+            status: "skipped" as const,
+            error: "Mapping quarantined (external resource gone) — re-link or retire",
+          });
+          continue;
+        }
+
         // Skip if unchanged
         if (previousQty !== null && previousQty === a.allocatedUnits) {
           result.variantsSkipped++;
@@ -446,6 +487,15 @@ class EchelonSyncOrchestrator {
                 );
               } else {
                 result.variantsErrored++;
+                if (isPermanentInventoryPushError(error)) {
+                  await this.recordPermanentPushFailure(
+                    channelId,
+                    channel.provider,
+                    item.variantId,
+                    error ?? "permanent push failure",
+                    item.externalVariantId ?? item.sku ?? null,
+                  );
+                }
                 await this.recordChannelListingSyncError(channelId, item.variantId, error ?? "Inventory push failed");
               }
 
@@ -611,7 +661,19 @@ class EchelonSyncOrchestrator {
       const [feed] = await this.db.select({
         lastSyncedQty: channelFeeds.lastSyncedQty,
         channelInventoryItemId: channelFeeds.channelInventoryItemId,
+        quarantinedAt: channelFeeds.quarantinedAt,
       }).from(channelFeeds).where(and(eq(channelFeeds.channelId, channelId), eq(channelFeeds.productVariantId, variantId))).limit(1);
+
+      // Quarantined = the external resource is gone (repeated permanent
+      // failures). Skipping is the point: no push, no 404, no error spam.
+      // recordPermanentPushFailure() explains how a mapping gets here.
+      if (feed?.quarantinedAt) {
+        result.details.push({
+          productId, variantId, sku: a.sku, allocatedQty: totalPushQty, previousQty: null, status: "skipped", error: "Mapping quarantined (external resource gone) — re-link or retire",
+        });
+        result.variantsSkipped++;
+        continue;
+      }
 
       const inventoryItemId = feed?.channelInventoryItemId || variant.shopifyInventoryItemId;
 
@@ -670,6 +732,10 @@ class EchelonSyncOrchestrator {
                 lastSyncedQty: pr.pushedQty,
                 lastSyncedAt: new Date(),
                 updatedAt: new Date(),
+                // a successful push proves the mapping is alive
+                consecutivePushFailures: 0,
+                quarantinedAt: null,
+                quarantineReason: null,
               })
               .where(and(eq(channelFeeds.channelId, channelId), eq(channelFeeds.productVariantId, pr.variantId)));
 
@@ -690,6 +756,16 @@ class EchelonSyncOrchestrator {
             }
           } else if (pr.status === "error") {
             result.variantsErrored++;
+            if (isPermanentInventoryPushError(pr.error)) {
+              const item = changedItems.find((i) => i.variantId === pr.variantId);
+              await this.recordPermanentPushFailure(
+                channelId,
+                channel.provider,
+                pr.variantId,
+                pr.error ?? "permanent push failure",
+                item?.externalVariantId ?? item?.sku ?? null,
+              );
+            }
             await this.logSync({
               productVariantId: pr.variantId,
               channelId,
@@ -1370,6 +1446,7 @@ class EchelonSyncOrchestrator {
         productVariantId: productVariants.id,
         feedId: channelFeeds.id,
         feedLastSyncedQty: channelFeeds.lastSyncedQty,
+        feedQuarantinedAt: channelFeeds.quarantinedAt,
         channelVariantId: channelFeeds.channelVariantId,
         channelSku: channelFeeds.channelSku,
         channelInventoryItemId: channelFeeds.channelInventoryItemId,
@@ -1434,6 +1511,10 @@ class EchelonSyncOrchestrator {
       lastSyncedQty: item.allocatedQty,
       lastSyncedAt: now,
       updatedAt: now,
+      // a successful push proves the mapping is alive
+      consecutivePushFailures: 0,
+      quarantinedAt: null,
+      quarantineReason: null,
     };
 
     if (existingFeed) {
@@ -1487,6 +1568,72 @@ class EchelonSyncOrchestrator {
           eq(channelListings.productVariantId, productVariantId),
         ),
       );
+  }
+
+  /**
+   * Count a PERMANENT push failure (external resource gone — see
+   * isPermanentInventoryPushError) and quarantine the mapping once it fails
+   * PERMANENT_FAILURE_QUARANTINE_THRESHOLD times in a row. Quarantined
+   * mappings are skipped by both inventory-push branches, so a dead mapping
+   * asks for review ONCE instead of erroring every sweep forever.
+   *
+   * Upserts so pv-fallback mappings (no feed row yet) are countable too.
+   * The counter resets on any successful push; repair paths
+   * (scripts/relink-shopify-variant-ids.ts) clear the quarantine explicitly.
+   */
+  private async recordPermanentPushFailure(
+    channelId: number,
+    provider: string,
+    productVariantId: number,
+    error: string,
+    externalVariantId: string | null,
+  ): Promise<void> {
+    const now = new Date();
+    const [feed] = await this.db
+      .insert(channelFeeds)
+      .values({
+        channelId,
+        productVariantId,
+        channelType: provider,
+        channelVariantId: externalVariantId ?? String(productVariantId),
+        isActive: 1,
+        consecutivePushFailures: 1,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [channelFeeds.channelId, channelFeeds.productVariantId],
+        set: {
+          consecutivePushFailures: sql`${channelFeeds.consecutivePushFailures} + 1`,
+          updatedAt: now,
+        },
+      })
+      .returning({
+        failures: channelFeeds.consecutivePushFailures,
+        quarantinedAt: channelFeeds.quarantinedAt,
+      });
+
+    if (
+      !feed ||
+      feed.quarantinedAt !== null ||
+      feed.failures < PERMANENT_FAILURE_QUARANTINE_THRESHOLD
+    ) {
+      return;
+    }
+
+    const reason = `CHANNELS_PUSH_PERMANENT after ${feed.failures} consecutive failures: ${error.slice(0, 500)}`;
+    await this.db
+      .update(channelFeeds)
+      .set({ quarantinedAt: now, quarantineReason: reason, updatedAt: now })
+      .where(and(eq(channelFeeds.channelId, channelId), eq(channelFeeds.productVariantId, productVariantId)));
+    await this.recordChannelListingSyncError(
+      channelId,
+      productVariantId,
+      `Quarantined: external resource gone (${error.slice(0, 300)}). Re-link or retire the mapping.`,
+    );
+    // ERROR level: a human must decide relist-vs-retire; the sweep stops asking.
+    console.error(
+      `[SyncOrchestrator] QUARANTINED inventory mapping channel=${channelId} variant=${productVariantId}: ${reason}`,
+    );
   }
 
   /**
