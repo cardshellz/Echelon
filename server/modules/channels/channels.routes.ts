@@ -22,6 +22,7 @@ import {
 import { pool } from "../../db";
 import { channelConnections } from "@shared/schema";
 import { ShopifyAdapter } from "./adapters/shopify.adapter";
+import { runShopifyWeightBackfill, createShopifyWeightBackfillDeps } from "./shopify-weight-backfill.service";
 import { rowToListingDto } from "./channel-listings.transform";
 import { createOmsService } from "../oms/oms.service";
 import { WmsOrderInvariantError } from "../wms/insert-order";
@@ -2518,6 +2519,41 @@ export function registerChannelRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error deleting allocation rule:", error);
       res.status(500).json({ error: error.message || "Failed to delete allocation rule" });
+    }
+  });
+
+  // ============================================
+  // ADMIN: SHOPIFY WEIGHT BACKFILL
+  // ============================================
+  // Fill catalog.product_variants.weight_grams from Shopify
+  // (inventoryItem.measurement.weight) for variants where it is still NULL.
+  // Never overwrites a non-null weight. dryRun defaults to true.
+  app.post("/api/channels/admin/shopify-weight-backfill", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const schema = z.object({
+        dryRun: z.boolean().optional(),
+        limit: z.number().int().positive().optional(),
+        channelId: z.number().int().positive().optional(),
+      });
+      const parsed = schema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request body", details: parsed.error.errors });
+      }
+
+      const report = await runShopifyWeightBackfill(
+        {
+          dryRun: parsed.data.dryRun ?? true,
+          limit: parsed.data.limit,
+          channelId: parsed.data.channelId,
+        },
+        createShopifyWeightBackfillDeps(db, parsed.data.channelId),
+      );
+
+      res.json(report);
+    } catch (error: any) {
+      // runShopifyWeightBackfill never throws — this guards the route plumbing itself.
+      console.error("Error running Shopify weight backfill:", error);
+      res.status(500).json({ error: error?.message || "Failed to run Shopify weight backfill" });
     }
   });
 
