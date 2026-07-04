@@ -498,6 +498,9 @@
   "shipping.box_warehouse_stock": [
     "modules/shipping-engine"
   ],
+  "shipping.quote_snapshots": [
+    "modules/shipping-engine"
+  ],
   "shipping.service_level_methods": [
     "modules/shipping-engine"
   ],
