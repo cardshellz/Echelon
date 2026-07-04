@@ -59,7 +59,7 @@ import {
   autoDraftRuns,
   purchasingRecommendationDecisions,
   products,
-  eq, and, or, inArray, sql, desc, asc, lte, like, ilike,
+  eq, and, or, inArray, notInArray, sql, desc, asc, lte, like, ilike,
 } from "../../storage/base";
 import {
   generatePurchasingRecommendations,
@@ -189,6 +189,7 @@ export interface IProcurementStorage {
   getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
+  getShippedQtyByPoLines(poLineIds: number[], executor?: any): Promise<Map<number, number>>;
   createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine>;
   bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]>;
   updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null>;
@@ -1150,6 +1151,42 @@ export const procurementMethods: IProcurementStorage = {
 
   async getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]> {
     return await db.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.purchaseOrderId, purchaseOrderId));
+  },
+
+  // SINGLE SOURCE OF TRUTH for "how much of each PO line has already shipped".
+  // Both the add-lines write path (validating remaining qty inside its FOR
+  // UPDATE transaction — it passes its `tx` as `executor`) and the
+  // shippable-lines read path (deciding which lines the Create Shipment modal
+  // offers) call this, so the status rule below can never drift between them.
+  //
+  // Cancelled shipments are excluded: their goods never left the origin. Cancel
+  // is a soft status change — the shipment header and its lines are retained for
+  // audit — so every "already shipped" calculation MUST filter them out. Statuses
+  // that represent real movement (closed, delivered, etc.) still count. Add any
+  // future non-counting status to NON_COUNTING_SHIPMENT_STATUSES and every
+  // caller inherits it.
+  async getShippedQtyByPoLines(poLineIds: number[], executor: any = db): Promise<Map<number, number>> {
+    const NON_COUNTING_SHIPMENT_STATUSES = ["cancelled"];
+    const map = new Map<number, number>();
+    if (poLineIds.length === 0) return map;
+    const rows = await executor
+      .select({
+        poLineId: inboundShipmentLines.purchaseOrderLineId,
+        shipped: sql<number>`COALESCE(SUM(${inboundShipmentLines.qtyShipped}), 0)`,
+      })
+      .from(inboundShipmentLines)
+      .innerJoin(inboundShipments, eq(inboundShipments.id, inboundShipmentLines.inboundShipmentId))
+      .where(
+        and(
+          inArray(inboundShipmentLines.purchaseOrderLineId, poLineIds),
+          notInArray(inboundShipments.status, NON_COUNTING_SHIPMENT_STATUSES),
+        ),
+      )
+      .groupBy(inboundShipmentLines.purchaseOrderLineId);
+    for (const r of rows as any[]) {
+      if (r.poLineId != null) map.set(Number(r.poLineId), Number(r.shipped));
+    }
+    return map;
   },
 
   async createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine> {

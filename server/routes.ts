@@ -52,6 +52,8 @@ import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/
 import { registerDropshipMarketplaceOrderIntakeRoutes } from "./modules/dropship/interfaces/http/dropship-marketplace-order-intake.routes";
 import { registerShippingAdminRoutes } from "./modules/shipping-engine/shipping-admin.routes";
 import { registerOutboundShipmentRoutes } from "./modules/shipping-engine/outbound-shipments.routes";
+import { registerCarrierCallbackRoutes } from "./modules/shipping-engine/interfaces/http/carrier-callback.routes";
+import { registerShadowAdminRoutes } from "./modules/shipping-engine/interfaces/http/shadow-admin.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -63,6 +65,9 @@ export async function registerRoutes(
 
   // Subscription webhooks BEFORE auth middleware (unauthenticated, HMAC-verified)
   registerSubscriptionWebhookRoutes(app);
+  // Shopify CarrierService rate callback BEFORE auth middleware (unauthenticated,
+  // webhook-style; token-gated — 404s unless SHIPPING_CALLBACK_TOKEN is set).
+  registerCarrierCallbackRoutes(app);
   registerDropshipMarketplaceOrderIntakeRoutes(app);
 
   registerAuthRoutes(app);
@@ -75,6 +80,7 @@ export async function registerRoutes(
   registerDropshipAdminNotificationOpsRoutes(app);
   registerDropshipAdminShippingConfigRoutes(app);
   registerShippingAdminRoutes(app);
+  registerShadowAdminRoutes(app);
   registerOutboundShipmentRoutes(app);
   registerDropshipAdminOmsChannelConfigRoutes(app);
   registerDropshipAdminWorkerOpsRoutes(app);
