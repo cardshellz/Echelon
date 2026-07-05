@@ -193,13 +193,18 @@ export const PERMANENT_FAILURE_QUARANTINE_THRESHOLD = 3;
  * True when a push error means the EXTERNAL RESOURCE IS GONE and a retry can
  * never succeed:
  *  - Shopify: "... failed (404) ..." — inventory item / variant deleted
- *  - eBay: [25710]/[25713] — offerId no longer exists AND the adapter's
- *    by-SKU recovery found nothing fresher
+ *  - eBay: [25710]/[25713], or the message-only "Please enter a valid
+ *    offerId." variant (prod 2026-07-05) — offerId no longer exists AND the
+ *    adapter's by-SKU recovery found nothing fresher
  * Rate limits (429), 5xx, and network errors are transient and never match.
  */
 export function isPermanentInventoryPushError(error: string | null | undefined): boolean {
   if (!error) return false;
-  return /failed \(404\)/.test(error) || /\[25710\]|\[25713\]/.test(error);
+  return (
+    /failed \(404\)/.test(error) ||
+    /\[25710\]|\[25713\]/.test(error) ||
+    /valid offerId|offerId is invalid/i.test(error)
+  );
 }
 
 // ---------------------------------------------------------------------------

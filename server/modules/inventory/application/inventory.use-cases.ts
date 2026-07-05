@@ -854,7 +854,8 @@ export class InventoryUseCases {
             AND UPPER(oi.location) = UPPER(${fromLoc.code})
             AND oi.requires_shipping = 1
             AND (oi.picked_quantity > 0 OR oi.status = 'picked')
-            AND o.warehouse_status NOT IN ('shipped', 'cancelled')
+            -- 'completed' = warehouse work done; no pick can still be active
+            AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
           LIMIT 1
         `);
         if (conflict.rows.length > 0) {
@@ -909,7 +910,8 @@ export class InventoryUseCases {
             AND oi.requires_shipping = 1
             AND oi.status = 'pending'
             AND oi.picked_quantity = 0
-            AND o.warehouse_status NOT IN ('shipped', 'cancelled')
+            -- 'completed' orders have no pickable lines left to re-point
+            AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
           RETURNING oi.id
         `);
         orderItemsRepointed = repoint.rows.length;
