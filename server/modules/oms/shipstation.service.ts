@@ -21,6 +21,7 @@ import {
 } from "../orders/shipment-rollup";
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-status";
+import { maybeGetPackInstruction } from "../shipping-engine/application/pack-plan.service";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -3945,6 +3946,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       warehouseId: orderRow.warehouse_id,
     });
 
+    // PACKER INSTRUCTION v1: box choice from the shipping engine's pack plan.
+    // Feature-flagged (SHIPPING_PACK_INSTRUCTION_ENABLED), never throws, and
+    // all shipping.pack_plans* writes stay inside the shipping-engine module.
+    const packInstruction = await maybeGetPackInstruction(orderRow.id, shipmentId);
+    const provenanceNote = `Source: wms shipment ${shipmentId} (channel ${orderRow.channel_id ?? "unknown"}) via Echelon WMS`;
+
     const payload: Record<string, unknown> = {
       orderNumber,
       orderKey,
@@ -3982,7 +3989,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       amountPaid: orderRow.amount_paid_cents / 100,
       taxAmount: orderRow.tax_cents / 100,
       shippingAmount: orderRow.shipping_cents / 100,
-      internalNotes: `Source: wms shipment ${shipmentId} (channel ${orderRow.channel_id ?? "unknown"}) via Echelon WMS`,
+      internalNotes: packInstruction ? `${packInstruction} | ${provenanceNote}` : provenanceNote,
       advancedOptions: {
         warehouseId: routing.warehouseId,
         storeId: routing.storeId,
