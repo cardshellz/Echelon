@@ -518,18 +518,13 @@ export function registerPurchaseOrderRoutes(app: Express) {
     try {
       const poId = Number(req.params.id);
       const poLines = await purchasing.getPurchaseOrderLines(poId);
-      const shipmentLines = await shipmentTracking.getLinesByPo(poId);
 
-      // Compute alreadyShippedQty per PO line
-      const shippedQtyByPoLine = new Map<number, number>();
-      for (const sl of shipmentLines) {
-        if (sl.purchaseOrderLineId) {
-          shippedQtyByPoLine.set(
-            sl.purchaseOrderLineId,
-            (shippedQtyByPoLine.get(sl.purchaseOrderLineId) ?? 0) + (sl.qtyShipped ?? 0),
-          );
-        }
-      }
+      // Already-shipped qty per PO line, via the shared status-aware tally.
+      // This is the SAME computation the add-lines write path uses, so a
+      // cancelled shipment's lines are excluded here too — otherwise they would
+      // wrongly zero out the remaining qty and hide every line from the modal.
+      const poLineIds = (poLines as any[]).map((l) => l.id);
+      const shippedQtyByPoLine = await shipmentTracking.getShippedQtyByPoLines(poLineIds);
 
       const result = (poLines as any[])
         .filter((line) => {

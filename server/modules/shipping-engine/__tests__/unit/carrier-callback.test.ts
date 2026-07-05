@@ -6,6 +6,8 @@ import {
   type ActiveServiceLevelMethod,
 } from "../../interfaces/http/carrier-callback.routes";
 import type { RateQuoteLine } from "../../application/rate-quote.service";
+import type { DeliveryWindow } from "../../domain/eta";
+import { rateComboKey } from "../../domain/rate-selection";
 
 // ---------------------------------------------------------------------------
 // Token gate
@@ -192,5 +194,87 @@ describe("mapQuotesToShopifyRates", () => {
     );
     expect(rates[0].total_price).toBe("0");
     expect(typeof rates[0].total_price).toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Delivery dates from transit estimates
+// ---------------------------------------------------------------------------
+
+describe("mapQuotesToShopifyRates delivery dates", () => {
+  const GROUND_WINDOW: DeliveryWindow = { minDate: "2026-07-10", maxDate: "2026-07-15" };
+  const PRIORITY_WINDOW: DeliveryWindow = { minDate: "2026-07-09", maxDate: "2026-07-13" };
+
+  it("attaches min/max_delivery_date when a transit estimate exists for the fulfilling quote", () => {
+    const estimates = new Map<string, DeliveryWindow>([
+      [rateComboKey("USPS", "usps_ground_advantage"), GROUND_WINDOW],
+    ]);
+    const rates = mapQuotesToShopifyRates(QUOTES, [method({})], estimates);
+    expect(rates).toHaveLength(1);
+    expect(rates[0]).toMatchObject({
+      service_code: "standard",
+      min_delivery_date: "2026-07-10",
+      max_delivery_date: "2026-07-15",
+    });
+  });
+
+  it("omits the date fields entirely when no transit row matches (never blocks, never guesses)", () => {
+    const estimates = new Map<string, DeliveryWindow>([
+      [rateComboKey("fedex", "fedex_ground"), GROUND_WINDOW], // different combo
+    ]);
+    const rates = mapQuotesToShopifyRates(QUOTES, [method({})], estimates);
+    expect(rates).toHaveLength(1);
+    expect(rates[0]).not.toHaveProperty("min_delivery_date");
+    expect(rates[0]).not.toHaveProperty("max_delivery_date");
+  });
+
+  it("omits the date fields when no estimates map is provided (existing callers unchanged)", () => {
+    const rates = mapQuotesToShopifyRates(QUOTES, [method({})]);
+    expect(rates).toHaveLength(1);
+    expect(rates[0]).not.toHaveProperty("min_delivery_date");
+    expect(rates[0]).not.toHaveProperty("max_delivery_date");
+  });
+
+  it("matches estimates case-insensitively via the combo key", () => {
+    const estimates = new Map<string, DeliveryWindow>([
+      [rateComboKey("usps", "USPS_GROUND_ADVANTAGE"), GROUND_WINDOW],
+    ]);
+    const rates = mapQuotesToShopifyRates(QUOTES, [method({})], estimates);
+    expect(rates[0].min_delivery_date).toBe("2026-07-10");
+  });
+
+  it("dates follow the quote that actually fulfills the level (cheapest wins)", () => {
+    const estimates = new Map<string, DeliveryWindow>([
+      [rateComboKey("USPS", "usps_ground_advantage"), GROUND_WINDOW],
+      [rateComboKey("UPS", "ups_ground"), PRIORITY_WINDOW],
+    ]);
+    // Both methods map to "standard"; the cheaper USPS quote (899) wins, so
+    // its window — not UPS's — decorates the rate.
+    const rates = mapQuotesToShopifyRates(QUOTES, [
+      method({ carrier: "UPS", serviceCode: "ups_ground" }),
+      method({ carrier: "USPS", serviceCode: "usps_ground_advantage" }),
+    ], estimates);
+    expect(rates).toHaveLength(1);
+    expect(rates[0].total_price).toBe("899");
+    expect(rates[0].min_delivery_date).toBe("2026-07-10");
+    expect(rates[0].max_delivery_date).toBe("2026-07-15");
+  });
+
+  it("decorates each level with its own quote's window", () => {
+    const estimates = new Map<string, DeliveryWindow>([
+      [rateComboKey("USPS", "usps_ground_advantage"), GROUND_WINDOW],
+      [rateComboKey("USPS", "usps_priority_mail"), PRIORITY_WINDOW],
+    ]);
+    const rates = mapQuotesToShopifyRates(QUOTES, [
+      method({ sortOrder: 0 }),
+      method({
+        levelCode: "expedited", displayName: "Expedited", sortOrder: 1,
+        carrier: "USPS", serviceCode: "usps_priority_mail",
+      }),
+    ], estimates);
+    expect(rates.map((r) => [r.service_code, r.min_delivery_date, r.max_delivery_date])).toEqual([
+      ["standard", "2026-07-10", "2026-07-15"],
+      ["expedited", "2026-07-09", "2026-07-13"],
+    ]);
   });
 });
