@@ -2,6 +2,7 @@
 
 Status: Authoritative build design draft  
 Date: 2026-04-28  
+Implementation notes last refreshed: 2026-07-05
 Purpose: Merge the prior dropship and .ops portal design docs into one forward design.
 
 This document supersedes the prior working docs for implementation decisions:
@@ -201,6 +202,15 @@ Admin controls must support inclusion and exclusion by:
 
 The resulting exposed catalog is the only catalog vendors can browse or select in .ops.
 
+Dogfood UI decisions:
+
+- Admin preview rows should represent sellable SKU variants for operational expose/hide decisions.
+- Each preview row should expose one primary action based on current visibility: Expose when hidden, Hide when visible.
+- Preview filtering must support visible only, hidden only, active only, inactive only, and all rows.
+- Preview must paginate; large catalogs cannot render as one unbounded table.
+- Published rule state and unpublished edits must be visually distinct so operators know what is live.
+- Rule labels should be generated from the selected scope/action by default, with manual override only when needed.
+
 ### Vendor Selection
 
 Within the exposed dropship catalog, vendors can select:
@@ -239,6 +249,12 @@ Marketplace-side content edits are treated as drift/audit. Card Shellz content r
 ## 6. Listing Preview, Listing Push, and Marketplace Drift
 
 Listing push must be job-based and auditable. Routes should validate input and call use cases; they should not push directly to eBay or Shopify inline.
+
+Connector direction:
+
+- Admin/internal marketplace listing pushes and dropship listing pushes should share connector and payload-building code.
+- Store/account-specific credentials should vary by connection; the marketplace payload builder should not fork into separate admin-only and dropship-only implementations.
+- eBay listing payload construction should remain shared so package, pricing, category, item specifics, and offer fixes do not diverge.
 
 Listing preview:
 
@@ -433,8 +449,8 @@ Shipping quote inputs:
 
 - Fulfillment warehouse.
 - Customer destination/zone.
-- SKU dimensions and weight.
-- SKU package profile.
+- SKU dimensions and weight from catalog variant package fields.
+- SKU package data edited from Catalog > Variants, including per-SKU line editing and CSV import/export.
 - Cartonization result.
 - Box/mailer catalog.
 - Carrier/service/rate table.
@@ -456,10 +472,18 @@ Admin controls:
 - Effective dates and versioning.
 - Zone definitions.
 - Box catalog.
-- Per-SKU packaging profiles.
+- Per-SKU package weight and dimensions from the catalog variant package data source.
 - Shipping markup.
 - Insurance pool percent.
 - Dunnage/box allocation.
+
+Package data direction:
+
+- Catalog variant package fields are the operational source for SKU weight and dimensions.
+- Shipping profile UI must not require raw variant IDs or create a competing package-data source.
+- Bulk same-value package editing is not the primary operator workflow because different SKUs usually need different package values.
+- The scalable workflow is a per-SKU package editor that saves only changed rows/fields, plus CSV import/export for large maintenance.
+- Cartonization remains a separate provider/service concern that consumes SKU package data and box catalog data.
 
 ---
 
@@ -667,6 +691,15 @@ Admin must be able to manage:
 - Order intake exceptions.
 - Marketplace cancellation failures.
 - Audit event search.
+
+Store connection admin UI direction:
+
+- Store connections are customer/vendor store connections, not internal Echelon channels.
+- Admin UI should show store, owner, subscription state, connection status, marketplace authorization, warehouse assignment, catalog/listing readiness, setup status, and kill-switch actions.
+- Avoid exposing internal hashes, raw database IDs, or duplicate labels such as "eBay connection 1" when a real store name exists.
+- Marketplace authorization is informational unless reconnect/reauth action is explicitly available.
+- Warehouse assignment is an admin-owned corrective action.
+- Listing readiness means enough selected/exposed/listable SKU state exists for marketplace push; do not hide partial listing reality behind a vague "ready" label.
 
 Admin views should prioritize blocked revenue and operational risk:
 

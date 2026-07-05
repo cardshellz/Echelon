@@ -1,6 +1,6 @@
 # Dropship Dogfood Checklist
 
-Last updated: 2026-06-29
+Last updated: 2026-07-05
 
 Primary admin surface: Echelon internal admin at `/dropship`.
 
@@ -17,7 +17,7 @@ Use this document as the working checklist for the first internal dropship dogfo
 | Run date | 2026-06-28 to 2026-06-29 |
 | Tester | Brett / Codex assist |
 | Environment URL | Echelon production admin `/dropship`; customer portal `https://www.cardshellz.io/dropship-portal` |
-| Echelon deploy/version/commit | Latest merged dropship dogfood UX fixes through PR #741; confirm deployed commit before marketplace order testing |
+| Echelon deploy/version/commit | Latest repo main observed at `22ef5f41`; dropship-relevant fixes through PR #796 / commit `214c10ac`; confirm deployed production commit before marketplace order testing |
 | Acquisition path | Existing `.core` customer upgraded to `.ops` through admin UI for dogfood setup |
 | Card Shellz customer email | `bseager6@gmail.com` for portal login; original membership row began as `nwscards@gmail.com` |
 | Starting membership plan | `.core` |
@@ -42,11 +42,11 @@ Use this document as the working checklist for the first internal dropship dogfo
 | Tracking push ID(s) |  |
 | Notification event ID(s) |  |
 | Return/RMA ID |  |
-| Final result | In progress; paused before final catalog exposure/listing/order test |
+| Final result | In progress; paused before package-data verification, final catalog exposure, listing push, and marketplace order test |
 
-## Current Working Status - 2026-06-29
+## Current Working Status - 2026-07-05
 
-Resume point: pull latest `main` after PR #741 is merged/deployed, confirm the dropship UI shows the selector fixes, then continue at Phase 4 with a narrow catalog exposure for one test SKU.
+Resume point: confirm production has the latest intended `main` deploy, then continue at Phase 3/4 with readiness verification, package-data verification for one test SKU, and narrow variant-level catalog exposure.
 
 Confirmed so far:
 
@@ -55,22 +55,37 @@ Confirmed so far:
 - eBay connection flow worked after OAuth/connect-change-store fixes. Connected store is `marzcards`; do not accept fallback labels like `eBay connection 1` as final evidence.
 - Default warehouse has been set to warehouse ID `1` for the connected store. This is the 20 Leonberg ship-from warehouse.
 - Shipping config is "ready enough" for a single-carton dogfood SKU: default warehouse, box, product shipping/profile data, zone/rate, markup, insurance, and return policy were created through the admin UI. Final quote validation is still required.
-- Latest merged UX cleanup: PR #739 redesigned admin catalog exposure rules; PR #741 replaced raw DB ID entry fields with selectors in catalog exposure, shipping, wallet, and RMA admin flows.
+- Latest relevant merged work after the prior 2026-06-29 status:
+  - PR #746 simplified catalog preview row actions to one Expose/Hide action.
+  - PR #748 clarified catalog exposure published/unpublished state.
+  - PR #750 added catalog preview pagination and clearer rule labels.
+  - PR #751 added visible/hidden and active/inactive preview filters.
+  - PR #758 removed non-useful shipping config search behavior.
+  - PR #762 organized shipping config into tabs.
+  - PR #765 and PR #768 simplified store connections admin and clarified readiness columns.
+  - PR #785 shared eBay listing payload construction across admin and dropship paths.
+  - Commit `5b058adb` refactored marketplace listing connectors.
+  - Commit `f7b2f741` uses retail cache as the listing price source.
+  - PR #794 moved package tools to Catalog > Variants.
+  - PR #796 added a per-SKU package line editor instead of same-value bulk package editing.
 
 Not yet proven:
 
 - Customer-facing `.ops` purchase/checkout path. Current dogfood customer was upgraded manually/admin-side.
 - Final dogfood readiness gate screenshot after latest deploy.
+- Production browser verification of the Catalog > Variants package line editor.
+- Package weight/dimensions for the chosen test SKU.
 - Narrow catalog exposure for the chosen SKU.
 - Listing push, marketplace order placement, order intake, wallet debit, OMS/WMS handoff, ShipStation fulfillment, tracking push, notifications, and returns.
 
 Next operator steps:
 
-1. Pull latest `main` on the testing computer and confirm the deployment includes PR #741.
+1. Pull latest `main` on the testing computer and confirm the deployment includes dropship-relevant changes through PR #796.
 2. Re-open Echelon `/dropship` and verify the dogfood row for `bseager6@gmail.com` / `marzcards`.
-3. Pick one test SKU and expose only that product/variant. Do not use broad entire-catalog exposure for the first marketplace order.
-4. Validate the vendor portal catalog shows that SKU and only the intended SKU.
-5. Continue with listing push and order intake phases below.
+3. Pick one test SKU and confirm package weight/dimensions are saved from Catalog > Variants > Package Editor.
+4. Expose only that product variant. Do not use broad entire-catalog exposure for the first marketplace order.
+5. Validate Catalog preview filters and the vendor portal catalog show that SKU and only the intended SKU.
+6. Continue with listing push and order intake phases below.
 
 ## Severity Guide
 
@@ -101,9 +116,9 @@ Next operator steps:
 | [ ] | 0. Membership acquisition | Direct `.ops` signup and `.club` to `.ops` upgrade paths are understood and at least one path is proven for the dogfood customer. | Partial: `.core` to `.ops` entitlement proven by admin/manual upgrade; customer-facing checkout path still unproven |
 | [x] | 1. Portal bootstrap | The `.ops` customer can access the dropship portal and Echelon provisions the vendor profile. | Relogin worked for `bseager6@gmail.com`; vendor profile present |
 | [x] | 2. Store connection | Vendor OAuth, store identity, and order/listing config are correct. | eBay store `marzcards` connected; verify one more time after latest deploy |
-| [ ] | 3. Admin readiness gate | Internal source, system readiness, launch gate, and one ready vendor/store are clean. | Need final readiness screenshot/evidence after PR #741 deploy |
-| [ ] | 4. Catalog exposure | Exactly the intended SKU or variant is exposed. | Next phase to resume |
-| [ ] | 5. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. | Config created for single-carton test; final quote still needs validation |
+| [ ] | 3. Admin readiness gate | Internal source, system readiness, launch gate, and one ready vendor/store are clean. | Need final readiness screenshot/evidence after latest deploy |
+| [ ] | 4. Catalog exposure | Exactly the intended SKU or variant is exposed. | Resume here after package-data verification |
+| [ ] | 5. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. | Config created for single-carton test; package editor and final quote still need validation |
 | [ ] | 6. Listing push | One marketplace listing is created and mapped back to Echelon identity. |  |
 | [ ] | 7. Order intake | One external marketplace order ingests once with correct vendor/store/line identity. |  |
 | [ ] | 8. Wallet and acceptance | Funding/hold/debit behavior is traceable and order acceptance is idempotent. |  |
@@ -240,8 +255,8 @@ Goal: prove the internal admin control surface recognizes the vendor/store row b
 | [ ] | READY-03 | Confirm `Dropship OMS source` is ready. | Source status: |  |
 | [ ] | READY-04 | If source is missing, run the source initialization action once. | Result: |  |
 | [ ] | READY-05 | Confirm `System readiness` has no blockers. | Blockers count: |  |
-| [ ] | READY-06 | Confirm launch gate is not blocked. | Gate status: looked ready enough before latest UI fixes | Capture final after PR #741 deploy |
-| [ ] | READY-07 | Confirm one vendor/store row is ready for dogfood. | Vendor/store row should be `bseager6@gmail.com` / `marzcards` | Capture final after PR #741 deploy |
+| [ ] | READY-06 | Confirm launch gate is not blocked. | Gate status: looked ready enough before earlier UI fixes | Capture final after latest deploy |
+| [ ] | READY-07 | Confirm one vendor/store row is ready for dogfood. | Vendor/store row should be `bseager6@gmail.com` / `marzcards` | Capture final after latest deploy |
 | [ ] | READY-08 | Record any remaining warnings. | Warning IDs/count: |  |
 
 Phase pass criteria:
@@ -257,11 +272,11 @@ Goal: expose exactly the intended catalog item to the vendor.
 | Done | ID | Check | Evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
 | [ ] | CAT-01 | Open `Catalog exposure`. |  |  |
-| [ ] | CAT-02 | Create a narrow include rule for one product, SKU, or variant. | Rule ID/scope: pending | Resume here next |
+| [ ] | CAT-02 | Create a narrow include rule for one product, SKU, or variant. | Rule ID/scope: pending | Resume here after package-data verification |
 | [ ] | CAT-03 | Do not use `Entire catalog` for the first dogfood pass. | Confirmed: pending | The UI allows broad exposure, but first test should stay narrow |
 | [ ] | CAT-04 | Save the rule set. | Save result: |  |
-| [ ] | CAT-05 | Use preview to confirm intended row is exposed. | Product/variant/SKU: |  |
-| [ ] | CAT-06 | Confirm unrelated rows remain blocked. | Blocked count/sample: |  |
+| [ ] | CAT-05 | Use preview to confirm intended variant row is exposed. | Product/variant/SKU: | Verify visible/hidden filters after PR #751 |
+| [ ] | CAT-06 | Confirm unrelated rows remain blocked. | Blocked count/sample: | Verify hidden-only filter shows expected unrelated rows |
 | [ ] | CAT-07 | Confirm Echelon SKU/product variant identity is available for the row. | Product variant ID: |  |
 | [ ] | CAT-08 | Confirm ATP is available and believable for the test quantity. | ATP value: |  |
 
@@ -278,8 +293,8 @@ Goal: prove the test SKU can calculate shipping and use the intended policy stac
 | Done | ID | Check | Evidence / ID | Exception / correction needed |
 | --- | --- | --- | --- | --- |
 | [x] | SHIPCFG-01 | Open `Shipping config`. | Shipping config page used during setup |  |
-| [ ] | SHIPCFG-02 | Confirm package or carton data applies to the test SKU. | Product shipping/profile data created for test setup | Needs final SKU-specific capture after test SKU selection |
-| [x] | SHIPCFG-03 | Confirm box configuration exists. | Box created through admin UI | Full view/edit boxes UI still needed; see EX-007 |
+| [ ] | SHIPCFG-02 | Confirm package or carton data applies to the test SKU. | Catalog variant package editor is available through PR #796 | Enter/save weight and dimensions for the chosen test SKU and capture evidence |
+| [x] | SHIPCFG-03 | Confirm box configuration exists. | Box created through admin UI | Full view/edit boxes UI still needed; see EX-008 |
 | [ ] | SHIPCFG-04 | Confirm rate table covers the test destination. | Zone/rate table created | Needs final quote validation |
 | [x] | SHIPCFG-05 | Confirm markup policy is configured. | Markup policy created | Capture policy ID if needed |
 | [x] | SHIPCFG-06 | Confirm insurance policy is configured. | Insurance policy created | Capture policy ID if needed |
@@ -541,9 +556,11 @@ Use one row per issue. Reference the exception ID in the related checklist row.
 | EX-008 | P2 | Phase 5 / boxes UI |  | Shipping boxes can be created, but there is no complete UI to view/edit/manage boxes. | Admin can list, edit, archive, and inspect shipping boxes. | Existing UI only surfaces created boxes in limited places. | Build full boxes management UI. | Frontend/backend | Open |
 | EX-009 | P2 | Phase 5 / cartonization |  | Current shipping setup is too simplistic for real product/box optimization. | Standalone cartonization engine chooses box(es), orientations, and packing based on ordered SKUs and dimensions; usable by dropship and other channels. | Single-carton setup is acceptable only for the first dogfood SKU. | Design/build plug-and-play cartonization service. | Architecture/engineering | Open |
 | EX-010 | P2 | Phase 5 / box code structure |  | Box `code` is free-form and the meaning versus name is unclear. | Operational code has a documented or generated structure; name remains human-readable. | Free-form code exists today. | Define box code convention/generator and validation. | Product/engineering | Open |
-| EX-011 | P2 | Phase 5 / product shipping profile model |  | Current "package profile" concept is confusing and asks for variant IDs; SKU dimensions belong in catalog and should feed shipping. | Product/SKU dimensions live in catalog; shipping engine consumes them for box optimization. | Product shipping profile UI improved to SKU picker, but model still needs architecture cleanup. | Move SKU dimensions to catalog source of truth and wire shipping engine ingestion. | Architecture/engineering | Open |
+| EX-011 | P2 | Phase 5 / product shipping profile model | PR #794, PR #796 | Current "package profile" concept is confusing and asks for variant IDs; SKU dimensions belong in catalog and should feed shipping. | Product/SKU dimensions live in catalog; shipping engine consumes them for box optimization. | Package tools moved to Catalog > Variants and per-SKU package line editor was added. | Verify deployed editor persists package data and confirm shipping/listing flows consume catalog variant package fields. | Architecture/engineering | Fixed / verify |
 | EX-012 | P2 | Phase 5 / rate zones strategy |  | Shipping zones/rate tables may be the wrong long-term model if carrier API rating is available. | Decide between rate table by zone/weight/package dimensions versus carrier API rating. | For dogfood, static config is created enough to continue. | Document and choose long-term carrier/rate architecture. | Product/architecture | Open |
 | EX-013 | P2 | Phase 4 / vendor catalog selection UX | PR #735, PR #737 | Vendor catalog selection UX mixed filters and selection actions; blank catalog was confusing when exposure was missing. | Filters narrow the table; selection happens in the table; product search is typeahead/search, not a dropdown. | Vendor catalog selection was redesigned. | Verify after narrow exposure that portal shows only the intended SKU. | Frontend/backend | Fixed / verify |
+| EX-014 | P2 | Phase 4/5 / package editor UX | PR #794, PR #796 | Bulk package editor applied one set of measurements to every selected SKU. | Operator can edit weight/dimensions per SKU line item and save only changed rows. | Per-SKU package editor exists in Catalog > Variants. | Verify in production with the selected dogfood SKU before listing push. | Frontend/backend | Fixed / verify |
+| EX-015 | P1 | Phase 6 / listing push proof | PR #785, commit `5b058adb`, commit `f7b2f741` | Shared listing connector/build path has been refactored, but no dogfood listing push has been proven in the test plan. | One eBay listing push creates or updates the external listing and records Echelon listing identity. | Not tested after connector/pricing/package changes. | Run one SKU listing push after catalog exposure, package data, and shipping readiness are verified. | Backend/frontend | Open |
 
 ## Final Dogfood Exit Checklist
 
