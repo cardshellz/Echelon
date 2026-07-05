@@ -965,20 +965,28 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                     const ref = engineRefFromRow(row);
                     if (!ref) continue;
                     const cancelResult = await engine.cancel(ref);
-                    if (cancelResult?.alreadyInState) {
+                    // P0.3: only "already_shipped" proves a package left the
+                    // building. "already_cancelled" used to fall into the same
+                    // alreadyInState branch and got recorded as SHIPPED —
+                    // resurrecting dead orders.
+                    if (cancelResult?.state === "already_shipped") {
                       await db.execute(sql`
                         UPDATE wms.outbound_shipments
                         SET status = 'shipped', updated_at = NOW()
                         WHERE id = ${row.shipment_id}
                           AND status NOT IN ('shipped', 'returned', 'lost')
                       `);
-                      console.log(`[OMS<->WMS Reconcile] Engine order ${ref.engineOrderRef} already terminal — recorded shipped for shipment ${row.shipment_id}`);
+                      console.log(`[OMS<->WMS Reconcile] Engine order ${ref.engineOrderRef} already shipped — recorded shipped for shipment ${row.shipment_id}`);
                     } else {
+                      // cancelled now, already_cancelled, or not_found: the
+                      // shipment is dead. Status predicate so a concurrent
+                      // SHIP_NOTIFY can never be clobbered post-network-call.
                       await db.execute(sql`
                         UPDATE wms.outbound_shipments SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
                         WHERE id = ${row.shipment_id}
+                          AND status NOT IN ('shipped', 'returned', 'lost')
                       `);
-                      console.log(`[OMS<->WMS Reconcile] Cancelled engine order ${ref.engineOrderRef} for shipment ${row.shipment_id}`);
+                      console.log(`[OMS<->WMS Reconcile] Cancelled engine order ${ref.engineOrderRef} for shipment ${row.shipment_id} (${cancelResult?.state ?? "cancelled"})`);
                     }
                   } catch (ssErr: any) {
                     console.warn(`[OMS<->WMS Reconcile] Failed to cancel engine order for shipment ${row.shipment_id}: ${ssErr?.message}`);
@@ -1292,17 +1300,20 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 row.wms_shipment_status === "cancelled"
               ) {
                 const cancelResult = await engine.cancel(ref);
-                if (cancelResult?.alreadyInState) {
+                // P0.3: only "already_shipped" may be recorded as shipped;
+                // "already_cancelled" was previously conflated with it and
+                // resurrected dead orders.
+                if (cancelResult?.state === "already_shipped") {
                   await db.execute(sql`
                     UPDATE wms.outbound_shipments
                     SET status = 'shipped', last_reconciled_at = NOW(), updated_at = NOW()
                     WHERE id = ${shipmentId}
                       AND status NOT IN ('shipped', 'returned', 'lost')
                   `);
-                  console.log(`[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already terminal — recorded shipped`);
+                  console.log(`[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already shipped — recorded shipped`);
                   markedShipped++;
                 } else {
-                  console.log(`[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef}`);
+                  console.log(`[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef} (${cancelResult?.state ?? "cancelled"})`);
                   markedCancelled++;
                   await db.execute(sql`
                     UPDATE wms.outbound_shipments
@@ -1399,6 +1410,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                       shipped_at = ${event.shipDate},
                       updated_at = NOW()
                     WHERE id = ${omsId}
+                      -- P0.3: never auto-flip a terminal (money-final) OMS order
+                      -- after a network call; the shipped-vs-terminal divergence
+                      -- surfaces via the flow-reconciliation review bucket.
+                      AND status NOT IN ('cancelled', 'refunded')
                   `);
                   await db.execute(sql`
                     WITH shipped_by_line AS (
@@ -1572,7 +1587,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               markedShipped++;
             } else {
               const cancelResult = await services.shippingEngine.cancel(v1Ref);
-              if (cancelResult?.alreadyInState) {
+              // P0.3: only an already-SHIPPED engine order counts as shipped;
+              // already_cancelled is the expected no-op for a cancelled order.
+              if (cancelResult?.state === "already_shipped") {
                 markedShipped++;
               } else {
                 skippedCancelled++;
