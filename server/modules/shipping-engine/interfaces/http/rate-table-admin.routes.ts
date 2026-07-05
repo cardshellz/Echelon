@@ -10,19 +10,21 @@
  * ShipStation-v2 calibration job. Separate file from shipping-admin.routes.ts
  * (same pattern as shadow-admin.routes.ts) so this PR does not touch the
  * config-CRUD surface. Parsing/validation live in domain/rate-table-import.ts
- * as pure functions. Design: docs/SHIPPING-ENGINE-DESIGN.md ("Rates Engine").
+ * as pure functions; the transactional write is the shared
+ * application/rate-table-import.service.ts (also used by the calibration job).
+ * Design: docs/SHIPPING-ENGINE-DESIGN.md ("Rates Engine").
  */
 
 import type { Express, Response } from "express";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import { z } from "zod";
-import { shippingRateTableRows, shippingRateTables, shippingZoneRules } from "@shared/schema";
+import { shippingRateTableRows, shippingRateTables } from "@shared/schema";
 import { db } from "../../../../db";
 import { requirePermission } from "../../../../routes/middleware";
+import { importRateTable } from "../../application/rate-table-import.service";
 import {
   MAX_IMPORT_ROWS,
   findBandOverlaps,
-  findUnknownZones,
   parseRateTableCsv,
   type RateTableImportRow,
 } from "../../domain/rate-table-import";
@@ -51,9 +53,6 @@ const parseCsvSchema = z.object({
   // pathological payloads before we split lines.
   csv: z.string().min(1).max(2_000_000),
 });
-
-/** Keep multi-row inserts comfortably below the postgres bind-param limit. */
-const INSERT_CHUNK_SIZE = 1000;
 
 export function registerRateTableAdminRoutes(app: Express): void {
   app.get(
@@ -128,57 +127,26 @@ export function registerRateTableAdminRoutes(app: Express): void {
         if (!parsed.success) {
           return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
         }
-        const { carrier, serviceCode, replaceExisting } = parsed.data;
-        const currency = parsed.data.currency.toUpperCase();
         const rows: RateTableImportRow[] = parsed.data.rows.map((row) => ({
           ...row,
           originWarehouseId: row.originWarehouseId ?? null,
         }));
 
-        // All validation BEFORE any write.
-        const bandErrors = findBandOverlaps(rows);
-        if (bandErrors.length > 0) {
+        const outcome = await importRateTable({
+          carrier: parsed.data.carrier,
+          serviceCode: parsed.data.serviceCode,
+          currency: parsed.data.currency,
+          effectiveFrom: parsed.data.effectiveFrom,
+          replaceExisting: parsed.data.replaceExisting,
+          rows,
+        });
+        if (!outcome.ok) {
           return res.status(400).json({
-            error: { code: "SHIPPING_ADMIN_RATE_BANDS_INVALID", message: "Weight bands overlap.", details: bandErrors },
+            error: { code: "SHIPPING_ADMIN_RATE_BANDS_INVALID", message: "Weight bands overlap.", details: outcome.bandErrors },
           });
         }
-        const knownZones = await db
-          .selectDistinct({ zone: shippingZoneRules.zone })
-          .from(shippingZoneRules)
-          .where(eq(shippingZoneRules.isActive, true));
-        const warnings = findUnknownZones(rows, knownZones.map((z) => z.zone));
 
-        const now = new Date();
-        const effectiveFrom = parsed.data.effectiveFrom ?? now;
-
-        const rateTable = await db.transaction(async (tx) => {
-          if (replaceExisting) {
-            await tx.update(shippingRateTables)
-              .set({ status: "superseded", effectiveTo: now })
-              .where(and(
-                eq(shippingRateTables.carrier, carrier),
-                eq(shippingRateTables.serviceCode, serviceCode),
-                eq(shippingRateTables.status, "active"),
-              ));
-          }
-          const [table] = await tx.insert(shippingRateTables).values({
-            carrier,
-            serviceCode,
-            currency,
-            status: "active",
-            effectiveFrom,
-            metadata: { source: "admin-import", importedAt: now.toISOString(), rowCount: rows.length },
-          }).returning();
-
-          for (let i = 0; i < rows.length; i += INSERT_CHUNK_SIZE) {
-            await tx.insert(shippingRateTableRows).values(
-              rows.slice(i, i + INSERT_CHUNK_SIZE).map((row) => ({ ...row, rateTableId: table.id })),
-            );
-          }
-          return table;
-        });
-
-        return res.json({ rateTable, rowCount: rows.length, warnings });
+        return res.json({ rateTable: outcome.rateTable, rowCount: outcome.rowCount, warnings: outcome.warnings });
       } catch (error) {
         return sendRateTableAdminError(res, error, "import rate table");
       }
