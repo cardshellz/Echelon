@@ -3449,22 +3449,26 @@ export function createShipStationService(db: any, inventoryCore?: any) {
    * cancel endpoint on the v1 API. This moves the order out of the
    * Awaiting Shipment queue and into the Cancelled tab.
    */
-  async function cancelOrder(shipstationOrderId: number): Promise<{ alreadyInState: boolean }> {
-    if (!isConfigured()) return { alreadyInState: false };
+  async function cancelOrder(
+    shipstationOrderId: number,
+  ): Promise<{ alreadyInState: boolean; state: "cancelled" | "already_cancelled" | "already_shipped" | "not_found" }> {
+    if (!isConfigured()) return { alreadyInState: false, state: "not_found" };
     const existing = await getOrderById(shipstationOrderId);
     if (!existing) {
       console.warn(`[ShipStation] cancelOrder skipped — order ${shipstationOrderId} not found`);
-      return { alreadyInState: false };
+      return { alreadyInState: false, state: "not_found" };
     }
 
     // Same restriction: cancelled/shipped orders can't be updated.
+    // P0.3: these are OPPOSITE outcomes — discriminate them. Recording an
+    // already-CANCELLED engine order as shipped resurrects dead orders.
     if (existing.orderStatus === "cancelled") {
       console.log(`[ShipStation] Order ${shipstationOrderId} already cancelled — no-op`);
-      return { alreadyInState: true };
+      return { alreadyInState: true, state: "already_cancelled" };
     }
     if (existing.orderStatus === "shipped") {
       console.log(`[ShipStation] Order ${shipstationOrderId} already shipped — cannot cancel`);
-      return { alreadyInState: true };
+      return { alreadyInState: true, state: "already_shipped" };
     }
 
     try {
@@ -3474,7 +3478,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       });
 
       console.log(`[ShipStation] Order ${shipstationOrderId} cancelled via createorder upsert`);
-      return { alreadyInState: false };
+      return { alreadyInState: false, state: "cancelled" };
     } catch (err: any) {
       console.error(
         `[ShipStation] Failed to cancel order ${shipstationOrderId}:`,

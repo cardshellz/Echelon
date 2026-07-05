@@ -107,7 +107,8 @@ async function getOrderPipeline(): Promise<OrderPipelineSummary> {
     db.execute(sql`
       SELECT warehouse_status AS status, COUNT(*)::int AS count
       FROM wms.orders
-      WHERE warehouse_status NOT IN ('cancelled', 'shipped')
+      -- 'completed' is terminal (warehouse work done) — not open pipeline
+      WHERE warehouse_status NOT IN ('cancelled', 'shipped', 'completed')
         AND cancelled_at IS NULL
       GROUP BY warehouse_status
     `),

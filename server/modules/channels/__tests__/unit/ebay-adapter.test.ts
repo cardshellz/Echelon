@@ -565,9 +565,65 @@ describe("eBay Listing Builder", () => {
           variantId: 180,
           pushedQty: 0,
           status: "error",
-          error: "This offerId is invalid.",
+          // errorId is preserved so logs + the permanent-error classifier see it
+          error: "[25713] This offerId is invalid.",
         },
       ]);
+    });
+
+    // Prod 2026-07-05: some bulk responses signal a dead offer with a generic
+    // user error whose MESSAGE says "Please enter a valid offerId." and a
+    // different errorId — recovery must key off the message too.
+    it("recovers when the stale offer signature is message-only", async () => {
+      const adapter = new EbayAdapter(createMockDb());
+      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
+        responses: [
+          {
+            sku: "SHLZ-TOP-180PT-BLU",
+            offers: [
+              {
+                offerId: "offer-stale",
+                statusCode: 400,
+                errors: [
+                  {
+                    errorId: 25002,
+                    domain: "API_INVENTORY",
+                    category: "REQUEST",
+                    message: "A user error has occurred. Please enter a valid offerId.",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const getOffers = vi.fn().mockResolvedValue({
+        offers: [{ offerId: "offer-fresh", sku: "SHLZ-TOP-180PT-BLU" }],
+      });
+      const updateOffer = vi.fn().mockResolvedValue(undefined);
+      (adapter as any).getApiClient = vi
+        .fn()
+        .mockResolvedValue({ bulkUpdatePriceQuantity, getOffers, updateOffer });
+      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
+
+      const result = await adapter.pushInventory(2, [
+        {
+          variantId: 180,
+          sku: "SHLZ-TOP-180PT-BLU",
+          externalVariantId: "offer-stale",
+          externalInventoryItemId: null,
+          allocatedQty: 8,
+        },
+      ]);
+
+      expect(updateOffer).toHaveBeenCalledWith(
+        "offer-fresh",
+        expect.objectContaining({ availableQuantity: 8 }),
+      );
+      expect(result[0]).toMatchObject({
+        status: "success",
+        refreshedExternalVariantId: "offer-fresh",
+      });
     });
 
     it("does not attempt re-resolution on non-stale per-offer errors", async () => {
@@ -615,7 +671,7 @@ describe("eBay Listing Builder", () => {
           variantId: 101,
           pushedQty: 0,
           status: "error",
-          error: "Invalid value for header Content-Language.",
+          error: "[25709] Invalid value for header Content-Language.",
         },
       ]);
     });
