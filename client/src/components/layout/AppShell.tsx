@@ -40,6 +40,7 @@ import {
   Crown,
   Map as MapIcon,
   ArrowUpDown,
+  PackageCheck,
   TrendingUp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -160,6 +161,7 @@ const navStructure: NavEntry[] = [
       { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
       { label: "Picking", icon: ClipboardList, href: "/picking" },
       { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", roles: ["admin", "lead"] },
+      { label: "Packing", icon: PackageCheck, href: "/packing" },
     ],
   },
   {
