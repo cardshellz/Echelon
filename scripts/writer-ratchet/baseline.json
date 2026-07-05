@@ -501,6 +501,12 @@
   "shipping.quote_snapshots": [
     "modules/shipping-engine"
   ],
+  "shipping.rate_table_rows": [
+    "modules/shipping-engine"
+  ],
+  "shipping.rate_tables": [
+    "modules/shipping-engine"
+  ],
   "shipping.service_level_methods": [
     "modules/shipping-engine"
   ],

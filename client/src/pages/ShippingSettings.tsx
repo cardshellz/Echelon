@@ -25,7 +25,9 @@ import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import {
+  AlertTriangle,
   Box,
+  FileSpreadsheet,
   Loader2,
   Package,
   PackageCheck,
@@ -36,6 +38,7 @@ import {
   Search,
   Trash2,
   Truck,
+  Upload,
 } from "lucide-react";
 
 // ===== Types (API contract: /api/shipping/admin/*) =====
@@ -113,6 +116,41 @@ interface WarehouseType {
   id: number;
   name: string;
   code: string;
+}
+
+interface RateTableSummary {
+  id: number;
+  carrier: string;
+  serviceCode: string;
+  currency: string;
+  status: string;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  rowCount: number;
+  zoneCount: number;
+  minWeightGrams: number | null;
+  maxWeightGrams: number | null;
+}
+
+interface RateTableImportRow {
+  originWarehouseId: number | null;
+  destinationZone: string;
+  minWeightGrams: number;
+  maxWeightGrams: number;
+  rateCents: number;
+}
+
+interface ParseCsvResponse {
+  dialect: "pounds" | "grams" | null;
+  rows: RateTableImportRow[];
+  errors: Array<{ line: number; message: string }>;
+  bandErrors: string[];
+}
+
+interface ImportResponse {
+  rateTable: RateTableSummary;
+  rowCount: number;
+  warnings: string[];
 }
 
 // ===== Unit conversion helpers (copied from ProductDetail.tsx — keep in sync) =====
@@ -212,6 +250,24 @@ async function putJson<T>(url: string, body: unknown): Promise<T> {
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     throw new Error(errBody.error || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const message =
+      typeof errBody.error === "string"
+        ? errBody.error
+        : errBody.error?.message || `Request failed (${res.status})`;
+    throw new Error(message);
   }
   return res.json();
 }
@@ -1508,6 +1564,397 @@ function PackingAttributesTab() {
   );
 }
 
+// ===== Rate tables =====
+
+function formatEffectiveDate(value: string | null): string {
+  if (!value) return "—";
+  return new Date(value).toLocaleDateString();
+}
+
+function formatBandRange(minGrams: number | null, maxGrams: number | null): string {
+  if (minGrams === null || maxGrams === null) return "—";
+  return `${formatWeight(minGrams)} – ${formatWeight(maxGrams)}`;
+}
+
+function rateTableStatusBadge(status: string) {
+  if (status === "active") {
+    return (
+      <Badge variant="outline" className="text-[10px] bg-green-50 text-green-700 border-green-300 capitalize">
+        {status}
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="secondary" className="text-[10px] capitalize">
+      {status}
+    </Badge>
+  );
+}
+
+const RATE_PREVIEW_ROW_LIMIT = 50;
+
+interface RateImportFormState {
+  carrier: string;
+  serviceCode: string;
+  csv: string;
+  replaceExisting: boolean;
+}
+
+function emptyRateImportForm(): RateImportFormState {
+  return { carrier: "usps", serviceCode: "", csv: "", replaceExisting: true };
+}
+
+function RateTablesTab() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [form, setForm] = useState<RateImportFormState>(emptyRateImportForm());
+  const [preview, setPreview] = useState<ParseCsvResponse | null>(null);
+  const [importWarnings, setImportWarnings] = useState<string[] | null>(null);
+
+  const { data: tablesData, isLoading } = useQuery<{ rateTables: RateTableSummary[] }>({
+    queryKey: ["/api/shipping/admin/rate-tables"],
+    queryFn: () => fetchJson<{ rateTables: RateTableSummary[] }>("/api/shipping/admin/rate-tables"),
+  });
+  const tables = tablesData?.rateTables || [];
+
+  const parseMutation = useMutation({
+    mutationFn: (csv: string) =>
+      postJson<ParseCsvResponse>("/api/shipping/admin/rate-tables/parse-csv", { csv }),
+    onSuccess: (data) => setPreview(data),
+    onError: (e: Error) => {
+      toast({ title: "Failed to parse CSV", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const importMutation = useMutation({
+    mutationFn: (body: {
+      carrier: string;
+      serviceCode: string;
+      replaceExisting: boolean;
+      rows: RateTableImportRow[];
+    }) => postJson<ImportResponse>("/api/shipping/admin/rate-tables/import", body),
+    onSuccess: (data) => {
+      invalidateShippingAdmin(queryClient);
+      toast({ title: `Rate table imported (${data.rowCount.toLocaleString()} rows)` });
+      if (data.warnings.length > 0) {
+        // Keep the dialog open so the zone warnings are read, not lost in a toast.
+        setImportWarnings(data.warnings);
+      } else {
+        closeDialog();
+      }
+    },
+    onError: (e: Error) => {
+      toast({ title: "Import failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const closeDialog = () => {
+    setDialogOpen(false);
+    setForm(emptyRateImportForm());
+    setPreview(null);
+    setImportWarnings(null);
+  };
+
+  const handleFileChange = (file: File | undefined) => {
+    if (!file) return;
+    file
+      .text()
+      .then((text) => {
+        setForm((prev) => ({ ...prev, csv: text }));
+        setPreview(null);
+      })
+      .catch(() => {
+        toast({ title: "Could not read file", variant: "destructive" });
+      });
+  };
+
+  const handleParse = () => {
+    if (!form.csv.trim()) {
+      toast({ title: "Paste or upload a CSV first", variant: "destructive" });
+      return;
+    }
+    parseMutation.mutate(form.csv);
+  };
+
+  const previewHasErrors =
+    preview !== null && (preview.errors.length > 0 || preview.bandErrors.length > 0);
+  const canImport =
+    preview !== null && !previewHasErrors && preview.rows.length > 0 && form.serviceCode.trim().length > 0;
+
+  const handleImport = () => {
+    if (!preview || !canImport) return;
+    importMutation.mutate({
+      carrier: form.carrier,
+      serviceCode: form.serviceCode.trim(),
+      replaceExisting: form.replaceExisting,
+      rows: preview.rows,
+    });
+  };
+
+  return (
+    <Card>
+      <CardHeader className="p-3 md:p-6 flex flex-row items-center justify-between space-y-0">
+        <div>
+          <CardTitle className="flex items-center gap-2 text-base md:text-lg">
+            <FileSpreadsheet className="w-5 h-5" />
+            Rate tables
+          </CardTitle>
+          <CardDescription className="text-xs md:text-sm">
+            Weight-band × zone prices the rates engine quotes from. Import hand-transcribed carrier
+            grids here; calibration jobs write tables through the same path.
+          </CardDescription>
+        </div>
+        <Button size="sm" onClick={() => setDialogOpen(true)} className="min-h-[36px]">
+          <Upload className="h-4 w-4 mr-1" />
+          Import table
+        </Button>
+      </CardHeader>
+      <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+        {isLoading ? (
+          <div className="flex justify-center p-8">
+            <Loader2 className="w-6 h-6 animate-spin" />
+          </div>
+        ) : tables.length === 0 ? (
+          <div className="text-center p-8 text-muted-foreground">
+            <FileSpreadsheet className="w-12 h-12 mx-auto mb-2 opacity-50" />
+            <p>No rate tables yet. Import a carrier's weight-band × zone grid to start quoting.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Carrier</TableHead>
+                  <TableHead>Service</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Effective</TableHead>
+                  <TableHead className="text-right">Rows</TableHead>
+                  <TableHead className="text-right">Zones</TableHead>
+                  <TableHead>Weight bands</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {tables.map((table) => (
+                  <TableRow key={table.id} className={table.status !== "active" ? "opacity-60" : undefined}>
+                    <TableCell className="text-sm uppercase font-medium">{table.carrier}</TableCell>
+                    <TableCell className="font-mono text-xs">{table.serviceCode}</TableCell>
+                    <TableCell>{rateTableStatusBadge(table.status)}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                      {formatEffectiveDate(table.effectiveFrom)}
+                      {" → "}
+                      {table.effectiveTo ? formatEffectiveDate(table.effectiveTo) : "open"}
+                    </TableCell>
+                    <TableCell className="text-sm text-right">{table.rowCount.toLocaleString()}</TableCell>
+                    <TableCell className="text-sm text-right">{table.zoneCount.toLocaleString()}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                      {formatBandRange(table.minWeightGrams, table.maxWeightGrams)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={dialogOpen} onOpenChange={(open) => !open && closeDialog()}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Import rate table</DialogTitle>
+            <DialogDescription>
+              CSV columns: zone,min_lb,max_lb,rate_usd or zone,min_g,max_g,rate_cents (optional
+              warehouse_id). Header row required.
+            </DialogDescription>
+          </DialogHeader>
+
+          {importWarnings !== null ? (
+            <div className="space-y-3 py-2">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <AlertTriangle className="w-4 h-4 text-yellow-600" />
+                Imported with warnings
+              </div>
+              <ul className="space-y-1 text-xs text-muted-foreground list-disc pl-5">
+                {importWarnings.map((warning, idx) => (
+                  <li key={idx}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="space-y-4 py-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Carrier</Label>
+                  <Select
+                    value={form.carrier}
+                    onValueChange={(v) => setForm((prev) => ({ ...prev, carrier: v }))}
+                  >
+                    <SelectTrigger className="h-10">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CARRIERS.map((carrier) => (
+                        <SelectItem key={carrier} value={carrier} className="uppercase">
+                          {carrier.toUpperCase()}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Service code</Label>
+                  <Input
+                    value={form.serviceCode}
+                    onChange={(e) => setForm((prev) => ({ ...prev, serviceCode: e.target.value }))}
+                    placeholder="usps_ground_advantage"
+                    className="h-10 font-mono text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>CSV</Label>
+                <Textarea
+                  value={form.csv}
+                  onChange={(e) => {
+                    setForm((prev) => ({ ...prev, csv: e.target.value }));
+                    setPreview(null);
+                  }}
+                  rows={8}
+                  className="font-mono text-xs"
+                  placeholder={"zone,min_lb,max_lb,rate_usd\nUS-48,0,1,8.99"}
+                />
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="h-10 max-w-xs text-xs"
+                    onChange={(e) => handleFileChange(e.target.files?.[0])}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleParse}
+                    disabled={parseMutation.isPending}
+                    className="min-h-[36px]"
+                  >
+                    {parseMutation.isPending ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <Search className="w-4 h-4 mr-2" />
+                    )}
+                    Preview
+                  </Button>
+                </div>
+              </div>
+
+              {preview && (
+                <div className="space-y-3">
+                  {(preview.errors.length > 0 || preview.bandErrors.length > 0) && (
+                    <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3 space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+                        <AlertTriangle className="w-4 h-4" />
+                        Fix these before importing
+                      </div>
+                      <ul className="text-xs text-destructive list-disc pl-5 max-h-40 overflow-y-auto">
+                        {preview.errors.map((err, idx) => (
+                          <li key={`row-${idx}`}>
+                            Line {err.line}: {err.message}
+                          </li>
+                        ))}
+                        {preview.bandErrors.map((err, idx) => (
+                          <li key={`band-${idx}`}>{err}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {preview.rows.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="text-xs text-muted-foreground">
+                        {preview.rows.length.toLocaleString()} row{preview.rows.length === 1 ? "" : "s"} parsed
+                        {preview.dialect ? ` (${preview.dialect} dialect)` : ""}
+                        {preview.rows.length > RATE_PREVIEW_ROW_LIMIT
+                          ? ` — showing first ${RATE_PREVIEW_ROW_LIMIT}`
+                          : ""}
+                      </p>
+                      <div className="overflow-x-auto max-h-64 overflow-y-auto rounded-md border">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Zone</TableHead>
+                              <TableHead>Warehouse</TableHead>
+                              <TableHead>Band</TableHead>
+                              <TableHead className="text-right">Rate</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {preview.rows.slice(0, RATE_PREVIEW_ROW_LIMIT).map((row, idx) => (
+                              <TableRow key={idx}>
+                                <TableCell className="font-mono text-xs">{row.destinationZone}</TableCell>
+                                <TableCell className="text-xs text-muted-foreground">
+                                  {row.originWarehouseId ?? "any"}
+                                </TableCell>
+                                <TableCell className="text-xs whitespace-nowrap">
+                                  {formatWeight(row.minWeightGrams)} – {formatWeight(row.maxWeightGrams)}
+                                </TableCell>
+                                <TableCell className="text-xs text-right">{formatCostUsd(row.rateCents)}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-start gap-3">
+                <Checkbox
+                  id="rate-replace-existing"
+                  checked={form.replaceExisting}
+                  onCheckedChange={(checked) =>
+                    setForm((prev) => ({ ...prev, replaceExisting: checked === true }))
+                  }
+                  className="mt-0.5"
+                />
+                <div>
+                  <label htmlFor="rate-replace-existing" className="text-sm font-medium cursor-pointer">
+                    Supersede current table for this carrier + service
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    Marks the prior active table superseded so only the new one is quoted.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="gap-2">
+            {importWarnings !== null ? (
+              <Button onClick={closeDialog}>Done</Button>
+            ) : (
+              <>
+                <Button variant="outline" onClick={closeDialog}>
+                  Cancel
+                </Button>
+                <Button onClick={handleImport} disabled={!canImport || importMutation.isPending}>
+                  {importMutation.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <Upload className="w-4 h-4 mr-2" />
+                  )}
+                  Import
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
 // ===== Page =====
 
 export default function ShippingSettings() {
@@ -1569,6 +2016,7 @@ export default function ShippingSettings() {
           <TabsTrigger value="boxes">Box catalog</TabsTrigger>
           <TabsTrigger value="service-levels">Service levels</TabsTrigger>
           <TabsTrigger value="packing-attrs">Packing attributes</TabsTrigger>
+          <TabsTrigger value="rate-tables">Rate tables</TabsTrigger>
         </TabsList>
         <TabsContent value="boxes" className="mt-4">
           <BoxCatalogTab boxes={config?.boxes || []} warehouses={warehouses} isLoading={configLoading} />
@@ -1578,6 +2026,9 @@ export default function ShippingSettings() {
         </TabsContent>
         <TabsContent value="packing-attrs" className="mt-4">
           <PackingAttributesTab />
+        </TabsContent>
+        <TabsContent value="rate-tables" className="mt-4">
+          <RateTablesTab />
         </TabsContent>
       </Tabs>
     </div>
