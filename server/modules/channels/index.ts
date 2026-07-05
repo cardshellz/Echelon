@@ -61,6 +61,15 @@ export { ShopifyAdapter, createShopifyAdapter } from "./adapters/shopify.adapter
 export { createCatalogBackfillService } from "./catalog-backfill.service";
 export type { CatalogBackfillService, BackfillOptions, BackfillResult } from "./catalog-backfill.service";
 
+export { runShopifyWeightBackfill, createShopifyWeightBackfillDeps, toGrams } from "./shopify-weight-backfill.service";
+export type {
+  ShopifyWeightBackfillOptions,
+  ShopifyWeightBackfillReport,
+  ShopifyWeightBackfillDeps,
+  WeightBackfillCandidate,
+  ShopifyWeightMeasurement,
+} from "./shopify-weight-backfill.service";
+
 export { createEchelonSyncOrchestrator } from "./echelon-sync-orchestrator.service";
 export type {
   EchelonSyncOrchestrator,
