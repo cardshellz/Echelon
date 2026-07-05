@@ -14,6 +14,7 @@ import {
 } from "@shared/schema";
 import { catalogStorage } from "../catalog";
 import { createImageSyncService } from "./image-sync.service";
+import { duplicateProduct, ProductDuplicateError } from "./product-duplicate.service";
 import { enqueueShippingGroupMetafields } from "./shipping-group-sync";
 import {
   coercePackageAttributesOnVariantPayload,
@@ -729,6 +730,24 @@ export async function registerProductRoutes(app: Express) {
       }
       console.error("Error creating product:", error);
       res.status(500).json({ error: "Failed to create product" });
+    }
+  });
+
+  // Duplicate an existing product into a NEW draft product with fresh SKUs.
+  // Copies base fields, active variants, and images; resets identity + all
+  // Shopify sync keys so the copy is unlinked. See product-duplicate.service.
+  app.post("/api/products/:id/duplicate", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const sourceId = parseInt(req.params.id);
+      if (Number.isNaN(sourceId)) return res.status(400).json({ error: "Invalid product id" });
+      const created = await duplicateProduct(storage, sourceId, req.body ?? {});
+      res.status(201).json(created);
+    } catch (error: any) {
+      if (error instanceof ProductDuplicateError) {
+        return res.status(error.statusCode).json({ error: error.message, ...(error.details ?? {}) });
+      }
+      console.error("Error duplicating product:", error);
+      res.status(500).json({ error: "Failed to duplicate product" });
     }
   });
 
