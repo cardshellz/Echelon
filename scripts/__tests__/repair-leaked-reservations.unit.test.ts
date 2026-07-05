@@ -33,8 +33,9 @@ describe("repair-leaked-reservations", () => {
       );
       // voided picks never count as consumed reservations
       expect(sql).toContain("it.voided_at IS NULL");
-      // only non-terminal orders hold reservations
-      expect(sql).toContain("o.warehouse_status NOT IN ('cancelled', 'shipped')");
+      // only non-terminal orders hold reservations — 'completed' is terminal
+      // (all warehouse work done; leftovers released on entry)
+      expect(sql).toContain("o.warehouse_status NOT IN ('cancelled', 'shipped', 'completed')");
     }
 
     // ...but drift and the WHERE gate follow the chosen measure

@@ -338,7 +338,9 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           OR (wo.source_table_id = oo.id::text)
         )
         WHERE os.status = 'shipped'
-          AND oo.status NOT IN ('shipped', 'partially_shipped')
+          -- P0.3: cancelled/refunded are money-final — a shipped shipment on
+          -- such an order is a REVIEW case, never an auto-flip candidate.
+          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
           AND os.updated_at < NOW() - INTERVAL '10 minutes'
       `,
       sql`
@@ -352,7 +354,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           OR (wo.source_table_id = oo.id::text)
         )
         WHERE os.status = 'shipped'
-          AND oo.status NOT IN ('shipped', 'partially_shipped')
+          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
           AND os.updated_at < NOW() - INTERVAL '10 minutes'
         ORDER BY os.updated_at ASC
         LIMIT 10
@@ -1539,7 +1541,9 @@ export async function remediateOmsFlowIssue(
                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
             OR (wo.source_table_id = oo.id::text)
           )
-          AND oo.status NOT IN ('shipped', 'partially_shipped')
+          -- P0.3: cancelled/refunded are money-final — never auto-flip them
+          -- to shipped. Divergence handled below as a review flag instead.
+          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
         RETURNING oo.id, os.order_id AS wms_order_id
       `);
 
@@ -1554,8 +1558,38 @@ export async function remediateOmsFlowIssue(
             NOW()
           )
         `);
+        return row;
       }
-      return row ?? null;
+
+      // P0.3 review bucket: the UPDATE was refused. If that's because the OMS
+      // order is money-final (cancelled/refunded) while a physical package
+      // shipped, a human must decide (refund vs recall vs re-open) — flag the
+      // shipment once instead of silently skipping forever.
+      const terminal = await tx.execute(sql`
+        SELECT status FROM oms.oms_orders
+        WHERE id = ${omsOrderId} AND status IN ('cancelled', 'refunded')
+        LIMIT 1
+      `);
+      if (firstRow<{ status: string }>(terminal)) {
+        await tx.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET requires_review = true,
+              review_reason = ${"shipped_but_oms_terminal: physical shipment shipped while OMS order is money-final"},
+              updated_at = NOW()
+          WHERE id = ${shipmentId}
+            AND COALESCE(requires_review, false) = false
+        `);
+        await tx.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'shipment_shipped_oms_terminal_review',
+            ${JSON.stringify({ code: input.code, shipmentId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return null;
     });
 
     return {
