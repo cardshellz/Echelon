@@ -6,7 +6,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createEchelonSyncOrchestrator, type EchelonSyncOrchestrator } from "../../echelon-sync-orchestrator.service";
+import {
+  createEchelonSyncOrchestrator,
+  isPermanentInventoryPushError,
+  PERMANENT_FAILURE_QUARANTINE_THRESHOLD,
+  type EchelonSyncOrchestrator,
+} from "../../echelon-sync-orchestrator.service";
 import { ChannelAdapterRegistry, type IChannelAdapter } from "../../channel-adapter.interface";
 
 // ---------------------------------------------------------------------------
@@ -23,6 +28,7 @@ function createMockDb() {
     chain.limit = vi.fn(() => chain);
     chain.set = vi.fn(() => chain);
     chain.values = vi.fn(() => chain);
+    chain.onConflictDoUpdate = vi.fn(() => chain);
     chain.returning = vi.fn(() => chain);
     chain.groupBy = vi.fn(() => chain);
     chain.innerJoin = vi.fn(() => chain);
@@ -364,6 +370,147 @@ describe("EchelonSyncOrchestrator", () => {
       expect(
         updateSetValues.some((v: any) => v.externalVariantId === "999888777"),
       ).toBe(true);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Permanent-failure quarantine (CLAUDE.md §6 — never retry a permanent error)
+  // -----------------------------------------------------------------------
+
+  describe("permanent-failure quarantine", () => {
+    it("classifies gone-resource errors as permanent, transient ones as retryable", () => {
+      expect(
+        isPermanentInventoryPushError(
+          "Shopify API POST /inventory_levels/set.json failed (404): Not Found",
+        ),
+      ).toBe(true);
+      expect(
+        isPermanentInventoryPushError("[25710] We didn't find the entity you are requesting."),
+      ).toBe(true);
+      expect(isPermanentInventoryPushError("[25713] This offerId is invalid.")).toBe(true);
+      expect(
+        isPermanentInventoryPushError("A user error has occurred. Please enter a valid offerId."),
+      ).toBe(true);
+      expect(
+        isPermanentInventoryPushError("Shopify API POST /inventory_levels/set.json failed (500): boom"),
+      ).toBe(false);
+      expect(isPermanentInventoryPushError("fetch failed: ECONNRESET")).toBe(false);
+      expect(isPermanentInventoryPushError(undefined)).toBe(false);
+    });
+
+    function setupEbayErrorScenario(pushError: string) {
+      const ebayAdapter: IChannelAdapter = {
+        ...createMockAdapter(),
+        adapterName: "MockEbay",
+        providerKey: "ebay",
+        pushInventory: vi.fn().mockResolvedValue([
+          { variantId: 67, pushedQty: 0, status: "error", error: pushError },
+        ]),
+      };
+      adapterRegistry.register(ebayAdapter);
+      allocationEngine.allocateProduct.mockResolvedValue({
+        productId: 33,
+        totalAtpBase: 204400,
+        allocations: [
+          {
+            channelId: 67,
+            channelName: "Ebay",
+            channelProvider: "ebay",
+            channelPriority: 0,
+            productVariantId: 67,
+            sku: "ARM-ENV-SGL-C700",
+            unitsPerVariant: 700,
+            allocatedUnits: 292,
+            allocatedBase: 204400,
+            method: "mirror",
+            reason: "Mirror ATP",
+          },
+        ],
+        blocked: [],
+      });
+      db._selectQueue = [
+        [],
+        [{
+          productVariantId: 67,
+          feedId: 663,
+          feedLastSyncedQty: null,
+          feedQuarantinedAt: null,
+          channelVariantId: "offer-dead",
+          channelSku: "ARM-ENV-SGL-C700",
+          channelInventoryItemId: null,
+          listingId: 663,
+          listingExternalVariantId: "offer-dead",
+          listingExternalSku: "ARM-ENV-SGL-C700",
+          listingLastSyncedQty: null,
+        }],
+        [],
+        [{ productId: 33 }],
+        [],
+      ];
+      return ebayAdapter;
+    }
+
+    const quarantineStamps = () =>
+      db.update.mock.results.flatMap((r: any) =>
+        r.value.set.mock.calls.map((c: any[]) => c[0]),
+      ).filter((v: any) => v.quarantinedAt instanceof Date);
+
+    const failureCounterUpserts = () =>
+      db.insert.mock.results.filter(
+        (r: any) => r.value.onConflictDoUpdate.mock.calls.length > 0,
+      );
+
+    it("counts a permanent failure but does NOT quarantine below the threshold", async () => {
+      setupEbayErrorScenario(
+        "eBay API POST /sell/inventory/v1/bulk_update_price_quantity failed (404): [25710] not found",
+      );
+      db._insertResult = [{ failures: 1, quarantinedAt: null }];
+
+      const results = await orchestrator.syncInventoryForProduct(33, { dryRun: false }, "test");
+
+      expect(results[0].variantsErrored).toBe(1);
+      expect(failureCounterUpserts().length).toBe(1);
+      expect(quarantineStamps()).toEqual([]);
+    });
+
+    it("quarantines the mapping at the consecutive-failure threshold", async () => {
+      setupEbayErrorScenario(
+        "eBay API POST /sell/inventory/v1/bulk_update_price_quantity failed (404): [25710] not found",
+      );
+      db._insertResult = [
+        { failures: PERMANENT_FAILURE_QUARANTINE_THRESHOLD, quarantinedAt: null },
+      ];
+
+      await orchestrator.syncInventoryForProduct(33, { dryRun: false }, "test");
+
+      const stamps = quarantineStamps();
+      expect(stamps.length).toBe(1);
+      expect(stamps[0].quarantineReason).toContain("CHANNELS_PUSH_PERMANENT");
+    });
+
+    it("does not touch the failure counter on transient errors", async () => {
+      setupEbayErrorScenario("eBay API POST ... failed (503): upstream unavailable");
+      const results = await orchestrator.syncInventoryForProduct(33, { dryRun: false }, "test");
+
+      expect(results[0].variantsErrored).toBe(1);
+      expect(failureCounterUpserts()).toEqual([]);
+      expect(quarantineStamps()).toEqual([]);
+    });
+
+    it("skips quarantined mappings without calling the adapter", async () => {
+      const ebayAdapter = setupEbayErrorScenario("unused");
+      db._selectQueue[1] = [
+        {
+          ...db._selectQueue[1][0],
+          feedQuarantinedAt: new Date("2026-07-01T00:00:00Z"),
+        },
+      ];
+
+      const results = await orchestrator.syncInventoryForProduct(33, { dryRun: false }, "test");
+
+      expect(ebayAdapter.pushInventory).not.toHaveBeenCalled();
+      expect(results[0].variantsSkipped).toBe(1);
+      expect(results[0].variantsErrored).toBe(0);
     });
 
     it("should skip variants without shopifyInventoryItemId", async () => {

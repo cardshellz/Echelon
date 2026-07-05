@@ -17,7 +17,16 @@ import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
 import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import { transitionOrderStatus, completeOrder } from "./order-status-core";
+import { completeWmsOrderAndRelease, type ReservationReleaser } from "./cancel-wms-order";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
+
+// Injected at boot (server/index.ts) so the pick-queue self-heal can release
+// leftover reservations when it completes an order — the storage layer cannot
+// reach app.locals.services. Mirrors setOmsFlowReconciliationServices.
+let pickQueueReservation: ReservationReleaser | null = null;
+export function setPickQueueReservationService(reservation: ReservationReleaser): void {
+  pickQueueReservation = reservation;
+}
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via
@@ -739,7 +748,16 @@ export const orderMethods: IOrderStorage = {
         );
         if (pendingShippable.length === 0) {
           try {
-            const result = await completeOrder(db, order.id, "self_heal_zero_shippable");
+            // 'completed' is terminal for demand: release leftover reservations
+            // (short/cancelled-item residue) on entry, or they leak forever.
+            const result = pickQueueReservation
+              ? await completeWmsOrderAndRelease(db, pickQueueReservation, order.id, "self_heal_zero_shippable")
+              : await completeOrder(db, order.id, "self_heal_zero_shippable");
+            if (!pickQueueReservation) {
+              console.warn(
+                `[PickQueue] Reservation service not injected — completed order ${order.id} without releasing leftovers`,
+              );
+            }
             if (result.transitioned) {
               order.warehouseStatus = "completed";
               order.completedAt = new Date();

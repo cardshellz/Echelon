@@ -1362,6 +1362,63 @@ export default function ProductDetail() {
     },
   });
 
+  // --- Duplicate product (prefilled draft) ---
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [dupName, setDupName] = useState("");
+  const [dupSku, setDupSku] = useState("");
+  const [dupVariantSkus, setDupVariantSkus] = useState<Record<number, string>>({});
+
+  const activeVariants = (product?.variants ?? []).filter((v) => v.isActive);
+
+  const openDuplicate = useCallback(() => {
+    if (!product) return;
+    setDupName(`${product.name} (Copy)`);
+    setDupSku(product.sku ? `${product.sku}-COPY` : "");
+    const seed: Record<number, string> = {};
+    for (const v of product.variants.filter((vv) => vv.isActive)) {
+      seed[v.id] = v.sku ? `${v.sku}-COPY` : "";
+    }
+    setDupVariantSkus(seed);
+    setDuplicateOpen(true);
+  }, [product]);
+
+  const duplicateMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/products/${productId}/duplicate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: dupName.trim(),
+          sku: dupSku.trim(),
+          status: "draft",
+          variants: Object.entries(dupVariantSkus).map(([sourceVariantId, sku]) => ({
+            sourceVariantId: Number(sourceVariantId),
+            sku: (sku ?? "").trim(),
+          })),
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || "Failed to duplicate product");
+      }
+      return res.json();
+    },
+    onSuccess: (created: { id: number }) => {
+      toast({ title: "Product duplicated", description: "Created as a draft — review and activate when ready." });
+      setDuplicateOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      setLocation(`/products/${created.id}`);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Duplicate failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const duplicateValid =
+    dupName.trim().length > 0 &&
+    dupSku.trim().length > 0 &&
+    activeVariants.every((v) => (dupVariantSkus[v.id] ?? "").trim().length > 0);
+
   // --- Archive: variant search for SKU correction transfer ---
   const variantSearchResults = useQuery<{ sku: string; name: string; productVariantId: number; productId: number; unitsPerVariant: number }[]>({
     queryKey: ["/api/inventory/skus/search", variantSearchQuery],
@@ -2165,6 +2222,16 @@ export default function ProductDetail() {
           <Badge variant={product.isActive ? "default" : "secondary"} className="text-xs">
             {product.status === "archived" ? "Archived" : product.isActive ? "Active" : "Inactive"}
           </Badge>
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-[44px]"
+            onClick={openDuplicate}
+            data-testid="btn-duplicate-product"
+          >
+            <Copy className="h-4 w-4 mr-2" />
+            Duplicate
+          </Button>
           {product.isActive ? (
             <Button
               variant="outline"
@@ -2217,6 +2284,67 @@ export default function ProductDetail() {
               disabled={deleteProductMutation.isPending}
             >
               {deleteProductMutation.isPending ? "Deleting..." : "Delete Permanently"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Duplicate product dialog */}
+      <Dialog open={duplicateOpen} onOpenChange={setDuplicateOpen}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Copy className="h-5 w-5" />
+              Duplicate Product
+            </DialogTitle>
+            <DialogDescription>
+              Creates a new <strong>draft</strong> product with these details prefilled. Base fields, images,
+              category, brand and procurement settings are copied. Inventory, channels, pick locations and
+              suppliers are not.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="dup-name">Product name</Label>
+              <Input id="dup-name" value={dupName} onChange={(e) => setDupName(e.target.value)} data-testid="input-dup-name" />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="dup-sku">Base SKU</Label>
+              <Input
+                id="dup-sku"
+                value={dupSku}
+                onChange={(e) => setDupSku(e.target.value)}
+                className="font-mono"
+                placeholder="New base SKU (required)"
+                data-testid="input-dup-sku"
+              />
+            </div>
+            {activeVariants.length > 0 && (
+              <div className="space-y-2">
+                <Label>Variant SKUs ({activeVariants.length})</Label>
+                <p className="text-xs text-muted-foreground">Each variant needs its own new, unique SKU.</p>
+                {activeVariants.map((v) => (
+                  <div key={v.id} className="flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground flex-1 min-w-0 truncate" title={v.name}>{v.name}</span>
+                    <Input
+                      value={dupVariantSkus[v.id] ?? ""}
+                      onChange={(e) => setDupVariantSkus((p) => ({ ...p, [v.id]: e.target.value }))}
+                      className="font-mono w-48"
+                      aria-label={`New SKU for ${v.name}`}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDuplicateOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => duplicateMutation.mutate()}
+              disabled={!duplicateValid || duplicateMutation.isPending}
+              data-testid="btn-confirm-duplicate"
+            >
+              {duplicateMutation.isPending ? "Duplicating..." : "Create Draft Copy"}
             </Button>
           </DialogFooter>
         </DialogContent>

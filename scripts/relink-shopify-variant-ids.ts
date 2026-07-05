@@ -508,11 +508,14 @@ async function main(): Promise<void> {
 
         if (feedChanges.length > 0 && p.row.feedId !== null) {
           // last_synced_qty=NULL forces the next sweep past the unchanged-qty
-          // drift-lock, so Shopify gets a fresh push on the new ids.
+          // drift-lock, so Shopify gets a fresh push on the new ids. A healed
+          // mapping also leaves quarantine (migration 118) — it can push again.
           await client.query(
             `UPDATE channels.channel_feeds
              SET channel_product_id = $1, channel_variant_id = $2,
-                 channel_inventory_item_id = $3, last_synced_qty = NULL, updated_at = NOW()
+                 channel_inventory_item_id = $3, last_synced_qty = NULL,
+                 consecutive_push_failures = 0, quarantined_at = NULL,
+                 quarantine_reason = NULL, updated_at = NOW()
              WHERE id = $4`,
             [p.live!.productId, p.live!.variantId, p.live!.inventoryItemId, p.row.feedId],
           );
@@ -536,9 +539,12 @@ async function main(): Promise<void> {
       }
       for (const p of archiveRows) {
         if (p.row.feedId !== null) {
+          // Retired deliberately — not "quarantined"; clear those fields too.
           await client.query(
             `UPDATE channels.channel_feeds
-             SET channel_inventory_item_id = NULL, is_active = 0, updated_at = NOW()
+             SET channel_inventory_item_id = NULL, is_active = 0,
+                 consecutive_push_failures = 0, quarantined_at = NULL,
+                 quarantine_reason = NULL, updated_at = NOW()
              WHERE id = $1`,
             [p.row.feedId],
           );

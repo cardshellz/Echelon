@@ -440,7 +440,7 @@ describe("Migrated writers use C4 functions", () => {
     expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
   });
 
-  it("zombie data repair uses cancelOrder/completeOrder (not raw UPDATE)", async () => {
+  it("zombie data repair uses the release-aware terminal wrappers (not raw transitions)", async () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf-8");
@@ -448,8 +448,10 @@ describe("Migrated writers use C4 functions", () => {
     const zombieEnd = src.indexOf("} catch", zombieStart);
     const block = src.slice(zombieStart, zombieEnd);
 
-    expect(block).toContain("cancelOrder(db,");
-    expect(block).toContain("completeOrder(db,");
+    // Terminal transitions must release leftover reservations (P0.1c /
+    // 'completed'-status fix) — the raw cancelOrder/completeOrder calls leaked.
+    expect(block).toContain("cancelWmsOrderAndRelease(db,");
+    expect(block).toContain("completeWmsOrderAndRelease(db,");
     expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
   });
 

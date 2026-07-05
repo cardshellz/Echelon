@@ -63,6 +63,7 @@ interface Storage {
   getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
+  getShippedQtyByPoLines(poLineIds: number[], executor?: any): Promise<Map<number, number>>;
   createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine>;
   bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]>;
   updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null>;
@@ -775,25 +776,12 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         throw new ShipmentTrackingError("No new PO lines to add (all already on this shipment)");
       }
 
-      // 2. Re-read alreadyShippedQty AFTER the lock (fresh data)
-      const shippedResult = await tx.execute(sqlTag`
-        SELECT
-          isl.purchase_order_line_id,
-          COALESCE(SUM(isl.qty_shipped), 0) AS already_shipped
-        FROM procurement.inbound_shipment_lines isl
-        JOIN procurement.inbound_shipments s ON s.id = isl.inbound_shipment_id
-        WHERE isl.purchase_order_line_id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
-          AND s.status != 'cancelled'
-        GROUP BY isl.purchase_order_line_id
-      `);
-
-      const shippedQtyByPoLine = new Map<number, number>();
-      for (const row of shippedResult.rows as any[]) {
-        shippedQtyByPoLine.set(
-          Number(row.purchase_order_line_id),
-          Number(row.already_shipped),
-        );
-      }
+      // 2. Re-read alreadyShippedQty AFTER the lock (fresh data). Delegates to
+      //    the single shared tally (storage.getShippedQtyByPoLines) so this
+      //    write path and the shippable-lines read path can never disagree about
+      //    what counts as shipped — cancelled shipments are excluded there.
+      //    Passing `tx` runs it inside this locked transaction.
+      const shippedQtyByPoLine = await storage.getShippedQtyByPoLines(candidateLineIds, tx);
 
       // 3. Validate per-line against locked, re-read data
       if (qtyMap.size > 0) {
@@ -1919,6 +1907,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     getLines: (shipmentId: number) => storage.getInboundShipmentLines(shipmentId),
     getEnrichedLines: getEnrichedLines,
     getLinesByPo: (poId: number) => storage.getInboundShipmentLinesByPo(poId),
+    getShippedQtyByPoLines: (poLineIds: number[]) => storage.getShippedQtyByPoLines(poLineIds),
 
     // Costs
     addCost,

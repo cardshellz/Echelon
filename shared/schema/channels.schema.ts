@@ -125,6 +125,12 @@ export const channelFeeds = channelsSchema.table("channel_feeds", {
   isActive: integer("is_active").notNull().default(1), // 1 = sync enabled
   lastSyncedAt: timestamp("last_synced_at"),
   lastSyncedQty: integer("last_synced_qty"), // Last quantity pushed to channel
+  // Permanent-failure quarantine (migration 118): a mapping that 404s is dead
+  // — count consecutive permanent failures, quarantine at the threshold, skip
+  // in the push loop. Success or a re-link repair clears it.
+  consecutivePushFailures: integer("consecutive_push_failures").notNull().default(0),
+  quarantinedAt: timestamp("quarantined_at"),
+  quarantineReason: text("quarantine_reason"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
