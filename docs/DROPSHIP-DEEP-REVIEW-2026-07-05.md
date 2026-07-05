@@ -10,8 +10,8 @@ Evidence tags: **[V]** = verified directly in code/config during this review. **
 
 ## 1. Live production state (checked 2026-07-05)
 
-- **[V] Production deploys are failing.** Releases v2286–v2289 all failed the release phase: `Migration prefix collision: 119_outbound_shipment_tracking_dedup.sql and 119_shipping_zone_seed.sql`. Production is pinned at v2285 = `5d748a4f`, 12+ commits behind main. Fix: **PR #837** renames the never-applied `119_outbound_shipment_tracking_dedup.sql` (PR #831) to `120_` (the `119_shipping_zone_seed.sql` from the PR #825 stack already ran in prod). Until merged, no hotfix can ship.
-- **[V] The running release v2285 already contains every dropship change the test plan cares about**: PR #796 package editor (`214c10ac`), shared eBay builder (`f1b2dbee`), retail-cache pricing (`f7b2f741`), connector refactor (`5b058adb`), P0.1 single-writer reservations (`20066ad1`). What prod is missing is the shipping-engine stack (#825/#826) and P0.4 SHIP_NOTIFY dedup (#831) — the latter matters for Phase 10's duplicate-shipment checks.
+- **[V] Deploy outage, RESOLVED same day.** Releases v2286–v2289 failed the release phase on `Migration prefix collision: 119_outbound_shipment_tracking_dedup.sql and 119_shipping_zone_seed.sql`, pinning prod at v2285 for ~1h. Fixed on main by renaming the never-applied file to `121_` (`120_` was claimed by `120_shipping_transit_seed.sql` in the interim); deploys green from v2290, prod current at v2292 (`d2f92f60`). PR #837 (this review's earlier `120_` rename) was superseded and closed. Standing recommendation: **add a CI check for duplicate migration prefixes** — this was detectable at PR time and cost a deploy outage.
+- **[V] Prod now contains every dropship change the test plan cares about** (PR #796 package editor, shared eBay builder `f1b2dbee`, retail-cache pricing `f7b2f741`, connector refactor `5b058adb`, P0.1 single-writer reservations `20066ad1`), plus P0.4 SHIP_NOTIFY dedup and the shipping-engine stack through #821.
 - **[V] Worker flags are set correctly in prod**: `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` is present (this worker is opt-in and **silently no-ops** when the var is missing — `dropship-order-processing-runner.ts:249-256`; keep this var pinned). Listing-push and eBay-intake workers are on; `DISABLE_SCHEDULERS=false`.
 - **[V] `TRUST_PROXY` is NOT set in prod.** `server/index.ts` sets the session cookie `secure` flag only when `TRUST_PROXY === "true"` (trust-proxy itself keys off `NODE_ENV`), so vendor-portal and admin session cookies are currently issued **without the Secure attribute**. One-line fix: `heroku config:set TRUST_PROXY=true -a cardshellz-echelon`, then verify login still works (it should — trust proxy is already on via NODE_ENV).
 
@@ -102,22 +102,22 @@ The action exists in the domain list (`domain/auth.ts:18`) and the vendor catalo
 
 ---
 
-## 5. Decisions needed (design doc vs code — pick a side, update the loser)
+## 5. Decisions — recorded 2026-07-05 (owner)
 
-1. **Auth model**: keep standalone credentials (then update design §3 and accept password-reset/MFA/lockout hardening as roadmap) or build Shellz Club SSO before external vendors?
-2. **Allocation pool**: is raw-global-ATP + per-variant vendor caps acceptable through early launch (accepting structural oversell vs your own channels), or is the §8 Dropship allocation pool + **admin** caps a pre-vendor-launch requirement?
-3. **P3.2 synchronous reservation**: schedule before real vendors? (Design §9's "accepted means reserved" is currently false; §18's two rollback tests are unwritable until then.)
-4. **eBay listing mode**: design says live-after-approval; code defaults `draft_first` everywhere. Which is intended? (If live: flip the eBay default; if draft-first: update design §6 and the LIST phase evidence expectations.)
-5. **Shipping stack convergence**: `SHIPPING-ENGINE-DESIGN.md` (2026-07-02) already decided "dropship keeps its stack short-term; converges on shared tables later" — EX-009/EX-010/EX-012 are really that decision. Set the convergence milestone, and decide the package-data source *now* (§3.1): sync `dropship_package_profiles` from catalog variants, or point dropship reads at catalog variant fields.
-6. **USDC on Base**: design §10 says launch-blocking; the readiness check is a stub. Confirm actual scope for launch (schema/tables exist; end-to-end state unproven).
-7. **Split shipments**: in dogfood scope or not (Phase 12 "if in scope")? The readiness stub always says ready, so this is a real scope decision, not a checklist artifact.
-8. **First real (non-dogfood) vendor timing**: §4 items (stale quantity, no lapse/disconnect cleanup, no drift) are tolerable for an internal dogfood store and clearly not for external vendors — the answer sequences the §4 backlog.
+1. **Auth model: keep standalone credentials.** Update design §3 to describe the built system (bcrypt passwords + passkeys + email MFA keyed to Shellz Club member identity by email). Hardening backlog stays open: session regeneration on login, account lockout, `manage_catalog_selection` CHECK fix, enumeration-oracle tightening.
+2. **Allocation: plug dropship into the existing channel allocation engine.** Verified state: the `Dropship OMS` channel exists in `channels.channels` (id 103, active) but has **no warehouse assignments, no channel allocation rules**, and the dropship ATP provider calls raw `getBulkAtp` — it never consults the engine. Work: (a) dropship ATP provider consumes engine allocation for the Dropship channel (`getAllocatedQty` / `allocateProduct`); (b) assign warehouse 1 to channel 103; (c) create the channel-default allocation rule (mode/share/caps = admin lever §8 wanted); (d) hang dropship quantity re-sync off `allocateAndGetSyncTargets` — which also closes the "no quantity sync on ATP change" gap (§4). Target: **before first external vendor** (dogfood may proceed on raw ATP with narrow exposure).
+3. **P3.2 synchronous reservation: before first external vendor.** Dogfood proceeds on the interim model with guardrails (no cross-listing last-unit SKUs; Phase-8 recovery runbook: admin retry-wms-sync + manual wallet credit).
+4. **eBay listing mode: live at push.** Flip the marzcards store `listing_mode` to `live` before the EX-015 test (data change; prod value verified `draft_first` on 2026-07-05); change the code default for eBay stores to `live` (Shopify stays `draft_first`). Design §6 already says this — the code changes, not the doc.
+5. **Package data: make dropship read the catalog now.** Small PR before listing/quote testing: the cartonization/quote path reads weight/dims from `catalog.product_variants` (the Catalog > Variants editor becomes the single entry point, matching design §11); `dropship_package_profiles` keeps only dropship-specific fields (ship_alone, default box, max units per package). Needs its own verification pass (unit tests + SHIPCFG-04/08 manual quote validation). Handoff step 3 becomes correct as originally written once this lands.
+6. **USDC on Base: descoped from launch.** Card + ACH are the launch rails. Update design §10; replace the always-green `usdc_base_funding` readiness stub with an honest not-ready/not-applicable status.
+7. **Lapse/disconnect cleanup: build during dogfood.** Implement the listing end/zero-quantity provider operation (eBay + Shopify), the grace-expiry worker (`grace_period → disconnected`), and lapse → zero-quantity push; add a lapse-simulation phase to the dogfood checklist (pause the `.ops` subscription → listings zero → restore → listings resume).
+8. **Split shipments** (not explicitly decided this round): Phase 12 stays conditional; the always-green `split_shipment_handoff` readiness stub should be fixed regardless so the gate reflects reality.
 
 ---
 
 ## 6. Test-plan and handoff corrections
 
-- **Handoff step 3 is wrong as written** (§3.1): package data for the test SKU must exist in `dropship.dropship_package_profiles` (Dropship admin > Shipping config), not (only) Catalog > Variants. Update EX-011/EX-014 from "Fixed / verify" to open decision.
+- **Handoff step 3 is wrong as written until Decision 5 ships** (§3.1): today, package data for the test SKU must exist in `dropship.dropship_package_profiles` (Dropship admin > Shipping config), not (only) Catalog > Variants. Decision 5 makes dropship read catalog variant fields, after which the handoff instruction becomes correct as written. Update EX-011/EX-014 to point at that PR.
 - **EX-013 cites PR #737 as landed — it is still OPEN** (verified via GitHub). Re-verify the vendor-catalog filter behavior against what actually merged (#735 only), or merge #737 first.
 - Add pre-flight rows to "Hard Stop Rules": deploy pipeline green (no migration collision — PR #837); `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` present; `TRUST_PROXY=true` set; test store `listing_mode='live'` (or staged-offer expectation documented); all six eBay marketplace-config keys present; box `max_weight_grams` and profile `max_units_per_package` set (cartonizer guard, §3.6); dogfood vendor has a **passkey** registered (§3.10).
 - Phase 7 addition: after acceptance, mutate the order on eBay (e.g., buyer note) and confirm the poll does **not** wedge (poison pill §3.5) — or at least document the failure signature (`DROPSHIP_ORDER_INTAKE_IMMUTABLE_PAYLOAD_CHANGE` + `storesFailed` in worker logs, watermark stuck).
@@ -128,10 +128,17 @@ The action exists in the domain list (`domain/auth.ts:18`) and the vendor catalo
 - CI: `dropship-schema.integration.test.ts` (where all §16 constraint proofs live) does not run in CI — add a PG service job, or at minimum run it locally before each dogfood session.
 - Process guard: add a CI check for duplicate migration prefixes (today's collision was detectable at PR time).
 
-## 7. Suggested sequence to resume dogfood
+## 7. Sequence to resume dogfood (updated for the recorded decisions)
 
-1. Merge **PR #837**, deploy, confirm release phase green and prod == main.
+1. ~~Merge PR #837~~ Deploys are green again (v2290+); confirm prod == main before each session.
 2. `heroku config:set TRUST_PROXY=true`; keep `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true`.
-3. Land the two small pre-push fixes: eBay-400 ≠ auth failure (both providers, §3.2) and payment-hold expiry preservation (§3.4). Optionally the poll poison-pill isolation (§3.5) — small and de-risks Phase 7.
-4. Update handoff/test plan per §6 (especially step 3 → dropship package profiles).
-5. Resume at Phase 3/4 exactly as the handoff prescribes: readiness gate evidence → package profile for the test SKU → narrow variant exposure → portal shows only that SKU → set `listing_mode='live'` → one-SKU push (EX-015) → verify external listing ID + Echelon mapping on eBay itself → one small order.
+3. Land the pre-push fix batch (small PRs):
+   - eBay 400 ≠ permanent auth failure — listing-push AND tracking providers (§3.2).
+   - Payment-hold expiry preserved through worker claim (§3.4).
+   - eBay poll poison-pill isolation — per-order catch + watermark advance (§3.5).
+   - eBay default listing mode → `live` (Decision 4) + flip marzcards store config to `live`.
+   - Dropship quote/cartonization reads `catalog.product_variants` weight/dims (Decision 5), with its own test pass.
+4. Update handoff/test plan per §6 (pre-flight rows; EX-011/EX-013/EX-014 statuses; Phase 7/8/11/14 amendments).
+5. Resume at Phase 3/4: readiness gate evidence → package data for the test SKU via Catalog > Variants (post-Decision-5) → narrow variant exposure → portal shows only that SKU → one-SKU push (EX-015) → verify the LIVE eBay listing ID + Echelon mapping on eBay itself → one small order.
+6. During dogfood (Decision 7): build listing end/zero + grace-expiry worker + lapse→zero push; add the lapse-simulation phase.
+7. Before first external vendor (Decisions 2, 3): allocation-engine wiring for channel 103 (+ quantity re-sync via `allocateAndGetSyncTargets`) and P3.2 synchronous reservation; auth hardening batch (Decision 1 backlog); honest readiness checks for `usdc_base_funding` (per Decision 6) and `split_shipment_handoff`.
