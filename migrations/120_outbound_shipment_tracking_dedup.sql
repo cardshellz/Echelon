@@ -1,4 +1,4 @@
--- 119: close the SHIP_NOTIFY legacy duplicate hole (P0.4).
+-- 120: close the SHIP_NOTIFY legacy duplicate hole (P0.4).
 --
 -- The legacy SHIP_NOTIFY path inserted status='shipped' rows with
 -- external_fulfillment_id NULL under an UNTARGETED "ON CONFLICT DO NOTHING":
