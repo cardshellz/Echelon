@@ -235,12 +235,20 @@ export async function pollEbayOrders(
   const endDate = new Date();
   const startDate = new Date(endDate.getTime() - POLL_WINDOW_MINUTES * 60 * 1000);
 
-  const filter = `creationdate:[${startDate.toISOString()}..${endDate.toISOString()}]`;
+  // P0.6: sweep BOTH windows. creationdate catches new orders;
+  // lastmodifieddate catches late cancels/refunds on orders created before
+  // the window (the creationdate-only filter silently missed those).
+  const filters = [
+    `creationdate:[${startDate.toISOString()}..${endDate.toISOString()}]`,
+    `lastmodifieddate:[${startDate.toISOString()}..${endDate.toISOString()}]`,
+  ];
 
   let totalIngested = 0;
-  let offset = 0;
   const limit = 50;
+  const seenThisPoll = new Set<string>();
 
+  for (const filter of filters) {
+  let offset = 0;
   while (true) {
     const response = await ebayApiClient.getOrders({ filter, limit, offset });
 
@@ -248,6 +256,8 @@ export async function pollEbayOrders(
 
     for (const ebayOrder of response.orders) {
       try {
+        if (seenThisPoll.has(ebayOrder.orderId)) continue;
+        seenThisPoll.add(ebayOrder.orderId);
         const orderData = mapEbayOrderToOrderData(ebayOrder);
         const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, ebayOrder.orderId, orderData);
 
@@ -325,6 +335,7 @@ export async function pollEbayOrders(
     // Paginate
     if (response.orders.length < limit || offset + limit >= response.total) break;
     offset += limit;
+  }
   }
 
   if (totalIngested > 0) {
@@ -413,6 +424,17 @@ export function createEbayOrderWebhookHandler(
 
     // POST — order notification
     try {
+      // P0.6: the route is now PUBLIC (eBay can't hold a session). Defense
+      // in depth: (1) require eBay's signature header — casual scans bounce;
+      // (2) the payload is never trusted for order DATA — we only take the
+      // orderId and re-fetch the full order from eBay's authenticated API,
+      // so a forged POST can at worst trigger an idempotent re-ingest of a
+      // REAL order. Full cryptographic verification of x-ebay-signature
+      // (eBay Notification SDK public-key flow) is tracked as follow-up.
+      if (!req.headers["x-ebay-signature"]) {
+        return res.status(401).json({ error: "Missing notification signature" });
+      }
+
       const payload = req.body as EbayNotificationPayload;
 
       if (!payload?.notification?.data) {
@@ -479,7 +501,24 @@ export function createEbayOrderWebhookHandler(
                 console.error(`[eBay Webhook] Failed to mark inbox ${inbox?.id} failed: ${markErr.message}`);
               });
             }
-            return res.status(200).json({ status: "ok", processing: "failed" });
+            // P0.6: a failed notification must not dead-end at the 200 ACK —
+            // enqueue it for the retry worker (backoff + dead-letter at 5
+            // attempts). ACKing after durable enqueue is correct (§6:
+            // persist first, then 2xx); if the ENQUEUE fails too, 500 so
+            // eBay redelivers.
+            try {
+              await db.execute(sql`
+                INSERT INTO oms.webhook_retry_queue
+                  (provider, topic, payload, source_inbox_id, attempts, last_error, next_retry_at, status, created_at, updated_at)
+                VALUES
+                  ('ebay', ${topic ?? "ORDER"}, ${JSON.stringify(payload)}::jsonb, ${inbox?.id ?? null},
+                   0, ${String(err?.message ?? err).slice(0, 500)}, NOW(), 'pending', NOW(), NOW())
+              `);
+            } catch (queueErr: any) {
+              console.error(`[eBay Webhook] Retry enqueue failed for ${orderId}: ${queueErr.message}`);
+              return res.status(500).json({ error: "retry enqueue failed" });
+            }
+            return res.status(200).json({ status: "ok", processing: "queued_for_retry" });
           }
         }
       }
