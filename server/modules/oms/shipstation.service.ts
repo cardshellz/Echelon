@@ -2996,33 +2996,60 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
         }
 
-        // Create shipment record for the WMS order.
-        // Column name is `order_id` (per shared/schema/orders.schema.ts L348
-        // and migrations/0071_create_namespaces.sql L817). The previous
-        // `wms_order_id` reference threw `column "wms_order_id" does not
-        // exist` and was swallowed by the per-shipment try/catch, so the
-        // outbound_shipments audit row was never written. See
-        // shipstation-sync-audit.md §3 / §1E.
-        const wmsChannelId = wmsOrderResult.rows[0].channel_id ?? null;
-        const insertedShipment: any = await db.execute(sql`
-          INSERT INTO wms.outbound_shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
-          VALUES (${wmsOrderId}, ${wmsChannelId}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
-          ON CONFLICT DO NOTHING
-          RETURNING id
+        // P0.4: RESOLVE-OR-FLAG — the legacy path no longer creates shipment
+        // rows. Its old INSERT ('shipped', external_fulfillment_id NULL) had
+        // an untargeted ON CONFLICT DO NOTHING that no unique index backed,
+        // so replayed webhooks piled up duplicate shipped rows and inflated
+        // fulfillment sums. Order of preference:
+        //   1. idempotent replay: an existing shipped row with this tracking
+        //   2. adopt the order's ACTIVE shipment (the row SHIP_NOTIFY v2
+        //      failed to match by id/orderKey) and mark it shipped
+        //   3. nothing to adopt → audit event; a human resolves via review,
+        //      no row is fabricated.
+        const replayShipment: any = await db.execute(sql`
+          SELECT id FROM wms.outbound_shipments
+          WHERE order_id = ${wmsOrderId}
+            AND status = 'shipped'
+            AND tracking_number = ${trackingNumber}
+          LIMIT 1
         `);
-        if (insertedShipment?.rows?.[0]?.id) {
-          trackingPushShipmentId = Number(insertedShipment.rows[0].id);
+        if (replayShipment?.rows?.[0]?.id) {
+          trackingPushShipmentId = Number(replayShipment.rows[0].id);
         } else {
-          // ON CONFLICT — find the existing shipment for Shopify push
-          const existingShipment: any = await db.execute(sql`
-            SELECT id FROM wms.outbound_shipments
-            WHERE order_id = ${wmsOrderId}
-              AND status = 'shipped'
-              AND tracking_number = ${trackingNumber}
-            LIMIT 1
+          const adopted: any = await db.execute(sql`
+            UPDATE wms.outbound_shipments
+            SET status = 'shipped',
+                carrier = COALESCE(${carrier}, carrier),
+                tracking_number = COALESCE(${trackingNumber}, tracking_number),
+                shipped_at = COALESCE(shipped_at, ${now}),
+                updated_at = NOW()
+            WHERE id = (
+              SELECT id FROM wms.outbound_shipments
+              WHERE order_id = ${wmsOrderId}
+                AND status IN ('planned', 'queued', 'labeled', 'on_hold')
+              ORDER BY id ASC
+              LIMIT 1
+            )
+            RETURNING id
           `);
-          if (existingShipment?.rows?.[0]?.id) {
-            trackingPushShipmentId = Number(existingShipment.rows[0].id);
+          if (adopted?.rows?.[0]?.id) {
+            trackingPushShipmentId = Number(adopted.rows[0].id);
+            console.log(
+              `[ShipStation Webhook] Legacy SHIP_NOTIFY adopted active shipment ${trackingPushShipmentId} for WMS order ${wmsOrderId}`,
+            );
+          } else {
+            await db.execute(sql`
+              INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+              VALUES (
+                ${omsOrderId},
+                'ship_notify_unresolved',
+                ${JSON.stringify({ wmsOrderId, trackingNumber, carrier, reason: "legacy_no_shipment_row" })}::jsonb,
+                NOW()
+              )
+            `);
+            console.warn(
+              `[ShipStation Webhook] Legacy SHIP_NOTIFY found no shipment row to adopt for WMS order ${wmsOrderId} — flagged, NOT created`,
+            );
           }
         }
 
