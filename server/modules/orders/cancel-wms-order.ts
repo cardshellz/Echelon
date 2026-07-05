@@ -22,7 +22,7 @@
  * Callers get `releaseFailed` to surface `requires_review` events.
  */
 import { sql } from "drizzle-orm";
-import { cancelOrder, type TransitionResult } from "./order-status-core";
+import { cancelOrder, completeOrder, type TransitionResult } from "./order-status-core";
 
 export interface ReservationReleaser {
   releaseOrderReservation(
@@ -58,6 +58,49 @@ export async function cancelWmsOrderAndRelease(
     sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${orderId}`,
   );
 
+  const release = await releaseOrderReservationBestEffort(
+    reservation, orderId, reason, userId, "WMS Cancel",
+  );
+  return { ...trans, ...release };
+}
+
+/**
+ * Terminal-complete twin of `cancelWmsOrderAndRelease` ('completed'-status
+ * fix, 2026-07). `completed` means the warehouse work is DONE — every
+ * shippable item is picked, short, or cancelled — so the order can never
+ * consume its remaining reservations. Picked units already consumed theirs
+ * at pick time; whatever the order-scoped ledger still holds is residue
+ * from short/cancelled items and must be released on entry, or it leaks
+ * forever (the #55xxx cluster held 200+ phantom units this way).
+ *
+ * Same discipline as cancel: no transition → no release; a release failure
+ * never rolls back the completion.
+ */
+export async function completeWmsOrderAndRelease(
+  db: any,
+  reservation: ReservationReleaser,
+  orderId: number,
+  reason: string,
+  userId?: string,
+): Promise<CancelWmsOrderOutcome> {
+  const trans = await completeOrder(db, orderId, reason);
+  if (!trans.transitioned) {
+    return { ...trans, releasedItems: 0, releaseFailed: false };
+  }
+
+  const release = await releaseOrderReservationBestEffort(
+    reservation, orderId, reason, userId, "WMS Complete",
+  );
+  return { ...trans, ...release };
+}
+
+async function releaseOrderReservationBestEffort(
+  reservation: ReservationReleaser,
+  orderId: number,
+  reason: string,
+  userId: string | undefined,
+  logTag: string,
+): Promise<{ releasedItems: number; releaseFailed: boolean }> {
   let releasedItems = 0;
   let releaseFailed = false;
   try {
@@ -66,16 +109,15 @@ export async function cancelWmsOrderAndRelease(
     releaseFailed = rel.failed.length > 0;
     if (releaseFailed) {
       console.error(
-        `[WMS Cancel] Partial reservation release for order ${orderId} (${reason}): ` +
+        `[${logTag}] Partial reservation release for order ${orderId} (${reason}): ` +
           rel.failed.map((f) => `${f.sku}: ${f.reason}`).join(", "),
       );
     }
   } catch (err: any) {
     releaseFailed = true;
     console.error(
-      `[WMS Cancel] Reservation release failed for order ${orderId} (${reason}): ${err?.message ?? String(err)}`,
+      `[${logTag}] Reservation release failed for order ${orderId} (${reason}): ${err?.message ?? String(err)}`,
     );
   }
-
-  return { ...trans, releasedItems, releaseFailed };
+  return { releasedItems, releaseFailed };
 }

@@ -80,6 +80,19 @@ interface EbayConnectionMetadata {
 const DEFAULT_MARKETPLACE = "EBAY_US";
 const ORDER_POLL_PAGE_SIZE = 50;
 
+/**
+ * Always surface eBay's numeric errorId alongside the message — sync logs
+ * and the orchestrator's permanent-error classifier key off it; a bare
+ * message hides which error class actually fired (prod 2026-07-05).
+ */
+function formatEbayOfferError(
+  error: EbayError | undefined,
+  statusCode: number | undefined,
+): string {
+  if (!error) return `Status ${statusCode ?? "unknown"}`;
+  return error.errorId != null ? `[${error.errorId}] ${error.message}` : error.message;
+}
+
 // ---------------------------------------------------------------------------
 // eBay Adapter
 // ---------------------------------------------------------------------------
@@ -272,7 +285,7 @@ export class EbayAdapter implements IChannelAdapter {
                   variantId: item.variantId,
                   pushedQty: 0,
                   status: "error",
-                  error: offerResp?.errors?.[0]?.message || resp?.errors?.[0]?.message || `Status ${statusCode ?? "unknown"}`,
+                  error: formatEbayOfferError(offerResp?.errors?.[0] ?? resp?.errors?.[0], statusCode),
                 },
               );
             }
@@ -368,8 +381,12 @@ export class EbayAdapter implements IChannelAdapter {
   }
 
   /**
-   * eBay signals a dead offerId with a per-offer 404, or error 25710
-   * ("could not find the entity") / 25713 ("invalid offerId").
+   * eBay signals a dead offerId with a per-offer 404, error 25710
+   * ("could not find the entity") / 25713 ("invalid offerId"), or — on some
+   * bulk responses — a generic user error whose MESSAGE says
+   * "Please enter a valid offerId." (seen in prod 2026-07-05, message-only,
+   * different errorId). Match the message too so no stale-offer variant
+   * slips past the by-SKU recovery.
    */
   private isStaleOfferError(
     statusCode: number | undefined,
@@ -377,7 +394,12 @@ export class EbayAdapter implements IChannelAdapter {
   ): boolean {
     if (statusCode === 404) return true;
     return errorLists.some((errors) =>
-      errors?.some((e) => e.errorId === 25710 || e.errorId === 25713),
+      errors?.some(
+        (e) =>
+          e.errorId === 25710 ||
+          e.errorId === 25713 ||
+          /valid offerId|offerId is invalid|offer.*not found/i.test(e.message ?? ""),
+      ),
     );
   }
 
@@ -471,7 +493,7 @@ export class EbayAdapter implements IChannelAdapter {
               results.push({
                 variantId: item.variantId,
                 status: "error",
-                error: offerResp?.errors?.[0]?.message || resp?.errors?.[0]?.message || `Status ${statusCode ?? "unknown"}`,
+                error: formatEbayOfferError(offerResp?.errors?.[0] ?? resp?.errors?.[0], statusCode),
               });
             }
           }

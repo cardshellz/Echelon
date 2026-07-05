@@ -100,8 +100,22 @@ export interface EnginePushResult {
 
 // ─── Cancel result ──────────────────────────────────────────────────
 
+/**
+ * P0.3: discriminated cancel outcome. `alreadyInState: true` used to cover
+ * two OPPOSITE terminal states — already cancelled (fine, nothing to do) and
+ * already shipped (package left the building; the order must be recorded
+ * shipped, never cancelled). Reconcilers MUST branch on `state`;
+ * `alreadyInState` is kept as the legacy summary flag.
+ */
+export type EngineCancelState =
+  | "cancelled"          // engine accepted the cancel now
+  | "already_cancelled"  // engine had it cancelled — no-op
+  | "already_shipped"    // engine shipped it — cancel impossible, truth wins
+  | "not_found";         // engine has no such order (or engine not configured)
+
 export interface EngineCancelResult {
   alreadyInState: boolean;
+  state: EngineCancelState;
 }
 
 // ─── Mark-shipped result ────────────────────────────────────────────
