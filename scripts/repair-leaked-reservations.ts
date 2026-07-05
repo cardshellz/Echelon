@@ -111,7 +111,9 @@ export function buildDriftSql(measure: PickedMeasure): string {
         AND it.transaction_type = 'pick'
         AND it.voided_at IS NULL
     ) lp ON TRUE
-    WHERE o.warehouse_status NOT IN ('cancelled', 'shipped')
+    -- 'completed' is terminal: all warehouse work done, leftover reservations
+    -- are released on entry ('completed'-status fix) — never open demand.
+    WHERE o.warehouse_status NOT IN ('cancelled', 'shipped', 'completed')
     GROUP BY pv.id
   ),
   reserved_now AS (

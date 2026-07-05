@@ -389,6 +389,9 @@ describe("EchelonSyncOrchestrator", () => {
       ).toBe(true);
       expect(isPermanentInventoryPushError("[25713] This offerId is invalid.")).toBe(true);
       expect(
+        isPermanentInventoryPushError("A user error has occurred. Please enter a valid offerId."),
+      ).toBe(true);
+      expect(
         isPermanentInventoryPushError("Shopify API POST /inventory_levels/set.json failed (500): boom"),
       ).toBe(false);
       expect(isPermanentInventoryPushError("fetch failed: ECONNRESET")).toBe(false);
