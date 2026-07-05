@@ -35,7 +35,8 @@ import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import { cancelOrder, markOrderShipped, completeOrder } from "./modules/orders/order-status-core";
-import { cancelWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
+import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
+import { setPickQueueReservationService } from "./modules/orders/orders.storage";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
 import type { SafeUser } from "@shared/schema";
@@ -798,6 +799,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         logSchedulerDisabled("scheduler", "Cycle-count freeze guard", "CYCLE_COUNT_FREEZE_GUARD_DISABLED");
       }
 
+      // 'completed'-status fix: the pick-queue self-heal completes orders and
+      // must release their leftover reservations (storage can't reach services).
+      setPickQueueReservationService(services.reservation);
+
       if (!schedulersDisabled("OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED")) {
         // P0.1c: reconciler cancels must release reservations; the
         // ready-but-unreserved detector needs the same service.
@@ -1058,9 +1063,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       `);
       const zombieFixed: string[] = [];
       for (const row of zombieCandidates.rows as any[]) {
+        // Terminal transitions must release leftover reservations (P0.1c /
+        // 'completed'-status fix) — raw transitions here leaked them.
         const result = row.target_status === "cancelled"
-          ? await cancelOrder(db, row.id, "zombie_data_repair")
-          : await completeOrder(db, row.id, "zombie_data_repair");
+          ? await cancelWmsOrderAndRelease(db, services.reservation, row.id, "zombie_data_repair")
+          : await completeWmsOrderAndRelease(db, services.reservation, row.id, "zombie_data_repair");
         if (result.transitioned) {
           zombieFixed.push(`${row.order_number}→${row.target_status}`);
         }
