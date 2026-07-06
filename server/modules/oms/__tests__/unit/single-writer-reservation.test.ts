@@ -76,7 +76,7 @@ describe("P0.1b — atomic reserve + ledger-recorded quantities", () => {
   });
 });
 
-describe("P0.1c — cancels release, shortfalls hold, detector re-reserves", () => {
+describe("P0.1c — cancels release, shortfalls log, detector re-reserves", () => {
   it("wms-sync cancels via the single entrypoint (release + guarded transition)", () => {
     expect(WMS_SYNC_SRC).toContain("cancelWmsOrderAndRelease");
   });
@@ -90,10 +90,15 @@ describe("P0.1c — cancels release, shortfalls hold, detector re-reserves", () 
     expect(FLOW_RECON_SRC).toContain("cancelledByThisRemediation");
   });
 
-  it("reservation shortfall holds the order and skips the engine push", () => {
-    expect(WMS_SYNC_SRC).toContain("reserveWithShortfallGuard");
-    expect(WMS_SYNC_SRC).toContain("SET on_hold = 1");
-    expect(WMS_SYNC_SRC).toContain("reservationShortfall");
+  it("reservation shortfall never auto-holds the order or skips the engine push (auto-hold removed 2026-07-06)", () => {
+    // Shortfalls are logged + recorded as an OMS event; the order proceeds to
+    // the engine and unreservable lines surface as pick shorts. The order-level
+    // auto-hold froze whole orders over one unreservable (preorder/oversold)
+    // line and nothing ever released or pushed them.
+    expect(WMS_SYNC_SRC).toContain("reserveBestEffort");
+    expect(WMS_SYNC_SRC).not.toContain("reserveWithShortfallGuard");
+    expect(WMS_SYNC_SRC).not.toContain("SET on_hold = 1");
+    expect(FLOW_RECON_SRC).not.toContain("SET on_hold = 1");
   });
 
   it("the ready-but-unreserved detector exists and is wired into the sweep", () => {
