@@ -338,6 +338,41 @@ export class ReceivingService {
     };
   }
 
+  private getClosedReceivingLineStatus(line: any): "complete" | "overage" | "short" {
+    const expectedQty = Number(line.expectedQty) || 0;
+    const receivedQty = Number(line.receivedQty) || 0;
+
+    if (expectedQty > 0 && receivedQty < expectedQty) return "short";
+    if (expectedQty > 0 && receivedQty > expectedQty) return "overage";
+    return "complete";
+  }
+
+  private async getZeroPostSummary(receivingOrderId: number, executor: { execute: (query: any) => Promise<{ rows: any[] }> }) {
+    const result = await executor.execute(sql`
+      SELECT
+        (SELECT COUNT(*)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS line_count,
+        (SELECT COALESCE(SUM(expected_qty), 0)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS expected_qty,
+        (SELECT COALESCE(SUM(received_qty), 0)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS received_qty,
+        (SELECT COUNT(*)::int FROM procurement.po_receipts WHERE receiving_order_id = ${receivingOrderId}) AS po_receipt_count,
+        (SELECT COUNT(*)::int FROM inventory.inventory_lots WHERE receiving_order_id = ${receivingOrderId}) AS inventory_lot_count,
+        (
+          SELECT COUNT(*)::int
+          FROM inventory.inventory_transactions
+          WHERE receiving_order_id = ${receivingOrderId}
+            AND voided_at IS NULL
+        ) AS inventory_transaction_count
+    `);
+    const row = result.rows?.[0] ?? {};
+    return {
+      lineCount: Number(row.line_count ?? 0),
+      expectedQty: Number(row.expected_qty ?? 0),
+      receivedQty: Number(row.received_qty ?? 0),
+      poReceiptCount: Number(row.po_receipt_count ?? 0),
+      inventoryLotCount: Number(row.inventory_lot_count ?? 0),
+      inventoryTransactionCount: Number(row.inventory_transaction_count ?? 0),
+    };
+  }
+
   // ─── Discard Draft ──────────────────────────────────────────
 
   /**
@@ -417,6 +452,118 @@ export class ReceivingService {
     });
   }
 
+  /**
+   * Void a closed receipt only when it has no operational or financial posting.
+   *
+   * This is deliberately narrower than reopening any closed receipt: once
+   * inventory lots, inventory transactions, or PO receipt ledger rows exist,
+   * corrections must happen through explicit adjustment documents.
+   */
+  async voidZeroPostClosedReceivingOrder(
+    receivingOrderId: number,
+    userId?: string,
+  ): Promise<{
+    success: true;
+    receivingOrderId: number;
+    receiptNumber: string | null;
+    previousStatus: string;
+    status: "cancelled";
+    lineCount: number;
+    expectedQty: number;
+  }> {
+    if (!Number.isInteger(receivingOrderId) || receivingOrderId <= 0) {
+      throw new ReceivingError("Invalid receiving order id", 400, {
+        code: "INVALID_RECEIVING_ORDER_ID",
+        receivingOrderId,
+      });
+    }
+
+    return await this.db.transaction(async (tx) => {
+      const orderRows = await tx.execute(sql`
+        SELECT id, receipt_number, status, purchase_order_id
+        FROM procurement.receiving_orders
+        WHERE id = ${receivingOrderId}
+        FOR UPDATE
+      `);
+      const order = orderRows.rows?.[0];
+      if (!order) throw new ReceivingError("Receiving order not found", 404);
+      if (order.status !== "closed") {
+        throw new ReceivingError("Only closed zero-post receipts can be voided by this recovery action", 409, {
+          code: "RECEIPT_NOT_CLOSED",
+          receivingOrderId,
+          status: order.status,
+        });
+      }
+
+      const summary = await this.getZeroPostSummary(receivingOrderId, tx);
+      const hasPostedEffects =
+        summary.receivedQty > 0 ||
+        summary.poReceiptCount > 0 ||
+        summary.inventoryLotCount > 0 ||
+        summary.inventoryTransactionCount > 0;
+      if (summary.lineCount === 0 || hasPostedEffects) {
+        throw new ReceivingError("Receipt has posted receiving activity and cannot be voided by zero-post recovery", 409, {
+          code: "RECEIPT_HAS_POSTED_EFFECTS",
+          receivingOrderId,
+          summary,
+        });
+      }
+
+      await tx.execute(sql`
+        UPDATE procurement.receiving_lines
+        SET status = 'cancelled',
+            updated_at = NOW()
+        WHERE receiving_order_id = ${receivingOrderId}
+      `);
+
+      const note = `Zero-post closed receipt voided${userId ? ` by ${userId}` : ""}; no inventory lots, inventory transactions, or PO receipts existed.`;
+      const updatedRows = await tx.execute(sql`
+        UPDATE procurement.receiving_orders
+        SET status = 'cancelled',
+            notes = CASE
+              WHEN notes IS NULL OR notes = '' THEN ${note}
+              ELSE notes || E'\n' || ${note}
+            END,
+            updated_at = NOW()
+        WHERE id = ${receivingOrderId}
+        RETURNING id, receipt_number, status
+      `);
+
+      const poId = Number(order.purchase_order_id);
+      if (Number.isInteger(poId) && poId > 0) {
+        const poRows = await tx.execute(sql`
+          SELECT physical_status, status
+          FROM procurement.purchase_orders
+          WHERE id = ${poId}
+        `);
+        const po = poRows.rows?.[0];
+        const physicalStatus = String(po?.physical_status ?? po?.status ?? "draft");
+        await tx.execute(sql`
+          INSERT INTO procurement.po_status_history
+            (purchase_order_id, from_status, to_status, changed_by, notes)
+          VALUES (
+            ${poId},
+            ${physicalStatus},
+            ${physicalStatus},
+            ${userId ?? null},
+            ${`Receipt ${order.receipt_number ?? receivingOrderId} voided as zero-post closed recovery`}
+          )
+        `);
+      }
+
+      const updated = updatedRows.rows?.[0] ?? {};
+      return {
+        success: true,
+        receivingOrderId,
+        receiptNumber: updated.receipt_number ?? order.receipt_number ?? null,
+        previousStatus: "closed",
+        status: "cancelled",
+        lineCount: summary.lineCount,
+        expectedQty: summary.expectedQty,
+      };
+    });
+  }
+
   // ─── Open ─────────────────────────────────────────────────────
 
   async open(orderId: number, userId: string | null) {
@@ -451,6 +598,22 @@ export class ReceivingService {
     }
 
     const lines = await this.storage.getReceivingLines(orderId);
+    if (
+      order.sourceType === "shipment" &&
+      lines.length > 0 &&
+      lines.every((line: any) => (Number(line.receivedQty) || 0) <= 0)
+    ) {
+      throw new ReceivingError(
+        "Shipment receipts cannot be finalized with zero received quantity. Enter received quantities or void the zero-post receipt.",
+        409,
+        {
+          code: "ZERO_SHIPMENT_RECEIPT_NOT_CLOSABLE",
+          receivingOrderId: orderId,
+          expectedLineCount: lines.length,
+          expectedTotalUnits: lines.reduce((sum: number, line: any) => sum + (Number(line.expectedQty) || 0), 0),
+        },
+      );
+    }
 
     // Auto-resolve missing productVariantId from SKU before processing
     for (const line of lines) {
@@ -665,7 +828,7 @@ export class ReceivingService {
         // (don't overwrite null → 0 on a costless receipt).
         const lineUpdates: Record<string, unknown> = {
           putawayComplete: 1,
-          status: "complete",
+          status: this.getClosedReceivingLineStatus(line),
         };
         if (typeof unitCostCents === "number") {
           lineUpdates.unitCost = unitCostCents;
@@ -679,6 +842,14 @@ export class ReceivingService {
         linesReceived++;
         receivedVariantIds.add(line.productVariantId);
         putawayLocationIds.add(line.putawayLocationId);
+      }
+    }
+
+    for (const line of lines) {
+      if ((Number(line.receivedQty) || 0) > 0) continue;
+      const status = this.getClosedReceivingLineStatus(line);
+      if (line.status !== status) {
+        await this.storage.updateReceivingLine(line.id, { status }, tx);
       }
     }
 

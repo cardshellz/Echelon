@@ -532,7 +532,7 @@ export default function EbayChannelPage() {
   const [pushProductIds, setPushProductIds] = useState<number[]>([]);
 
   const handlePushAll = () => {
-    const readyProducts = feedData?.feed?.filter((f) => f.status === "ready" || f.status === "error") || [];
+    const readyProducts = feedData?.feed?.filter((f) => f.status === "ready") || [];
     if (readyProducts.length === 0) return;
     const ids = readyProducts.map((f) => f.id);
     setPushProductIds(ids);
@@ -1842,9 +1842,18 @@ export default function EbayChannelPage() {
                                     variant="outline"
                                     size="sm"
                                     className="min-h-[44px] min-w-[44px] px-3 text-xs"
-                                    onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
+                                    disabled={syncingProductIds.has(item.id)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (item.externalListingId) handleSyncProduct(item.id);
+                                      else handlePushSingle(item.id);
+                                    }}
                                   >
-                                    <RefreshCw className="h-4 w-4 mr-1" />
+                                    {syncingProductIds.has(item.id) ? (
+                                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                                    ) : (
+                                      <RefreshCw className="h-4 w-4 mr-1" />
+                                    )}
                                     Retry
                                   </Button>
                                 </>
@@ -1948,10 +1957,19 @@ export default function EbayChannelPage() {
                                       variant="ghost"
                                       size="sm"
                                       className="h-6 w-6 p-0"
-                                      onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
-                                      title="Retry push"
+                                      disabled={syncingProductIds.has(item.id)}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (item.externalListingId) handleSyncProduct(item.id);
+                                        else handlePushSingle(item.id);
+                                      }}
+                                      title={item.externalListingId ? "Retry listing sync" : "Retry push"}
                                     >
-                                      <RefreshCw className="h-3.5 w-3.5" />
+                                      {syncingProductIds.has(item.id) ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                      ) : (
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                      )}
                                     </Button>
                                   </>
                                 )}

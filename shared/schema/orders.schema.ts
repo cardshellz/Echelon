@@ -43,6 +43,7 @@ export const pickingActionTypeEnum = [
   "order_released",     // Picker released an order back to queue
   "order_completed",    // All items picked, order completed
   "item_picked",        // Individual item scanned/picked
+  "item_unpicked",      // Picker explicitly reversed picked inventory
   "item_shorted",       // Item marked as short
   "item_quantity_adjusted", // Picker changed picked quantity
   "order_held",         // Admin put order on hold
@@ -59,6 +60,22 @@ export type RoutingMatchType = typeof routingMatchTypeEnum[number];
 // Shipment source types
 export const shipmentSourceEnum = ["shopify_webhook", "manual", "api"] as const;
 export type ShipmentSource = typeof shipmentSourceEnum[number];
+
+export const reconciliationClassificationEnum = [
+  "safe_auto_repair",
+  "manual_review",
+  "hard_block",
+  "historical_ignore",
+] as const;
+export type ReconciliationClassification = typeof reconciliationClassificationEnum[number];
+
+export const reconciliationExceptionStatusEnum = [
+  "open",
+  "acknowledged",
+  "resolved",
+  "ignored",
+] as const;
+export type ReconciliationExceptionStatus = typeof reconciliationExceptionStatusEnum[number];
 
 // Shipment status workflow (imported from shared/enums/order-status)
 
@@ -111,6 +128,7 @@ export const orders = wmsSchema.table("orders", {
   channelShipByDate: timestamp("channel_ship_by_date"), // platform-provided ship-by deadline, preferred over generic channel SLA
   sortRank: varchar("sort_rank", { length: 32 }), // flattened pick queue sort key (26 chars), pushed to ShipStation customField1
   warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled, awaiting_3pl
+  fulfillmentPartitionKey: varchar("fulfillment_partition_key", { length: 120 }).notNull().default("default"), // Explicit fulfillment partition; default preserves one WMS work order per OMS order.
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
   heldAt: timestamp("held_at"),
   assignedPickerId: varchar("assigned_picker_id", { length: 100 }),
@@ -182,7 +200,7 @@ export const orderItems = wmsSchema.table("order_items", {
 
   // ===== CHANNEL LINKAGE =====
   // Links to source raw tables for full line item data (pricing, properties, etc.)
-  omsOrderLineId: integer("oms_order_line_id"),
+  omsOrderLineId: bigint("oms_order_line_id", { mode: "number" }),
   shopifyLineItemId: varchar("shopify_line_item_id", { length: 50 }), // Legacy
   sourceItemId: varchar("source_item_id", { length: 100 }), // ID in source table for JOIN lookups
 
@@ -517,6 +535,47 @@ export const insertOutboundShipmentItemSchema = createInsertSchema(outboundShipm
 export type InsertOutboundShipmentItem = z.infer<typeof insertOutboundShipmentItemSchema>;
 export type OutboundShipmentItem = typeof outboundShipmentItems.$inferSelect;
 
+// Durable review surface for proof-first OMS/WMS reconciliation. Reconciliation
+// code writes here when drift cannot be safely auto-repaired from complete line
+// authority and shipment evidence.
+export const reconciliationExceptions = wmsSchema.table("reconciliation_exceptions", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  source: varchar("source", { length: 50 }).notNull(),
+  classification: varchar("classification", { length: 30 }).notNull(),
+  rule: varchar("rule", { length: 80 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("open"),
+  severity: varchar("severity", { length: 20 }).notNull().default("review"),
+  wmsOrderId: integer("wms_order_id").references(() => orders.id, { onDelete: "set null" }),
+  wmsShipmentId: integer("wms_shipment_id").references(() => outboundShipments.id, { onDelete: "set null" }),
+  externalSystem: varchar("external_system", { length: 40 }),
+  externalOrderRef: varchar("external_order_ref", { length: 200 }),
+  externalShipmentRef: varchar("external_shipment_ref", { length: 200 }),
+  externalOrderKey: varchar("external_order_key", { length: 200 }),
+  idempotencyKey: varchar("idempotency_key", { length: 500 }).notNull(),
+  summary: text("summary").notNull(),
+  details: jsonb("details").notNull().default({}),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  occurrenceCount: integer("occurrence_count").notNull().default(1),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  resolvedBy: varchar("resolved_by", { length: 120 }),
+  resolution: text("resolution"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const insertReconciliationExceptionSchema = createInsertSchema(reconciliationExceptions).omit({
+  id: true,
+  firstSeenAt: true,
+  lastSeenAt: true,
+  occurrenceCount: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReconciliationException = z.infer<typeof insertReconciliationExceptionSchema>;
+export type ReconciliationException = typeof reconciliationExceptions.$inferSelect;
+
 // Line-fulfillment ledger — append-only, channel/engine-NEUTRAL source of truth
 // for net_shipped_qty per order line (FULFILLMENT_STATE_DESIGN.md §2.1).
 // Added by migration 103. One row per fulfillment event affecting a line; never
@@ -586,7 +645,7 @@ export const returnItems = wmsSchema.table("return_items", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   returnId: bigint("return_id", { mode: "number" }).notNull().references(() => returns.id, { onDelete: "cascade" }),
   orderItemId: integer("order_item_id").references(() => orderItems.id, { onDelete: "set null" }),
-  omsOrderLineId: integer("oms_order_line_id"),
+  omsOrderLineId: bigint("oms_order_line_id", { mode: "number" }),
   externalLineItemId: varchar("external_line_item_id", { length: 100 }),
   sku: varchar("sku", { length: 100 }),
   expectedQty: integer("expected_qty").notNull(),

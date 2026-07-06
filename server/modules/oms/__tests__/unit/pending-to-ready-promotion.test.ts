@@ -35,7 +35,12 @@ describe("pending → ready promotion on payment", () => {
 
   describe("wms-sync.service :: syncOmsOrderToWms existing-order branch", () => {
     it("runs reservation after promotion", () => {
-      expect(WMS_SYNC_SRC).toMatch(/headerRefresh\.promoted[\s\S]{0,200}?reservation\.reserveOrder/);
+      // P0.1c (revised 2026-07-06): the promotion path reserves via the
+      // best-effort reserve, which wraps
+      // this.services.reservation.reserveOrder(wmsOrderId); shortfalls are
+      // logged, never auto-held.
+      expect(WMS_SYNC_SRC).toMatch(/headerRefresh\.promoted[\s\S]{0,200}?reserveBestEffort/);
+      expect(WMS_SYNC_SRC).toContain("this.services.reservation.reserveOrder(wmsOrderId)");
     });
 
     it("logs promoted flag in the sync summary", () => {

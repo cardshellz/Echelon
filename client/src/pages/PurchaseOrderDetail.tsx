@@ -10,7 +10,7 @@ import {
 } from "@shared/schema/procurement.schema";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRoute, useLocation } from "wouter";
+import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -31,6 +31,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
+import {
+  ShipmentReceiptPackResolutionDialog,
+  type ShipmentReceiptPackResolution,
+  type ShipmentReceiptPackResolutionLine,
+} from "@/components/purchasing/ShipmentReceiptPackResolutionDialog";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import {
@@ -786,10 +791,31 @@ function formatLineUnitCost(line: {
   return formatMills(mills);
 }
 
+function createEmptyNewLine() {
+  return {
+    productId: 0,
+    productVariantId: 0,
+    expectedReceiveVariantId: 0,
+    expectedReceiveUnitsPerVariant: 1,
+    orderQty: 1,
+    unitCostCents: 0,
+    unitsPerUom: 1,
+    vendorSku: "",
+    description: "",
+  };
+}
+
+function parsePositiveInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 export default function PurchaseOrderDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
+  const searchStr = useSearch();
   const [, params] = useRoute("/purchase-orders/:id");
   const poId = params?.id ? Number(params.id) : null;
 
@@ -809,6 +835,10 @@ export default function PurchaseOrderDetail() {
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
   const [showCreateShipmentDialog, setShowCreateShipmentDialog] = useState(false);
   const [showReceivePicker, setShowReceivePicker] = useState(false);
+  const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
+  const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
+  const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
+  const resumeShipmentReceiptHandled = React.useRef<string | null>(null);
   const [newShipmentForm, setNewShipmentForm] = useState({
     mode: "sea_fcl",
     shipmentNumber: "",
@@ -893,15 +923,7 @@ export default function PurchaseOrderDetail() {
     invoiceId: null as number | null,  // which invoice this payment allocates to
   });
 
-  const [newLine, setNewLine] = useState({
-    productId: 0,
-    productVariantId: 0,
-    orderQty: 1,
-    unitCostCents: 0,
-    unitsPerUom: 1,
-    vendorSku: "",
-    description: "",
-  });
+  const [newLine, setNewLine] = useState(createEmptyNewLine);
 
   // Queries
   const { data: po, isLoading } = useQuery<any>({
@@ -969,11 +991,16 @@ export default function PurchaseOrderDetail() {
     enabled: showAddLineDialog && !!po?.vendorId,
   });
 
-  const { data: linkedShipmentsRaw = [], isLoading: shipmentsLoading } = useQuery<any[]>({
+  const { data: linkedShipmentsRaw = [] } = useQuery<any[]>({
     queryKey: [`/api/purchase-orders/${poId}/shipments`],
-    enabled: !!poId && (activeTab === "shipments" || showReceivePicker),
+    enabled: !!poId && activeTab === "shipments",
   });
   const linkedShipments = linkedShipmentsRaw.filter((s: any) => s.status !== "cancelled");
+
+  const { data: receiveOptions, isLoading: receiveOptionsLoading } = useQuery<any>({
+    queryKey: [`/api/purchase-orders/${poId}/receive-options`],
+    enabled: !!poId && showReceivePicker,
+  });
 
   // Eagerly fetched (not tab-gated) so the side-rail Record Payment button
   // can pre-populate the invoice dropdown without requiring the invoices tab
@@ -1068,12 +1095,15 @@ export default function PurchaseOrderDetail() {
     )
     .slice(0, 50);
 
-  // Selected variant info for case helper
+  // Selected receive configuration for the piece-to-config helper.
+  const selectedReceiveVariantId = newLine.expectedReceiveVariantId || newLine.productVariantId;
   const selectedVariant = selectedProductForLine?.variants?.find(
-    (v: any) => v.id === newLine.productVariantId
+    (v: any) => v.id === selectedReceiveVariantId
   );
-  const casesEquiv = newLine.unitsPerUom > 1 && newLine.orderQty > 0
-    ? Math.ceil(newLine.orderQty / newLine.unitsPerUom)
+  const receiveUnitsPerVariant =
+    newLine.expectedReceiveUnitsPerVariant || newLine.unitsPerUom || 1;
+  const receiveConfigQty = receiveUnitsPerVariant > 1 && newLine.orderQty > 0
+    ? Math.ceil(newLine.orderQty / receiveUnitsPerVariant)
     : null;
 
   // Mutations
@@ -1245,15 +1275,19 @@ export default function PurchaseOrderDetail() {
   // Receive AGAINST a shipment: links the receipt to the shipment so its freight
   // attaches to exactly these lots (vs createReceiptMutation, which is PO-direct).
   const createReceiptFromShipmentMutation = useMutation({
-    mutationFn: async (shipmentId: number) => {
+    mutationFn: async ({ shipmentId, purchaseOrderId }: { shipmentId: number; purchaseOrderId: number }) => {
       const idempotencyKey = (
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? (crypto as any).randomUUID()
-          : `shp-receipt-${shipmentId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+          : `shp-receipt-${shipmentId}-${purchaseOrderId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
       ) as string;
       const res = await fetch(`/api/inbound-shipments/${shipmentId}/create-receipt`, {
         method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({ purchaseOrderId }),
       });
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create receipt"); }
       return res.json();
@@ -1261,15 +1295,206 @@ export default function PurchaseOrderDetail() {
     onSuccess: (receipt) => {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] });
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       setShowReceivePicker(false);
+      setShipmentReceiptPackResolution(null);
+      setPendingShipmentReceipt(null);
       toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created from shipment` });
       navigate(`/receiving?open=${receipt.id}`);
+    },
+    onError: async (err: Error, variables) => {
+      const openedBlocker = await openShipmentReceiptPackBlocker(variables);
+      if (openedBlocker) return;
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const cleanupEmptyShipmentReceiptMutation = useMutation({
+    mutationFn: async ({
+      receiptId,
+    }: {
+      receiptId: number;
+      shipmentId: number;
+      purchaseOrderId: number;
+    }) => {
+      const res = await fetch(`/api/receiving-orders/${receiptId}/discard`, {
+        method: "DELETE",
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Failed to clean up empty receipt");
+      return body;
+    },
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/receiving"] }),
+      ]);
+      toast({
+        title: "Empty receipt cleaned up",
+        description: "Rechecking this shipment before creating a new receipt.",
+      });
+      checkAndReceiveShipment({
+        shipmentId: variables.shipmentId,
+        purchaseOrderId: variables.purchaseOrderId,
+      });
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  const voidZeroPostShipmentReceiptMutation = useMutation({
+    mutationFn: async ({
+      receiptId,
+    }: {
+      receiptId: number;
+      shipmentId: number;
+      purchaseOrderId: number;
+    }) => {
+      const res = await fetch(`/api/receiving-orders/${receiptId}/void-zero-post`, {
+        method: "POST",
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Failed to void zero-post receipt");
+      return body;
+    },
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receive-options`] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/receiving"] }),
+      ]);
+      toast({
+        title: "Zero-post receipt voided",
+        description: "Rechecking this shipment before creating a new receipt.",
+      });
+      checkAndReceiveShipment({
+        shipmentId: variables.shipmentId,
+        purchaseOrderId: variables.purchaseOrderId,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
+    const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
+    const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
+    return body as ShipmentReceiptPackResolution;
+  }
+
+  async function openShipmentReceiptPackBlocker(params: { shipmentId: number; purchaseOrderId: number } | undefined | null): Promise<boolean> {
+    if (!params) return false;
+    setCheckingShipmentReceiptPacks(true);
+    setPendingShipmentReceipt(params);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!resolution.canCreateReceipt) {
+        setShipmentReceiptPackResolution(resolution);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  async function checkAndReceiveShipment(params: { shipmentId: number; purchaseOrderId: number }) {
+    setCheckingShipmentReceiptPacks(true);
+    setPendingShipmentReceipt(params);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!resolution.canCreateReceipt) {
+        setShipmentReceiptPackResolution(resolution);
+        return;
+      }
+      setShipmentReceiptPackResolution(null);
+      createReceiptFromShipmentMutation.mutate(params);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  async function refreshShipmentReceiptPackResolution() {
+    if (!pendingShipmentReceipt) return;
+    setCheckingShipmentReceiptPacks(true);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt);
+      setShipmentReceiptPackResolution(resolution);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  function createPendingShipmentReceipt() {
+    if (!pendingShipmentReceipt) return;
+    createReceiptFromShipmentMutation.mutate(pendingShipmentReceipt);
+  }
+
+  function openReceiptVariantSetup(line?: ShipmentReceiptPackResolutionLine) {
+    const context = pendingShipmentReceipt ?? (shipmentReceiptPackResolution
+      ? {
+          shipmentId: shipmentReceiptPackResolution.shipmentId,
+          purchaseOrderId: shipmentReceiptPackResolution.purchaseOrderId,
+        }
+      : null);
+    const returnTo = context && poId
+      ? `/purchase-orders/${poId}?resumeShipmentReceipt=1&shipmentId=${context.shipmentId}&purchaseOrderId=${context.purchaseOrderId}`
+      : `/purchase-orders/${poId ?? ""}`;
+    const setupParams = new URLSearchParams({
+      receiptSetup: "1",
+      returnTo,
+    });
+    if (line?.unitsPerCarton && Number(line.unitsPerCarton) > 0) {
+      setupParams.set("unitsPerVariant", String(line.unitsPerCarton));
+      setupParams.set("hierarchyLevel", "3");
+    }
+    if (line?.sku) setupParams.set("shipmentSku", line.sku);
+
+    if (line?.productId) {
+      navigate(`/products/${line.productId}?${setupParams.toString()}`);
+      return;
+    }
+
+    navigate(`/catalog/variants?${setupParams.toString()}`);
+  }
+
+  useEffect(() => {
+    if (!poId) return;
+    const searchParams = new URLSearchParams(searchStr);
+    if (searchParams.get("resumeShipmentReceipt") !== "1") return;
+
+    const shipmentId = parsePositiveInt(searchParams.get("shipmentId"));
+    const purchaseOrderId = parsePositiveInt(searchParams.get("purchaseOrderId")) ?? poId;
+    if (!shipmentId || purchaseOrderId !== poId) {
+      toast({
+        title: "Cannot resume receipt",
+        description: "The return link is missing the shipment or PO context.",
+        variant: "destructive",
+      });
+      navigate(`/purchase-orders/${poId}`, { replace: true });
+      return;
+    }
+
+    const resumeKey = `${shipmentId}:${purchaseOrderId}`;
+    if (resumeShipmentReceiptHandled.current === resumeKey) return;
+    resumeShipmentReceiptHandled.current = resumeKey;
+    navigate(`/purchase-orders/${poId}`, { replace: true });
+    void checkAndReceiveShipment({ shipmentId, purchaseOrderId });
+  }, [poId, searchStr]);
 
   const createInvoiceMutation = useMutation({
     mutationFn: async () => {
@@ -1510,19 +1735,19 @@ export default function PurchaseOrderDetail() {
       // Capture before state reset
       const totalCents = dollarsToCents(totalCostDollars || "0");
       const derivedUnitCostCents = newLine.orderQty > 0 ? totalCents / newLine.orderQty : 0;
-      const catalogData = saveToVendorCatalog && po?.vendorId && newLine.productVariantId ? {
+      const catalogData = saveToVendorCatalog && po?.vendorId && selectedReceiveVariantId ? {
         vendorId: po.vendorId,
         productId: newLine.productId,
-        productVariantId: newLine.productVariantId,
+        productVariantId: selectedReceiveVariantId,
         vendorSku: newLine.vendorSku,
         unitCostCents: derivedUnitCostCents,
-        packSize: newLine.unitsPerUom,
+        packSize: receiveUnitsPerVariant,
         isPreferred: setAsPreferred,
       } : null;
 
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       setShowAddLineDialog(false);
-      setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+      setNewLine(createEmptyNewLine());
       setProductSearch("");
       setSelectedProductForLine(null);
       setTotalCostDollars("");
@@ -1599,7 +1824,8 @@ export default function PurchaseOrderDetail() {
       lineId,
       updates: {
         productVariantId: variant.id,
-        sku: variant.sku,
+        expectedReceiveVariantId: variant.id,
+        expectedReceiveUnitsPerVariant: variant.unitsPerVariant || 1,
         unitsPerUom: variant.unitsPerVariant,
       },
     });
@@ -2448,9 +2674,9 @@ export default function PurchaseOrderDetail() {
                               skuVariants.map((v) => (
                                 <div
                                   key={v.id}
-                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === line.productVariantId ? "bg-muted font-bold" : ""}`}
+                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === (line.expectedReceiveVariantId ?? line.productVariantId) ? "bg-muted font-bold" : ""}`}
                                   onClick={() => {
-                                    if (v.id !== line.productVariantId) {
+                                    if (v.id !== (line.expectedReceiveVariantId ?? line.productVariantId)) {
                                       saveSkuEdit(line.id, v);
                                     } else {
                                       cancelLineEdit();
@@ -2477,8 +2703,8 @@ export default function PurchaseOrderDetail() {
                         <div className="text-sm mt-1 truncate">{line.productName || "—"}</div>
                         <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
                           <span>
-                            {(line.unitsPerUom || 1) > 1
-                              ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)`
+                            {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
+                              ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)`
                               : `Qty: ${line.receivedQty || 0}/${line.orderQty}`}
                           </span>
                           {isEditingCostMobile ? (
@@ -2562,9 +2788,9 @@ export default function PurchaseOrderDetail() {
                               skuVariants.map((v) => (
                                 <div
                                   key={v.id}
-                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === line.productVariantId ? "bg-muted font-bold" : ""}`}
+                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === (line.expectedReceiveVariantId ?? line.productVariantId) ? "bg-muted font-bold" : ""}`}
                                   onClick={() => {
-                                    if (v.id !== line.productVariantId) {
+                                    if (v.id !== (line.expectedReceiveVariantId ?? line.productVariantId)) {
                                       saveSkuEdit(line.id, v);
                                     } else {
                                       cancelLineEdit();
@@ -2616,15 +2842,15 @@ export default function PurchaseOrderDetail() {
                             className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
                             onClick={() => canEditLines && startLineEdit(line.id, "qty", line.orderQty)}
                           >
-                            {(line.unitsPerUom || 1) > 1
-                              ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)</span></>
+                            {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
+                              ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
                               : line.orderQty}
                           </span>
                         )}
                       </TableCell>
                       <TableCell className="text-right">
-                        {(line.unitsPerUom || 1) > 1
-                          ? <span>{(line.receivedQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.receivedQty || 0) / (line.unitsPerUom || 1))} cases)</span></span>
+                        {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
+                          ? <span>{(line.receivedQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.receivedQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></span>
                           : line.receivedQty || 0}
                         {(line.damagedQty || 0) > 0 && (
                           <span className="text-red-500 ml-1">({line.damagedQty} dmg)</span>
@@ -3301,7 +3527,7 @@ export default function PurchaseOrderDetail() {
           setTotalCostDollars("");
           setSaveToVendorCatalog(true);
           setSetAsPreferred(false);
-          setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+          setNewLine(createEmptyNewLine());
           setCatalogSearch("");
           setSelectedCatalogEntry(null);
           setAddLineMode("catalog");
@@ -3330,7 +3556,7 @@ export default function PurchaseOrderDetail() {
                     setAddLineMode("catalog");
                     setSelectedProductForLine(null);
                     setSelectedCatalogEntry(null);
-                    setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                    setNewLine(createEmptyNewLine());
                     setTotalCostDollars("");
                   }}
                 >
@@ -3343,7 +3569,7 @@ export default function PurchaseOrderDetail() {
                   onClick={() => {
                     setAddLineMode("search");
                     setSelectedCatalogEntry(null);
-                    setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                    setNewLine(createEmptyNewLine());
                     setTotalCostDollars("");
                     setSelectedProductForLine(null);
                   }}
@@ -3382,7 +3608,7 @@ export default function PurchaseOrderDetail() {
                       onClick={() => {
                         setSelectedCatalogEntry(null);
                         setSelectedProductForLine(null);
-                        setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                        setNewLine(createEmptyNewLine());
                         setTotalCostDollars("");
                       }}
                     >
@@ -3448,6 +3674,8 @@ export default function PurchaseOrderDetail() {
                                     ...prev,
                                     productId: entry.productId,
                                     productVariantId: entry.productVariantId || 0,
+                                    expectedReceiveVariantId: entry.productVariantId || 0,
+                                    expectedReceiveUnitsPerVariant: entry.packSize || 1,
                                     vendorSku: entry.vendorSku || "",
                                     unitsPerUom: entry.packSize || 1,
                                   }));
@@ -3463,7 +3691,7 @@ export default function PurchaseOrderDetail() {
                                     <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5 flex-wrap">
                                       {variant && <span className="font-mono">{variant.sku}</span>}
                                       {entry.vendorSku && <span>· {entry.vendorSku}</span>}
-                                      {(entry.packSize || 1) > 1 && <span>· {entry.packSize} pcs/case</span>}
+                                      {(entry.packSize || 1) > 1 && <span>· {entry.packSize} pcs/config</span>}
                                       {entry.moq > 1 && <span>· MOQ {entry.moq}</span>}
                                     </div>
                                   </div>
@@ -3485,7 +3713,7 @@ export default function PurchaseOrderDetail() {
                 {/* If catalog entry has no variant set, show variant picker */}
                 {selectedCatalogEntry && !selectedCatalogEntry.productVariantId && selectedProductForLine && (
                   <div className="space-y-2">
-                    <Label>Variant / Case Size *</Label>
+                    <Label>Receive As *</Label>
                     <Popover open={variantOpen} onOpenChange={setVariantOpen}>
                       <PopoverTrigger asChild>
                         <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
@@ -3508,16 +3736,18 @@ export default function PurchaseOrderDetail() {
                                     setNewLine(prev => ({
                                       ...prev,
                                       productVariantId: v.id,
+                                      expectedReceiveVariantId: v.id,
+                                      expectedReceiveUnitsPerVariant: v.unitsPerVariant || 1,
                                       unitsPerUom: v.unitsPerVariant || 1,
                                     }));
                                     setVariantOpen(false);
                                   }}
                                 >
-                                  <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                  <Check className={`mr-2 h-4 w-4 ${selectedReceiveVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
                                   <span className="font-mono text-xs mr-2">{v.sku}</span>
                                   <span className="truncate">{v.name}</span>
                                   {(v.unitsPerVariant || 1) > 1 && (
-                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/case</span>
+                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/config</span>
                                   )}
                                 </CommandItem>
                               ))}
@@ -3555,7 +3785,14 @@ export default function PurchaseOrderDetail() {
                                 value={String(p.id)}
                                 onSelect={() => {
                                   setSelectedProductForLine(p);
-                                  setNewLine(prev => ({ ...prev, productId: p.id, productVariantId: 0, unitsPerUom: 1 }));
+                                  setNewLine(prev => ({
+                                    ...prev,
+                                    productId: p.id,
+                                    productVariantId: 0,
+                                    expectedReceiveVariantId: 0,
+                                    expectedReceiveUnitsPerVariant: 1,
+                                    unitsPerUom: 1,
+                                  }));
                                   setProductOpen(false);
                                   setProductSearch("");
                                 }}
@@ -3574,7 +3811,7 @@ export default function PurchaseOrderDetail() {
 
                 {selectedProductForLine && (
                   <div className="space-y-2">
-                    <Label>Variant / Case Size *</Label>
+                    <Label>Receive As *</Label>
                     <Popover open={variantOpen} onOpenChange={setVariantOpen}>
                       <PopoverTrigger asChild>
                         <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
@@ -3597,16 +3834,18 @@ export default function PurchaseOrderDetail() {
                                     setNewLine(prev => ({
                                       ...prev,
                                       productVariantId: v.id,
+                                      expectedReceiveVariantId: v.id,
+                                      expectedReceiveUnitsPerVariant: v.unitsPerVariant || 1,
                                       unitsPerUom: v.unitsPerVariant || 1,
                                     }));
                                     setVariantOpen(false);
                                   }}
                                 >
-                                  <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                  <Check className={`mr-2 h-4 w-4 ${selectedReceiveVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
                                   <span className="font-mono text-xs mr-2">{v.sku}</span>
                                   <span className="truncate">{v.name}</span>
                                   {(v.unitsPerVariant || 1) > 1 && (
-                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/case</span>
+                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/config</span>
                                   )}
                                 </CommandItem>
                               ))}
@@ -3621,7 +3860,7 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* ── COMMON FIELDS — shown once a variant is selected ── */}
-            {newLine.productVariantId > 0 && (
+            {selectedReceiveVariantId > 0 && (
               <>
                 <Separator />
                 <div className="grid grid-cols-2 gap-4">
@@ -3634,8 +3873,8 @@ export default function PurchaseOrderDetail() {
                       onChange={e => setNewLine(prev => ({ ...prev, orderQty: parseInt(e.target.value) || 0 }))}
                       className="h-10"
                     />
-                    {casesEquiv !== null && (
-                      <p className="text-xs text-muted-foreground">= {casesEquiv} cases @ {newLine.unitsPerUom} pcs/case</p>
+                    {receiveConfigQty !== null && (
+                      <p className="text-xs text-muted-foreground">= {receiveConfigQty} configs @ {receiveUnitsPerVariant} pcs/config</p>
                     )}
                   </div>
                   <div className="space-y-2">
@@ -3700,9 +3939,16 @@ export default function PurchaseOrderDetail() {
                 onClick={() => {
                   const totalCents = dollarsToCents(totalCostDollars || "0");
                   const unitCostCents = newLine.orderQty > 0 ? totalCents / newLine.orderQty : 0;
-                  addLineMutation.mutate({ ...newLine, unitCostCents });
+                  addLineMutation.mutate({
+                    ...newLine,
+                    productVariantId: selectedReceiveVariantId,
+                    expectedReceiveVariantId: selectedReceiveVariantId,
+                    expectedReceiveUnitsPerVariant: receiveUnitsPerVariant,
+                    unitsPerUom: receiveUnitsPerVariant,
+                    unitCostCents,
+                  });
                 }}
-                disabled={!newLine.productVariantId || newLine.orderQty < 1 || !totalCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
+                disabled={!selectedReceiveVariantId || newLine.orderQty < 1 || !totalCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
               >
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
               </Button>
@@ -3970,60 +4216,140 @@ export default function PurchaseOrderDetail() {
             </DialogDescription>
           </DialogHeader>
           {(() => {
-            if (shipmentsLoading) {
-              return <div className="py-6 text-center text-sm text-muted-foreground">Checking for shipments…</div>;
+            if (receiveOptionsLoading) {
+              return <div className="py-6 text-center text-sm text-muted-foreground">Checking receive options...</div>;
             }
-            const readyStatuses = ["at_port", "customs_clearance", "delivered", "costing"];
-            const readyShipments = linkedShipments.filter((s: any) => readyStatuses.includes(s.status));
-            const pendingShipments = linkedShipments.filter((s: any) => !readyStatuses.includes(s.status));
-            const busy = createReceiptMutation.isPending || createReceiptFromShipmentMutation.isPending;
+            const shipmentOptions = receiveOptions?.shipmentOptions ?? [];
+            const receivableShipments = shipmentOptions.filter((s: any) => s.receivable);
+            const blockedShipments = shipmentOptions.filter((s: any) => !s.receivable);
+            const poDirect = receiveOptions?.poDirect ?? { allowed: true, warning: "No receive options loaded." };
+            const busy =
+              createReceiptMutation.isPending ||
+              createReceiptFromShipmentMutation.isPending ||
+              cleanupEmptyShipmentReceiptMutation.isPending ||
+              voidZeroPostShipmentReceiptMutation.isPending ||
+              checkingShipmentReceiptPacks;
+            const renderBlockedShipment = (s: any) => {
+              const cleaningThisReceipt =
+                cleanupEmptyShipmentReceiptMutation.isPending &&
+                cleanupEmptyShipmentReceiptMutation.variables?.receiptId === s.existingReceiptId;
+              const voidingThisReceipt =
+                voidZeroPostShipmentReceiptMutation.isPending &&
+                voidZeroPostShipmentReceiptMutation.variables?.receiptId === s.existingReceiptId;
+              return (
+                <div key={s.shipmentId} className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="font-mono text-sm font-medium flex items-center gap-1.5">
+                        <Ship className="h-4 w-4 text-amber-700" /> {s.shipmentNumber || `Shipment #${s.shipmentId}`}
+                      </div>
+                      <div className="mt-1 text-xs text-amber-800">
+                        {s.reason || "This shipment is blocked from receiving."}
+                      </div>
+                    </div>
+                    {s.action === "repair_empty_receipt" && s.existingReceiptId ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => cleanupEmptyShipmentReceiptMutation.mutate({
+                          receiptId: s.existingReceiptId,
+                          shipmentId: s.shipmentId,
+                          purchaseOrderId: s.purchaseOrderId,
+                        })}
+                      >
+                        {cleaningThisReceipt ? "Cleaning..." : "Clean up and continue"}
+                      </Button>
+                    ) : s.action === "void_zero_post_receipt" && s.existingReceiptId ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => voidZeroPostShipmentReceiptMutation.mutate({
+                          receiptId: s.existingReceiptId,
+                          shipmentId: s.shipmentId,
+                          purchaseOrderId: s.purchaseOrderId,
+                        })}
+                      >
+                        {voidingThisReceipt ? "Voiding..." : "Void and continue"}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            };
             return (
               <div className="space-y-3">
-                {readyShipments.length > 0 ? (
+                {receivableShipments.length > 0 ? (
                   <>
                     <p className="text-sm text-muted-foreground">
-                      This PO has {readyShipments.length} shipment{readyShipments.length > 1 ? "s" : ""} with goods here:
+                      This PO has {receivableShipments.length} shipment{receivableShipments.length > 1 ? "s" : ""} ready to receive:
                     </p>
-                    {readyShipments.map((s: any) => (
-                      <div key={s.id} className="flex items-center justify-between gap-3 rounded-lg border-2 border-blue-200 bg-blue-50/50 p-3">
+                    {receivableShipments.map((s: any) => (
+                      <div key={s.shipmentId} className="flex items-center justify-between gap-3 rounded-lg border-2 border-blue-200 bg-blue-50/50 p-3">
                         <div className="min-w-0">
                           <div className="font-mono text-sm font-medium flex items-center gap-1.5">
-                            <Ship className="h-4 w-4 text-blue-600" /> {s.shipmentNumber}
+                            <Ship className="h-4 w-4 text-blue-600" /> {s.shipmentNumber || `Shipment #${s.shipmentId}`}
                           </div>
                           <div className="text-xs text-muted-foreground capitalize">
                             {(s.status || "").replace(/_/g, " ")}
-                            {s.actualTotalCostCents ? ` · freight $${(s.actualTotalCostCents / 100).toFixed(2)}` : ""}
+                            {s.actualTotalCostCents ? ` - freight $${(s.actualTotalCostCents / 100).toFixed(2)}` : ""}
+                            {s.lineCount ? ` - ${s.lineCount} line${s.lineCount === 1 ? "" : "s"}` : ""}
                           </div>
                         </div>
-                        <Button size="sm" disabled={busy} onClick={() => createReceiptFromShipmentMutation.mutate(s.id)}>
-                          Receive this shipment
+                        <Button
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => {
+                            if (s.action === "open_existing_receipt" && s.existingReceiptId) {
+                              setShowReceivePicker(false);
+                              navigate(`/receiving?open=${s.existingReceiptId}`);
+                              return;
+                            }
+                            checkAndReceiveShipment({
+                              shipmentId: s.shipmentId,
+                              purchaseOrderId: s.purchaseOrderId,
+                            });
+                          }}
+                        >
+                          {checkingShipmentReceiptPacks && pendingShipmentReceipt?.shipmentId === s.shipmentId
+                            ? "Checking..."
+                            : s.action === "open_existing_receipt" ? "Open receipt" : "Receive this shipment"}
                         </Button>
                       </div>
                     ))}
+                    {blockedShipments.map(renderBlockedShipment)}
                     <div className="rounded-lg border p-3">
                       <div className="font-medium text-sm flex items-center gap-1.5">
                         <FileText className="h-4 w-4 text-muted-foreground" /> Receive against the PO directly
                       </div>
                       <div className="mt-1 flex items-start gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
-                        <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" /> Skips the shipment freight above — only for goods that arrived without a shipment.
+                        <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" /> {poDirect.warning}
                       </div>
-                      <Button size="sm" variant="outline" className="mt-2" disabled={busy} onClick={() => createReceiptMutation.mutate()}>
+                      <Button size="sm" variant="outline" className="mt-2" disabled={busy || !poDirect.allowed} onClick={() => createReceiptMutation.mutate()}>
                         Receive against PO anyway
                       </Button>
+                      {!poDirect.allowed && poDirect.reason && (
+                        <div className="mt-1 text-xs text-muted-foreground">{poDirect.reason}</div>
+                      )}
                     </div>
                   </>
                 ) : (
                   <>
+                    {blockedShipments.map(renderBlockedShipment)}
                     <div className="rounded-lg border p-3">
                       <div className="font-medium text-sm">Receive against the PO directly</div>
                       <div className="text-xs text-muted-foreground mt-1">
-                        {pendingShipments.length > 0
-                          ? `This PO's shipment (${pendingShipments[0].shipmentNumber}, ${(pendingShipments[0].status || "").replace(/_/g, " ")}) isn't marked as arrived yet — receiving now won't carry its freight.`
-                          : "No inbound shipment exists for this PO. A shipment's freight won't apply (fine for domestic / no-freight goods)."}
+                        {blockedShipments.length > 0
+                          ? blockedShipments[0].reason
+                          : poDirect.warning}
                       </div>
-                      <Button size="sm" className="mt-2" disabled={busy} onClick={() => createReceiptMutation.mutate()}>
+                      <Button size="sm" className="mt-2" disabled={busy || !poDirect.allowed} onClick={() => createReceiptMutation.mutate()}>
                         Receive against PO
                       </Button>
+                      {!poDirect.allowed && poDirect.reason && (
+                        <div className="mt-1 text-xs text-muted-foreground">{poDirect.reason}</div>
+                      )}
                     </div>
                     <div className="text-center">
                       <Button size="sm" variant="ghost" onClick={() => { setShowReceivePicker(false); setShowCreateShipmentDialog(true); }}>
@@ -4398,6 +4724,18 @@ export default function PurchaseOrderDetail() {
           </div>
         </DialogContent>
       </Dialog>
+      <ShipmentReceiptPackResolutionDialog
+        open={!!shipmentReceiptPackResolution}
+        onOpenChange={(open) => {
+          if (!open) setShipmentReceiptPackResolution(null);
+        }}
+        resolution={shipmentReceiptPackResolution}
+        creating={createReceiptFromShipmentMutation.isPending}
+        refreshing={checkingShipmentReceiptPacks}
+        onCreateReceipt={createPendingShipmentReceipt}
+        onRefresh={refreshShipmentReceiptPackResolution}
+        onOpenCatalog={openReceiptVariantSetup}
+      />
     </div>
   );
 }

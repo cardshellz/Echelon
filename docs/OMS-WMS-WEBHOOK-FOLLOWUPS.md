@@ -1,8 +1,10 @@
 # OMS/WMS Webhook Follow-ups
 
-## Open Issues
+## Completed Slices
 
 ### Auto-close dead fulfillment retries when later webhook evidence proves success
+
+Status: implemented in `runOmsFlowReconciliation`.
 
 Observed case:
 
@@ -14,7 +16,7 @@ Needed behavior:
 
 - Reconciliation should detect dead retry rows for `delayed_tracking_push` and `shopify_fulfillment_push`.
 - If OMS has later proof of fulfillment/tracking success for the same order, shipment, fulfillment id, or tracking number, mark the dead retry row `success`.
-- Write a clear `last_error`/note such as `auto-closed: later Shopify fulfillment webhook confirmed success`.
+- Write a clear `last_error`/note: `auto-closed: later OMS fulfillment/tracking event confirmed success`.
 - Keep truly unresolved Shopify quantity/fulfillment-order errors visible.
 
 Reason this matters:
@@ -22,6 +24,8 @@ Reason this matters:
 - Dead-letter queues should represent currently actionable failures, not stale failures that later self-healed through webhook arrival.
 - Operators need health counts to mean real current risk.
 - This prevents the same stale Shopify fulfillment rows from being repeatedly investigated by hand.
+
+## Open Issues
 
 ### Provider-specific fulfillment identifiers on OMS order lines
 
@@ -36,8 +40,25 @@ Proposed follow-up:
 
 - Introduce provider-neutral fulfillment reference fields or a separate fulfillment-line mapping table.
 - Preserve provider context explicitly, for example `provider`, `provider_fulfillment_order_id`, and `provider_fulfillment_order_line_item_id`.
-- Migrate Shopify values into the neutral representation.
-- Update Shopify fulfillment push, eBay fulfillment/tracking, dropship fulfillment, reconciliation, and health checks to read through the neutral contract.
+- Initial compatibility slice: migration `110_oms_provider_fulfillment_references.sql` adds nullable neutral columns on `oms.oms_order_lines` and backfills them from existing Shopify fulfillment-order columns while the legacy Shopify aliases remain in place.
+- Shopify fulfillment push now reads provider-neutral fulfillment references first, falls back to the Shopify aliases, and back-writes both sets when Path B self-heals fulfillment-order line ids.
+- Shared OMS line schema now exposes the neutral provider fulfillment columns,
+  and OMS flow reconciliation/ops health flags Shopify alias drift as
+  `OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT`.
+- Shopify fulfillment-order ingest now writes the neutral provider fields
+  alongside the legacy Shopify aliases.
+- Shopify fulfillment-order ingest preserves existing non-Shopify provider
+  context instead of overwriting it with Shopify references.
+- Transition-window Shopify alias values are re-backfilled into the neutral
+  provider representation by migration
+  `112_oms_provider_fulfillment_reference_backfill.sql`.
+- Shopify fulfillment push now filters explicit non-Shopify OMS line
+  providers out of both Path A and Path B resolution.
+- Direct eBay ingest and dropship acceptance now stamp OMS line provider
+  ownership, and eBay/dropship tracking reads ignore rows explicitly owned by
+  another provider.
+- Reconciliation and ops health now normalize the neutral provider contract
+  before comparing Shopify compatibility aliases for drift.
 - Keep compatibility aliases or transitional reads from the existing Shopify columns until all call sites are migrated.
 
 Reason this matters:
@@ -47,6 +68,23 @@ Reason this matters:
 - Reduces risk that future provider integrations add another set of one-off columns.
 
 ### Explicit fulfillment partitions for future multi-warehouse routing
+
+Initial schema/backstop slice:
+
+- Added `wms.orders.fulfillment_partition_key`, defaulting existing and new
+  rows to `default`.
+- Replaced the active OMS WMS-order uniqueness backstop with a partition-aware
+  index on `source + oms_fulfillment_order_id + warehouse_id +
+  fulfillment_partition_key` for the current OMS creation path.
+- WMS sync and order-create idempotency now key duplicate detection to the
+  default partition so future split routing can introduce non-overlapping
+  partition keys without changing the storage contract.
+- OMS flow reconciliation now flags active WMS partitions/jobs that cover the
+  same OMS order line as `WMS_PARTITION_DUPLICATE_LINE_COVERAGE`, which feeds
+  the ops health surface as a critical issue.
+- WMS sync now resolves the OMS fulfillment partition key once and reuses it
+  for the existing-order lookup, locked race recheck, and WMS order create
+  payload. Today that resolver preserves the default single-partition behavior.
 
 Current valid shape:
 

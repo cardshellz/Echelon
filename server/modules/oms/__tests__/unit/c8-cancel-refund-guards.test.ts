@@ -34,13 +34,29 @@ function extractSyncCancelFn(): string {
 }
 
 describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
-  it("calls releaseOrderReservation before cancelWmsOrder", () => {
+  // P0.1c: the sync cancel path now delegates to the single cancel
+  // entrypoint (cancelWmsOrderAndRelease), which performs the guarded
+  // cancel transition FIRST and then the order-scoped, idempotent release.
+  // Cancel-first is deliberate: a shipped order must never be released
+  // (its reservations were consumed by picks), and the release is
+  // idempotent so a failure can be retried by the reconciler.
+  const CANCEL_HELPER_SRC = readFileSync(
+    fileURLToPath(new URL("../../../orders/cancel-wms-order.ts", import.meta.url)),
+    "utf8",
+  );
+
+  it("routes through the single cancel entrypoint", () => {
     const fnBlock = extractSyncCancelFn();
-    const releasePos = fnBlock.indexOf("releaseOrderReservation");
-    const cancelPos = fnBlock.indexOf("cancelWmsOrder(db");
-    expect(releasePos).toBeGreaterThan(-1);
+    expect(fnBlock).toContain("cancelWmsOrderAndRelease(");
+  });
+
+  it("the entrypoint releases reservations after a successful transition", () => {
+    const cancelPos = CANCEL_HELPER_SRC.indexOf("await cancelOrder(db, orderId, reason)");
+    const releasePos = CANCEL_HELPER_SRC.indexOf("releaseOrderReservation(orderId, reason");
     expect(cancelPos).toBeGreaterThan(-1);
-    expect(releasePos).toBeLessThan(cancelPos);
+    expect(releasePos).toBeGreaterThan(cancelPos);
+    // no release without a transition:
+    expect(CANCEL_HELPER_SRC).toContain("if (!trans.transitioned)");
   });
 
   it("persists cancel_release_failed event on release failure", () => {
@@ -49,12 +65,11 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
     expect(fnBlock).toContain("requiresReview: true");
   });
 
-  it("does not skip cancel transition on release failure", () => {
-    const fnBlock = extractSyncCancelFn();
-    const catchPos = fnBlock.indexOf("catch (releaseErr");
-    const cancelPos = fnBlock.indexOf("cancelWmsOrder(db");
-    expect(catchPos).toBeGreaterThan(-1);
-    expect(cancelPos).toBeGreaterThan(catchPos);
+  it("does not undo the cancel transition on release failure", () => {
+    // the helper catches release errors and reports releaseFailed instead
+    // of throwing — the cancel stands.
+    expect(CANCEL_HELPER_SRC).toContain("releaseFailed = true");
+    expect(CANCEL_HELPER_SRC).toMatch(/catch \(err: any\) \{\s*\n\s*releaseFailed = true/);
   });
 });
 
@@ -62,7 +77,7 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
 
 function extractCancelOrderCascade(): string {
   const start = OMS_WEBHOOKS_SRC.indexOf("export async function cancelOrderCascade(");
-  const nextExport = OMS_WEBHOOKS_SRC.indexOf("/**\n * Apply a Shopify `refunds/create`");
+  const nextExport = OMS_WEBHOOKS_SRC.indexOf("Apply a Shopify `refunds/create`", start);
   return OMS_WEBHOOKS_SRC.substring(start, nextExport);
 }
 
@@ -111,6 +126,71 @@ describe("Single cancel path: all handlers use cancelOrderCascade", () => {
 
   it("reconcileCancellations calls cancelOrderCascade", () => {
     expect(WMS_SYNC_SRC).toContain("cancelOrderCascade(db, row.oms_id");
+  });
+});
+
+// ─── P0.5: refund atomicity + cancel-retry effectiveness ──────────
+
+describe("P0.5: refund financial update is atomic and serialized", () => {
+  function extractRefundHandler(): string {
+    const start = OMS_WEBHOOKS_SRC.indexOf('"/api/oms/webhooks/refunds/create"');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const next = OMS_WEBHOOKS_SRC.indexOf("app.post(", start + 1);
+    return OMS_WEBHOOKS_SRC.substring(start, next === -1 ? OMS_WEBHOOKS_SRC.length : next);
+  }
+
+  it("serializes refunds per order with an advisory xact lock", () => {
+    const handler = extractRefundHandler();
+    expect(handler).toContain("pg_advisory_xact_lock(918411");
+  });
+
+  it("increments refund_amount_cents atomically in SQL (no JS read-modify-write)", () => {
+    const handler = extractRefundHandler();
+    expect(handler).toContain(
+      "refund_amount_cents = COALESCE(refund_amount_cents, 0) + ${thisRefundCents}",
+    );
+    // the old lost-update pattern must not return:
+    expect(handler).not.toMatch(/priorRefundCents\s*\+\s*thisRefundCents/);
+  });
+
+  it("derives financial_status from the CUMULATIVE amount vs order total", () => {
+    const handler = extractRefundHandler();
+    expect(handler).toMatch(
+      /COALESCE\(refund_amount_cents, 0\) \+ \$\{thisRefundCents\} >= COALESCE\(NULLIF\(total_cents, 0\)/,
+    );
+  });
+
+  it("checks the replay marker INSIDE the locked transaction", () => {
+    const handler = extractRefundHandler();
+    const lockPos = handler.indexOf("pg_advisory_xact_lock(918411");
+    const markerPos = handler.indexOf("details->>'refundId'");
+    expect(lockPos).toBeGreaterThan(-1);
+    expect(markerPos).toBeGreaterThan(lockPos);
+  });
+});
+
+describe("P0.5: cancelled-order retries re-run an incomplete cascade", () => {
+  function extractCancelledHandler(): string {
+    const start = OMS_WEBHOOKS_SRC.indexOf('"/api/oms/webhooks/orders/cancelled"');
+    const end = OMS_WEBHOOKS_SRC.indexOf('"/api/oms/webhooks/orders/fulfilled"');
+    return OMS_WEBHOOKS_SRC.substring(start, end);
+  }
+
+  it("the already-cancelled guard consults the cascade-completion marker", () => {
+    const handler = extractCancelledHandler();
+    const guardPos = handler.indexOf('existing.status === "cancelled"');
+    const markerPos = handler.indexOf("event_type = 'cancelled'");
+    const retryCascadePos = handler.indexOf("shopify_cancel_webhook_retry");
+    expect(guardPos).toBeGreaterThan(-1);
+    expect(markerPos).toBeGreaterThan(guardPos);
+    expect(retryCascadePos).toBeGreaterThan(markerPos);
+  });
+
+  it("the cascade-completion marker premise holds: cancelOrderCascade writes the 'cancelled' event last and is its only writer", () => {
+    const cascade = extractCancelOrderCascade();
+    expect(cascade).toContain('eventType: "cancelled"');
+    const writers = OMS_WEBHOOKS_SRC.match(/eventType: "cancelled"/g) ?? [];
+    expect(writers).toHaveLength(1);
   });
 });
 

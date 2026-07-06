@@ -13,6 +13,7 @@ import {
   enqueueShipStationShipmentPushRetry,
 } from "../oms/webhook-retry.worker";
 import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
+import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
 import { sql } from "drizzle-orm";
 import Papa from "papaparse";
 
@@ -216,9 +217,17 @@ export function registerPickingRoutes(app: Express) {
     try {
       const { picking } = req.app.locals.services;
       const id = parseInt(req.params.id);
-      const { pickerId } = req.body;
-      if (!pickerId) return res.status(400).json({ error: "pickerId is required" });
-      const result = await picking.claimOrder(id, pickerId, req.headers["x-device-type"] as string, req.sessionID);
+      const pickerId = req.session.user?.id;
+      if (!pickerId) return res.status(401).json({ error: "Authentication required" });
+      const rawClaimSource = typeof req.body?.claimSource === "string" ? req.body.claimSource : undefined;
+      const claimSource = rawClaimSource?.slice(0, 64);
+      const result = await picking.claimOrder(
+        id,
+        pickerId,
+        req.headers["x-device-type"] as string,
+        req.sessionID,
+        claimSource,
+      );
 
       res.json({ ...result.order, items: result.items });
     } catch (error: any) {
@@ -241,10 +250,17 @@ export function registerPickingRoutes(app: Express) {
     try {
       const { picking } = req.app.locals.services;
       const id = parseInt(req.params.id);
-      const { resetProgress = true, reason } = req.body || {};
+      const { resetProgress = false, reason } = req.body || {};
+      if (resetProgress === true) {
+        return res.status(400).json({
+          error: "Picker release cannot reset pick progress; use admin repair reset",
+          reason: "reset_not_allowed_on_release",
+        });
+      }
       const order = await picking.releaseOrder(id, {
-        resetProgress,
+        resetProgress: false,
         reason,
+        userId: req.session.user?.id,
         deviceType: req.headers["x-device-type"] as string,
         sessionId: req.sessionID,
       });
@@ -252,7 +268,10 @@ export function registerPickingRoutes(app: Express) {
       res.json(order);
     } catch (error: any) {
       console.error("Error releasing order:", error);
-      res.status(500).json({ error: "Failed to release order" });
+      const status = error?.isOperational && typeof error.statusCode === "number"
+        ? error.statusCode
+        : 500;
+      res.status(status).json({ error: error.message || "Failed to release order" });
     }
   });
 
@@ -277,7 +296,35 @@ export function registerPickingRoutes(app: Express) {
       res.json({ item: result.item, inventory: result.inventory });
     } catch (error: any) {
       console.error("Error updating item:", error);
-      res.status(500).json({ error: "Failed to update item" });
+      const status = error?.isOperational && typeof error.statusCode === "number"
+        ? error.statusCode
+        : error?.name === "ValidationError" ? 400 : 500;
+      res.status(status).json({ error: error.message || "Failed to update item" });
+    }
+  });
+
+  app.post("/api/picking/items/:id/unpick", requireAuth, async (req, res) => {
+    try {
+      const { picking } = req.app.locals.services;
+      const result = await picking.unpickItem(parseInt(req.params.id), {
+        qty: req.body.qty,
+        reason: req.body.reason,
+        userId: req.session.user?.id,
+        deviceType: req.headers["x-device-type"] as string,
+        sessionId: req.sessionID,
+      });
+
+      if (!result.success) {
+        return res.status(409).json(result);
+      }
+
+      res.json({ item: result.item, inventory: result.inventory });
+    } catch (error: any) {
+      console.error("Error unpicking item:", error);
+      const status = error?.isOperational && typeof error.statusCode === "number"
+        ? error.statusCode
+        : error?.name === "ValidationError" ? 400 : 500;
+      res.status(status).json({ error: error.message || "Failed to unpick item" });
     }
   });
 
@@ -460,7 +507,12 @@ export function registerPickingRoutes(app: Express) {
       // Local WMS state is authoritative; ShipStation sync is retried durably.
       await queueShipStationHoldSync(id, "release", "ReleaseHold");
       await queueShipStationSortRankSync(id, "ReleaseHoldSortRank");
-      
+
+      // An order held before its shipment ever reached the engine has nothing
+      // for the hold-release sync above to release — re-reserve and push its
+      // never-pushed shipments now so the release actually makes it shippable.
+      await reserveAndPushAfterHoldRelease(db, app.locals.services, id, "ReleaseHold");
+
       // Log the unhold action (non-blocking)
       storage.createPickingLog({
         actionType: "order_unhold",
@@ -671,15 +723,37 @@ export function registerPickingRoutes(app: Express) {
       }
       
       const id = parseInt(req.params.id);
-      const { resetProgress } = req.body;
+      const { resetProgress, reason } = req.body || {};
+      const resetRequested = resetProgress === true;
       
       const orderBefore = await storage.getOrderById(id);
       if (!orderBefore) {
         return res.status(404).json({ error: "Order not found" });
       }
+
+      if (resetRequested) {
+        const resetReason = typeof reason === "string" ? reason.trim() : "";
+        if (!resetReason) {
+          return res.status(400).json({
+            error: "Admin reset requires a reason",
+            reason: "reset_reason_required",
+          });
+        }
+
+        const items = await storage.getOrderItems(id);
+        const pickedItem = items.find(item => (item.pickedQuantity || 0) > 0);
+        if (pickedItem) {
+          return res.status(409).json({
+            error: "Cannot reset pick progress after picking has started; use the explicit unpick workflow",
+            reason: "reset_blocked_after_pick",
+            orderItemId: pickedItem.id,
+            pickedQuantity: pickedItem.pickedQuantity,
+          });
+        }
+      }
       
       // Force release: clear assignment and optionally reset progress
-      const order = await storage.forceReleaseOrder(id, resetProgress === true);
+      const order = await storage.forceReleaseOrder(id, resetRequested);
       
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
@@ -695,8 +769,8 @@ export function registerPickingRoutes(app: Express) {
         orderNumber: order.orderNumber,
         orderStatusBefore: orderBefore?.warehouseStatus,
         orderStatusAfter: order.warehouseStatus,
-        reason: "Admin force release",
-        notes: resetProgress ? "Progress was reset" : "Progress preserved",
+        reason: resetRequested ? reason.trim() : "Admin force release",
+        notes: resetRequested ? "Progress was reset" : "Progress preserved",
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log force_release:", err.message));
@@ -704,7 +778,10 @@ export function registerPickingRoutes(app: Express) {
       res.json(order);
     } catch (error: any) {
       console.error("Error force releasing order:", error);
-      res.status(500).json({ error: "Failed to force release order" });
+      const status = error?.isOperational && typeof error.statusCode === "number"
+        ? error.statusCode
+        : 500;
+      res.status(status).json({ error: error.message || "Failed to force release order" });
     }
   });
 

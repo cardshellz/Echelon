@@ -265,6 +265,10 @@ export function registerPurchaseOrderRoutes(app: Express) {
           const lineType = l.line_type ?? l.lineType ?? "product";
           const variantIdRaw = l.product_variant_id ?? l.productVariantId;
           const productIdRaw = l.product_id ?? l.productId;
+          const expectedReceiveVariantIdRaw =
+            l.expected_receive_variant_id ?? l.expectedReceiveVariantId ?? variantIdRaw;
+          const expectedReceiveUnitsPerVariantRaw =
+            l.expected_receive_units_per_variant ?? l.expectedReceiveUnitsPerVariant;
           const out: any = {
             // line_type is the dispatch key; default to 'product' for
             // back-compat callers that don't send it (matches column default).
@@ -281,6 +285,14 @@ export function registerPurchaseOrderRoutes(app: Express) {
             productVariantId:
               lineType === "product" && variantIdRaw != null
                 ? Number(variantIdRaw)
+                : null,
+            expectedReceiveVariantId:
+              lineType === "product" && expectedReceiveVariantIdRaw != null
+                ? Number(expectedReceiveVariantIdRaw)
+                : null,
+            expectedReceiveUnitsPerVariant:
+              lineType === "product" && expectedReceiveUnitsPerVariantRaw != null
+                ? Number(expectedReceiveUnitsPerVariantRaw)
                 : null,
             orderQty: Number(l.quantity_ordered ?? l.orderQty),
             vendorProductId: l.vendor_product_id ?? l.vendorProductId ?? undefined,
@@ -506,18 +518,13 @@ export function registerPurchaseOrderRoutes(app: Express) {
     try {
       const poId = Number(req.params.id);
       const poLines = await purchasing.getPurchaseOrderLines(poId);
-      const shipmentLines = await shipmentTracking.getLinesByPo(poId);
 
-      // Compute alreadyShippedQty per PO line
-      const shippedQtyByPoLine = new Map<number, number>();
-      for (const sl of shipmentLines) {
-        if (sl.purchaseOrderLineId) {
-          shippedQtyByPoLine.set(
-            sl.purchaseOrderLineId,
-            (shippedQtyByPoLine.get(sl.purchaseOrderLineId) ?? 0) + (sl.qtyShipped ?? 0),
-          );
-        }
-      }
+      // Already-shipped qty per PO line, via the shared status-aware tally.
+      // This is the SAME computation the add-lines write path uses, so a
+      // cancelled shipment's lines are excluded here too — otherwise they would
+      // wrongly zero out the remaining qty and hide every line from the modal.
+      const poLineIds = (poLines as any[]).map((l) => l.id);
+      const shippedQtyByPoLine = await shipmentTracking.getShippedQtyByPoLines(poLineIds);
 
       const result = (poLines as any[])
         .filter((line) => {
@@ -656,6 +663,37 @@ export function registerPurchaseOrderRoutes(app: Express) {
     await handleLifecycleCommand(req, res, "create_receipt");
   });
 
+  app.get("/api/purchase-orders/:id/receive-options", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const poId = Number(req.params.id);
+      if (!Number.isInteger(poId) || poId <= 0) {
+        return res.status(400).json({ error: "Invalid purchase order id" });
+      }
+      const options = await purchasing.getPurchaseOrderReceiveOptions(poId);
+      res.json(options);
+    } catch (error: any) {
+      res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to load receive options" });
+    }
+  });
+
+  app.get("/api/inbound-shipments/:id/receipt-pack-resolution", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const shipmentId = Number(req.params.id);
+      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+        return res.status(400).json({ error: "Invalid shipment id" });
+      }
+      const rawPurchaseOrderId = req.query.purchaseOrderId ?? req.query.purchase_order_id;
+      const purchaseOrderId = rawPurchaseOrderId === undefined ? undefined : Number(rawPurchaseOrderId);
+      if (purchaseOrderId !== undefined && (!Number.isInteger(purchaseOrderId) || purchaseOrderId <= 0)) {
+        return res.status(400).json({ error: "Invalid purchase order id" });
+      }
+      const resolution = await purchasing.getShipmentReceiptPackResolution(shipmentId, { purchaseOrderId });
+      res.json(resolution);
+    } catch (error: any) {
+      res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to resolve shipment receipt packs" });
+    }
+  });
+
   // Receive AGAINST an inbound shipment: creates a receiving order linked to the
   // shipment (inbound_shipment_id + source_type='shipment'), lines defaulted from
   // the shipment's qtyShipped, so lots created at close inherit the shipment link
@@ -666,8 +704,13 @@ export function registerPurchaseOrderRoutes(app: Express) {
       if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
         return res.status(400).json({ error: "Invalid shipment id" });
       }
+      const rawPurchaseOrderId = req.body?.purchaseOrderId ?? req.body?.purchase_order_id ?? req.query.purchaseOrderId;
+      const purchaseOrderId = rawPurchaseOrderId === undefined ? undefined : Number(rawPurchaseOrderId);
+      if (purchaseOrderId !== undefined && (!Number.isInteger(purchaseOrderId) || purchaseOrderId <= 0)) {
+        return res.status(400).json({ error: "Invalid purchase order id" });
+      }
       const userId = (req as any).session?.user?.id;
-      const receipt = await purchasing.createReceiptFromShipment(shipmentId, userId);
+      const receipt = await purchasing.createReceiptFromShipment(shipmentId, userId, { purchaseOrderId });
       res.status(201).json(receipt);
     } catch (error: any) {
       res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to create receipt from shipment" });

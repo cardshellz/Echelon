@@ -185,7 +185,19 @@ describe("dropship ops surface client helpers", () => {
       search: " pack ",
       exposedOnly: true,
       includeInactiveCatalog: false,
-    })).toBe("/api/dropship/admin/catalog/preview?search=pack&exposedOnly=true&includeInactiveCatalog=false&page=1&limit=50");
+    })).toBe("/api/dropship/admin/catalog/preview?search=pack&visibility=visible&catalogStatus=active&page=1&limit=50");
+    expect(buildAdminCatalogExposurePreviewUrl({
+      search: "",
+      visibility: "hidden",
+      catalogStatus: "inactive",
+      page: 3,
+      limit: 100,
+    })).toBe("/api/dropship/admin/catalog/preview?visibility=hidden&catalogStatus=inactive&page=3&limit=100");
+    expect(buildAdminCatalogExposurePreviewUrl({
+      search: "",
+      exposedOnly: false,
+      includeInactiveCatalog: true,
+    })).toBe("/api/dropship/admin/catalog/preview?visibility=all&catalogStatus=all&page=1&limit=50");
   });
 
   it("builds admin dogfood readiness URLs with optional filters", () => {
@@ -264,10 +276,9 @@ describe("dropship ops surface client helpers", () => {
 
   it("builds admin shipping config URLs with bounded list parameters", () => {
     expect(buildAdminShippingConfigUrl({
-      search: "  sku-1 ",
       packageProfileLimit: 25,
       rateTableLimit: 10,
-    })).toBe("/api/dropship/admin/shipping/config?search=sku-1&packageProfileLimit=25&rateTableLimit=10");
+    })).toBe("/api/dropship/admin/shipping/config?packageProfileLimit=25&rateTableLimit=10");
   });
 
   it("builds admin order intake URLs without forcing default status filters", () => {
@@ -1205,7 +1216,7 @@ describe("dropship ops surface client helpers", () => {
       productVariantId: null,
       category: null,
       priority: 100,
-      notes: "Include Display",
+      notes: "Expose Display",
       metadata: { source: "admin_catalog_preview" },
     }));
 
@@ -1218,7 +1229,7 @@ describe("dropship ops surface client helpers", () => {
       action: "exclude",
       category: "Cases",
       priority: 200,
-      notes: "Exclude category Cases",
+      notes: "Hide category Cases",
     }));
 
     expect(buildCatalogExposureRuleFromPreviewRow({
@@ -1228,7 +1239,7 @@ describe("dropship ops surface client helpers", () => {
     })).toEqual(expect.objectContaining({
       scopeType: "product",
       productId: 14,
-      notes: "Include PROD-14",
+      notes: "Expose PROD-14",
     }));
   });
 
@@ -1308,14 +1319,17 @@ describe("dropship ops surface client helpers", () => {
       returnTo: " /onboarding ",
     })).toEqual({
       platform: "ebay",
+      intent: "connect",
       returnTo: "/onboarding",
     });
     expect(buildStoreConnectionOAuthStartInput({
       platform: "shopify",
+      intent: "change_store",
       shopDomain: "Vendor-Test",
       returnTo: "/onboarding",
     })).toEqual({
       platform: "shopify",
+      intent: "change_store",
       shopDomain: "vendor-test.myshopify.com",
       returnTo: "/onboarding",
     });

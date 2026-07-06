@@ -14,7 +14,16 @@ import {
 } from "@shared/schema";
 import { catalogStorage } from "../catalog";
 import { createImageSyncService } from "./image-sync.service";
+import { duplicateProduct, ProductDuplicateError } from "./product-duplicate.service";
+import {
+  type ShopifyProductSearchResult,
+  fetchShopifyProductsForSearch,
+} from "./shopify-product-search";
 import { enqueueShippingGroupMetafields } from "./shipping-group-sync";
+import {
+  coercePackageAttributesOnVariantPayload,
+  parsePackageAttributeBulkRows,
+} from "./package-attributes";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
@@ -132,20 +141,6 @@ async function fetchShopifyJson(credentials: { shopDomain: string; accessToken: 
   return response.json();
 }
 
-type ShopifyProductSearchResult = {
-  id: string;
-  title: string | null;
-  handle: string | null;
-  status: string | null;
-  variants: any[];
-};
-
-function getShopifyNextPageInfo(linkHeader: string | null): string | null {
-  if (!linkHeader) return null;
-  const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
-  return nextMatch?.[1] || null;
-}
-
 async function fetchShopifyProductForSearch(
   credentials: { shopDomain: string; accessToken: string; apiVersion: string },
   productId: string,
@@ -165,49 +160,6 @@ async function fetchShopifyProductForSearch(
     if (error?.statusCode === 404) return null;
     throw error;
   }
-}
-
-async function fetchShopifyProductsForSearch(
-  credentials: { shopDomain: string; accessToken: string; apiVersion: string },
-  maxProducts: number,
-): Promise<ShopifyProductSearchResult[]> {
-  const productsForSearch: ShopifyProductSearchResult[] = [];
-  let pageInfo: string | null = null;
-
-  do {
-    const path: string = pageInfo
-      ? `/products.json?limit=250&page_info=${encodeURIComponent(pageInfo)}&fields=id,title,handle,status,variants`
-      : "/products.json?limit=250&fields=id,title,handle,status,variants";
-    const response = await fetch(`https://${credentials.shopDomain}/admin/api/${credentials.apiVersion}${path}`, {
-      headers: {
-        "X-Shopify-Access-Token": credentials.accessToken,
-        "Content-Type": "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw Object.assign(new Error(`Shopify API error ${response.status}: ${body || response.statusText}`), {
-        statusCode: response.status === 404 ? 404 : 502,
-      });
-    }
-
-    const data = await response.json();
-    for (const product of data?.products || []) {
-      if (productsForSearch.length >= maxProducts) break;
-      productsForSearch.push({
-        id: String(product.id),
-        title: product.title || null,
-        handle: product.handle || null,
-        status: product.status || null,
-        variants: Array.isArray(product.variants) ? product.variants : [],
-      });
-    }
-
-    pageInfo = productsForSearch.length >= maxProducts ? null : getShopifyNextPageInfo(response.headers.get("Link"));
-  } while (pageInfo);
-
-  return productsForSearch;
 }
 
 async function resolveShopifyVariant(input: {
@@ -728,6 +680,24 @@ export async function registerProductRoutes(app: Express) {
     }
   });
 
+  // Duplicate an existing product into a NEW draft product with fresh SKUs.
+  // Copies base fields, active variants, and images; resets identity + all
+  // Shopify sync keys so the copy is unlinked. See product-duplicate.service.
+  app.post("/api/products/:id/duplicate", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const sourceId = parseInt(req.params.id);
+      if (Number.isNaN(sourceId)) return res.status(400).json({ error: "Invalid product id" });
+      const created = await duplicateProduct(storage, sourceId, req.body ?? {});
+      res.status(201).json(created);
+    } catch (error: any) {
+      if (error instanceof ProductDuplicateError) {
+        return res.status(error.statusCode).json({ error: error.message, ...(error.details ?? {}) });
+      }
+      console.error("Error duplicating product:", error);
+      res.status(500).json({ error: "Failed to duplicate product" });
+    }
+  });
+
   app.put("/api/products/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -1204,6 +1174,9 @@ export async function registerProductRoutes(app: Express) {
   app.post("/api/products/:productId/variants", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const productId = parseInt(req.params.productId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
+      }
       // Check for SKU conflict with existing active variants
       if (req.body.sku) {
         const conflict = await storage.getActiveVariantBySku(req.body.sku);
@@ -1215,12 +1188,17 @@ export async function registerProductRoutes(app: Express) {
           });
         }
       }
+      const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
       const variant = await storage.createProductVariant({
         ...req.body,
+        ...packageAttributes,
         productId,
       });
       res.json(variant);
-    } catch (error) {
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
       console.error("Error creating variant:", error);
       res.status(500).json({ error: "Failed to create variant" });
     }
@@ -1229,6 +1207,9 @@ export async function registerProductRoutes(app: Express) {
   app.put("/api/product-variants/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid variant id" });
+      }
       const newSku: string | undefined = req.body.sku;
 
       // Check for SKU conflict when SKU is being changed
@@ -1250,7 +1231,8 @@ export async function registerProductRoutes(app: Express) {
         if (existing) oldSku = existing.sku;
       }
 
-      const variant = await storage.updateProductVariant(id, req.body);
+      const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
+      const variant = await storage.updateProductVariant(id, { ...req.body, ...packageAttributes });
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
       }
@@ -1266,9 +1248,105 @@ export async function registerProductRoutes(app: Express) {
       }
 
       res.json(variant);
-    } catch (error) {
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
       console.error("Error updating variant:", error);
       res.status(500).json({ error: "Failed to update variant" });
+    }
+  });
+
+  app.put("/api/products/:productId/variants/package-attributes/bulk", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
+      }
+
+      const rows = parsePackageAttributeBulkRows(req.body?.rows);
+
+      const requestedIds = [...new Set(rows.map((row) => row.variantId))];
+      const productVariantRows = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(and(eq(productVariants.productId, productId), inArray(productVariants.id, requestedIds)));
+      const ownedVariantIds = new Set(productVariantRows.map((row) => row.id));
+      const missingVariantIds = requestedIds.filter((id) => !ownedVariantIds.has(id));
+      if (missingVariantIds.length > 0) {
+        return res.status(400).json({
+          error: "One or more variants do not belong to this product",
+          missingVariantIds,
+        });
+      }
+
+      const updatedVariants = await db.transaction(async (tx) => {
+        const updated = [];
+        for (const row of rows) {
+          const [variant] = await tx
+            .update(productVariants)
+            .set({ ...row.updates, updatedAt: new Date() })
+            .where(and(eq(productVariants.productId, productId), eq(productVariants.id, row.variantId)))
+            .returning();
+          if (!variant) {
+            throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
+          }
+          updated.push(variant);
+        }
+        return updated;
+      });
+
+      res.json({ updated: updatedVariants.length, variants: updatedVariants });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      console.error("Error bulk updating variant package attributes:", error);
+      res.status(500).json({ error: "Failed to bulk update variant package attributes" });
+    }
+  });
+
+  app.put("/api/product-variants/package-attributes/bulk", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const rows = parsePackageAttributeBulkRows(req.body?.rows);
+
+      const requestedIds = [...new Set(rows.map((row) => row.variantId))];
+      const variantRows = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(inArray(productVariants.id, requestedIds));
+      const existingVariantIds = new Set(variantRows.map((row) => row.id));
+      const missingVariantIds = requestedIds.filter((id) => !existingVariantIds.has(id));
+      if (missingVariantIds.length > 0) {
+        return res.status(400).json({
+          error: "One or more variants do not exist",
+          missingVariantIds,
+        });
+      }
+
+      const updatedVariants = await db.transaction(async (tx) => {
+        const updated = [];
+        for (const row of rows) {
+          const [variant] = await tx
+            .update(productVariants)
+            .set({ ...row.updates, updatedAt: new Date() })
+            .where(eq(productVariants.id, row.variantId))
+            .returning();
+          if (!variant) {
+            throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
+          }
+          updated.push(variant);
+        }
+        return updated;
+      });
+
+      res.json({ updated: updatedVariants.length, variants: updatedVariants });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      console.error("Error bulk updating catalog variant package attributes:", error);
+      res.status(500).json({ error: "Failed to bulk update variant package attributes" });
     }
   });
 
@@ -1309,10 +1387,14 @@ export async function registerProductRoutes(app: Express) {
         : null;
       const mappedProductId = normalizeShopifyNumericId(product.shopifyProductId);
       const scope = req.query.scope === "all" ? "all" : "mapped";
-      const maxProductsRaw = Number(req.query.maxProducts || 250);
+      // Upper bound on products scanned in "all" scope. Defaults high enough to
+      // cover the whole catalog (the fetch early-exits on an exact SKU match, so
+      // this is a safety ceiling, not the usual work). Was 250 — which silently
+      // hid every product past the first page.
+      const maxProductsRaw = Number(req.query.maxProducts || 5000);
       const maxProducts = Number.isInteger(maxProductsRaw)
-        ? Math.min(Math.max(maxProductsRaw, 1), 1000)
-        : 250;
+        ? Math.min(Math.max(maxProductsRaw, 1), 10000)
+        : 5000;
       const limitRaw = Number(req.query.limit || 25);
       const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), 50) : 25;
 
@@ -1336,7 +1418,10 @@ export async function registerProductRoutes(app: Express) {
         productsToSearch = shopifyProduct ? [shopifyProduct] : [];
         searchedScope = "mapped";
       } else {
-        productsToSearch = await fetchShopifyProductsForSearch(credentials, maxProducts);
+        // Scan the whole catalog (early-exiting on an exact SKU hit) rather than
+        // just the first page — products past the first 250 (Shopify returns
+        // them oldest-first) were previously unreachable.
+        productsToSearch = await fetchShopifyProductsForSearch(credentials, maxProducts, normalizedQuery || null);
         searchedScope = "all";
       }
 

@@ -47,6 +47,7 @@ async function reconcileOneShipment(
     wms_shipment_status: string;
     tracking_number: string | null;
     carrier: string | null;
+    oms_order_status?: string;
   },
   ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string },
   dispatchShipmentEvent: typeof import("../../orders/shipment-rollup").dispatchShipmentEvent,
@@ -69,6 +70,9 @@ async function reconcileOneShipment(
     currentTrackingNumber: row.tracking_number,
     currentCarrier: row.carrier,
     shipments: canonicalShipments,
+    // Mirrors the production loop (server/index.ts): engine-side cancels are
+    // only authoritative when the ORDER itself is cancelled.
+    orderIsCancelled: row.oms_order_status === "cancelled",
   });
 
   if (!event) {
@@ -136,6 +140,7 @@ function makeRow(overrides: Partial<{
   wms_shipment_status: string;
   tracking_number: string | null;
   carrier: string | null;
+  oms_order_status: string;
 }> = {}) {
   return {
     shipment_id: overrides.shipment_id ?? 100,
@@ -143,6 +148,7 @@ function makeRow(overrides: Partial<{
     wms_shipment_status: overrides.wms_shipment_status ?? "queued",
     tracking_number: overrides.tracking_number ?? null,
     carrier: overrides.carrier ?? null,
+    oms_order_status: overrides.oms_order_status ?? "confirmed",
   };
 }
 
@@ -190,7 +196,29 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     expect(result.event?.kind).toBe("shipped");
   });
 
-  it("labeled → engine cancelled → dispatches markShipmentCancelled + stamps", async () => {
+  it("labeled → engine cancelled + ORDER cancelled → dispatches markShipmentCancelled + stamps", async () => {
+    const engine = makeEngine({
+      state: { status: "cancelled", trackingNumber: null, carrier: null, shipDate: null },
+      shipments: [],
+    });
+
+    const result = await reconcileOneShipment(
+      db, engine, makeRow({ wms_shipment_status: "labeled", oms_order_status: "cancelled" }),
+      makeRef(), dispatch as any, recompute,
+    );
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(db, 100, expect.objectContaining({ kind: "cancelled" }));
+    expect(recompute).toHaveBeenCalledTimes(1);
+    expect(db.execute).toHaveBeenCalledWith("oms_update_cancelled", { orderId: 1 });
+    expect(result.event?.kind).toBe("cancelled");
+  });
+
+  it("labeled → engine cancelled but order ACTIVE → review, never auto-cancel (divergence guard)", async () => {
+    // ENGINE-CANCEL-DIVERGENCE-DESIGN.md: cancel is WMS-intent-owned. Someone
+    // cancelling the order in ShipStation while it is live in Echelon is a
+    // discrepancy to review — auto-cancelling here is the 606-shipment
+    // incident class.
     const engine = makeEngine({
       state: { status: "cancelled", trackingNumber: null, carrier: null, shipDate: null },
       shipments: [],
@@ -201,11 +229,12 @@ describe("reconcile-v2 :: per-shipment logic", () => {
       makeRef(), dispatch as any, recompute,
     );
 
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(dispatch).toHaveBeenCalledWith(db, 100, expect.objectContaining({ kind: "cancelled" }));
-    expect(recompute).toHaveBeenCalledTimes(1);
-    expect(db.execute).toHaveBeenCalledWith("oms_update_cancelled", { orderId: 1 });
-    expect(result.event?.kind).toBe("cancelled");
+    expect(dispatch).toHaveBeenCalledWith(
+      db, 100,
+      expect.objectContaining({ kind: "review", reason: "engine_cancelled_order_active" }),
+    );
+    expect(db.execute).not.toHaveBeenCalledWith("oms_update_cancelled", expect.any(Object));
+    expect(result.event?.kind).toBe("review");
   });
 
   it("queued → engine voided (all shipments voided) → dispatches markShipmentVoided + stamps", async () => {

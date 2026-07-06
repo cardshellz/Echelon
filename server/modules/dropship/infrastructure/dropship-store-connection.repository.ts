@@ -158,13 +158,13 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     }
   }
 
-  async hasRepairableConnection(input: {
+  async hasReconnectableConnection(input: {
     vendorId: number;
     platform: DropshipSupportedStorePlatform;
   }): Promise<boolean> {
     const client = await this.dbPool.connect();
     try {
-      return await hasRepairableConnectionWithClient(client, input.vendorId, input.platform);
+      return await hasReconnectableConnectionWithClient(client, input.vendorId, input.platform);
     } finally {
       client.release();
     }
@@ -190,7 +190,7 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
 
       const existing = await findReusableConnection(client, input.vendorId, input.platform, input.shopDomain);
       const activeCount = await countActiveByVendorIdWithClient(client, input.vendorId);
-      if (activeCount > 0 && (activeCount > 1 || !isRepairableActiveConnection(existing))) {
+      if (activeCount > 0 && (activeCount > 1 || !isReconnectableActiveConnection(existing))) {
         throw new DropshipError(
           "DROPSHIP_STORE_CONNECTION_LIMIT_REACHED",
           "Dropship store connection limit has been reached.",
@@ -453,6 +453,95 @@ export class PgDropshipStoreConnectionRepository implements DropshipStoreConnect
     }
   }
 
+  async disconnectStoreForAdmin(input: {
+    storeConnectionId: number;
+    reason: string;
+    disconnectedAt: Date;
+    graceEndsAt: Date;
+    idempotencyKey: string;
+    actor: {
+      actorType: "admin" | "system";
+      actorId?: string;
+    };
+  }): Promise<DropshipStoreConnectionProfile> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const vendorId = await findConnectionVendorId(client, input.storeConnectionId);
+      if (vendorId === null) {
+        throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_FOUND", "Dropship store connection was not found.", {
+          storeConnectionId: input.storeConnectionId,
+        });
+      }
+      await lockVendorConnections(client, vendorId);
+
+      const existing = await findConnectionByIdForUpdate(client, vendorId, input.storeConnectionId);
+      if (!existing) {
+        throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_FOUND", "Dropship store connection was not found.", {
+          storeConnectionId: input.storeConnectionId,
+        });
+      }
+
+      if (existing.status === "disconnected" || existing.status === "grace_period") {
+        await client.query("COMMIT");
+        return mapStoreConnectionRow(existing);
+      }
+
+      const result = await client.query<StoreConnectionRow>(
+        `UPDATE dropship.dropship_store_connections
+         SET status = 'grace_period',
+             setup_status = 'attention_required',
+             access_token_ref = NULL,
+             refresh_token_ref = NULL,
+             token_expires_at = NULL,
+             disconnect_reason = $2,
+             disconnected_at = $3,
+             grace_ends_at = $4,
+             updated_at = $3
+         WHERE id = $1
+         RETURNING id, vendor_id, platform, external_account_id, external_display_name, shop_domain,
+                   access_token_ref, refresh_token_ref, token_expires_at, status, setup_status,
+                   disconnect_reason, disconnected_at, grace_ends_at, last_sync_at, last_order_sync_at,
+                   last_inventory_sync_at, config, created_at, updated_at`,
+        [
+          input.storeConnectionId,
+          input.reason,
+          input.disconnectedAt,
+          input.graceEndsAt,
+        ],
+      );
+      await client.query(
+        `DELETE FROM dropship.dropship_store_connection_tokens WHERE store_connection_id = $1`,
+        [input.storeConnectionId],
+      );
+
+      const updated = requiredRow(result.rows[0], "Admin dropship store disconnect did not return a row.");
+      await recordAuditEvent(client, {
+        vendorId,
+        storeConnectionId: updated.id,
+        eventType: "store_connection_admin_disconnect_started",
+        actor: input.actor,
+        severity: "warning",
+        payload: {
+          reason: input.reason,
+          graceEndsAt: input.graceEndsAt.toISOString(),
+          idempotencyKey: input.idempotencyKey,
+          previousStatus: existing.status,
+        },
+        occurredAt: input.disconnectedAt,
+      });
+
+      await client.query("COMMIT");
+      return mapStoreConnectionRow(updated);
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async updateOrderProcessingConfig(input: {
     storeConnectionId: number;
     defaultWarehouseId: number | null;
@@ -565,7 +654,7 @@ async function countActiveByVendorIdWithClient(client: PoolClient, vendorId: num
   return Number(result.rows[0]?.count ?? 0);
 }
 
-async function hasRepairableConnectionWithClient(
+async function hasReconnectableConnectionWithClient(
   client: PoolClient,
   vendorId: number,
   platform: DropshipSupportedStorePlatform,
@@ -575,7 +664,7 @@ async function hasRepairableConnectionWithClient(
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
-       AND status IN ('needs_reauth','refresh_failed')`,
+       AND status IN ('connected','needs_reauth','refresh_failed','disconnected')`,
     [vendorId, platform],
   );
   return Number(result.rows[0]?.count ?? 0) > 0;
@@ -632,15 +721,16 @@ async function findReusableConnection(
      FROM dropship.dropship_store_connections
      WHERE vendor_id = $1
        AND platform = $2
-       AND status IN ('needs_reauth','refresh_failed','disconnected')
+       AND status IN ('connected','needs_reauth','refresh_failed','disconnected')
        AND (
-         status IN ('needs_reauth','refresh_failed')
+         status IN ('connected','needs_reauth','refresh_failed')
          OR COALESCE(shop_domain, '') = COALESCE($3, '')
        )
      ORDER BY CASE status
                 WHEN 'needs_reauth' THEN 0
                 WHEN 'refresh_failed' THEN 1
-                ELSE 2
+                WHEN 'connected' THEN 2
+                ELSE 3
               END,
               updated_at DESC,
               id DESC
@@ -651,8 +741,8 @@ async function findReusableConnection(
   return result.rows[0] ?? null;
 }
 
-function isRepairableActiveConnection(connection: StoreConnectionRow | null): boolean {
-  return connection?.status === "needs_reauth" || connection?.status === "refresh_failed";
+function isReconnectableActiveConnection(connection: StoreConnectionRow | null): boolean {
+  return connection?.status === "connected" || connection?.status === "needs_reauth" || connection?.status === "refresh_failed";
 }
 
 async function findConnectionByIdForUpdate(
@@ -671,6 +761,19 @@ async function findConnectionByIdForUpdate(
     [vendorId, storeConnectionId],
   );
   return result.rows[0] ?? null;
+}
+
+async function findConnectionVendorId(
+  client: PoolClient,
+  storeConnectionId: number,
+): Promise<number | null> {
+  const result = await client.query<{ vendor_id: number }>(
+    `SELECT vendor_id
+     FROM dropship.dropship_store_connections
+     WHERE id = $1`,
+    [storeConnectionId],
+  );
+  return result.rows[0]?.vendor_id ?? null;
 }
 
 async function findConnectionByIdAnyVendorForUpdate(

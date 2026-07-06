@@ -19,6 +19,9 @@ function buildMockStorage(overrides: Record<string, any> = {}): any {
     getPurchaseOrderLines: vi.fn().mockResolvedValue([]),
     getInboundShipmentLines: vi.fn().mockResolvedValue([]),
     getInboundShipmentLinesByPo: vi.fn().mockResolvedValue([]),
+    // Shared status-aware shipped-qty tally (cancelled shipments excluded).
+    // Default: nothing shipped. Tests override with a Map<poLineId, qty>.
+    getShippedQtyByPoLines: vi.fn().mockResolvedValue(new Map()),
     getProductVariantById: vi.fn().mockResolvedValue(null),
     getVendorProducts: vi.fn().mockResolvedValue([]),
     bulkCreateInboundShipmentLines: vi.fn().mockResolvedValue([]),
@@ -28,16 +31,19 @@ function buildMockStorage(overrides: Record<string, any> = {}): any {
     getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
     getAllocationsForLine: vi.fn().mockResolvedValue([]),
     createInboundShipmentStatusHistory: vi.fn().mockResolvedValue({}),
+    // refreshAllocationsForShipment clears stale allocations when a shipment
+    // has no lines — added to the real storage after this mock was written.
+    deleteAllocationsForShipment: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
 
 /**
  * Build a mock db that executes transaction callbacks synchronously.
- * The mock tx.execute returns PO lines from storage.getPurchaseOrderLines
- * (mapped to snake_case) for the FOR UPDATE query, and aggregates
- * already-shipped qty from storage.getInboundShipmentLinesByPo for the
- * shipped-qty query.
+ * The mock tx.execute serves two raw queries: the FOR UPDATE lock (call 1,
+ * PO lines from storage.getPurchaseOrderLines mapped to snake_case) and the
+ * dedup query (call 2). The already-shipped tally is NO LONGER a raw tx.execute
+ * — it now runs through storage.getShippedQtyByPoLines, which tests mock directly.
  */
 function buildMockDb(storage: any) {
   // mockInsertValues captures data passed to .values() so tests can assert on it
@@ -69,30 +75,15 @@ function buildMockDb(storage: any) {
               cancelled_qty: l.cancelledQty,
               sku: l.sku,
               product_variant_id: l.productVariantId,
+              expected_receive_variant_id: l.expectedReceiveVariantId,
+              expected_receive_units_per_variant: l.expectedReceiveUnitsPerVariant,
+              units_per_uom: l.unitsPerUom,
             })),
           };
         }
-        if (executeCallCount === 2) {
-          // Dedup query → empty by default
-          return { rows: [] };
-        }
-        // Call 3+: already-shipped qty query → aggregate from storage
-        const allShipmentLines = await storage.getInboundShipmentLinesByPo();
-        const qtyByLine = new Map<number, number>();
-        for (const sl of allShipmentLines) {
-          if (sl.purchaseOrderLineId) {
-            qtyByLine.set(
-              sl.purchaseOrderLineId,
-              (qtyByLine.get(sl.purchaseOrderLineId) ?? 0) + (sl.qtyShipped ?? 0),
-            );
-          }
-        }
-        return {
-          rows: Array.from(qtyByLine.entries()).map(([poLineId, qty]) => ({
-            purchase_order_line_id: poLineId,
-            already_shipped: qty,
-          })),
-        };
+        // Call 2 (dedup) and any later raw query → empty by default. The
+        // shipped-qty tally is served by storage.getShippedQtyByPoLines, not here.
+        return { rows: [] };
       });
 
       return fn(mockTx);
@@ -108,6 +99,7 @@ function makeProductLine(overrides: Record<string, any> = {}) {
     purchaseOrderId: 10,
     lineNumber: 1,
     productVariantId: 200,
+    expectedReceiveVariantId: 200,
     sku: "SKU-001",
     productName: "Widget",
     lineType: "product",
@@ -186,10 +178,8 @@ describe("addLinesFromPO", () => {
   it("rejects qty > remaining (ordered - already shipped - cancelled)", async () => {
     const poLine = makeProductLine({ id: 5, orderQty: 100, cancelledQty: 10 });
     storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
-    // 60 already shipped on another shipment
-    storage.getInboundShipmentLinesByPo.mockResolvedValue([
-      { purchaseOrderLineId: 5, qtyShipped: 60, inboundShipmentId: 99 },
-    ]);
+    // 60 already shipped on another (non-cancelled) shipment
+    storage.getShippedQtyByPoLines.mockResolvedValue(new Map([[5, 60]]));
 
     // remaining = 100 - 60 - 10 = 30, requesting 31
     await expect(
@@ -239,6 +229,47 @@ describe("addLinesFromPO", () => {
     );
   });
 
+  it("uses the expected receive variant for shipment lines and carton math", async () => {
+    const poLine = makeProductLine({
+      id: 5,
+      orderQty: 1000,
+      productVariantId: 200,
+      expectedReceiveVariantId: 900,
+      expectedReceiveUnitsPerVariant: 250,
+    });
+    storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
+    storage.getVendorProducts.mockResolvedValue([
+      {
+        productVariantId: 900,
+        weightKg: "12.5",
+        lengthCm: "40",
+        widthCm: "30",
+        heightCm: "20",
+      },
+    ]);
+
+    await svc.addLinesFromPO(1, 10, [{ poLineId: 5, qty: 501 }]);
+
+    expect(storage.getVendorProducts).toHaveBeenCalledWith({
+      vendorId: 100,
+      productVariantId: 900,
+    });
+    expect(mockInsertValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          purchaseOrderLineId: 5,
+          productVariantId: 900,
+          qtyShipped: 501,
+          cartonCount: 3,
+          weightKg: "12.5",
+          lengthCm: "40",
+          widthCm: "30",
+          heightCm: "20",
+        }),
+      ]),
+    );
+  });
+
   it("legacy lineIds shape uses orderQty", async () => {
     const line1 = makeProductLine({ id: 1, sku: "A", orderQty: 50 });
     const line2 = makeProductLine({ id: 2, sku: "B", orderQty: 60 });
@@ -269,9 +300,7 @@ describe("addLinesFromPO", () => {
   it("allows qty equal to remaining", async () => {
     const poLine = makeProductLine({ id: 5, orderQty: 100, cancelledQty: 10 });
     storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
-    storage.getInboundShipmentLinesByPo.mockResolvedValue([
-      { purchaseOrderLineId: 5, qtyShipped: 60, inboundShipmentId: 99 },
-    ]);
+    storage.getShippedQtyByPoLines.mockResolvedValue(new Map([[5, 60]]));
 
     // remaining = 100 - 60 - 10 = 30
     await svc.addLinesFromPO(1, 10, [{ poLineId: 5, qty: 30 }]);
@@ -294,8 +323,10 @@ describe("addLinesFromPO", () => {
     // Every tx.execute call receives a SQL template. Inspect the raw SQL
     // fragments to confirm every ANY() usage uses ARRAY[]::integer[] pattern
     // (Drizzle sql.join builds individual bound params inside ARRAY literal).
+    // Two raw queries remain (FOR UPDATE + dedup); the shipped-qty tally moved
+    // to storage.getShippedQtyByPoLines (drizzle builder, not raw tx.execute).
     const calls = mockTx.execute.mock.calls;
-    expect(calls.length).toBeGreaterThanOrEqual(3);
+    expect(calls.length).toBeGreaterThanOrEqual(2);
 
     for (const [query] of calls) {
       // query is a Drizzle sql`` template — its queryChunks contain the raw text

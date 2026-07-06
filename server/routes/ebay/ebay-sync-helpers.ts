@@ -1,5 +1,5 @@
-import { pool, db } from "../../db";
-import { EBAY_CHANNEL_ID, getAuthService, getChannelConnection, ebayApiRequest, atpService } from "./ebay-utils";
+import { db } from "../../db";
+import { EBAY_CHANNEL_ID, getAuthService, getChannelConnection, atpService } from "./ebay-utils";
 import {
   channelListings,
   productVariants,
@@ -8,16 +8,28 @@ import {
   ebayCategoryMappings,
   ebayTypeAspectDefaults,
   ebayProductAspectOverrides,
-  channelPricingRules,
   channelProductOverrides,
   channelVariantOverrides,
 } from "@shared/schema";
-import { eq, and, sql, inArray, asc } from "drizzle-orm";
+import { eq, and, sql, inArray, asc, or, isNotNull } from "drizzle-orm";
+import { EbayMarketplaceListingConnector } from "../../modules/channels/listing-connectors/ebay-listing.connector";
+import { buildEbayRouteListingDraft } from "./ebay-listing-draft-builder";
+import {
+  createEbayRouteListingClient,
+  getExistingEbayInventoryImageUrls,
+} from "./ebay-listing-connector-client";
+import {
+  resolveChannelListingPrice,
+} from "../../modules/channels/channel-pricing-resolver";
+
+export { applyPricingRule } from "../../modules/channels/channel-pricing-resolver";
 
 export interface SyncFilter { productIds?: number[]; productTypeSlugs?: string[]; variantIds?: number[]; }
 
+type EchelonDb = typeof db;
+
 export async function upsertChannelListing(
-  dbArg: any,
+  dbArg: EchelonDb,
   channelId: number,
   productVariantId: number,
   data: {
@@ -70,7 +82,7 @@ export async function upsertChannelListing(
  * Store the last push error for a product (across all its variants).
  * Uses the first variant's channel_listing row to store the error.
  */
-export async function upsertPushError(dbArg: any, channelId: number, productId: number, error: string): Promise<void> {
+export async function upsertPushError(dbArg: EchelonDb, channelId: number, productId: number, error: string): Promise<void> {
   // Find all variant IDs for this product
   const variants = await dbArg.select({ id: productVariants.id })
     .from(productVariants)
@@ -95,7 +107,7 @@ export async function upsertPushError(dbArg: any, channelId: number, productId: 
 /**
  * Clear push error for a product (across all its variants).
  */
-export async function clearPushError(dbArg: any, channelId: number, productId: number): Promise<void> {
+export async function clearPushError(dbArg: EchelonDb, channelId: number, productId: number): Promise<void> {
   // Subquery: get all variant IDs for the product
   const variants = await dbArg.select({ id: productVariants.id })
     .from(productVariants)
@@ -121,100 +133,23 @@ export async function clearPushError(dbArg: any, channelId: number, productId: n
 
 /**
  * Resolve the effective channel price for a variant.
- * Priority: variant > product > category > channel > base price
+ * Compatibility wrapper around the shared channel listing price resolver.
  */
 export async function resolveChannelPrice(
-  dbArg: any,
+  dbArg: EchelonDb,
   channelId: number,
   productId: number,
   variantId: number,
-  basePriceCents: number,
+  basePriceCents: number | null | undefined,
 ): Promise<number> {
-  // 1. Check variant-level rule
-  const variantRule = await dbArg.select()
-    .from(channelPricingRules)
-    .where(
-      and(
-        eq(channelPricingRules.channelId, channelId),
-        eq(channelPricingRules.scope, "variant"),
-        eq(channelPricingRules.scopeId, String(variantId))
-      )
-    );
-  if (variantRule.length > 0) {
-    return applyPricingRule(basePriceCents, variantRule[0].ruleType, parseFloat(variantRule[0].value as string));
-  }
-
-  // 2. Check product-level rule
-  const productRule = await dbArg.select()
-    .from(channelPricingRules)
-    .where(
-      and(
-        eq(channelPricingRules.channelId, channelId),
-        eq(channelPricingRules.scope, "product"),
-        eq(channelPricingRules.scopeId, String(productId))
-      )
-    );
-  if (productRule.length > 0) {
-    return applyPricingRule(basePriceCents, productRule[0].ruleType, parseFloat(productRule[0].value as string));
-  }
-
-  // 3. Check category-level rule (lookup product's product_type)
-  const productInfo = await dbArg.select({ productType: products.productType })
-    .from(products)
-    .where(eq(products.id, productId));
-
-  if (productInfo.length > 0 && productInfo[0].productType) {
-    const categoryRule = await dbArg.select()
-      .from(channelPricingRules)
-      .where(
-        and(
-          eq(channelPricingRules.channelId, channelId),
-          eq(channelPricingRules.scope, "category"),
-          eq(channelPricingRules.scopeId, productInfo[0].productType)
-        )
-      );
-    if (categoryRule.length > 0) {
-      return applyPricingRule(basePriceCents, categoryRule[0].ruleType, parseFloat(categoryRule[0].value as string));
-    }
-  }
-
-  // 4. Check channel-level rule
-  const channelRule = await dbArg.select()
-    .from(channelPricingRules)
-    .where(
-      and(
-        eq(channelPricingRules.channelId, channelId),
-        eq(channelPricingRules.scope, "channel"),
-        sql`${channelPricingRules.scopeId} IS NULL`
-      )
-    );
-  if (channelRule.length > 0) {
-    return applyPricingRule(basePriceCents, channelRule[0].ruleType, parseFloat(channelRule[0].value as string));
-  }
-
-  // 5. No rule — return base price
-  return basePriceCents;
+  const resolution = await resolveChannelListingPrice(dbArg, {
+    channelId,
+    productId,
+    variantId,
+    fallbackCatalogPriceCents: basePriceCents,
+  });
+  return resolution.priceCents ?? 0;
 }
-
-/**
- * Apply a pricing rule to a base price.
- * - percentage: basePriceCents * (1 + value/100) — value is percentage (e.g., 15.00 = 15%)
- * - fixed: basePriceCents + value*100 — value is dollars (e.g., 2.00 = $2.00)
- * - override: value*100 — value is the exact price in dollars (e.g., 39.99 = $39.99)
- */
-export function applyPricingRule(basePriceCents: number, ruleType: string, value: number): number {
-  switch (ruleType) {
-    case "percentage":
-      return Math.round(basePriceCents * (1 + value / 100));
-    case "fixed":
-      return basePriceCents + Math.round(value * 100);
-    case "override":
-      return Math.round(value * 100);
-    default:
-      return basePriceCents;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Variation Aspect Name Detection
 // ---------------------------------------------------------------------------
@@ -261,7 +196,7 @@ export function escapeXml(str: string): string {
 // Sync Active Listings — updates prices, quantities, policies, aspects
 // ---------------------------------------------------------------------------
 
-export const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 
 
@@ -299,57 +234,77 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
   };
   const merchantLocationKey = metadata.merchantLocationKey || "card-shellz-hq";
 
-  const client = await pool.connect();
-  try {
-    // Build the filter clause for active listings
-    const conditions = [
-      eq(channelListings.channelId, EBAY_CHANNEL_ID),
-      eq(channelListings.syncStatus, 'synced'),
-      sql`COALESCE(${products.ebayListingExcluded}, false) = false`,
-      sql`COALESCE(${productVariants.ebayListingExcluded}, false) = false`,
-      sql`COALESCE(${channelProductOverrides.isListed}, 1) <> 0`,
-      sql`COALESCE(${channelVariantOverrides.isListed}, 1) <> 0`,
-    ];
+  const marketplaceId = typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+    ? metadata.marketplaceId.trim()
+    : "EBAY_US";
+  const ebayClient = createEbayRouteListingClient({ accessToken });
+  const listingConnector = new EbayMarketplaceListingConnector({
+    delay,
+    inventoryDelayMs: 200,
+    offerDelayMs: 200,
+  });
 
-    if (filter?.productIds && filter.productIds.length > 0) {
-      conditions.push(inArray(products.id, filter.productIds));
-    }
-    if (filter?.productTypeSlugs && filter.productTypeSlugs.length > 0) {
-      conditions.push(inArray(products.productType, filter.productTypeSlugs));
-    }
-    if (filter?.variantIds && filter.variantIds.length > 0) {
-      conditions.push(inArray(productVariants.id, filter.variantIds));
-    }
+  // Build the filter clause for active listings
+  const conditions = [
+    eq(channelListings.channelId, EBAY_CHANNEL_ID),
+    or(
+      eq(channelListings.syncStatus, "synced"),
+      and(
+        eq(channelListings.syncStatus, "error"),
+        or(
+          isNotNull(channelListings.externalProductId),
+          isNotNull(channelListings.externalVariantId),
+          isNotNull(channelListings.externalSku),
+        ),
+      ),
+    ),
+    sql`COALESCE(${products.ebayListingExcluded}, false) = false`,
+    sql`COALESCE(${productVariants.ebayListingExcluded}, false) = false`,
+    sql`COALESCE(${channelProductOverrides.isListed}, 1) <> 0`,
+    sql`COALESCE(${channelVariantOverrides.isListed}, 1) <> 0`,
+  ];
 
-    // Get all synced listings with their product/variant data
-    const listingsResult = await db.select({
-      listing_id: channelListings.id,
-      product_variant_id: channelListings.productVariantId,
-      external_product_id: channelListings.externalProductId,
-      external_variant_id: channelListings.externalVariantId,
-      external_sku: channelListings.externalSku,
-      last_synced_price: channelListings.lastSyncedPrice,
-      last_synced_qty: channelListings.lastSyncedQty,
-      variant_id: productVariants.id,
-      variant_sku: productVariants.sku,
-      variant_name: productVariants.name,
-      price_cents: productVariants.priceCents,
-      option1_name: productVariants.option1Name,
-      option1_value: productVariants.option1Value,
-      variant_fulfillment_override: productVariants.ebayFulfillmentPolicyOverride,
-      variant_return_override: productVariants.ebayReturnPolicyOverride,
-      variant_payment_override: productVariants.ebayPaymentPolicyOverride,
-      product_id: products.id,
-      product_name: products.name,
-      product_sku: products.sku,
-      product_description: products.description,
-      product_brand: products.brand,
-      product_type: products.productType,
-      ebay_browse_category_id: products.ebayBrowseCategoryId,
-      product_fulfillment_override: products.ebayFulfillmentPolicyOverride,
-      product_return_override: products.ebayReturnPolicyOverride,
-      product_payment_override: products.ebayPaymentPolicyOverride,
-    })
+  if (filter?.productIds && filter.productIds.length > 0) {
+    conditions.push(inArray(products.id, filter.productIds));
+  }
+  if (filter?.productTypeSlugs && filter.productTypeSlugs.length > 0) {
+    conditions.push(inArray(products.productType, filter.productTypeSlugs));
+  }
+  if (filter?.variantIds && filter.variantIds.length > 0) {
+    conditions.push(inArray(productVariants.id, filter.variantIds));
+  }
+
+  // Get all synced listings with their product/variant data
+  const listingsResult = await db.select({
+    listing_id: channelListings.id,
+    product_variant_id: channelListings.productVariantId,
+    external_product_id: channelListings.externalProductId,
+    external_variant_id: channelListings.externalVariantId,
+    external_sku: channelListings.externalSku,
+    last_synced_price: channelListings.lastSyncedPrice,
+    last_synced_qty: channelListings.lastSyncedQty,
+    variant_id: productVariants.id,
+    variant_sku: productVariants.sku,
+    variant_name: productVariants.name,
+    price_cents: productVariants.priceCents,
+    variant_weight_grams: productVariants.weightGrams,
+    variant_weight_override: channelVariantOverrides.weightOverride,
+    option1_name: productVariants.option1Name,
+    option1_value: productVariants.option1Value,
+    variant_fulfillment_override: productVariants.ebayFulfillmentPolicyOverride,
+    variant_return_override: productVariants.ebayReturnPolicyOverride,
+    variant_payment_override: productVariants.ebayPaymentPolicyOverride,
+    product_id: products.id,
+    product_name: products.name,
+    product_sku: products.sku,
+    product_description: products.description,
+    product_brand: products.brand,
+    product_type: products.productType,
+    ebay_browse_category_id: products.ebayBrowseCategoryId,
+    product_fulfillment_override: products.ebayFulfillmentPolicyOverride,
+    product_return_override: products.ebayReturnPolicyOverride,
+    product_payment_override: products.ebayPaymentPolicyOverride,
+  })
     .from(channelListings)
     .innerJoin(productVariants, eq(productVariants.id, channelListings.productVariantId))
     .innerJoin(products, eq(products.id, productVariants.productId))
@@ -370,50 +325,52 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
     .where(and(...conditions))
     .orderBy(asc(products.id), asc(productVariants.position), asc(productVariants.id));
 
-    if (listingsResult.length === 0) {
-      return { synced: 0, priceChanges: 0, qtyChanges: 0, policyChanges: 0, errors: 0, details: [] };
-    }
+  if (listingsResult.length === 0) {
+    return { synced: 0, priceChanges: 0, qtyChanges: 0, policyChanges: 0, errors: 0, details: [] };
+  }
 
-    // Group listings by product
-    const productGroups: Map<number, any[]> = new Map();
-    for (const row of listingsResult) {
-      const pid = row.product_id;
-      if (!productGroups.has(pid)) productGroups.set(pid, []);
-      productGroups.get(pid)!.push(row);
-    }
+  // Group listings by product
+  const productGroups: Map<number, any[]> = new Map();
+  for (const row of listingsResult) {
+    const pid = row.product_id;
+    if (!productGroups.has(pid)) productGroups.set(pid, []);
+    productGroups.get(pid)!.push(row);
+  }
 
-    const summary = {
-      synced: 0,
-      priceChanges: 0,
-      qtyChanges: 0,
-      policyChanges: 0,
-      errors: 0,
-      details: [] as any[],
-    };
+  const summary = {
+    synced: 0,
+    priceChanges: 0,
+    qtyChanges: 0,
+    policyChanges: 0,
+    errors: 0,
+    details: [] as any[],
+  };
 
-    // Process products sequentially
-    for (const [productId, variants] of productGroups) {
-      const product = variants[0]; // product data is same for all variants
+  // Process products sequentially
+  for (const [productId, variants] of productGroups) {
+    const product = variants[0]; // product data is same for all variants
 
+    try {
       // Get effective eBay category
       let ebayBrowseCategoryId = product.ebay_browse_category_id;
       let effectivePolicies = { ...defaultPolicies };
+      let storeCategoryNames: string[] = [];
 
       // Category-level overrides
       if (product.product_type) {
         const catResult = await db.select({
-            ebayBrowseCategoryId: ebayCategoryMappings.ebayBrowseCategoryId,
-            ebayStoreCategoryName: ebayCategoryMappings.ebayStoreCategoryName,
-            fulfillmentPolicyOverride: ebayCategoryMappings.fulfillmentPolicyOverride,
-            returnPolicyOverride: ebayCategoryMappings.returnPolicyOverride,
-            paymentPolicyOverride: ebayCategoryMappings.paymentPolicyOverride,
-          })
+          ebayBrowseCategoryId: ebayCategoryMappings.ebayBrowseCategoryId,
+          ebayStoreCategoryName: ebayCategoryMappings.ebayStoreCategoryName,
+          fulfillmentPolicyOverride: ebayCategoryMappings.fulfillmentPolicyOverride,
+          returnPolicyOverride: ebayCategoryMappings.returnPolicyOverride,
+          paymentPolicyOverride: ebayCategoryMappings.paymentPolicyOverride,
+        })
           .from(ebayCategoryMappings)
           .where(
             and(
               eq(ebayCategoryMappings.channelId, EBAY_CHANNEL_ID),
-              eq(ebayCategoryMappings.productTypeSlug, product.product_type)
-            )
+              eq(ebayCategoryMappings.productTypeSlug, product.product_type),
+            ),
           );
         if (catResult.length > 0) {
           const catRow = catResult[0];
@@ -421,6 +378,7 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
           if (catRow.fulfillmentPolicyOverride) effectivePolicies.fulfillmentPolicyId = catRow.fulfillmentPolicyOverride;
           if (catRow.returnPolicyOverride) effectivePolicies.returnPolicyId = catRow.returnPolicyOverride;
           if (catRow.paymentPolicyOverride) effectivePolicies.paymentPolicyId = catRow.paymentPolicyOverride;
+          if (catRow.ebayStoreCategoryName) storeCategoryNames = [catRow.ebayStoreCategoryName];
         }
       }
 
@@ -435,18 +393,18 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
 
       if (product.product_type) {
         const typeDefaults = await db.select({
-            aspectName: ebayTypeAspectDefaults.aspectName,
-            aspectValue: ebayTypeAspectDefaults.aspectValue
-          })
+          aspectName: ebayTypeAspectDefaults.aspectName,
+          aspectValue: ebayTypeAspectDefaults.aspectValue,
+        })
           .from(ebayTypeAspectDefaults)
           .where(eq(ebayTypeAspectDefaults.productTypeSlug, product.product_type));
         for (const td of typeDefaults) aspects[td.aspectName] = [td.aspectValue];
       }
-      
+
       const prodOverrides = await db.select({
-          aspectName: ebayProductAspectOverrides.aspectName,
-          aspectValue: ebayProductAspectOverrides.aspectValue
-        })
+        aspectName: ebayProductAspectOverrides.aspectName,
+        aspectValue: ebayProductAspectOverrides.aspectValue,
+      })
         .from(ebayProductAspectOverrides)
         .where(eq(ebayProductAspectOverrides.productId, productId));
       for (const po of prodOverrides) aspects[po.aspectName] = [po.aspectValue];
@@ -467,13 +425,9 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         try {
           const firstSku = variants[0]?.variant_sku;
           if (firstSku) {
-            const existingItem = await ebayApiRequest(
-              "GET",
-              `/sell/inventory/v1/inventory_item/${encodeURIComponent(firstSku)}`,
-              accessToken,
-            );
-            if (existingItem?.product?.imageUrls?.length > 0) {
-              effectiveImageUrls = existingItem.product.imageUrls;
+            const existingImageUrls = await getExistingEbayInventoryImageUrls({ accessToken, sku: firstSku });
+            if (existingImageUrls.length > 0) {
+              effectiveImageUrls = existingImageUrls;
               console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
             }
           }
@@ -492,145 +446,85 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
         syncAtpByVariantId.set(va.productVariantId, va.atpUnits);
       }
 
-      // ---- Process each variant ----
+      const routeProduct = {
+        name: product.product_name,
+        sku: product.product_sku,
+        description: product.product_description,
+      };
+      const routeVariants = variants.map((variant: any) => ({
+        id: variant.variant_id,
+        sku: variant.variant_sku,
+        name: variant.variant_name,
+        option1_value: variant.option1_value,
+        price_cents: variant.price_cents,
+        ebay_weight_grams: variant.variant_weight_override ?? variant.variant_weight_grams,
+        ebay_fulfillment_policy_override: variant.variant_fulfillment_override,
+        ebay_return_policy_override: variant.variant_return_override,
+        ebay_payment_policy_override: variant.variant_payment_override,
+      }));
+
+      const variantPrices: Map<number, number> = new Map();
+      const variantChangeState = new Map<number, { priceChanged: boolean; qtyChanged: boolean }>();
+      for (const variant of variants) {
+        const newPriceCents = await resolveChannelPrice(
+          db,
+          EBAY_CHANNEL_ID,
+          productId,
+          variant.variant_id,
+          variant.price_cents,
+        );
+        const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
+        variantPrices.set(variant.variant_id, newPriceCents);
+        variantChangeState.set(variant.variant_id, {
+          priceChanged: newPriceCents !== (variant.last_synced_price || 0),
+          qtyChanged: newQty !== (variant.last_synced_qty || 0),
+        });
+      }
+
+      const routeDraft = buildEbayRouteListingDraft({
+        productId,
+        product: routeProduct,
+        variants: routeVariants,
+        effectiveImageUrls,
+        aspects,
+        isMultiVariant,
+        variationAspectName,
+        variantPrices,
+        atpByVariantId: syncAtpByVariantId,
+        marketplaceId,
+        ebayBrowseCategoryId,
+        effectivePolicies,
+        storeCategoryNames,
+        merchantLocationKey,
+      });
+
+      const syncResult = await listingConnector.syncExistingListing({
+        client: ebayClient,
+        draft: {
+          productId,
+          marketplaceId,
+          inventoryItems: routeDraft.inventoryItems,
+          offers: routeDraft.offers,
+          itemGroup: routeDraft.itemGroup,
+        },
+      });
+
+      const missingOfferVariantIds = new Set(syncResult.missingOfferVariantIds);
+      const policyChangedVariantIds = new Set(syncResult.policyChangedVariantIds);
+
       for (const variant of variants) {
         const sku = variant.variant_sku;
-        try {
-          // Recalculate price
-          const newPriceCents = await resolveChannelPrice(
-            db, EBAY_CHANNEL_ID, productId, variant.variant_id, variant.price_cents,
-          );
-          const priceInDollars = (newPriceCents / 100).toFixed(2);
+        const changes = variantChangeState.get(variant.variant_id) ?? { priceChanged: false, qtyChanged: false };
+        const newPriceCents = variantPrices.get(variant.variant_id) ?? variant.price_cents ?? 0;
+        const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
+        const policyChanged = policyChangedVariantIds.has(variant.variant_id);
 
-          // Recalculate available quantity (fungible ATP)
-          const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
-
-          // Detect changes
-          const oldPrice = variant.last_synced_price || 0;
-          const oldQty = variant.last_synced_qty || 0;
-          const priceChanged = newPriceCents !== oldPrice;
-          const qtyChanged = newQty !== oldQty;
-
-          // Build variant aspects
-          const variantAspects: Record<string, string[]> = { ...aspects };
-          if (isMultiVariant) {
-            const variationValue = variant.option1_value || variant.variant_name || sku;
-            variantAspects[variationAspectName] = [variationValue];
-          }
-
-          // A. Update inventory item
-          const inventoryItemBody: Record<string, any> = {
-            condition: "NEW",
-            product: {
-              title: product.product_name.length > 80 ? product.product_name.substring(0, 77) + "..." : product.product_name,
-              ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
-              aspects: variantAspects,
-            },
-            availability: {
-              shipToLocationAvailability: { quantity: newQty },
-            },
-          };
-          // Always include description — eBay requires it
-          inventoryItemBody.product.description = product.product_description || `<p>${product.product_name}</p>`;
-
-          console.log(`[eBay Sync] Updating inventory item: ${sku}`);
-          await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, inventoryItemBody);
-          await delay(200);
-
-          // B. Update offer — find existing, then update
-          let policyChanged = false;
-          try {
-            const offersResp = await ebayApiRequest(
-              "GET",
-              `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=EBAY_US`,
-              accessToken,
-            );
-            await delay(200);
-
-            if (offersResp?.offers?.length > 0) {
-              const existingOffer = offersResp.offers[0];
-              const offerId = existingOffer.offerId;
-
-              // Variant-level policy overrides
-              const variantPolicies = {
-                fulfillmentPolicyId: variant.variant_fulfillment_override || effectivePolicies.fulfillmentPolicyId,
-                returnPolicyId: variant.variant_return_override || effectivePolicies.returnPolicyId,
-                paymentPolicyId: variant.variant_payment_override || effectivePolicies.paymentPolicyId,
-              };
-
-              // Detect policy changes
-              const oldPolicies = existingOffer.listingPolicies || {};
-              if (
-                oldPolicies.fulfillmentPolicyId !== variantPolicies.fulfillmentPolicyId ||
-                oldPolicies.returnPolicyId !== variantPolicies.returnPolicyId ||
-                oldPolicies.paymentPolicyId !== variantPolicies.paymentPolicyId
-              ) {
-                policyChanged = true;
-              }
-
-              // Get store category names
-              let storeCategoryNames: string[] = [];
-              if (product.product_type) {
-                const scResult = await client.query(
-                  `SELECT ebay_store_category_name FROM ebay_category_mappings
-                   WHERE channel_id = $1 AND product_type_slug = $2`,
-                  [EBAY_CHANNEL_ID, product.product_type],
-                );
-                if (scResult.rows.length > 0 && scResult.rows[0].ebay_store_category_name) {
-                  storeCategoryNames = [scResult.rows[0].ebay_store_category_name];
-                }
-              }
-
-              const offerBody: Record<string, any> = {
-                sku,
-                marketplaceId: "EBAY_US",
-                format: "FIXED_PRICE",
-                categoryId: ebayBrowseCategoryId,
-                listingPolicies: variantPolicies,
-                merchantLocationKey,
-                pricingSummary: {
-                  price: { value: priceInDollars, currency: "USD" },
-                },
-                availableQuantity: newQty,
-              };
-              if (storeCategoryNames.length > 0) {
-                offerBody.storeCategoryNames = storeCategoryNames;
-              }
-
-              console.log(`[eBay Sync] Updating offer ${offerId} for SKU: ${sku}`);
-              await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
-              await delay(200);
-            }
-          } catch (offerErr: any) {
-            console.error(`[eBay Sync] Offer update failed for ${sku}:`, offerErr.message);
-            // Non-fatal — inventory item was still updated
-          }
-
-          // Update channel_listings with new synced values
+        if (missingOfferVariantIds.has(variant.variant_id)) {
+          const error = "eBay offer not found during active listing sync.";
           await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
-            lastSyncedPrice: newPriceCents,
-            lastSyncedQty: newQty,
-            syncStatus: "synced",
-            syncError: null,
+            syncStatus: "error",
+            syncError: error,
           });
-
-          summary.synced++;
-          if (priceChanged) summary.priceChanges++;
-          if (qtyChanged) summary.qtyChanges++;
-          if (policyChanged) summary.policyChanges++;
-
-          summary.details.push({
-            productId,
-            productName: product.product_name,
-            variantSku: sku,
-            success: true,
-            priceChanged,
-            qtyChanged,
-            policyChanged,
-          });
-
-        } catch (err: any) {
-          console.error(`[eBay Sync] Error syncing SKU ${sku}:`, err.message);
           summary.errors++;
           summary.details.push({
             productId,
@@ -640,59 +534,58 @@ export async function syncActiveListings(filter: SyncFilter | null): Promise<{
             priceChanged: false,
             qtyChanged: false,
             policyChanged: false,
-            error: err.message.substring(0, 500),
+            error,
           });
-          await delay(200);
+          continue;
         }
+
+        await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
+          lastSyncedPrice: newPriceCents,
+          lastSyncedQty: newQty,
+          syncStatus: "synced",
+          syncError: null,
+        });
+
+        summary.synced++;
+        if (changes.priceChanged) summary.priceChanges++;
+        if (changes.qtyChanged) summary.qtyChanges++;
+        if (policyChanged) summary.policyChanges++;
+
+        summary.details.push({
+          productId,
+          productName: product.product_name,
+          variantSku: sku,
+          success: true,
+          priceChanged: changes.priceChanged,
+          qtyChanged: changes.qtyChanged,
+          policyChanged,
+        });
       }
-
-      // C. Update inventory item group if multi-variant
-      if (isMultiVariant) {
-        try {
-          const groupKey = product.product_sku || `PROD-${productId}`;
-          const successfulSkus = variants.map((v: any) => v.variant_sku);
-
-          const variationValues = variants.map(
-            (v: any) => v.option1_value || v.variant_name || v.variant_sku,
-          );
-
-          const groupBody: Record<string, any> = {
-            title: product.product_name.length > 80 ? product.product_name.substring(0, 77) + "..." : product.product_name,
-            description: product.product_description || `<p>${product.product_name}</p>`,
-            ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
-            aspects,
-            variantSKUs: successfulSkus,
-            variesBy: {
-              aspectsImageVariesBy: [],
-              specifications: [
-                {
-                  name: variationAspectName,
-                  values: variationValues,
-                },
-              ],
-            },
-          };
-
-          console.log(`[eBay Sync] Updating inventory item group: ${groupKey}`);
-          await ebayApiRequest(
-            "PUT",
-            `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
-            accessToken,
-            groupBody,
-          );
-          await delay(200);
-        } catch (groupErr: any) {
-          console.error(`[eBay Sync] Group update failed for product ${productId}:`, groupErr.message);
-          // Non-fatal
-        }
+    } catch (err: any) {
+      console.error(`[eBay Sync] Error syncing product ${productId}:`, err.message);
+      const syncError = err.message.substring(0, 500);
+      for (const variant of variants) {
+        await upsertChannelListing(db, EBAY_CHANNEL_ID, variant.variant_id, {
+          syncStatus: "error",
+          syncError,
+        });
+        summary.errors++;
+        summary.details.push({
+          productId,
+          productName: product.product_name,
+          variantSku: variant.variant_sku,
+          success: false,
+          priceChanged: false,
+          qtyChanged: false,
+          policyChanged: false,
+          error: syncError,
+        });
       }
     }
-
-    console.log(`[eBay Sync] Complete: synced=${summary.synced} priceChanges=${summary.priceChanges} qtyChanges=${summary.qtyChanges} policyChanges=${summary.policyChanges} errors=${summary.errors}`);
-    return summary;
-  } finally {
-    // client.release() is removed since we use db directly
   }
+
+  console.log(`[eBay Sync] Complete: synced=${summary.synced} priceChanges=${summary.priceChanges} qtyChanges=${summary.qtyChanges} policyChanges=${summary.policyChanges} errors=${summary.errors}`);
+  return summary;
 }
 
 // ---------------------------------------------------------------------------

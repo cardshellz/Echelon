@@ -118,15 +118,23 @@ interface Storage {
 
   // Products
   getProductVariantById(id: number): Promise<any>;
+  getProductVariantsByProductId?(productId: number): Promise<any[]>;
   getProductById(id: number): Promise<any>;
 
   // Receiving
   createReceivingOrder(data: any): Promise<any>;
   getReceivingOrdersForPurchaseOrder?(purchaseOrderId: number): Promise<any[]>;
+  getReceivingLines?(receivingOrderId: number): Promise<any[]>;
+  deleteReceivingOrder?(id: number): Promise<boolean>;
   generateReceiptNumber(): Promise<string>;
   bulkCreateReceivingLines(lines: any[]): Promise<any[]>;
   getReceivingLineById(id: number): Promise<any>;
   getReceivingOrderById(id: number): Promise<any>;
+
+  // Inbound shipments
+  getInboundShipmentById(id: number): Promise<any>;
+  getInboundShipmentLines(inboundShipmentId: number): Promise<any[]>;
+  getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<any[]>;
 
   // Settings
   getSetting(key: string): Promise<string | null>;
@@ -150,6 +158,8 @@ const EDITABLE_STATUSES = new Set(["draft"]);
 const LINE_AMENDABLE_STATUSES = new Set(["draft", "pending_approval", "approved", "sent", "acknowledged", "partially_received"]);
 const CANCELLABLE_FROM = new Set(["draft", "pending_approval", "approved"]);
 const VOIDABLE_FROM = new Set(["sent", "acknowledged"]);
+const RECEIVABLE_SHIPMENT_STATUSES = new Set(["at_port", "customs_clearance", "delivered", "costing", "closed"]);
+const ACTIVE_RECEIPT_STATUSES = new Set(["draft", "open", "receiving", "verified"]);
 const PHYSICAL_LIFECYCLE_EVENTS: Partial<Record<PoPhysicalStatus, string>> = {
   sent: "sent_to_vendor",
   acknowledged: "vendor_acknowledged",
@@ -1055,6 +1065,8 @@ export function createPurchasingService(db: any, storage: Storage) {
   async function addLine(purchaseOrderId: number, data: {
     productId: number;
     productVariantId?: number | null;
+    expectedReceiveVariantId?: number | null;
+    expectedReceiveUnitsPerVariant?: number | null;
     vendorProductId?: number;
     orderQty: number;
     unitCostCents: number;
@@ -1073,9 +1085,11 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot add lines to PO in '${po.status}' status`, 400);
     }
 
-    // Cache product info
-    const variant = data.productVariantId ? await storage.getProductVariantById(data.productVariantId) : null;
-    if (data.productVariantId && !variant) throw new PurchasingError("Product variant not found", 404);
+    // Cache product info. The PO buys product pieces; the variant is the
+    // expected receive configuration used by receiving/AP downstream.
+    const receiveVariantId = data.expectedReceiveVariantId ?? data.productVariantId ?? null;
+    const variant = receiveVariantId ? await storage.getProductVariantById(receiveVariantId) : null;
+    if (receiveVariantId && !variant) throw new PurchasingError("Expected receive variant not found", 404);
     const product = await storage.getProductById(data.productId);
     if (!product) throw new PurchasingError("Product not found", 404);
 
@@ -1096,14 +1110,17 @@ export function createPurchasingService(db: any, storage: Storage) {
       purchaseOrderId,
       lineNumber: nextLineNumber,
       productId: data.productId,
-      productVariantId: data.productVariantId || null,
+      productVariantId: receiveVariantId,
+      expectedReceiveVariantId: receiveVariantId,
       vendorProductId: data.vendorProductId,
-      sku: variant?.sku || product.sku,
+      sku: product.sku || variant?.sku,
       productName: product.name,
       vendorSku: data.vendorSku,
       description: data.description,
       unitOfMeasure: data.unitOfMeasure || variant?.name?.split(" ")[0]?.toLowerCase() || product.baseUnit,
       unitsPerUom: data.unitsPerUom || variant?.unitsPerVariant || 1,
+      expectedReceiveUnitsPerVariant:
+        data.expectedReceiveUnitsPerVariant || data.unitsPerUom || variant?.unitsPerVariant || 1,
       orderQty: data.orderQty,
       unitCostCents: data.unitCostCents,
       discountPercent: String(data.discountPercent || 0),
@@ -1123,6 +1140,8 @@ export function createPurchasingService(db: any, storage: Storage) {
   async function addBulkLines(purchaseOrderId: number, lines: Array<{
     productId: number;
     productVariantId?: number | null;
+    expectedReceiveVariantId?: number | null;
+    expectedReceiveUnitsPerVariant?: number | null;
     vendorProductId?: number;
     orderQty: number;
     unitCostCents: number;
@@ -1143,7 +1162,9 @@ export function createPurchasingService(db: any, storage: Storage) {
 
     const lineData: any[] = [];
     for (const line of lines) {
-      const variant = line.productVariantId ? await storage.getProductVariantById(line.productVariantId) : null;
+      const receiveVariantId = line.expectedReceiveVariantId ?? line.productVariantId ?? null;
+      const variant = receiveVariantId ? await storage.getProductVariantById(receiveVariantId) : null;
+      if (receiveVariantId && !variant) throw new PurchasingError("Expected receive variant not found", 404);
       const product = await storage.getProductById(line.productId);
       if (!product) continue;
 
@@ -1156,14 +1177,17 @@ export function createPurchasingService(db: any, storage: Storage) {
         purchaseOrderId,
         lineNumber: nextLineNumber++,
         productId: line.productId,
-        productVariantId: line.productVariantId || null,
+        productVariantId: receiveVariantId,
+        expectedReceiveVariantId: receiveVariantId,
         vendorProductId: line.vendorProductId,
-        sku: variant?.sku || product.sku,
+        sku: product.sku || variant?.sku,
         productName: product.name,
         vendorSku: line.vendorSku,
         description: line.description,
         unitOfMeasure: line.unitOfMeasure || "each",
         unitsPerUom: variant?.unitsPerVariant || 1,
+        expectedReceiveUnitsPerVariant:
+          line.expectedReceiveUnitsPerVariant || variant?.unitsPerVariant || 1,
         orderQty: line.orderQty,
         unitCostCents: line.unitCostCents,
         lineTotalCents: costs.lineTotalCents,
@@ -1189,14 +1213,61 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot edit lines on PO in '${po.status}' status`, 400);
     }
 
-    const updated = await storage.updatePurchaseOrderLine(lineId, updates);
+    const normalizedUpdates = { ...updates };
+    const receiveVariantId =
+      normalizedUpdates.expectedReceiveVariantId ??
+      normalizedUpdates.productVariantId ??
+      null;
 
-    // Cascade variant/SKU changes to downstream records
-    if (updates.productVariantId || updates.sku) {
-      const newVariantId = updates.productVariantId ?? line.productVariantId;
-      const newSku = updates.sku ?? line.sku;
+    if (
+      normalizedUpdates.expectedReceiveUnitsPerVariant !== undefined &&
+      normalizedUpdates.expectedReceiveUnitsPerVariant !== null &&
+      (
+        !Number.isInteger(normalizedUpdates.expectedReceiveUnitsPerVariant) ||
+        normalizedUpdates.expectedReceiveUnitsPerVariant <= 0
+      )
+    ) {
+      throw new PurchasingError("expected_receive_units_per_variant must be a positive integer", 400);
+    }
+
+    if (receiveVariantId !== null) {
+      if (!Number.isInteger(receiveVariantId) || receiveVariantId <= 0) {
+        throw new PurchasingError("expected_receive_variant_id must be a positive integer", 400);
+      }
+      const variant = await storage.getProductVariantById(receiveVariantId);
+      if (!variant) throw new PurchasingError("Expected receive variant not found", 404);
+
+      normalizedUpdates.productVariantId = receiveVariantId;
+      normalizedUpdates.expectedReceiveVariantId = receiveVariantId;
+      normalizedUpdates.unitsPerUom =
+        normalizedUpdates.unitsPerUom ?? variant.unitsPerVariant ?? 1;
+      normalizedUpdates.expectedReceiveUnitsPerVariant =
+        normalizedUpdates.expectedReceiveUnitsPerVariant ??
+        variant.unitsPerVariant ??
+        1;
+    }
+
+    const updated = await storage.updatePurchaseOrderLine(lineId, normalizedUpdates);
+
+    // Cascade receive-configuration/SKU changes to downstream records.
+    if (
+      normalizedUpdates.productVariantId ||
+      normalizedUpdates.expectedReceiveVariantId ||
+      normalizedUpdates.sku
+    ) {
+      const newVariantId =
+        normalizedUpdates.expectedReceiveVariantId ??
+        normalizedUpdates.productVariantId ??
+        line.expectedReceiveVariantId ??
+        line.productVariantId;
+      const newSku = normalizedUpdates.sku ?? line.sku;
+      if (!newVariantId) {
+        console.warn(`[Purchasing] Skipped receive config cascade for PO line ${lineId}: no receive variant`);
+        await recalculateTotals(line.purchaseOrderId, userId);
+        return updated;
+      }
       try {
-        // Look up the new variant's units-per-case for carton recalc
+        // Look up the receive configuration's units-per-variant for carton recalc.
         const newVariant = await storage.getProductVariantById(newVariantId);
         const newUpc = newVariant?.unitsPerVariant ?? 1;
 
@@ -1218,9 +1289,9 @@ export function createPurchasingService(db: any, storage: Storage) {
         await db.update(vendorInvoiceLines)
           .set({ productVariantId: newVariantId })
           .where(eq(vendorInvoiceLines.purchaseOrderLineId, lineId));
-        console.log(`[Purchasing] Cascaded variant change on PO line ${lineId}: variant=${newVariantId} sku=${newSku} upc=${newUpc}`);
+        console.log(`[Purchasing] Cascaded receive config change on PO line ${lineId}: variant=${newVariantId} sku=${newSku} upc=${newUpc}`);
       } catch (err: any) {
-        console.warn(`[Purchasing] Failed to cascade variant change for PO line ${lineId}: ${err.message}`);
+        console.warn(`[Purchasing] Failed to cascade receive config change for PO line ${lineId}: ${err.message}`);
       }
     }
 
@@ -1822,36 +1893,11 @@ export function createPurchasingService(db: any, storage: Storage) {
     // otherwise we derive mills from cents via centsToMills (no rounding).
     // Keeps receiving_lines consistent with the (post-0562) contract in
     // receiving.service.ts: mills is the source of truth, cents mirrors.
-    // Default EVERY receiving line to the product's LARGEST pack (the case) and
-    // express Expected in that pack's units, regardless of how the PO line was
-    // ordered (no variant, Pack-of-1, or any smaller variant). Receivers count
-    // cases; the catalog models Case -> N x base, so 10 pieces ordered => Expected
-    // 1 Case-of-10 (not 10). Done once at creation so the unit is unambiguous
-    // downstream; the receiving UI's variant dropdown is the override for
-    // off-default packs.
-    const defaultPackByProduct = new Map<number, { id: number; unitsPerVariant: number }>();
-    for (const pid of Array.from(new Set(
-      receivableLines
-        .filter((pl: any) => pl.productId)
-        .map((pl: any) => pl.productId as number),
-    ))) {
-      try {
-        const vs = (await (storage as any).getProductVariantsByProductId?.(pid)) ?? [];
-        if (vs.length) {
-          const largest = vs.reduce((a: any, b: any) =>
-            ((b.unitsPerVariant || 1) > (a.unitsPerVariant || 1) ? b : a));
-          defaultPackByProduct.set(pid, { id: largest.id, unitsPerVariant: largest.unitsPerVariant || 1 });
-        }
-      } catch { /* non-critical: leave the line product-level */ }
-    }
-
     const receivingLineData = receivableLines.map((poLine: any) => {
-      // Prefer the product's largest pack (the case) as the receiving default,
-      // upgrading even Pack-of-1 / variant-level PO lines; fall back to the PO
-      // line's own variant only when the product has no resolvable packs.
-      const pack = defaultPackByProduct.get(poLine.productId);
-      const resolvedVariantId = pack?.id ?? poLine.productVariantId ?? null;
-      const packSize = pack?.unitsPerVariant ?? (poLine.unitsPerUom || 1);
+      const resolvedVariantId =
+        poLine.expectedReceiveVariantId ?? poLine.productVariantId ?? null;
+      const packSize =
+        poLine.expectedReceiveUnitsPerVariant ?? poLine.unitsPerUom ?? 1;
       const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
       const hasPoMills =
         typeof poLine.unitCostMills === "number" &&
@@ -1888,6 +1934,650 @@ export function createPurchasingService(db: any, storage: Storage) {
     return receivingOrder;
   }
 
+  type ShipmentReceiptExistingState =
+    | { kind: "none" }
+    | { kind: "active"; receipt: any }
+    | { kind: "empty_active"; receipt: any; lineCount: 0 }
+    | { kind: "zero_post_closed"; receipt: any; summary: ShipmentReceiptPostingSummary }
+    | { kind: "closed"; receipt: any };
+
+  type ShipmentReceiveOption = {
+    shipmentId: number;
+    shipmentNumber: string | null;
+    status: string | null;
+    purchaseOrderId: number;
+    lineCount: number;
+    qtyShipped: number;
+    receivedBaseQty: number;
+    remainingBaseQty: number;
+    missingPurchaseOrderLineCount: number;
+    receivable: boolean;
+    action: "create_receipt" | "open_existing_receipt" | "repair_empty_receipt" | "void_zero_post_receipt" | "blocked";
+    reason: string | null;
+    freightWillCarry: boolean;
+    estimatedTotalCostCents: number | null;
+    actualTotalCostCents: number | null;
+    existingReceiptId: number | null;
+    existingReceiptStatus: string | null;
+    existingReceiptLineCount: number | null;
+  };
+
+  type ShipmentReceiptPostingSummary = {
+    lineCount: number;
+    expectedQty: number;
+    receivedQty: number;
+    poReceiptCount: number;
+    inventoryLotCount: number;
+    inventoryTransactionCount: number;
+    postingStateKnown: boolean;
+  };
+
+  type ShipmentReceiptCoverageSummary = {
+    totalExpectedBaseQty: number;
+    totalReceivedBaseQty: number;
+    totalRemainingBaseQty: number;
+    remainingLines: any[];
+  };
+
+  type ShipmentCartonReceivePackInspection = {
+    status: "no_carton_count" | "fractional_carton" | "pack";
+    cartonCount: number | null;
+    shippedQty: number | null;
+    unitsPerVariant: number | null;
+    issue: string | null;
+  };
+
+  type ShipmentReceiptPackResolutionLine = {
+    shipmentLineId: number | null;
+    purchaseOrderId: number | null;
+    purchaseOrderLineId: number | null;
+    sku: string | null;
+    productId: number | null;
+    productName: string | null;
+    qtyShipped: number | null;
+    cartonCount: number | null;
+    unitsPerCarton: number | null;
+    status:
+      | "resolved"
+      | "no_carton_count"
+      | "fractional_carton"
+      | "missing_product"
+      | "missing_variant"
+      | "invalid_po_line";
+    blocking: boolean;
+    issue: string | null;
+    matchedVariant: {
+      id: number;
+      sku: string | null;
+      name: string | null;
+      unitsPerVariant: number;
+    } | null;
+    activeVariants: Array<{
+      id: number;
+      sku: string | null;
+      name: string | null;
+      unitsPerVariant: number;
+    }>;
+  };
+
+  function parsePositiveInteger(value: unknown): number | null {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function activeReceiptStatus(status: unknown): boolean {
+    return ACTIVE_RECEIPT_STATUSES.has(String(status ?? ""));
+  }
+
+  async function getShipmentReceiptPostingSummary(receivingOrderId: number): Promise<ShipmentReceiptPostingSummary> {
+    const fallback: ShipmentReceiptPostingSummary = {
+      lineCount: 0,
+      expectedQty: 0,
+      receivedQty: 0,
+      poReceiptCount: 0,
+      inventoryLotCount: 0,
+      inventoryTransactionCount: 0,
+      postingStateKnown: false,
+    };
+
+    try {
+      const result = await db.execute(sql`
+        SELECT
+          (SELECT COUNT(*)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS line_count,
+          (SELECT COALESCE(SUM(expected_qty), 0)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS expected_qty,
+          (SELECT COALESCE(SUM(received_qty), 0)::int FROM procurement.receiving_lines WHERE receiving_order_id = ${receivingOrderId}) AS received_qty,
+          (SELECT COUNT(*)::int FROM procurement.po_receipts WHERE receiving_order_id = ${receivingOrderId}) AS po_receipt_count,
+          (SELECT COUNT(*)::int FROM inventory.inventory_lots WHERE receiving_order_id = ${receivingOrderId}) AS inventory_lot_count,
+          (
+            SELECT COUNT(*)::int
+            FROM inventory.inventory_transactions
+            WHERE receiving_order_id = ${receivingOrderId}
+              AND voided_at IS NULL
+          ) AS inventory_transaction_count
+      `);
+      const row = result?.rows?.[0];
+      if (!row) return fallback;
+      return {
+        lineCount: Number(row.line_count ?? 0),
+        expectedQty: Number(row.expected_qty ?? 0),
+        receivedQty: Number(row.received_qty ?? 0),
+        poReceiptCount: Number(row.po_receipt_count ?? 0),
+        inventoryLotCount: Number(row.inventory_lot_count ?? 0),
+        inventoryTransactionCount: Number(row.inventory_transaction_count ?? 0),
+        postingStateKnown: true,
+      };
+    } catch (error) {
+      console.warn("[Procurement] Failed to inspect shipment receipt posting summary", {
+        receivingOrderId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return fallback;
+    }
+  }
+
+  function isZeroPostClosedShipmentReceipt(summary: ShipmentReceiptPostingSummary): boolean {
+    return summary.postingStateKnown &&
+      summary.lineCount > 0 &&
+      summary.receivedQty === 0 &&
+      summary.poReceiptCount === 0 &&
+      summary.inventoryLotCount === 0 &&
+      summary.inventoryTransactionCount === 0;
+  }
+
+  async function getClosedShipmentReceivedBaseQtyByPoLine(
+    purchaseOrderId: number,
+    inboundShipmentId: number,
+  ): Promise<Map<number, number>> {
+    const result = await db.execute(sql`
+      SELECT
+        rl.purchase_order_line_id,
+        COALESCE(SUM(rl.received_qty * COALESCE(pv.units_per_variant, 1)), 0)::int AS received_base_qty
+      FROM procurement.receiving_orders ro
+      JOIN procurement.receiving_lines rl ON rl.receiving_order_id = ro.id
+      LEFT JOIN catalog.product_variants pv ON pv.id = rl.product_variant_id
+      WHERE ro.purchase_order_id = ${purchaseOrderId}
+        AND ro.inbound_shipment_id = ${inboundShipmentId}
+        AND ro.status = 'closed'
+        AND rl.purchase_order_line_id IS NOT NULL
+      GROUP BY rl.purchase_order_line_id
+    `);
+
+    const receivedByPoLine = new Map<number, number>();
+    for (const row of result?.rows ?? []) {
+      const poLineId = parsePositiveInteger(row.purchase_order_line_id);
+      if (!poLineId) continue;
+      receivedByPoLine.set(poLineId, Number(row.received_base_qty ?? 0));
+    }
+    return receivedByPoLine;
+  }
+
+  function adjustShipmentLineToRemainingBaseQty(line: any, remainingBaseQty: number): any {
+    const adjusted = { ...line, qtyShipped: remainingBaseQty, qty_shipped: remainingBaseQty };
+    const pack = deriveShipmentCartonReceivePack(line);
+    if (pack) {
+      adjusted.cartonCount =
+        remainingBaseQty > 0 && remainingBaseQty % pack.unitsPerVariant === 0
+          ? remainingBaseQty / pack.unitsPerVariant
+          : null;
+      adjusted.carton_count = adjusted.cartonCount;
+    }
+    return adjusted;
+  }
+
+  function summarizeShipmentReceiptCoverage(
+    shipmentLines: any[],
+    receivedBaseQtyByPoLine: Map<number, number>,
+  ): ShipmentReceiptCoverageSummary {
+    const unappliedReceivedByPoLine = new Map(receivedBaseQtyByPoLine);
+    const remainingLines: any[] = [];
+    let totalExpectedBaseQty = 0;
+    let totalReceivedBaseQty = 0;
+
+    for (const line of shipmentLines) {
+      const expectedBaseQty = Number(line.qtyShipped ?? line.qty_shipped) || 0;
+      if (expectedBaseQty <= 0) continue;
+      totalExpectedBaseQty += expectedBaseQty;
+
+      const poLineId = parsePositiveInteger(line.purchaseOrderLineId ?? line.purchase_order_line_id);
+      const availableReceived = poLineId ? (unappliedReceivedByPoLine.get(poLineId) ?? 0) : 0;
+      const appliedReceived = Math.min(Math.max(availableReceived, 0), expectedBaseQty);
+      if (poLineId) {
+        unappliedReceivedByPoLine.set(poLineId, Math.max(0, availableReceived - appliedReceived));
+      }
+      totalReceivedBaseQty += appliedReceived;
+
+      const remainingBaseQty = expectedBaseQty - appliedReceived;
+      if (remainingBaseQty > 0) {
+        remainingLines.push(adjustShipmentLineToRemainingBaseQty(line, remainingBaseQty));
+      }
+    }
+
+    return {
+      totalExpectedBaseQty,
+      totalReceivedBaseQty,
+      totalRemainingBaseQty: Math.max(0, totalExpectedBaseQty - totalReceivedBaseQty),
+      remainingLines,
+    };
+  }
+
+  function variantIsActive(variant: any): boolean {
+    return variant?.isActive !== false && variant?.is_active !== false;
+  }
+
+  function variantUnitsPerVariant(variant: any): number {
+    const units = Number(variant?.unitsPerVariant ?? variant?.units_per_variant);
+    return Number.isInteger(units) && units > 0 ? units : 1;
+  }
+
+  function inspectShipmentCartonReceivePack(line: any): ShipmentCartonReceivePackInspection {
+    const cartonCount = parsePositiveInteger(line?.cartonCount ?? line?.carton_count);
+    const shippedQty = parsePositiveInteger(line?.qtyShipped ?? line?.qty_shipped);
+    if (!cartonCount || !shippedQty) {
+      return {
+        status: "no_carton_count",
+        cartonCount,
+        shippedQty,
+        unitsPerVariant: null,
+        issue: null,
+      };
+    }
+    if (shippedQty % cartonCount !== 0) {
+      return {
+        status: "fractional_carton",
+        cartonCount,
+        shippedQty,
+        unitsPerVariant: null,
+        issue: `Shipment line ${line?.sku ?? line?.id ?? ""} has ${shippedQty} shipped units across ${cartonCount} cartons; units per carton must be a whole number before receiving.`,
+      };
+    }
+    return {
+      status: "pack",
+      cartonCount,
+      shippedQty,
+      unitsPerVariant: shippedQty / cartonCount,
+      issue: null,
+    };
+  }
+
+  function deriveShipmentCartonReceivePack(line: any): { cartonCount: number; unitsPerVariant: number } | null {
+    const inspected = inspectShipmentCartonReceivePack(line);
+    if (inspected.status === "no_carton_count") return null;
+    if (inspected.status === "fractional_carton") {
+      throw new PurchasingError(
+        inspected.issue ?? "Shipment carton quantity cannot be resolved.",
+        400,
+        { shipmentLineId: line?.id ?? null, qtyShipped: inspected.shippedQty, cartonCount: inspected.cartonCount },
+      );
+    }
+    return { cartonCount: inspected.cartonCount as number, unitsPerVariant: inspected.unitsPerVariant as number };
+  }
+
+  function chooseActiveVariantByUnits(variants: any[], unitsPerVariant: number): any | null {
+    return variants.find(
+      (variant) =>
+        parsePositiveInteger(variant?.id) &&
+        variantIsActive(variant) &&
+        variantUnitsPerVariant(variant) === unitsPerVariant,
+    ) ?? null;
+  }
+
+  function chooseFallbackReceiveVariant(variants: any[], qtyShipped: unknown): any | null {
+    const shippedQty = Number(qtyShipped);
+    const activeVariants = variants
+      .filter((variant) => parsePositiveInteger(variant?.id) && variantIsActive(variant))
+      .map((variant) => ({ variant, unitsPerVariant: variantUnitsPerVariant(variant) }))
+      .sort((a, b) => b.unitsPerVariant - a.unitsPerVariant);
+
+    if (activeVariants.length === 0) return null;
+
+    if (Number.isInteger(shippedQty) && shippedQty > 0) {
+      const exactFit = activeVariants.find(
+        ({ unitsPerVariant }) => unitsPerVariant <= shippedQty && shippedQty % unitsPerVariant === 0,
+      );
+      if (exactFit) return exactFit.variant;
+
+      const largestNotExceedingShipment = activeVariants.find(
+        ({ unitsPerVariant }) => unitsPerVariant <= shippedQty,
+      );
+      if (largestNotExceedingShipment) return largestNotExceedingShipment.variant;
+    }
+
+    return activeVariants[activeVariants.length - 1]?.variant ?? null;
+  }
+
+  function summarizeActiveVariants(variants: any[]): ShipmentReceiptPackResolutionLine["activeVariants"] {
+    return variants
+      .filter((variant) => parsePositiveInteger(variant?.id) && variantIsActive(variant))
+      .map((variant) => ({
+        id: parsePositiveInteger(variant.id) as number,
+        sku: variant.sku ?? null,
+        name: variant.name ?? null,
+        unitsPerVariant: variantUnitsPerVariant(variant),
+      }))
+      .sort((a, b) => b.unitsPerVariant - a.unitsPerVariant || a.id - b.id);
+  }
+
+  function emptyShipmentReceiptError(
+    receipt: any,
+    purchaseOrderId: number,
+    inboundShipmentId: number,
+  ): PurchasingError {
+    return new PurchasingError(
+      "An empty draft receipt already exists for this shipment and PO. Clean up that draft receipt, then receive the shipment again.",
+      409,
+      {
+        code: "EMPTY_SHIPMENT_RECEIPT",
+        receivingOrderId: receipt?.id ?? null,
+        purchaseOrderId,
+        inboundShipmentId,
+      },
+    );
+  }
+
+  async function getReceiptForShipmentPo(
+    purchaseOrderId: number,
+    inboundShipmentId: number,
+  ): Promise<ShipmentReceiptExistingState> {
+    const receipts =
+      typeof storage.getReceivingOrdersForPurchaseOrder === "function"
+        ? await storage.getReceivingOrdersForPurchaseOrder(purchaseOrderId)
+        : [];
+    const matchingReceipts = receipts.filter(
+      (candidate: any) =>
+        Number(candidate.inboundShipmentId) === inboundShipmentId &&
+        candidate.status !== "cancelled",
+    );
+    if (matchingReceipts.length === 0) return { kind: "none" };
+
+    const activeReceipt = matchingReceipts.find((candidate: any) => activeReceiptStatus(candidate.status));
+    if (activeReceipt) {
+      if (typeof storage.getReceivingLines === "function") {
+        const lines = await storage.getReceivingLines(activeReceipt.id);
+        if (lines.length === 0) return { kind: "empty_active", receipt: activeReceipt, lineCount: 0 };
+      }
+      return { kind: "active", receipt: activeReceipt };
+    }
+
+    for (const receipt of matchingReceipts) {
+      const summary = await getShipmentReceiptPostingSummary(receipt.id);
+      if (isZeroPostClosedShipmentReceipt(summary)) {
+        return { kind: "zero_post_closed", receipt, summary };
+      }
+    }
+
+    return { kind: "closed", receipt: matchingReceipts[0] };
+  }
+
+  function buildShipmentReceiveOption(params: {
+    shipment: any | null;
+    purchaseOrderId: number;
+    inboundShipmentId: number;
+    shipmentLines: any[];
+    existing: ShipmentReceiptExistingState;
+    coverage: ShipmentReceiptCoverageSummary;
+  }): ShipmentReceiveOption {
+    const { shipment, purchaseOrderId, inboundShipmentId, shipmentLines, existing, coverage } = params;
+    const status = shipment?.status ?? null;
+    const missingPurchaseOrderLineCount = shipmentLines.filter((line: any) => !line.purchaseOrderLineId).length;
+    const shipmentIsReceivable = status ? RECEIVABLE_SHIPMENT_STATUSES.has(status) : false;
+    const lineCount = shipmentLines.length;
+    const qtyShipped = shipmentLines.reduce((sum, line: any) => sum + (Number(line.qtyShipped) || 0), 0);
+
+    let action: ShipmentReceiveOption["action"] = "create_receipt";
+    let reason: string | null = null;
+    let receivable = true;
+
+    if (!shipment) {
+      receivable = false;
+      action = "blocked";
+      reason = `Shipment ${inboundShipmentId} was referenced by PO lines but no shipment row was found.`;
+    } else if (!shipmentIsReceivable) {
+      receivable = false;
+      action = "blocked";
+      reason = `Shipment is ${String(status).replace(/_/g, " ")}, so it is not physically receivable yet.`;
+    } else if (lineCount === 0) {
+      receivable = false;
+      action = "blocked";
+      reason = "Shipment has no positive-quantity lines for this PO.";
+    } else if (missingPurchaseOrderLineCount > 0) {
+      receivable = false;
+      action = "blocked";
+      reason = `${missingPurchaseOrderLineCount} shipment line(s) are missing PO line links.`;
+    } else if (existing.kind === "active") {
+      action = "open_existing_receipt";
+      reason = "A receipt is already open for this shipment and PO.";
+    } else if (existing.kind === "empty_active") {
+      receivable = false;
+      action = "repair_empty_receipt";
+      reason = "A draft shipment receipt exists but has no lines. Clean it up, then receive this shipment again so the pack checks can run.";
+    } else if (existing.kind === "zero_post_closed") {
+      receivable = false;
+      action = "void_zero_post_receipt";
+      reason = "A closed receipt exists for this shipment and PO, but it posted zero received quantity. Void that zero-post receipt, then receive this shipment again.";
+    } else if (existing.kind === "closed" && coverage.totalRemainingBaseQty <= 0) {
+      receivable = false;
+      action = "blocked";
+      reason = "This shipment has already been received for this PO.";
+    } else if (existing.kind === "closed") {
+      action = "create_receipt";
+      reason = `A prior shipment receipt was short; ${coverage.totalRemainingBaseQty} of ${coverage.totalExpectedBaseQty} shipped base units remain to receive.`;
+    }
+
+    const existingReceipt = existing.kind === "none" ? null : existing.receipt;
+    const existingReceiptLineCount =
+      existing.kind === "empty_active" ? existing.lineCount :
+      existing.kind === "zero_post_closed" ? existing.summary.lineCount :
+      null;
+    return {
+      shipmentId: inboundShipmentId,
+      shipmentNumber: shipment?.shipmentNumber ?? null,
+      status,
+      purchaseOrderId,
+      lineCount,
+      qtyShipped,
+      receivedBaseQty: coverage.totalReceivedBaseQty,
+      remainingBaseQty: coverage.totalRemainingBaseQty,
+      missingPurchaseOrderLineCount,
+      receivable,
+      action,
+      reason,
+      freightWillCarry: receivable && action !== "blocked",
+      estimatedTotalCostCents: shipment?.estimatedTotalCostCents ?? null,
+      actualTotalCostCents: shipment?.actualTotalCostCents ?? null,
+      existingReceiptId: existingReceipt?.id ?? null,
+      existingReceiptStatus: existingReceipt?.status ?? null,
+      existingReceiptLineCount,
+    };
+  }
+
+  async function getPurchaseOrderReceiveOptions(purchaseOrderId: number) {
+    const po = await storage.getPurchaseOrderById(purchaseOrderId);
+    if (!po) throw new PurchasingError("Purchase order not found", 404);
+
+    const shipmentLines = await storage.getInboundShipmentLinesByPo(purchaseOrderId);
+    const positiveShipmentLines = shipmentLines.filter((line: any) => Number(line.qtyShipped) > 0);
+    const linesByShipment = new Map<number, any[]>();
+    for (const line of positiveShipmentLines) {
+      const shipmentId = parsePositiveInteger(line.inboundShipmentId);
+      if (!shipmentId) continue;
+      const lines = linesByShipment.get(shipmentId) ?? [];
+      lines.push(line);
+      linesByShipment.set(shipmentId, lines);
+    }
+
+    const shipmentOptions: ShipmentReceiveOption[] = [];
+    for (const [shipmentId, lines] of linesByShipment) {
+      const [shipment, existing, receivedBaseQtyByPoLine] = await Promise.all([
+        storage.getInboundShipmentById(shipmentId),
+        getReceiptForShipmentPo(purchaseOrderId, shipmentId),
+        getClosedShipmentReceivedBaseQtyByPoLine(purchaseOrderId, shipmentId),
+      ]);
+      const coverage = summarizeShipmentReceiptCoverage(lines, receivedBaseQtyByPoLine);
+      shipmentOptions.push(buildShipmentReceiveOption({
+        shipment,
+        purchaseOrderId,
+        inboundShipmentId: shipmentId,
+        shipmentLines: lines,
+        existing,
+        coverage,
+      }));
+    }
+
+    shipmentOptions.sort((a, b) => {
+      const rank = Number(b.receivable) - Number(a.receivable);
+      if (rank !== 0) return rank;
+      return b.shipmentId - a.shipmentId;
+    });
+
+    const poDirectAllowed = ["sent", "acknowledged", "partially_received"].includes(po.status);
+    const linkedShipmentCount = shipmentOptions.length;
+    return {
+      purchaseOrderId,
+      poNumber: po.poNumber,
+      status: po.status,
+      physicalStatus: po.physicalStatus ?? null,
+      shipmentOptions,
+      poDirect: {
+        allowed: poDirectAllowed,
+        reason: poDirectAllowed ? null : `Cannot create receipt for PO in '${po.status}' status`,
+        warning: linkedShipmentCount > 0
+          ? "PO-direct receiving does not attach shipment freight to the received lots."
+          : "No inbound shipment exists for this PO. PO-direct receiving is appropriate for no-freight or domestic receipts.",
+      },
+    };
+  }
+
+  async function getShipmentReceiptPackResolution(
+    inboundShipmentId: number,
+    options: { purchaseOrderId?: number } = {},
+  ) {
+    const shipment = await storage.getInboundShipmentById(inboundShipmentId);
+    if (!shipment) throw new PurchasingError("Inbound shipment not found", 404);
+
+    const shipmentLines = await storage.getInboundShipmentLines(inboundShipmentId);
+    const linkedShipmentLines = shipmentLines.filter(
+      (sl: any) => Number(sl.qtyShipped) > 0 && sl.purchaseOrderId && sl.purchaseOrderLineId,
+    );
+    const poIds = Array.from(
+      new Set(linkedShipmentLines.map((sl: any) => Number(sl.purchaseOrderId)).filter((id: number) => Number.isInteger(id) && id > 0)),
+    ).sort((a, b) => a - b);
+    const requestedPoId = parsePositiveInteger(options.purchaseOrderId);
+    if (!requestedPoId && poIds.length !== 1) {
+      throw new PurchasingError(
+        "This shipment's lines span multiple POs; choose which PO to receive.",
+        409,
+        { purchaseOrderIds: poIds },
+      );
+    }
+    const purchaseOrderId = requestedPoId ?? (poIds[0] as number | undefined);
+    if (!purchaseOrderId || !poIds.includes(purchaseOrderId)) {
+      throw new PurchasingError(
+        `Shipment ${inboundShipmentId} has no receivable lines for PO ${purchaseOrderId ?? "unknown"}.`,
+        404,
+        { purchaseOrderIds: poIds },
+      );
+    }
+
+    const po = await storage.getPurchaseOrderById(purchaseOrderId);
+    if (!po) throw new PurchasingError("Linked purchase order not found", 404);
+
+    const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
+    const poLineById = new Map<number, any>(poLines.map((line: any) => [line.id, line]));
+    const receivableShipmentLines = linkedShipmentLines.filter(
+      (sl: any) => Number(sl.purchaseOrderId) === purchaseOrderId,
+    );
+
+    const productIds = new Set<number>();
+    for (const sl of receivableShipmentLines) {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const productId = parsePositiveInteger(poLine?.productId);
+      if (productId) productIds.add(productId);
+    }
+
+    const variantsByProductId = new Map<number, any[]>();
+    if (typeof storage.getProductVariantsByProductId === "function") {
+      for (const productId of productIds) {
+        try {
+          variantsByProductId.set(productId, await storage.getProductVariantsByProductId(productId));
+        } catch {
+          variantsByProductId.set(productId, []);
+        }
+      }
+    }
+
+    const lines: ShipmentReceiptPackResolutionLine[] = receivableShipmentLines.map((sl: any) => {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const productId = parsePositiveInteger(poLine?.productId);
+      const inspectedPack = inspectShipmentCartonReceivePack(sl);
+      const activeVariants = productId
+        ? summarizeActiveVariants(variantsByProductId.get(productId) ?? [])
+        : [];
+      const matchedVariant = inspectedPack.unitsPerVariant
+        ? activeVariants.find((variant) => variant.unitsPerVariant === inspectedPack.unitsPerVariant) ?? null
+        : null;
+
+      let status: ShipmentReceiptPackResolutionLine["status"] = "resolved";
+      let blocking = false;
+      let issue: string | null = null;
+
+      if (!poLine) {
+        status = "invalid_po_line";
+        blocking = true;
+        issue = "Shipment line is linked to a PO line that was not found on this purchase order.";
+      } else if (inspectedPack.status === "fractional_carton") {
+        status = "fractional_carton";
+        blocking = true;
+        issue = inspectedPack.issue;
+      } else if (inspectedPack.status === "no_carton_count") {
+        status = "no_carton_count";
+        blocking = false;
+        issue = "Shipment line has no carton count; receipt creation will use the existing receive configuration.";
+      } else if (!productId) {
+        status = "missing_product";
+        blocking = true;
+        issue = "Shipment cartons are present, but the PO line has no product_id to resolve a receive variant.";
+      } else if (!matchedVariant) {
+        status = "missing_variant";
+        blocking = true;
+        issue = `Shipment cartons imply ${inspectedPack.cartonCount} carton${inspectedPack.cartonCount === 1 ? "" : "s"} of ${inspectedPack.unitsPerVariant} units, but product ${productId} has no active receive variant with units_per_variant=${inspectedPack.unitsPerVariant}.`;
+      }
+
+      return {
+        shipmentLineId: parsePositiveInteger(sl.id),
+        purchaseOrderId: parsePositiveInteger(sl.purchaseOrderId),
+        purchaseOrderLineId: parsePositiveInteger(sl.purchaseOrderLineId),
+        sku: poLine?.sku ?? sl.sku ?? null,
+        productId,
+        productName: poLine?.productName ?? poLine?.product_name ?? null,
+        qtyShipped: parsePositiveInteger(sl.qtyShipped ?? sl.qty_shipped),
+        cartonCount: inspectedPack.cartonCount,
+        unitsPerCarton: inspectedPack.unitsPerVariant,
+        status,
+        blocking,
+        issue,
+        matchedVariant,
+        activeVariants,
+      };
+    });
+
+    const blockingLines = lines.filter((line) => line.blocking);
+    const shipmentIsReceivable = RECEIVABLE_SHIPMENT_STATUSES.has((shipment as any).status);
+    return {
+      shipmentId: inboundShipmentId,
+      shipmentNumber: shipment.shipmentNumber ?? shipment.shipment_number ?? null,
+      status: shipment.status ?? null,
+      purchaseOrderId,
+      poNumber: po.poNumber ?? po.po_number ?? null,
+      canCreateReceipt: shipmentIsReceivable && linkedShipmentLines.length > 0 && blockingLines.length === 0,
+      unresolvedCount: blockingLines.length,
+      lineCount: lines.length,
+      issue: shipmentIsReceivable
+        ? (lines.length === 0 ? "Shipment has no positive-quantity lines linked to this PO." : null)
+        : `Cannot receive a shipment in '${(shipment as any).status}' status.`,
+      lines,
+    };
+  }
+
   /**
    * Create a receiving order against an inbound SHIPMENT (the freight-bearing
    * leg). Mirrors createReceiptFromPO's line-building, but:
@@ -1898,99 +2588,157 @@ export function createPurchasingService(db: any, storage: Storage) {
    *     shipment's finalized landed cost attaches to exactly these lots.
    * Cost is still stamped from the PO line (the AP source of truth).
    *
-   * NOTE: the per-line cost stamping + largest-pack defaults intentionally mirror
-   * createReceiptFromPO — keep the two in sync (or DRY) if that logic changes.
+   * NOTE: cost stamping mirrors createReceiptFromPO. Shipment lines already
+   * carry the resolved receive variant.
    */
-  async function createReceiptFromShipment(inboundShipmentId: number, userId?: string) {
-    const shipment = await (storage as any).getInboundShipmentById(inboundShipmentId);
+  async function createReceiptFromShipment(
+    inboundShipmentId: number,
+    userId?: string,
+    options: { purchaseOrderId?: number } = {},
+  ) {
+    const shipment = await storage.getInboundShipmentById(inboundShipmentId);
     if (!shipment) throw new PurchasingError("Inbound shipment not found", 404);
 
     // Goods must be physically here (or being costed/closed) to receive them.
-    const receivableStatuses = ["at_port", "customs_clearance", "delivered", "costing", "closed"];
-    if (!receivableStatuses.includes((shipment as any).status)) {
+    if (!RECEIVABLE_SHIPMENT_STATUSES.has((shipment as any).status)) {
       throw new PurchasingError(`Cannot receive a shipment in '${(shipment as any).status}' status`, 400);
     }
 
-    const shipmentLines = await (storage as any).getInboundShipmentLines(inboundShipmentId);
-    const receivableShipmentLines = shipmentLines.filter(
-      (sl: any) => Number(sl.qtyShipped) > 0 && sl.purchaseOrderLineId,
+    const shipmentLines = await storage.getInboundShipmentLines(inboundShipmentId);
+    const linkedShipmentLines = shipmentLines.filter(
+      (sl: any) => Number(sl.qtyShipped) > 0 && sl.purchaseOrderId && sl.purchaseOrderLineId,
     );
-    if (receivableShipmentLines.length === 0) {
+    if (linkedShipmentLines.length === 0) {
       throw new PurchasingError("Shipment has no receivable lines", 400);
     }
 
-    // PR3a handles single-PO shipments (the common case). A multi-PO shipment
-    // makes the receiving order's PO link ambiguous for reconciliation; receive
-    // those per PO until that's modeled.
     const poIds = Array.from(
-      new Set(receivableShipmentLines.map((sl: any) => sl.purchaseOrderId).filter(Boolean)),
-    );
-    if (poIds.length !== 1) {
+      new Set(linkedShipmentLines.map((sl: any) => Number(sl.purchaseOrderId)).filter((id: number) => Number.isInteger(id) && id > 0)),
+    ).sort((a, b) => a - b);
+    const requestedPoId = parsePositiveInteger(options.purchaseOrderId);
+    if (!requestedPoId && poIds.length !== 1) {
       throw new PurchasingError(
-        "This shipment's lines span multiple POs; receiving multi-PO shipments isn't supported yet.",
-        400,
+        "This shipment's lines span multiple POs; choose which PO to receive.",
+        409,
+        { purchaseOrderIds: poIds },
       );
     }
-    const purchaseOrderId = poIds[0] as number;
+    const purchaseOrderId = requestedPoId ?? (poIds[0] as number);
+    if (!poIds.includes(purchaseOrderId)) {
+      throw new PurchasingError(
+        `Shipment ${inboundShipmentId} has no receivable lines for PO ${purchaseOrderId}.`,
+        404,
+        { purchaseOrderIds: poIds },
+      );
+    }
+
+    const receivableShipmentLines = linkedShipmentLines.filter(
+      (sl: any) => Number(sl.purchaseOrderId) === purchaseOrderId,
+    );
+    const receivedBaseQtyByPoLine = await getClosedShipmentReceivedBaseQtyByPoLine(
+      purchaseOrderId,
+      inboundShipmentId,
+    );
+    const coverage = summarizeShipmentReceiptCoverage(receivableShipmentLines, receivedBaseQtyByPoLine);
+    const receiptShipmentLines = coverage.remainingLines;
     const po = await storage.getPurchaseOrderById(purchaseOrderId);
     if (!po) throw new PurchasingError("Linked purchase order not found", 404);
 
-    // Reuse: if an open receipt is already linked to THIS shipment, return it
-    // instead of spawning a duplicate (idempotent on repeat clicks).
-    const findOpenForShipment = async () =>
-      (await (storage as any).getReceivingOrdersForPurchaseOrder(purchaseOrderId)).find(
-        (r: any) =>
-          Number(r.inboundShipmentId) === inboundShipmentId &&
-          r.status !== "closed" &&
-          r.status !== "cancelled",
+    const existingReceipt = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
+    if (existingReceipt.kind === "active") return { ...existingReceipt.receipt, reusedExisting: true };
+    if (existingReceipt.kind === "empty_active") {
+      throw emptyShipmentReceiptError(existingReceipt.receipt, purchaseOrderId, inboundShipmentId);
+    }
+    if (existingReceipt.kind === "zero_post_closed") {
+      throw new PurchasingError(
+        "A closed zero-post receipt already exists for this shipment and PO. Void that receipt, then receive the shipment again.",
+        409,
+        {
+          code: "ZERO_POST_SHIPMENT_RECEIPT",
+          receivingOrderId: existingReceipt.receipt.id,
+          purchaseOrderId,
+          inboundShipmentId,
+        },
       );
-    const reusable = await findOpenForShipment();
-    if (reusable) return { ...reusable, reusedExisting: true };
+    }
+    if (existingReceipt.kind === "closed" && coverage.totalRemainingBaseQty <= 0) {
+      throw new PurchasingError(
+        "This shipment has already been received for this PO.",
+        409,
+        { receivingOrderId: existingReceipt.receipt.id, purchaseOrderId, inboundShipmentId },
+      );
+    }
+    if (receiptShipmentLines.length === 0) {
+      throw new PurchasingError(
+        "This shipment has no remaining quantity to receive for this PO.",
+        409,
+        {
+          code: "SHIPMENT_ALREADY_FULLY_RECEIVED",
+          purchaseOrderId,
+          inboundShipmentId,
+          receivedBaseQty: coverage.totalReceivedBaseQty,
+          expectedBaseQty: coverage.totalExpectedBaseQty,
+        },
+      );
+    }
 
     const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
     const poLineById = new Map<number, any>(poLines.map((l: any) => [l.id, l]));
-
-    const receiptNumber = await storage.generateReceiptNumber();
-    let receivingOrder;
-    try {
-      receivingOrder = await storage.createReceivingOrder({
-        receiptNumber,
-        poNumber: po.poNumber,
-        purchaseOrderId: po.id,
-        inboundShipmentId,
-        sourceType: "shipment",
-        vendorId: po.vendorId,
-        warehouseId: po.warehouseId,
-        status: "draft",
-        expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
-        createdBy: userId,
-      });
-    } catch (error: any) {
-      if (error?.code === "23505") {
-        const conflict = await findOpenForShipment();
-        if (conflict) return { ...conflict, reusedExisting: true };
-        throw new PurchasingError(`Receipt number '${receiptNumber}' already in use by an active record.`, 409);
-      }
-      throw error;
+    const invalidLinkedLine = receivableShipmentLines.find((sl: any) => {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const linePurchaseOrderId = parsePositiveInteger(poLine?.purchaseOrderId);
+      return !poLine || (linePurchaseOrderId !== null && linePurchaseOrderId !== purchaseOrderId);
+    });
+    if (invalidLinkedLine) {
+      throw new PurchasingError(
+        "Shipment line PO links are inconsistent; receiving is blocked until the line links are repaired.",
+        409,
+        {
+          inboundShipmentId,
+          inboundShipmentLineId: invalidLinkedLine.id,
+          purchaseOrderId,
+          purchaseOrderLineId: invalidLinkedLine.purchaseOrderLineId ?? null,
+        },
+      );
     }
 
-    // Largest-pack defaults + primary putaway locations (mirrors createReceiptFromPO).
-    const productIds = Array.from(new Set(
-      receivableShipmentLines
-        .map((sl: any) => poLineById.get(sl.purchaseOrderLineId)?.productId)
-        .filter(Boolean),
-    )) as number[];
-    const defaultPackByProduct = new Map<number, { id: number; unitsPerVariant: number }>();
-    for (const pid of productIds) {
+    const unitsPerVariantById = new Map<number, number>();
+    const fallbackVariantsByProductId = new Map<number, any[]>();
+    const explicitVariantIds = new Set<number>();
+    for (const sl of receiptShipmentLines) {
+      const poLine = poLineById.get(sl.purchaseOrderLineId);
+      const variantId = parsePositiveInteger(
+        sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId,
+      );
+      if (variantId) explicitVariantIds.add(variantId);
+    }
+    for (const variantId of explicitVariantIds) {
       try {
-        const vs = (await (storage as any).getProductVariantsByProductId?.(pid)) ?? [];
-        if (vs.length) {
-          const largest = vs.reduce((a: any, b: any) =>
-            ((b.unitsPerVariant || 1) > (a.unitsPerVariant || 1) ? b : a));
-          defaultPackByProduct.set(pid, { id: largest.id, unitsPerVariant: largest.unitsPerVariant || 1 });
+        const variant = await storage.getProductVariantById(variantId);
+        if (variant) {
+          unitsPerVariantById.set(variantId, Math.max(1, variant.unitsPerVariant || 1));
         }
-      } catch { /* non-critical: leave the line product-level */ }
+      } catch { /* non-critical: fall back to PO receive units */ }
     }
+    if (typeof storage.getProductVariantsByProductId === "function") {
+      const productIdsNeedingFallback = new Set<number>();
+      for (const sl of receiptShipmentLines) {
+        const poLine = poLineById.get(sl.purchaseOrderLineId);
+        const productId = parsePositiveInteger(poLine?.productId);
+        const hasExplicitVariant = parsePositiveInteger(
+          sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId,
+        );
+        const shipmentReceivePack = deriveShipmentCartonReceivePack(sl);
+        if (productId && (!hasExplicitVariant || shipmentReceivePack)) productIdsNeedingFallback.add(productId);
+      }
+      for (const productId of productIdsNeedingFallback) {
+        try {
+          const variants = await storage.getProductVariantsByProductId(productId);
+          fallbackVariantsByProductId.set(productId, variants);
+        } catch { /* non-critical: fall back to PO receive units */ }
+      }
+    }
+    // Primary putaway locations keyed by receive variant.
     const productLocationMap = new Map<number, number>();
     try {
       const allProductLocations = (await (storage as any).getAllProductLocations?.()) ?? [];
@@ -2003,14 +2751,61 @@ export function createPurchasingService(db: any, storage: Storage) {
       }
     } catch { /* non-critical */ }
 
-    // Build receiving lines from the SHIPMENT lines: Expected = qtyShipped scaled
-    // to the product's largest pack; cost stamped from the PO line (mills-first).
-    const receivingLineData = receivableShipmentLines.map((sl: any) => {
+    // Build receiving lines from SHIPMENT lines. When the shipment carries a
+    // carton count, the shipment's carton math is the receipt authority; the
+    // product variant must exactly match the implied units-per-carton so
+    // inventory posting still lands in the right variant units.
+    const receivingLineData = receiptShipmentLines.map((sl: any) => {
       const poLine = poLineById.get(sl.purchaseOrderLineId);
-      const productId = poLine?.productId ?? null;
-      const pack = productId != null ? defaultPackByProduct.get(productId) : undefined;
-      const resolvedVariantId = pack?.id ?? sl.productVariantId ?? poLine?.productVariantId ?? null;
-      const packSize = Math.max(1, pack?.unitsPerVariant ?? (poLine?.unitsPerUom || 1));
+      const productId = parsePositiveInteger(poLine?.productId);
+      const shipmentReceivePack = deriveShipmentCartonReceivePack(sl);
+      if (shipmentReceivePack && !productId) {
+        throw new PurchasingError(
+          `Shipment line ${poLine?.sku ?? sl.sku ?? sl.id} has carton count but no product_id on its PO line; cannot resolve a receive variant.`,
+          400,
+          {
+            shipmentLineId: sl.id ?? null,
+            purchaseOrderLineId: sl.purchaseOrderLineId ?? null,
+            qtyShipped: sl.qtyShipped,
+            cartonCount: shipmentReceivePack.cartonCount,
+            unitsPerVariant: shipmentReceivePack.unitsPerVariant,
+          },
+        );
+      }
+      const shipmentReceiveVariant = productId && shipmentReceivePack
+        ? chooseActiveVariantByUnits(
+            fallbackVariantsByProductId.get(productId) ?? [],
+            shipmentReceivePack.unitsPerVariant,
+          )
+        : null;
+      if (shipmentReceivePack && productId && !shipmentReceiveVariant) {
+        throw new PurchasingError(
+          `Shipment line ${poLine?.sku ?? sl.sku ?? sl.id} expects ${shipmentReceivePack.cartonCount} carton${shipmentReceivePack.cartonCount === 1 ? "" : "s"} of ${shipmentReceivePack.unitsPerVariant}, but product ${productId} has no active receive variant with units_per_variant=${shipmentReceivePack.unitsPerVariant}. Update the product receive variant before creating the receipt.`,
+          400,
+          {
+            shipmentLineId: sl.id ?? null,
+            purchaseOrderLineId: sl.purchaseOrderLineId ?? null,
+            productId,
+            qtyShipped: sl.qtyShipped,
+            cartonCount: shipmentReceivePack.cartonCount,
+            unitsPerVariant: shipmentReceivePack.unitsPerVariant,
+          },
+        );
+      }
+      const fallbackVariant = productId
+        ? chooseFallbackReceiveVariant(fallbackVariantsByProductId.get(productId) ?? [], sl.qtyShipped)
+        : null;
+      const resolvedVariantId =
+        shipmentReceiveVariant?.id ?? sl.productVariantId ?? poLine?.expectedReceiveVariantId ?? poLine?.productVariantId ?? fallbackVariant?.id ?? null;
+      const packSize = Math.max(
+        1,
+        shipmentReceivePack?.unitsPerVariant ??
+          (resolvedVariantId ? unitsPerVariantById.get(resolvedVariantId) : undefined) ??
+          (fallbackVariant ? Number(fallbackVariant.unitsPerVariant) : undefined) ??
+          poLine?.expectedReceiveUnitsPerVariant ??
+          poLine?.unitsPerUom ??
+          1,
+      );
       const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
       const hasPoMills =
         typeof poLine?.unitCostMills === "number" &&
@@ -2025,12 +2820,11 @@ export function createPurchasingService(db: any, storage: Storage) {
         ? millsToCents(poLine.unitCostMills as number)
         : (typeof poLine?.unitCostCents === "number" ? poLine.unitCostCents : null);
       return {
-        receivingOrderId: receivingOrder!.id,
         productVariantId: resolvedVariantId,
         productId,
         sku: poLine?.sku ?? sl.sku,
         productName: poLine?.productName,
-        expectedQty: Math.ceil(Number(sl.qtyShipped) / packSize),
+        expectedQty: shipmentReceivePack?.cartonCount ?? Math.ceil(Number(sl.qtyShipped) / packSize),
         receivedQty: 0,
         damagedQty: 0,
         purchaseOrderLineId: sl.purchaseOrderLineId,
@@ -2041,7 +2835,88 @@ export function createPurchasingService(db: any, storage: Storage) {
       };
     });
 
-    await storage.bulkCreateReceivingLines(receivingLineData as any);
+    if (receivingLineData.length === 0) {
+      throw new PurchasingError("Shipment has no receivable lines for this PO.", 400, {
+        purchaseOrderId,
+        inboundShipmentId,
+      });
+    }
+
+    const expectedLineCount = receivingLineData.length;
+    const expectedTotalUnits = receivingLineData.reduce(
+      (sum: number, line: any) => sum + (Number(line.expectedQty) || 0),
+      0,
+    );
+
+    const receiptNumber = await storage.generateReceiptNumber();
+    let receivingOrder;
+    try {
+      receivingOrder = await storage.createReceivingOrder({
+        receiptNumber,
+        poNumber: po.poNumber,
+        purchaseOrderId: po.id,
+        inboundShipmentId,
+        sourceType: "shipment",
+        vendorId: po.vendorId,
+        warehouseId: po.warehouseId,
+        status: "draft",
+        expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
+        expectedLineCount,
+        expectedTotalUnits,
+        createdBy: userId,
+      });
+    } catch (error: any) {
+      if (error?.code === "23505") {
+        const conflict = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
+        if (conflict.kind === "active") return { ...conflict.receipt, reusedExisting: true };
+        if (conflict.kind === "empty_active") {
+          throw emptyShipmentReceiptError(conflict.receipt, purchaseOrderId, inboundShipmentId);
+        }
+        if (conflict.kind === "zero_post_closed") {
+          throw new PurchasingError(
+            "A closed zero-post receipt already exists for this shipment and PO. Void that receipt, then receive the shipment again.",
+            409,
+            {
+              code: "ZERO_POST_SHIPMENT_RECEIPT",
+              receivingOrderId: conflict.receipt.id,
+              purchaseOrderId,
+              inboundShipmentId,
+            },
+          );
+        }
+        if (conflict.kind === "closed") {
+          throw new PurchasingError(
+            "This shipment has already been received for this PO.",
+            409,
+            { receivingOrderId: conflict.receipt.id, purchaseOrderId, inboundShipmentId },
+          );
+        }
+        throw new PurchasingError(`Receipt number '${receiptNumber}' already in use by an active record.`, 409);
+      }
+      throw error;
+    }
+
+    const receivingLinesToCreate = receivingLineData.map((line: any) => ({
+      ...line,
+      receivingOrderId: receivingOrder.id,
+    }));
+    try {
+      await storage.bulkCreateReceivingLines(receivingLinesToCreate as any);
+    } catch (error) {
+      if (typeof storage.deleteReceivingOrder === "function") {
+        try {
+          await storage.deleteReceivingOrder(receivingOrder.id);
+        } catch (cleanupError) {
+          console.error("[Purchasing] Failed to clean up shipment receipt header after line creation failed:", {
+            receivingOrderId: receivingOrder.id,
+            inboundShipmentId,
+            purchaseOrderId,
+            cleanupError,
+          });
+        }
+      }
+      throw error;
+    }
     return receivingOrder;
   }
 
@@ -2357,13 +3232,15 @@ export function createPurchasingService(db: any, storage: Storage) {
       // product line; no chains.
       parentClientId?: string | null;
 
-      // Required on non-product lines; ignored on product lines (which
-      // cache product_name/sku from the variant lookup).
+      // Required on non-product lines; product lines cache product_name/sku
+      // from product_id and receive configuration from expected_receive_*.
       description?: string | null;
 
       // Required on product lines only. Must be null/absent on other types.
       productId?: number | null;
       productVariantId?: number | null;
+      expectedReceiveVariantId?: number | null;
+      expectedReceiveUnitsPerVariant?: number | null;
 
       // Product lines: qty > 0. Fee: qty >= 1. All other types: qty == 1.
       orderQty: number;
@@ -2391,7 +3268,7 @@ export function createPurchasingService(db: any, storage: Storage) {
   //
   // Rules per line_type:
   //
-  //   product     requires productVariantId; cost >= 0; qty > 0.
+  //   product     requires productId; cost >= 0; qty > 0.
   //   discount    no variant; cost <= 0; qty == 1.
   //   fee         no variant; cost >= 0; qty >= 1.
   //   tax         no variant; cost >= 0; qty == 1.
@@ -2449,6 +3326,19 @@ export function createPurchasingService(db: any, storage: Storage) {
         ) {
           throw new PurchasingError(`${label}.product_id is required`, 400);
         }
+        if (
+          line.expectedReceiveUnitsPerVariant !== undefined &&
+          line.expectedReceiveUnitsPerVariant !== null &&
+          (
+            !Number.isInteger(line.expectedReceiveUnitsPerVariant) ||
+            line.expectedReceiveUnitsPerVariant <= 0
+          )
+        ) {
+          throw new PurchasingError(
+            `${label}.expected_receive_units_per_variant must be a positive integer`,
+            400,
+          );
+        }
       } else {
         if (
           line.productId !== undefined &&
@@ -2465,6 +3355,24 @@ export function createPurchasingService(db: any, storage: Storage) {
         ) {
           throw new PurchasingError(
             `${label}.product_variant_id is only valid on product lines`,
+            400,
+          );
+        }
+        if (
+          line.expectedReceiveVariantId !== undefined &&
+          line.expectedReceiveVariantId !== null
+        ) {
+          throw new PurchasingError(
+            `${label}.expected_receive_variant_id is only valid on product lines`,
+            400,
+          );
+        }
+        if (
+          line.expectedReceiveUnitsPerVariant !== undefined &&
+          line.expectedReceiveUnitsPerVariant !== null
+        ) {
+          throw new PurchasingError(
+            `${label}.expected_receive_units_per_variant is only valid on product lines`,
             400,
           );
         }
@@ -2673,8 +3581,16 @@ export function createPurchasingService(db: any, storage: Storage) {
           if (!product) {
             throw new PurchasingError(`Product ${line.productId} not found`, 404);
           }
-          if (line.productVariantId) {
-            variant = await storage.getProductVariantById(line.productVariantId);
+          const expectedReceiveVariantId =
+            line.expectedReceiveVariantId ?? line.productVariantId ?? null;
+          if (expectedReceiveVariantId) {
+            variant = await storage.getProductVariantById(expectedReceiveVariantId);
+            if (!variant) {
+              throw new PurchasingError(
+                `Expected receive variant ${expectedReceiveVariantId} not found`,
+                404,
+              );
+            }
           }
         }
 
@@ -2736,24 +3652,31 @@ export function createPurchasingService(db: any, storage: Storage) {
         })
         .returning();
 
-      // Build line rows. Product lines pull cached product info from the
-      // variant lookup; non-product lines carry only the description. Both
-      // record line_type (migration 0563) so downstream consumers can filter.
+      // Build line rows. Product lines cache product identity/SKU and carry
+      // expected_receive_* as the physical receiving configuration. Both record
+      // line_type (migration 0563) so downstream consumers can filter.
       const lineRows = resolvedLines.map((r, idx) => {
         const isProduct = r.lineType === "product";
         return {
           purchaseOrderId: header.id,
           lineNumber: idx + 1,
           productId: isProduct ? r.product.id : null,
+          // Deprecated compatibility field. PO purchasing identity is product_id
+          // + product SKU + piece quantity; expected_receive_* carries the
+          // receiving configuration.
           productVariantId: isProduct ? (r.variant?.id ?? null) : null,
+          expectedReceiveVariantId: isProduct ? (r.variant?.id ?? null) : null,
           vendorProductId: isProduct ? (r.line.vendorProductId ?? null) : null,
-          sku: isProduct ? (r.variant?.sku || r.product.sku || null) : null,
+          sku: isProduct ? (r.product.sku ?? r.variant?.sku ?? null) : null,
           productName: isProduct ? r.product.name : null,
           description: r.line.description ?? null,
           unitOfMeasure: isProduct
             ? (r.variant?.name?.split(" ")[0]?.toLowerCase() ?? "each")
             : null,
           unitsPerUom: isProduct ? (r.variant?.unitsPerVariant || 1) : 1,
+          expectedReceiveUnitsPerVariant: isProduct
+            ? (r.line.expectedReceiveUnitsPerVariant || r.variant?.unitsPerVariant || 1)
+            : 1,
           orderQty: r.line.orderQty,
           // Write BOTH mills/cents and totals on INSERT (Spec F Phase 1).
           // Mills/cents are computed-derived for back-compat; totals are source of truth.
@@ -3045,7 +3968,7 @@ export function createPurchasingService(db: any, storage: Storage) {
         try {
           const vp = await storage.getPreferredVendorProduct(
             src.productId,
-            src.productVariantId,
+            src.expectedReceiveVariantId ?? src.productVariantId,
           );
           if (vp && vp.vendorId === targetVendorId) {
             if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
@@ -3069,7 +3992,15 @@ export function createPurchasingService(db: any, storage: Storage) {
         clientId: clientIdBySourceId.get(src.id),
         lineType: srcLineType,
         parentClientId,
-        productVariantId: srcLineType === "product" ? src.productVariantId : null,
+        productVariantId: srcLineType === "product"
+          ? (src.expectedReceiveVariantId ?? src.productVariantId ?? null)
+          : null,
+        expectedReceiveVariantId: srcLineType === "product"
+          ? (src.expectedReceiveVariantId ?? src.productVariantId ?? null)
+          : null,
+        expectedReceiveUnitsPerVariant: srcLineType === "product"
+          ? (src.expectedReceiveUnitsPerVariant ?? src.unitsPerUom ?? 1)
+          : 1,
         orderQty: src.orderQty,
         unitCostMills,
         // Include cents (derived) so downstream validators that still look
@@ -3394,7 +4325,10 @@ export function createPurchasingService(db: any, storage: Storage) {
   // can render without a cascade of follow-up fetches.
 
   type PreloadLine = {
-    productVariantId: number;
+    productId: number;
+    productVariantId: number | null;
+    expectedReceiveVariantId: number | null;
+    expectedReceiveUnitsPerVariant: number;
     productName: string;
     sku: string | null;
     variantDescription: string | null;
@@ -3438,7 +4372,10 @@ export function createPurchasingService(db: any, storage: Storage) {
             : centsToMills(Number(src.unitCostCents || 0));
         let catalogSource: PreloadLine["catalogSource"] = "duplicate";
         try {
-          const vp = await storage.getPreferredVendorProduct(src.productId, src.productVariantId);
+          const vp = await storage.getPreferredVendorProduct(
+            src.productId,
+            src.expectedReceiveVariantId ?? src.productVariantId,
+          );
           if (vp && vp.vendorId === source.vendorId) {
             if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
               unitCostMills = vp.unitCostMills;
@@ -3452,7 +4389,10 @@ export function createPurchasingService(db: any, storage: Storage) {
           // non-fatal
         }
         lines.push({
-          productVariantId: src.productVariantId,
+          productId: src.productId,
+          productVariantId: src.expectedReceiveVariantId ?? src.productVariantId,
+          expectedReceiveVariantId: src.expectedReceiveVariantId ?? src.productVariantId,
+          expectedReceiveUnitsPerVariant: src.expectedReceiveUnitsPerVariant ?? src.unitsPerUom ?? 1,
           productName: src.productName ?? "",
           sku: src.sku ?? null,
           variantDescription: null,
@@ -3510,9 +4450,12 @@ export function createPurchasingService(db: any, storage: Storage) {
           }
         }
         lines.push({
+          productId: product.id,
           productVariantId: variant.id,
+          expectedReceiveVariantId: variant.id,
+          expectedReceiveUnitsPerVariant: variant.unitsPerVariant || 1,
           productName: product.name ?? "",
-          sku: variant.sku ?? null,
+          sku: product.sku ?? variant.sku ?? null,
           variantDescription: variant.name ?? null,
           uomLabel: variant.name?.split(" ")[0]?.toLowerCase() ?? null,
           // No reorder_quantity column today. Default to 1 so the row is
@@ -3605,6 +4548,8 @@ export function createPurchasingService(db: any, storage: Storage) {
     // Receiving integration
     createReceiptFromPO,
     createReceiptFromShipment,
+    getShipmentReceiptPackResolution,
+    getPurchaseOrderReceiveOptions,
     onReceivingOrderClosed,
 
     // Dual-track lifecycle (migration 0565)

@@ -90,11 +90,18 @@ async function fetchPickingQueue(): Promise<OrderWithItems[]> {
   return res.json();
 }
 
-async function claimOrder(orderId: number, pickerId: string): Promise<OrderWithItems> {
+type ClaimSource =
+  | "card_click"
+  | "grab_next"
+  | "active_resume"
+  | "preserved_progress_resume"
+  | "combined_group";
+
+async function claimOrder(orderId: number, claimSource: ClaimSource): Promise<OrderWithItems> {
   const res = await fetch(`/api/picking/orders/${orderId}/claim`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pickerId }),
+    body: JSON.stringify({ claimSource }),
   });
   if (!res.ok) {
     // Prefer the server's structured reason so the picker sees the truth
@@ -111,13 +118,33 @@ async function claimOrder(orderId: number, pickerId: string): Promise<OrderWithI
   return res.json();
 }
 
-async function releaseOrder(orderId: number, resetProgress: boolean = true): Promise<Order> {
+async function releaseOrder(orderId: number): Promise<Order> {
   const res = await fetch(`/api/picking/orders/${orderId}/release`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ resetProgress }),
+    body: JSON.stringify({}),
   });
   if (!res.ok) throw new Error("Failed to release order");
+  return res.json();
+}
+
+async function unpickItem(itemId: number, qty: number, reason: string = "Picker unpick"): Promise<PickResponse> {
+  const res = await fetch(`/api/picking/items/${itemId}/unpick`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ qty, reason }),
+  });
+  if (!res.ok) {
+    let message = "Failed to unpick item";
+    try {
+      const body = await res.json();
+      if (body?.error || body?.message) message = body.error || body.message;
+    } catch {
+      // Non-JSON error body.
+    }
+    throw new Error(message);
+  }
   return res.json();
 }
 
@@ -571,6 +598,55 @@ interface SingleOrder {
   memberPlanColor?: string | null;
 }
 
+function getOrderPickProgress(items: PickItem[]) {
+  const totalUnits = items.reduce((sum, item) => sum + Math.max(0, item.qty), 0);
+  const pickedUnits = items.reduce((sum, item) => sum + Math.max(0, item.picked), 0);
+  const pickedLines = items.filter(
+    (item) => item.picked > 0 || item.status === "completed" || item.status === "short",
+  ).length;
+
+  return {
+    totalUnits,
+    pickedUnits,
+    totalLines: items.length,
+    pickedLines,
+    hasProgress: pickedUnits > 0 || pickedLines > 0,
+    isFullyPicked: totalUnits > 0 && pickedUnits >= totalUnits,
+  };
+}
+
+function shouldShowReleasedPickProgress(order: SingleOrder) {
+  return order.status === "ready" && !order.onHold && getOrderPickProgress(order.items).hasProgress;
+}
+
+function ReleasedPickProgressBadge({ order }: { order: SingleOrder }) {
+  if (!shouldShowReleasedPickProgress(order)) {
+    return null;
+  }
+
+  const progress = getOrderPickProgress(order.items);
+  return (
+    <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-400 text-amber-700 bg-amber-50">
+      {progress.isFullyPicked ? "PICKED" : "PARTIAL PICK"}
+    </Badge>
+  );
+}
+
+function ReleasedPickProgressNotice({ order }: { order: SingleOrder }) {
+  if (!shouldShowReleasedPickProgress(order)) {
+    return null;
+  }
+
+  const progress = getOrderPickProgress(order.items);
+  return (
+    <div className="text-[10px] font-semibold text-amber-700 flex items-center gap-1 mt-0.5">
+      Pick progress preserved: {progress.pickedUnits}/{progress.totalUnits} units
+      {" / "}
+      {progress.pickedLines}/{progress.totalLines} lines
+    </div>
+  );
+}
+
 
 // Sound and haptic imports from shared library
 import { 
@@ -926,7 +1002,8 @@ export default function Picking() {
   
   // Mutation for claiming orders
   const claimMutation = useMutation({
-    mutationFn: ({ orderId }: { orderId: number }) => claimOrder(orderId, pickerId),
+    mutationFn: ({ orderId, claimSource }: { orderId: number; claimSource: ClaimSource }) =>
+      claimOrder(orderId, claimSource),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
     },
@@ -934,8 +1011,7 @@ export default function Picking() {
   
   // Mutation for releasing orders
   const releaseMutation = useMutation({
-    mutationFn: ({ orderId, resetProgress = true }: { orderId: number; resetProgress?: boolean }) => 
-      releaseOrder(orderId, resetProgress),
+    mutationFn: ({ orderId }: { orderId: number }) => releaseOrder(orderId),
     onSuccess: (_, { orderId }) => {
       // Clear local state for this order so it refreshes from API
       setLocalSingleQueue(prev => prev.filter(o => o.id !== String(orderId)));
@@ -1052,6 +1128,57 @@ export default function Picking() {
   const focusedScanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const scanPickInFlightRef = useRef<Set<number>>(new Set());
 
+  const applyServerItemToLocalQueues = (updatedItem: OrderItemWithReplen) => {
+    const applyToPickItem = (item: PickItem): PickItem => {
+      if (item.id !== updatedItem.id) return item;
+
+      const fulfilled = Math.max(0, updatedItem.fulfilledQuantity || 0);
+      const remainingQty = Math.max(0, updatedItem.quantity - fulfilled);
+      const pickedRemaining = Math.min(updatedItem.pickedQuantity || 0, remainingQty);
+
+      return {
+        ...item,
+        sku: updatedItem.sku,
+        name: updatedItem.name,
+        location: updatedItem.location,
+        qty: remainingQty,
+        picked: pickedRemaining,
+        status: remainingQty <= 0 ? "completed" : updatedItem.status as PickItem["status"],
+        image: updatedItem.imageUrl || item.image,
+        barcode: updatedItem.barcode || item.barcode,
+        replenPrediction: updatedItem.replenPrediction ?? item.replenPrediction ?? null,
+      };
+    };
+
+    setLocalSingleQueue(prev => prev.map(order => {
+      if (!order.items.some(item => item.id === updatedItem.id)) return order;
+
+      const items = order.items.map(applyToPickItem).filter(item => item.qty > 0 || item.status === "short");
+      const allDone = items.length > 0 && items.every(item => item.status === "completed" || item.status === "short");
+      return {
+        ...order,
+        items,
+        status: allDone ? "completed" : order.status,
+      };
+    }));
+
+    setQueue(prev => prev.map(batch => {
+      if (!batch.items.some(item => item.id === updatedItem.id)) return batch;
+
+      const items = batch.items.map(applyToPickItem).filter(item => item.qty > 0 || item.status === "short");
+      const allDone = items.length > 0 && items.every(item => item.status === "completed" || item.status === "short");
+      return {
+        ...batch,
+        items,
+        status: allDone ? "completed" : batch.status,
+      };
+    }));
+  };
+
+  const discardOptimisticLocalOrderForItem = (itemId: number) => {
+    setLocalSingleQueue(prev => prev.filter(order => !order.items.some(item => item.id === itemId)));
+  };
+
   // Mutation for updating items
   const updateItemMutation = useMutation({
     mutationFn: ({ itemId, status, pickedQuantity, shortReason, pickMethod }: {
@@ -1072,10 +1199,17 @@ export default function Picking() {
           )
         }));
       });
+      applyServerItemToLocalQueues(updatedItem);
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
 
       const replen = inventory?.replen;
       binCountPendingRef.current = false;
+      if (inventory?.resolution?.autoResolved && inventory.resolution.reviewRequired) {
+        toast({
+          title: "Inventory variance recorded",
+          description: inventory.resolution.message || "System inventory was corrected and queued for review.",
+        });
+      }
       if (replen?.triggered) {
         if (replen.autoExecutedFailed) {
           toast({
@@ -1114,13 +1248,14 @@ export default function Picking() {
         }, 500);
       }
     },
-    onError: (error: Error) => {
+    onError: (error: Error, variables) => {
       // Critical: Reset all state so scanner can work again
       binCountPendingRef.current = false;
       orderCompletedPendingRef.current = false;
       setBinCountOpen(false);
       setBinCountContext(null);
       setMultiQtyOpen(false);
+      discardOptimisticLocalOrderForItem(variables.itemId);
 
       // Show error to user
       console.error("[PICK ERROR]", error.message, "status:", error);
@@ -1136,6 +1271,35 @@ export default function Picking() {
     },
     onSettled: (_data, _error, variables) => {
       scanPickInFlightRef.current.delete(variables.itemId);
+    },
+  });
+
+  const unpickItemMutation = useMutation({
+    mutationFn: ({ itemId, qty, reason }: { itemId: number; qty: number; reason?: string }) =>
+      unpickItem(itemId, qty, reason),
+    onSuccess: (data: PickResponse) => {
+      const { item: updatedItem } = data;
+      queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], (oldData) => {
+        if (!oldData) return oldData;
+        return oldData.map(order => ({
+          ...order,
+          items: order.items.map(item =>
+            item.id === updatedItem.id ? { ...item, ...updatedItem } : item
+          )
+        }));
+      });
+      applyServerItemToLocalQueues(updatedItem);
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+    },
+    onError: (error: Error, variables) => {
+      discardOptimisticLocalOrderForItem(variables.itemId);
+      toast({
+        title: "Unpick failed",
+        description: error.message || "Failed to unpick item. Try again.",
+        variant: "destructive",
+      });
+      playSound("error");
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
     },
   });
 
@@ -1314,8 +1478,6 @@ export default function Picking() {
   const [allocationDialogOpen, setAllocationDialogOpen] = useState(false);
   const [allocationTargetIndex, setAllocationTargetIndex] = useState<number | null>(null);
   const [allocationBinCode, setAllocationBinCode] = useState("");
-  const [releaseDialogOpen, setReleaseDialogOpen] = useState(false);
-  const [releaseOrderId, setReleaseOrderId] = useState<string | null>(null);
   
   // Scanner mode settings
   const [scannerMode, setScannerMode] = useState(false);
@@ -1541,7 +1703,10 @@ export default function Picking() {
   const [claimError, setClaimError] = useState<string | null>(null);
   
   // Start picking a batch or order
-  const handleStartPicking = async (id: string) => {
+  const handleStartPicking = async (
+    id: string,
+    options: { allowPreservedProgress?: boolean; claimSource?: ClaimSource } = {},
+  ) => {
     setClaimError(null);
     setDebugLog([]); // Clear debug log for new order
     
@@ -1566,11 +1731,23 @@ export default function Picking() {
         }
         
         try {
+          if (shouldShowReleasedPickProgress(combinedOrder) && !options.allowPreservedProgress) {
+            toast({
+              title: "Pick progress preserved",
+              description: "Use Resume to continue this partially picked order.",
+              variant: "default",
+            });
+            return;
+          }
+
           // Claim all orders in the combined group
           for (const subOrder of combinedOrder.combinedOrders) {
             const subOrderId = parseInt(subOrder.id);
             if (!isNaN(subOrderId)) {
-              await claimMutation.mutateAsync({ orderId: subOrderId });
+              await claimMutation.mutateAsync({
+                orderId: subOrderId,
+                claimSource: options.claimSource || "combined_group",
+              });
             }
           }
           
@@ -1605,8 +1782,20 @@ export default function Picking() {
       const numericId = parseInt(id);
       
       try {
-        await claimMutation.mutateAsync({ orderId: numericId });
         const orderToPick = ordersFromApi.find(o => o.id === id);
+        if (orderToPick && shouldShowReleasedPickProgress(orderToPick) && !options.allowPreservedProgress) {
+          toast({
+            title: "Pick progress preserved",
+            description: "Use Resume to continue this partially picked order.",
+            variant: "default",
+          });
+          return;
+        }
+
+        await claimMutation.mutateAsync({
+          orderId: numericId,
+          claimSource: options.claimSource || "card_click",
+        });
         if (orderToPick) {
           setLocalSingleQueue(prev => {
             const existing = prev.find(o => o.id === id);
@@ -1692,14 +1881,20 @@ export default function Picking() {
       }
     } else {
       // Use fresh data from API, filtering out orders we just completed locally
-      const freshQueue = ordersFromApi.filter(o => 
-        o.status === "ready" && !o.onHold
+      const freshQueue = ordersFromApi.filter(o =>
+        o.status === "ready" && !o.onHold && !shouldShowReleasedPickProgress(o)
       );
       // Apply the same sorting as the displayed queue
       const sortedQueue = applySortToOrders(freshQueue);
       const nextOrder = sortedQueue[0];
       if (nextOrder) {
-        handleStartPicking(nextOrder.id);
+        handleStartPicking(nextOrder.id, { claimSource: "grab_next" });
+      } else if (ordersFromApi.some(o => o.status === "ready" && !o.onHold && shouldShowReleasedPickProgress(o))) {
+        toast({
+          title: "Only preserved-progress orders are ready",
+          description: "Use Resume on a partially picked order to continue it.",
+          variant: "default",
+        });
       }
     }
   };
@@ -2425,41 +2620,13 @@ export default function Picking() {
     const item = activeWork.items[idx];
     if (!item || item.picked <= 0) return;
     
-    const newPicked = item.picked - 1;
-    const newStatus: ItemStatus = newPicked === 0 ? "pending" : "in_progress";
-    
     triggerHaptic("light");
-    
-    updateItemMutation.mutate({ 
-      itemId: item.id, 
-      status: newStatus, 
-      pickedQuantity: newPicked,
-      pickMethod: "manual"
+
+    unpickItemMutation.mutate({
+      itemId: item.id,
+      qty: 1,
+      reason: "Picker decremented picked quantity",
     });
-    
-    if (pickingMode === "batch") {
-      setQueue(prev => prev.map(batch => {
-        if (batch.id !== activeBatchId) return batch;
-        const newItems = batch.items.map((it, i) => {
-          if (i !== idx) return it;
-          return { ...it, picked: newPicked, status: newStatus };
-        });
-        return { ...batch, items: newItems };
-      }));
-    } else {
-      setLocalSingleQueue(prev => {
-        const orderExists = prev.some(o => o.id === activeOrderId);
-        const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
-        return base.map(order => {
-          if (order.id !== activeOrderId) return order;
-          const newItems = order.items.map((it, i) => {
-            if (i !== idx) return it;
-            return { ...it, picked: newPicked, status: newStatus };
-          });
-          return { ...order, items: newItems };
-        });
-      });
-    }
   };
   
   // State and handler for editing item quantity directly
@@ -2483,6 +2650,23 @@ export default function Picking() {
     if (!item) return;
     
     const newPicked = Math.max(0, Math.min(item.qty, editQtyValue));
+    if (newPicked === item.picked) {
+      setEditQtyOpen(false);
+      setEditQtyIdx(null);
+      return;
+    }
+
+    if (newPicked < item.picked) {
+      unpickItemMutation.mutate({
+        itemId: item.id,
+        qty: item.picked - newPicked,
+        reason: "Picker edited picked quantity down",
+      });
+      setEditQtyOpen(false);
+      setEditQtyIdx(null);
+      return;
+    }
+
     const isItemComplete = newPicked >= item.qty;
     const newStatus: ItemStatus = newPicked === 0 ? "pending" : isItemComplete ? "completed" : "in_progress";
     
@@ -2666,21 +2850,9 @@ export default function Picking() {
     return isNaN(numId) ? [] : [numId];
   };
 
-  // Release order handler - shows dialog if partially picked
+  // Release order handler - preserves all pick progress.
   const handleReleaseOrder = async (orderStringId: string) => {
     console.log("[RELEASE] Attempting to release order:", orderStringId);
-    const order = singleQueue.find(o => o.id === orderStringId);
-    console.log("[RELEASE] Found order in singleQueue:", order ? "yes" : "no");
-
-    // Also check API data directly for more accurate item status
-    const apiOrder = ordersFromApi.find(o => o.id === orderStringId);
-    console.log("[RELEASE] Found order in API data:", apiOrder ? "yes" : "no");
-
-    // Use API data if local queue doesn't have the order
-    const checkOrder = order || apiOrder;
-    const pickedCount = checkOrder?.items.filter(i => i.status === "completed" || i.status === "short" || i.picked > 0).length || 0;
-    console.log("[RELEASE] Picked/short item count:", pickedCount);
-
     const subOrderIds = getSubOrderIds(orderStringId);
     if (subOrderIds.length === 0) {
       console.error("[RELEASE] No valid order IDs found for:", orderStringId);
@@ -2688,59 +2860,20 @@ export default function Picking() {
       return;
     }
 
-    if (pickedCount === 0) {
-      // No items picked - just release immediately
-      try {
-        console.log("[RELEASE] No picked items, releasing immediately with reset");
-        for (const subId of subOrderIds) {
-          await releaseMutation.mutateAsync({ orderId: subId, resetProgress: true });
-        }
-        toast({ title: "Order released", description: "Order is back in the queue" });
-        if (view === "picking") {
-          setView("queue");
-          setActiveOrderId(null);
-          setCurrentItemIndex(0);
-        }
-      } catch (error) {
-        console.error("[RELEASE] Failed to release:", error);
-        toast({ title: "Failed to release", description: "Please try again", variant: "destructive" });
+    try {
+      console.log("[RELEASE] Releasing with progress preserved");
+      for (const subId of subOrderIds) {
+        await releaseMutation.mutateAsync({ orderId: subId });
       }
-    } else {
-      // Partially picked - show confirmation dialog
-      console.log("[RELEASE] Has picked items, showing dialog");
-      setReleaseOrderId(orderStringId);
-      setReleaseDialogOpen(true);
-    }
-  };
-  
-  // Confirm release with chosen option
-  const confirmRelease = async (resetProgress: boolean) => {
-    if (releaseOrderId) {
-      const subOrderIds = getSubOrderIds(releaseOrderId);
-      if (subOrderIds.length === 0) {
-        toast({ title: "Failed to release", description: "Could not find order IDs", variant: "destructive" });
-        return;
+      toast({ title: "Order released", description: "Progress preserved for the next picker" });
+      if (view === "picking") {
+        setView("queue");
+        setActiveOrderId(null);
+        setCurrentItemIndex(0);
       }
-      try {
-        console.log("[RELEASE] Confirming release with resetProgress:", resetProgress);
-        for (const subId of subOrderIds) {
-          await releaseMutation.mutateAsync({ orderId: subId, resetProgress });
-        }
-        toast({
-          title: "Order released",
-          description: resetProgress ? "Order reset and back in queue" : "Order released, progress kept"
-        });
-        setReleaseDialogOpen(false);
-        setReleaseOrderId(null);
-        if (view === "picking") {
-          setView("queue");
-          setActiveOrderId(null);
-          setCurrentItemIndex(0);
-        }
-      } catch (error) {
-        console.error("[RELEASE] Failed to confirm release:", error);
-        toast({ title: "Failed to release", description: "Please try again", variant: "destructive" });
-      }
+    } catch (error) {
+      console.error("[RELEASE] Failed to release:", error);
+      toast({ title: "Failed to release", description: "Please try again", variant: "destructive" });
     }
   };
 
@@ -3191,6 +3324,7 @@ export default function Picking() {
                   !order.isCombinedGroup && order.priority < 9999 && order.shippingServiceLevel === "expedited" && "border-l-4 border-l-amber-500",
                   !order.isCombinedGroup && order.priority < 9999 && (!order.shippingServiceLevel || order.shippingServiceLevel === "standard") && order.memberPlanName && order.memberPlanColor && "border-l-4",
                   order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
+                  shouldShowReleasedPickProgress(order) && "bg-amber-50/40 dark:bg-amber-950/20",
                   order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40",
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
                 )}
@@ -3208,7 +3342,15 @@ export default function Picking() {
                 onClick={() => {
                   console.log("Card clicked:", order.id, "status:", order.status, "onHold:", order.onHold, "assignee:", order.assignee);
                   if (order.status === "ready" && !order.onHold) {
-                    handleStartPicking(order.id);
+                    if (shouldShowReleasedPickProgress(order)) {
+                      toast({
+                        title: "Pick progress preserved",
+                        description: "Use Resume to continue this partially picked order.",
+                        variant: "default",
+                      });
+                      return;
+                    }
+                    handleStartPicking(order.id, { claimSource: "card_click" });
                   } else if (order.status === "completed") {
                     console.log("Opening completed order dialog:", order.orderNumber, order);
                     toast({ title: "Opening order details", description: order.orderNumber });
@@ -3218,7 +3360,7 @@ export default function Picking() {
                     const isMyOrder = order.assignee === pickerId || !order.assignee;
                     if (isMyOrder) {
                       // Resume picking own order
-                      handleStartPicking(order.id);
+                      handleStartPicking(order.id, { claimSource: "active_resume" });
                     } else if (isAdminOrLead) {
                       // Admin/lead can force release and take over
                       toast({
@@ -3298,6 +3440,7 @@ export default function Picking() {
                                 {order.orderDate && <><span className="opacity-40">·</span><span>{order.orderDate}</span></>}
                               </span>
                               <span className="ml-auto inline-flex gap-1 items-center">
+                                <ReleasedPickProgressBadge order={order} />
                                 <PriorityBadges
                                   shippingServiceLevel={order.shippingServiceLevel}
                                   memberPlanName={order.memberPlanName}
@@ -3314,6 +3457,7 @@ export default function Picking() {
                                 </Badge>
                               )}
                             </div>
+                            <ReleasedPickProgressNotice order={order} />
                             {/* SLA / Ship-by deadline surfaced to every picker */}
                             {(order as any).channelShipByDate && (
                               (() => {
@@ -3442,10 +3586,28 @@ export default function Picking() {
                         {order.status === "completed" && order.c2p && (
                           <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
                         )}
-                        {(order.status === "ready" && !order.onHold && !isAdminOrLead) && (
+                        {shouldShowReleasedPickProgress(order) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-9 px-2 border-amber-300 text-amber-700 bg-white hover:bg-amber-50"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleStartPicking(order.id, {
+                                allowPreservedProgress: true,
+                                claimSource: "preserved_progress_resume",
+                              });
+                            }}
+                            data-testid={`button-resume-preserved-${order.id}`}
+                          >
+                            <Play className="h-4 w-4 mr-1" />
+                            Resume
+                          </Button>
+                        )}
+                        {(order.status === "ready" && !order.onHold && !isAdminOrLead && !shouldShowReleasedPickProgress(order)) && (
                           <ChevronRight className="h-5 w-5 text-muted-foreground" />
                         )}
-                        {isAdminOrLead && order.status === "ready" && !order.onHold && (
+                        {isAdminOrLead && order.status === "ready" && !order.onHold && !shouldShowReleasedPickProgress(order) && (
                           <ChevronRight className="h-5 w-5 text-muted-foreground" />
                         )}
                       </div>
@@ -4321,9 +4483,30 @@ export default function Picking() {
                             </Button>
                           </div>
                         ) : (
-                          <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
-                            {item.status === "completed" ? <CheckCircle2 className="h-5 w-5 md:h-6 md:w-6 text-emerald-500" /> : <AlertTriangle className="h-5 w-5 md:h-6 md:w-6 text-amber-500" />}
-                          </div>
+                          item.status === "completed" ? (
+                            <div className="flex gap-1">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-9 md:h-11 px-2 md:px-3 border-amber-300 text-amber-700 bg-white hover:bg-amber-50 flex-shrink-0 whitespace-nowrap"
+                                onClick={() => handleListItemDecrement(idx)}
+                                disabled={item.picked <= 0 || unpickItemMutation.isPending}
+                                aria-label={`Unpick one ${item.sku}`}
+                                title={`Unpick one ${item.sku}`}
+                                data-testid={`button-unpick-${item.id}`}
+                              >
+                                <RotateCcw className="h-4 w-4 mr-1" />
+                                <span className="text-xs md:text-sm font-semibold">Unpick</span>
+                              </Button>
+                              <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
+                                <CheckCircle2 className="h-5 w-5 md:h-6 md:w-6 text-emerald-500" />
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
+                              <AlertTriangle className="h-5 w-5 md:h-6 md:w-6 text-amber-500" />
+                            </div>
+                          )
                         )}
                       </div>
                     </div>
@@ -4569,46 +4752,6 @@ export default function Picking() {
               onClick={() => setSoundSettingsOpen(false)}
             >
               Done
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      
-      {/* Release Order Dialog */}
-      <Dialog open={releaseDialogOpen} onOpenChange={setReleaseDialogOpen}>
-        <DialogContent className="w-[95vw] max-w-sm p-4">
-          <DialogHeader>
-            <DialogTitle className="flex items-center justify-center gap-2">
-              <Unlock className="h-5 w-5" />
-              Release Order
-            </DialogTitle>
-            <DialogDescription className="text-center">
-              This order has items that were partially picked. What would you like to do with the progress?
-            </DialogDescription>
-          </DialogHeader>
-          
-          <DialogFooter className="flex-col gap-2 sm:flex-col pt-4">
-            <Button 
-              className="w-full h-14 min-h-[44px] text-base bg-emerald-600 hover:bg-emerald-700"
-              onClick={() => confirmRelease(false)}
-            >
-              Keep Progress
-              <span className="text-xs opacity-80 ml-2">(Next picker continues)</span>
-            </Button>
-            <Button 
-              variant="outline"
-              className="w-full h-14 min-h-[44px] text-base"
-              onClick={() => confirmRelease(true)}
-            >
-              Reset Progress
-              <span className="text-xs opacity-80 ml-2">(Start fresh)</span>
-            </Button>
-            <Button 
-              variant="ghost" 
-              className="w-full h-12 min-h-[44px]"
-              onClick={() => setReleaseDialogOpen(false)}
-            >
-              Cancel
             </Button>
           </DialogFooter>
         </DialogContent>

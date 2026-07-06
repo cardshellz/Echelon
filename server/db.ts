@@ -76,7 +76,7 @@ export async function runStartupMigrations(): Promise<void> {
           id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
           return_id BIGINT NOT NULL REFERENCES wms.returns(id) ON DELETE CASCADE,
           order_item_id INTEGER REFERENCES wms.order_items(id) ON DELETE SET NULL,
-          oms_order_line_id INTEGER,
+          oms_order_line_id BIGINT,
           external_line_item_id VARCHAR(100),
           sku VARCHAR(100),
           expected_qty INTEGER NOT NULL,
@@ -129,6 +129,77 @@ export async function runStartupMigrations(): Promise<void> {
       console.log("Checked fulfillment-state ledger (wms.line_fulfillments, wms.order_items.on_hold)");
     } catch (e: any) {
       console.error("[startup-migration] fulfillment-state ledger DDL failed:", e?.message ?? e);
+    }
+
+    // OMS/WMS reconciliation exceptions (authority remediation Phase 5).
+    // This gives ShipStation and future reconciliation paths a durable review
+    // surface when proof is insufficient for a safe auto-repair.
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS wms.reconciliation_exceptions (
+          id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          source VARCHAR(50) NOT NULL,
+          classification VARCHAR(30) NOT NULL,
+          rule VARCHAR(80) NOT NULL,
+          status VARCHAR(20) NOT NULL DEFAULT 'open',
+          severity VARCHAR(20) NOT NULL DEFAULT 'review',
+          wms_order_id INTEGER REFERENCES wms.orders(id) ON DELETE SET NULL,
+          wms_shipment_id INTEGER REFERENCES wms.outbound_shipments(id) ON DELETE SET NULL,
+          external_system VARCHAR(40),
+          external_order_ref VARCHAR(200),
+          external_shipment_ref VARCHAR(200),
+          external_order_key VARCHAR(200),
+          idempotency_key VARCHAR(500) NOT NULL,
+          summary TEXT NOT NULL,
+          details JSONB NOT NULL DEFAULT '{}'::jsonb,
+          first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          occurrence_count INTEGER NOT NULL DEFAULT 1,
+          resolved_at TIMESTAMPTZ,
+          resolved_by VARCHAR(120),
+          resolution TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT wms_reconciliation_exceptions_classification_chk
+            CHECK (classification IN (
+              'safe_auto_repair',
+              'manual_review',
+              'hard_block',
+              'historical_ignore'
+            )),
+          CONSTRAINT wms_reconciliation_exceptions_status_chk
+            CHECK (status IN ('open', 'acknowledged', 'resolved', 'ignored')),
+          CONSTRAINT wms_reconciliation_exceptions_severity_chk
+            CHECK (severity IN ('info', 'warning', 'review', 'blocker')),
+          CONSTRAINT wms_reconciliation_exceptions_occurrence_count_chk
+            CHECK (occurrence_count > 0)
+        )
+      `);
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_reconciliation_exceptions_open_idem
+        ON wms.reconciliation_exceptions (idempotency_key)
+        WHERE status IN ('open', 'acknowledged')
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_wms_reconciliation_exceptions_status
+        ON wms.reconciliation_exceptions (status, classification, last_seen_at DESC)
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_wms_reconciliation_exceptions_shipment
+        ON wms.reconciliation_exceptions (wms_shipment_id)
+        WHERE wms_shipment_id IS NOT NULL
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_wms_reconciliation_exceptions_external
+        ON wms.reconciliation_exceptions (
+          external_system,
+          external_order_ref,
+          external_shipment_ref
+        )
+      `);
+      console.log("Checked OMS/WMS reconciliation exceptions (wms.reconciliation_exceptions)");
+    } catch (e: any) {
+      console.error("[startup-migration] reconciliation exceptions DDL failed:", e?.message ?? e);
     }
 
     // Create combined_order_groups table if it doesn't exist
@@ -237,6 +308,15 @@ export async function runStartupMigrations(): Promise<void> {
     // Add aisle_filter column to cycle_counts if missing
     await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS aisle_filter VARCHAR(20)`);
 
+    // Migration 116: reservation quantities on the ledger (P0.1b).
+    // reserve:+qty, unreserve:-qty, pick:-(reservation consumed). NULL = pre-116 row.
+    await client.query(`ALTER TABLE inventory.inventory_transactions ADD COLUMN IF NOT EXISTS reserved_qty_delta integer`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_invtx_reservation_by_order_item
+        ON inventory.inventory_transactions (order_id, order_item_id)
+        WHERE transaction_type IN ('reserve', 'unreserve', 'pick') AND voided_at IS NULL
+    `);
+
     // Migration 037: Product lines
     await client.query(`
       CREATE TABLE IF NOT EXISTS catalog.product_lines (
@@ -279,21 +359,10 @@ export async function runStartupMigrations(): Promise<void> {
       VALUES ('TRADING_CARD_SUPPLIES', 'Trading Card Supplies', 'Card sleeves, toploaders, boxes, and accessories', 0)
       ON CONFLICT (code) DO NOTHING
     `);
-    // Assign all existing products to default line (idempotent)
-    await client.query(`
-      INSERT INTO catalog.product_line_products (product_line_id, product_id)
-      SELECT pl.id, p.id FROM catalog.product_lines pl, catalog.products p
-      WHERE pl.code = 'TRADING_CARD_SUPPLIES'
-        AND NOT EXISTS (SELECT 1 FROM catalog.product_line_products plp WHERE plp.product_line_id = pl.id AND plp.product_id = p.id)
-    `);
-    // Assign default line to all active channels (idempotent)
-    await client.query(`
-      INSERT INTO channels.channel_product_lines (channel_id, product_line_id)
-      SELECT c.id, pl.id FROM channels.channels c, catalog.product_lines pl
-      WHERE pl.code = 'TRADING_CARD_SUPPLIES' AND c.status = 'active'
-        AND NOT EXISTS (SELECT 1 FROM channels.channel_product_lines cpl WHERE cpl.channel_id = c.id AND cpl.product_line_id = pl.id)
-    `);
-    console.log("Checked product_lines tables and seeded defaults");
+    // Do not backfill product/channel assignments here. Product-line assignment
+    // is admin-owned configuration; rerunning a startup seed would silently
+    // restore products to the default line after an operator moves them.
+    console.log("Checked product_lines tables and ensured default line exists");
 
     // Add location_codes column to cycle_counts for quick single-bin counts
     await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS location_codes TEXT`);
@@ -522,6 +591,17 @@ export async function runStartupMigrations(): Promise<void> {
         title VARCHAR(300),
         variant_title VARCHAR(200),
         quantity INTEGER NOT NULL,
+        channel_observed_quantity INTEGER NOT NULL DEFAULT 0,
+        paid_quantity INTEGER NOT NULL DEFAULT 0,
+        authority_fulfillable_quantity INTEGER NOT NULL DEFAULT 0,
+        cancelled_quantity INTEGER NOT NULL DEFAULT 0,
+        refunded_quantity INTEGER NOT NULL DEFAULT 0,
+        wms_materialized_quantity INTEGER NOT NULL DEFAULT 0,
+        authorization_status VARCHAR(30) NOT NULL DEFAULT 'authorized',
+        authorized_at TIMESTAMP,
+        authorized_by_event_id VARCHAR(100),
+        authority_source_topic VARCHAR(50),
+        authority_source_inbox_id INTEGER,
         unit_price_cents INTEGER NOT NULL DEFAULT 0,
         total_cents INTEGER NOT NULL DEFAULT 0,
         tax_cents INTEGER NOT NULL DEFAULT 0,
@@ -532,6 +612,35 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_lines_order ON oms.oms_order_lines(order_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_lines_variant ON oms.oms_order_lines(product_variant_id)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS oms.oms_order_line_authority_events (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        event_key VARCHAR(500) NOT NULL UNIQUE,
+        event_type VARCHAR(50) NOT NULL,
+        order_id BIGINT NOT NULL REFERENCES oms.oms_orders(id) ON DELETE CASCADE,
+        order_line_id BIGINT NOT NULL REFERENCES oms.oms_order_lines(id) ON DELETE CASCADE,
+        source_topic VARCHAR(50) NOT NULL,
+        source_event_id VARCHAR(100),
+        source_inbox_id INTEGER,
+        previous_channel_observed_quantity INTEGER,
+        previous_paid_quantity INTEGER,
+        previous_authority_fulfillable_quantity INTEGER,
+        previous_authorization_status VARCHAR(30),
+        channel_observed_quantity INTEGER NOT NULL,
+        paid_quantity INTEGER NOT NULL,
+        authority_fulfillable_quantity INTEGER NOT NULL,
+        cancelled_quantity INTEGER NOT NULL DEFAULT 0,
+        refunded_quantity INTEGER NOT NULL DEFAULT 0,
+        authorization_status VARCHAR(30) NOT NULL,
+        authorized_at TIMESTAMP,
+        authorized_by_event_id VARCHAR(100),
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_line_authority_events_order ON oms.oms_order_line_authority_events(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_line_authority_events_line ON oms.oms_order_line_authority_events(order_line_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_line_authority_events_source ON oms.oms_order_line_authority_events(source_topic, source_event_id)`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS oms.oms_order_events (
@@ -545,23 +654,11 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_events_order ON oms.oms_order_events(order_id)`);
     console.log("Checked OMS tables (oms_orders, oms_order_lines, oms_order_events)");
 
-    // Cleanup: delete zombie inventory_levels (all buckets zero, not assigned to bin)
-    const zombieResult = await client.query(`
-      DELETE FROM inventory.inventory_levels il
-      WHERE il.variant_qty = 0
-        AND il.reserved_qty = 0
-        AND il.picked_qty = 0
-        AND COALESCE(il.packed_qty, 0) = 0
-        AND COALESCE(il.backorder_qty, 0) = 0
-        AND NOT EXISTS (
-          SELECT 1 FROM warehouse.product_locations pl
-          WHERE pl.product_variant_id = il.product_variant_id
-            AND pl.warehouse_location_id = il.warehouse_location_id
-        )
-    `);
-    if ((zombieResult.rowCount ?? 0) > 0) {
-      console.log(`Cleaned up ${zombieResult.rowCount} zombie inventory_levels records`);
-    }
+    // P0.2: the boot-time "zombie inventory_levels" DELETE was removed. It
+    // hard-deleted financial rows with no inventory_transactions entry on
+    // EVERY deploy (audit F2/P0.2) and could race a concurrent reserve
+    // upsert. Empty level rows are harmless; if cleanup is ever needed it
+    // belongs in a reviewed one-time script, ledgered, not in boot.
 
     // Migration: Sync Control System tables
     // 1. sync_settings — global sync engine config
@@ -629,44 +726,34 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_key VARCHAR(100)`);
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipping_engine VARCHAR(30)`);
     await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS engine_order_ref VARCHAR(200)`);
-    await client.query(`UPDATE oms.oms_orders SET shipping_engine = 'shipstation', engine_order_ref = shipstation_order_id::text WHERE shipstation_order_id IS NOT NULL AND shipping_engine IS NULL`);
+    // P0.2: the engine-ref backfill UPDATE was removed — it was a one-time
+    // mirror of migration 0573 (long applied in prod) that kept re-stamping
+    // rows at boot, masking any writer that creates rows without engine refs.
     console.log("Checked shipping engine columns on oms_orders");
 
     // 5b. Engine-agnostic columns on outbound_shipments (mirrors migration 0573)
     await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS shipping_engine VARCHAR(30)`);
     await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS engine_order_ref VARCHAR(200)`);
     await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS engine_shipment_ref VARCHAR(200)`);
-    await client.query(`UPDATE wms.outbound_shipments SET shipping_engine = 'shipstation', engine_order_ref = shipstation_order_id::text, engine_shipment_ref = shipstation_order_key WHERE shipstation_order_id IS NOT NULL AND shipping_engine IS NULL`);
+    // P0.2: engine-ref backfill UPDATE removed (mirror of migration 0573,
+    // long applied). Rows missing engine refs must be surfaced and fixed at
+    // their writer (audit: create-shipment child rows), not re-stamped at boot.
     console.log("Checked shipping engine columns on outbound_shipments");
 
-    // 5c. Hold flag, orthogonal to the lifecycle status — Phase 1a of the
-    // single-flow design (SHIPMENT-STATE-MACHINE-DESIGN.md). Dual-written
-    // alongside status='on_hold'; backfill makes existing on_hold rows held.
+    // 5c. Hold flag columns (Phase 1a of SHIPMENT-STATE-MACHINE-DESIGN.md).
     await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS held BOOLEAN NOT NULL DEFAULT false`);
     await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS held_at TIMESTAMP`);
-    await client.query(`UPDATE wms.outbound_shipments SET held = true WHERE status = 'on_hold' AND held = false`);
     console.log("Checked hold flag columns on outbound_shipments (Phase 1a)");
 
-    // 5d. Phase 1c: refunds no longer "hold" shipments (they reduce/cancel/flag),
-    // so `status='on_hold'` is now writerless. Restore any lingering on_hold rows
-    // to their real lifecycle status and clear the held flag: a shipped one
-    // (shipped_at set) -> 'shipped' (physical truth); a pre-ship one -> 'cancelled'
-    // (these were refund-held with the SS order already cancelled, so they will
-    // not ship). Idempotent — once retired, no rows match.
-    await client.query(`
-      UPDATE wms.outbound_shipments SET
-        status = (CASE WHEN shipped_at IS NOT NULL THEN 'shipped' ELSE 'cancelled' END)::wms.shipment_status,
-        held = false,
-        held_at = NULL,
-        cancelled_at = CASE WHEN shipped_at IS NULL THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
-        updated_at = NOW()
-      WHERE status = 'on_hold'
-    `);
-    // Clear any stray `held` flag on non-on_hold rows — e.g. a refund-held row
-    // later cancelled by a channel cancel (markShipmentCancelled doesn't clear
-    // held). Post-1c `held` has no writer until an operational hold path lands.
-    await client.query(`UPDATE wms.outbound_shipments SET held = false, held_at = NULL WHERE held = true`);
-    console.log("Restored lingering on_hold shipments + cleared stray held (Phase 1c)");
+    // P0.2: three boot-time hold/status rewrites were REMOVED here (audit F2,
+    // CRITICAL). The worst — `SET held = false WHERE held = true` — silently
+    // released every line-item hold on EVERY restart: its "held has no
+    // writer" assumption went stale the day line-item holds (P2a,
+    // wms/line-item-hold.ts) started writing held=true, and the pushShipment
+    // held-refusal was the only thing keeping a held line from shipping.
+    // The Phase 1a/1c one-time backfills (`held=true from status='on_hold'`,
+    // on_hold rows restored to shipped/cancelled) ran long ago in prod; the
+    // shipment status lifecycle belongs to the state machine, never to boot.
 
     // 6. eBay listing control columns
     await client.query(`ALTER TABLE ebay_category_mappings ADD COLUMN IF NOT EXISTS listing_enabled BOOLEAN NOT NULL DEFAULT true`);
@@ -797,19 +884,9 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS cost_source VARCHAR(20) DEFAULT 'manual'`);
     await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS batch_number VARCHAR(100)`);
 
-    // Backfill existing lots: copy unit_cost_cents → COGS columns where not set
-    await client.query(`
-      UPDATE inventory_lots
-      SET
-        po_unit_cost_cents = COALESCE(unit_cost_cents, 0),
-        total_unit_cost_cents = COALESCE(unit_cost_cents, 0),
-        qty_received = COALESCE(qty_on_hand, 0) + COALESCE(qty_consumed, 0),
-        cost_source = CASE
-          WHEN purchase_order_id IS NOT NULL THEN 'po'
-          ELSE 'manual'
-        END
-      WHERE COALESCE(total_unit_cost_cents, 0) = 0 AND COALESCE(unit_cost_cents, 0) > 0
-    `);
+    // P0.2: the cents→COGS-columns backfill UPDATE was removed — a one-time
+    // mirror of migration 051, long applied in prod. Boot must not mutate
+    // lot cost data (financial history).
 
     // --- Mills cost layers: AUTHORITATIVE source of truth for cost ------------
     // Integer mills (1/100 cent, 4-decimal dollars) so per-unit × pack-size and
@@ -826,63 +903,17 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE oms.order_item_costs ADD COLUMN IF NOT EXISTS unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
     await client.query(`ALTER TABLE oms.order_item_costs ADD COLUMN IF NOT EXISTS total_cost_mills BIGINT NOT NULL DEFAULT 0`);
 
-    // Backfill mills from existing cents (cents × 100, exact; ROUND collapses the
-    // NUMERIC packaging column cleanly). Idempotent + non-clobbering: only rows
-    // still at 0 mills with a positive cents value, so re-runs and the
-    // authoritative-mills writes from later PRs are never overwritten.
-    await client.query(`
-      UPDATE inventory_lots SET
-        unit_cost_mills       = ROUND(COALESCE(unit_cost_cents, 0)       * 100)::bigint,
-        po_unit_cost_mills    = ROUND(COALESCE(po_unit_cost_cents, 0)    * 100)::bigint,
-        packaging_cost_mills  = ROUND(COALESCE(packaging_cost_cents, 0)  * 100)::bigint,
-        landed_cost_mills     = ROUND(COALESCE(landed_cost_cents, 0)     * 100)::bigint,
-        total_unit_cost_mills = ROUND(COALESCE(total_unit_cost_cents, 0) * 100)::bigint
-      WHERE total_unit_cost_mills = 0 AND COALESCE(total_unit_cost_cents, 0) > 0
-    `);
-    await client.query(`
-      UPDATE oms.order_item_costs SET
-        unit_cost_mills  = ROUND(COALESCE(unit_cost_cents, 0)  * 100)::bigint,
-        total_cost_mills = ROUND(COALESCE(total_cost_cents, 0) * 100)::bigint
-      WHERE total_cost_mills = 0 AND COALESCE(total_cost_cents, 0) > 0
-    `);
-    console.log("Checked inventory_lots + oms.order_item_costs mills cost columns (backfilled from cents)");
-
-    // PR5: repair historical lots whose mills drifted from the exact per-variant-unit cost.
-    // The PR1 backfill copied cents*100, which for pre-migration lots can be wrong: (a) pre-#635
-    // lots carried the per-piece-not-scaled bug ($0.60/case where it should be $6.00), and (b)
-    // pre-PR2 lots baked packaging into po (packaging_mills=0). For lots STILL ON HAND that came
-    // from a PO line (cost_source po / po_landed), recompute po + packaging mills EXACTLY from the
-    // PO line totals (same round_half_up(total*100*upv/order_qty) the receive path uses), keep
-    // landed, and refresh the cents mirrors. Idempotent: only rows that still drift are updated.
-    // Does NOT cascade to oms.order_item_costs — already-booked COGS is historical, not restated.
-    const lotRepair = await client.query(`
-      WITH src AS (
-        SELECT il.id,
-          ROUND(pol.total_product_cost_cents::numeric * 100 * pv.units_per_variant / NULLIF(pol.order_qty, 0))::bigint AS exact_po,
-          ROUND(pol.packaging_cost_cents::numeric    * 100 * pv.units_per_variant / NULLIF(pol.order_qty, 0))::bigint AS exact_pkg,
-          COALESCE(il.landed_cost_mills, 0) AS landed
-        FROM inventory_lots il
-        JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
-        JOIN procurement.purchase_order_lines pol ON pol.id = il.po_line_id
-        WHERE il.qty_on_hand > 0
-          AND il.po_line_id IS NOT NULL
-          AND il.cost_source IN ('po', 'po_landed')
-          AND COALESCE(pol.order_qty, 0) > 0
-      )
-      UPDATE inventory_lots il SET
-        po_unit_cost_mills    = src.exact_po,
-        packaging_cost_mills  = src.exact_pkg,
-        total_unit_cost_mills = src.exact_po + src.exact_pkg + src.landed,
-        unit_cost_mills       = src.exact_po + src.exact_pkg + src.landed,
-        po_unit_cost_cents    = ROUND(src.exact_po::numeric / 100)::bigint,
-        packaging_cost_cents  = ROUND(src.exact_pkg::numeric / 100),
-        total_unit_cost_cents = ROUND((src.exact_po + src.exact_pkg + src.landed)::numeric / 100)::bigint,
-        unit_cost_cents       = ROUND((src.exact_po + src.exact_pkg + src.landed)::numeric / 100)::bigint
-      FROM src
-      WHERE src.id = il.id
-        AND (il.po_unit_cost_mills <> src.exact_po OR il.packaging_cost_mills <> src.exact_pkg)
-    `);
-    console.log(`Repaired ${lotRepair.rowCount ?? 0} historical lot(s) with drifted po/packaging mills (recomputed from PO line)`);
+    // P0.2: two classes of boot-time lot-cost DML were REMOVED here:
+    //  1. The cents→mills backfills for inventory_lots and
+    //     oms.order_item_costs — one-time mirrors of the mills PR1
+    //     migration, long applied in prod.
+    //  2. The PR5 "drifted mills" repair — a RECURRING silent re-write of
+    //     lot cost data on every deploy. Repairing drift at boot masks
+    //     whichever writer creates it (audit F8g: convertSku/transfers/CSV
+    //     import mutate levels without lots). Drift must be surfaced by the
+    //     lot reconciler (`wms:reconcile-lots`) and fixed at the writer or
+    //     via the reviewed remediation script — never silently at boot.
+    console.log("Checked inventory_lots + oms.order_item_costs mills cost columns");
 
     // order_line_costs table (COGS per order line)
     await client.query(`
@@ -1047,29 +1078,92 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_event_lines_event ON procurement.demand_event_lines (demand_event_id)`);
     console.log("Checked forward demand events tables (demand_events, demand_event_lines)");
 
-    // ─── WMS order dedup: one active WMS order per OMS fulfillment order ──────────
+    // ─── WMS order dedup: one active WMS order per OMS fulfillment partition ──────
     // Advisory lock in syncOmsOrderToWms prevents races at runtime; this index
-    // is the permanent DB-level backstop. Excludes cancelled rows so the index
-    // can be created even when historical duplicates exist (all known dupes are
-    // {shipped, cancelled} pairs).
+    // is the permanent DB-level backstop. The default partition preserves
+    // today's one-WMS-order shape, while making future split routing explicit.
     try {
       await client.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_orders_oms_fulfillment_active
-          ON wms.orders (oms_fulfillment_order_id)
+        ALTER TABLE wms.orders
+          ADD COLUMN IF NOT EXISTS fulfillment_partition_key VARCHAR(120)
+      `);
+      await client.query(`
+        ALTER TABLE wms.orders
+          ALTER COLUMN fulfillment_partition_key SET DEFAULT 'default'
+      `);
+      // Migration 064 intentionally leaves legacy orphan WMS rows in place
+      // with NULL oms_fulfillment_order_id under a NOT VALID check constraint.
+      // Postgres still enforces that constraint on UPDATE, so do not touch
+      // those rows while backfilling the new partition key.
+      await client.query(`
+        UPDATE wms.orders
+        SET fulfillment_partition_key = 'default'
+        WHERE oms_fulfillment_order_id IS NOT NULL
+          AND (
+            fulfillment_partition_key IS NULL
+            OR BTRIM(fulfillment_partition_key) = ''
+          )
+      `);
+      await client.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'wms_orders_fulfillment_partition_key_not_blank_chk'
+          ) THEN
+            ALTER TABLE wms.orders
+              ADD CONSTRAINT wms_orders_fulfillment_partition_key_not_blank_chk
+              CHECK (BTRIM(fulfillment_partition_key) <> '');
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'wms_orders_fulfillment_partition_required_chk'
+          ) THEN
+            ALTER TABLE wms.orders
+              ADD CONSTRAINT wms_orders_fulfillment_partition_required_chk
+              CHECK (
+                oms_fulfillment_order_id IS NULL
+                OR fulfillment_partition_key IS NOT NULL
+              );
+          END IF;
+        END $$
+      `);
+      await client.query(`DROP INDEX IF EXISTS wms.uq_wms_orders_oms_fulfillment_active`);
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_orders_oms_fulfillment_partition_active
+          ON wms.orders (
+            source,
+            oms_fulfillment_order_id,
+            (COALESCE(warehouse_id, 0)),
+            fulfillment_partition_key
+          )
           WHERE source = 'oms'
             AND warehouse_status NOT IN ('cancelled', 'voided')
             AND oms_fulfillment_order_id IS NOT NULL
       `);
-      console.log("Checked WMS order dedup unique index (uq_wms_orders_oms_fulfillment_active)");
+      console.log("Checked WMS order dedup unique index (uq_wms_orders_oms_fulfillment_partition_active)");
     } catch (err: any) {
       console.error(
-        `[startup-migration] Could not create uq_wms_orders_oms_fulfillment_active ` +
-          `(likely duplicate active WMS orders for same OMS order — needs manual reconciliation): ${err.message}`,
+        `[startup-migration] Could not create uq_wms_orders_oms_fulfillment_partition_active ` +
+          `(likely duplicate active WMS orders for same OMS fulfillment partition — needs manual reconciliation): ${err.message}`,
       );
     }
 
   } catch (error) {
-    console.error("Error running startup migrations:", error);
+    // Deliberately resilient: a fallback-DDL hiccup must not crash-loop every
+    // dyno (release-phase migrations are the fail-fast gate; this routine is
+    // the safety net). But the failure mode is "some schema fallbacks were
+    // silently skipped" (DB-ROLE-SEPARATION-RUNBOOK.md), so make it scream.
+    // P4.1 consolidates to a single migration authority and removes this.
+    console.error(
+      "[startup-migration] FAILED PARTWAY — remaining schema fallbacks were SKIPPED. " +
+        "If a recent deploy relies on a new column/table, run its tracked migration " +
+        "manually and investigate before assuming schema is current:",
+      error,
+    );
   } finally {
     client.release();
     await migrationsPool.end().catch(() => {}); // Close the separate pool

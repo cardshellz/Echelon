@@ -53,7 +53,7 @@ describe("C2 Phase 2: tx-aware pipeline structural checks", () => {
 
   it("syncOmsOrderToWms passes tx to createOrderWithItems", () => {
     expect(WMS_SYNC_SRC).toContain(
-      "ordersStorage.createOrderWithItems(wmsOrderData, wmsLineItems, tx)",
+      "ordersStorage.createOrderWithItems(txWmsOrderData, txWmsLineItems, tx)",
     );
   });
 
@@ -110,10 +110,14 @@ describe("C2 Phase 2: tx-aware pipeline structural checks", () => {
     expect(callSite).not.toBeNull();
   });
 
-  it("ReservationService.reserveForOrder passes dbOverride to inventoryCore.reserveForOrder", () => {
+  it("ReservationService.reserveForOrder passes the locked handle to inventoryCore.reserveForOrder", () => {
+    // P0.1b: reserveForOrder wraps ATP-check→reserve in a per-product
+    // advisory xact lock; the locked handle (dbOverride when supplied,
+    // otherwise the internal tx) is what reaches inventoryCore.
     expect(RESERVATION_SRC).toContain(
-      "}, dbOverride);",
+      "}, dbh);",
     );
+    expect(RESERVATION_SRC).toContain("pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})");
   });
 
   it("inventoryCore.reserveForOrder accepts txOverride parameter", () => {
@@ -377,6 +381,9 @@ describe("ReservationService :: dbOverride threading", () => {
         };
         return chainable;
       }),
+      // P0.1b: reserveForOrder takes the per-product advisory xact lock on
+      // the supplied transaction before reading ATP.
+      execute: vi.fn(async () => ({ rows: [] })),
     };
 
     const atpService = (service as any).atpService;

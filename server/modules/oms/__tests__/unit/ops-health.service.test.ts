@@ -7,6 +7,14 @@ const OPS_HEALTH_SRC = readFileSync(
   resolve(__dirname, "../../ops-health.service.ts"),
   "utf-8",
 );
+const OMS_FLOW_RECONCILIATION_SRC = readFileSync(
+  resolve(__dirname, "../../oms-flow-reconciliation.service.ts"),
+  "utf-8",
+);
+const OMS_SCHEMA_SRC = readFileSync(
+  resolve(__dirname, "../../../../../shared/schema/oms.schema.ts"),
+  "utf-8",
+);
 
 describe("ops-health.service :: fulfillment alert severity", () => {
   it("treats stuck ShipStation push and missing tracking confirmation as critical", () => {
@@ -63,6 +71,46 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_OPS_ALERT_SCHEDULER_NOT_STARTED"/);
     expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_OPS_ALERT_SCHEDULER_STALE"/);
   });
+
+  it("surfaces Phase 7 OMS/WMS authority monitoring signals", () => {
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "WMS_ITEM_WITHOUT_OMS_AUTHORITY"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "OMS_LINE_AUTHORITY_OVER_MATERIALIZED"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "WMS_RECONCILIATION_MANUAL_REVIEW"[\s\S]*severity: "warning"/,
+    );
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("WMS_PARTITION_DUPLICATE_LINE_COVERAGE");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT");
+    expect(OPS_HEALTH_SRC).toContain("wms.reconciliation_exceptions");
+    expect(OPS_HEALTH_SRC).toContain("GROUP BY rule");
+    expect(OPS_HEALTH_SRC).toContain("authority_fulfillable_quantity");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("fulfillment_partition_key");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_drift");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_reference_rows");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("normalized_fulfillment_provider");
+    expect(OMS_SCHEMA_SRC).toContain("fulfillmentProvider");
+    expect(OMS_SCHEMA_SRC).toContain("providerFulfillmentOrderId");
+    expect(OMS_SCHEMA_SRC).toContain("providerFulfillmentOrderLineItemId");
+  });
+
+  it("surfaces duplicate active shipment identity monitoring signals", () => {
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "SHIPSTATION_ORDER_ID_DUPLICATE"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "SHIPSTATION_ORDER_KEY_DUPLICATE"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "SHIPPING_ENGINE_ORDER_REF_DUPLICATE"[\s\S]*severity: "critical"/,
+    );
+    expect(OPS_HEALTH_SRC).toContain("s.shipstation_order_key");
+    expect(OPS_HEALTH_SRC).toContain("s.engine_order_ref");
+    expect(OPS_HEALTH_SRC).toContain("echelon_combined_child");
+    expect(OPS_HEALTH_SRC).toContain("shipstation_combined_child");
+  });
 });
 
 describe("ops-health.service :: issue mapping", () => {
@@ -116,6 +164,148 @@ describe("ops-health.service :: issue mapping", () => {
       expect(health.workers.webhookRetry).toHaveProperty("startedAt");
       expect(health.workers.omsFlowReconciliation).toHaveProperty("startedAt");
       expect(health.workers.omsOpsAlert).toHaveProperty("startedAt");
+    } finally {
+      if (previousDisableSchedulers === undefined) {
+        delete process.env.DISABLE_SCHEDULERS;
+      } else {
+        process.env.DISABLE_SCHEDULERS = previousDisableSchedulers;
+      }
+    }
+  });
+
+  it("maps authority health query results to Phase 7 issue buckets", async () => {
+    const previousDisableSchedulers = process.env.DISABLE_SCHEDULERS;
+    process.env.DISABLE_SCHEDULERS = "true";
+    const execute = vi.fn(async (query: any) => {
+      const queryText = (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ");
+
+      if (
+        queryText.includes("LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id") &&
+        queryText.includes("authority_gap")
+      ) {
+        return { rows: [{ wms_order_item_id: 101, authority_gap: "missing_oms_order_line_id" }] };
+      }
+      if (
+        queryText.includes("LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id") &&
+        queryText.includes("COUNT(*)")
+      ) {
+        return { rows: [{ count: 1 }] };
+      }
+
+      if (queryText.includes("WITH active_materialized") && queryText.includes("over_materialized_quantity")) {
+        return { rows: [{ oms_order_line_id: 202, over_materialized_quantity: 1 }] };
+      }
+      if (
+        queryText.includes("WITH active_materialized") &&
+        queryText.includes("authority_fulfillable_quantity") &&
+        queryText.includes("COUNT(*)")
+      ) {
+        return { rows: [{ count: 1 }] };
+      }
+
+      if (queryText.includes("FROM wms.reconciliation_exceptions") && queryText.includes("GROUP BY rule")) {
+        return { rows: [{ rule: "picked_quantity_exceeds_oms_authority", count: 2 }] };
+      }
+      if (queryText.includes("FROM wms.reconciliation_exceptions") && queryText.includes("COUNT(*)")) {
+        return { rows: [{ count: 2 }] };
+      }
+
+      if (queryText.includes("duplicate_line_coverage") && queryText.includes("fulfillment_partition_keys")) {
+        return {
+          rows: [{
+            oms_order_line_id: 303,
+            wms_order_count: 2,
+            fulfillment_partition_keys: ["default", "west"],
+          }],
+        };
+      }
+      if (queryText.includes("duplicate_line_coverage") && queryText.includes("COUNT(*)")) {
+        return { rows: [{ count: 1 }] };
+      }
+
+      if (queryText.includes("provider_reference_drift") && queryText.includes("drift_reason")) {
+        return {
+          rows: [{
+            oms_order_line_id: 404,
+            fulfillment_provider: null,
+            normalized_fulfillment_provider: null,
+            shopify_fulfillment_order_id: "gid://shopify/FulfillmentOrder/1",
+            provider_fulfillment_order_id: null,
+            drift_reason: "provider_context_missing_or_mismatched",
+          }],
+        };
+      }
+      if (queryText.includes("provider_reference_drift") && queryText.includes("COUNT(*)")) {
+        return { rows: [{ count: 1 }] };
+      }
+
+      return { rows: [{ count: 0 }] };
+    });
+
+    try {
+      const health = await getOmsOpsHealth({ execute });
+
+      expect(
+        health.issues.find((issue) => issue.code === "WMS_ITEM_WITHOUT_OMS_AUTHORITY")?.sample,
+      ).toEqual([expect.objectContaining({ authority_gap: "missing_oms_order_line_id" })]);
+      expect(
+        health.issues.find((issue) => issue.code === "OMS_LINE_AUTHORITY_OVER_MATERIALIZED")?.sample,
+      ).toEqual([expect.objectContaining({ over_materialized_quantity: 1 })]);
+      expect(
+        health.issues.find((issue) => issue.code === "WMS_RECONCILIATION_MANUAL_REVIEW")?.sample,
+      ).toEqual([expect.objectContaining({ rule: "picked_quantity_exceeds_oms_authority" })]);
+      expect(
+        health.issues.find((issue) => issue.code === "WMS_PARTITION_DUPLICATE_LINE_COVERAGE")?.sample,
+      ).toEqual([expect.objectContaining({ fulfillment_partition_keys: ["default", "west"] })]);
+      expect(
+        health.issues.find((issue) => issue.code === "OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT")?.sample,
+      ).toEqual([expect.objectContaining({ drift_reason: "provider_context_missing_or_mismatched" })]);
+    } finally {
+      if (previousDisableSchedulers === undefined) {
+        delete process.env.DISABLE_SCHEDULERS;
+      } else {
+        process.env.DISABLE_SCHEDULERS = previousDisableSchedulers;
+      }
+    }
+  });
+
+  it("maps duplicate shipment identity query results to health issues", async () => {
+    const previousDisableSchedulers = process.env.DISABLE_SCHEDULERS;
+    process.env.DISABLE_SCHEDULERS = "true";
+    const execute = vi.fn(async (query: any) => {
+      const queryText = (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ");
+
+      if (queryText.includes("s.shipstation_order_key") && queryText.includes("shipment_count")) {
+        return {
+          rows: [{
+            shipstation_order_key: "ss-key-1",
+            shipment_count: 2,
+            shipment_ids: [11, 12],
+          }],
+        };
+      }
+      if (queryText.includes("s.shipstation_order_key") && queryText.includes("duplicate_identity")) {
+        return { rows: [{ count: 1 }] };
+      }
+
+      return { rows: [{ count: 0 }] };
+    });
+
+    try {
+      const health = await getOmsOpsHealth({ execute });
+
+      expect(
+        health.issues.find((issue) => issue.code === "SHIPSTATION_ORDER_KEY_DUPLICATE")?.sample,
+      ).toEqual([
+        expect.objectContaining({
+          shipstation_order_key: "ss-key-1",
+          shipment_count: 2,
+        }),
+      ]);
     } finally {
       if (previousDisableSchedulers === undefined) {
         delete process.env.DISABLE_SCHEDULERS;

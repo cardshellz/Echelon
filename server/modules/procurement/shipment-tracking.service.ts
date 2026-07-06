@@ -22,7 +22,7 @@ import type {
   InventoryLot,
 } from "@shared/schema";
 import { inboundShipmentLines, inboundFreightCosts, vendors } from "@shared/schema";
-import { millsToCents, perUnitMills } from "@shared/utils/money";
+import { centsToMills, millsToCents, perUnitMills } from "@shared/utils/money";
 
 /**
  * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
@@ -63,6 +63,7 @@ interface Storage {
   getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
+  getShippedQtyByPoLines(poLineIds: number[], executor?: any): Promise<Map<number, number>>;
   createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine>;
   bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]>;
   updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null>;
@@ -146,6 +147,7 @@ const MODE_DEFAULT_ALLOCATION: Record<string, string> = {
 // equal-split fallback when every line lacks it, or $0 to the dimensionless lines
 // when only some do — so we hard-block closing until dimensions are entered.
 const DIMENSIONAL_METHODS = new Set(["by_volume", "by_weight", "by_chargeable_weight"]);
+const ALLOCATION_BASIS_EPSILON = 0.000001;
 const DIMENSION_LABELS: Record<string, string> = {
   by_volume: "volume (length × width × height)",
   by_weight: "weight",
@@ -160,6 +162,36 @@ function rawLineBasisForDimension(line: any, method: string): number {
   }
 }
 
+function allocationBasisNumber(value: unknown): number {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : 0;
+}
+
+function allocationBasisDiffers(left: unknown, right: unknown): boolean {
+  return Math.abs(allocationBasisNumber(left) - allocationBasisNumber(right)) > ALLOCATION_BASIS_EPSILON;
+}
+
+function allocatedCentsPerUnitMills(allocatedCents: unknown, qtyShipped: unknown): number | null {
+  const cents = Number(allocatedCents);
+  const qty = Number(qtyShipped);
+  if (!Number.isInteger(cents) || cents < 0 || !Number.isInteger(qty) || qty <= 0) return null;
+  return perUnitMills(cents * 100, qty);
+}
+
+function nonNegativeIntegerOrNull(value: unknown): number | null {
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue < 0) return null;
+  return numberValue;
+}
+
+function poUnitCostMillsFromLine(poLine: any): number | null {
+  const mills = nonNegativeIntegerOrNull(poLine?.unitCostMills);
+  if (mills !== null) return mills;
+
+  const cents = nonNegativeIntegerOrNull(poLine?.unitCostCents);
+  return cents !== null ? centsToMills(cents) : null;
+}
+
 // Cost types with hard-coded allocation method overrides
 const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   duty: "by_value",
@@ -167,6 +199,38 @@ const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   inspection: "by_line_count",
   platform_fee: "by_line_count",
 };
+
+function positiveIntegerOrNull(value: unknown): number | null {
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue <= 0) return null;
+  return numberValue;
+}
+
+function firstPositiveInteger(...values: unknown[]): number | null {
+  for (const value of values) {
+    const numberValue = positiveIntegerOrNull(value);
+    if (numberValue !== null) return numberValue;
+  }
+  return null;
+}
+
+function getReceiveVariantId(row: any): number | null {
+  return firstPositiveInteger(
+    row?.expectedReceiveVariantId,
+    row?.expected_receive_variant_id,
+    row?.productVariantId,
+    row?.product_variant_id,
+  );
+}
+
+function getReceiveUnitsPerVariant(row: any): number | null {
+  return firstPositiveInteger(
+    row?.expectedReceiveUnitsPerVariant,
+    row?.expected_receive_units_per_variant,
+    row?.unitsPerUom,
+    row?.units_per_uom,
+  );
+}
 
 // ── Service factory ─────────────────────────────────────────────────
 
@@ -295,6 +359,53 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     } as any);
   }
 
+  async function refreshAllocationsForShipment(shipmentId: number) {
+    const lines = await storage.getInboundShipmentLines(shipmentId);
+    if (lines.length === 0) {
+      await storage.deleteAllocationsForShipment(shipmentId);
+      return;
+    }
+
+    await runAllocation(shipmentId);
+  }
+
+  async function getAllocationBreakdownsByLine(shipmentId: number) {
+    const costs = await storage.getInboundFreightCosts(shipmentId);
+    const breakdowns = new Map<number, {
+      freightAllocatedCents: number;
+      dutyAllocatedCents: number;
+      insuranceAllocatedCents: number;
+      otherAllocatedCents: number;
+    }>();
+
+    for (const cost of costs) {
+      const allocations = await storage.getInboundFreightCostAllocations(cost.id);
+      const category = getCostCategory(cost.costType);
+
+      for (const allocation of allocations) {
+        const lineId = Number(allocation.inboundShipmentLineId);
+        if (!Number.isInteger(lineId)) continue;
+
+        const current = breakdowns.get(lineId) ?? {
+          freightAllocatedCents: 0,
+          dutyAllocatedCents: 0,
+          insuranceAllocatedCents: 0,
+          otherAllocatedCents: 0,
+        };
+        const cents = Number(allocation.allocatedCents || 0);
+
+        if (category === "freight") current.freightAllocatedCents += cents;
+        else if (category === "duty") current.dutyAllocatedCents += cents;
+        else if (category === "insurance") current.insuranceAllocatedCents += cents;
+        else current.otherAllocatedCents += cents;
+
+        breakdowns.set(lineId, current);
+      }
+    }
+
+    return breakdowns;
+  }
+
   function computeLineTotals(line: { qtyShipped: number; cartonCount?: number | null; weightKg?: string | null; lengthCm?: string | null; widthCm?: string | null; heightCm?: string | null }) {
     // Multiplier: cartonCount for case SKUs (weight/dims are per-carton), qtyShipped for piece items
     const multiplier = (line.cartonCount && line.cartonCount > 0) ? line.cartonCount : line.qtyShipped;
@@ -322,6 +433,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
 
   async function getEnrichedLines(shipmentId: number) {
     const lines = await storage.getInboundShipmentLines(shipmentId);
+    const allocationBreakdowns = await getAllocationBreakdownsByLine(shipmentId);
 
     // Batch-fetch unique variant IDs and PO line IDs
     const variantIds = Array.from(new Set(lines.map(l => l.productVariantId).filter(Boolean))) as number[];
@@ -356,11 +468,43 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       const pv = line.productVariantId ? variantMap.get(line.productVariantId) : null;
       const product = pv?.productId ? productMap.get(pv.productId) : null;
       const pol = line.purchaseOrderLineId ? poLineMap.get(line.purchaseOrderLineId) : null;
+      const allocationBreakdown = allocationBreakdowns.get(line.id);
+      const freightAllocatedCents = allocationBreakdown?.freightAllocatedCents ?? null;
+      const dutyAllocatedCents = allocationBreakdown?.dutyAllocatedCents ?? null;
+      const insuranceAllocatedCents = allocationBreakdown?.insuranceAllocatedCents ?? null;
+      const otherAllocatedCents = allocationBreakdown?.otherAllocatedCents ?? null;
+      const breakdownTotalCents = allocationBreakdown
+        ? allocationBreakdown.freightAllocatedCents
+          + allocationBreakdown.dutyAllocatedCents
+          + allocationBreakdown.insuranceAllocatedCents
+          + allocationBreakdown.otherAllocatedCents
+        : null;
+      const allocatedCostCents = line.allocatedCostCents ?? breakdownTotalCents;
+      const poUnitCostMills = poUnitCostMillsFromLine(pol);
+      const totalAllocatedMillsPerUnit = allocatedCentsPerUnitMills(allocatedCostCents, line.qtyShipped);
+      const landedUnitCostMills =
+        poUnitCostMills !== null && totalAllocatedMillsPerUnit !== null
+          ? poUnitCostMills + totalAllocatedMillsPerUnit
+          : null;
       return {
         ...line,
+        allocatedCostCents,
+        sku: line.sku || pol?.sku || pv?.sku || product?.sku || null,
         unitsPerVariant: pv?.unitsPerVariant ?? 1,
         productName: product?.title || product?.name || pol?.productName || pv?.name || line.sku || null,
         poQtyOrdered: pol?.orderQty ?? null,
+        poUnitCostCents: pol?.unitCostCents ?? null,
+        poUnitCostMills,
+        freightAllocatedCents,
+        dutyAllocatedCents,
+        insuranceAllocatedCents,
+        otherAllocatedCents,
+        freightAllocatedMillsPerUnit: allocatedCentsPerUnitMills(freightAllocatedCents, line.qtyShipped),
+        dutyAllocatedMillsPerUnit: allocatedCentsPerUnitMills(dutyAllocatedCents, line.qtyShipped),
+        insuranceAllocatedMillsPerUnit: allocatedCentsPerUnitMills(insuranceAllocatedCents, line.qtyShipped),
+        otherAllocatedMillsPerUnit: allocatedCentsPerUnitMills(otherAllocatedCents, line.qtyShipped),
+        totalAllocatedMillsPerUnit,
+        landedUnitCostMills,
       };
     });
   }
@@ -581,24 +725,6 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         ? poLines.filter((l: any) => lineIds.includes(l.id))
         : poLines;
 
-    // Resolve dimensions + cartonCount outside the tx (read-only, not contended)
-    const lineMeta = new Map<number, { dims: any; cartonCount: number | null; qtyPieces: number }>();
-    for (const poLine of candidateLines) {
-      const dims = await resolveDimensionsForVariant(poLine.productVariantId, po.vendorId);
-      const qtyPieces = qtyMap.size > 0 ? qtyMap.get(poLine.id)! : (poLine.orderQty ?? 0);
-
-      let cartonCount: number | null = null;
-      if (poLine.productVariantId) {
-        const pv = await storage.getProductVariantById(poLine.productVariantId);
-        const unitsPerCase = pv?.unitsPerVariant ?? 1;
-        if (unitsPerCase > 1) {
-          cartonCount = Math.ceil(qtyPieces / unitsPerCase);
-        }
-      }
-
-      lineMeta.set(poLine.id, { dims, cartonCount, qtyPieces });
-    }
-
     const candidateLineIds = candidateLines.map((l: any) => l.id);
 
     if (candidateLineIds.length === 0) {
@@ -609,7 +735,17 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     const created = await db.transaction(async (tx: any) => {
       // 1. Lock candidate PO lines (serializes concurrent adds on same lines)
       const lockedRows = await tx.execute(sqlTag`
-        SELECT id, line_type, status, order_qty, cancelled_qty, sku
+        SELECT
+          id,
+          line_type,
+          status,
+          order_qty,
+          cancelled_qty,
+          sku,
+          product_variant_id,
+          expected_receive_variant_id,
+          expected_receive_units_per_variant,
+          units_per_uom
         FROM procurement.purchase_order_lines
         WHERE id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
         FOR UPDATE
@@ -640,25 +776,12 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         throw new ShipmentTrackingError("No new PO lines to add (all already on this shipment)");
       }
 
-      // 2. Re-read alreadyShippedQty AFTER the lock (fresh data)
-      const shippedResult = await tx.execute(sqlTag`
-        SELECT
-          isl.purchase_order_line_id,
-          COALESCE(SUM(isl.qty_shipped), 0) AS already_shipped
-        FROM procurement.inbound_shipment_lines isl
-        JOIN procurement.inbound_shipments s ON s.id = isl.inbound_shipment_id
-        WHERE isl.purchase_order_line_id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
-          AND s.status != 'cancelled'
-        GROUP BY isl.purchase_order_line_id
-      `);
-
-      const shippedQtyByPoLine = new Map<number, number>();
-      for (const row of shippedResult.rows as any[]) {
-        shippedQtyByPoLine.set(
-          Number(row.purchase_order_line_id),
-          Number(row.already_shipped),
-        );
-      }
+      // 2. Re-read alreadyShippedQty AFTER the lock (fresh data). Delegates to
+      //    the single shared tally (storage.getShippedQtyByPoLines) so this
+      //    write path and the shippable-lines read path can never disagree about
+      //    what counts as shipped — cancelled shipments are excluded there.
+      //    Passing `tx` runs it inside this locked transaction.
+      const shippedQtyByPoLine = await storage.getShippedQtyByPoLines(candidateLineIds, tx);
 
       // 3. Validate per-line against locked, re-read data
       if (qtyMap.size > 0) {
@@ -695,37 +818,51 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       }
 
       // 4. Insert new lines inside the transaction
-      const newLines = linesToAdd.map((poLine: any) => {
-        const meta = lineMeta.get(poLine.id)!;
+      const newLines = await Promise.all(linesToAdd.map(async (poLine: any) => {
+        const receiveVariantId = getReceiveVariantId(poLine);
+        const qtyPieces = qtyMap.size > 0 ? qtyMap.get(poLine.id)! : (poLine.order_qty ?? 0);
+        const dims = await resolveDimensionsForVariant(receiveVariantId, po.vendorId);
+
+        let cartonCount: number | null = null;
+        let receiveUnitsPerVariant = getReceiveUnitsPerVariant(poLine);
+        if (!receiveUnitsPerVariant && receiveVariantId) {
+          const receiveVariant = await storage.getProductVariantById(receiveVariantId);
+          receiveUnitsPerVariant = positiveIntegerOrNull(receiveVariant?.unitsPerVariant);
+        }
+        if (receiveUnitsPerVariant && receiveUnitsPerVariant > 1) {
+          cartonCount = Math.ceil(qtyPieces / receiveUnitsPerVariant);
+        }
+
         const computed = computeLineTotals({
-          qtyShipped: meta.qtyPieces,
-          cartonCount: meta.cartonCount,
-          weightKg: meta.dims.weightKg,
-          lengthCm: meta.dims.lengthCm,
-          widthCm: meta.dims.widthCm,
-          heightCm: meta.dims.heightCm,
+          qtyShipped: qtyPieces,
+          cartonCount,
+          weightKg: dims.weightKg,
+          lengthCm: dims.lengthCm,
+          widthCm: dims.widthCm,
+          heightCm: dims.heightCm,
         });
 
         return {
           inboundShipmentId: shipmentId,
           purchaseOrderId,
           purchaseOrderLineId: poLine.id,
-          productVariantId: poLine.product_variant_id,
+          productVariantId: receiveVariantId,
           sku: poLine.sku || null,
-          qtyShipped: meta.qtyPieces,
-          cartonCount: meta.cartonCount,
-          weightKg: meta.dims.weightKg,
-          lengthCm: meta.dims.lengthCm,
-          widthCm: meta.dims.widthCm,
-          heightCm: meta.dims.heightCm,
+          qtyShipped: qtyPieces,
+          cartonCount,
+          weightKg: dims.weightKg,
+          lengthCm: dims.lengthCm,
+          widthCm: dims.widthCm,
+          heightCm: dims.heightCm,
           ...computed,
         };
-      });
+      }));
 
       return await tx.insert(inboundShipmentLines).values(newLines).returning();
     });
 
     await recomputeShipmentTotals(shipmentId);
+    await refreshAllocationsForShipment(shipmentId);
     return created;
   }
 
@@ -740,6 +877,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
 
     await storage.deleteInboundShipmentLine(lineId);
     await recomputeShipmentTotals(line.inboundShipmentId);
+    await refreshAllocationsForShipment(line.inboundShipmentId);
     return true;
   }
 
@@ -777,6 +915,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     } as any);
 
     await recomputeShipmentTotals(line.inboundShipmentId);
+    await refreshAllocationsForShipment(line.inboundShipmentId);
     return await storage.getInboundShipmentLineById(lineId);
   }
 
@@ -857,6 +996,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     }
 
     await recomputeShipmentTotals(shipmentId);
+    await refreshAllocationsForShipment(shipmentId);
     return { updated, total: lines.length };
   }
 
@@ -913,6 +1053,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
 
     const created = await storage.bulkCreateInboundShipmentLines(newLines);
     await recomputeShipmentTotals(shipmentId);
+    await refreshAllocationsForShipment(shipmentId);
 
     return {
       imported: created.length,
@@ -1171,6 +1312,17 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       const basisSummary = lines.length > 0
         ? await buildAllocationBasis(lines, method)
         : { rawBasisTotal: 0, basisTotal: 0, usedFallback: false };
+      const basisValues = "values" in basisSummary ? basisSummary.values : [];
+      const expectedBasisByLine = new Map(
+        basisValues.map((value: any) => [value.lineId, value.basis]),
+      );
+      const staleBasisCount = allocations.filter((allocation: any) => {
+        if (!currentLineIds.has(allocation.inboundShipmentLineId)) return false;
+        const expectedBasis = expectedBasisByLine.get(allocation.inboundShipmentLineId);
+        if (expectedBasis == null) return true;
+        return allocationBasisDiffers(allocation.allocationBasisValue, expectedBasis)
+          || allocationBasisDiffers(allocation.allocationBasisTotal, basisSummary.basisTotal);
+      }).length;
 
       effectiveCostCents += effectiveCents;
       allocatedCostCents += allocatedCents;
@@ -1208,6 +1360,14 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
           code: "stale_allocation_line",
           costId: cost.id,
           message: `${cost.costType} cost has allocations tied to missing shipment lines`,
+        });
+      } else if (staleBasisCount > 0) {
+        status = "stale_allocation_basis";
+        issues.push({
+          severity: "blocker",
+          code: "stale_allocation_basis",
+          costId: cost.id,
+          message: `${cost.costType} allocation basis no longer matches current ${method} values on ${staleBasisCount} line(s). Re-run allocation before closing.`,
         });
       } else if (allocatedCents !== effectiveCents) {
         status = "allocation_mismatch";
@@ -1747,6 +1907,7 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
     getLines: (shipmentId: number) => storage.getInboundShipmentLines(shipmentId),
     getEnrichedLines: getEnrichedLines,
     getLinesByPo: (poId: number) => storage.getInboundShipmentLinesByPo(poId),
+    getShippedQtyByPoLines: (poLineIds: number[]) => storage.getShippedQtyByPoLines(poLineIds),
 
     // Costs
     addCost,

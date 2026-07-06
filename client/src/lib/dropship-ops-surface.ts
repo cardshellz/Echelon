@@ -83,6 +83,7 @@ export type DropshipStoreConnectionLifecycleStatus =
   | "grace_period"
   | "paused"
   | "disconnected";
+export type DropshipStoreOAuthIntent = "connect" | "refresh_connection" | "change_store";
 
 export const allDropshipOpsOrderIntakeStatuses: DropshipOpsOrderIntakeStatus[] = [
   "received",
@@ -266,6 +267,7 @@ export interface DropshipOnboardingState {
 
 export interface DropshipStoreConnectionOAuthStartInput {
   platform: DropshipStorePlatform;
+  intent: DropshipStoreOAuthIntent;
   shopDomain?: string;
   returnTo?: string;
 }
@@ -1422,11 +1424,31 @@ export interface DropshipCatalogRow {
   selectionDecision: DropshipCatalogSelectionDecision;
 }
 
+export interface DropshipCatalogFacets {
+  categories: Array<{
+    category: string;
+    label: string;
+    rowCount: number;
+  }>;
+  productLines: Array<{
+    productLineIds: number[];
+    label: string;
+    rowCount: number;
+  }>;
+  products: Array<{
+    productId: number;
+    label: string;
+    sku: string | null;
+    rowCount: number;
+  }>;
+}
+
 export interface DropshipCatalogResponse {
   rows: DropshipCatalogRow[];
   total: number;
   page: number;
   limit: number;
+  facets: DropshipCatalogFacets;
 }
 
 export interface DropshipListingPreviewRow {
@@ -2174,15 +2196,19 @@ export function queryErrorMessage(error: unknown, fallback: string): string {
 
 export function buildAdminCatalogExposurePreviewUrl(input: {
   search: string;
-  exposedOnly: boolean;
-  includeInactiveCatalog: boolean;
+  visibility?: "all" | "visible" | "hidden";
+  catalogStatus?: "active" | "inactive" | "all";
+  exposedOnly?: boolean;
+  includeInactiveCatalog?: boolean;
   page?: number;
   limit?: number;
 }): string {
+  const visibility = input.visibility ?? (input.exposedOnly ? "visible" : "all");
+  const catalogStatus = input.catalogStatus ?? (input.includeInactiveCatalog ? "all" : "active");
   return buildQueryUrl("/api/dropship/admin/catalog/preview", {
     search: input.search.trim(),
-    exposedOnly: input.exposedOnly,
-    includeInactiveCatalog: input.includeInactiveCatalog,
+    visibility,
+    catalogStatus,
     page: input.page ?? 1,
     limit: input.limit ?? 50,
   });
@@ -2479,12 +2505,10 @@ export function buildAdminOmsChannelConfigureInput(input: {
 }
 
 export function buildAdminShippingConfigUrl(input: {
-  search?: string;
   packageProfileLimit?: number;
   rateTableLimit?: number;
 } = {}): string {
   return buildQueryUrl("/api/dropship/admin/shipping/config", {
-    search: input.search?.trim() || undefined,
     packageProfileLimit: input.packageProfileLimit ?? 50,
     rateTableLimit: input.rateTableLimit ?? 25,
   });
@@ -3186,7 +3210,7 @@ export function buildCatalogExposureRuleFromPreviewRow(input: {
     productVariantId: target.productVariantId,
     category: target.category,
     priority: input.action === "include" ? 100 : 200,
-    notes: `${input.action === "include" ? "Include" : "Exclude"} ${target.label}`,
+    notes: `${input.action === "include" ? "Expose" : "Hide"} ${target.label}`,
     metadata: {
       source: "admin_catalog_preview",
     },
@@ -3285,16 +3309,19 @@ export function catalogExposureRuleKey(rule: Pick<
 
 export function buildStoreConnectionOAuthStartInput(input: {
   platform: DropshipStorePlatform;
+  intent?: DropshipStoreOAuthIntent;
   shopDomain: string;
   returnTo: string;
 }): DropshipStoreConnectionOAuthStartInput {
   const returnTo = normalizePortalReturnPath(input.returnTo);
+  const intent = input.intent ?? "connect";
   if (input.platform === "ebay") {
-    return { platform: input.platform, returnTo };
+    return { platform: input.platform, intent, returnTo };
   }
 
   return {
     platform: input.platform,
+    intent,
     shopDomain: normalizeShopifyShopDomainInput(input.shopDomain),
     returnTo,
   };

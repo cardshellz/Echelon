@@ -9,15 +9,19 @@ const WMS_SYNC_SRC = readFileSync(
 
 describe("wms-sync.service :: inventory reservation call", () => {
   it("calls reserveOrder (order-level) not reserveForOrder (per-item 5-arg)", () => {
+    // P0.1c (revised 2026-07-06): the ready branch reserves via the
+    // best-effort reserve, which wraps the order-level reserveOrder. The
+    // per-item 5-arg reserveForOrder must never appear in wms-sync.
     const reserveReadyBlock = WMS_SYNC_SRC.match(
-      /warehouseStatus === "ready"[\s\S]{0,500}?reservation\.(reserveOrder|reserveForOrder)\(/,
+      /warehouseStatus === "ready"[\s\S]{0,500}?reserveBestEffort\(/,
     );
     expect(reserveReadyBlock).not.toBeNull();
-    expect(reserveReadyBlock![1]).toBe("reserveOrder");
+    expect(WMS_SYNC_SRC).toContain("this.services.reservation.reserveOrder(wmsOrderId)");
+    expect(WMS_SYNC_SRC).not.toMatch(/reservation\.reserveForOrder\(/);
   });
 
   it("checks failed array from ReservationResult, not a .success property", () => {
-    expect(WMS_SYNC_SRC).toMatch(/reserveResult\.failed\.length > 0/);
+    expect(WMS_SYNC_SRC).toMatch(/reserveResult\.failed\.length/);
     expect(WMS_SYNC_SRC).not.toMatch(/reserveResult\.success/);
   });
 });

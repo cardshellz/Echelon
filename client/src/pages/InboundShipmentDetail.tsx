@@ -1,7 +1,7 @@
-import { dollarsToCents } from "@shared/utils/money";
-import { useState, useRef } from "react";
+import { dollarsToCents, formatMills } from "@shared/utils/money";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useRoute, useLocation } from "wouter";
+import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +19,11 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { AddInvoiceFromCostsModal } from "@/components/shipment/AddInvoiceFromCostsModal";
+import {
+  ShipmentReceiptPackResolutionDialog,
+  type ShipmentReceiptPackResolution,
+  type ShipmentReceiptPackResolutionLine,
+} from "@/components/purchasing/ShipmentReceiptPackResolutionDialog";
 import { format } from "date-fns";
 import Papa from "papaparse";
 import {
@@ -118,6 +123,12 @@ const ALLOCATION_METHOD_OPTIONS = [
   { value: "by_line_count", label: "By Line Count" },
 ];
 
+function parsePositiveInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 type LandedCostPushResult = {
   updated: number;
   total: number;
@@ -174,10 +185,27 @@ const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
   zero_amount: "Zero Amount",
   needs_allocation: "Needs Allocation",
   stale_allocation: "Stale Allocation",
+  stale_allocation_basis: "Stale Basis",
   allocation_mismatch: "Mismatch",
   allocated_with_fallback: "Even Split",
   allocated: "Allocated",
 };
+
+function compareShipmentLinesByEntryOrder(a: any, b: any): number {
+  const aCreatedAt = Date.parse(a?.createdAt ?? "");
+  const bCreatedAt = Date.parse(b?.createdAt ?? "");
+  const aHasCreatedAt = Number.isFinite(aCreatedAt);
+  const bHasCreatedAt = Number.isFinite(bCreatedAt);
+
+  if (aHasCreatedAt && bHasCreatedAt && aCreatedAt !== bCreatedAt) {
+    return aCreatedAt - bCreatedAt;
+  }
+  if (aHasCreatedAt !== bHasCreatedAt) {
+    return aHasCreatedAt ? -1 : 1;
+  }
+
+  return Number(a?.id ?? 0) - Number(b?.id ?? 0);
+}
 
 const LANDED_COST_SKIP_LABELS: Record<string, string> = {
   ambiguous_variant_landed_cost: "Ambiguous same-SKU landed cost",
@@ -211,6 +239,40 @@ function formatCents(cents: number | null | undefined, opts?: { unitCost?: boole
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function formatSignedCents(cents: number | null | undefined): string {
+  const n = Number(cents || 0);
+  if (n < 0) return `-${formatCents(Math.abs(n))}`;
+  return formatCents(n);
+}
+
+function formatMillsPerUnit(mills: number | null | undefined): string {
+  if (mills === null || mills === undefined) return "—";
+  return `${formatMills(mills)}/unit`;
+}
+
+function formatMillsOrDash(mills: number | null | undefined): string {
+  if (mills === null || mills === undefined) return "—";
+  return formatMills(mills);
+}
+
+function AllocationAmountCell({
+  cents,
+  millsPerUnit,
+  strong = false,
+}: {
+  cents: number | string | null | undefined;
+  millsPerUnit?: number | null;
+  strong?: boolean;
+}) {
+  if (cents === null || cents === undefined) return <>—</>;
+  return (
+    <div className={`font-mono ${strong ? "font-medium" : ""}`}>
+      <div>{formatCents(Number(cents))}</div>
+      <div className="text-xs font-normal text-muted-foreground">{formatMillsPerUnit(millsPerUnit)}</div>
+    </div>
+  );
+}
+
 function formatNumber(val: string | number | null | undefined, decimals = 2): string {
   if (val === null || val === undefined || val === "") return "—";
   return Number(val).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
@@ -227,8 +289,11 @@ export default function InboundShipmentDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
+  const searchStr = useSearch();
   const [, params] = useRoute("/shipments/:id");
   const shipmentId = params?.id ? Number(params.id) : null;
+  const shipmentDetailQueryKey = [`/api/inbound-shipments/${shipmentId}`] as const;
+  const shipmentAllocationStatusQueryKey = [`/api/inbound-shipments/${shipmentId}/allocation-status`] as const;
 
   const [activeTab, setActiveTab] = useState("lines");
 
@@ -241,6 +306,11 @@ export default function InboundShipmentDetail() {
   const [showEditCostDialog, setShowEditCostDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [lastLandedCostPush, setLastLandedCostPush] = useState<LandedCostPushResult | null>(null);
+  const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
+  const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
+  const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
+  const [creatingShipmentReceipt, setCreatingShipmentReceipt] = useState(false);
+  const resumeShipmentReceiptHandled = useRef<string | null>(null);
 
   // Edit line dialog state
   const [editDialogLine, setEditDialogLine] = useState<any | null>(null);
@@ -302,7 +372,7 @@ export default function InboundShipmentDetail() {
   // ── Queries ──
 
   const { data: shipment, isLoading } = useQuery<any>({
-    queryKey: [`/api/inbound-shipments/${shipmentId}`],
+    queryKey: shipmentDetailQueryKey,
     enabled: !!shipmentId,
   });
 
@@ -317,7 +387,7 @@ export default function InboundShipmentDetail() {
   });
 
   const { data: allocationStatus } = useQuery<AllocationStatus>({
-    queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`],
+    queryKey: shipmentAllocationStatusQueryKey,
     // Loaded whenever the shipment is open so the missing-dimensions banner + fix modal
     // (and the close-blocked auto-open) always have allocation data, regardless of tab.
     enabled: !!shipmentId,
@@ -332,12 +402,24 @@ export default function InboundShipmentDetail() {
     enabled: !!shipmentId,
   });
 
-  const lines = shipment?.lines ?? [];
+  const lines = useMemo(
+    () => (Array.isArray(shipment?.lines) ? [...shipment.lines].sort(compareShipmentLinesByEntryOrder) : []),
+    [shipment?.lines],
+  );
   const costs = shipment?.costs ?? [];
   const paymentStatus = shipment?.paymentStatus ?? null;
   const statusHistory = shipment?.statusHistory ?? [];
   const purchaseOrders = posData?.pos ?? posData?.purchaseOrders ?? [];
   const poLines = selectedPo?.lines ?? [];
+  const lineAllocatedTotalCents = lines.reduce(
+    (sum: number, line: any) => sum + Number(line.allocatedCostCents || 0),
+    0,
+  );
+  const allocatableCostTotalCents = allocationStatus?.effectiveCostCents ?? costs.reduce(
+    (sum: number, cost: any) => sum + Number(cost.actualCents ?? cost.estimatedCents ?? 0),
+    0,
+  );
+  const allocationChecksumDeltaCents = allocatableCostTotalCents - lineAllocatedTotalCents;
 
   // Track which PO line IDs are already on this shipment (for duplicate detection)
   const existingPoLineIds = new Set(
@@ -372,6 +454,167 @@ export default function InboundShipmentDetail() {
       predicate: (q) =>
         typeof q.queryKey[0] === "string" && q.queryKey[0].startsWith("/api/purchase-orders/"),
     });
+  const refreshActiveQuery = async (queryKey: readonly [string]) => {
+    await queryClient.invalidateQueries({ queryKey });
+    await queryClient.refetchQueries({ queryKey, type: "active" });
+  };
+  const refreshShipmentCostingViews = async () => {
+    const results = await Promise.allSettled([
+      refreshActiveQuery(shipmentDetailQueryKey),
+      refreshActiveQuery(shipmentAllocationStatusQueryKey),
+    ]);
+    const failedRefreshes = results.filter((result) => result.status === "rejected");
+    if (failedRefreshes.length > 0) {
+      console.error("Failed to refresh shipment costing views after mutation", {
+        shipmentId,
+        failedRefreshes: failedRefreshes.map((result) => String((result as PromiseRejectedResult).reason)),
+      });
+    }
+  };
+
+  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
+    const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
+    const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
+    return body as ShipmentReceiptPackResolution;
+  }
+
+  async function createReceiptForShipment(params: { shipmentId: number; purchaseOrderId: number }) {
+    setCreatingShipmentReceipt(true);
+    try {
+      const idempotencyKey = (
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? (crypto as any).randomUUID()
+          : `shipment-receipt-${params.shipmentId}-${params.purchaseOrderId}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      ) as string;
+      const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/create-receipt`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({ purchaseOrderId: params.purchaseOrderId }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Failed to create receipt");
+      setShipmentReceiptPackResolution(null);
+      setPendingShipmentReceipt(null);
+      toast({ title: "Receipt created", description: `${body.receiptNumber} created from shipment` });
+      invalidatePoViews();
+      navigate(`/receiving?open=${body.id}`);
+    } catch (err: any) {
+      const openedBlocker = await openShipmentReceiptPackBlocker(params);
+      if (openedBlocker) return;
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCreatingShipmentReceipt(false);
+    }
+  }
+
+  async function openShipmentReceiptPackBlocker(params: { shipmentId: number; purchaseOrderId: number } | undefined | null): Promise<boolean> {
+    if (!params) return false;
+    setCheckingShipmentReceiptPacks(true);
+    setPendingShipmentReceipt(params);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!resolution.canCreateReceipt) {
+        setShipmentReceiptPackResolution(resolution);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  async function checkAndCreateReceiptForShipment(params: { shipmentId: number; purchaseOrderId: number }) {
+    setCheckingShipmentReceiptPacks(true);
+    setPendingShipmentReceipt(params);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(params);
+      if (!resolution.canCreateReceipt) {
+        setShipmentReceiptPackResolution(resolution);
+        return;
+      }
+      await createReceiptForShipment(params);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  async function refreshShipmentReceiptPackResolution() {
+    if (!pendingShipmentReceipt) return;
+    setCheckingShipmentReceiptPacks(true);
+    try {
+      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt);
+      setShipmentReceiptPackResolution(resolution);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setCheckingShipmentReceiptPacks(false);
+    }
+  }
+
+  function createPendingShipmentReceipt() {
+    if (!pendingShipmentReceipt) return;
+    createReceiptForShipment(pendingShipmentReceipt);
+  }
+
+  function openReceiptVariantSetup(line?: ShipmentReceiptPackResolutionLine) {
+    const context = pendingShipmentReceipt ?? (shipmentReceiptPackResolution
+      ? {
+          shipmentId: shipmentReceiptPackResolution.shipmentId,
+          purchaseOrderId: shipmentReceiptPackResolution.purchaseOrderId,
+        }
+      : null);
+    const returnTo = context
+      ? `/shipments/${context.shipmentId}?resumeShipmentReceipt=1&purchaseOrderId=${context.purchaseOrderId}`
+      : `/shipments/${shipmentId ?? ""}`;
+    const setupParams = new URLSearchParams({
+      receiptSetup: "1",
+      returnTo,
+    });
+    if (line?.unitsPerCarton && Number(line.unitsPerCarton) > 0) {
+      setupParams.set("unitsPerVariant", String(line.unitsPerCarton));
+      setupParams.set("hierarchyLevel", "3");
+    }
+    if (line?.sku) setupParams.set("shipmentSku", line.sku);
+
+    if (line?.productId) {
+      navigate(`/products/${line.productId}?${setupParams.toString()}`);
+      return;
+    }
+
+    navigate(`/catalog/variants?${setupParams.toString()}`);
+  }
+
+  useEffect(() => {
+    if (!shipmentId) return;
+    const searchParams = new URLSearchParams(searchStr);
+    if (searchParams.get("resumeShipmentReceipt") !== "1") return;
+
+    const purchaseOrderId = parsePositiveInt(searchParams.get("purchaseOrderId"));
+    if (!purchaseOrderId) {
+      toast({
+        title: "Cannot resume receipt",
+        description: "The return link is missing the PO context.",
+        variant: "destructive",
+      });
+      navigate(`/shipments/${shipmentId}`, { replace: true });
+      return;
+    }
+
+    const resumeKey = `${shipmentId}:${purchaseOrderId}`;
+    if (resumeShipmentReceiptHandled.current === resumeKey) return;
+    resumeShipmentReceiptHandled.current = resumeKey;
+    navigate(`/shipments/${shipmentId}`, { replace: true });
+    void checkAndCreateReceiptForShipment({ shipmentId, purchaseOrderId });
+  }, [shipmentId, searchStr]);
 
   function createTransitionMutation(endpoint: string) {
     return useMutation({
@@ -422,8 +665,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("PATCH", `/api/inbound-shipments/${shipmentId}`, data);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
       invalidatePoViews();
       setShowEditDialog(false);
@@ -440,8 +683,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/from-po`, data);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setShowAddFromPoDialog(false);
       setSelectedPoId(null);
       setSelectedPoLineIds([]);
@@ -458,8 +701,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/import-packing-list`, { rows });
       return res.json();
     },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async (result) => {
+      await refreshShipmentCostingViews();
       setShowImportDialog(false);
       resetImportState();
       toast({ title: "Import complete", description: `${result.imported ?? "Lines"} imported successfully` });
@@ -474,8 +717,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/resolve-dimensions`);
       return res.json();
     },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async (result) => {
+      await refreshShipmentCostingViews();
       toast({ title: "Dimensions resolved", description: `${result.resolved ?? "Lines"} updated from product data` });
     },
     onError: (err: Error) => {
@@ -488,8 +731,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("PATCH", `/api/inbound-shipments/lines/${lineId}`, data);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setEditDialogLine(null);
       toast({ title: "Line updated" });
     },
@@ -503,8 +746,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("DELETE", `/api/inbound-shipments/lines/${lineId}`);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       toast({ title: "Line removed" });
     },
     onError: (err: Error) => {
@@ -527,8 +770,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/costs`, payload);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setShowAddCostDialog(false);
       setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByName: "", costDate: "" });
       setCostVendorSearch("");
@@ -553,8 +796,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("PATCH", `/api/inbound-shipments/costs/${costId}`, payload);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setShowEditCostDialog(false);
       setEditingCost(null);
       toast({ title: "Cost updated" });
@@ -569,8 +812,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("DELETE", `/api/inbound-shipments/costs/${costId}`);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       toast({ title: "Cost removed" });
     },
     onError: (err: Error) => {
@@ -606,9 +849,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/allocate`);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       toast({ title: "Allocation complete", description: "Costs allocated to shipment lines" });
     },
     onError: (err: Error) => {
@@ -621,9 +863,8 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/finalize`);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       toast({ title: "Finalized", description: "Landed costs finalized and snapshotted" });
     },
     onError: (err: Error) => {
@@ -636,10 +877,9 @@ export default function InboundShipmentDetail() {
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/push-costs-to-lots`);
       return res.json();
     },
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       setLastLandedCostPush(result);
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+      await refreshShipmentCostingViews();
       const skippedCount = result.skipped?.length ?? 0;
       toast({
         title: skippedCount > 0 ? "Landed cost push needs review" : "Landed costs pushed",
@@ -659,18 +899,17 @@ export default function InboundShipmentDetail() {
   // totalVolumeCbm/Weight so the by-volume/by-weight gate clears.
   const saveDimFixMutation = useMutation({
     mutationFn: async () => {
-      await Promise.all(dimFixRows.map((r) =>
-        apiRequest("PATCH", `/api/inbound-shipments/lines/${r.lineId}`, {
+      for (const r of dimFixRows) {
+        await apiRequest("PATCH", `/api/inbound-shipments/lines/${r.lineId}`, {
           lengthCm: r.lengthCm || null,
           widthCm: r.widthCm || null,
           heightCm: r.heightCm || null,
           weightKg: r.weightPerCarton || null,
-        })
-      ));
+        });
+      }
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/allocation-status`] });
+    onSuccess: async () => {
+      await refreshShipmentCostingViews();
       setShowDimFixModal(false);
       toast({ title: "Dimensions saved", description: "Lines updated — you can close the shipment now." });
     },
@@ -1002,45 +1241,41 @@ export default function InboundShipmentDetail() {
           )}
 
           {/* Create Receipt from shipment lines — available once delivered */}
-          {["delivered", "costing"].includes(shipment.status) && lines.length > 0 && (
+          {["delivered", "costing", "closed"].includes(shipment.status) && lines.length > 0 && (
             <Button
               variant="outline"
               onClick={async () => {
-                // Find linked PO IDs from shipment lines
-                const poLineIds = lines.map((sl: any) => sl.purchaseOrderLineId).filter(Boolean);
-                if (poLineIds.length === 0) {
-                  toast({ title: "No PO lines linked", description: "Shipment lines must be linked to PO lines to create a receipt.", variant: "destructive" });
+                const positiveLines = lines.filter((sl: any) => Number(sl.qtyShipped) > 0);
+                const unlinkedLineCount = positiveLines.filter((sl: any) => !sl.purchaseOrderId || !sl.purchaseOrderLineId).length;
+                if (positiveLines.length === 0) {
+                  toast({ title: "No receivable lines", description: "Shipment has no positive-quantity lines to receive.", variant: "destructive" });
                   return;
                 }
-                // Get unique PO IDs — create receipt from the first linked PO
-                const poIds = [...new Set(lines.map((sl: any) => sl.purchaseOrderId).filter(Boolean))];
+                if (unlinkedLineCount > 0) {
+                  toast({ title: "PO links required", description: `${unlinkedLineCount} positive shipment line(s) are missing PO links. Link every line before creating a receipt from the shipment page.`, variant: "destructive" });
+                  return;
+                }
+                // Shipment-level creation is only safe when all lines belong to one PO.
+                const poIds = [...new Set(positiveLines.map((sl: any) => Number(sl.purchaseOrderId)).filter((id: number) => Number.isInteger(id) && id > 0))];
                 if (poIds.length === 0) {
                   toast({ title: "No PO linked", description: "Link shipment lines to a PO first.", variant: "destructive" });
                   return;
                 }
-                try {
-                  const idempotencyKey = (
-                    typeof crypto !== "undefined" && "randomUUID" in crypto
-                      ? (crypto as any).randomUUID()
-                      : `shipment-receipt-${poIds[0]}-${Date.now()}-${Math.random().toString(36).slice(2)}`
-                  ) as string;
-                  const res = await fetch(`/api/inbound-shipments/${shipment.id}/create-receipt`, {
-                    method: "POST",
-                    headers: { "Idempotency-Key": idempotencyKey },
+                if (poIds.length > 1) {
+                  toast({
+                    title: "Choose a PO first",
+                    description: "This shipment contains multiple POs. Open the PO detail and receive this shipment for the specific PO.",
+                    variant: "destructive",
                   });
-                  if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed"); }
-                  const receipt = await res.json();
-                  toast({ title: "Receipt created", description: `${receipt.receiptNumber} created from shipment` });
-                  invalidatePoViews();
-                  navigate(`/receiving?open=${receipt.id}`);
-                } catch (err: any) {
-                  toast({ title: "Error", description: err.message, variant: "destructive" });
+                  return;
                 }
+                await checkAndCreateReceiptForShipment({ shipmentId: shipment.id, purchaseOrderId: poIds[0] });
               }}
+              disabled={checkingShipmentReceiptPacks || creatingShipmentReceipt}
               className="flex-1 sm:flex-none min-h-[44px]"
             >
               <Truck className="h-4 w-4 mr-2" />
-              Create Receipt
+              {checkingShipmentReceiptPacks ? "Checking..." : creatingShipmentReceipt ? "Creating..." : "Create Receipt"}
             </Button>
           )}
 
@@ -1215,7 +1450,7 @@ export default function InboundShipmentDetail() {
                           </div>
                           {line.allocatedCostCents != null && (
                             <div className="text-xs mt-1">
-                              Allocated: {formatCents(line.allocatedCostCents)} | Landed: {formatCents(line.landedUnitCostCents)}
+                              Allocated: {formatCents(line.allocatedCostCents)} ({formatMillsPerUnit(line.totalAllocatedMillsPerUnit)}) | Landed: {formatMillsOrDash(line.landedUnitCostMills)}
                             </div>
                           )}
                         </div>
@@ -1273,8 +1508,10 @@ export default function InboundShipmentDetail() {
                         <TableCell className="text-right">{formatNumber(line.weightKg, 2)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>
-                        <TableCell className="text-right font-mono">{line.allocatedCostCents != null ? formatCents(line.allocatedCostCents) : "—"}</TableCell>
-                        <TableCell className="text-right font-mono">{line.landedUnitCostCents != null ? formatCents(line.landedUnitCostCents) : "—"}</TableCell>
+                        <TableCell className="text-right">
+                          <AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} />
+                        </TableCell>
+                        <TableCell className="text-right font-mono">{formatMillsOrDash(line.landedUnitCostMills)}</TableCell>
                         {isEditable && (
                           <TableCell>
                             <div className="flex gap-1">
@@ -1303,6 +1540,24 @@ export default function InboundShipmentDetail() {
               </TableBody>
             </Table>
           </Card>
+          {lines.length > 0 && (
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 text-sm md:grid-cols-3">
+              <div>
+                <div className="text-xs text-muted-foreground">Allocatable cost total</div>
+                <div className="font-mono font-medium">{formatCents(allocatableCostTotalCents)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Allocated to lines</div>
+                <div className="font-mono font-medium">{formatCents(lineAllocatedTotalCents)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Checksum delta</div>
+                <div className={`font-mono font-medium ${allocationChecksumDeltaCents === 0 ? "" : "text-destructive"}`}>
+                  {formatSignedCents(allocationChecksumDeltaCents)}
+                </div>
+              </div>
+            </div>
+          )}
         </TabsContent>
 
         {/* ══ Tab 2: Costs ══ */}
@@ -1669,7 +1924,7 @@ export default function InboundShipmentDetail() {
                           </TableCell>
                           <TableCell>
                             <Badge
-                              variant={["needs_allocation", "stale_allocation", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
+                              variant={["needs_allocation", "stale_allocation", "stale_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
                               className={cost.status === "allocated_with_fallback" ? "border-amber-500 text-amber-700" : undefined}
                             >
                               {ALLOCATION_COST_STATUS_LABELS[cost.status] || cost.status.replace(/_/g, " ")}
@@ -1721,7 +1976,7 @@ export default function InboundShipmentDetail() {
                   <TableHead>SKU</TableHead>
                   <TableHead className="text-right">PO $/unit</TableHead>
                   <TableHead className="text-right">Freight</TableHead>
-                  <TableHead className="text-right">Duty</TableHead>
+                  <TableHead className="text-right">Duty/Customs</TableHead>
                   <TableHead className="text-right">Insurance</TableHead>
                   <TableHead className="text-right">Other</TableHead>
                   <TableHead className="text-right">Total Allocated</TableHead>
@@ -1739,13 +1994,13 @@ export default function InboundShipmentDetail() {
                   lines.map((line: any) => (
                     <TableRow key={line.id}>
                       <TableCell className="font-mono">{line.sku || "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.poUnitCostCents != null ? formatCents(line.poUnitCostCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.freightAllocatedCents != null ? formatCents(line.freightAllocatedCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.dutyAllocatedCents != null ? formatCents(line.dutyAllocatedCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.insuranceAllocatedCents != null ? formatCents(line.insuranceAllocatedCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono">{line.otherAllocatedCents != null ? formatCents(line.otherAllocatedCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono font-medium">{line.allocatedCostCents != null ? formatCents(line.allocatedCostCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-mono font-medium">{line.landedUnitCostCents != null ? formatCents(line.landedUnitCostCents) : "—"}</TableCell>
+                      <TableCell className="text-right font-mono">{formatMillsOrDash(line.poUnitCostMills)}</TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.freightAllocatedCents} millsPerUnit={line.freightAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.dutyAllocatedCents} millsPerUnit={line.dutyAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.insuranceAllocatedCents} millsPerUnit={line.insuranceAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.otherAllocatedCents} millsPerUnit={line.otherAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} strong /></TableCell>
+                      <TableCell className="text-right font-mono font-medium">{formatMillsOrDash(line.landedUnitCostMills)}</TableCell>
                     </TableRow>
                   ))
                 )}
@@ -3082,6 +3337,18 @@ export default function InboundShipmentDetail() {
           })()}
         </DialogContent>
       </Dialog>
+      <ShipmentReceiptPackResolutionDialog
+        open={!!shipmentReceiptPackResolution}
+        onOpenChange={(open) => {
+          if (!open) setShipmentReceiptPackResolution(null);
+        }}
+        resolution={shipmentReceiptPackResolution}
+        creating={creatingShipmentReceipt}
+        refreshing={checkingShipmentReceiptPacks}
+        onCreateReceipt={createPendingShipmentReceipt}
+        onRefresh={refreshShipmentReceiptPackResolution}
+        onOpenCatalog={openReceiptVariantSetup}
+      />
     </div>
   );
 }

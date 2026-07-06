@@ -17,6 +17,7 @@
     "recover:replen-health": "tsx scripts/recover-replen-health.ts --json",
     "wms:reconcile-ledger": "tsx scripts/reconcile-inventory-ledger.ts",
     "wms:reconcile-lots": "tsx scripts/reconcile-lot-onhand.ts",
+    "wms:release-auto-holds": "tsx scripts/release-auto-held-orders.ts",
     "wms:remediate-lot-drift": "tsx scripts/remediate-lot-drift.ts",
     "dropship:dogfood-status": "tsx scripts/dropship-dogfood-status.ts",
     "db:push": "drizzle-kit push",
@@ -24,7 +25,8 @@
     "test:coverage": "vitest run unit --coverage",
     "test:db:setup": "docker compose -f docker-compose.test.yml up -d",
     "test:unit": "vitest run unit",
-    "test:integration": "vitest run integration"
+    "test:integration": "vitest run integration",
+    "writer-ratchet:baseline": "tsx scripts/writer-ratchet/generate-baseline.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

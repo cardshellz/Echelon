@@ -34,6 +34,7 @@ import Dropship from "@/pages/Dropship";
 import Subscriptions from "@/pages/Subscriptions";
 import PickingPage from "@/pages/PickingPage";
 import PickPriority from "@/pages/PickPriority";
+import Packing from "@/pages/Packing";
 import OrderHistory from "@/pages/OrderHistory";
 import WarehousePage from "@/pages/WarehousePage";
 import PickZones from "@/pages/PickZones";
@@ -61,6 +62,7 @@ import PurchaseOrderEdit from "@/pages/PurchaseOrderEdit";
 import PurchasingDashboard from "@/pages/PurchasingDashboard";
 import Returns from "@/pages/Returns";
 import InboundShipments from "@/pages/InboundShipments";
+import OutboundShipments from "@/pages/OutboundShipments";
 import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
 import CostDashboard from "@/pages/CostDashboard";
 import APDashboard from "@/pages/APDashboard";
@@ -70,6 +72,7 @@ import APPayments from "@/pages/APPayments";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import ProcurementSettings from "@/pages/ProcurementSettings";
+import ShippingSettings from "@/pages/ShippingSettings";
 import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
 import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
@@ -293,6 +296,7 @@ function Router() {
         <Route path="/pick-priority">
           <ProtectedRoute component={PickPriority} allowedRoles={["admin", "lead"]} />
         </Route>
+        <Route path="/packing" component={Packing} />
         <Route path="/order-history">
           <ProtectedRoute component={OrderHistory} allowedRoles={["admin", "lead"]} />
         </Route>
@@ -358,6 +362,9 @@ function Router() {
         </Route>
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/outbound-shipments">
+          <ProtectedRoute component={OutboundShipments} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/enterprise"><Redirect to="/" /></Route>
         <Route path="/demand-planner">
@@ -426,6 +433,9 @@ function Router() {
             /settings so wouter does not fall through to the general page. */}
         <Route path="/settings/procurement">
           <ProtectedRoute component={ProcurementSettings} allowedRoles={["admin"]} />
+        </Route>
+        <Route path="/shipping-settings">
+          <ProtectedRoute component={ShippingSettings} allowedRoles={["admin"]} />
         </Route>
         <Route path="/settings">
           <ProtectedRoute component={Settings} allowedRoles={["admin"]} />

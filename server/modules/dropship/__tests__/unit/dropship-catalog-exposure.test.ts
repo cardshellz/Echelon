@@ -14,6 +14,7 @@ import {
   type ReplaceDropshipCatalogExposureRulesRepositoryInput,
   type ReplaceDropshipCatalogExposureRulesRepositoryResult,
 } from "../../application/dropship-catalog-exposure-service";
+import type { PreviewDropshipCatalogExposureInput } from "../../application/dropship-catalog-dtos";
 
 const now = new Date("2026-04-30T12:00:00.000Z");
 
@@ -49,7 +50,22 @@ describe("dropship catalog exposure domain", () => {
     expect(decision.includeRuleIds).toEqual([1]);
   });
 
-  it("lets any active exclusion rule block a broader include", () => {
+  it("lets later matching rules override earlier matching rules", () => {
+    const rules: DropshipCatalogExposureRule[] = [
+      { id: 1, scopeType: "catalog", action: "include" },
+      { id: 2, scopeType: "variant", action: "exclude", productVariantId: 20 },
+      { id: 3, scopeType: "product", action: "include", productId: 10 },
+    ];
+
+    const decision = evaluateDropshipCatalogExposure(activeCandidate, rules, now);
+
+    expect(decision.exposed).toBe(true);
+    expect(decision.reason).toBe("exposed");
+    expect(decision.includeRuleIds).toEqual([1, 3]);
+    expect(decision.excludeRuleIds).toEqual([2]);
+  });
+
+  it("blocks variants when a later hide rule overrides a broader expose rule", () => {
     const rules: DropshipCatalogExposureRule[] = [
       { id: 1, scopeType: "catalog", action: "include" },
       { id: 2, scopeType: "variant", action: "exclude", productVariantId: 20 },
@@ -182,12 +198,104 @@ describe("DropshipCatalogExposureService", () => {
     expect(result.rows[0].productVariantId).toBe(20);
     expect(result.rows[0].decision.exposed).toBe(true);
   });
+
+  it("filters exposed product-line rows before paginating", async () => {
+    const repository = new FakeCatalogExposureRepository();
+    repository.rules = [{
+      id: 1,
+      revisionId: 1001,
+      scopeType: "product_line",
+      action: "include",
+      productLineId: 30,
+      productId: null,
+      productVariantId: null,
+      category: null,
+      priority: 0,
+      isActive: true,
+      startsAt: null,
+      endsAt: null,
+      notes: null,
+      metadata: {},
+      createdAt: now,
+      updatedAt: now,
+    }];
+    repository.candidates = [
+      makePreviewCandidate(20, true, { productLineIds: [30], productLineNames: ["Allowed line"] }),
+      makePreviewCandidate(21, true, { productLineIds: [99], productLineNames: ["Blocked line"] }),
+      makePreviewCandidate(22, true, { productLineIds: [30], productLineNames: ["Allowed line"] }),
+    ];
+    const service = new DropshipCatalogExposureService({
+      clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      repository,
+    });
+
+    const result = await service.preview({ exposedOnly: true, page: 2, limit: 1 });
+
+    expect(result.total).toBe(2);
+    expect(result.page).toBe(2);
+    expect(result.limit).toBe(1);
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].productVariantId).toBe(22);
+    expect(result.rows[0].decision.exposed).toBe(true);
+  });
+
+  it("previews hidden rows when requested", async () => {
+    const repository = new FakeCatalogExposureRepository();
+    repository.rules = [{
+      id: 1,
+      revisionId: 1001,
+      scopeType: "product_line",
+      action: "include",
+      productLineId: 30,
+      productId: null,
+      productVariantId: null,
+      category: null,
+      priority: 0,
+      isActive: true,
+      startsAt: null,
+      endsAt: null,
+      notes: null,
+      metadata: {},
+      createdAt: now,
+      updatedAt: now,
+    }];
+    repository.candidates = [
+      makePreviewCandidate(20, true, { productLineIds: [30], productLineNames: ["Allowed line"] }),
+      makePreviewCandidate(21, true, { productLineIds: [99], productLineNames: ["Hidden line"] }),
+    ];
+    const service = new DropshipCatalogExposureService({
+      clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      repository,
+    });
+
+    const result = await service.preview({ visibility: "hidden" });
+
+    expect(result.total).toBe(1);
+    expect(result.rows[0].productVariantId).toBe(21);
+    expect(result.rows[0].decision.exposed).toBe(false);
+  });
+
+  it("passes inactive-only catalog status to the preview repository", async () => {
+    const repository = new FakeCatalogExposureRepository();
+    const service = new DropshipCatalogExposureService({
+      clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      repository,
+    });
+
+    await service.preview({ catalogStatus: "inactive" });
+
+    expect(repository.lastPreviewInput?.catalogStatus).toBe("inactive");
+  });
 });
 
 class FakeCatalogExposureRepository implements DropshipCatalogExposureRepository {
   rules: DropshipCatalogExposureRuleRecord[] = [];
   candidates: DropshipCatalogPreviewCandidate[] = [];
   lastReplace: ReplaceDropshipCatalogExposureRulesRepositoryInput | null = null;
+  lastPreviewInput: PreviewDropshipCatalogExposureInput | null = null;
 
   async listRules(): Promise<DropshipCatalogExposureRuleRecord[]> {
     return this.rules;
@@ -212,7 +320,8 @@ class FakeCatalogExposureRepository implements DropshipCatalogExposureRepository
     };
   }
 
-  async listPreviewCandidates(): Promise<DropshipCatalogPreviewCandidate[]> {
+  async listPreviewCandidates(input: PreviewDropshipCatalogExposureInput): Promise<DropshipCatalogPreviewCandidate[]> {
+    this.lastPreviewInput = input;
     return this.candidates;
   }
 }
@@ -220,6 +329,7 @@ class FakeCatalogExposureRepository implements DropshipCatalogExposureRepository
 function makePreviewCandidate(
   productVariantId: number,
   active: boolean,
+  overrides: Partial<DropshipCatalogPreviewCandidate> = {},
 ): DropshipCatalogPreviewCandidate {
   return {
     ...activeCandidate,
@@ -230,5 +340,6 @@ function makePreviewCandidate(
     variantName: `Variant ${productVariantId}`,
     productLineNames: ["Line"],
     variantIsActive: active,
+    ...overrides,
   };
 }

@@ -13,6 +13,11 @@ import {
   channels,
 } from "@shared/schema";
 import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import {
+  deriveOmsLineAuthority,
+  type OmsLineAuthorityState,
+} from "./oms-line-authority";
+import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,6 +67,9 @@ export interface OrderData {
   riskFacts?: unknown;
   orderedAt: Date;
   lineItems: LineItemData[];
+  sourceTopic?: string;
+  sourceEventId?: string | null;
+  sourceInboxId?: number | null;
 }
 
 export interface LineItemData {
@@ -69,6 +77,7 @@ export interface LineItemData {
   externalProductId?: string | null;
   sku?: string | null;
   title?: string;
+  name?: string | null;
   variantTitle?: string | null;
   quantity: number;
   paidPriceCents?: number;
@@ -82,6 +91,9 @@ export interface LineItemData {
   requiresShipping?: boolean;
   fulfillableQuantity?: number | null;
   fulfillmentService?: string | null;
+  fulfillmentProvider?: string | null;
+  providerFulfillmentOrderId?: string | null;
+  providerFulfillmentOrderLineItemId?: string | null;
   properties?: any | null;
   compareAtPriceCents?: number | null;
   taxLines?: any | null;
@@ -119,6 +131,41 @@ function sameDateTime(
   if (!leftDate && !rightDate) return true;
   if (!leftDate || !rightDate) return false;
   return leftDate.getTime() === rightDate.getTime();
+}
+
+function authorityValues(state: OmsLineAuthorityState) {
+  return {
+    channelObservedQuantity: state.channelObservedQuantity,
+    paidQuantity: state.paidQuantity,
+    authorityFulfillableQuantity: state.authorityFulfillableQuantity,
+    authorizationStatus: state.authorizationStatus,
+    authorizedAt: state.authorizedAt,
+    authorizedByEventId: state.authorizedByEventId,
+    authoritySourceTopic: state.authoritySourceTopic,
+    authoritySourceInboxId: state.authoritySourceInboxId,
+  };
+}
+
+function buildLineAuthorityState(
+  data: OrderData,
+  item: LineItemData,
+  previous?: {
+    paidQuantity?: number | null;
+    authorityFulfillableQuantity?: number | null;
+    authorizationStatus?: string | null;
+    authorizedAt?: Date | string | null;
+    authorizedByEventId?: string | null;
+  } | null,
+) {
+  return deriveOmsLineAuthority({
+    sourceTopic: data.sourceTopic ?? "unknown",
+    sourceEventId: data.sourceEventId ?? null,
+    sourceInboxId: data.sourceInboxId ?? null,
+    financialStatus: data.financialStatus,
+    quantity: item.quantity,
+    fulfillableQuantity: item.fulfillableQuantity ?? null,
+    previous,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -238,15 +285,18 @@ export function createOmsService(db: any, reservationService?: any) {
           }
         }
 
-        await tx.insert(omsOrderLines).values({
+        const authority = buildLineAuthorityState(data, item);
+        const [insertedLine] = await tx.insert(omsOrderLines).values({
           orderId: inserted.id,
           productVariantId,
           externalLineItemId: item.externalLineItemId,
           externalProductId: item.externalProductId || null,
           sku: item.sku,
           title: item.title,
+          name: item.name ?? item.title ?? null,
           variantTitle: item.variantTitle,
           quantity: item.quantity,
+          ...authorityValues(authority),
           paidPriceCents: item.paidPriceCents || 0,
           retailPriceCents: item.retailPriceCents || 0,
           totalPriceCents: item.totalCents || 0,
@@ -257,12 +307,26 @@ export function createOmsService(db: any, reservationService?: any) {
           requiresShipping: item.requiresShipping ?? true,
           fulfillableQuantity: item.fulfillableQuantity ?? null,
           fulfillmentService: item.fulfillmentService ?? null,
+          fulfillmentProvider: item.fulfillmentProvider ?? null,
+          providerFulfillmentOrderId: item.providerFulfillmentOrderId ?? null,
+          providerFulfillmentOrderLineItemId: item.providerFulfillmentOrderLineItemId ?? null,
           properties: item.properties ?? null,
           compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,
           taxLines: item.taxLines ?? null,
           discountAllocations: item.discountAllocations ?? null,
           orderNumber: data.externalOrderNumber || null,
-        } satisfies InsertOmsOrderLine).onConflictDoNothing();
+        } satisfies InsertOmsOrderLine).onConflictDoNothing().returning({ id: omsOrderLines.id });
+
+        if (insertedLine) {
+          await recordOmsLineAuthorityEvent({
+            db: tx,
+            orderId: inserted.id,
+            orderLineId: insertedLine.id,
+            eventType: "line_inserted",
+            sourceEventId: data.sourceEventId ?? null,
+            authority,
+          });
+        }
       }
 
       await tx.insert(omsOrderEvents).values({
@@ -321,40 +385,102 @@ export function createOmsService(db: any, reservationService?: any) {
         });
       }
 
-      // Check if line items exist for this order
-      const existingLines = await db
+      const existingLines: OmsOrderLine[] = await db
         .select()
         .from(omsOrderLines)
-        .where(eq(omsOrderLines.orderId, existingOrder.id))
-        .limit(1);
+        .where(eq(omsOrderLines.orderId, existingOrder.id));
 
-      // If no line items, create them (handles partial ingestion recovery)
-      if (existingLines.length === 0 && data.lineItems.length > 0) {
-        for (const item of data.lineItems) {
-          let productVariantId: number | null = null;
-          let variantCompareAtPrice = null;
+      const existingLineByExternalId = new Map<string, OmsOrderLine>(
+        existingLines
+          .filter((line: OmsOrderLine) => line.externalLineItemId)
+          .map((line: OmsOrderLine) => [line.externalLineItemId!, line]),
+      );
+      let insertedLines = 0;
+      let updatedLines = 0;
 
-          if (item.sku) {
-            const [variant] = await db
-              .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
-              .from(productVariants)
-              .where(eq(productVariants.sku, item.sku.toUpperCase()))
-              .limit(1);
-            if (variant) {
-              productVariantId = variant.id;
-              variantCompareAtPrice = variant.compareAtPriceCents;
-            }
+      for (const item of data.lineItems) {
+        let productVariantId: number | null = null;
+        let variantCompareAtPrice = null;
+
+        if (item.sku) {
+          const [variant] = await db
+            .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
+            .from(productVariants)
+            .where(eq(productVariants.sku, item.sku.toUpperCase()))
+            .limit(1);
+          if (variant) {
+            productVariantId = variant.id;
+            variantCompareAtPrice = variant.compareAtPriceCents;
           }
+        }
 
-          await db.insert(omsOrderLines).values({
+        const existingLine = item.externalLineItemId
+          ? existingLineByExternalId.get(item.externalLineItemId)
+          : undefined;
+
+        if (existingLine) {
+          const authority = buildLineAuthorityState(data, item, existingLine);
+          await db.transaction(async (tx: any) => {
+            await tx
+              .update(omsOrderLines)
+              .set({
+                productVariantId: productVariantId ?? existingLine.productVariantId,
+                externalProductId: item.externalProductId ?? existingLine.externalProductId ?? null,
+                sku: item.sku ?? existingLine.sku,
+                title: item.title ?? existingLine.title,
+                name: item.name ?? existingLine.name ?? item.title ?? null,
+                variantTitle: item.variantTitle ?? existingLine.variantTitle,
+                quantity: item.quantity,
+                ...authorityValues(authority),
+                paidPriceCents: item.paidPriceCents ?? existingLine.paidPriceCents ?? 0,
+                retailPriceCents: item.retailPriceCents ?? existingLine.retailPriceCents ?? 0,
+                totalPriceCents: item.totalCents ?? existingLine.totalPriceCents ?? 0,
+                totalDiscountCents: item.discountCents ?? existingLine.totalDiscountCents ?? 0,
+                planDiscountCents: item.planDiscountCents ?? existingLine.planDiscountCents ?? 0,
+                couponDiscountCents: item.couponDiscountCents ?? existingLine.couponDiscountCents ?? 0,
+                taxable: item.taxable ?? existingLine.taxable ?? true,
+                requiresShipping: item.requiresShipping ?? existingLine.requiresShipping ?? true,
+                fulfillableQuantity: item.fulfillableQuantity ?? existingLine.fulfillableQuantity ?? null,
+                fulfillmentService: item.fulfillmentService ?? existingLine.fulfillmentService ?? null,
+                fulfillmentProvider: item.fulfillmentProvider ?? existingLine.fulfillmentProvider ?? null,
+                providerFulfillmentOrderId: item.providerFulfillmentOrderId ?? existingLine.providerFulfillmentOrderId ?? null,
+                providerFulfillmentOrderLineItemId: item.providerFulfillmentOrderLineItemId ?? existingLine.providerFulfillmentOrderLineItemId ?? null,
+                properties: item.properties ?? existingLine.properties ?? null,
+                compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice ?? existingLine.compareAtPriceCents,
+                taxLines: item.taxLines ?? existingLine.taxLines ?? null,
+                discountAllocations: item.discountAllocations ?? existingLine.discountAllocations ?? null,
+                orderNumber: data.externalOrderNumber || existingLine.orderNumber || null,
+                updatedAt: new Date(),
+              })
+              .where(eq(omsOrderLines.id, existingLine.id));
+
+            await recordOmsLineAuthorityEvent({
+              db: tx,
+              orderId: existingOrder.id,
+              orderLineId: existingLine.id,
+              eventType: "line_updated",
+              sourceEventId: data.sourceEventId ?? null,
+              previous: existingLine,
+              authority,
+            });
+          });
+          updatedLines += 1;
+          continue;
+        }
+
+        const authority = buildLineAuthorityState(data, item);
+        await db.transaction(async (tx: any) => {
+          const [insertedLine] = await tx.insert(omsOrderLines).values({
             orderId: existingOrder.id,
             productVariantId,
             externalLineItemId: item.externalLineItemId,
             externalProductId: item.externalProductId || null,
             sku: item.sku,
             title: item.title,
+            name: item.name ?? item.title ?? null,
             variantTitle: item.variantTitle,
             quantity: item.quantity,
+            ...authorityValues(authority),
             paidPriceCents: item.paidPriceCents || 0,
             retailPriceCents: item.retailPriceCents || 0,
             totalPriceCents: item.totalCents || 0,
@@ -365,14 +491,34 @@ export function createOmsService(db: any, reservationService?: any) {
             requiresShipping: item.requiresShipping ?? true,
             fulfillableQuantity: item.fulfillableQuantity ?? null,
             fulfillmentService: item.fulfillmentService ?? null,
+            fulfillmentProvider: item.fulfillmentProvider ?? null,
+            providerFulfillmentOrderId: item.providerFulfillmentOrderId ?? null,
+            providerFulfillmentOrderLineItemId: item.providerFulfillmentOrderLineItemId ?? null,
             properties: item.properties ?? null,
-            compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,            
+            compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice,
             taxLines: item.taxLines ?? null,
             discountAllocations: item.discountAllocations ?? null,
             orderNumber: data.externalOrderNumber || null,
-          } satisfies InsertOmsOrderLine).onConflictDoNothing();
-        }
-        console.log(`[OMS] Backfilled ${data.lineItems.length} missing line items for order ${existingOrder.id}`);
+          } satisfies InsertOmsOrderLine).onConflictDoNothing().returning({ id: omsOrderLines.id });
+
+          if (insertedLine) {
+            await recordOmsLineAuthorityEvent({
+              db: tx,
+              orderId: existingOrder.id,
+              orderLineId: insertedLine.id,
+              eventType: "line_inserted",
+              sourceEventId: data.sourceEventId ?? null,
+              authority,
+            });
+          }
+        });
+        insertedLines += 1;
+      }
+
+      if (insertedLines > 0 || updatedLines > 0) {
+        console.log(
+          `[OMS] Reconciled duplicate ingest lines for order ${existingOrder.id}: inserted=${insertedLines} updated=${updatedLines}`,
+        );
       }
 
       return existingOrder;
@@ -404,72 +550,53 @@ export function createOmsService(db: any, reservationService?: any) {
       return { reserved: 0, failed: [] };
     }
 
-    const lines = await db
-      .select()
-      .from(omsOrderLines)
-      .where(eq(omsOrderLines.orderId, orderId));
-
-    let reserved = 0;
-    const failed: string[] = [];
-    const skipped: string[] = [];
-
-    for (const line of lines) {
-      if (!line.requiresShipping) {
-        skipped.push(line.sku || "UNSHIPPABLE");
-        continue;
-      }
-
-      if (!line.productVariantId) {
-        skipped.push(line.sku || "UNMAPPED");
-        continue;
-      }
-
-      if (!reservationService) {
-        // Fallback: no reservation service wired — log warning
-        console.error(`[OMS] reserveInventory called but no ReservationService wired. Order ${orderId} line ${line.sku} not reserved.`);
-        failed.push(line.sku || "UNKNOWN");
-        continue;
-      }
-
-      try {
-        // Look up the variant to get its productId (needed by reservation service)
-        const [variant] = await db
-          .select({ id: productVariants.id, productId: productVariants.productId })
-          .from(productVariants)
-          .where(eq(productVariants.id, line.productVariantId))
-          .limit(1);
-
-        if (!variant) {
-          failed.push(line.sku || "UNKNOWN");
-          continue;
-        }
-
-        // Delegate to WMS ReservationService — gates on fungible ATP,
-        // finds assigned bin, writes audit trail, triggers channel sync
-        const result = await reservationService.reserveForOrder(
-          variant.productId,
-          variant.id,
-          line.quantity,
-          orderId,
-          line.id,
-        );
-
-        if (result.reserved > 0) {
-          reserved++;
-        }
-        if (result.shortfall > 0) {
-          failed.push(line.sku || "UNKNOWN");
-        }
-      } catch (err: any) {
-        console.error(`[OMS] Reservation failed for order ${orderId} line ${line.sku}: ${err.message}`);
-        failed.push(line.sku || "UNKNOWN");
-      }
+    // P0.1a — SINGLE-WRITER RESERVATION.
+    // This function no longer places reservations of its own. Historically it
+    // reserved keyed by (oms_order_id, oms_order_line_id) while WMS sync
+    // reserved the same demand keyed by (wms_order_id, wms_order_item_id);
+    // the per-item dedup guard cannot match across the two id schemes, so
+    // every order that hit both paths was double-reserved — and the OMS-keyed
+    // half leaked forever, because picks consume the WMS-keyed one and no
+    // release path knew about the other (prod-confirmed 2026-07-02: 5,372
+    // orphan reserves across 197 variants).
+    //
+    // Reservations now happen in exactly ONE place: the WMS-side
+    // reserveOrder(wmsOrderId), which is ATP-gated and idempotent per item.
+    // If the WMS order does not exist yet, we do nothing — WMS sync reserves
+    // as part of creating it.
+    if (!reservationService?.reserveOrder) {
+      console.error(`[OMS] reserveInventory called but no ReservationService wired. Order ${orderId} not reserved.`);
+      return { reserved: 0, failed: ["no_reservation_service"] };
     }
+
+    const wmsRows: any = await db.execute(sql`
+      SELECT id FROM wms.orders
+      WHERE (source IN ('oms', 'ebay') AND oms_fulfillment_order_id = ${String(orderId)})
+         OR (source = 'shopify' AND source_table_id = ${String(orderId)})
+      ORDER BY id DESC
+      LIMIT 1
+    `);
+    const wmsOrder = wmsRows?.rows?.[0];
+    if (!wmsOrder) {
+      console.log(
+        `[OMS] reserveInventory(${orderId}): no WMS order yet — reservation happens at WMS sync (single-writer)`,
+      );
+      return { reserved: 0, failed: [] };
+    }
+
+    const result = await reservationService.reserveOrder(Number(wmsOrder.id));
+    const reserved = Number(result?.reserved ?? 0);
+    const failed = (result?.failed ?? []).map((f: any) => f?.sku ?? String(f));
 
     await db.insert(omsOrderEvents).values({
       orderId,
       eventType: "inventory_reserved",
-      details: { reserved, failed, skipped },
+      details: {
+        delegatedToWmsOrderId: Number(wmsOrder.id),
+        reserved,
+        failed,
+        singleWriter: true,
+      },
     });
 
     return { reserved, failed };
@@ -856,12 +983,14 @@ export function createOmsService(db: any, reservationService?: any) {
       id: number;
       sku: string | null;
       quantity: number;
+      fulfillmentProvider: string | null;
       shopifyFulfillmentOrderLineItemId: string | null;
     }> = await db
       .select({
         id: omsOrderLines.id,
         sku: omsOrderLines.sku,
         quantity: omsOrderLines.quantity,
+        fulfillmentProvider: omsOrderLines.fulfillmentProvider,
         shopifyFulfillmentOrderLineItemId:
           omsOrderLines.shopifyFulfillmentOrderLineItemId,
       })
@@ -945,6 +1074,15 @@ export function createOmsService(db: any, reservationService?: any) {
     let unmatched = 0;
     let updates = 0;
     for (const line of lines) {
+      const provider = String(line.fulfillmentProvider ?? "").trim();
+      if (provider.length > 0 && provider.toLowerCase() !== "shopify") {
+        unmatched++;
+        console.log(
+          `[OMS] populateShopifyFulfillmentOrderIds: skipping line ${line.id} provider=${provider} (not Shopify)`,
+        );
+        continue;
+      }
+
       const sku = (line.sku ?? "").trim();
       if (sku.length === 0) {
         unmatched++;
@@ -970,6 +1108,9 @@ export function createOmsService(db: any, reservationService?: any) {
       const result = await db
         .update(omsOrderLines)
         .set({
+          fulfillmentProvider: "shopify",
+          providerFulfillmentOrderId: candidate.fulfillmentOrderId,
+          providerFulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
           shopifyFulfillmentOrderId: candidate.fulfillmentOrderId,
           shopifyFulfillmentOrderLineItemId: candidate.fulfillmentOrderLineItemId,
           updatedAt: new Date(),

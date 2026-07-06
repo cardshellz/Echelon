@@ -531,6 +531,20 @@ function mockFetchOnce500() {
   }));
 }
 
+function mockFetchForPush(createorderJson: any) {
+  return vi.fn(async (_url: string, _init: any) => {
+    const isPost = _init?.method === "POST";
+    const json = isPost ? createorderJson : { orders: [] };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => json,
+      text: async () => JSON.stringify(json),
+      headers: new Map<string, string>() as any,
+    };
+  });
+}
+
 function mockFetchQueue(responses: any[]) {
   const remaining = [...responses];
   return vi.fn(async (_url: string, _init: any) => {
@@ -574,7 +588,7 @@ describe("pushShipment :: happy path", () => {
       { rows: [] }, // 5. UPDATE
     ]);
 
-    const fetchMock = mockFetchOnceOk({
+    const fetchMock = mockFetchForPush({
       orderId: 555000,
       orderNumber: shipmentRow.id,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -593,9 +607,10 @@ describe("pushShipment :: happy path", () => {
     // then shipment-rollup order + shipment status reads.
     expect(mock.getCallCount()).toBe(10);
 
-    // One fetch call to /orders/createorder.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as any;
+    // Two fetch calls: GET orderKey pre-check + POST /orders/createorder.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
+    const [url, init] = postCall as any;
     expect(url).toContain("/orders/createorder");
     expect(init.method).toBe("POST");
 
@@ -636,7 +651,7 @@ describe("pushShipment :: happy path", () => {
       { rows: [] },
     ]);
 
-    const fetchMock = mockFetchOnceOk({
+    const fetchMock = mockFetchForPush({
       orderId: 555001,
       orderNumber: shipmentRow.id,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -647,7 +662,11 @@ describe("pushShipment :: happy path", () => {
     const svc = createShipStationService(mock.db);
     await svc.pushShipment(shipmentRow.id);
 
-    const [, init] = fetchMock.mock.calls[0] as any;
+    const createOrderCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/orders/createorder"),
+    );
+    expect(createOrderCall).toBeDefined();
+    const [, init] = createOrderCall as any;
     const payload = JSON.parse(init.body);
     expect(payload.customerEmail).toBe(`no-email+wms-${orderRow.id}@cardshellz.local`);
     expect(payload.shipTo.street1).toBe(orderRow.shipping_address);
@@ -668,7 +687,7 @@ describe("pushShipment :: happy path", () => {
       { rows: [] },
       { rows: [] },
     ]);
-    const fetchMock = mockFetchOnceOk({
+    const fetchMock = mockFetchForPush({
       orderId: 555000,
       orderNumber: shipmentRow.id,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -679,7 +698,11 @@ describe("pushShipment :: happy path", () => {
     const svc = createShipStationService(mock.db);
     await svc.pushShipment(shipmentRow.id);
 
-    const [, init] = fetchMock.mock.calls[0] as any;
+    const createOrderCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/orders/createorder"),
+    );
+    expect(createOrderCall).toBeDefined();
+    const [, init] = createOrderCall as any;
     const payload = JSON.parse(init.body);
     expect(payload.shipTo.company).toBe("Acme Card Shop");
     expect(payload.shipTo.street1).toBe("123 Main St");
@@ -703,7 +726,7 @@ describe("pushShipment :: happy path", () => {
       { rows: [] },             // 5. UPDATE
     ]);
 
-    const fetchMock = mockFetchOnceOk({
+    const fetchMock = mockFetchForPush({
       // SS upserts on orderKey so the same orderId comes back.
       orderId: 555000,
       orderNumber: shipmentRow.id,
@@ -721,7 +744,7 @@ describe("pushShipment :: happy path", () => {
     // add any reads/writes; the single UPDATE simply also NULLs the
     // void columns.
     expect(mock.getCallCount()).toBe(10);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
 
     // Inspect the UPDATE's SQL text: must set status='queued' and must
     // also clear voided_at + voided_reason so stale void state cannot
@@ -778,7 +801,11 @@ describe("pushShipment :: happy path", () => {
 
     expect(result.shipstationOrderId).toBe(555000);
 
-    const [, init] = fetchMock.mock.calls[0] as any;
+    const createOrderCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/orders/createorder"),
+    );
+    expect(createOrderCall).toBeDefined();
+    const [, init] = createOrderCall as any;
     const payload = JSON.parse(init.body);
     expect(payload.orderId).toBe(555000);
     expect(payload.orderKey).toBe(`echelon-wms-shp-${shipmentRow.id}`);
@@ -797,7 +824,7 @@ describe("pushShipment :: happy path", () => {
       { rows: [] },
     ]);
 
-    const fetchMock = mockFetchOnceOk({
+    const fetchMock = mockFetchForPush({
       orderId: 555001,
       orderNumber: shipmentRow.id,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -808,7 +835,8 @@ describe("pushShipment :: happy path", () => {
     const svc = createShipStationService(mock.db);
     await svc.pushShipment(shipmentRow.id);
 
-    const [, init] = fetchMock.mock.calls[0] as any;
+    const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
+    const [, init] = postCall as any;
     const payload = JSON.parse(init.body);
     expect(payload.orderId).toBeUndefined();
   });
@@ -829,7 +857,7 @@ describe("pushShipment :: happy path", () => {
       { rows: items },
       { rows: [] },
     ]);
-    globalThis.fetch = mockFetchOnceOk({
+    globalThis.fetch = mockFetchForPush({
       orderId: 42,
       orderNumber: "EB-EBAY-123",
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -839,7 +867,8 @@ describe("pushShipment :: happy path", () => {
     const svc = createShipStationService(mock.db);
     await svc.pushShipment(shipmentRow.id);
 
-    const [, init] = (globalThis.fetch as any).mock.calls[0];
+    const postCall = (globalThis.fetch as any).mock.calls.find(([, i]: any) => i?.method === "POST")!;
+    const [, init] = postCall;
     const payload = JSON.parse(init.body);
     expect(payload.orderNumber).toBe("EB-EBAY-123");
   });
@@ -984,7 +1013,7 @@ describe("pushShipment :: sibling-shipment dedup", () => {
       sibling: null,
     });
 
-    const fetchMock = mockFetchOnceOk({
+    const fetchMock = mockFetchForPush({
       orderId: 888,
       orderNumber: orderRow.order_number,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -995,7 +1024,8 @@ describe("pushShipment :: sibling-shipment dedup", () => {
     const svc = createShipStationService(mock.db as any);
     const result = await svc.pushShipment(shipmentRow.id);
 
-    const [, init] = fetchMock.mock.calls[0] as any;
+    const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
+    const [, init] = postCall as any;
     const payload = JSON.parse(init.body);
     // No sibling → CREATE: no orderId, own per-shipment key.
     expect(payload.orderId).toBeUndefined();
@@ -1024,7 +1054,7 @@ describe("pushShipment :: sibling-shipment dedup", () => {
       shipmentShippableQty: 2, // this box only ships 2 → partial
     });
 
-    const fetchMock = mockFetchOnceOk({
+    const fetchMock = mockFetchForPush({
       orderId: 1010,
       orderNumber: orderRow.order_number,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -1035,7 +1065,8 @@ describe("pushShipment :: sibling-shipment dedup", () => {
     const svc = createShipStationService(mock.db as any);
     const result = await svc.pushShipment(shipmentRow.id);
 
-    const [, init] = fetchMock.mock.calls[0] as any;
+    const postCall = fetchMock.mock.calls.find(([, i]: any) => i?.method === "POST")!;
+    const [, init] = postCall as any;
     const payload = JSON.parse(init.body);
     // Partial → must NOT adopt sibling 999; keeps its own key, creates new.
     expect(payload.orderId).toBeUndefined();

@@ -79,7 +79,7 @@ export function engineRefFromRow(row: {
 export type ShipStationServiceHandle = {
   isConfigured(): boolean;
   pushShipment(shipmentId: number): Promise<{ shipstationOrderId: number; orderKey: string }>;
-  cancelOrder(shipstationOrderId: number): Promise<{ alreadyInState: boolean }>;
+  cancelOrder(shipstationOrderId: number): Promise<EngineCancelResult>;
   putOrderOnHold(shipstationOrderId: number): Promise<void>;
   releaseOrderFromHold(shipstationOrderId: number): Promise<void>;
   markAsShipped(

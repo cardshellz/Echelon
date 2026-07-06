@@ -30,3 +30,4 @@ export type { OrderRoutingContext, RoutingResult } from "./fulfillment-router.se
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "./combining.service";
 export type { SLAAlert, SLASummary } from "./sla-monitor.service";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "./operations-dashboard.service";
+export { backfillOpenOrderItemBinAssignment } from "./bin-location-backfill";

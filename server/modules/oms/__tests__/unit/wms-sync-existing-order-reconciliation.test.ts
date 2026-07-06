@@ -21,6 +21,22 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/enqueueShipStationShipmentPushRetry/);
   });
 
+  it("records named safe-auto-repair audit events for reconciliation-created WMS work", () => {
+    expect(WMS_SYNC_SRC).toMatch(/recordWmsReconciliationAuditEvent/);
+    expect(WMS_SYNC_SRC).toMatch(/eventType: "wms_reconciliation_auto_repair"/);
+    expect(WMS_SYNC_SRC).toMatch(/classification: "safe_auto_repair"/);
+    expect(WMS_SYNC_SRC).toMatch(/"materialize_authorized_oms_line"/);
+    expect(WMS_SYNC_SRC).toMatch(/"create_missing_initial_shipment"/);
+    expect(WMS_SYNC_SRC).toMatch(/"attach_authorized_line_to_planned_shipment"/);
+  });
+
+  it("keeps reconciliation-created shipment work and its audit event in the same transaction", () => {
+    expect(WMS_SYNC_SRC).toMatch(/const created = await db\.transaction/);
+    expect(WMS_SYNC_SRC).toMatch(/createShipmentForOrder\([\s\S]*\{ useXactLock: true \}/);
+    expect(WMS_SYNC_SRC).toMatch(/const insertedCount = await db\.transaction/);
+    expect(WMS_SYNC_SRC).toMatch(/await this\.recordWmsReconciliationAuditEvent/);
+  });
+
   it("does not reconcile cancelled or refunded OMS orders back into WMS work", () => {
     expect(WMS_SYNC_SRC).toMatch(/isFinalOrCancelledOmsOrder/);
     expect(WMS_SYNC_SRC).toMatch(/cancelExistingWmsOrderForFinalOmsOrder/);
@@ -68,6 +84,42 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toContain("Reconciled item");
     expect(WMS_SYNC_SRC).toContain('updates.status = "cancelled"');
     expect(WMS_SYNC_SRC).toContain("omsQty <= 0");
+  });
+
+  it("creates manual-review exceptions when picked WMS quantity exceeds OMS authority", () => {
+    expect(WMS_SYNC_SRC).toMatch(/recordWmsReconciliationReviewException/);
+    expect(WMS_SYNC_SRC).toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
+    expect(WMS_SYNC_SRC).toMatch(/'manual_review'/);
+    expect(WMS_SYNC_SRC).toMatch(/"picked_quantity_exceeds_oms_authority"/);
+    expect(WMS_SYNC_SRC).toMatch(/ON CONFLICT \(idempotency_key\)/);
+    expect(WMS_SYNC_SRC).toMatch(
+      /already picked[\s\S]*recordWmsReconciliationReviewException/,
+    );
+  });
+
+  it("creates manual-review exceptions for OMS edit propagation review branches", () => {
+    expect(WMS_SYNC_SRC).toMatch(/"edit_removed_picked_wms_item"/);
+    expect(WMS_SYNC_SRC).toMatch(/"edit_picked_quantity_exceeds_oms_authority"/);
+    expect(WMS_SYNC_SRC).toMatch(/source: "propagateOmsEditsToWms"/);
+    expect(WMS_SYNC_SRC).toMatch(/result\.flaggedForReview\.push\(reviewMessage\)/);
+    expect(WMS_SYNC_SRC).toMatch(/reviewMessage: args\.reviewMessage \?\? null/);
+  });
+
+  it("uses remaining OMS line authority instead of raw channel quantity for WMS materialization", () => {
+    expect(WMS_SYNC_SRC).toMatch(/getOmsLineMaterializableQuantity/);
+    expect(WMS_SYNC_SRC).toMatch(/getOmsLineRemainingMaterializableQuantity/);
+    expect(WMS_SYNC_SRC).toMatch(/const materializableOmsLines = omsLines\.filter/);
+    expect(WMS_SYNC_SRC).toMatch(/no OMS-authorized fulfillable quantity/);
+    expect(WMS_SYNC_SRC).toMatch(/const omsQty = omsLine \? getOmsLineMaterializableQuantity\(omsLine\) : 0/);
+    expect(WMS_SYNC_SRC).toMatch(/const materializableQuantity = getOmsLineRemainingMaterializableQuantity\(omsLine\)/);
+  });
+
+  it("locks and consumes OMS line materialization authority transactionally", () => {
+    expect(WMS_SYNC_SRC).toMatch(/FOR UPDATE/);
+    expect(WMS_SYNC_SRC).toMatch(/lockOmsLinesForMaterialization/);
+    expect(WMS_SYNC_SRC).toMatch(/incrementOmsLineMaterializedQuantities/);
+    expect(WMS_SYNC_SRC).toMatch(/wms_materialized_quantity = ol\.wms_materialized_quantity \+ consumed\.quantity/);
+    expect(WMS_SYNC_SRC).toMatch(/no remaining authorized quantity to materialize after row lock/);
   });
 
   it("recomputes WMS aggregate counts after reconciliation changes order items", () => {

@@ -195,17 +195,15 @@ export async function reconcilePurchaseOrderReceipt(params: {
       continue;
     }
 
-    const poVariant = await storage.getProductVariantById(poLine.productVariantId as number);
     const receivedVariant = await storage.getProductVariantById(receivingLineRecord.productVariantId as number);
 
-    const poUnitsPerVariant = poVariant?.unitsPerVariant || poLine.unitsPerUom || 1;
     const receivedUnitsPerVariant = receivedVariant?.unitsPerVariant || 1;
 
     const baseUnitsReceived = receivingLine.receivedQty * receivedUnitsPerVariant;
     const damagedBaseUnits = (receivingLine.damagedQty || 0) * receivedUnitsPerVariant;
 
-    const poLineUnitsReceived = Math.floor(baseUnitsReceived / poUnitsPerVariant);
-    const poLineDamagedReceived = Math.floor(damagedBaseUnits / poUnitsPerVariant);
+    const poLineUnitsReceived = baseUnitsReceived;
+    const poLineDamagedReceived = damagedBaseUnits;
 
     const newReceivedQty = (poLine.receivedQty || 0) + poLineUnitsReceived;
     const newDamagedQty = (poLine.damagedQty || 0) + poLineDamagedReceived;

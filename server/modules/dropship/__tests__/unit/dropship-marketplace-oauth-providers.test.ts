@@ -27,13 +27,138 @@ describe("EbayDropshipOAuthProvider", () => {
 
     const start = EbayDropshipOAuthProvider
       .fromEnv()
-      .createAuthorizationUrl({ state: "state", shopDomain: null });
+      .createAuthorizationUrl({ state: "state", shopDomain: null, intent: "connect" });
     const url = new URL(start.authorizationUrl);
 
     expect(url.origin).toBe("https://auth.sandbox.ebay.com");
     expect(url.searchParams.get("client_id")).toBe("dropship-ebay-client");
     expect(url.searchParams.get("redirect_uri")).toBe("Cardshellz_Cardshellz-dropship-oauth");
+    expect(url.searchParams.get("prompt")).toBe("login");
+    expect(url.searchParams.get("scope")).toContain("https://api.ebay.com/oauth/api_scope/sell.stores");
     expect(url.searchParams.toString()).not.toContain("dropship-ebay-secret");
+  });
+
+  it("forces eBay login when changing stores but keeps refresh on the current session", () => {
+    process.env = {
+      ...ORIGINAL_ENV,
+      DROPSHIP_EBAY_CLIENT_ID: "dropship-ebay-client",
+      DROPSHIP_EBAY_CLIENT_SECRET: "dropship-ebay-secret",
+      EBAY_VENDOR_RUNAME: "Cardshellz_Cardshellz-dropship-oauth",
+      EBAY_ENVIRONMENT: "sandbox",
+    };
+    const provider = EbayDropshipOAuthProvider.fromEnv();
+
+    const changeStoreUrl = new URL(provider.createAuthorizationUrl({
+      state: "state",
+      shopDomain: null,
+      intent: "change_store",
+    }).authorizationUrl);
+    const refreshUrl = new URL(provider.createAuthorizationUrl({
+      state: "state",
+      shopDomain: null,
+      intent: "refresh_connection",
+    }).authorizationUrl);
+
+    expect(changeStoreUrl.searchParams.get("prompt")).toBe("login");
+    expect(refreshUrl.searchParams.has("prompt")).toBe(false);
+  });
+
+  it("uses the eBay Store name as the connected store display name when available", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "ebay-access-token",
+        refresh_token: "ebay-refresh-token",
+        expires_in: 3600,
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        userId: "seller-account-123",
+        username: "seller-login",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        name: "marzcards",
+        url: "https://www.ebay.com/str/marzcards",
+        urlPath: "marzcards",
+      }), { status: 200 }));
+    const provider = new EbayDropshipOAuthProvider({
+      clientId: "ebay-key",
+      clientSecret: "ebay-secret",
+      ruName: "Cardshellz_Cardshellz-dropship-oauth",
+      environment: "sandbox",
+    });
+
+    const result = await provider.exchangeCode({
+      code: "auth-code",
+      shopDomain: null,
+      query: {
+        code: "auth-code",
+        state: "signed-state",
+      },
+    });
+
+    expect(result).toMatchObject({
+      accessToken: "ebay-access-token",
+      refreshToken: "ebay-refresh-token",
+      externalAccountId: "seller-account-123",
+      externalDisplayName: "marzcards",
+      tokenMetadata: {
+        environment: "sandbox",
+        identityAccountId: "seller-account-123",
+        identityDisplayName: "seller-login",
+        provider: "ebay",
+        storeName: "marzcards",
+        storeUrl: "https://www.ebay.com/str/marzcards",
+        storeUrlPath: "marzcards",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.sandbox.ebay.com/sell/stores/v1/store",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer ebay-access-token",
+        }),
+      }),
+    );
+  });
+
+  it("falls back to the eBay identity display name when no Store profile is available", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "ebay-access-token",
+        expires_in: 3600,
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        userId: "seller-account-123",
+        username: "seller-login",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        errors: [{ errorId: 225002, message: "Store not found." }],
+      }), { status: 404 }));
+    const provider = new EbayDropshipOAuthProvider({
+      clientId: "ebay-key",
+      clientSecret: "ebay-secret",
+      ruName: "Cardshellz_Cardshellz-dropship-oauth",
+      environment: "sandbox",
+    });
+
+    const result = await provider.exchangeCode({
+      code: "auth-code",
+      shopDomain: null,
+      query: {
+        code: "auth-code",
+        state: "signed-state",
+      },
+    });
+
+    expect(result).toMatchObject({
+      externalAccountId: "seller-account-123",
+      externalDisplayName: "seller-login",
+      tokenMetadata: {
+        provider: "ebay",
+        storeName: null,
+        storeUrl: null,
+        storeUrlPath: null,
+      },
+    });
   });
 
   it("requires either dropship-specific or shared eBay OAuth client credentials", () => {
@@ -69,7 +194,7 @@ describe("ShopifyDropshipOAuthProvider", () => {
 
     const start = ShopifyDropshipOAuthProvider
       .fromEnv()
-      .createAuthorizationUrl({ state: "state", shopDomain: "vendor.myshopify.com" });
+      .createAuthorizationUrl({ state: "state", shopDomain: "vendor.myshopify.com", intent: "connect" });
     const url = new URL(start.authorizationUrl);
 
     expect(url.origin).toBe("https://vendor.myshopify.com");

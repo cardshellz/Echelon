@@ -65,6 +65,31 @@ export interface DropshipVendorCatalogPreviewRow extends DropshipVendorCatalogCa
   selectionDecision: DropshipVendorCatalogSelectionDecision;
 }
 
+export interface DropshipVendorCatalogCategoryFacet {
+  category: string;
+  label: string;
+  rowCount: number;
+}
+
+export interface DropshipVendorCatalogProductLineFacet {
+  productLineIds: number[];
+  label: string;
+  rowCount: number;
+}
+
+export interface DropshipVendorCatalogProductFacet {
+  productId: number;
+  label: string;
+  sku: string | null;
+  rowCount: number;
+}
+
+export interface DropshipVendorCatalogFacets {
+  categories: DropshipVendorCatalogCategoryFacet[];
+  productLines: DropshipVendorCatalogProductLineFacet[];
+  products: DropshipVendorCatalogProductFacet[];
+}
+
 export interface ReplaceDropshipVendorSelectionRulesRepositoryInput {
   vendorId: number;
   idempotencyKey: string;
@@ -181,13 +206,29 @@ export class DropshipSelectionAtpService {
     total: number;
     page: number;
     limit: number;
+    facets: DropshipVendorCatalogFacets;
   }> {
     const parsed = previewDropshipVendorCatalogInputSchema.parse(input);
-    const [adminRules, selectionRules, candidates] = await Promise.all([
+    const facetInput: PreviewDropshipVendorCatalogInput = {
+      ...parsed,
+      category: undefined,
+      productLineId: undefined,
+      productLineIds: undefined,
+      productId: undefined,
+      selectedOnly: false,
+      page: 1,
+    };
+    const [adminRules, selectionRules, candidates, facetCandidates] = await Promise.all([
       this.deps.repository.listCatalogExposureRules(),
       this.deps.repository.listSelectionRules({ vendorId: parsed.vendorId, includeInactive: false }),
       this.deps.repository.listVendorCatalogCandidates(parsed),
+      this.deps.repository.listVendorCatalogCandidates(facetInput),
     ]);
+    const now = this.deps.clock.now();
+    const exposedFacetCandidates = facetCandidates.filter((candidate) => {
+      return evaluateDropshipCatalogExposure(candidate, adminRules, now).exposed;
+    });
+    const facets = buildCatalogFacets(exposedFacetCandidates);
 
     const productIds = uniqueNumbers(candidates.map((candidate) => candidate.productId));
     const productVariantIds = uniqueNumbers(candidates.map((candidate) => candidate.productVariantId));
@@ -202,7 +243,6 @@ export class DropshipSelectionAtpService {
     const overridesByVariantId = new Map(
       overrideRows.map((override) => [override.productVariantId, override]),
     );
-    const now = this.deps.clock.now();
     const evaluatedRows = candidates.map((candidate) => {
       const adminExposureDecision = evaluateDropshipCatalogExposure(candidate, adminRules, now);
       const productAtpBase = baseAtpByProductId.get(candidate.productId) ?? 0;
@@ -222,9 +262,10 @@ export class DropshipSelectionAtpService {
         selectionDecision,
       };
     });
+    const exposedRows = evaluatedRows.filter((row) => row.adminExposureDecision.exposed);
     const filteredRows = parsed.selectedOnly
-      ? evaluatedRows.filter((row) => row.selectionDecision.selected)
-      : evaluatedRows;
+      ? exposedRows.filter((row) => row.selectionDecision.selected)
+      : exposedRows;
     const start = (parsed.page - 1) * parsed.limit;
 
     return {
@@ -232,8 +273,68 @@ export class DropshipSelectionAtpService {
       total: filteredRows.length,
       page: parsed.page,
       limit: parsed.limit,
+      facets,
     };
   }
+}
+
+type CatalogFacetCandidate = Pick<
+  DropshipVendorCatalogCandidate,
+  "category" | "productId" | "productLineIds" | "productLineNames" | "productName" | "productSku"
+>;
+
+function buildCatalogFacets(rows: readonly CatalogFacetCandidate[]): DropshipVendorCatalogFacets {
+  const categories = new Map<string, DropshipVendorCatalogCategoryFacet>();
+  const productLines = new Map<string, DropshipVendorCatalogProductLineFacet>();
+  const products = new Map<number, DropshipVendorCatalogProductFacet>();
+
+  for (const row of rows) {
+    const category = row.category?.trim();
+    if (category) {
+      const key = category.toLowerCase();
+      const facet = categories.get(key) ?? { category, label: category, rowCount: 0 };
+      facet.rowCount += 1;
+      categories.set(key, facet);
+    }
+
+    const countedProductLineKeys = new Set<string>();
+    row.productLineIds.forEach((productLineId, index) => {
+      if (!Number.isInteger(productLineId) || productLineId <= 0) {
+        return;
+      }
+      const label = row.productLineNames[index]?.trim() || `Product line ${productLineId}`;
+      const key = label.toLowerCase();
+      const facet = productLines.get(key) ?? { productLineIds: [], label, rowCount: 0 };
+      if (!facet.productLineIds.includes(productLineId)) {
+        facet.productLineIds.push(productLineId);
+        facet.productLineIds.sort((left, right) => left - right);
+      }
+      if (!countedProductLineKeys.has(key)) {
+        facet.rowCount += 1;
+        countedProductLineKeys.add(key);
+      }
+      productLines.set(key, facet);
+    });
+
+    const product = products.get(row.productId) ?? {
+      productId: row.productId,
+      label: row.productName || row.productSku || `Product ${row.productId}`,
+      sku: row.productSku,
+      rowCount: 0,
+    };
+    product.rowCount += 1;
+    products.set(row.productId, product);
+  }
+
+  return {
+    categories: sortFacetsByLabel(Array.from(categories.values())),
+    productLines: sortFacetsByLabel(Array.from(productLines.values())),
+    products: sortFacetsByLabel(Array.from(products.values())),
+  };
+}
+
+function sortFacetsByLabel<T extends { label: string }>(facets: T[]): T[] {
+  return facets.sort((left, right) => left.label.localeCompare(right.label));
 }
 
 export function hashVendorSelectionRules(

@@ -98,7 +98,9 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
       externalProductId: item.legacyItemId || null, // eBay product ID
       sku: item.sku,
       title: item.title,
+      name: item.title,
       quantity: qty,
+      fulfillmentProvider: "ebay",
       paidPriceCents,
       totalCents: lineItemCostCents, // product cost only, no shipping/tax
       taxCents,
@@ -127,6 +129,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
   }
 
   return {
+    sourceTopic: "ebay/order",
     externalOrderNumber: ebayOrder.orderId,
     status,
     financialStatus,

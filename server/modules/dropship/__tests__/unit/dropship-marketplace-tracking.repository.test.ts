@@ -90,7 +90,85 @@ describe("PgDropshipMarketplaceTrackingRepository", () => {
     );
     expect(String(shipmentLineQuery?.[0])).toContain("WHERE si.shipment_id = $1");
     expect(String(shipmentLineQuery?.[0])).toContain("AND ol.order_id = $2");
+    expect(String(shipmentLineQuery?.[0])).toContain(
+      "COALESCE(LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')), 'dropship') = 'dropship'",
+    );
     expect(shipmentLineQuery?.[1]).toEqual([55, 500]);
+  });
+
+  it("filters order-level tracking reads to dropship-owned or legacy OMS lines", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      if (sqlText === "BEGIN" || sqlText === "COMMIT") {
+        return { rows: [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_order_intake")) {
+        return { rows: [makeIntakeRow()] };
+      }
+      if (sqlText.includes("FROM oms.oms_order_lines")) {
+        return {
+          rows: [
+            { external_line_item_id: "LINE-A", quantity: 1 },
+            { external_line_item_id: "LINE-B", quantity: 2 },
+          ],
+        };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_marketplace_tracking_pushes")) {
+        return {
+          rows: [
+            makeTrackingPushRow({
+              request_hash: String(params?.[9]),
+              wms_shipment_id: params?.[13] as number | null,
+            }),
+          ],
+        };
+      }
+      if (sqlText.includes("UPDATE dropship.dropship_marketplace_tracking_pushes")) {
+        return {
+          rows: [
+            makeTrackingPushRow({
+              status: "processing",
+              request_hash: "unused-after-claim",
+              wms_shipment_id: null,
+              attempt_count: 1,
+            }),
+          ],
+        };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+    const client = { query, release: vi.fn() } as unknown as PoolClient;
+    const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
+    const repository = new PgDropshipMarketplaceTrackingRepository(pool);
+
+    const result = await repository.claimForOmsOrder({
+      omsOrderId: 500,
+      wmsShipmentId: null,
+      carrier: "USPS",
+      trackingNumber: "94001111",
+      shippedAt,
+      idempotencyKey: "dropship:oms:500:tracking:usps:94001111",
+      now,
+    });
+
+    expect(result.status).toBe("claimed");
+    if (result.status !== "claimed") throw new Error("Expected a claimed tracking push.");
+    expect(result.request.lineItems).toEqual([
+      { externalLineItemId: "LINE-A", quantity: 1 },
+      { externalLineItemId: "LINE-B", quantity: 2 },
+    ]);
+
+    const orderLineQuery = query.mock.calls.find((call) =>
+      String(call[0]).includes("FROM oms.oms_order_lines"),
+    );
+    expect(String(orderLineQuery?.[0])).toContain("WHERE order_id = $1");
+    expect(String(orderLineQuery?.[0])).toContain(
+      "COALESCE(LOWER(NULLIF(BTRIM(fulfillment_provider), '')), 'dropship') = 'dropship'",
+    );
+    expect(orderLineQuery?.[1]).toEqual([500]);
   });
 
   it("does not reclaim a non-stale processing push for the same idempotency key", async () => {

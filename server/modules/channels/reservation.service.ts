@@ -15,8 +15,13 @@ type DrizzleDb = {
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
+  execute: (query: any) => Promise<any>;
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
+
+// Advisory lock namespace for per-product reservation serialization (P0.1b).
+// 918405-918407 are taken by flow-reconciliation / shipment-creation / push.
+const RESERVATION_LOCK_NS = 918410;
 
 interface ChannelSync {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
@@ -96,12 +101,48 @@ class ReservationService {
     userId?: string,
     dbOverride?: any,
   ): Promise<ReserveForOrderResult> {
-    const dbh = dbOverride ?? this.db;
-
     if (orderQty <= 0) {
       return { reserved: 0, shortfall: 0 };
     }
 
+    // P0.1b: serialize check→reserve per product. Without this, two
+    // concurrent reservations can both read the same ATP and both reserve
+    // the last units (over-commit). pg_advisory_xact_lock pins the lock to
+    // the transaction's connection and releases automatically on commit /
+    // rollback — competing reservers for the SAME product queue here and
+    // re-read ATP only after the winner's reserve has committed.
+    if (dbOverride) {
+      // Caller supplied a transaction — bind the lock to it.
+      await dbOverride.execute(
+        sql`SELECT pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})`,
+      );
+      return this.reserveForOrderLocked(
+        productId, variantId, orderQty, orderId, orderItemId, userId, dbOverride,
+      );
+    }
+    return this.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})`,
+      );
+      return this.reserveForOrderLocked(
+        productId, variantId, orderQty, orderId, orderItemId, userId, tx,
+      );
+    });
+  }
+
+  /**
+   * Inner body of reserveForOrder — MUST be called while holding the
+   * per-product advisory lock on `dbh`'s connection.
+   */
+  private async reserveForOrderLocked(
+    productId: number,
+    variantId: number,
+    orderQty: number,
+    orderId: number,
+    orderItemId: number,
+    userId: string | undefined,
+    dbh: any,
+  ): Promise<ReserveForOrderResult> {
     // Step 1: Get fungible ATP for the ordered variant
     const variantAtps = await this.atpService.getAtpPerVariant(productId);
     const variantAtp = variantAtps.find((v) => v.productVariantId === variantId);
@@ -206,7 +247,7 @@ class ReservationService {
       orderId,
       orderItemId,
       userId,
-    }, dbOverride);
+    }, dbh);
 
     if (!success) {
       // Should not happen since core no longer checks bin-level stock,
@@ -322,12 +363,26 @@ class ReservationService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Release all inventory reservations for an order (e.g. order cancelled).
+   * Release an order's OPEN reservations — order-scoped and idempotent (P0.1b).
    *
-   * For each line item, finds the matching reserved inventory and calls
-   * `inventoryCore.releaseReservation()` to decrement `reservedQty`.
+   * The amount to release is derived from the reservation ledger for THIS
+   * order item, never from the raw order quantity:
    *
-   * @param orderId  Internal order PK.
+   *   open = SUM(reserved_qty_delta) over reserve/unreserve/pick rows
+   *          keyed by (order_id, order_item_id)
+   *
+   * so a reservation already consumed by a pick, already released, or never
+   * placed (shortfall) releases 0. Calling this twice is a no-op — it can
+   * never drain other orders' reservations (the pre-P0.1 bug).
+   *
+   * Legacy fallback: reserve rows written before migration 116 carry no
+   * quantity. For those, the open amount is estimated as
+   * max(0, item.quantity − ledger picks − qty-carrying unreserves). This can
+   * over-release only for a pre-116 order that was shortfall-reserved and is
+   * cancelled during the transition window — accepted and bounded; the
+   * weekly drift check catches residue.
+   *
+   * @param orderId  WMS order PK.
    * @param reason   Human-readable reason for the release (audit trail).
    * @param userId   Optional user performing the release.
    */
@@ -346,7 +401,7 @@ class ReservationService {
 
     for (const item of items) {
       try {
-        // Resolve variant
+        // Resolve variant (wms.order_items carries sku, not variant id)
         const [variant] = await this.db
           .select()
           .from(productVariants)
@@ -362,10 +417,40 @@ class ReservationService {
           continue;
         }
 
-        const unitsNeeded = item.quantity;
+        // Open reservation for THIS item, from the ledger.
+        const ledger: any = await this.db.execute(sql`
+          SELECT
+            COALESCE(SUM(reserved_qty_delta), 0)::int AS delta_sum,
+            COUNT(*) FILTER (
+              WHERE transaction_type = 'reserve' AND reserved_qty_delta IS NULL
+            )::int AS legacy_reserves,
+            COALESCE(SUM(CASE WHEN transaction_type = 'pick'
+                              THEN -variant_qty_delta ELSE 0 END), 0)::int AS picked_units,
+            COALESCE(SUM(CASE WHEN transaction_type = 'unreserve'
+                                   AND reserved_qty_delta IS NOT NULL
+                              THEN -reserved_qty_delta ELSE 0 END), 0)::int AS unreserved_units
+          FROM inventory.inventory_transactions
+          WHERE order_id = ${orderId}
+            AND order_item_id = ${item.id}
+            AND transaction_type IN ('reserve', 'unreserve', 'pick')
+            AND voided_at IS NULL
+        `);
+        const row = ledger?.rows?.[0] ?? {};
+        let openQty = Math.max(0, Number(row.delta_sum ?? 0));
+        if (Number(row.legacy_reserves ?? 0) > 0) {
+          // Pre-106 reserve rows have unknown qty — conservative estimate.
+          const estimate = Math.max(
+            0,
+            Number(item.quantity) - Number(row.picked_units ?? 0) - Number(row.unreserved_units ?? 0),
+          );
+          openQty = Math.max(openQty, estimate);
+        }
 
-        // Find which location(s) hold the reservation for this variant.
-        // We look for locations where reservedQty > 0.
+        if (openQty <= 0) {
+          continue; // nothing open for this item — idempotent no-op
+        }
+
+        // Release the open amount from levels actually holding reservations.
         const levels = await this.db
           .select()
           .from(inventoryLevels)
@@ -374,9 +459,10 @@ class ReservationService {
               eq(inventoryLevels.productVariantId, variant.id),
               sql`${inventoryLevels.reservedQty} > 0`,
             ),
-          );
+          )
+          .orderBy(sql`${inventoryLevels.reservedQty} DESC`);
 
-        let remaining = unitsNeeded;
+        let remaining = openQty;
 
         for (const level of levels) {
           if (remaining <= 0) break;
@@ -411,15 +497,13 @@ class ReservationService {
         }
 
         if (remaining > 0) {
+          // Ledger says more is open than the counters hold — counters are
+          // already below the attributed amount (historical drift). Not an
+          // error: releasing further would over-release someone else.
           console.warn(
-            `[RESERVATION] Could not fully release reservation for SKU "${item.sku}": ` +
-              `${remaining} units unaccounted for (order ${orderId})`,
+            `[RESERVATION] Order ${orderId} item ${item.id} (${item.sku}): ledger shows ` +
+              `${remaining} open unit(s) beyond current counters — skipping (drift candidate)`,
           );
-          result.failed.push({
-            sku: item.sku,
-            orderItemId: item.id,
-            reason: `Partial release: ${remaining} of ${unitsNeeded} units could not be released`,
-          });
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -454,7 +538,7 @@ class ReservationService {
    *
    * This method:
    *  1. Detects excess reserved_qty at the given location for the variant.
-   *  2. Force-releases the excess via adjustLevel + unreserve transaction.
+   *  2. Force-releases the excess via trimOrphanedReservation (counter + lots + ledger).
    *  3. Finds affected orders via reserve transactions at this location.
    *  4. Attempts to re-reserve each affected order at an alternative assigned bin.
    *
@@ -500,20 +584,35 @@ class ReservationService {
           `loc=${warehouseLocationId} reserved=${level.reservedQty} onHand=${level.variantQty} excess=${excess}`,
       );
 
-      // Force-release the excess reserved qty
-      await this.inventoryCore.adjustLevel(level.id, { reservedQty: -excess });
+      // Force-release the excess (counter + lots + ledger, atomically).
+      // Replaces a call to a phantom core method that never existed on
+      // InventoryUseCases and threw at runtime (audit F8b).
+      const trimmed = await this.inventoryCore.trimOrphanedReservation({
+        productVariantId,
+        warehouseLocationId,
+        qty: excess,
+        reason: "Orphaned reservation released: inventory count dropped below reserved amount",
+        userId,
+      });
+      result.released = trimmed;
+      excess = trimmed;
     }
 
-    result.released = excess;
-
-    await this.db.insert(inventoryTransactions).values({
-      productVariantId,
-      fromLocationId: warehouseLocationId,
-      transactionType: "unreserve",
-      variantQtyDelta: -excess,
-      notes: `Orphaned reservation released: inventory count dropped below reserved amount`,
-      userId: userId || null,
-    });
+    if (orphanedQty !== undefined) {
+      result.released = excess;
+      // Caller already adjusted the counter — record the ledger row here.
+      // unreserve rows never change on-hand: variantQtyDelta must be 0
+      // (the old -excess here corrupted on-hand ledger replay).
+      await this.db.insert(inventoryTransactions).values({
+        productVariantId,
+        fromLocationId: warehouseLocationId,
+        transactionType: "unreserve",
+        variantQtyDelta: 0,
+        reservedQtyDelta: -excess,
+        notes: `Orphaned reservation released: inventory count dropped below reserved amount`,
+        userId: userId || null,
+      });
+    }
 
     // 3. Find affected orders: distinct orders that had reserves at this location
     const reserveTxns = await this.db

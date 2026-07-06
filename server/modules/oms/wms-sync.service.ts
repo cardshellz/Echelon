@@ -39,11 +39,86 @@ import {
   enqueueShipStationShipmentPushRetry,
   enqueueShipStationSortRankSyncRetry,
 } from "./webhook-retry.worker";
+import { buildChannelLineDisplayName } from "./line-display-name";
+import {
+  getOmsLineMaterializableQuantity,
+  getOmsLineRemainingMaterializableQuantity,
+} from "./oms-line-authority";
 
 type WmsBinLocation = { location: string; zone: string };
+type DbLike = typeof db | any;
+type MaterializableOmsLine = {
+  id: number;
+  productVariantId: number | null;
+  sku: string | null;
+  name: string | null;
+  title: string | null;
+  variantTitle: string | null;
+  quantity: number;
+  authorityFulfillableQuantity: number;
+  wmsMaterializedQuantity: number;
+  requiresShipping: boolean | null;
+  paidPriceCents: number;
+  totalPriceCents: number;
+  fulfillableQuantity?: number | null;
+  fulfillmentStatus?: string | null;
+};
+
+const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
+
+function normalizeFulfillmentPartitionKey(value: string | null | undefined): string {
+  const normalized = String(value ?? "").trim();
+  return normalized.length > 0 ? normalized : DEFAULT_FULFILLMENT_PARTITION_KEY;
+}
+
+function resolveOmsFulfillmentPartitionKey(): string {
+  return normalizeFulfillmentPartitionKey(DEFAULT_FULFILLMENT_PARTITION_KEY);
+}
+
+function buildOmsWmsOrderScope(omsOrderId: number, fulfillmentPartitionKey: string) {
+  const normalizedPartitionKey = normalizeFulfillmentPartitionKey(fulfillmentPartitionKey);
+  return and(
+    eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
+    eq(wmsOrders.source, 'oms'),
+    eq(wmsOrders.fulfillmentPartitionKey, normalizedPartitionKey),
+  );
+}
+
+type WmsReconciliationAutoRepairRule =
+  | "materialize_authorized_oms_line"
+  | "create_missing_initial_shipment"
+  | "attach_authorized_line_to_planned_shipment";
+
+type WmsReconciliationManualReviewRule =
+  | "picked_quantity_exceeds_oms_authority"
+  | "edit_removed_picked_wms_item"
+  | "edit_picked_quantity_exceeds_oms_authority";
+
+type WmsReconciliationManualReviewSource =
+  | "reconcileExistingWmsOrderLines"
+  | "propagateOmsEditsToWms";
+
+function toNonNegativeInteger(value: unknown, field: string): number {
+  const normalized = Number(value ?? 0);
+  if (!Number.isInteger(normalized) || normalized < 0) {
+    throw new Error(`[WMS Sync] ${field} must be a non-negative integer (got ${String(value)})`);
+  }
+  return normalized;
+}
+
+function toNullableInteger(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const normalized = Number(value);
+  return Number.isInteger(normalized) ? normalized : null;
+}
+
+function toNullableBoolean(value: unknown): boolean | null {
+  if (value === null || value === undefined) return null;
+  return value === true || value === 1 || value === "1" || value === "true";
+}
 
 async function resolvePrimaryBinLocation(
-  database: typeof db,
+  database: DbLike,
   variantId: number,
 ): Promise<WmsBinLocation | null> {
   const [row] = await database
@@ -73,10 +148,85 @@ async function resolvePrimaryBinLocation(
     : null;
 }
 
+function mapLockedOmsLine(row: any): MaterializableOmsLine {
+  return {
+    id: toNonNegativeInteger(row.id, "oms_order_lines.id"),
+    productVariantId: toNullableInteger(row.product_variant_id),
+    sku: row.sku ?? null,
+    name: row.name ?? null,
+    title: row.title ?? null,
+    variantTitle: row.variant_title ?? null,
+    quantity: toNonNegativeInteger(row.quantity, "oms_order_lines.quantity"),
+    authorityFulfillableQuantity: toNonNegativeInteger(
+      row.authority_fulfillable_quantity,
+      "oms_order_lines.authority_fulfillable_quantity",
+    ),
+    wmsMaterializedQuantity: toNonNegativeInteger(
+      row.wms_materialized_quantity,
+      "oms_order_lines.wms_materialized_quantity",
+    ),
+    requiresShipping: toNullableBoolean(row.requires_shipping),
+    paidPriceCents: toNonNegativeInteger(row.paid_price_cents, "oms_order_lines.paid_price_cents"),
+    totalPriceCents: toNonNegativeInteger(row.total_price_cents, "oms_order_lines.total_price_cents"),
+    fulfillableQuantity: toNullableInteger(row.fulfillable_quantity),
+    fulfillmentStatus: row.fulfillment_status ?? null,
+  };
+}
+
+async function buildWmsLineItemFromOmsLine(
+  database: DbLike,
+  line: MaterializableOmsLine,
+  materializableQuantity: number,
+  orderId = 0,
+): Promise<InsertWmsOrderItem> {
+  if (materializableQuantity <= 0) {
+    throw new Error(`[WMS Sync] Cannot create WMS item for OMS line ${line.id} with non-positive quantity ${materializableQuantity}`);
+  }
+
+  const variantId = line.productVariantId || null;
+  let binLocation: WmsBinLocation | null = null;
+  if (variantId) {
+    try {
+      binLocation = await resolvePrimaryBinLocation(database, variantId);
+    } catch (err: any) {
+      console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
+    }
+  }
+
+  const itemRequiresShipping = line.requiresShipping !== false;
+  const itemSnapshot = buildWmsItemFinancialSnapshot({
+    id: line.id,
+    quantity: materializableQuantity,
+    paidPriceCents: line.paidPriceCents,
+    totalPriceCents: line.totalPriceCents,
+  });
+
+  return {
+    orderId,
+    omsOrderLineId: line.id,
+    sku: line.sku || "UNKNOWN",
+    name: buildChannelLineDisplayName({
+      name: line.name,
+      title: line.title,
+      variantTitle: line.variantTitle,
+    }),
+    quantity: materializableQuantity,
+    pickedQuantity: itemRequiresShipping ? 0 : materializableQuantity,
+    fulfilledQuantity: itemRequiresShipping ? 0 : materializableQuantity,
+    status: itemRequiresShipping ? "pending" : "completed",
+    location: binLocation?.location || "UNASSIGNED",
+    zone: binLocation?.zone || "U",
+    productId: variantId,
+    requiresShipping: itemRequiresShipping ? 1 : 0,
+    ...itemSnapshot,
+  };
+}
+
 interface WmsSyncServices {
   inventoryCore: any;
   reservation: any;
   fulfillmentRouter: any;
+  slaMonitor?: any;
   shippingEngine?: import("../shipping/engine").ShippingEngine;
   shipStation?: any;
   omsService?: any;
@@ -109,6 +259,170 @@ export class WmsSyncService {
     this.services = services;
   }
 
+  private async lockOmsLinesForMaterialization(
+    database: DbLike,
+    omsOrderId: number,
+  ): Promise<MaterializableOmsLine[]> {
+    const result = await database.execute(sql`
+      SELECT
+        id,
+        product_variant_id,
+        sku,
+        name,
+        title,
+        variant_title,
+        quantity,
+        requires_shipping,
+        paid_price_cents,
+        total_price_cents,
+        authority_fulfillable_quantity,
+        wms_materialized_quantity,
+        fulfillable_quantity,
+        fulfillment_status
+      FROM oms.oms_order_lines
+      WHERE order_id = ${omsOrderId}
+      ORDER BY id
+      FOR UPDATE
+    `);
+
+    return (result.rows ?? []).map(mapLockedOmsLine);
+  }
+
+  private async incrementOmsLineMaterializedQuantities(
+    database: DbLike,
+    items: Array<{ omsOrderLineId?: number | null; quantity?: number | null }>,
+  ): Promise<void> {
+    const consumptions = items
+      .map((item) => ({
+        omsOrderLineId: item.omsOrderLineId == null ? null : Number(item.omsOrderLineId),
+        quantity: Number(item.quantity ?? 0),
+      }))
+      .filter(
+        (item): item is { omsOrderLineId: number; quantity: number } =>
+          typeof item.omsOrderLineId === "number" &&
+          Number.isInteger(item.omsOrderLineId) &&
+          item.omsOrderLineId > 0 &&
+          Number.isInteger(item.quantity) &&
+          item.quantity > 0,
+      );
+
+    if (consumptions.length === 0) return;
+
+    const values = sql.join(
+      consumptions.map((item) => sql`(${item.omsOrderLineId}::bigint, ${item.quantity}::int)`),
+      sql`, `,
+    );
+
+    await database.execute(sql`
+      WITH consumed(order_line_id, quantity) AS (
+        VALUES ${values}
+      )
+      UPDATE oms.oms_order_lines ol
+         SET wms_materialized_quantity = ol.wms_materialized_quantity + consumed.quantity,
+             updated_at = NOW()
+        FROM consumed
+       WHERE ol.id = consumed.order_line_id
+    `);
+  }
+
+  private async recordWmsReconciliationAuditEvent(
+    database: DbLike,
+    omsOrderId: number,
+    rule: WmsReconciliationAutoRepairRule,
+    details: Record<string, unknown>,
+  ): Promise<void> {
+    await database.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "wms_reconciliation_auto_repair",
+      details: {
+        classification: "safe_auto_repair",
+        rule,
+        source: "reconcileExistingWmsOrderLines",
+        ...details,
+      },
+    });
+  }
+
+  private async recordWmsReconciliationReviewException(
+    database: DbLike,
+    args: {
+      rule: WmsReconciliationManualReviewRule;
+      source: WmsReconciliationManualReviewSource;
+      omsOrderId: number;
+      wmsOrderId: number;
+      wmsOrderItemId: number;
+      omsOrderLineId: number | null;
+      sku: string | null;
+      omsQuantity: number;
+      wmsQuantity: number;
+      pickedQuantity: number;
+      externalLineItemId?: string | null;
+      reviewMessage?: string;
+      summary?: string;
+    },
+  ): Promise<void> {
+    const idempotencyKey = [
+      "oms_wms_reconciliation",
+      args.rule,
+      `oms-${args.omsOrderId}`,
+      `wms-${args.wmsOrderId}`,
+      `item-${args.wmsOrderItemId}`,
+      `line-${args.omsOrderLineId ?? "none"}`,
+    ].join(":").slice(0, 500);
+    const summary = args.summary ??
+      `WMS item ${args.wmsOrderItemId} has picked quantity ${args.pickedQuantity} ` +
+      `above OMS-authorized quantity ${args.omsQuantity}`;
+    const details = {
+      source: args.source,
+      omsOrderId: args.omsOrderId,
+      wmsOrderId: args.wmsOrderId,
+      wmsOrderItemId: args.wmsOrderItemId,
+      omsOrderLineId: args.omsOrderLineId,
+      externalLineItemId: args.externalLineItemId ?? null,
+      sku: args.sku,
+      omsQuantity: args.omsQuantity,
+      wmsQuantity: args.wmsQuantity,
+      pickedQuantity: args.pickedQuantity,
+      reviewMessage: args.reviewMessage ?? null,
+    };
+
+    await database.execute(sql`
+      INSERT INTO wms.reconciliation_exceptions (
+        source,
+        classification,
+        rule,
+        status,
+        severity,
+        wms_order_id,
+        external_system,
+        external_order_ref,
+        idempotency_key,
+        summary,
+        details
+      )
+      VALUES (
+        'oms_wms_reconciliation',
+        'manual_review',
+        ${args.rule},
+        'open',
+        'review',
+        ${args.wmsOrderId},
+        'oms',
+        ${String(args.omsOrderId)},
+        ${idempotencyKey},
+        ${summary},
+        ${JSON.stringify(details)}::jsonb
+      )
+      ON CONFLICT (idempotency_key)
+        WHERE status IN ('open', 'acknowledged')
+      DO UPDATE SET
+        last_seen_at = NOW(),
+        updated_at = NOW(),
+        occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
+        details = wms.reconciliation_exceptions.details || EXCLUDED.details
+    `);
+  }
+
   /**
    * Sync an OMS order to WMS for fulfillment.
    * Idempotent - safe to call multiple times (checks if already synced).
@@ -134,6 +448,7 @@ export class WmsSyncService {
       }
 
       const omsOrder = omsOrderResult[0];
+      const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey();
 
       if (this.isFinalOrCancelledOmsOrder(omsOrder)) {
         await this.cancelExistingWmsOrderForFinalOmsOrder(omsOrderId);
@@ -150,12 +465,7 @@ export class WmsSyncService {
           warehouseStatus: wmsOrders.warehouseStatus,
         })
         .from(wmsOrders)
-        .where(
-          and(
-            eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
-            eq(wmsOrders.source, 'oms') // Distinguish from legacy shopify orders
-          )
-        )
+        .where(buildOmsWmsOrderScope(omsOrderId, fulfillmentPartitionKey))
         .orderBy(sql`
           CASE
             WHEN ${wmsOrders.warehouseStatus} = 'cancelled' THEN 2
@@ -176,14 +486,7 @@ export class WmsSyncService {
         );
 
         if (headerRefresh.promoted) {
-          try {
-            const reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
-            if (reserveResult.failed.length > 0) {
-              console.warn(`[WMS Sync] Reservation partial failure after promotion for order ${wmsOrderId}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
-            }
-          } catch (err: any) {
-            console.error(`[WMS Sync] Reservation error after promotion for order ${wmsOrderId}: ${err.message}`);
-          }
+          await this.reserveBestEffort(wmsOrderId, omsOrderId, "post_promotion");
         }
 
         return wmsOrderId;
@@ -219,6 +522,17 @@ export class WmsSyncService {
         return null;
       }
 
+      const materializableOmsLines = omsLines.filter(
+        (line) => getOmsLineMaterializableQuantity(line) > 0,
+      );
+
+      if (materializableOmsLines.length === 0) {
+        console.warn(
+          `[WMS Sync] OMS order ${omsOrderId} has no OMS-authorized fulfillable quantity; skipping WMS materialization`,
+        );
+        return null;
+      }
+
       // Snapshot financials into the WMS row so pushShipment reads cents
       // from wms.orders (WMS-owned push).
       validateOmsOrderFinancials(
@@ -231,9 +545,9 @@ export class WmsSyncService {
           totalCents: omsOrder.totalCents ?? 0,
           currency: omsOrder.currency ?? "USD",
         },
-        omsLines.map((l) => ({
+        materializableOmsLines.map((l) => ({
           id: l.id,
-          quantity: l.quantity ?? 0,
+          quantity: getOmsLineMaterializableQuantity(l),
           paidPriceCents: (l as any).paidPriceCents ?? 0,
           totalPriceCents: (l as any).totalPriceCents ?? 0,
         })),
@@ -249,7 +563,7 @@ export class WmsSyncService {
       });
 
       // 3. Check if order has any shippable items
-      const hasShippableItems = omsLines.some(line => line.requiresShipping !== false);
+      const hasShippableItems = materializableOmsLines.some(line => line.requiresShipping !== false);
 
       // 3b. Route to a fulfillment warehouse UP FRONT, so the order carries its
       // warehouse through picking and its SLA cutoff is bucketed in that
@@ -261,7 +575,7 @@ export class WmsSyncService {
         routing = await this.services.fulfillmentRouter.routeOrder({
           channelId: omsOrder.channelId,
           country: (omsOrder as any).shipToCountry ?? null,
-          skus: omsLines.map((l: any) => l.sku).filter(Boolean),
+          skus: materializableOmsLines.map((l: any) => l.sku).filter(Boolean),
         });
       } catch (err: any) {
         console.warn(`[WMS Sync] Warehouse routing failed for OMS order ${omsOrderId}: ${err?.message ?? err}`);
@@ -324,55 +638,12 @@ export class WmsSyncService {
         slaStatus: "on_time",
         sortRank,
         warehouseStatus,
-        itemCount: omsLines.length,
-        unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
+        fulfillmentPartitionKey,
+        itemCount: materializableOmsLines.length,
+        unitCount: materializableOmsLines.reduce((sum, line) => sum + getOmsLineMaterializableQuantity(line), 0),
         orderPlacedAt: omsOrder.orderedAt,
         ...orderFinancialSnapshot,
       };
-
-      // 4. Map line items
-      const wmsLineItems: InsertWmsOrderItem[] = [];
-
-      for (const line of omsLines) {
-        // Resolve product_variant_id and bin location from catalog
-        const variantId = line.productVariantId || null;
-        let binLocation: { location: string; zone: string } | null = null;
-
-        if (variantId) {
-          try {
-            binLocation = await resolvePrimaryBinLocation(db, variantId);
-          } catch (err: any) {
-            console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
-          }
-        }
-
-        // Propagate requiresShipping from OMS (false = donation/membership/digital)
-        const itemRequiresShipping = line.requiresShipping !== false;
-
-        // Per-line financial snapshot for WMS-owned push.
-        const itemSnapshot = buildWmsItemFinancialSnapshot({
-          id: line.id,
-          quantity: line.quantity ?? 0,
-          paidPriceCents: (line as any).paidPriceCents ?? 0,
-          totalPriceCents: (line as any).totalPriceCents ?? 0,
-        });
-
-        wmsLineItems.push({
-          orderId: 0, // Will be set by createOrderWithItems
-          omsOrderLineId: line.id,
-          sku: line.sku || "UNKNOWN",
-          name: line.title || "Unknown Item",
-          quantity: line.quantity || 0,
-          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          status: itemRequiresShipping ? "pending" : "completed",
-          location: binLocation?.location || "UNASSIGNED",
-          zone: binLocation?.zone || "U",
-          productId: variantId, // Temporary mapping to satisfy schema
-          requiresShipping: itemRequiresShipping ? 1 : 0,
-          ...itemSnapshot,
-        });
-      }
 
       // ── C2 Atomic pipeline: steps 5 + 5b + 6 run in one transaction ──
       // Order creation, shipment creation, and inventory reservation are
@@ -407,12 +678,7 @@ export class WmsSyncService {
         const racedWmsOrder = await tx
           .select({ id: wmsOrders.id })
           .from(wmsOrders)
-          .where(
-            and(
-              eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
-              eq(wmsOrders.source, 'oms'),
-            ),
-          )
+          .where(buildOmsWmsOrderScope(omsOrderId, fulfillmentPartitionKey))
           .orderBy(sql`
             CASE
               WHEN ${wmsOrders.warehouseStatus} = 'cancelled' THEN 2
@@ -426,8 +692,52 @@ export class WmsSyncService {
           return { racedExistingWmsOrderId: Number(racedWmsOrder[0].id) };
         }
 
+        const lockedOmsLines = await this.lockOmsLinesForMaterialization(tx, omsOrderId);
+        const remainingOmsLines = lockedOmsLines.filter(
+          (line) => getOmsLineRemainingMaterializableQuantity(line) > 0,
+        );
+
+        if (remainingOmsLines.length === 0) {
+          console.warn(
+            `[WMS Sync] OMS order ${omsOrderId} has no remaining authorized quantity to materialize after row lock`,
+          );
+          return { noMaterializableAuthority: true };
+        }
+
+        const txWmsLineItems: InsertWmsOrderItem[] = [];
+        for (const line of remainingOmsLines) {
+          txWmsLineItems.push(
+            await buildWmsLineItemFromOmsLine(
+              tx,
+              line,
+              getOmsLineRemainingMaterializableQuantity(line),
+            ),
+          );
+        }
+
+        const txHasShippableItems = remainingOmsLines.some((line) => line.requiresShipping !== false);
+        const txWarehouseStatus = !txHasShippableItems ? "completed" : warehouseStatus;
+        const txWmsOrderData: InsertWmsOrder = {
+          ...wmsOrderData,
+          warehouseStatus: txWarehouseStatus,
+          itemCount: txWmsLineItems.length,
+          unitCount: txWmsLineItems.reduce((sum, item) => sum + (item.quantity ?? 0), 0),
+        };
+
         // 5. Create WMS order (writes to orders + order_items)
-        const newWmsOrder = await ordersStorage.createOrderWithItems(wmsOrderData, wmsLineItems, tx);
+        const newWmsOrder = await ordersStorage.createOrderWithItems(txWmsOrderData, txWmsLineItems, tx);
+
+        if (
+          (newWmsOrder as any).source !== "oms" ||
+          String((newWmsOrder as any).omsFulfillmentOrderId ?? "") !== String(omsOrderId)
+        ) {
+          console.warn(
+            `[WMS Sync] createOrderWithItems returned existing non-OMS-linked WMS order ${newWmsOrder.id} for OMS order ${omsOrderId}; reconciling instead of consuming line authority`,
+          );
+          return { racedExistingWmsOrderId: Number(newWmsOrder.id) };
+        }
+
+        await this.incrementOmsLineMaterializedQuantities(tx, txWmsLineItems);
 
         console.log(`[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})`);
 
@@ -435,7 +745,7 @@ export class WmsSyncService {
         // rows. Failure is non-fatal so a broken shipment insert never
         // blocks order sync (the hourly reconcile sweep will retry).
         let shipmentIdForPush: number | null = null;
-        if (hasShippableItems) {
+        if (txHasShippableItems) {
           // §6 Commit 14: routing by combined_role.
           const combinedRole =
             (newWmsOrder as any).combinedRole ?? null;
@@ -522,14 +832,14 @@ export class WmsSyncService {
                 }
               }
 
-              const shipmentItemInputs = omsLines
+              const shipmentItemInputs = remainingOmsLines
                 .filter((line) => line.requiresShipping !== false)
                 .map((line) => {
                   const item = itemsByOmsLineId.get(line.id);
                   return item != null
                     ? {
                         id: item.id,
-                        quantity: line.quantity ?? 0,
+                        quantity: getOmsLineRemainingMaterializableQuantity(line),
                         productVariantId: item.productVariantId,
                       }
                     : null;
@@ -555,7 +865,7 @@ export class WmsSyncService {
           }
         }
 
-        return { newWmsOrder, shipmentIdForPush, warehouseStatus };
+        return { newWmsOrder, shipmentIdForPush, warehouseStatus: txWarehouseStatus };
       });
 
       // 6. Reserve inventory — OUTSIDE the transaction.
@@ -568,14 +878,7 @@ export class WmsSyncService {
       if ((txResult as any).warehouseStatus === "ready" && !(txResult as any).racedExistingWmsOrderId) {
         const wmsOrderId = (txResult as any).newWmsOrder?.id;
         if (wmsOrderId) {
-          try {
-            const reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
-            if (reserveResult.failed.length > 0) {
-              console.warn(`[WMS Sync] Inventory reservation partial failure for order ${wmsOrderId}: ${reserveResult.failed.map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`).join(", ")}`);
-            }
-          } catch (err: any) {
-            console.error(`[WMS Sync] Inventory reservation error for order ${wmsOrderId}: ${err.message}`);
-          }
+          await this.reserveBestEffort(wmsOrderId, omsOrderId, "post_create");
         }
       }
 
@@ -590,12 +893,17 @@ export class WmsSyncService {
         );
         try {
           await this.reconcileExistingWmsOrderLines(omsOrderId, racedId);
+          await this.refreshOmsLineMaterializedQuantities(omsOrderId);
         } catch (err: any) {
           console.error(
             `[WMS Sync] Reconcile after race for OMS order ${omsOrderId} (WMS ${racedId}) failed: ${err.message}`,
           );
         }
         return racedId;
+      }
+
+      if ((txResult as any).noMaterializableAuthority) {
+        return null;
       }
 
       // Past the race guard: txResult is the create-path variant.
@@ -608,6 +916,7 @@ export class WmsSyncService {
       // (Warehouse routing now happens BEFORE order creation — see step 3b —
       // so the row is inserted with its warehouse_id and a warehouse-correct
       // SLA, instead of being patched afterward.)
+      await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
       // 8. Push to ShipStation via WMS-owned pushShipment path.
       // Push failures never block the sync — reconcile retries.
@@ -694,10 +1003,39 @@ export class WmsSyncService {
     );
   }
 
+  private async refreshOmsLineMaterializedQuantities(omsOrderId: number): Promise<void> {
+    await db.execute(sql`
+      WITH target_lines AS (
+        SELECT id
+        FROM oms.oms_order_lines
+        WHERE order_id = ${omsOrderId}
+      ),
+      materialized AS (
+        SELECT
+          oi.oms_order_line_id,
+          COALESCE(SUM(COALESCE(oi.quantity, 0)), 0)::int AS quantity
+        FROM wms.order_items oi
+        JOIN wms.orders w ON w.id = oi.order_id
+        WHERE w.source = 'oms'
+          AND w.oms_fulfillment_order_id = ${String(omsOrderId)}
+          AND oi.oms_order_line_id IS NOT NULL
+          AND oi.status <> 'cancelled'
+        GROUP BY oi.oms_order_line_id
+      )
+      UPDATE oms.oms_order_lines ol
+         SET wms_materialized_quantity = COALESCE(materialized.quantity, 0),
+             updated_at = NOW()
+        FROM target_lines
+        LEFT JOIN materialized
+          ON materialized.oms_order_line_id = target_lines.id
+       WHERE ol.id = target_lines.id
+    `);
+  }
+
   private hasOpenShippableOmsDemand(lines: Array<typeof omsOrderLines.$inferSelect>): boolean {
     return lines.some((line) => {
       if (line.requiresShipping === false) return false;
-      if ((line.quantity ?? 0) <= 0) return false;
+      if (getOmsLineMaterializableQuantity(line) <= 0) return false;
       const lineFulfillmentStatus = String(line.fulfillmentStatus ?? "").toLowerCase();
       if (lineFulfillmentStatus === "fulfilled") return false;
       const fulfillableQuantity = line.fulfillableQuantity;
@@ -705,8 +1043,65 @@ export class WmsSyncService {
     });
   }
 
+  /**
+   * Reserve a WMS order's inventory, best-effort (P0.1c, revised 2026-07-06).
+   *
+   * A shortfall (a line with no reservable stock — oversell, stale channel
+   * mapping, or a not-yet-modeled preorder) is logged and recorded as an OMS
+   * event, but the order is NOT held and the engine push proceeds. The earlier
+   * order-level auto-hold froze every order containing one unreservable line,
+   * never released it when stock arrived, and kept the order off ShipStation
+   * entirely; until preorder is modeled, the intended flow is that pickers
+   * short the unreservable line. Reservation errors are logged and left for
+   * the ready-but-unreserved reconciler detector — reserveOrder is idempotent
+   * per item, so re-running is always safe.
+   */
+  private async reserveBestEffort(
+    wmsOrderId: number,
+    omsOrderId: number | null,
+    context: string,
+  ): Promise<void> {
+    try {
+      const reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
+      if (reserveResult.failed.length === 0) {
+        return;
+      }
+
+      const detail = reserveResult.failed
+        .map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`)
+        .join(", ");
+      console.warn(
+        `[WMS Sync] Reservation shortfall for WMS order ${wmsOrderId} (${context}): ${detail} — proceeding without hold; unreservable lines surface as pick shorts`,
+      );
+      if (omsOrderId) {
+        try {
+          await db.insert(omsOrderEvents).values({
+            orderId: omsOrderId,
+            eventType: "reservation_shortfall",
+            details: {
+              wmsOrderId,
+              context,
+              failed: reserveResult.failed,
+            },
+          });
+        } catch (evtErr: any) {
+          console.error(
+            `[WMS Sync] Failed to record shortfall event for OMS order ${omsOrderId}: ${evtErr?.message}`,
+          );
+        }
+      }
+    } catch (err: any) {
+      // Reservation errored outright (not a shortfall). The order stays
+      // unheld; the ready-but-unreserved detector re-reserves it — that is
+      // the retry path (reserveOrder is idempotent).
+      console.error(
+        `[WMS Sync] Reservation error for WMS order ${wmsOrderId} (${context}): ${err.message} — detector will retry`,
+      );
+    }
+  }
+
   private async cancelExistingWmsOrderForFinalOmsOrder(omsOrderId: number): Promise<void> {
-    const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+    const { cancelWmsOrderAndRelease } = await import("../orders/cancel-wms-order");
     const rows: any = await db.execute(sql`
       SELECT id FROM wms.orders
        WHERE (
@@ -716,32 +1111,28 @@ export class WmsSyncService {
          AND warehouse_status NOT IN ('cancelled', 'shipped')
     `);
     for (const row of rows?.rows ?? []) {
-      // D-SYNCANCEL: Release inventory reservation before transitioning
-      // to cancelled. Without this, reserved units leak permanently.
-      try {
-        await this.services.reservation.releaseOrderReservation(
-          row.id,
-          "oms_final_state_cancel",
-        );
-      } catch (releaseErr: any) {
-        console.error(
-          `[WMS Sync] Failed to release reservation for WMS order ${row.id} during OMS cancel: ${releaseErr?.message}`,
-        );
+      // P0.1c: single cancel entrypoint — guarded transition + order-scoped
+      // reservation release (D-SYNCANCEL: without release, units leak).
+      const outcome = await cancelWmsOrderAndRelease(
+        db,
+        this.services.reservation,
+        Number(row.id),
+        "oms_final_state_cancel",
+      );
+      if (outcome.releaseFailed) {
         try {
           await db.insert(omsOrderEvents).values({
             orderId: omsOrderId,
             eventType: "cancel_release_failed",
             details: {
               wmsOrderId: row.id,
-              error: releaseErr?.message ?? String(releaseErr),
               requiresReview: true,
             },
           });
         } catch (_dlErr) {
-          // Structured log above is our trace
+          // Structured log inside the helper is our trace
         }
       }
-      await cancelWmsOrder(db, row.id, "oms_final_state_cancel");
     }
   }
 
@@ -847,7 +1238,7 @@ export class WmsSyncService {
       return { insertedItems: 0, updatedShipments: 0 };
     }
 
-    const omsLines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrderId));
+    let omsLines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrderId));
     if (omsLines.length === 0) return { insertedItems: 0, updatedShipments: 0 };
 
     const [wmsOrderState] = await db
@@ -870,6 +1261,9 @@ export class WmsSyncService {
       return { insertedItems: 0, updatedShipments: 0 };
     }
 
+    await this.refreshOmsLineMaterializedQuantities(omsOrderId);
+    omsLines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrderId));
+
     const existingItems = await db
       .select({
         id: wmsOrderItems.id,
@@ -884,7 +1278,9 @@ export class WmsSyncService {
     const existingOmsLineIds = new Set(
       existingItems.map((item) => item.omsOrderLineId).filter((id): id is number => id != null),
     );
-    const missingLines = omsLines.filter((line) => !existingOmsLineIds.has(line.id));
+    const missingLines = omsLines.filter(
+      (line) => !existingOmsLineIds.has(line.id) && getOmsLineRemainingMaterializableQuantity(line) > 0,
+    );
 
     // Sync cancellations and quantity changes from OMS → WMS.
     // If an OMS line was removed (quantity zeroed) or edited, update the
@@ -895,7 +1291,7 @@ export class WmsSyncService {
       if (wmsItem.status === "cancelled") continue;
 
       const omsLine = omsLineById.get(wmsItem.omsOrderLineId);
-      const omsQty = omsLine?.quantity ?? 0;
+      const omsQty = omsLine ? getOmsLineMaterializableQuantity(omsLine) : 0;
       const wmsQty = wmsItem.quantity ?? 0;
 
       if (omsQty === wmsQty) continue;
@@ -914,6 +1310,18 @@ export class WmsSyncService {
         console.warn(
           `[WMS Sync] Item ${wmsItem.sku} (id ${wmsItem.id}): OMS qty reduced to ${omsQty} but ${wmsItem.pickedQuantity} already picked — needs manual review`,
         );
+        await this.recordWmsReconciliationReviewException(db, {
+          rule: "picked_quantity_exceeds_oms_authority",
+          source: "reconcileExistingWmsOrderLines",
+          omsOrderId,
+          wmsOrderId,
+          wmsOrderItemId: wmsItem.id,
+          omsOrderLineId: wmsItem.omsOrderLineId,
+          sku: wmsItem.sku,
+          omsQuantity: omsQty,
+          wmsQuantity: wmsQty,
+          pickedQuantity: wmsItem.pickedQuantity ?? 0,
+        });
       } else if (omsQty !== wmsQty) {
         await db
           .update(wmsOrderItems)
@@ -934,43 +1342,61 @@ export class WmsSyncService {
     }[] = [];
 
     for (const line of missingLines) {
-      const variantId = line.productVariantId || null;
-      let binLocation: { location: string; zone: string } | null = null;
-      if (variantId) {
-        try {
-          binLocation = await resolvePrimaryBinLocation(db, variantId);
-        } catch (err: any) {
-          console.warn(`[WMS Sync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
-        }
-      }
+      const inserted = await db.transaction(async (tx: any) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(918407, ${omsOrderId})`);
 
-      const itemRequiresShipping = line.requiresShipping !== false;
-      const [inserted] = await db
-        .insert(wmsOrderItems)
-        .values({
-          orderId: wmsOrderId,
-          omsOrderLineId: line.id,
-          sku: line.sku || "UNKNOWN",
-          name: line.title || "Unknown Item",
-          quantity: line.quantity || 0,
-          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          status: itemRequiresShipping ? "pending" : "completed",
-          location: binLocation?.location || "UNASSIGNED",
-          zone: binLocation?.zone || "U",
-          productId: variantId,
-          requiresShipping: itemRequiresShipping ? 1 : 0,
-          unitPriceCents: (line as any).paidPriceCents ?? 0,
-          paidPriceCents: (line as any).paidPriceCents ?? 0,
-          totalPriceCents: (line as any).totalPriceCents ?? 0,
-        } as any)
-        .returning({
-          id: wmsOrderItems.id,
-          omsOrderLineId: wmsOrderItems.omsOrderLineId,
-          productId: wmsOrderItems.productId,
-          quantity: wmsOrderItems.quantity,
-          requiresShipping: wmsOrderItems.requiresShipping,
-        });
+        const duplicateItem = await tx
+          .select({ id: wmsOrderItems.id })
+          .from(wmsOrderItems)
+          .where(and(
+            eq(wmsOrderItems.orderId, wmsOrderId),
+            eq(wmsOrderItems.omsOrderLineId, line.id),
+          ))
+          .limit(1);
+        if (duplicateItem.length > 0) return null;
+
+        const lockedLine = (await this.lockOmsLinesForMaterialization(tx, omsOrderId))
+          .find((candidate) => candidate.id === line.id);
+        if (!lockedLine) return null;
+
+        const materializableQuantity = getOmsLineRemainingMaterializableQuantity(lockedLine);
+        if (materializableQuantity <= 0) return null;
+
+        const itemToInsert = await buildWmsLineItemFromOmsLine(
+          tx,
+          lockedLine,
+          materializableQuantity,
+          wmsOrderId,
+        );
+
+        const [created] = await tx
+          .insert(wmsOrderItems)
+          .values(itemToInsert as any)
+          .returning({
+            id: wmsOrderItems.id,
+            omsOrderLineId: wmsOrderItems.omsOrderLineId,
+            productId: wmsOrderItems.productId,
+            quantity: wmsOrderItems.quantity,
+            requiresShipping: wmsOrderItems.requiresShipping,
+          });
+
+        if (created) {
+          await this.incrementOmsLineMaterializedQuantities(tx, [created]);
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "materialize_authorized_oms_line",
+            {
+              wmsOrderId,
+              wmsOrderItemId: created.id,
+              omsOrderLineId: created.omsOrderLineId,
+              quantity: created.quantity,
+              requiresShipping: Number((created as any).requiresShipping ?? 0) !== 0,
+            },
+          );
+        }
+        return created ?? null;
+      });
       if (inserted) {
         insertedItems.push({
           ...inserted,
@@ -1078,6 +1504,8 @@ export class WmsSyncService {
        WHERE w.id = agg.order_id
     `);
 
+    await this.refreshOmsLineMaterializedQuantities(omsOrderId);
+
     if (shippableShipmentItems.length === 0) {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
     }
@@ -1106,16 +1534,33 @@ export class WmsSyncService {
     if (activeShipments.length === 0) {
       // Case A: No shipment exists at all — initial sync must have crashed
       // before creating one. Create a new shipment and push it.
-      const created = await createShipmentForOrder(
-        db,
-        wmsOrderId,
-        wmsOrderState?.channelId ?? null,
-        shippableShipmentItems.map((item) => ({
-          id: item.id,
-          quantity: item.quantity ?? 0,
-          productVariantId: item.productId,
-        })),
-      );
+      const created = await db.transaction(async (tx: any) => {
+        const result = await createShipmentForOrder(
+          tx as any,
+          wmsOrderId,
+          wmsOrderState?.channelId ?? null,
+          shippableShipmentItems.map((item) => ({
+            id: item.id,
+            quantity: item.quantity ?? 0,
+            productVariantId: item.productId,
+          })),
+          { useXactLock: true },
+        );
+        if (result.created) {
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "create_missing_initial_shipment",
+            {
+              wmsOrderId,
+              wmsShipmentId: result.shipmentId,
+              itemCount: shippableShipmentItems.length,
+              orderItemIds: shippableShipmentItems.map((item) => item.id),
+            },
+          );
+        }
+        return result;
+      });
       updatedShipments += shippableShipmentItems.length;
       try {
         await enqueueShipStationShipmentPushRetry(
@@ -1138,27 +1583,46 @@ export class WmsSyncService {
         for (const item of shippableShipmentItems) {
           const line = omsLines.find((candidate) => candidate.id === item.omsOrderLineId);
           if (!line || line.requiresShipping === false) continue;
-          const inserted: any = await db.execute(sql`
-            INSERT INTO wms.outbound_shipment_items (
-              shipment_id,
-              order_item_id,
-              product_variant_id,
-              qty
-            )
-            SELECT
-              ${shipment.id},
-              ${item.id},
-              ${item.productId},
-              ${item.quantity ?? 0}
-            WHERE NOT EXISTS (
-              SELECT 1
-              FROM wms.outbound_shipment_items
-              WHERE shipment_id = ${shipment.id}
-                AND order_item_id = ${item.id}
-            )
-            RETURNING id
-          `);
-          updatedShipments += inserted?.rows?.length ?? 0;
+          const insertedCount = await db.transaction(async (tx: any) => {
+            const inserted: any = await tx.execute(sql`
+              INSERT INTO wms.outbound_shipment_items (
+                shipment_id,
+                order_item_id,
+                product_variant_id,
+                qty
+              )
+              SELECT
+                ${shipment.id},
+                ${item.id},
+                ${item.productId},
+                ${item.quantity ?? 0}
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM wms.outbound_shipment_items
+                WHERE shipment_id = ${shipment.id}
+                  AND order_item_id = ${item.id}
+              )
+              RETURNING id
+            `);
+            const createdRows = inserted?.rows ?? [];
+            if (createdRows.length > 0) {
+              await this.recordWmsReconciliationAuditEvent(
+                tx,
+                omsOrderId,
+                "attach_authorized_line_to_planned_shipment",
+                {
+                  wmsOrderId,
+                  wmsShipmentId: shipment.id,
+                  wmsOrderItemId: item.id,
+                  outboundShipmentItemIds: createdRows.map((row: any) => row.id),
+                  omsOrderLineId: item.omsOrderLineId,
+                  quantity: item.quantity ?? 0,
+                },
+              );
+            }
+            return createdRows.length;
+          });
+          updatedShipments += insertedCount;
         }
         try {
           await enqueueShipStationShipmentPushRetry(
@@ -1214,6 +1678,8 @@ export class WmsSyncService {
       return result;
     }
 
+    await this.refreshOmsLineMaterializedQuantities(omsOrderId);
+
     // 2. Current OMS lines (already updated by webhook handler)
     const omsLines = await db
       .select()
@@ -1262,16 +1728,31 @@ export class WmsSyncService {
           changes.push(`Cancelled pending item ${wmsItem.sku} (removed from order)`);
           result.removed++;
         } else if (wmsItem.status === "completed" || wmsItem.pickedQuantity > 0) {
-          result.flaggedForReview.push(
-            `Item ${wmsItem.sku} (id ${wmsItem.id}) removed from order but ${wmsItem.pickedQuantity} already picked — needs manual reversal`,
-          );
+          const reviewMessage =
+            `Item ${wmsItem.sku} (id ${wmsItem.id}) removed from order but ${wmsItem.pickedQuantity} already picked - needs manual reversal`;
+          result.flaggedForReview.push(reviewMessage);
+          await this.recordWmsReconciliationReviewException(db, {
+            rule: "edit_removed_picked_wms_item",
+            source: "propagateOmsEditsToWms",
+            omsOrderId,
+            wmsOrderId,
+            wmsOrderItemId: wmsItem.id,
+            omsOrderLineId: wmsItem.omsOrderLineId,
+            externalLineItemId: omsLine?.externalLineItemId ?? null,
+            sku: wmsItem.sku,
+            omsQuantity: 0,
+            wmsQuantity: wmsItem.quantity ?? 0,
+            pickedQuantity: wmsItem.pickedQuantity ?? 0,
+            reviewMessage,
+            summary: reviewMessage,
+          });
         }
         continue;
       }
 
       if (!omsLine) continue;
 
-      const omsQty = omsLine.quantity || 0;
+      const omsQty = getOmsLineMaterializableQuantity(omsLine);
       const wmsQty = wmsItem.quantity;
 
       if (omsQty === wmsQty) {
@@ -1337,9 +1818,24 @@ export class WmsSyncService {
       } else if (wmsItem.pickedQuantity > 0) {
         if (omsQty < wmsItem.pickedQuantity) {
           // Qty reduced below what was already picked
-          result.flaggedForReview.push(
-            `Item ${wmsItem.sku} (id ${wmsItem.id}): qty reduced ${wmsQty} → ${omsQty} but ${wmsItem.pickedQuantity} already picked`,
-          );
+          const reviewMessage =
+            `Item ${wmsItem.sku} (id ${wmsItem.id}): qty reduced ${wmsQty} -> ${omsQty} but ${wmsItem.pickedQuantity} already picked`;
+          result.flaggedForReview.push(reviewMessage);
+          await this.recordWmsReconciliationReviewException(db, {
+            rule: "edit_picked_quantity_exceeds_oms_authority",
+            source: "propagateOmsEditsToWms",
+            omsOrderId,
+            wmsOrderId,
+            wmsOrderItemId: wmsItem.id,
+            omsOrderLineId: wmsItem.omsOrderLineId,
+            externalLineItemId: omsLine.externalLineItemId ?? null,
+            sku: wmsItem.sku,
+            omsQuantity: omsQty,
+            wmsQuantity: wmsQty,
+            pickedQuantity: wmsItem.pickedQuantity ?? 0,
+            reviewMessage,
+            summary: reviewMessage,
+          });
         } else if (omsQty > wmsQty) {
           // Qty increased — update qty, mark pending so picker picks the rest
           await db
@@ -1364,8 +1860,9 @@ export class WmsSyncService {
 
     // 5. Add new items (OMS lines not yet in WMS)
     for (const omsLine of omsLines) {
+      const materializableQuantity = getOmsLineRemainingMaterializableQuantity(omsLine);
       if (wmsItemByOmsLineId.has(omsLine.id)) continue;
-      if (!omsLine.quantity || omsLine.quantity <= 0) continue;
+      if (materializableQuantity <= 0) continue;
 
       // Skip items already removed from Shopify
       if (
@@ -1376,38 +1873,40 @@ export class WmsSyncService {
         continue;
       }
 
-      const variantId = omsLine.productVariantId || null;
-      let binLocation: WmsBinLocation | null = null;
-      if (variantId) {
-        try {
-          binLocation = await resolvePrimaryBinLocation(db, variantId);
-        } catch (e: any) {
-          console.warn(
-            `${LOG} Could not resolve bin for variant ${variantId}: ${e.message}`,
-          );
-        }
-      }
+      const inserted = await db.transaction(async (tx: any) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(918407, ${omsOrderId})`);
 
-      const itemRequiresShipping = omsLine.requiresShipping !== false;
-      await db.insert(wmsOrderItems).values({
-        orderId: wmsOrderId,
-        omsOrderLineId: omsLine.id,
-        sku: omsLine.sku || "UNKNOWN",
-        name: omsLine.title || "Unknown Item",
-        quantity: omsLine.quantity || 0,
-        pickedQuantity: itemRequiresShipping ? 0 : (omsLine.quantity || 0),
-        fulfilledQuantity: itemRequiresShipping ? 0 : (omsLine.quantity || 0),
-        status: itemRequiresShipping ? "pending" : "completed",
-        location: binLocation?.location || "UNASSIGNED",
-        zone: binLocation?.zone || "U",
-        productId: variantId,
-        requiresShipping: itemRequiresShipping ? 1 : 0,
-        unitPriceCents: (omsLine as any).paidPriceCents ?? 0,
-        paidPriceCents: (omsLine as any).paidPriceCents ?? 0,
-        totalPriceCents: (omsLine as any).totalPriceCents ?? 0,
-      } as any);
+        const duplicateItem = await tx
+          .select({ id: wmsOrderItems.id })
+          .from(wmsOrderItems)
+          .where(and(
+            eq(wmsOrderItems.orderId, wmsOrderId),
+            eq(wmsOrderItems.omsOrderLineId, omsLine.id),
+          ))
+          .limit(1);
+        if (duplicateItem.length > 0) return null;
 
-      changes.push(`Added new item ${omsLine.sku} (qty ${omsLine.quantity})`);
+        const lockedLine = (await this.lockOmsLinesForMaterialization(tx, omsOrderId))
+          .find((candidate) => candidate.id === omsLine.id);
+        if (!lockedLine) return null;
+
+        const remainingQuantity = getOmsLineRemainingMaterializableQuantity(lockedLine);
+        if (remainingQuantity <= 0) return null;
+
+        const itemToInsert = await buildWmsLineItemFromOmsLine(
+          tx,
+          lockedLine,
+          remainingQuantity,
+          wmsOrderId,
+        );
+        await tx.insert(wmsOrderItems).values(itemToInsert as any);
+        await this.incrementOmsLineMaterializedQuantities(tx, [itemToInsert]);
+        return { sku: itemToInsert.sku, quantity: remainingQuantity };
+      });
+
+      if (!inserted) continue;
+
+      changes.push(`Added new item ${inserted.sku} (qty ${inserted.quantity})`);
       result.added++;
     }
 
@@ -1437,6 +1936,8 @@ export class WmsSyncService {
           updated_at = NOW()
         WHERE id = ${wmsOrderId}
       `);
+
+      await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
       // Re-reserve inventory (release all then re-reserve for updated items)
       try {
@@ -1834,45 +2335,45 @@ export class WmsSyncService {
       const omsOrderId = wmsOrder.omsFulfillmentOrderId ? parseInt(wmsOrder.omsFulfillmentOrderId, 10) : null;
       if (!omsOrderId) return { success: false, message: `WMS order ${wmsOrderId} has no OMS source link` };
 
-      // 2. Fetch fresh OMS lines
-      const omsLines = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, omsOrderId));
-      if (omsLines.length === 0) return { success: false, message: `OMS order ${omsOrderId} has no line items` };
-
-      // 3. Delete existing WMS order items
-      await db.delete(wmsOrderItems).where(eq(wmsOrderItems.orderId, wmsOrderId));
-
-      // 4. Re-create items from OMS
-      const newItems: InsertWmsOrderItem[] = [];
-      for (const line of omsLines) {
-        const variantId = line.productVariantId || null;
-        let binLocation: { location: string; zone: string } | null = null;
-        if (variantId) {
-          try {
-            binLocation = await resolvePrimaryBinLocation(db, variantId);
-          } catch (err: any) {
-            console.warn(`[WMS Resync] Could not resolve bin for variant ${variantId}: ${err?.message ?? err}`);
-          }
+      const newItems = await db.transaction(async (tx: any) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(918407, ${omsOrderId})`);
+        const lockedOmsLines = await this.lockOmsLinesForMaterialization(tx, omsOrderId);
+        if (lockedOmsLines.length === 0) {
+          throw new Error(`OMS order ${omsOrderId} has no line items`);
         }
-        const itemRequiresShipping = line.requiresShipping !== false;
-        newItems.push({
-          orderId: wmsOrderId,
-          omsOrderLineId: line.id,
-          sku: line.sku || 'UNKNOWN',
-          name: line.title || 'Unknown Item',
-          quantity: line.quantity || 0,
-          pickedQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          fulfilledQuantity: itemRequiresShipping ? 0 : (line.quantity || 0),
-          status: itemRequiresShipping ? 'pending' : 'completed',
-          location: binLocation?.location || 'UNASSIGNED',
-          zone: binLocation?.zone || 'U',
-          productId: variantId,
-          requiresShipping: itemRequiresShipping ? 1 : 0,
-        });
-      }
 
-      if (newItems.length > 0) {
-        await db.insert(wmsOrderItems).values(newItems);
-      }
+        // 3. Delete existing WMS order items
+        await tx.delete(wmsOrderItems).where(eq(wmsOrderItems.orderId, wmsOrderId));
+        await tx.execute(sql`
+          UPDATE oms.oms_order_lines
+             SET wms_materialized_quantity = 0,
+                 updated_at = NOW()
+           WHERE order_id = ${omsOrderId}
+        `);
+
+        // 4. Re-create items from OMS authority. This is a destructive repair path,
+        // so authority consumption starts from zero after the delete above.
+        const rebuiltItems: InsertWmsOrderItem[] = [];
+        for (const line of lockedOmsLines) {
+          const materializableQuantity = getOmsLineMaterializableQuantity(line);
+          if (materializableQuantity <= 0) continue;
+          rebuiltItems.push(
+            await buildWmsLineItemFromOmsLine(
+              tx,
+              line,
+              materializableQuantity,
+              wmsOrderId,
+            ),
+          );
+        }
+
+        if (rebuiltItems.length > 0) {
+          await tx.insert(wmsOrderItems).values(rebuiltItems as any);
+          await this.incrementOmsLineMaterializedQuantities(tx, rebuiltItems);
+        }
+
+        return rebuiltItems;
+      });
 
       // 5. Recalculate order counts
       const { ordersStorage } = await import('../orders');

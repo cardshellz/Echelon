@@ -2607,18 +2607,9 @@ export function registerInventoryRoutes(app: Express) {
   app.get("/api/cogs/lot-cost-template", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;
-      const lots = await cogs.getUncostedLots();
-      const header = "sku,lot_number,location,qty_on_hand,current_cost,unit_cost";
-      const rows = lots.map((l: any) =>
-        [
-          l.sku,
-          l.lot_number,
-          l.location_code ?? "",
-          l.qty_on_hand,
-          ((Number(l.total_unit_cost_cents) || 0) / 100).toFixed(2),
-          "",
-        ].join(","),
-      );
+      const variants = await cogs.getUncostedVariants();
+      const header = "sku,cost_per_piece";
+      const rows = variants.map((v: any) => `${v.sku},`);
       res.setHeader("Content-Type", "text/csv");
       res.setHeader("Content-Disposition", "attachment; filename=lot_costs_template.csv");
       res.send([header, ...rows].join("\n"));
@@ -2799,6 +2790,27 @@ export function registerInventoryRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error deleting manual lot:", error);
       res.status(500).json({ error: "Failed to delete manual lot" });
+    }
+  });
+
+  // Recost ANY lot (correction / override) by per-piece cost. Lot cost = per_piece × pack size
+  // (mills); clears provisional, cost_source → manual, cascades booked COGS, audit-logged.
+  app.post("/api/cogs/lots/:lotId/recost", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const lotId = parseInt(req.params.lotId);
+      const dollars = Number(String(req.body?.cost_per_piece ?? "").replace(/[$,\s]/g, ""));
+      if (!Number.isInteger(lotId) || lotId <= 0) return res.status(400).json({ error: "Invalid lotId" });
+      if (!Number.isFinite(dollars) || dollars < 0) return res.status(400).json({ error: "Invalid cost_per_piece" });
+      const note = String(req.body?.reason ?? "").trim();
+      const reason = note ? `manual_recost: ${note}` : "manual_recost";
+      const perPieceMills = Math.round(dollars * 10000);
+      const result = await cogs.recostLotPerPiece(lotId, perPieceMills, reason);
+      if (!result) return res.status(404).json({ error: "Lot not found" });
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error recosting lot:", error);
+      res.status(500).json({ error: "Failed to recost lot" });
     }
   });
 

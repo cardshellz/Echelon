@@ -5,6 +5,11 @@ import { buildPurchasingRecommendationRunDetail } from "../../purchasing-recomme
 describe("purchasing recommendation run detail", () => {
   it("builds a compact audit payload with actionable and skipped recommendation samples", () => {
     const recommendations = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {
@@ -246,6 +251,11 @@ describe("purchasing recommendation run detail", () => {
 
   it("records approval-policy outcomes separately from the high-confidence quality gate", () => {
     const recommendations = generatePurchasingRecommendations({
+      // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
+      // 2026-05-18 — without asOf these tests rot as wall-time passes
+      // (demand goes "stale" after the 30-day lookback and the trust
+      // signal degrades the candidate score).
+      asOf: "2026-05-20T12:00:00.000Z",
       lookbackDays: 30,
       rows: [
         {

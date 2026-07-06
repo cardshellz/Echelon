@@ -24,6 +24,34 @@ const REMEDIABLE_CODES = new Set([
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
 const AUTO_FLOW_REMEDIATION_LIMIT = 10;
+const AUTO_RESERVATION_REPAIR_LIMIT = 25;
+
+/**
+ * Reservation service handle for release-on-cancel and the
+ * ready-but-unreserved detector (P0.1c). Injected from the composition root
+ * via setOmsFlowReconciliationServices() — same idiom as the eBay ingestion
+ * setters. When unwired (tests, partial boots), the reconciler falls back to
+ * status-only behavior and logs that release was skipped.
+ */
+interface FlowReconciliationReservation {
+  reserveOrder(orderId: number): Promise<{
+    reserved: number;
+    failed: Array<{ sku: string; orderItemId: number; reason: string }>;
+  }>;
+  releaseOrderReservation(
+    orderId: number,
+    reason: string,
+    userId?: string,
+  ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }>;
+}
+let flowReconciliationReservation: FlowReconciliationReservation | null = null;
+
+export function setOmsFlowReconciliationServices(services: {
+  reservation: FlowReconciliationReservation;
+}): void {
+  flowReconciliationReservation = services.reservation;
+}
+
 let reconciliationSchedulerStartedAt: Date | null = null;
 let reconciliationSchedulerLastRunAt: Date | null = null;
 let reconciliationSchedulerLastSuccessAt: Date | null = null;
@@ -132,6 +160,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     wmsReadyWithoutShipment,
     unpushedShipStationShipments,
     shopifyShipmentFulfillmentMissing,
+    partitionDuplicateLineCoverage,
+    providerFulfillmentReferenceDrift,
   ] = await Promise.all([
     countAndSample(
       db,
@@ -308,7 +338,9 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           OR (wo.source_table_id = oo.id::text)
         )
         WHERE os.status = 'shipped'
-          AND oo.status NOT IN ('shipped', 'partially_shipped')
+          -- P0.3: cancelled/refunded are money-final — a shipped shipment on
+          -- such an order is a REVIEW case, never an auto-flip candidate.
+          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
           AND os.updated_at < NOW() - INTERVAL '10 minutes'
       `,
       sql`
@@ -322,7 +354,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           OR (wo.source_table_id = oo.id::text)
         )
         WHERE os.status = 'shipped'
-          AND oo.status NOT IN ('shipped', 'partially_shipped')
+          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
           AND os.updated_at < NOW() - INTERVAL '10 minutes'
         ORDER BY os.updated_at ASC
         LIMIT 10
@@ -499,6 +531,146 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         LIMIT 10
       `,
     ),
+    countAndSample(
+      db,
+      sql`
+        WITH duplicate_line_coverage AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oi.oms_order_line_id,
+            COUNT(DISTINCT wo.id)::int AS wms_order_count
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+            AND COALESCE(oi.quantity, 0) > 0
+          GROUP BY ol.order_id, oi.oms_order_line_id
+          HAVING COUNT(DISTINCT wo.id) > 1
+        )
+        SELECT COUNT(*)::int AS count
+        FROM duplicate_line_coverage
+      `,
+      sql`
+        WITH duplicate_line_coverage AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oi.oms_order_line_id,
+            ol.sku,
+            ol.authority_fulfillable_quantity,
+            SUM(COALESCE(oi.quantity, 0))::int AS materialized_quantity,
+            COUNT(DISTINCT wo.id)::int AS wms_order_count,
+            ARRAY_AGG(DISTINCT wo.id) AS wms_order_ids,
+            ARRAY_AGG(DISTINCT COALESCE(wo.warehouse_id, 0)) AS warehouse_ids,
+            ARRAY_AGG(DISTINCT COALESCE(NULLIF(wo.fulfillment_partition_key, ''), 'default')) AS fulfillment_partition_keys,
+            ARRAY_AGG(DISTINCT oi.id) AS wms_order_item_ids
+          FROM wms.order_items oi
+          JOIN wms.orders wo ON wo.id = oi.order_id
+          JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+          WHERE oi.oms_order_line_id IS NOT NULL
+            AND COALESCE(wo.source, '') IN ('oms', 'shopify', 'ebay')
+            AND wo.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
+            AND wo.cancelled_at IS NULL
+            AND wo.completed_at IS NULL
+            AND COALESCE(oi.status, '') NOT IN ('cancelled', 'completed', 'short')
+            AND COALESCE(oi.quantity, 0) > 0
+          GROUP BY ol.order_id, oi.oms_order_line_id, ol.sku, ol.authority_fulfillable_quantity
+          HAVING COUNT(DISTINCT wo.id) > 1
+        )
+        SELECT *
+        FROM duplicate_line_coverage
+        ORDER BY wms_order_count DESC, oms_order_line_id DESC
+        LIMIT 10
+      `,
+    ),
+    countAndSample(
+      db,
+      sql`
+        WITH provider_reference_rows AS (
+          SELECT
+            ol.id,
+            LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')) AS normalized_fulfillment_provider,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_id), '') AS provider_fulfillment_order_id,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_line_item_id), '') AS provider_fulfillment_order_line_item_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_id), '') AS shopify_fulfillment_order_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_line_item_id), '') AS shopify_fulfillment_order_line_item_id
+          FROM oms.oms_order_lines ol
+        ),
+        provider_reference_drift AS (
+          SELECT id
+          FROM provider_reference_rows
+          WHERE (
+              normalized_fulfillment_provider = 'shopify'
+              OR shopify_fulfillment_order_id IS NOT NULL
+              OR shopify_fulfillment_order_line_item_id IS NOT NULL
+            )
+            AND (
+              normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+              OR provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+              OR provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+            )
+        )
+        SELECT COUNT(*)::int AS count
+        FROM provider_reference_drift
+      `,
+      sql`
+        WITH provider_reference_rows AS (
+          SELECT
+            ol.order_id AS oms_order_id,
+            oo.external_order_number,
+            ol.id AS oms_order_line_id,
+            ol.sku,
+            ol.fulfillment_provider,
+            LOWER(NULLIF(BTRIM(ol.fulfillment_provider), '')) AS normalized_fulfillment_provider,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_id), '') AS provider_fulfillment_order_id,
+            NULLIF(BTRIM(ol.provider_fulfillment_order_line_item_id), '') AS provider_fulfillment_order_line_item_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_id), '') AS shopify_fulfillment_order_id,
+            NULLIF(BTRIM(ol.shopify_fulfillment_order_line_item_id), '') AS shopify_fulfillment_order_line_item_id
+          FROM oms.oms_order_lines ol
+          JOIN oms.oms_orders oo ON oo.id = ol.order_id
+        ),
+        provider_reference_drift AS (
+          SELECT
+            oms_order_id,
+            external_order_number,
+            oms_order_line_id,
+            sku,
+            fulfillment_provider,
+            normalized_fulfillment_provider,
+            provider_fulfillment_order_id,
+            provider_fulfillment_order_line_item_id,
+            shopify_fulfillment_order_id,
+            shopify_fulfillment_order_line_item_id,
+            CASE
+              WHEN normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+                THEN 'provider_context_missing_or_mismatched'
+              WHEN provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+                THEN 'fulfillment_order_id_mismatch'
+              WHEN provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+                THEN 'fulfillment_order_line_item_id_mismatch'
+              ELSE 'unknown'
+            END AS drift_reason
+          WHERE (
+              normalized_fulfillment_provider = 'shopify'
+              OR shopify_fulfillment_order_id IS NOT NULL
+              OR shopify_fulfillment_order_line_item_id IS NOT NULL
+            )
+            AND (
+              normalized_fulfillment_provider IS DISTINCT FROM 'shopify'
+              OR provider_fulfillment_order_id IS DISTINCT FROM shopify_fulfillment_order_id
+              OR provider_fulfillment_order_line_item_id IS DISTINCT FROM shopify_fulfillment_order_line_item_id
+            )
+        )
+        SELECT *
+        FROM provider_reference_drift
+        ORDER BY oms_order_id DESC, oms_order_line_id DESC
+        LIMIT 10
+      `,
+    ),
   ]);
 
   const issues: OmsOpsIssue[] = [
@@ -558,6 +730,20 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       message: "Shopify WMS shipments are shipped but have no Shopify fulfillment id.",
       sample: shopifyShipmentFulfillmentMissing.sample,
     },
+    {
+      code: "WMS_PARTITION_DUPLICATE_LINE_COVERAGE",
+      severity: "critical" as const,
+      count: partitionDuplicateLineCoverage.count,
+      message: "Active WMS fulfillment partitions cover the same OMS order line.",
+      sample: partitionDuplicateLineCoverage.sample,
+    },
+    {
+      code: "OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT",
+      severity: "warning" as const,
+      count: providerFulfillmentReferenceDrift.count,
+      message: "Shopify OMS line fulfillment references differ from provider-neutral references.",
+      sample: providerFulfillmentReferenceDrift.sample,
+    },
   ];
 
   return issues.filter((entry) => entry.count > 0);
@@ -569,11 +755,191 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
+  await autoCloseResolvedDeadFulfillmentRetries(dbArg);
   await autoRemediateCriticalFlowIssues(dbArg, issues);
   await autoQueueStaleTrackingPushRetries(dbArg, issues);
   await autoQueueStaleShipStationPushRetries(dbArg, issues);
   await autoQueueMissingShopifyFulfillmentRetries(dbArg, issues);
+  await remediateMissingReservations(dbArg);
   return issues;
+}
+
+/**
+ * Ready-but-unreserved detector (P0.1c).
+ *
+ * With reservation reduced to a single writer at WMS sync, a post-commit
+ * reservation failure would otherwise leave a ready order with zero
+ * reservations and nothing retrying. This sweep finds ready, unheld orders
+ * older than 15 minutes whose ledger shows NO reserve rows and re-runs the
+ * idempotent reserveOrder. Shortfalls are logged only (2026-07-06: the
+ * order-level auto-hold was removed — it froze whole orders over one
+ * unreservable line with no auto-release; unreservable lines surface as
+ * pick shorts instead).
+ *
+ * Scoped to 'ready' only: 'pending' orders are unpaid (reservation happens on
+ * promotion), and 'in_progress' orders may be partially picked — reserveOrder
+ * is not pick-aware, so re-reserving them would over-reserve.
+ */
+async function remediateMissingReservations(db: any): Promise<void> {
+  const svc = flowReconciliationReservation;
+  if (!svc?.reserveOrder) return;
+
+  let rows: any;
+  try {
+    rows = await db.execute(sql`
+      SELECT w.id, w.oms_fulfillment_order_id, w.source, w.source_table_id
+      FROM wms.orders w
+      WHERE w.warehouse_status = 'ready'
+        AND COALESCE(w.on_hold, 0) = 0
+        AND w.created_at < NOW() - INTERVAL '15 minutes'
+        AND EXISTS (SELECT 1 FROM wms.order_items oi WHERE oi.order_id = w.id)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM inventory.inventory_transactions it
+          WHERE it.order_id = w.id
+            AND it.transaction_type = 'reserve'
+            AND it.voided_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM wms.order_items oi2
+              WHERE oi2.id = it.order_item_id AND oi2.order_id = w.id
+            )
+        )
+      ORDER BY w.id
+      LIMIT ${AUTO_RESERVATION_REPAIR_LIMIT}
+    `);
+  } catch (err: any) {
+    console.error(`${LOG_PREFIX} missing-reservation sweep query failed: ${err?.message}`);
+    return;
+  }
+
+  for (const row of rows?.rows ?? []) {
+    const wmsOrderId = Number(row.id);
+    try {
+      const result = await svc.reserveOrder(wmsOrderId);
+      if (result.failed.length > 0) {
+        console.warn(
+          `${LOG_PREFIX} re-reservation shortfall for WMS order ${wmsOrderId}: ` +
+            result.failed.map((f) => `${f.sku}: ${f.reason}`).join(", ") +
+            " — proceeding without hold; unreservable lines surface as pick shorts",
+        );
+      } else if (result.reserved > 0) {
+        console.warn(
+          `${LOG_PREFIX} re-reserved WMS order ${wmsOrderId} (${result.reserved} item(s)) — ` +
+            `original reservation was missing`,
+        );
+      }
+    } catch (err: any) {
+      console.error(
+        `${LOG_PREFIX} re-reservation failed for WMS order ${wmsOrderId}: ${err?.message} — will retry next sweep`,
+      );
+    }
+  }
+}
+
+export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<number> {
+  const result = await db.execute(sql`
+    WITH candidates AS (
+      SELECT
+        q.id,
+        q.topic,
+        q.created_at,
+        q.updated_at AS dead_at,
+        CASE
+          WHEN q.payload->>'shipmentId' ~ '^[0-9]+$'
+            THEN (q.payload->>'shipmentId')::bigint
+          ELSE NULL
+        END AS payload_shipment_id,
+        CASE
+          WHEN q.payload->>'orderId' ~ '^[0-9]+$'
+            THEN (q.payload->>'orderId')::bigint
+          ELSE NULL
+        END AS payload_order_id,
+        CASE
+          WHEN q.payload->>'omsOrderId' ~ '^[0-9]+$'
+            THEN (q.payload->>'omsOrderId')::bigint
+          ELSE NULL
+        END AS payload_oms_order_id,
+        NULLIF(q.payload->>'trackingNumber', '') AS payload_tracking_number,
+        COALESCE(
+          NULLIF(q.payload->>'shopifyFulfillmentId', ''),
+          NULLIF(q.payload->>'fulfillmentId', '')
+        ) AS payload_fulfillment_id
+      FROM oms.webhook_retry_queue q
+      WHERE q.provider = 'internal'
+        AND q.status = 'dead'
+        AND q.topic IN ('delayed_tracking_push', 'shopify_fulfillment_push')
+    ),
+    scoped_candidates AS (
+      SELECT
+        c.*,
+        os.id AS shipment_id,
+        NULLIF(os.tracking_number, '') AS shipment_tracking_number,
+        NULLIF(os.shopify_fulfillment_id, '') AS shipment_shopify_fulfillment_id,
+        COALESCE(payload_oo.id, shipment_oo.id) AS oms_order_id,
+        (
+             c.payload_shipment_id IS NOT NULL
+          OR c.payload_tracking_number IS NOT NULL
+          OR c.payload_fulfillment_id IS NOT NULL
+          OR NULLIF(os.tracking_number, '') IS NOT NULL
+          OR NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+        ) AS has_specific_scope
+      FROM candidates c
+      LEFT JOIN wms.outbound_shipments os ON os.id = c.payload_shipment_id
+      LEFT JOIN wms.orders wo ON wo.id = os.order_id
+      LEFT JOIN oms.oms_orders shipment_oo ON (
+           (wo.source = 'oms' AND wo.oms_fulfillment_order_id = shipment_oo.id::text)
+        OR (wo.source_table_id = shipment_oo.id::text)
+      )
+      LEFT JOIN oms.oms_orders payload_oo
+        ON payload_oo.id = COALESCE(c.payload_order_id, c.payload_oms_order_id)
+    ),
+    resolved AS (
+      SELECT DISTINCT c.id
+      FROM scoped_candidates c
+      JOIN oms.oms_order_events e
+        ON e.created_at >= COALESCE(c.dead_at, c.created_at)
+       AND (
+            (c.topic = 'delayed_tracking_push'
+              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed'))
+         OR (c.topic = 'shopify_fulfillment_push'
+              AND e.event_type = 'shopify_fulfillment_pushed')
+       )
+      WHERE (c.oms_order_id IS NULL OR e.order_id = c.oms_order_id)
+        AND (
+             (c.shipment_id IS NOT NULL
+               AND e.details->>'wmsShipmentId' = c.shipment_id::text)
+          OR (c.payload_shipment_id IS NOT NULL
+               AND e.details->>'wmsShipmentId' = c.payload_shipment_id::text)
+          OR (c.shipment_tracking_number IS NOT NULL
+               AND e.details->>'trackingNumber' = c.shipment_tracking_number)
+          OR (c.payload_tracking_number IS NOT NULL
+               AND e.details->>'trackingNumber' = c.payload_tracking_number)
+          OR (c.shipment_shopify_fulfillment_id IS NOT NULL
+               AND e.details->>'shopifyFulfillmentId' = c.shipment_shopify_fulfillment_id)
+          OR (c.shipment_shopify_fulfillment_id IS NOT NULL
+               AND e.details->>'fulfillmentId' = c.shipment_shopify_fulfillment_id)
+          OR (c.payload_fulfillment_id IS NOT NULL
+               AND e.details->>'shopifyFulfillmentId' = c.payload_fulfillment_id)
+          OR (c.payload_fulfillment_id IS NOT NULL
+               AND e.details->>'fulfillmentId' = c.payload_fulfillment_id)
+          OR (c.has_specific_scope = false AND c.oms_order_id IS NOT NULL)
+        )
+    )
+    UPDATE oms.webhook_retry_queue q
+    SET status = 'success',
+        last_error = 'auto-closed: later OMS fulfillment/tracking event confirmed success',
+        updated_at = NOW()
+    FROM resolved
+    WHERE q.id = resolved.id
+      AND q.status = 'dead'
+    RETURNING q.id
+  `);
+
+  const closed = rows(result).filter((row) => row?.id != null).length;
+  if (closed > 0) {
+    console.warn(`${LOG_PREFIX} auto-closed ${closed} resolved fulfillment/tracking retry row(s)`);
+  }
+  return closed;
 }
 
 async function autoRemediateCriticalFlowIssues(
@@ -1009,6 +1375,7 @@ export async function remediateOmsFlowIssue(
   if (input.code === "OMS_FINAL_WMS_ACTIVE") {
     const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
     const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    let cancelledByThisRemediation = false;
     const updated = await withOptionalTransaction(db, async (tx) => {
       const omsResult: any = await tx.execute(sql`
         SELECT oo.status, oo.financial_status
@@ -1033,6 +1400,7 @@ export async function remediateOmsFlowIssue(
       if (transResult.transitioned) {
         if (isCancelled) {
           await tx.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${wmsOrderId}`);
+          cancelledByThisRemediation = true;
         }
         await tx.execute(sql`
           INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
@@ -1046,6 +1414,30 @@ export async function remediateOmsFlowIssue(
       }
       return transResult.transitioned;
     });
+
+    // P0.1c: a reconciler cancel must release the order's reservations —
+    // these are exactly the missed-webhook cases where no other path ever
+    // released, leaking reserved stock permanently. Order-scoped and
+    // idempotent (P0.1b), run after the status commit; failures are logged
+    // and cleaned by the drift check.
+    if (updated && cancelledByThisRemediation) {
+      if (flowReconciliationReservation) {
+        try {
+          await flowReconciliationReservation.releaseOrderReservation(
+            wmsOrderId,
+            "oms_flow_reconcile_cancel_release",
+          );
+        } catch (err: any) {
+          console.error(
+            `${LOG_PREFIX} reservation release failed for WMS order ${wmsOrderId} after reconcile-cancel: ${err?.message}`,
+          );
+        }
+      } else {
+        console.error(
+          `${LOG_PREFIX} reservation service not wired — reconcile-cancel of WMS order ${wmsOrderId} did NOT release reservations`,
+        );
+      }
+    }
 
     return {
       code: input.code,
@@ -1148,7 +1540,9 @@ export async function remediateOmsFlowIssue(
                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
             OR (wo.source_table_id = oo.id::text)
           )
-          AND oo.status NOT IN ('shipped', 'partially_shipped')
+          -- P0.3: cancelled/refunded are money-final — never auto-flip them
+          -- to shipped. Divergence handled below as a review flag instead.
+          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
         RETURNING oo.id, os.order_id AS wms_order_id
       `);
 
@@ -1163,8 +1557,38 @@ export async function remediateOmsFlowIssue(
             NOW()
           )
         `);
+        return row;
       }
-      return row ?? null;
+
+      // P0.3 review bucket: the UPDATE was refused. If that's because the OMS
+      // order is money-final (cancelled/refunded) while a physical package
+      // shipped, a human must decide (refund vs recall vs re-open) — flag the
+      // shipment once instead of silently skipping forever.
+      const terminal = await tx.execute(sql`
+        SELECT status FROM oms.oms_orders
+        WHERE id = ${omsOrderId} AND status IN ('cancelled', 'refunded')
+        LIMIT 1
+      `);
+      if (firstRow<{ status: string }>(terminal)) {
+        await tx.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET requires_review = true,
+              review_reason = ${"shipped_but_oms_terminal: physical shipment shipped while OMS order is money-final"},
+              updated_at = NOW()
+          WHERE id = ${shipmentId}
+            AND COALESCE(requires_review, false) = false
+        `);
+        await tx.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'shipment_shipped_oms_terminal_review',
+            ${JSON.stringify({ code: input.code, shipmentId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return null;
     });
 
     return {

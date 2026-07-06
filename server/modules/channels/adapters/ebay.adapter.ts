@@ -40,11 +40,13 @@ import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service"
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
 import { EbayListingBuilder, createEbayListingBuilder } from "./ebay/ebay-listing-builder";
 import { mapCarrierToEbay } from "./ebay/ebay-category-map";
+import { EbayMarketplaceListingConnector } from "../listing-connectors/ebay-listing.connector";
 import type {
   EbayOrder,
   EbayOrderLineItem,
   EbayNotificationPayload,
   EbayOrderConfirmationData,
+  EbayError,
 } from "./ebay/ebay-types";
 
 import crypto from "crypto";
@@ -78,6 +80,19 @@ interface EbayConnectionMetadata {
 const DEFAULT_MARKETPLACE = "EBAY_US";
 const ORDER_POLL_PAGE_SIZE = 50;
 
+/**
+ * Always surface eBay's numeric errorId alongside the message — sync logs
+ * and the orchestrator's permanent-error classifier key off it; a bare
+ * message hides which error class actually fired (prod 2026-07-05).
+ */
+function formatEbayOfferError(
+  error: EbayError | undefined,
+  statusCode: number | undefined,
+): string {
+  if (!error) return `Status ${statusCode ?? "unknown"}`;
+  return error.errorId != null ? `[${error.errorId}] ${error.message}` : error.message;
+}
+
 // ---------------------------------------------------------------------------
 // eBay Adapter
 // ---------------------------------------------------------------------------
@@ -89,9 +104,15 @@ export class EbayAdapter implements IChannelAdapter {
   private authService: EbayAuthService | null = null;
   private apiClients = new Map<number, EbayApiClient>();
   private readonly listingBuilder: EbayListingBuilder;
+  private readonly listingConnector: EbayMarketplaceListingConnector;
 
   constructor(private readonly db: DrizzleDb) {
     this.listingBuilder = createEbayListingBuilder();
+    this.listingConnector = new EbayMarketplaceListingConnector({
+      delay: (ms) => this.delay(ms),
+      inventoryDelayMs: 300,
+      offerDelayMs: 300,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -169,70 +190,30 @@ export class EbayAdapter implements IChannelAdapter {
       channelOverrides: overrides || undefined,
     };
 
-    // Step 1: Create/update inventory items (one per variant SKU)
     const inventoryItems = this.listingBuilder.buildInventoryItems(listing, config);
-    for (const item of inventoryItems) {
-      await client.createOrReplaceInventoryItem(item.sku, item.payload);
-      await this.delay(300);
-    }
-
-    // Step 2: Create/update offers (one per variant)
     const offers = this.listingBuilder.buildOffers(listing, config);
-    const variantIdMap: Record<number, string> = {};
-
-    for (const offer of offers) {
-      // Check if offer already exists
-      const existingOffers = await client.getOffers(offer.sku, config.marketplaceId);
-      let offerId: string;
-
-      if (existingOffers.offers && existingOffers.offers.length > 0) {
-        // Update existing offer
-        offerId = existingOffers.offers[0].offerId;
-        offer.payload.offerId = offerId;
-        await client.updateOffer(offerId, offer.payload);
-      } else {
-        // Create new offer
-        offerId = await client.createOffer(offer.payload);
-      }
-
-      variantIdMap[offer.variantId] = offerId;
-      await this.delay(300);
-    }
-
-    // Step 3: Handle multi-variation vs single-variation listing
     const itemGroup = this.listingBuilder.buildItemGroup(listing, config);
-    let externalProductId: string | undefined;
-
-    if (itemGroup) {
-      // Multi-variation: create group and publish
-      await client.createOrReplaceInventoryItemGroup(
-        itemGroup.groupKey,
-        itemGroup.payload,
-      );
-      const publishResult = await client.publishOfferByInventoryItemGroup(
-        itemGroup.groupKey,
-        config.marketplaceId,
-      );
-      externalProductId = publishResult?.listingId;
-    } else if (offers.length === 1) {
-      // Single-variation: publish the single offer
-      const offerId = Object.values(variantIdMap)[0];
-      if (offerId) {
-        const publishResult = await client.publishOffer(offerId);
-        externalProductId = publishResult?.listingId;
-      }
-    }
-
-    // Determine if this was a create or update
     const hasExistingIds = listing.variants.some(
       (v) => v.externalVariantId,
     );
+    const pushResult = await this.listingConnector.pushListing({
+      client,
+      draft: {
+        productId: listing.productId,
+        marketplaceId: config.marketplaceId,
+        inventoryItems,
+        offers,
+        itemGroup,
+        publishMode: "publish",
+        hasExistingExternalIds: hasExistingIds,
+      },
+    });
 
     return {
       productId: listing.productId,
-      status: hasExistingIds ? "updated" : "created",
-      externalProductId,
-      externalVariantIds: variantIdMap,
+      status: pushResult.status,
+      externalProductId: pushResult.externalProductId,
+      externalVariantIds: pushResult.externalVariantIds,
     };
   }
 
@@ -292,12 +273,21 @@ export class EbayAdapter implements IChannelAdapter {
                 status: "success",
               });
             } else {
-              results.push({
-                variantId: item.variantId,
-                pushedQty: 0,
-                status: "error",
-                error: offerResp?.errors?.[0]?.message || resp?.errors?.[0]?.message || `Status ${statusCode ?? "unknown"}`,
-              });
+              // A stored offerId can go stale (offer withdrawn + relisted gets
+              // a NEW id) — that surfaces as a per-offer error inside an
+              // otherwise-successful bulk response, so the catch fallback
+              // below never sees it. Re-resolve by SKU and heal the mapping.
+              const recovered = this.isStaleOfferError(statusCode, offerResp?.errors, resp?.errors)
+                ? await this.recoverStaleOffer(client, item)
+                : null;
+              results.push(
+                recovered ?? {
+                  variantId: item.variantId,
+                  pushedQty: 0,
+                  status: "error",
+                  error: formatEbayOfferError(offerResp?.errors?.[0] ?? resp?.errors?.[0], statusCode),
+                },
+              );
             }
           }
         } catch (err: any) {
@@ -307,12 +297,17 @@ export class EbayAdapter implements IChannelAdapter {
               const existingOffers = await client.getOffers(item.sku || "");
               if (existingOffers.offers?.[0]) {
                 const offer = existingOffers.offers[0];
-                offer.availableQuantity = item.allocatedQty;
-                await client.updateOffer(offer.offerId, offer as any);
+                await client.updateOffer(offer.offerId, {
+                  ...offer,
+                  availableQuantity: item.allocatedQty,
+                } as any);
                 results.push({
                   variantId: item.variantId,
                   pushedQty: item.allocatedQty,
                   status: "success",
+                  ...(offer.offerId !== item.externalVariantId
+                    ? { refreshedExternalVariantId: offer.offerId }
+                    : {}),
                 });
               } else {
                 results.push({
@@ -385,6 +380,69 @@ export class EbayAdapter implements IChannelAdapter {
     return results;
   }
 
+  /**
+   * eBay signals a dead offerId with a per-offer 404, error 25710
+   * ("could not find the entity") / 25713 ("invalid offerId"), or — on some
+   * bulk responses — a generic user error whose MESSAGE says
+   * "Please enter a valid offerId." (seen in prod 2026-07-05, message-only,
+   * different errorId). Match the message too so no stale-offer variant
+   * slips past the by-SKU recovery.
+   */
+  private isStaleOfferError(
+    statusCode: number | undefined,
+    ...errorLists: Array<EbayError[] | undefined>
+  ): boolean {
+    if (statusCode === 404) return true;
+    return errorLists.some((errors) =>
+      errors?.some(
+        (e) =>
+          e.errorId === 25710 ||
+          e.errorId === 25713 ||
+          /valid offerId|offerId is invalid|offer.*not found/i.test(e.message ?? ""),
+      ),
+    );
+  }
+
+  /**
+   * The stored offerId no longer exists on eBay (withdraw + relist mints a
+   * new one). Re-resolve the live offer by SKU, push the quantity to it,
+   * and report the fresh offerId so the orchestrator can heal the mapping.
+   * Returns null when there is nothing fresher — caller keeps the original
+   * error result.
+   */
+  private async recoverStaleOffer(
+    client: EbayApiClient,
+    item: InventoryPushItem,
+  ): Promise<InventoryPushResult | null> {
+    if (!item.sku) return null;
+    try {
+      const existing = await client.getOffers(item.sku);
+      const fresh = existing.offers?.[0];
+      if (!fresh?.offerId || fresh.offerId === item.externalVariantId) {
+        return null;
+      }
+      await client.updateOffer(fresh.offerId, {
+        ...fresh,
+        availableQuantity: item.allocatedQty,
+      } as any);
+      console.warn(
+        `[EbayAdapter] Healed stale offerId for SKU ${item.sku}: ` +
+          `${item.externalVariantId} -> ${fresh.offerId}`,
+      );
+      return {
+        variantId: item.variantId,
+        pushedQty: item.allocatedQty,
+        status: "success",
+        refreshedExternalVariantId: fresh.offerId,
+      };
+    } catch (err: any) {
+      console.warn(
+        `[EbayAdapter] Stale-offer recovery failed for SKU ${item.sku}: ${err.message}`,
+      );
+      return null;
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Pricing
   // -------------------------------------------------------------------------
@@ -435,7 +493,7 @@ export class EbayAdapter implements IChannelAdapter {
               results.push({
                 variantId: item.variantId,
                 status: "error",
-                error: offerResp?.errors?.[0]?.message || resp?.errors?.[0]?.message || `Status ${statusCode ?? "unknown"}`,
+                error: formatEbayOfferError(offerResp?.errors?.[0] ?? resp?.errors?.[0], statusCode),
               });
             }
           }

@@ -4,6 +4,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipStoreConnectionService } from "../../application/dropship-store-connection-service";
 import type { DropshipStoreWebhookRepairService } from "../../application/dropship-store-webhook-repair-service";
 import {
+  disconnectDropshipStoreConnectionInputSchema,
   repairDropshipStoreWebhooksRequestSchema,
   updateDropshipStoreOrderProcessingConfigInputSchema,
 } from "../../application/dropship-store-connection-dtos";
@@ -50,6 +51,29 @@ export function registerDropshipAdminStoreConnectionRoutes(
         const connection = await service.updateOrderProcessingConfig({
           storeConnectionId,
           defaultWarehouseId: input.defaultWarehouseId,
+          idempotencyKey: input.idempotencyKey,
+          actor: {
+            actorType: "admin",
+            actorId: sessionUser(req)?.id,
+          },
+        });
+        return res.json({ connection });
+      } catch (error) {
+        return sendDropshipAdminStoreConnectionError(res, error);
+      }
+    },
+  );
+
+  app.post(
+    "/api/dropship/admin/store-connections/:storeConnectionId/disconnect",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const storeConnectionId = parsePositiveInteger(req.params.storeConnectionId, "storeConnectionId");
+        const input = parseBody(disconnectDropshipStoreConnectionInputSchema, req.body);
+        const connection = await service.disconnectForAdmin({
+          storeConnectionId,
+          reason: input.reason,
           idempotencyKey: input.idempotencyKey,
           actor: {
             actorType: "admin",

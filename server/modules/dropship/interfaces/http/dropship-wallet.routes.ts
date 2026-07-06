@@ -14,6 +14,22 @@ export function registerDropshipWalletRoutes(
   service: DropshipWalletService = createDropshipWalletServiceFromEnv(),
   stripeFundingProvider: StripeDropshipFundingProvider = createStripeDropshipFundingProviderFromEnv(),
 ): void {
+  app.get(
+    "/api/dropship/admin/wallet/vendors/:vendorId",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const wallet = await service.getWalletForVendor(
+          parsePositiveInteger(req.params.vendorId, "vendorId"),
+          { ledgerLimit: parseLedgerLimit(req.query.ledgerLimit) },
+        );
+        return res.json({ wallet: serializeWalletOverview(wallet) });
+      } catch (error) {
+        return sendDropshipWalletError(res, error);
+      }
+    },
+  );
+
   app.post(
     "/api/dropship/admin/wallet/manual-credit",
     requirePermission("dropship", "manage_operations"),
@@ -241,6 +257,18 @@ function parseLedgerLimit(value: unknown): number | undefined {
   }
   const parsed = Number(value);
   return Number.isInteger(parsed) ? parsed : undefined;
+}
+
+function parsePositiveInteger(value: string | undefined, key: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_INVALID_PATH_PARAMETER",
+      `${key} must be a positive integer.`,
+      { key, value },
+    );
+  }
+  return parsed;
 }
 
 function serializeWalletOverview(wallet: Awaited<ReturnType<DropshipWalletService["getWalletForVendor"]>>) {

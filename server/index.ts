@@ -21,7 +21,7 @@ import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastru
 import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
-import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reconciliation.service";
+import { startOmsFlowReconciliationScheduler, setOmsFlowReconciliationServices } from "./modules/oms/oms-flow-reconciliation.service";
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import {
   startWebhookRetryWorker,
@@ -35,6 +35,8 @@ import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import { cancelOrder, markOrderShipped, completeOrder } from "./modules/orders/order-status-core";
+import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
+import { setPickQueueReservationService } from "./modules/orders/orders.storage";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
 import type { SafeUser } from "@shared/schema";
@@ -45,6 +47,7 @@ import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapte
 import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
 import { requireAuth } from "./routes/middleware";
 import {
+  envFlagEnabled,
   envPositiveInteger,
   getSchedulerDisableReason,
   schedulerIsDisabled,
@@ -413,10 +416,14 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
 (async () => {
   // Run startup migrations to ensure database schema is up to date
-  try {
-    await runStartupMigrations();
-  } catch (err) {
-    console.error("Startup migrations failed, continuing anyway:", err);
+  if (envFlagEnabled("SKIP_STARTUP_MIGRATIONS")) {
+    console.warn("Startup migrations skipped (SKIP_STARTUP_MIGRATIONS=true)");
+  } else {
+    try {
+      await runStartupMigrations();
+    } catch (err) {
+      console.error("Startup migrations failed, continuing anyway:", err);
+    }
   }
 
   // Create WMS service container and attach to app for route handlers
@@ -736,12 +743,15 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     reportError(err, { action: "uncaught_exception" });
   });
 
+  const serverHost = process.env.SERVER_HOST || "0.0.0.0";
+  const listenOptions: Parameters<typeof httpServer.listen>[0] = {
+    port,
+    host: serverHost,
+    ...(process.platform === "win32" ? {} : { reusePort: true }),
+  };
+
   httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
+    listenOptions,
     () => {
       log(`serving on port ${port}`);
       
@@ -789,7 +799,14 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         logSchedulerDisabled("scheduler", "Cycle-count freeze guard", "CYCLE_COUNT_FREEZE_GUARD_DISABLED");
       }
 
+      // 'completed'-status fix: the pick-queue self-heal completes orders and
+      // must release their leftover reservations (storage can't reach services).
+      setPickQueueReservationService(services.reservation);
+
       if (!schedulersDisabled("OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED")) {
+        // P0.1c: reconciler cancels must release reservations; the
+        // ready-but-unreserved detector needs the same service.
+        setOmsFlowReconciliationServices({ reservation: services.reservation });
         startOmsFlowReconciliationScheduler(db);
       } else {
         logSchedulerDisabled("scheduler", "OMS flow reconciliation scheduler", "OMS_FLOW_RECONCILIATION_SCHEDULER_DISABLED");
@@ -911,9 +928,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         `);
         const corrected: any[] = [];
         for (const row of divergent.rows as any[]) {
+          // P0.1c: cancels go through the single entrypoint so the missed-
+          // webhook cases (exactly what this sweep catches) release their
+          // reservations instead of leaking them.
           const transResult = row.oms_status === "shipped"
             ? await markOrderShipped(db, row.id, "oms_wms_reconcile")
-            : await cancelOrder(db, row.id, "oms_wms_reconcile");
+            : await cancelWmsOrderAndRelease(db, services.reservation, row.id, "oms_wms_reconcile");
           if (transResult.transitioned) {
             await db.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${row.id}`);
             corrected.push(row);
@@ -945,20 +965,28 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                     const ref = engineRefFromRow(row);
                     if (!ref) continue;
                     const cancelResult = await engine.cancel(ref);
-                    if (cancelResult?.alreadyInState) {
+                    // P0.3: only "already_shipped" proves a package left the
+                    // building. "already_cancelled" used to fall into the same
+                    // alreadyInState branch and got recorded as SHIPPED —
+                    // resurrecting dead orders.
+                    if (cancelResult?.state === "already_shipped") {
                       await db.execute(sql`
                         UPDATE wms.outbound_shipments
                         SET status = 'shipped', updated_at = NOW()
                         WHERE id = ${row.shipment_id}
                           AND status NOT IN ('shipped', 'returned', 'lost')
                       `);
-                      console.log(`[OMS<->WMS Reconcile] Engine order ${ref.engineOrderRef} already terminal — recorded shipped for shipment ${row.shipment_id}`);
+                      console.log(`[OMS<->WMS Reconcile] Engine order ${ref.engineOrderRef} already shipped — recorded shipped for shipment ${row.shipment_id}`);
                     } else {
+                      // cancelled now, already_cancelled, or not_found: the
+                      // shipment is dead. Status predicate so a concurrent
+                      // SHIP_NOTIFY can never be clobbered post-network-call.
                       await db.execute(sql`
                         UPDATE wms.outbound_shipments SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
                         WHERE id = ${row.shipment_id}
+                          AND status NOT IN ('shipped', 'returned', 'lost')
                       `);
-                      console.log(`[OMS<->WMS Reconcile] Cancelled engine order ${ref.engineOrderRef} for shipment ${row.shipment_id}`);
+                      console.log(`[OMS<->WMS Reconcile] Cancelled engine order ${ref.engineOrderRef} for shipment ${row.shipment_id} (${cancelResult?.state ?? "cancelled"})`);
                     }
                   } catch (ssErr: any) {
                     console.warn(`[OMS<->WMS Reconcile] Failed to cancel engine order for shipment ${row.shipment_id}: ${ssErr?.message}`);
@@ -1043,9 +1071,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       `);
       const zombieFixed: string[] = [];
       for (const row of zombieCandidates.rows as any[]) {
+        // Terminal transitions must release leftover reservations (P0.1c /
+        // 'completed'-status fix) — raw transitions here leaked them.
         const result = row.target_status === "cancelled"
-          ? await cancelOrder(db, row.id, "zombie_data_repair")
-          : await completeOrder(db, row.id, "zombie_data_repair");
+          ? await cancelWmsOrderAndRelease(db, services.reservation, row.id, "zombie_data_repair")
+          : await completeWmsOrderAndRelease(db, services.reservation, row.id, "zombie_data_repair");
         if (result.transitioned) {
           zombieFixed.push(`${row.order_number}→${row.target_status}`);
         }
@@ -1186,7 +1216,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                  os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
                  os.shipstation_order_key,
                  w.order_number,
-                 w.oms_fulfillment_order_id AS oms_id
+                 w.oms_fulfillment_order_id AS oms_id,
+                 (SELECT oo.status FROM oms.oms_orders oo
+                   WHERE (w.source = 'oms' AND w.oms_fulfillment_order_id = oo.id::text)
+                      OR (w.source_table_id = oo.id::text)
+                   LIMIT 1) AS oms_order_status
           FROM wms.outbound_shipments os
           JOIN wms.orders w ON w.id = os.order_id
           WHERE COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
@@ -1235,6 +1269,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 currentTrackingNumber: row.tracking_number,
                 currentCarrier: row.carrier,
                 shipments: canonicalShipments,
+                // Cancel is WMS-owned: only follow an engine-side cancel when the
+                // order itself is cancelled; otherwise it's flagged for review.
+                orderIsCancelled: row.oms_order_status === "cancelled",
               });
 
             // 3. Push WMS shipped/cancelled status outward when engine has drifted.
@@ -1263,17 +1300,20 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 row.wms_shipment_status === "cancelled"
               ) {
                 const cancelResult = await engine.cancel(ref);
-                if (cancelResult?.alreadyInState) {
+                // P0.3: only "already_shipped" may be recorded as shipped;
+                // "already_cancelled" was previously conflated with it and
+                // resurrected dead orders.
+                if (cancelResult?.state === "already_shipped") {
                   await db.execute(sql`
                     UPDATE wms.outbound_shipments
                     SET status = 'shipped', last_reconciled_at = NOW(), updated_at = NOW()
                     WHERE id = ${shipmentId}
                       AND status NOT IN ('shipped', 'returned', 'lost')
                   `);
-                  console.log(`[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already terminal — recorded shipped`);
+                  console.log(`[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already shipped — recorded shipped`);
                   markedShipped++;
                 } else {
-                  console.log(`[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef}`);
+                  console.log(`[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef} (${cancelResult?.state ?? "cancelled"})`);
                   markedCancelled++;
                   await db.execute(sql`
                     UPDATE wms.outbound_shipments
@@ -1292,6 +1332,39 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 SET last_reconciled_at = NOW()
                 WHERE id = ${shipmentId}
               `);
+              continue;
+            }
+
+            if (event.kind === "review") {
+              // Engine-side cancel of a LIVE order: a discrepancy, not a fact.
+              // Flag for review (surfaces in the SHIPMENT_REQUIRES_REVIEW bucket);
+              // do NOT cancel the shipment or let a push resurrect it
+              // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
+              await db.execute(sql`
+                UPDATE wms.outbound_shipments
+                SET requires_review = true,
+                    review_reason = CASE WHEN COALESCE(requires_review, false)
+                                         THEN review_reason ELSE ${event.reason} END,
+                    last_reconciled_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = ${shipmentId}
+              `);
+              if (row.oms_id && String(row.oms_id).match(/^[0-9]+$/)) {
+                try {
+                  await db.execute(sql`
+                    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+                    VALUES (
+                      ${Number(row.oms_id)},
+                      'engine_cancel_flagged_for_review',
+                      ${JSON.stringify({ wmsShipmentId: shipmentId, engineOrderRef: ref.engineOrderRef, reason: event.reason })}::jsonb,
+                      NOW()
+                    )
+                  `);
+                } catch (auditErr: any) {
+                  console.warn(`[Reconcile V2] review audit insert failed for shipment ${shipmentId}:`, auditErr?.message);
+                }
+              }
+              console.log(`[Reconcile V2] shipment=${shipmentId} flagged for review (${event.reason}) — ShipStation cancelled but the order is live`);
               continue;
             }
 
@@ -1337,6 +1410,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                       shipped_at = ${event.shipDate},
                       updated_at = NOW()
                     WHERE id = ${omsId}
+                      -- P0.3: never auto-flip a terminal (money-final) OMS order
+                      -- after a network call; the shipped-vs-terminal divergence
+                      -- surfaces via the flow-reconciliation review bucket.
+                      AND status NOT IN ('cancelled', 'refunded')
                   `);
                   await db.execute(sql`
                     WITH shipped_by_line AS (
@@ -1510,7 +1587,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               markedShipped++;
             } else {
               const cancelResult = await services.shippingEngine.cancel(v1Ref);
-              if (cancelResult?.alreadyInState) {
+              // P0.3: only an already-SHIPPED engine order counts as shipped;
+              // already_cancelled is the expected no-op for a cancelled order.
+              if (cancelResult?.state === "already_shipped") {
                 markedShipped++;
               } else {
                 skippedCancelled++;

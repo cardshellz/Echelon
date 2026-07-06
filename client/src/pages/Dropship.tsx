@@ -3,9 +3,15 @@ import type { Dispatch, SetStateAction } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   Bell,
   Boxes,
+  Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsUpDown,
   CircleDollarSign,
   ClipboardList,
   FileSearch,
@@ -26,8 +32,18 @@ import { useLocation, useSearch } from "wouter";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
@@ -39,12 +55,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  allDropshipListingInventoryModes,
-  allDropshipListingModes,
-  allDropshipListingPriceModes,
-  allDropshipListingRequiredProductFields,
   allDropshipOrderCancellationStatuses,
   buildAdminCatalogExposurePreviewUrl,
   buildAdminDogfoodReadinessUrl,
@@ -81,7 +93,7 @@ import {
   buildShippingPackageProfileInput,
   buildShippingRateTableInput,
   buildShippingZoneRuleInput,
-  buildStoreListingConfigInput,
+  buildStoreConnectionDisconnectInput,
   buildStoreOrderProcessingConfigInput,
   countByKey,
   catalogExposureRecordToInput,
@@ -105,7 +117,6 @@ import {
   type DropshipAdminCatalogExposureRulesReplaceResponse,
   type DropshipAdminCatalogExposureRulesResponse,
   type DropshipAdminCatalogExposureRuleInput,
-  type DropshipCatalogExposurePreviewRuleScope,
   type DropshipAdminListingPushJobListItem,
   type DropshipAdminListingPushJobListResponse,
   type DropshipAdminListingPushJobRetryResponse,
@@ -117,6 +128,8 @@ import {
   type DropshipAdminOrderOpsIntakeListItem,
   type DropshipAdminOrderOpsListResponse,
   type DropshipAdminOrderOpsProcessResponse,
+  type DropshipAdminOrderOpsStoreSummary,
+  type DropshipAdminOrderOpsVendorSummary,
   type DropshipAdminOrderOpsWmsSyncResponse,
   type DropshipOrderDetail,
   type DropshipOrderDetailResponse,
@@ -172,14 +185,12 @@ import {
   type DropshipTrackingPushStatus,
   type DropshipSeverity,
   type DropshipShippingConfigOverview,
-  type DropshipListingInventoryMode,
-  type DropshipListingMode,
-  type DropshipListingPriceMode,
   type DropshipStoreConnectionLifecycleStatus,
+  type DropshipStoreConnectionDisconnectResponse,
   type DropshipStorePlatform,
-  type DropshipStoreListingConfigResponse,
   type DropshipStoreOrderProcessingConfigResponse,
   type DropshipSystemReadinessCheck,
+  type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
@@ -211,6 +222,66 @@ type DropshipOpsTabValue =
   | "audit";
 type CatalogExposureScopeFilter = DropshipAdminCatalogExposureRuleInput["scopeType"];
 type CatalogExposureActionFilter = DropshipAdminCatalogExposureRuleInput["action"];
+type CatalogPreviewVisibilityFilter = "all" | "visible" | "hidden";
+type CatalogPreviewStatusFilter = "active" | "inactive" | "all";
+
+interface DropshipWarehouseOption {
+  id: number;
+  code: string;
+  name: string;
+  warehouseType: string;
+  isActive: number;
+  isDefault: number;
+}
+
+interface DropshipProductVariantOption {
+  id: number;
+  sku: string | null;
+  name: string;
+  productId: number;
+  active?: number | null;
+  isActive?: boolean;
+}
+
+interface DropshipProductOption {
+  id: number;
+  sku?: string | null;
+  baseSku?: string | null;
+  name: string;
+  active?: number | null;
+  status?: string | null;
+}
+
+interface DropshipProductLineOption {
+  id: number;
+  name: string;
+  status?: string | null;
+  productCount?: number | null;
+}
+
+interface DropshipProductCategoryOption {
+  id: number;
+  name: string;
+  isActive?: boolean | null;
+  productCount?: number | null;
+}
+
+interface DropshipSelectOption {
+  value: string;
+  label: string;
+  detail?: string;
+  search?: string;
+}
+
+interface CatalogRuleTargetLabels {
+  productLineNamesById: Map<number, string>;
+  productLabelsById: Map<number, string>;
+  variantLabelsById: Map<number, string>;
+  categoryLabelsByKey: Map<string, string>;
+}
+
+const NO_DEFAULT_WAREHOUSE_VALUE = "__none__";
+const CATALOG_PREVIEW_PAGE_SIZE = 50;
 
 const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "overview",
@@ -232,17 +303,6 @@ interface DropshipOpsSearchSignal {
   search: string;
   platform?: StoreConnectionPlatformFilter;
   nonce: number;
-}
-
-interface ListingConfigFormState {
-  storeConnectionId: number;
-  listingMode: DropshipListingMode;
-  inventoryMode: DropshipListingInventoryMode;
-  priceMode: DropshipListingPriceMode;
-  marketplaceConfigJson: string;
-  requiredConfigKeys: string;
-  requiredProductFields: string;
-  isActive: boolean;
 }
 
 interface CatalogRuleFormState {
@@ -306,20 +366,20 @@ interface ReturnPolicyFormState {
 interface ShippingBoxFormState {
   code: string;
   name: string;
-  lengthMm: string;
-  widthMm: string;
-  heightMm: string;
-  tareWeightGrams: string;
-  maxWeightGrams: string;
+  lengthIn: string;
+  widthIn: string;
+  heightIn: string;
+  tareWeightLb: string;
+  maxWeightLb: string;
   isActive: boolean;
 }
 
 interface ShippingPackageProfileFormState {
   productVariantId: string;
-  weightGrams: string;
-  lengthMm: string;
-  widthMm: string;
-  heightMm: string;
+  weightLb: string;
+  lengthIn: string;
+  widthIn: string;
+  heightIn: string;
   shipAlone: boolean;
   defaultCarrier: string;
   defaultService: string;
@@ -373,6 +433,25 @@ interface ShippingInsurancePolicyFormState {
   effectiveTo: string;
 }
 
+type ShippingConfigSectionKey =
+  | "overview"
+  | "boxes"
+  | "profiles"
+  | "zones"
+  | "rates"
+  | "markup"
+  | "insurance";
+
+const shippingConfigSections: Array<{ key: ShippingConfigSectionKey; label: string }> = [
+  { key: "overview", label: "Overview" },
+  { key: "boxes", label: "Boxes" },
+  { key: "profiles", label: "Product profiles" },
+  { key: "zones", label: "Zones" },
+  { key: "rates", label: "Rate tables" },
+  { key: "markup", label: "Markup" },
+  { key: "insurance", label: "Insurance" },
+];
+
 const emptyCatalogRuleForm: CatalogRuleFormState = {
   scopeType: "catalog",
   action: "include",
@@ -387,11 +466,11 @@ const emptyCatalogRuleForm: CatalogRuleFormState = {
 const emptyShippingBoxForm: ShippingBoxFormState = {
   code: "",
   name: "",
-  lengthMm: "",
-  widthMm: "",
-  heightMm: "",
-  tareWeightGrams: "0",
-  maxWeightGrams: "",
+  lengthIn: "",
+  widthIn: "",
+  heightIn: "",
+  tareWeightLb: "0",
+  maxWeightLb: "",
   isActive: true,
 };
 
@@ -434,10 +513,10 @@ function makeEmptyReturnCreateForm(): ReturnCreateFormState {
 
 const emptyShippingPackageProfileForm: ShippingPackageProfileFormState = {
   productVariantId: "",
-  weightGrams: "",
-  lengthMm: "",
-  widthMm: "",
-  heightMm: "",
+  weightLb: "",
+  lengthIn: "",
+  widthIn: "",
+  heightIn: "",
   shipAlone: false,
   defaultCarrier: "",
   defaultService: "",
@@ -1636,6 +1715,23 @@ function ReturnOpsTab() {
     status: appliedFilters.status,
   }), [appliedFilters]);
   const returnPolicyUrl = useMemo(() => buildAdminReturnPolicyUrl(), []);
+  const returnVendorOptionsUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 250,
+  }), []);
+  const returnStoreConnectionsUrl = useMemo(() => buildAdminStoreConnectionsUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 250,
+  }), []);
+  const returnOrderIntakeUrl = useMemo(() => buildAdminOrderIntakeUrl({
+    search: "",
+    status: "all",
+    limit: 250,
+  }), []);
 
   const returnsQuery = useQuery<DropshipReturnListResponse>({
     queryKey: [returnsUrl],
@@ -1653,9 +1749,48 @@ function ReturnOpsTab() {
     },
     enabled: selectedInspectionRmaId !== null,
   });
+  const returnVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
+    queryKey: [returnVendorOptionsUrl, "return-vendors"],
+    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(returnVendorOptionsUrl),
+  });
+  const returnStoreConnectionsQuery = useQuery<DropshipAdminStoreConnectionListResponse>({
+    queryKey: [returnStoreConnectionsUrl, "return-store-connections"],
+    queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(returnStoreConnectionsUrl),
+  });
+  const returnOrderIntakesQuery = useQuery<DropshipAdminOrderOpsListResponse>({
+    queryKey: [returnOrderIntakeUrl, "return-order-intakes"],
+    queryFn: () => fetchJson<DropshipAdminOrderOpsListResponse>(returnOrderIntakeUrl),
+  });
+  const returnVariantsQuery = useQuery<DropshipProductVariantOption[]>({
+    queryKey: ["/api/product-variants", "return-options"],
+    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+  });
 
   const rmas = returnsQuery.data?.items ?? [];
   const activeReturnPolicy = returnPolicyQuery.data?.policy ?? null;
+  const returnVendorOptions = useMemo(
+    () => buildVendorSelectOptions(returnVendorOptionsQuery.data?.items ?? []),
+    [returnVendorOptionsQuery.data?.items],
+  );
+  const returnStoreConnections = useMemo(
+    () => returnStoreConnectionsQuery.data?.items ?? [],
+    [returnStoreConnectionsQuery.data?.items],
+  );
+  const returnOrderIntakes = useMemo(
+    () => returnOrderIntakesQuery.data?.items ?? [],
+    [returnOrderIntakesQuery.data?.items],
+  );
+  const returnVariantOptions = useMemo(
+    () => (returnVariantsQuery.data ?? [])
+      .filter((variant) => variant.isActive !== false && variant.active !== 0)
+      .sort((first, second) => {
+        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+        if (skuCompare !== 0) return skuCompare;
+        const nameCompare = first.name.localeCompare(second.name);
+        return nameCompare !== 0 ? nameCompare : first.id - second.id;
+      }),
+    [returnVariantsQuery.data],
+  );
 
   useEffect(() => {
     const rma = returnDetailQuery.data?.rma;
@@ -1866,14 +2001,21 @@ function ReturnOpsTab() {
 
   return (
     <div className="space-y-5">
-      {(returnsQuery.error || returnPolicyQuery.error || error) && (
+      {(returnsQuery.error || returnPolicyQuery.error || returnVendorOptionsQuery.error || returnStoreConnectionsQuery.error || returnOrderIntakesQuery.error || returnVariantsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
             {error
               || (returnsQuery.error
                 ? queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")
-                : queryErrorMessage(returnPolicyQuery.error, "Unable to load dropship return policy."))}
+                : queryErrorMessage(
+                  returnPolicyQuery.error
+                    ?? returnVendorOptionsQuery.error
+                    ?? returnStoreConnectionsQuery.error
+                    ?? returnOrderIntakesQuery.error
+                    ?? returnVariantsQuery.error,
+                  "Unable to load dropship return setup data.",
+                ))}
           </AlertDescription>
         </Alert>
       )}
@@ -1942,11 +2084,19 @@ function ReturnOpsTab() {
       <ReturnCreatePanel
         form={createForm}
         isSaving={creatingRma}
+        intakes={returnOrderIntakes}
+        intakesLoading={returnOrderIntakesQuery.isLoading || returnOrderIntakesQuery.isFetching}
         onAddItem={addCreateItem}
         onChange={updateCreateForm}
         onItemChange={updateCreateItem}
         onRemoveItem={removeCreateItem}
         onSubmit={createReturn}
+        storeConnections={returnStoreConnections}
+        storeConnectionsLoading={returnStoreConnectionsQuery.isLoading || returnStoreConnectionsQuery.isFetching}
+        variants={returnVariantOptions}
+        variantsLoading={returnVariantsQuery.isLoading || returnVariantsQuery.isFetching}
+        vendorOptions={returnVendorOptions}
+        vendorsLoading={returnVendorOptionsQuery.isLoading || returnVendorOptionsQuery.isFetching}
       />
 
       <ReturnOpsTable
@@ -1988,11 +2138,12 @@ function StoreConnectionOpsTab() {
     status: "all" as StoreConnectionStatusFilter,
     platform: "all" as StoreConnectionPlatformFilter,
   });
-  const [warehouseInputs, setWarehouseInputs] = useState<Record<number, string>>({});
-  const [listingConfigForm, setListingConfigForm] = useState<ListingConfigFormState | null>(null);
-  const [loadingListingConfigId, setLoadingListingConfigId] = useState<number | null>(null);
-  const [savingListingConfigId, setSavingListingConfigId] = useState<number | null>(null);
-  const [savingConnectionId, setSavingConnectionId] = useState<number | null>(null);
+  const [disableTarget, setDisableTarget] = useState<DropshipAdminStoreConnectionListItem | null>(null);
+  const [disableReason, setDisableReason] = useState("Disabled by Card Shellz admin.");
+  const [disablingConnectionId, setDisablingConnectionId] = useState<number | null>(null);
+  const [warehouseTarget, setWarehouseTarget] = useState<DropshipAdminStoreConnectionListItem | null>(null);
+  const [warehouseInput, setWarehouseInput] = useState("");
+  const [savingWarehouseConnectionId, setSavingWarehouseConnectionId] = useState<number | null>(null);
   const [repairingWebhookConnectionId, setRepairingWebhookConnectionId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -2008,57 +2159,102 @@ function StoreConnectionOpsTab() {
     queryFn: () => fetchJson<DropshipAdminStoreConnectionListResponse>(storeConnectionsUrl),
   });
 
+  const warehousesQuery = useQuery<DropshipWarehouseOption[]>({
+    queryKey: ["/api/warehouses"],
+    queryFn: () => fetchJson<DropshipWarehouseOption[]>("/api/warehouses"),
+  });
+
   const connections = useMemo(
     () => storeConnectionsQuery.data?.items ?? [],
     [storeConnectionsQuery.data?.items],
   );
-  const attentionCount = connections.filter((connection) => storeConnectionNeedsAttention(connection)).length;
-  const listingConfigActiveCount = connections.filter((connection) => connection.listingConfig.isActive).length;
-  const selectedListingConfigConnection = connections.find(
-    (connection) => connection.storeConnectionId === listingConfigForm?.storeConnectionId,
-  ) ?? null;
-
-  useEffect(() => {
-    setWarehouseInputs((current) => {
-      const next = { ...current };
-      for (const connection of connections) {
-        if (next[connection.storeConnectionId] === undefined) {
-          next[connection.storeConnectionId] = connection.orderProcessingConfig.defaultWarehouseId === null
-            ? ""
-            : String(connection.orderProcessingConfig.defaultWarehouseId);
-        }
-      }
-      return next;
-    });
-  }, [connections]);
+  const warehouseOptions = useMemo(
+    () => (warehousesQuery.data ?? [])
+      .filter((warehouse) => warehouse.isActive === 1 && warehouse.warehouseType !== "bulk_storage")
+      .sort((a, b) => {
+        if (a.isDefault !== b.isDefault) return b.isDefault - a.isDefault;
+        return a.name.localeCompare(b.name);
+      }),
+    [warehousesQuery.data],
+  );
+  const summary = useMemo(() => buildStoreConnectionSummary(connections), [connections]);
 
   function applyStoreFilters() {
     setAppliedFilters({ search, status, platform });
   }
 
-  async function saveWarehouseConfig(connection: DropshipAdminStoreConnectionListItem) {
-    setSavingConnectionId(connection.storeConnectionId);
+  function openWarehouseConfigDialog(connection: DropshipAdminStoreConnectionListItem) {
+    setWarehouseTarget(connection);
+    setWarehouseInput(connection.orderProcessingConfig.defaultWarehouseId === null
+      ? ""
+      : String(connection.orderProcessingConfig.defaultWarehouseId));
+    setError("");
+    setMessage("");
+  }
+
+  async function saveWarehouseConfig() {
+    if (!warehouseTarget) return;
+    setSavingWarehouseConnectionId(warehouseTarget.storeConnectionId);
     setError("");
     setMessage("");
     try {
-      const input = buildStoreOrderProcessingConfigInput({
-        defaultWarehouseId: warehouseInputs[connection.storeConnectionId] ?? "",
-        idempotencyKey: createDropshipIdempotencyKey(`admin-store-${connection.storeConnectionId}-warehouse`),
-      });
       const response = await putJson<DropshipStoreOrderProcessingConfigResponse>(
-        `/api/dropship/admin/store-connections/${connection.storeConnectionId}/order-processing-config`,
-        input,
+        `/api/dropship/admin/store-connections/${warehouseTarget.storeConnectionId}/order-processing-config`,
+        buildStoreOrderProcessingConfigInput({
+          defaultWarehouseId: warehouseInput,
+          idempotencyKey: createDropshipIdempotencyKey(`admin-store-${warehouseTarget.storeConnectionId}-warehouse`),
+        }),
       );
-      setMessage(`Store connection ${response.connection.storeConnectionId} warehouse config saved.`);
+      setMessage(`${storeConnectionDisplayName(warehouseTarget)} warehouse assignment saved.`);
+      setWarehouseTarget(null);
       await Promise.all([
         storeConnectionsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
+      ]);
+      setWarehouseInput(response.connection.orderProcessingConfig.defaultWarehouseId === null
+        ? ""
+        : String(response.connection.orderProcessingConfig.defaultWarehouseId));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Warehouse assignment update failed.");
+    } finally {
+      setSavingWarehouseConnectionId(null);
+    }
+  }
+
+  function openDisableStoreDialog(connection: DropshipAdminStoreConnectionListItem) {
+    setDisableTarget(connection);
+    setDisableReason(`Disabled by Card Shellz admin for ${storeConnectionDisplayName(connection)}.`);
+    setError("");
+    setMessage("");
+  }
+
+  async function confirmDisableStoreConnection() {
+    if (!disableTarget) return;
+    setDisablingConnectionId(disableTarget.storeConnectionId);
+    setError("");
+    setMessage("");
+    try {
+      await postJson<DropshipStoreConnectionDisconnectResponse>(
+        `/api/dropship/admin/store-connections/${disableTarget.storeConnectionId}/disconnect`,
+        buildStoreConnectionDisconnectInput({
+          reason: disableReason,
+          idempotencyKey: createDropshipIdempotencyKey(`admin-store-${disableTarget.storeConnectionId}-disconnect`),
+        }),
+      );
+      setMessage(`${storeConnectionDisplayName(disableTarget)} was disabled. Intake and listing pushes are paused during the disconnect grace period.`);
+      setDisableTarget(null);
+      await Promise.all([
+        storeConnectionsQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Store connection config update failed.");
+      setError(caught instanceof Error ? caught.message : "Store disable request failed.");
     } finally {
-      setSavingConnectionId(null);
+      setDisablingConnectionId(null);
     }
   }
 
@@ -2087,60 +2283,13 @@ function StoreConnectionOpsTab() {
     }
   }
 
-  async function editListingConfig(connection: DropshipAdminStoreConnectionListItem) {
-    setLoadingListingConfigId(connection.storeConnectionId);
-    setError("");
-    setMessage("");
-    try {
-      const response = await fetchJson<DropshipStoreListingConfigResponse>(
-        `/api/dropship/admin/store-connections/${connection.storeConnectionId}/listing-config`,
-      );
-      setListingConfigForm(listingConfigResponseToForm(response));
-      await storeConnectionsQuery.refetch();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to load listing config.");
-    } finally {
-      setLoadingListingConfigId(null);
-    }
-  }
-
-  async function saveListingConfig() {
-    if (!listingConfigForm) return;
-    setSavingListingConfigId(listingConfigForm.storeConnectionId);
-    setError("");
-    setMessage("");
-    try {
-      const input = buildStoreListingConfigInput(listingConfigForm);
-      const response = await putJson<DropshipStoreListingConfigResponse>(
-        `/api/dropship/admin/store-connections/${listingConfigForm.storeConnectionId}/listing-config`,
-        input,
-      );
-      setListingConfigForm(listingConfigResponseToForm(response));
-      setMessage(`Store connection ${response.storeConnection.storeConnectionId} listing config saved.`);
-      await Promise.all([
-        storeConnectionsQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/dogfood-readiness"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/ops/overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/admin/audit-events"] }),
-      ]);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Listing config update failed.");
-    } finally {
-      setSavingListingConfigId(null);
-    }
-  }
-
-  function updateListingConfigForm(patch: Partial<ListingConfigFormState>) {
-    setListingConfigForm((current) => current ? { ...current, ...patch } : current);
-  }
-
   return (
     <div className="space-y-5">
-      {(storeConnectionsQuery.error || error) && (
+      {(storeConnectionsQuery.error || warehousesQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(storeConnectionsQuery.error, "Unable to load dropship store connections.")}
+            {error || queryErrorMessage(storeConnectionsQuery.error ?? warehousesQuery.error, "Unable to load dropship store connections.")}
           </AlertDescription>
         </Alert>
       )}
@@ -2154,9 +2303,9 @@ function StoreConnectionOpsTab() {
       <section className="rounded-md border bg-card p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h2 className="text-lg font-semibold">Store connection health</h2>
+            <h2 className="text-lg font-semibold">Customer store connections</h2>
             <p className="text-sm text-muted-foreground">
-              Review connected vendor stores, token health, setup checks, sync recency, and order-processing warehouse config.
+              Monitor connected dropship stores, owner identity, setup progress, and operator actions.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -2166,7 +2315,7 @@ function StoreConnectionOpsTab() {
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 className="pl-9"
-                placeholder="Vendor, store, domain, or member"
+                placeholder="Store, owner, email, or domain"
               />
             </div>
             <Select value={platform} onValueChange={(value) => setPlatform(value as StoreConnectionPlatformFilter)}>
@@ -2200,183 +2349,157 @@ function StoreConnectionOpsTab() {
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching connections" value={String(storeConnectionsQuery.data?.total ?? 0)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Visible needing attention" value={String(attentionCount)} />
-        <CatalogMetric icon={<RefreshCw className="h-4 w-4" />} label="Connected visible" value={String(connections.filter((connection) => connection.status === "connected").length)} />
-        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Warehouse configured" value={String(connections.filter((connection) => connection.orderProcessingConfig.defaultWarehouseId !== null).length)} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Listing config active" value={String(listingConfigActiveCount)} />
+        <CatalogMetric icon={<Store className="h-4 w-4" />} label="Matching stores" value={String(storeConnectionsQuery.data?.total ?? 0)} />
+        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Ready stores" value={String(summary.ready)} />
+        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Needs setup" value={String(summary.setupIncomplete)} />
+        <CatalogMetric icon={<ShieldAlert className="h-4 w-4" />} label="Auth attention" value={String(summary.authAttention)} />
+        <CatalogMetric icon={<MinusCircle className="h-4 w-4" />} label="Disabled" value={String(summary.disabled)} />
       </section>
-
-      {listingConfigForm && selectedListingConfigConnection && (
-        <ListingConfigEditorPanel
-          connection={selectedListingConfigConnection}
-          form={listingConfigForm}
-          isSaving={savingListingConfigId === listingConfigForm.storeConnectionId}
-          onCancel={() => setListingConfigForm(null)}
-          onChange={updateListingConfigForm}
-          onSave={saveListingConfig}
-        />
-      )}
 
       <StoreConnectionsTable
         connections={connections}
         isLoading={storeConnectionsQuery.isLoading || storeConnectionsQuery.isFetching}
-        loadingListingConfigId={loadingListingConfigId}
-        onEditListingConfig={editListingConfig}
+        onDisableStoreConnection={openDisableStoreDialog}
+        onOpenWarehouseConfig={openWarehouseConfigDialog}
         onRepairShopifyWebhooks={repairShopifyWebhooks}
-        savingConnectionId={savingConnectionId}
+        disablingConnectionId={disablingConnectionId}
         repairingWebhookConnectionId={repairingWebhookConnectionId}
+        savingWarehouseConnectionId={savingWarehouseConnectionId}
         total={storeConnectionsQuery.data?.total ?? 0}
-        warehouseInputs={warehouseInputs}
-        onSaveWarehouseConfig={saveWarehouseConfig}
-        onWarehouseInputChange={(storeConnectionId, value) => setWarehouseInputs((current) => ({
-          ...current,
-          [storeConnectionId]: value,
-        }))}
       />
-    </div>
-  );
-}
 
-function ListingConfigEditorPanel({
-  connection,
-  form,
-  isSaving,
-  onCancel,
-  onChange,
-  onSave,
-}: {
-  connection: DropshipAdminStoreConnectionListItem;
-  form: ListingConfigFormState;
-  isSaving: boolean;
-  onCancel: () => void;
-  onChange: (patch: Partial<ListingConfigFormState>) => void;
-  onSave: () => void;
-}) {
-  return (
-    <section className="rounded-md border bg-card p-4">
-      <div className="flex flex-col gap-3 border-b pb-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h3 className="font-semibold">Listing config</h3>
-          <div className="text-sm text-muted-foreground">
-            {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
-            {" / "}
-            {connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`}
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={onCancel} disabled={isSaving}>
-            Cancel
-          </Button>
-          <Button type="button" size="sm" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={onSave} disabled={isSaving}>
-            <Save className={isSaving ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-            {isSaving ? "Saving" : "Save"}
-          </Button>
-        </div>
-      </div>
+      <Dialog
+        open={warehouseTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && savingWarehouseConnectionId === null) {
+            setWarehouseTarget(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Assign default warehouse</DialogTitle>
+            <DialogDescription>
+              This sets the internal Echelon warehouse used when accepted dropship orders are routed for fulfillment.
+            </DialogDescription>
+          </DialogHeader>
+          {warehouseTarget && (
+            <div className="space-y-4">
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="font-medium">{storeConnectionDisplayName(warehouseTarget)}</div>
+                <div className="text-sm text-muted-foreground">
+                  {formatStatus(warehouseTarget.platform)} / {storeConnectionOwnerLabel(warehouseTarget)}
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium" htmlFor="dropship-store-warehouse">
+                  Default warehouse
+                </label>
+                <Select
+                  value={warehouseInput || NO_DEFAULT_WAREHOUSE_VALUE}
+                  onValueChange={(value) => setWarehouseInput(value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value)}
+                  disabled={warehousesQuery.isLoading || warehousesQuery.isFetching}
+                >
+                  <SelectTrigger id="dropship-store-warehouse" className="mt-2">
+                    <SelectValue placeholder={warehousesQuery.isLoading ? "Loading warehouses..." : "Select warehouse"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>Not assigned</SelectItem>
+                    {warehouseInput !== ""
+                      && !warehouseOptions.some((warehouse) => String(warehouse.id) === warehouseInput)
+                      && <SelectItem value={warehouseInput}>Warehouse ID {warehouseInput} (not found)</SelectItem>}
+                    {warehouseOptions.map((warehouse) => (
+                      <SelectItem key={warehouse.id} value={String(warehouse.id)}>
+                        {formatWarehouseOption(warehouse)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={savingWarehouseConnectionId !== null}
+              onClick={() => setWarehouseTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+              disabled={savingWarehouseConnectionId !== null || warehousesQuery.isLoading || warehousesQuery.isFetching}
+              onClick={saveWarehouseConfig}
+            >
+              <Save className={savingWarehouseConnectionId !== null ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+              {savingWarehouseConnectionId !== null ? "Saving" : "Save warehouse"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-4">
-        <ListingConfigSelect
-          label="Listing mode"
-          value={form.listingMode}
-          options={allDropshipListingModes}
-          onChange={(value) => onChange({ listingMode: value as DropshipListingMode })}
-        />
-        <ListingConfigSelect
-          label="Inventory mode"
-          value={form.inventoryMode}
-          options={allDropshipListingInventoryModes}
-          onChange={(value) => onChange({ inventoryMode: value as DropshipListingInventoryMode })}
-        />
-        <ListingConfigSelect
-          label="Price mode"
-          value={form.priceMode}
-          options={allDropshipListingPriceModes}
-          onChange={(value) => onChange({ priceMode: value as DropshipListingPriceMode })}
-        />
-        <div>
-          <label className="text-sm font-medium">Status</label>
-          <Select value={form.isActive ? "active" : "inactive"} onValueChange={(value) => onChange({ isActive: value === "active" })}>
-            <SelectTrigger className="mt-2">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="active">Active</SelectItem>
-              <SelectItem value="inactive">Inactive</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <div>
-          <label className="text-sm font-medium" htmlFor="dropship-listing-required-config-keys">
-            Required config keys
-          </label>
-          <Input
-            id="dropship-listing-required-config-keys"
-            value={form.requiredConfigKeys}
-            onChange={(event) => onChange({ requiredConfigKeys: event.target.value })}
-            className="mt-2"
-            placeholder="marketplaceId, categoryId"
-          />
-        </div>
-        <div>
-          <label className="text-sm font-medium" htmlFor="dropship-listing-required-product-fields">
-            Required product fields
-          </label>
-          <Input
-            id="dropship-listing-required-product-fields"
-            value={form.requiredProductFields}
-            onChange={(event) => onChange({ requiredProductFields: event.target.value })}
-            className="mt-2"
-            placeholder={allDropshipListingRequiredProductFields.slice(0, 4).join(", ")}
-          />
-        </div>
-      </div>
-
-      <div className="mt-4">
-        <label className="text-sm font-medium" htmlFor="dropship-listing-marketplace-config">
-          Marketplace config JSON
-        </label>
-        <Textarea
-          id="dropship-listing-marketplace-config"
-          value={form.marketplaceConfigJson}
-          onChange={(event) => onChange({ marketplaceConfigJson: event.target.value })}
-          className="mt-2 min-h-44 font-mono text-xs"
-          spellCheck={false}
-        />
-      </div>
-    </section>
-  );
-}
-
-function ListingConfigSelect({
-  label,
-  options,
-  value,
-  onChange,
-}: {
-  label: string;
-  options: string[];
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div>
-      <label className="text-sm font-medium">{label}</label>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="mt-2">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((option) => (
-            <SelectItem key={option} value={option}>
-              {formatStatus(option)}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <Dialog
+        open={disableTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && disablingConnectionId === null) {
+            setDisableTarget(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Disable store connection</DialogTitle>
+            <DialogDescription>
+              This moves the store into disconnect grace, clears marketplace tokens, and pauses dropship intake and listing pushes for this store.
+            </DialogDescription>
+          </DialogHeader>
+          {disableTarget && (
+            <div className="space-y-4">
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="font-medium">{storeConnectionDisplayName(disableTarget)}</div>
+                <div className="text-sm text-muted-foreground">
+                  {formatStatus(disableTarget.platform)} / {storeConnectionOwnerLabel(disableTarget)}
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium" htmlFor="dropship-store-disable-reason">
+                  Reason
+                </label>
+                <Textarea
+                  id="dropship-store-disable-reason"
+                  value={disableReason}
+                  onChange={(event) => setDisableReason(event.target.value)}
+                  className="mt-2 min-h-28"
+                  maxLength={500}
+                />
+                <div className="mt-1 text-xs text-muted-foreground">
+                  This reason is saved to audit history and included in the vendor notification.
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={disablingConnectionId !== null}
+              onClick={() => setDisableTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={disablingConnectionId !== null || disableReason.trim().length === 0}
+              onClick={confirmDisableStoreConnection}
+            >
+              {disablingConnectionId !== null ? "Disabling" : "Disable store"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -2615,6 +2738,46 @@ function WalletOpsTab() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const pending = pendingAction !== null;
+  const walletVendorOptionsUrl = useMemo(() => buildAdminDogfoodReadinessUrl({
+    search: "",
+    status: "all",
+    platform: "all",
+    limit: 250,
+  }), []);
+  const walletVendorOptionsQuery = useQuery<DropshipDogfoodReadinessResponse>({
+    queryKey: [walletVendorOptionsUrl, "wallet-vendors"],
+    queryFn: () => fetchJson<DropshipDogfoodReadinessResponse>(walletVendorOptionsUrl),
+  });
+  const selectedUsdcVendorId = usdcVendorId.trim();
+  const usdcWalletQuery = useQuery<DropshipWalletResponse>({
+    queryKey: ["/api/dropship/admin/wallet/vendors", selectedUsdcVendorId],
+    queryFn: () => fetchJson<DropshipWalletResponse>(`/api/dropship/admin/wallet/vendors/${selectedUsdcVendorId}`),
+    enabled: /^[1-9]\d*$/.test(selectedUsdcVendorId),
+  });
+  const vendorSelectOptions = useMemo(
+    () => buildVendorSelectOptions(walletVendorOptionsQuery.data?.items ?? []),
+    [walletVendorOptionsQuery.data?.items],
+  );
+  const usdcFundingMethodOptions = useMemo(
+    () => (usdcWalletQuery.data?.wallet.fundingMethods ?? [])
+      .filter((method) => method.rail === "usdc_base")
+      .sort((first, second) => {
+        if (first.isDefault !== second.isDefault) return Number(second.isDefault) - Number(first.isDefault);
+        if (first.status !== second.status) return first.status.localeCompare(second.status);
+        return first.fundingMethodId - second.fundingMethodId;
+      })
+      .map((method) => ({
+        value: String(method.fundingMethodId),
+        label: method.displayLabel || formatStatus(method.rail),
+        detail: [
+          `ID ${method.fundingMethodId}`,
+          formatStatus(method.status),
+          method.isDefault ? "default" : "",
+          method.usdcWalletAddress ? truncateMiddle(method.usdcWalletAddress, 16) : "",
+        ].filter(Boolean).join(" / "),
+      })),
+    [usdcWalletQuery.data?.wallet.fundingMethods],
+  );
 
   function resetManualCreditIdempotencyKey() {
     setManualCreditIdempotencyKey(createDropshipIdempotencyKey("admin-wallet-credit"));
@@ -2701,10 +2864,12 @@ function WalletOpsTab() {
 
   return (
     <div className="space-y-5">
-      {error && (
+      {(walletVendorOptionsQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>
+            {error || queryErrorMessage(walletVendorOptionsQuery.error, "Unable to load dropship vendors.")}
+          </AlertDescription>
         </Alert>
       )}
       {message && (
@@ -2724,22 +2889,19 @@ function WalletOpsTab() {
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[0.45fr_0.45fr_1.1fr_auto] lg:items-end">
-          <div>
-            <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-vendor">
-              Vendor ID
-            </label>
-            <Input
-              id="dropship-wallet-credit-vendor"
-              className="mt-2"
-              value={vendorId}
-              onChange={(event) => {
-                setVendorId(event.target.value);
-                resetManualCreditIdempotencyKey();
-              }}
-              inputMode="numeric"
-              placeholder="10"
-            />
-          </div>
+          <SearchableOptionPicker
+            label="Vendor"
+            value={vendorId}
+            onChange={(value) => {
+              setVendorId(value);
+              resetManualCreditIdempotencyKey();
+            }}
+            options={vendorSelectOptions}
+            isLoading={walletVendorOptionsQuery.isLoading || walletVendorOptionsQuery.isFetching}
+            placeholder="Select vendor"
+            searchPlaceholder="Search vendor, email, or member..."
+            emptyText="No dropship vendors found."
+          />
           <div>
             <label className="text-sm font-medium" htmlFor="dropship-wallet-credit-amount">
               Amount
@@ -2793,37 +2955,47 @@ function WalletOpsTab() {
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-4">
+          <SearchableOptionPicker
+            label="Vendor"
+            value={usdcVendorId}
+            onChange={(value) => {
+              setUsdcVendorId(value);
+              setUsdcFundingMethodId("");
+              resetUsdcCreditIdempotencyKey();
+            }}
+            options={vendorSelectOptions}
+            isLoading={walletVendorOptionsQuery.isLoading || walletVendorOptionsQuery.isFetching}
+            placeholder="Select vendor"
+            searchPlaceholder="Search vendor, email, or member..."
+            emptyText="No dropship vendors found."
+          />
           <div>
-            <label className="text-sm font-medium" htmlFor="dropship-usdc-credit-vendor">
-              Vendor ID
-            </label>
-            <Input
-              id="dropship-usdc-credit-vendor"
-              className="mt-2"
-              value={usdcVendorId}
-              onChange={(event) => {
-                setUsdcVendorId(event.target.value);
+            <label className="text-sm font-medium">Funding method</label>
+            <Select
+              value={usdcFundingMethodId || NO_DEFAULT_WAREHOUSE_VALUE}
+              onValueChange={(value) => {
+                setUsdcFundingMethodId(value === NO_DEFAULT_WAREHOUSE_VALUE ? "" : value);
                 resetUsdcCreditIdempotencyKey();
               }}
-              inputMode="numeric"
-              placeholder="10"
-            />
-          </div>
-          <div>
-            <label className="text-sm font-medium" htmlFor="dropship-usdc-funding-method">
-              Funding method ID
-            </label>
-            <Input
-              id="dropship-usdc-funding-method"
-              className="mt-2"
-              value={usdcFundingMethodId}
-              onChange={(event) => {
-                setUsdcFundingMethodId(event.target.value);
-                resetUsdcCreditIdempotencyKey();
-              }}
-              inputMode="numeric"
-              placeholder="Optional"
-            />
+              disabled={!selectedUsdcVendorId || usdcWalletQuery.isLoading || usdcWalletQuery.isFetching}
+            >
+              <SelectTrigger className="mt-2">
+                <SelectValue placeholder="Select funding method" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>No funding method</SelectItem>
+                {usdcFundingMethodOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label} - {option.detail}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {usdcWalletQuery.error && (
+              <p className="mt-1 text-xs text-rose-700">
+                {queryErrorMessage(usdcWalletQuery.error, "Unable to load vendor wallet.")}
+              </p>
+            )}
           </div>
           <div>
             <label className="text-sm font-medium" htmlFor="dropship-usdc-dollar-amount">
@@ -2939,25 +3111,29 @@ function WalletOpsTab() {
 function CatalogExposureTab() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  const [exposedOnly, setExposedOnly] = useState("false");
-  const [includeInactiveCatalog, setIncludeInactiveCatalog] = useState("false");
+  const [visibilityFilter, setVisibilityFilter] = useState<CatalogPreviewVisibilityFilter>("all");
+  const [catalogStatusFilter, setCatalogStatusFilter] = useState<CatalogPreviewStatusFilter>("active");
   const [appliedFilters, setAppliedFilters] = useState({
     search: "",
-    exposedOnly: "false",
-    includeInactiveCatalog: "false",
+    visibility: "all" as CatalogPreviewVisibilityFilter,
+    catalogStatus: "active" as CatalogPreviewStatusFilter,
   });
+  const [previewPage, setPreviewPage] = useState(1);
   const [draftRules, setDraftRules] = useState<DropshipAdminCatalogExposureRuleInput[]>([]);
   const [loadedRulesKey, setLoadedRulesKey] = useState("");
   const [ruleForm, setRuleForm] = useState<CatalogRuleFormState>(emptyCatalogRuleForm);
+  const [ruleDialogOpen, setRuleDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   const previewUrl = useMemo(() => buildAdminCatalogExposurePreviewUrl({
     search: appliedFilters.search,
-    exposedOnly: appliedFilters.exposedOnly === "true",
-    includeInactiveCatalog: appliedFilters.includeInactiveCatalog === "true",
-  }), [appliedFilters]);
+    visibility: appliedFilters.visibility,
+    catalogStatus: appliedFilters.catalogStatus,
+    page: previewPage,
+    limit: CATALOG_PREVIEW_PAGE_SIZE,
+  }), [appliedFilters, previewPage]);
 
   const rulesQuery = useQuery<DropshipAdminCatalogExposureRulesResponse>({
     queryKey: ["/api/dropship/admin/catalog/rules"],
@@ -2967,33 +3143,130 @@ function CatalogExposureTab() {
     queryKey: [previewUrl],
     queryFn: () => fetchJson<DropshipAdminCatalogExposurePreviewResponse>(previewUrl),
   });
+  const productLinesQuery = useQuery<DropshipProductLineOption[]>({
+    queryKey: ["/api/product-lines", "active"],
+    queryFn: () => fetchJson<DropshipProductLineOption[]>("/api/product-lines?status=active"),
+  });
+  const categoriesQuery = useQuery<DropshipProductCategoryOption[]>({
+    queryKey: ["/api/product-categories"],
+    queryFn: () => fetchJson<DropshipProductCategoryOption[]>("/api/product-categories"),
+  });
+  const productsQuery = useQuery<DropshipProductOption[]>({
+    queryKey: ["/api/products", "active-options"],
+    queryFn: () => fetchJson<DropshipProductOption[]>("/api/products"),
+  });
+  const variantsQuery = useQuery<DropshipProductVariantOption[]>({
+    queryKey: ["/api/product-variants", "active-options"],
+    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+  });
 
   const previewRows = previewQuery.data?.rows ?? [];
-  const exposedPreviewCount = previewRows.filter((row) => row.decision.exposed).length;
-  const blockedPreviewCount = previewRows.length - exposedPreviewCount;
+  const previewTotal = previewQuery.data?.total ?? 0;
+  const previewLimit = previewQuery.data?.limit ?? CATALOG_PREVIEW_PAGE_SIZE;
+  const previewTotalPages = Math.max(1, Math.ceil(previewTotal / previewLimit));
+  const activeRuleInputs = useMemo(
+    () => normalizeCatalogRuleOrder((rulesQuery.data?.rules ?? [])
+      .filter((rule) => rule.isActive !== false)
+      .map(catalogExposureRecordToInput)),
+    [rulesQuery.data?.rules],
+  );
+  const activeRulesKey = useMemo(() => catalogExposureRulesStateKey(activeRuleInputs), [activeRuleInputs]);
+  const draftRulesKey = useMemo(() => catalogExposureRulesStateKey(draftRules), [draftRules]);
+  const hasUnsavedExposureChanges = draftRulesKey !== activeRulesKey;
+  const unsavedExposureRuleCount = hasUnsavedExposureChanges ? draftRules.length : 0;
+  const productLineOptions = useMemo(
+    () => (productLinesQuery.data ?? [])
+      .filter((line) => line.status === undefined || line.status === null || line.status === "active")
+      .sort((first, second) => first.name.localeCompare(second.name)),
+    [productLinesQuery.data],
+  );
+  const categoryOptions = useMemo(
+    () => (categoriesQuery.data ?? [])
+      .filter((category) => category.isActive !== false)
+      .sort((first, second) => first.name.localeCompare(second.name)),
+    [categoriesQuery.data],
+  );
+  const productOptions = useMemo(
+    () => (productsQuery.data ?? [])
+      .filter((product) => product.status ? product.status === "active" : product.active !== 0)
+      .sort((first, second) => {
+        const firstSku = first.sku ?? first.baseSku ?? "";
+        const secondSku = second.sku ?? second.baseSku ?? "";
+        const skuCompare = firstSku.localeCompare(secondSku);
+        return skuCompare !== 0 ? skuCompare : first.name.localeCompare(second.name);
+      }),
+    [productsQuery.data],
+  );
+  const variantOptions = useMemo(
+    () => (variantsQuery.data ?? [])
+      .filter((variant) => variant.isActive !== false && variant.active !== 0)
+      .sort((first, second) => {
+        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+        if (skuCompare !== 0) return skuCompare;
+        const nameCompare = first.name.localeCompare(second.name);
+        return nameCompare !== 0 ? nameCompare : first.id - second.id;
+      }),
+    [variantsQuery.data],
+  );
+  const catalogRuleTargetLabels = useMemo<CatalogRuleTargetLabels>(() => ({
+    productLineNamesById: new Map(productLineOptions.map((line) => [line.id, line.name])),
+    productLabelsById: new Map(productOptions.map((product) => [
+      product.id,
+      [product.sku ?? product.baseSku, product.name].filter(Boolean).join(" - ") || `Product ${product.id}`,
+    ])),
+    variantLabelsById: new Map(variantOptions.map((variant) => [
+      variant.id,
+      [variant.sku, variant.name].filter(Boolean).join(" - ") || `Variant ${variant.id}`,
+    ])),
+    categoryLabelsByKey: new Map(categoryOptions.map((category) => [
+      normalizeCatalogRuleLabelKey(category.name),
+      category.name,
+    ])),
+  }), [categoryOptions, productLineOptions, productOptions, variantOptions]);
 
   useEffect(() => {
     if (!rulesQuery.data) return;
-    const activeInputs = rulesQuery.data.rules
-      .filter((rule) => rule.isActive !== false)
-      .map(catalogExposureRecordToInput);
-    const nextRulesKey = activeInputs
-      .map((rule) => `${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`)
-      .sort()
-      .join("|");
-    if (nextRulesKey === loadedRulesKey) return;
-    setDraftRules(activeInputs);
-    setLoadedRulesKey(nextRulesKey);
-  }, [loadedRulesKey, rulesQuery.data]);
+    if (activeRulesKey === loadedRulesKey) return;
+    setDraftRules(activeRuleInputs);
+    setLoadedRulesKey(activeRulesKey);
+  }, [activeRuleInputs, activeRulesKey, loadedRulesKey, rulesQuery.data]);
+
+  useEffect(() => {
+    if (!previewQuery.data || previewPage <= previewTotalPages) return;
+    setPreviewPage(previewTotalPages);
+  }, [previewPage, previewQuery.data, previewTotalPages]);
 
   function applyCatalogFilters() {
-    setAppliedFilters({ search, exposedOnly, includeInactiveCatalog });
+    setAppliedFilters({
+      search,
+      visibility: visibilityFilter,
+      catalogStatus: catalogStatusFilter,
+    });
+    setPreviewPage(1);
+  }
+
+  function applyVisibilityFilter(value: CatalogPreviewVisibilityFilter) {
+    setVisibilityFilter(value);
+    setAppliedFilters((current) => ({ ...current, visibility: value }));
+    setPreviewPage(1);
+  }
+
+  function applyCatalogStatusFilter(value: CatalogPreviewStatusFilter) {
+    setCatalogStatusFilter(value);
+    setAppliedFilters((current) => ({ ...current, catalogStatus: value }));
+    setPreviewPage(1);
   }
 
   function addRuleFromForm() {
     try {
-      upsertDraftRule(buildCatalogExposureRuleInput(ruleForm));
-      setMessage("Catalog exposure rule added to draft.");
+      const rule = buildCatalogExposureRuleInput({
+        ...ruleForm,
+        priority: draftRules.length,
+      });
+      upsertDraftRule(rule);
+      setRuleDialogOpen(false);
+      setRuleForm(emptyCatalogRuleForm);
+      setMessage(`${catalogExposureActionLabel(rule.action)} ${catalogRuleTargetLabel(rule, catalogRuleTargetLabels)} added to unsaved changes.`);
       setError("");
     } catch (caught) {
       setMessage("");
@@ -3002,40 +3275,44 @@ function CatalogExposureTab() {
   }
 
   function addCatalogWideRule(action: CatalogExposureActionFilter) {
-    upsertDraftRule(buildCatalogExposureRuleInput({
+    const rule = buildCatalogExposureRuleInput({
       scopeType: "catalog",
       action,
-      priority: action === "include" ? 0 : 300,
-      notes: `${action === "include" ? "Include" : "Exclude"} entire active catalog`,
+      priority: draftRules.length,
+      notes: `${catalogExposureActionLabel(action)} entire active catalog`,
       metadata: {
         source: "admin_catalog_quick_action",
       },
-    }));
-    setMessage(`${action === "include" ? "Include" : "Exclude"} entire catalog rule added to draft.`);
+    });
+    upsertDraftRule(rule);
+    setMessage(`${catalogExposureActionLabel(action)} entire active catalog added to unsaved changes.`);
     setError("");
   }
 
   function clearDraftRules() {
-    setDraftRules([]);
-    setMessage("Catalog exposure draft cleared.");
+    setDraftRules(activeRuleInputs);
+    setMessage("Unsaved exposure changes reverted.");
     setError("");
   }
 
   function addPreviewRule(
     row: DropshipAdminCatalogExposurePreviewRow,
-    scopeType: DropshipCatalogExposurePreviewRuleScope,
     action: CatalogExposureActionFilter,
-    productLineId?: number,
   ) {
     try {
       const rule = buildCatalogExposureRuleFromPreviewRow({
         row,
-        scopeType,
+        scopeType: "variant",
         action,
-        productLineId,
       });
-      upsertDraftRule(rule);
-      setMessage(`${action === "include" ? "Include" : "Exclude"} ${formatStatus(scopeType)} rule added to draft.`);
+      upsertDraftRule({
+        ...rule,
+        priority: draftRules.length,
+        notes: rule.notes
+          ?.replace(/^Include /, "Expose ")
+          .replace(/^Exclude /, "Hide ") ?? rule.notes,
+      });
+      setMessage(`${catalogExposureActionLabel(action)} variant rule added to unsaved changes.`);
       setError("");
     } catch (caught) {
       setMessage("");
@@ -3044,16 +3321,43 @@ function CatalogExposureTab() {
   }
 
   function upsertDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
-    const ruleKey = catalogExposureRuleKey(rule);
-    setDraftRules((current) => [
-      ...current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey),
-      rule,
-    ]);
+    const targetKey = catalogExposureRuleTargetKey(rule);
+    setDraftRules((current) => {
+      const existingIndex = current.findIndex((existing) => catalogExposureRuleTargetKey(existing) === targetKey);
+      if (existingIndex < 0) {
+        return normalizeCatalogRuleOrder([...current, rule]);
+      }
+      return normalizeCatalogRuleOrder(current.map((existing, index) => (index === existingIndex ? rule : existing)));
+    });
+  }
+
+  function catalogExposureRuleTargetKey(rule: DropshipAdminCatalogExposureRuleInput): string {
+    return [
+      rule.scopeType,
+      rule.productVariantId ?? "",
+      rule.productId ?? "",
+      rule.category ?? "",
+      rule.productLineId ?? "",
+    ].join("|");
   }
 
   function removeDraftRule(rule: DropshipAdminCatalogExposureRuleInput) {
     const ruleKey = catalogExposureRuleKey(rule);
-    setDraftRules((current) => current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey));
+    setDraftRules((current) => normalizeCatalogRuleOrder(
+      current.filter((existing) => catalogExposureRuleKey(existing) !== ruleKey),
+    ));
+  }
+
+  function moveDraftRule(rule: DropshipAdminCatalogExposureRuleInput, direction: -1 | 1) {
+    const ruleKey = catalogExposureRuleKey(rule);
+    setDraftRules((current) => {
+      const currentIndex = current.findIndex((existing) => catalogExposureRuleKey(existing) === ruleKey);
+      const nextIndex = currentIndex + direction;
+      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= current.length) return current;
+      const next = [...current];
+      [next[currentIndex], next[nextIndex]] = [next[nextIndex], next[currentIndex]];
+      return normalizeCatalogRuleOrder(next);
+    });
   }
 
   async function saveDraftRules() {
@@ -3061,14 +3365,18 @@ function CatalogExposureTab() {
     setError("");
     setMessage("");
     try {
+      const orderedRules = normalizeCatalogRuleOrder(draftRules);
+      const orderedRulesKey = catalogExposureRulesStateKey(orderedRules);
       const result = await putJson<DropshipAdminCatalogExposureRulesReplaceResponse>(
         "/api/dropship/admin/catalog/rules",
         {
           idempotencyKey: createDropshipIdempotencyKey("admin-catalog-exposure"),
-          rules: draftRules,
+          rules: orderedRules,
         },
       );
-      setMessage(`Catalog exposure rules saved as revision ${result.revisionId}.`);
+      setDraftRules(orderedRules);
+      setLoadedRulesKey(orderedRulesKey);
+      setMessage(`Catalog exposure rules published as revision ${result.revisionId}.`);
       await Promise.all([
         rulesQuery.refetch(),
         previewQuery.refetch(),
@@ -3100,113 +3408,72 @@ function CatalogExposureTab() {
         </Alert>
       )}
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active rules" value={String(rulesQuery.data?.rules.length ?? 0)} />
-        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Draft rules" value={String(draftRules.length)} />
-        <CatalogMetric icon={<CheckCircle2 className="h-4 w-4" />} label="Exposed preview rows" value={String(exposedPreviewCount)} />
-        <CatalogMetric icon={<AlertCircle className="h-4 w-4" />} label="Blocked preview rows" value={String(blockedPreviewCount)} />
+      <div className="grid gap-3 md:grid-cols-2">
+        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active rules" value={String(activeRuleInputs.length)} />
+        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Unsaved changes" value={String(unsavedExposureRuleCount)} />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
         <section className="rounded-md border bg-card p-4">
-          <div>
-            <h2 className="text-lg font-semibold">Rule draft</h2>
-            <p className="text-sm text-muted-foreground">Define the catalog Card Shellz makes available to dropship vendors.</p>
-          </div>
-
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <div className="flex flex-col gap-4">
             <div>
-              <label className="text-sm font-medium">Scope</label>
-              <Select
-                value={ruleForm.scopeType}
-                onValueChange={(value) => setRuleForm((current) => ({
-                  ...current,
-                  scopeType: value as CatalogExposureScopeFilter,
-                }))}
+              <h2 className="text-lg font-semibold">Catalog exposure</h2>
+              <p className="text-sm text-muted-foreground">
+                Publish the catalog vendors can see. Rules run top to bottom, and later matching rules override earlier ones.
+              </p>
+            </div>
+            <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+              Common setup: expose the entire active catalog first, then add hide rules below it for exceptions.
+            </div>
+            <div className="grid gap-2">
+              <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={() => addCatalogWideRule("include")}>
+                <PlusCircle className="h-4 w-4" />
+                Expose entire active catalog
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-2"
+                onClick={() => {
+                  setRuleForm(emptyCatalogRuleForm);
+                  setRuleDialogOpen(true);
+                }}
               >
-                <SelectTrigger className="mt-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="catalog">Entire catalog</SelectItem>
-                  <SelectItem value="product_line">Product line</SelectItem>
-                  <SelectItem value="category">Category</SelectItem>
-                  <SelectItem value="product">Product</SelectItem>
-                  <SelectItem value="variant">Variant</SelectItem>
-                </SelectContent>
-              </Select>
+                <PlusCircle className="h-4 w-4" />
+                Add exposure rule
+              </Button>
             </div>
-            <div>
-              <label className="text-sm font-medium">Action</label>
-              <Select
-                value={ruleForm.action}
-                onValueChange={(value) => setRuleForm((current) => ({
-                  ...current,
-                  action: value as CatalogExposureActionFilter,
-                }))}
-              >
-                <SelectTrigger className="mt-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="include">Include</SelectItem>
-                  <SelectItem value="exclude">Exclude</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <CatalogRuleTargetInput ruleForm={ruleForm} setRuleForm={setRuleForm} />
-
-            <div>
-              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-priority">Priority</label>
-              <Input
-                id="dropship-catalog-rule-priority"
-                className="mt-2"
-                value={ruleForm.priority}
-                onChange={(event) => setRuleForm((current) => ({ ...current, priority: event.target.value }))}
-              />
-            </div>
-            <div className="md:col-span-2">
-              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-notes">Notes</label>
-              <Input
-                id="dropship-catalog-rule-notes"
-                className="mt-2"
-                value={ruleForm.notes}
-                onChange={(event) => setRuleForm((current) => ({ ...current, notes: event.target.value }))}
-                placeholder="Optional admin note"
-              />
-            </div>
-          </div>
-
-          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-            <Button type="button" variant="outline" className="gap-2" onClick={() => addCatalogWideRule("include")}>
-              <PlusCircle className="h-4 w-4" />
-              Include active catalog
-            </Button>
-            <Button type="button" variant="outline" className="gap-2" onClick={addRuleFromForm}>
-              <PlusCircle className="h-4 w-4" />
-              Add draft rule
-            </Button>
-            <Button type="button" variant="outline" onClick={() => setRuleForm(emptyCatalogRuleForm)}>
-              Reset form
-            </Button>
-            <Button type="button" variant="outline" className="gap-2" onClick={clearDraftRules}>
-              <MinusCircle className="h-4 w-4" />
-              Clear draft
-            </Button>
-            <Button type="button" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={saving} onClick={saveDraftRules}>
-              <Save className="h-4 w-4" />
-              {saving ? "Saving" : "Save rules"}
-            </Button>
           </div>
         </section>
 
         <CatalogDraftRulesTable
+          hasUnsavedChanges={hasUnsavedExposureChanges}
+          targetLabels={catalogRuleTargetLabels}
           rules={draftRules}
           isLoading={rulesQuery.isLoading}
+          isSaving={saving}
+          onClearRules={clearDraftRules}
+          onMoveRule={moveDraftRule}
           onRemoveRule={removeDraftRule}
+          onSaveRules={saveDraftRules}
         />
       </div>
+
+      <CatalogRuleDialog
+        open={ruleDialogOpen}
+        onOpenChange={setRuleDialogOpen}
+        onSubmit={addRuleFromForm}
+        categoryOptions={categoryOptions}
+        isLoadingCategories={categoriesQuery.isLoading || categoriesQuery.isFetching}
+        isLoadingProductLines={productLinesQuery.isLoading || productLinesQuery.isFetching}
+        isLoadingProducts={productsQuery.isLoading || productsQuery.isFetching}
+        isLoadingVariants={variantsQuery.isLoading || variantsQuery.isFetching}
+        productLineOptions={productLineOptions}
+        productOptions={productOptions}
+        ruleForm={ruleForm}
+        setRuleForm={setRuleForm}
+        variantOptions={variantOptions}
+      />
 
       <section className="rounded-md border bg-card p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -3224,22 +3491,30 @@ function CatalogExposureTab() {
                 placeholder="Search SKU, product, or variant"
               />
             </div>
-            <Select value={exposedOnly} onValueChange={setExposedOnly}>
+            <Select
+              value={visibilityFilter}
+              onValueChange={(value) => applyVisibilityFilter(value as CatalogPreviewVisibilityFilter)}
+            >
               <SelectTrigger className="lg:w-44">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="false">All rows</SelectItem>
-                <SelectItem value="true">Exposed only</SelectItem>
+                <SelectItem value="all">All visibility</SelectItem>
+                <SelectItem value="visible">Visible only</SelectItem>
+                <SelectItem value="hidden">Hidden only</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={includeInactiveCatalog} onValueChange={setIncludeInactiveCatalog}>
+            <Select
+              value={catalogStatusFilter}
+              onValueChange={(value) => applyCatalogStatusFilter(value as CatalogPreviewStatusFilter)}
+            >
               <SelectTrigger className="lg:w-44">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="false">Active only</SelectItem>
-                <SelectItem value="true">Include inactive</SelectItem>
+                <SelectItem value="active">Active only</SelectItem>
+                <SelectItem value="inactive">Inactive only</SelectItem>
+                <SelectItem value="all">Both</SelectItem>
               </SelectContent>
             </Select>
             <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applyCatalogFilters}>
@@ -3251,9 +3526,13 @@ function CatalogExposureTab() {
 
         <CatalogPreviewTable
           isLoading={previewQuery.isLoading || previewQuery.isFetching}
+          limit={previewLimit}
+          page={previewQuery.data?.page ?? previewPage}
           rows={previewRows}
-          total={previewQuery.data?.total ?? 0}
+          total={previewTotal}
+          totalPages={previewTotalPages}
           onAddPreviewRule={addPreviewRule}
+          onPageChange={setPreviewPage}
         />
       </section>
     </div>
@@ -3262,8 +3541,6 @@ function CatalogExposureTab() {
 
 function ShippingConfigTab() {
   const queryClient = useQueryClient();
-  const [search, setSearch] = useState("");
-  const [appliedSearch, setAppliedSearch] = useState("");
   const [boxForm, setBoxForm] = useState<ShippingBoxFormState>(emptyShippingBoxForm);
   const [profileForm, setProfileForm] = useState<ShippingPackageProfileFormState>(emptyShippingPackageProfileForm);
   const [zoneForm, setZoneForm] = useState<ShippingZoneRuleFormState>(emptyShippingZoneRuleForm);
@@ -3271,17 +3548,46 @@ function ShippingConfigTab() {
   const [markupForm, setMarkupForm] = useState<ShippingMarkupPolicyFormState>(emptyShippingMarkupPolicyForm);
   const [insuranceForm, setInsuranceForm] = useState<ShippingInsurancePolicyFormState>(emptyShippingInsurancePolicyForm);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<ShippingConfigSectionKey>("overview");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const shippingConfigUrl = useMemo(
-    () => buildAdminShippingConfigUrl({ search: appliedSearch, packageProfileLimit: 75, rateTableLimit: 25 }),
-    [appliedSearch],
+    () => buildAdminShippingConfigUrl({ packageProfileLimit: 250, rateTableLimit: 100 }),
+    [],
   );
   const shippingQuery = useQuery<DropshipAdminShippingConfigResponse>({
     queryKey: [shippingConfigUrl],
     queryFn: () => fetchJson<DropshipAdminShippingConfigResponse>(shippingConfigUrl),
   });
+  const variantsQuery = useQuery<DropshipProductVariantOption[]>({
+    queryKey: ["/api/product-variants"],
+    queryFn: () => fetchJson<DropshipProductVariantOption[]>("/api/product-variants"),
+  });
+  const warehousesQuery = useQuery<DropshipWarehouseOption[]>({
+    queryKey: ["/api/warehouses"],
+    queryFn: () => fetchJson<DropshipWarehouseOption[]>("/api/warehouses"),
+  });
   const config = shippingQuery.data?.config;
+  const productVariantOptions = useMemo(
+    () => (variantsQuery.data ?? [])
+      .filter((variant) => variant.isActive !== false && variant.active !== 0)
+      .sort((first, second) => {
+        const skuCompare = (first.sku ?? "").localeCompare(second.sku ?? "");
+        if (skuCompare !== 0) return skuCompare;
+        const nameCompare = first.name.localeCompare(second.name);
+        return nameCompare !== 0 ? nameCompare : first.id - second.id;
+      }),
+    [variantsQuery.data],
+  );
+  const warehouseOptions = useMemo(
+    () => (warehousesQuery.data ?? [])
+      .filter((warehouse) => warehouse.isActive === 1 && warehouse.warehouseType !== "bulk_storage")
+      .sort((first, second) => {
+        if (first.isDefault !== second.isDefault) return second.isDefault - first.isDefault;
+        return first.name.localeCompare(second.name);
+      }),
+    [warehousesQuery.data],
+  );
 
   async function runShippingAction(action: string, task: () => Promise<void>) {
     setPendingAction(action);
@@ -3300,14 +3606,17 @@ function ShippingConfigTab() {
     }
   }
 
-  function applySearch() {
-    setAppliedSearch(search.trim());
-  }
-
   async function saveBox() {
     await runShippingAction("box", async () => {
       await putJson("/api/dropship/admin/shipping/boxes", buildShippingBoxInput({
-        ...boxForm,
+        code: boxForm.code,
+        name: boxForm.name,
+        lengthMm: inchesToMillimetersString(boxForm.lengthIn, "length"),
+        widthMm: inchesToMillimetersString(boxForm.widthIn, "width"),
+        heightMm: inchesToMillimetersString(boxForm.heightIn, "height"),
+        tareWeightGrams: poundsToGramsString(boxForm.tareWeightLb, "tare weight"),
+        maxWeightGrams: boxForm.maxWeightLb.trim() ? poundsToGramsString(boxForm.maxWeightLb, "max weight") : "",
+        isActive: boxForm.isActive,
         idempotencyKey: createDropshipIdempotencyKey("shipping-box"),
       }));
       setBoxForm(emptyShippingBoxForm);
@@ -3318,11 +3627,21 @@ function ShippingConfigTab() {
   async function savePackageProfile() {
     await runShippingAction("profile", async () => {
       await putJson("/api/dropship/admin/shipping/package-profiles", buildShippingPackageProfileInput({
-        ...profileForm,
+        productVariantId: profileForm.productVariantId,
+        weightGrams: poundsToGramsString(profileForm.weightLb, "weight"),
+        lengthMm: inchesToMillimetersString(profileForm.lengthIn, "length"),
+        widthMm: inchesToMillimetersString(profileForm.widthIn, "width"),
+        heightMm: inchesToMillimetersString(profileForm.heightIn, "height"),
+        shipAlone: profileForm.shipAlone,
+        defaultCarrier: profileForm.defaultCarrier,
+        defaultService: profileForm.defaultService,
+        defaultBoxId: profileForm.defaultBoxId,
+        maxUnitsPerPackage: profileForm.maxUnitsPerPackage,
+        isActive: profileForm.isActive,
         idempotencyKey: createDropshipIdempotencyKey("shipping-package-profile"),
       }));
       setProfileForm(emptyShippingPackageProfileForm);
-      setMessage("Package profile saved.");
+      setMessage("Product shipping profile saved.");
     });
   }
 
@@ -3372,11 +3691,11 @@ function ShippingConfigTab() {
 
   return (
     <div className="space-y-5">
-      {(shippingQuery.error || error) && (
+      {(shippingQuery.error || warehousesQuery.error || error) && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            {error || queryErrorMessage(shippingQuery.error, "Unable to load dropship shipping config.")}
+            {error || queryErrorMessage(shippingQuery.error ?? warehousesQuery.error, "Unable to load dropship shipping config.")}
           </AlertDescription>
         </Alert>
       )}
@@ -3387,75 +3706,110 @@ function ShippingConfigTab() {
         </Alert>
       )}
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active boxes" value={String(activeCount(config?.boxes))} />
-        <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Package profiles" value={String(config?.packageProfiles.length ?? 0)} />
-        <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Zone rules" value={String(activeCount(config?.zoneRules))} />
-        <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Active rate tables" value={String(activeRateTableCount(config))} />
-      </section>
+      <Tabs
+        value={activeSection}
+        onValueChange={(value) => setActiveSection(value as ShippingConfigSectionKey)}
+        className="space-y-5"
+      >
+        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-md border bg-muted/50 p-1">
+          {shippingConfigSections.map((section) => (
+            <TabsTrigger key={section.key} value={section.key} className="shrink-0 px-4 py-2">
+              {section.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
 
-      <section className="rounded-md border bg-card p-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
-          <div className="min-w-0 flex-1">
-            <h2 className="text-lg font-semibold">Shipping configuration</h2>
-            <p className="text-sm text-muted-foreground">Manage package data, zones, cached rates, markup, and insurance pool fees used by dropship quotes.</p>
+        <TabsContent value="overview" className="m-0 space-y-5">
+          <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active boxes" value={String(activeCount(config?.boxes))} />
+            <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Product profiles" value={String(config?.packageProfiles.length ?? 0)} />
+            <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Zone rules" value={String(activeCount(config?.zoneRules))} />
+            <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Active rate tables" value={String(activeRateTableCount(config))} />
+          </section>
+          <ShippingConfigOverviewDashboard config={config ?? null} isLoading={shippingQuery.isLoading} />
+        </TabsContent>
+
+        <TabsContent value="boxes" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingBoxPanel
+              form={boxForm}
+              isSaving={pendingAction === "box"}
+              onChange={setBoxForm}
+              onSave={saveBox}
+            />
+            <ShippingBoxesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
           </div>
-          <Input
-            className="lg:w-72"
-            placeholder="Search package profiles"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-          <Button className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={applySearch}>
-            <Search className="h-4 w-4" />
-            Apply
-          </Button>
-        </div>
-      </section>
+        </TabsContent>
 
-      <div className="grid gap-5 xl:grid-cols-2">
-        <ShippingBoxPanel
-          form={boxForm}
-          isSaving={pendingAction === "box"}
-          onChange={setBoxForm}
-          onSave={saveBox}
-        />
-        <ShippingPackageProfilePanel
-          boxes={config?.boxes ?? []}
-          form={profileForm}
-          isSaving={pendingAction === "profile"}
-          onChange={setProfileForm}
-          onSave={savePackageProfile}
-        />
-        <ShippingZoneRulePanel
-          form={zoneForm}
-          isSaving={pendingAction === "zone"}
-          onChange={setZoneForm}
-          onSave={saveZoneRule}
-        />
-        <ShippingRateTablePanel
-          form={rateForm}
-          isSaving={pendingAction === "rate"}
-          onChange={setRateForm}
-          onSave={saveRateTable}
-        />
-        <ShippingMarkupPolicyPanel
-          activePolicy={config?.activeMarkupPolicy ?? null}
-          form={markupForm}
-          isSaving={pendingAction === "markup"}
-          onChange={setMarkupForm}
-          onSave={saveMarkupPolicy}
-        />
-        <ShippingInsurancePolicyPanel
-          activePolicy={config?.activeInsurancePolicy ?? null}
-          form={insuranceForm}
-          isSaving={pendingAction === "insurance"}
-          onChange={setInsuranceForm}
-          onSave={saveInsurancePolicy}
-        />
-      </div>
+        <TabsContent value="profiles" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingPackageProfilePanel
+              boxes={config?.boxes ?? []}
+              form={profileForm}
+              isSaving={pendingAction === "profile"}
+              onChange={setProfileForm}
+              onSave={savePackageProfile}
+              variants={productVariantOptions}
+              variantsLoading={variantsQuery.isLoading}
+            />
+            <ShippingProductProfilesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
 
-      <ShippingConfigTables config={config ?? null} isLoading={shippingQuery.isLoading} />
+        <TabsContent value="zones" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingZoneRulePanel
+              form={zoneForm}
+              isSaving={pendingAction === "zone"}
+              onChange={setZoneForm}
+              onSave={saveZoneRule}
+              warehouses={warehouseOptions}
+              warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
+            />
+            <ShippingZonesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="rates" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingRateTablePanel
+              form={rateForm}
+              isSaving={pendingAction === "rate"}
+              onChange={setRateForm}
+              onSave={saveRateTable}
+              warehouses={warehouseOptions}
+              warehousesLoading={warehousesQuery.isLoading || warehousesQuery.isFetching}
+            />
+            <ShippingRateTablesTable config={config ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="markup" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingMarkupPolicyPanel
+              activePolicy={config?.activeMarkupPolicy ?? null}
+              form={markupForm}
+              isSaving={pendingAction === "markup"}
+              onChange={setMarkupForm}
+              onSave={saveMarkupPolicy}
+            />
+            <ShippingMarkupPolicyTable activePolicy={config?.activeMarkupPolicy ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="insurance" className="m-0">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+            <ShippingInsurancePolicyPanel
+              activePolicy={config?.activeInsurancePolicy ?? null}
+              form={insuranceForm}
+              isSaving={pendingAction === "insurance"}
+              onChange={setInsuranceForm}
+              onSave={saveInsurancePolicy}
+            />
+            <ShippingInsurancePolicyTable activePolicy={config?.activeInsurancePolicy ?? null} isLoading={shippingQuery.isLoading} />
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -3477,11 +3831,11 @@ function ShippingBoxPanel({
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <ShippingInput label="Code" value={form.code} onChange={(value) => onChange((current) => ({ ...current, code: value }))} />
         <ShippingInput label="Name" value={form.name} onChange={(value) => onChange((current) => ({ ...current, name: value }))} />
-        <ShippingInput label="Length mm" value={form.lengthMm} onChange={(value) => onChange((current) => ({ ...current, lengthMm: value }))} />
-        <ShippingInput label="Width mm" value={form.widthMm} onChange={(value) => onChange((current) => ({ ...current, widthMm: value }))} />
-        <ShippingInput label="Height mm" value={form.heightMm} onChange={(value) => onChange((current) => ({ ...current, heightMm: value }))} />
-        <ShippingInput label="Tare grams" value={form.tareWeightGrams} onChange={(value) => onChange((current) => ({ ...current, tareWeightGrams: value }))} />
-        <ShippingInput label="Max weight grams" value={form.maxWeightGrams} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxWeightGrams: value }))} />
+        <ShippingInput label="Length in" value={form.lengthIn} onChange={(value) => onChange((current) => ({ ...current, lengthIn: value }))} />
+        <ShippingInput label="Width in" value={form.widthIn} onChange={(value) => onChange((current) => ({ ...current, widthIn: value }))} />
+        <ShippingInput label="Height in" value={form.heightIn} onChange={(value) => onChange((current) => ({ ...current, heightIn: value }))} />
+        <ShippingInput label="Tare weight lb" value={form.tareWeightLb} onChange={(value) => onChange((current) => ({ ...current, tareWeightLb: value }))} />
+        <ShippingInput label="Max weight lb" value={form.maxWeightLb} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxWeightLb: value }))} />
         <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
       </div>
       <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
@@ -3498,22 +3852,31 @@ function ShippingPackageProfilePanel({
   isSaving,
   onChange,
   onSave,
+  variants,
+  variantsLoading,
 }: {
   boxes: DropshipShippingConfigOverview["boxes"];
   form: ShippingPackageProfileFormState;
   isSaving: boolean;
   onChange: Dispatch<SetStateAction<ShippingPackageProfileFormState>>;
   onSave: () => void;
+  variants: DropshipProductVariantOption[];
+  variantsLoading: boolean;
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <PanelHeader title="Package profiles" detail="SKU-level weight, dimensions, and default package rules." />
+      <PanelHeader title="Product shipping profiles" detail="SKU-level shipping dimensions, weight, and package rules." />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <ShippingInput label="Variant ID" value={form.productVariantId} onChange={(value) => onChange((current) => ({ ...current, productVariantId: value }))} />
-        <ShippingInput label="Weight grams" value={form.weightGrams} onChange={(value) => onChange((current) => ({ ...current, weightGrams: value }))} />
-        <ShippingInput label="Length mm" value={form.lengthMm} onChange={(value) => onChange((current) => ({ ...current, lengthMm: value }))} />
-        <ShippingInput label="Width mm" value={form.widthMm} onChange={(value) => onChange((current) => ({ ...current, widthMm: value }))} />
-        <ShippingInput label="Height mm" value={form.heightMm} onChange={(value) => onChange((current) => ({ ...current, heightMm: value }))} />
+        <ProductVariantSkuPicker
+          isLoading={variantsLoading}
+          onChange={(value) => onChange((current) => ({ ...current, productVariantId: value }))}
+          value={form.productVariantId}
+          variants={variants}
+        />
+        <ShippingInput label="Weight lb" value={form.weightLb} onChange={(value) => onChange((current) => ({ ...current, weightLb: value }))} />
+        <ShippingInput label="Length in" value={form.lengthIn} onChange={(value) => onChange((current) => ({ ...current, lengthIn: value }))} />
+        <ShippingInput label="Width in" value={form.widthIn} onChange={(value) => onChange((current) => ({ ...current, widthIn: value }))} />
+        <ShippingInput label="Height in" value={form.heightIn} onChange={(value) => onChange((current) => ({ ...current, heightIn: value }))} />
         <ShippingInput label="Max units/package" value={form.maxUnitsPerPackage} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxUnitsPerPackage: value }))} />
         <ShippingInput label="Default carrier" value={form.defaultCarrier} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultCarrier: value }))} />
         <ShippingInput label="Default service" value={form.defaultService} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultService: value }))} />
@@ -3549,9 +3912,193 @@ function ShippingPackageProfilePanel({
       </div>
       <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
         <Save className="h-4 w-4" />
-        Save profile
+        Save product profile
       </Button>
     </section>
+  );
+}
+
+function SearchableOptionPicker({
+  clearLabel = "Clear selection",
+  clearable = false,
+  disabled = false,
+  emptyText,
+  isLoading,
+  label,
+  onChange,
+  options,
+  placeholder,
+  searchPlaceholder,
+  value,
+}: {
+  clearLabel?: string;
+  clearable?: boolean;
+  disabled?: boolean;
+  emptyText: string;
+  isLoading: boolean;
+  label: string;
+  onChange: (value: string) => void;
+  options: DropshipSelectOption[];
+  placeholder: string;
+  searchPlaceholder: string;
+  value: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedOption = options.find((option) => option.value === value) ?? null;
+
+  return (
+    <div>
+      <label className="text-sm font-medium">{label}</label>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            aria-expanded={open}
+            className="mt-2 h-10 w-full justify-between"
+            disabled={disabled}
+            role="combobox"
+            type="button"
+            variant="outline"
+          >
+            <span className={selectedOption || value ? "truncate" : "truncate text-muted-foreground"}>
+              {isLoading
+                ? "Loading..."
+                : selectedOption
+                  ? selectedOption.label
+                  : value
+                    ? `Selected ID ${value} (not found)`
+                    : placeholder}
+            </span>
+            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[360px] p-0">
+          <Command>
+            <CommandInput placeholder={searchPlaceholder} />
+            <CommandList>
+              <CommandEmpty>{emptyText}</CommandEmpty>
+              <CommandGroup>
+                {clearable && value && (
+                  <CommandItem
+                    onSelect={() => {
+                      onChange("");
+                      setOpen(false);
+                    }}
+                    value="__clear_selection__"
+                  >
+                    <MinusCircle className="mr-2 h-4 w-4" />
+                    {clearLabel}
+                  </CommandItem>
+                )}
+                {options.map((option) => (
+                  <CommandItem
+                    key={option.value}
+                    onSelect={() => {
+                      onChange(option.value);
+                      setOpen(false);
+                    }}
+                    value={option.search ?? `${option.label} ${option.detail ?? ""} ${option.value}`}
+                  >
+                    <Check className={`mr-2 h-4 w-4 ${option.value === value ? "opacity-100" : "opacity-0"}`} />
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{option.label}</div>
+                      {option.detail && (
+                        <div className="truncate text-xs text-muted-foreground">{option.detail}</div>
+                      )}
+                    </div>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
+function ProductVariantSkuPicker({
+  clearable = false,
+  disabled = false,
+  isLoading,
+  label = "SKU",
+  onChange,
+  placeholder = "Select SKU",
+  value,
+  variants,
+}: {
+  clearable?: boolean;
+  disabled?: boolean;
+  isLoading: boolean;
+  label?: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  value: string;
+  variants: DropshipProductVariantOption[];
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedVariant = variants.find((variant) => String(variant.id) === value) ?? null;
+
+  return (
+    <div>
+      {label && <label className="text-sm font-medium">{label}</label>}
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            aria-expanded={open}
+            className={`${label ? "mt-2 " : ""}h-10 w-full justify-between`}
+            disabled={disabled}
+            role="combobox"
+            type="button"
+            variant="outline"
+          >
+            <span className={selectedVariant ? "truncate" : "truncate text-muted-foreground"}>
+              {isLoading ? "Loading SKUs..." : selectedVariant ? formatVariantOption(selectedVariant) : placeholder}
+            </span>
+            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[360px] p-0">
+          <Command>
+            <CommandInput placeholder="Search SKU or name..." />
+            <CommandList>
+              <CommandEmpty>No SKU found.</CommandEmpty>
+              <CommandGroup>
+                {clearable && value && (
+                  <CommandItem
+                    onSelect={() => {
+                      onChange("");
+                      setOpen(false);
+                    }}
+                    value="__clear_variant__"
+                  >
+                    <MinusCircle className="mr-2 h-4 w-4" />
+                    Clear SKU
+                  </CommandItem>
+                )}
+                {variants.map((variant) => (
+                  <CommandItem
+                    key={variant.id}
+                    onSelect={() => {
+                      onChange(String(variant.id));
+                      setOpen(false);
+                    }}
+                    value={variantOptionSearchValue(variant)}
+                  >
+                    <Check className={`mr-2 h-4 w-4 ${String(variant.id) === value ? "opacity-100" : "opacity-0"}`} />
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{variant.sku || `Variant ${variant.id}`}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {variant.name} - ID {variant.id}
+                      </div>
+                    </div>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </div>
   );
 }
 
@@ -3560,17 +4107,27 @@ function ShippingZoneRulePanel({
   isSaving,
   onChange,
   onSave,
+  warehouses,
+  warehousesLoading,
 }: {
   form: ShippingZoneRuleFormState;
   isSaving: boolean;
   onChange: Dispatch<SetStateAction<ShippingZoneRuleFormState>>;
   onSave: () => void;
+  warehouses: DropshipWarehouseOption[];
+  warehousesLoading: boolean;
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
       <PanelHeader title="Zones" detail="Origin warehouse and destination matching for cached rate lookups." />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <ShippingInput label="Origin warehouse ID" value={form.originWarehouseId} onChange={(value) => onChange((current) => ({ ...current, originWarehouseId: value }))} />
+        <WarehouseSelect
+          label="Origin warehouse"
+          value={form.originWarehouseId}
+          onChange={(value) => onChange((current) => ({ ...current, originWarehouseId: value }))}
+          warehouses={warehouses}
+          warehousesLoading={warehousesLoading}
+        />
         <ShippingInput label="Country" value={form.destinationCountry} onChange={(value) => onChange((current) => ({ ...current, destinationCountry: value }))} />
         <ShippingInput label="Region" value={form.destinationRegion} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, destinationRegion: value }))} />
         <ShippingInput label="Postal prefix" value={form.postalPrefix} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, postalPrefix: value }))} />
@@ -3591,11 +4148,15 @@ function ShippingRateTablePanel({
   isSaving,
   onChange,
   onSave,
+  warehouses,
+  warehousesLoading,
 }: {
   form: ShippingRateTableFormState;
   isSaving: boolean;
   onChange: Dispatch<SetStateAction<ShippingRateTableFormState>>;
   onSave: () => void;
+  warehouses: DropshipWarehouseOption[];
+  warehousesLoading: boolean;
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
@@ -3619,7 +4180,14 @@ function ShippingRateTablePanel({
         </div>
         <ShippingInput label="Effective from" value={form.effectiveFrom} placeholder="Optional ISO date" onChange={(value) => onChange((current) => ({ ...current, effectiveFrom: value }))} />
         <ShippingInput label="Effective to" value={form.effectiveTo} placeholder="Optional ISO date" onChange={(value) => onChange((current) => ({ ...current, effectiveTo: value }))} />
-        <ShippingInput label="Warehouse ID" value={form.warehouseId} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, warehouseId: value }))} />
+        <WarehouseSelect
+          label="Warehouse"
+          optional
+          value={form.warehouseId}
+          onChange={(value) => onChange((current) => ({ ...current, warehouseId: value }))}
+          warehouses={warehouses}
+          warehousesLoading={warehousesLoading}
+        />
         <ShippingInput label="Destination zone" value={form.destinationZone} onChange={(value) => onChange((current) => ({ ...current, destinationZone: value }))} />
         <ShippingInput label="Min grams" value={form.minWeightGrams} onChange={(value) => onChange((current) => ({ ...current, minWeightGrams: value }))} />
         <ShippingInput label="Max grams" value={form.maxWeightGrams} onChange={(value) => onChange((current) => ({ ...current, maxWeightGrams: value }))} />
@@ -3696,7 +4264,7 @@ function ShippingInsurancePolicyPanel({
   );
 }
 
-function ShippingConfigTables({
+function ShippingConfigOverviewDashboard({
   config,
   isLoading,
 }: {
@@ -3705,62 +4273,258 @@ function ShippingConfigTables({
 }) {
   if (isLoading) {
     return (
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Skeleton className="h-48 w-full" />
-        <Skeleton className="h-48 w-full" />
-      </div>
+      <section className="rounded-md border bg-card p-4">
+        <Skeleton className="h-6 w-64" />
+        <Skeleton className="mt-4 h-52 w-full" />
+      </section>
     );
   }
   if (!config) {
     return <EmptyState title="No shipping config" description="Dropship shipping configuration is not loaded." />;
   }
+
+  const rows = [
+    {
+      section: "Boxes",
+      configured: `${activeCount(config.boxes)} active / ${config.boxes.length} loaded`,
+      ready: activeCount(config.boxes) > 0,
+      detail: "Physical boxes and mailers available for package selection.",
+    },
+    {
+      section: "Product shipping profiles",
+      configured: `${activeCount(config.packageProfiles)} active / ${config.packageProfiles.length} loaded`,
+      ready: activeCount(config.packageProfiles) > 0,
+      detail: "SKU-level dimensions and package behavior used before quoting.",
+    },
+    {
+      section: "Zones",
+      configured: `${activeCount(config.zoneRules)} active / ${config.zoneRules.length} loaded`,
+      ready: activeCount(config.zoneRules) > 0,
+      detail: "Warehouse and destination matching rules for rate lookup.",
+    },
+    {
+      section: "Rate tables",
+      configured: `${activeRateTableCount(config)} active / ${config.rateTables.length} loaded`,
+      ready: activeRateTableCount(config) > 0,
+      detail: "Cached carrier/service rates used when a quote is requested.",
+    },
+    {
+      section: "Markup",
+      configured: config.activeMarkupPolicy ? config.activeMarkupPolicy.name : "No active policy",
+      ready: Boolean(config.activeMarkupPolicy),
+      detail: "Shipping charge markup applied after base rate lookup.",
+    },
+    {
+      section: "Insurance pool",
+      configured: config.activeInsurancePolicy ? config.activeInsurancePolicy.name : "No active policy",
+      ready: Boolean(config.activeInsurancePolicy),
+      detail: "Configurable fee funding carrier-fault reimbursements.",
+    },
+  ];
+
   return (
-    <div className="grid gap-5 xl:grid-cols-2">
-      <ShippingSimpleTable
-        title="Boxes"
-        emptyTitle="No boxes"
-        headers={["Code", "Size", "Weight", "Status"]}
-        rows={config.boxes.map((box) => [
-          box.code,
-          `${box.lengthMm} x ${box.widthMm} x ${box.heightMm} mm`,
-          `${box.tareWeightGrams}g tare${box.maxWeightGrams ? ` / ${box.maxWeightGrams}g max` : ""}`,
-          box.isActive ? "Active" : "Inactive",
-        ])}
-      />
-      <ShippingSimpleTable
-        title="Package profiles"
-        emptyTitle="No package profiles"
-        headers={["Variant", "Size", "Weight", "Status"]}
-        rows={config.packageProfiles.map((profile) => [
-          profile.variantSku || String(profile.productVariantId),
-          `${profile.lengthMm} x ${profile.widthMm} x ${profile.heightMm} mm`,
-          `${profile.weightGrams}g`,
-          profile.isActive ? "Active" : "Inactive",
-        ])}
-      />
-      <ShippingSimpleTable
-        title="Zones"
-        emptyTitle="No zone rules"
-        headers={["Warehouse", "Destination", "Zone", "Status"]}
-        rows={config.zoneRules.map((rule) => [
-          String(rule.originWarehouseId),
-          [rule.destinationCountry, rule.destinationRegion, rule.postalPrefix].filter(Boolean).join(" / "),
-          rule.zone,
-          rule.isActive ? "Active" : "Inactive",
-        ])}
-      />
-      <ShippingSimpleTable
-        title="Rate tables"
-        emptyTitle="No rate tables"
-        headers={["Carrier/service", "Status", "Rows", "Effective"]}
-        rows={config.rateTables.map((table) => [
-          `${table.carrier} ${table.service}`,
-          table.status,
-          String(table.rows.length),
-          formatDateTime(table.effectiveFrom),
-        ])}
-      />
-    </div>
+    <section className="rounded-md border bg-card p-4">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Shipping configuration dashboard</h2>
+          <p className="text-sm text-muted-foreground">
+            Current shipping quote inputs loaded from the admin shipping config API.
+          </p>
+        </div>
+        <Badge variant="outline">Generated {formatDateTime(config.generatedAt)}</Badge>
+      </div>
+      <div className="mt-4 overflow-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Area</TableHead>
+              <TableHead>Configured</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Purpose</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow key={row.section}>
+                <TableCell className="font-medium">{row.section}</TableCell>
+                <TableCell className="text-sm text-muted-foreground">{row.configured}</TableCell>
+                <TableCell>
+                  <Badge
+                    variant="outline"
+                    className={row.ready
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                      : "border-amber-200 bg-amber-50 text-amber-800"}
+                  >
+                    {row.ready ? "Ready" : "Missing"}
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">{row.detail}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </section>
+  );
+}
+
+function ShippingBoxesTable({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  if (!config) return <EmptyState title="No boxes" description="Dropship shipping boxes are not loaded." />;
+  return (
+    <ShippingSimpleTable
+      title="Boxes and mailers"
+      emptyTitle="No boxes"
+      headers={["Code", "Size", "Weight", "Status"]}
+      rows={config.boxes.map((box) => [
+        box.code,
+        `${formatMmAsInches(box.lengthMm)} x ${formatMmAsInches(box.widthMm)} x ${formatMmAsInches(box.heightMm)} in`,
+        `${formatGramsAsPounds(box.tareWeightGrams)} lb tare${box.maxWeightGrams ? ` / ${formatGramsAsPounds(box.maxWeightGrams)} lb max` : ""}`,
+        box.isActive ? "Active" : "Inactive",
+      ])}
+    />
+  );
+}
+
+function ShippingProductProfilesTable({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  if (!config) return <EmptyState title="No product profiles" description="Dropship product shipping profiles are not loaded." />;
+  return (
+    <ShippingSimpleTable
+      title="Product shipping profiles"
+      emptyTitle="No product shipping profiles"
+      headers={["SKU", "Size", "Weight", "Defaults", "Status"]}
+      rows={config.packageProfiles.map((profile) => [
+        profile.variantSku || String(profile.productVariantId),
+        `${formatMmAsInches(profile.lengthMm)} x ${formatMmAsInches(profile.widthMm)} x ${formatMmAsInches(profile.heightMm)} in`,
+        `${formatGramsAsPounds(profile.weightGrams)} lb`,
+        [
+          profile.defaultCarrier,
+          profile.defaultService,
+          profile.defaultBoxId ? `Box ${profile.defaultBoxId}` : null,
+          profile.shipAlone ? "Ships alone" : null,
+        ].filter(Boolean).join(" / ") || "None",
+        profile.isActive ? "Active" : "Inactive",
+      ])}
+    />
+  );
+}
+
+function ShippingZonesTable({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  if (!config) return <EmptyState title="No zones" description="Dropship shipping zones are not loaded." />;
+  return (
+    <ShippingSimpleTable
+      title="Zones"
+      emptyTitle="No zone rules"
+      headers={["Warehouse", "Destination", "Zone", "Priority", "Status"]}
+      rows={config.zoneRules.map((rule) => [
+        String(rule.originWarehouseId),
+        [rule.destinationCountry, rule.destinationRegion, rule.postalPrefix].filter(Boolean).join(" / "),
+        rule.zone,
+        String(rule.priority),
+        rule.isActive ? "Active" : "Inactive",
+      ])}
+    />
+  );
+}
+
+function ShippingRateTablesTable({
+  config,
+  isLoading,
+}: {
+  config: DropshipShippingConfigOverview | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  if (!config) return <EmptyState title="No rate tables" description="Dropship rate tables are not loaded." />;
+  return (
+    <ShippingSimpleTable
+      title="Rate tables"
+      emptyTitle="No rate tables"
+      headers={["Carrier/service", "Status", "Rows", "Effective", "Expires"]}
+      rows={config.rateTables.map((table) => [
+        `${table.carrier} ${table.service}`,
+        table.status,
+        String(table.rows.length),
+        formatDateTime(table.effectiveFrom),
+        table.effectiveTo ? formatDateTime(table.effectiveTo) : "Open",
+      ])}
+    />
+  );
+}
+
+function ShippingMarkupPolicyTable({
+  activePolicy,
+  isLoading,
+}: {
+  activePolicy: DropshipShippingConfigOverview["activeMarkupPolicy"];
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  return (
+    <ShippingSimpleTable
+      title="Active markup policy"
+      emptyTitle="No active markup policy"
+      headers={["Name", "Variable", "Fixed", "Range", "Effective"]}
+      rows={activePolicy ? [[
+        activePolicy.name,
+        `${activePolicy.markupBps} bps`,
+        formatCents(activePolicy.fixedMarkupCents),
+        formatShippingMoneyRange(activePolicy.minMarkupCents, activePolicy.maxMarkupCents),
+        formatDateTime(activePolicy.effectiveFrom),
+      ]] : []}
+    />
+  );
+}
+
+function ShippingInsurancePolicyTable({
+  activePolicy,
+  isLoading,
+}: {
+  activePolicy: DropshipShippingConfigOverview["activeInsurancePolicy"];
+  isLoading: boolean;
+}) {
+  if (isLoading) return <ShippingTableSkeleton />;
+  return (
+    <ShippingSimpleTable
+      title="Active insurance pool policy"
+      emptyTitle="No active insurance pool policy"
+      headers={["Name", "Fee", "Range", "Effective"]}
+      rows={activePolicy ? [[
+        activePolicy.name,
+        `${activePolicy.feeBps} bps`,
+        formatShippingMoneyRange(activePolicy.minFeeCents, activePolicy.maxFeeCents),
+        formatDateTime(activePolicy.effectiveFrom),
+      ]] : []}
+    />
+  );
+}
+
+function ShippingTableSkeleton() {
+  return (
+    <section className="rounded-md border bg-card p-4">
+      <Skeleton className="h-6 w-48" />
+      <Skeleton className="mt-4 h-44 w-full" />
+    </section>
   );
 }
 
@@ -3822,6 +4586,52 @@ function PanelHeader({ detail, title }: { detail: string; title: string }) {
   );
 }
 
+function WarehouseSelect({
+  label,
+  onChange,
+  optional = false,
+  value,
+  warehouses,
+  warehousesLoading,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  optional?: boolean;
+  value: string;
+  warehouses: DropshipWarehouseOption[];
+  warehousesLoading: boolean;
+}) {
+  const selectedWarehouseKnown = value === "" || warehouses.some((warehouse) => String(warehouse.id) === value);
+
+  return (
+    <div>
+      <label className="text-sm font-medium">{label}</label>
+      <Select
+        value={value || NO_DEFAULT_WAREHOUSE_VALUE}
+        onValueChange={(nextValue) => onChange(nextValue === NO_DEFAULT_WAREHOUSE_VALUE ? "" : nextValue)}
+        disabled={warehousesLoading}
+      >
+        <SelectTrigger className="mt-2">
+          <SelectValue placeholder={warehousesLoading ? "Loading warehouses..." : "Select warehouse"} />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={NO_DEFAULT_WAREHOUSE_VALUE}>
+            {optional ? "Any warehouse" : "Select warehouse"}
+          </SelectItem>
+          {!selectedWarehouseKnown && (
+            <SelectItem value={value}>Warehouse ID {value} (not found)</SelectItem>
+          )}
+          {warehouses.map((warehouse) => (
+            <SelectItem key={warehouse.id} value={String(warehouse.id)}>
+              {formatWarehouseOption(warehouse)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 function ShippingInput({
   label,
   onChange,
@@ -3875,6 +4685,13 @@ function activeCount(items: Array<{ isActive: boolean }> | undefined): number {
 
 function activeRateTableCount(config: DropshipShippingConfigOverview | undefined): number {
   return config?.rateTables.filter((table) => table.status === "active").length ?? 0;
+}
+
+function formatShippingMoneyRange(minCents: number | null, maxCents: number | null): string {
+  if (minCents === null && maxCents === null) return "No min/max";
+  if (minCents !== null && maxCents !== null) return `${formatCents(minCents)} - ${formatCents(maxCents)}`;
+  if (minCents !== null) return `Min ${formatCents(minCents)}`;
+  return `Max ${formatCents(maxCents ?? 0)}`;
 }
 
 function dropshipOmsSourceLabel(channel: DropshipOmsChannelOption): string {
@@ -5161,21 +5978,73 @@ function ReturnPolicyPanel({
 
 function ReturnCreatePanel({
   form,
+  intakes,
+  intakesLoading,
   isSaving,
   onAddItem,
   onChange,
   onItemChange,
   onRemoveItem,
   onSubmit,
+  storeConnections,
+  storeConnectionsLoading,
+  variants,
+  variantsLoading,
+  vendorOptions,
+  vendorsLoading,
 }: {
   form: ReturnCreateFormState;
+  intakes: DropshipAdminOrderOpsIntakeListItem[];
+  intakesLoading: boolean;
   isSaving: boolean;
   onAddItem: () => void;
   onChange: (patch: Partial<ReturnCreateFormState>) => void;
   onItemChange: (index: number, patch: Partial<ReturnCreateItemFormState>) => void;
   onRemoveItem: (index: number) => void;
   onSubmit: () => void;
+  storeConnections: DropshipAdminStoreConnectionListItem[];
+  storeConnectionsLoading: boolean;
+  variants: DropshipProductVariantOption[];
+  variantsLoading: boolean;
+  vendorOptions: DropshipSelectOption[];
+  vendorsLoading: boolean;
 }) {
+  const storeConnectionOptions = storeConnections.map(storeConnectionSelectOption);
+  const intakeOptions = intakes.map(orderIntakeSelectOption);
+  const omsOrderOptions = buildOmsOrderSelectOptions(intakes);
+
+  function selectStoreConnection(storeConnectionId: string) {
+    const connection = storeConnections.find((candidate) => String(candidate.storeConnectionId) === storeConnectionId);
+    onChange({
+      storeConnectionId,
+      ...(connection ? { vendorId: String(connection.vendor.vendorId) } : {}),
+    });
+  }
+
+  function selectIntake(intakeId: string) {
+    const intake = intakes.find((candidate) => String(candidate.intakeId) === intakeId);
+    onChange({
+      intakeId,
+      ...(intake ? {
+        vendorId: String(intake.vendor.vendorId),
+        storeConnectionId: String(intake.storeConnection.storeConnectionId),
+        omsOrderId: intake.omsOrderId === null ? "" : String(intake.omsOrderId),
+      } : {}),
+    });
+  }
+
+  function selectOmsOrder(omsOrderId: string) {
+    const intake = intakes.find((candidate) => candidate.omsOrderId !== null && String(candidate.omsOrderId) === omsOrderId);
+    onChange({
+      omsOrderId,
+      ...(intake ? {
+        vendorId: String(intake.vendor.vendorId),
+        storeConnectionId: String(intake.storeConnection.storeConnectionId),
+        intakeId: String(intake.intakeId),
+      } : {}),
+    });
+  }
+
   return (
     <section className="rounded-md border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -5196,10 +6065,15 @@ function ReturnCreatePanel({
 
       <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_1.2fr]">
         <div className="grid gap-3 md:grid-cols-2">
-          <AdminReturnInput
-            label="Vendor ID"
+          <SearchableOptionPicker
+            label="Vendor"
             value={form.vendorId}
             disabled={isSaving}
+            options={vendorOptions}
+            isLoading={vendorsLoading}
+            placeholder="Select vendor"
+            searchPlaceholder="Search vendor, email, or member..."
+            emptyText="No dropship vendors found."
             onChange={(value) => onChange({ vendorId: value })}
           />
           <AdminReturnInput
@@ -5208,26 +6082,44 @@ function ReturnCreatePanel({
             disabled={isSaving}
             onChange={(value) => onChange({ rmaNumber: value })}
           />
-          <AdminReturnInput
-            label="Store connection ID"
+          <SearchableOptionPicker
+            label="Store connection"
             value={form.storeConnectionId}
-            placeholder="Optional"
             disabled={isSaving}
-            onChange={(value) => onChange({ storeConnectionId: value })}
+            clearable
+            clearLabel="No store connection"
+            options={storeConnectionOptions}
+            isLoading={storeConnectionsLoading}
+            placeholder="Optional"
+            searchPlaceholder="Search store, vendor, or email..."
+            emptyText="No store connections found."
+            onChange={selectStoreConnection}
           />
-          <AdminReturnInput
-            label="Intake ID"
+          <SearchableOptionPicker
+            label="Order intake"
             value={form.intakeId}
-            placeholder="Optional"
             disabled={isSaving}
-            onChange={(value) => onChange({ intakeId: value })}
+            clearable
+            clearLabel="No intake"
+            options={intakeOptions}
+            isLoading={intakesLoading}
+            placeholder="Optional"
+            searchPlaceholder="Search order, intake, vendor, or store..."
+            emptyText="No order intakes found."
+            onChange={selectIntake}
           />
-          <AdminReturnInput
-            label="OMS order ID"
+          <SearchableOptionPicker
+            label="OMS order"
             value={form.omsOrderId}
-            placeholder="Optional"
             disabled={isSaving}
-            onChange={(value) => onChange({ omsOrderId: value })}
+            clearable
+            clearLabel="No OMS order"
+            options={omsOrderOptions}
+            isLoading={intakesLoading}
+            placeholder="Optional"
+            searchPlaceholder="Search OMS order, intake, or marketplace order..."
+            emptyText="No OMS orders found."
+            onChange={selectOmsOrder}
           />
           <AdminReturnInput
             label="Return window days"
@@ -5310,11 +6202,15 @@ function ReturnCreatePanel({
                 {form.items.map((item, index) => (
                   <TableRow key={index}>
                     <TableCell>
-                      <Input
-                        value={item.productVariantId}
-                        placeholder="Optional"
+                      <ProductVariantSkuPicker
+                        clearable
                         disabled={isSaving}
-                        onChange={(event) => onItemChange(index, { productVariantId: event.target.value })}
+                        isLoading={variantsLoading}
+                        label=""
+                        placeholder="Optional SKU"
+                        variants={variants}
+                        value={item.productVariantId}
+                        onChange={(value) => onItemChange(index, { productVariantId: value })}
                       />
                     </TableCell>
                     <TableCell>
@@ -5800,28 +6696,24 @@ function ReturnOpsTable({
 
 function StoreConnectionsTable({
   connections,
+  disablingConnectionId,
   isLoading,
-  loadingListingConfigId,
-  onEditListingConfig,
+  onDisableStoreConnection,
+  onOpenWarehouseConfig,
   onRepairShopifyWebhooks,
-  onSaveWarehouseConfig,
-  onWarehouseInputChange,
   repairingWebhookConnectionId,
-  savingConnectionId,
+  savingWarehouseConnectionId,
   total,
-  warehouseInputs,
 }: {
   connections: DropshipAdminStoreConnectionListItem[];
+  disablingConnectionId: number | null;
   isLoading: boolean;
-  loadingListingConfigId: number | null;
-  onEditListingConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
+  onDisableStoreConnection: (connection: DropshipAdminStoreConnectionListItem) => void;
+  onOpenWarehouseConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
   onRepairShopifyWebhooks: (connection: DropshipAdminStoreConnectionListItem) => void;
-  onSaveWarehouseConfig: (connection: DropshipAdminStoreConnectionListItem) => void;
-  onWarehouseInputChange: (storeConnectionId: number, value: string) => void;
   repairingWebhookConnectionId: number | null;
-  savingConnectionId: number | null;
+  savingWarehouseConnectionId: number | null;
   total: number;
-  warehouseInputs: Record<number, string>;
 }) {
   if (isLoading) {
     return (
@@ -5854,129 +6746,102 @@ function StoreConnectionsTable({
         <TableHeader>
           <TableRow>
             <TableHead>Store</TableHead>
-            <TableHead>Vendor</TableHead>
+            <TableHead>Owner</TableHead>
+            <TableHead>Subscription</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Tokens</TableHead>
-            <TableHead>Sync</TableHead>
-            <TableHead>Setup checks</TableHead>
-            <TableHead className="w-[230px]">Listing config</TableHead>
-            <TableHead className="w-[260px]">Default warehouse</TableHead>
-            <TableHead className="w-[190px]">Actions</TableHead>
+            <TableHead>Marketplace auth</TableHead>
+            <TableHead className="w-[190px]">Warehouse</TableHead>
+            <TableHead>Listing</TableHead>
+            <TableHead>Setup status</TableHead>
+            <TableHead className="w-[210px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {connections.map((connection) => {
+            const disabled = storeConnectionIsDisabled(connection);
             const canRepairShopifyWebhooks = connection.platform === "shopify" && connection.status === "connected";
+            const ownerDetail = storeConnectionOwnerDetail(connection);
             return (
               <TableRow key={connection.storeConnectionId}>
                 <TableCell>
-                  <div className="font-medium">
-                    {connection.externalDisplayName || connection.shopDomain || formatStatus(connection.platform)}
+                  <div className="flex flex-col gap-1">
+                    <div className="font-medium">{storeConnectionDisplayName(connection)}</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className="border-zinc-200 bg-zinc-50 text-zinc-700">
+                        {formatStatus(connection.platform)}
+                      </Badge>
+                      {connection.shopDomain && (
+                        <span className="max-w-[220px] truncate text-xs text-muted-foreground">{connection.shopDomain}</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    {formatStatus(connection.platform)} connection {connection.storeConnectionId}
-                  </div>
-                  {connection.externalAccountId && (
-                    <div className="max-w-[220px] truncate text-xs text-muted-foreground">{connection.externalAccountId}</div>
-                  )}
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`}</div>
-                  <div className="text-xs text-muted-foreground">{connection.vendor.memberId}</div>
+                  <div className="font-medium">{storeConnectionOwnerLabel(connection)}</div>
+                  {ownerDetail && <div className="text-xs text-muted-foreground">{ownerDetail}</div>}
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className={subscriptionStatusTone(connection.vendor.entitlementStatus)}>
+                    {subscriptionStatusLabel(connection.vendor.entitlementStatus)}
+                  </Badge>
                 </TableCell>
                 <TableCell>
                   <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
                     {formatStatus(connection.status)}
                   </Badge>
-                  <div className="mt-1 text-xs text-muted-foreground">Setup {formatStatus(connection.setupStatus)}</div>
-                  {connection.disconnectReason && (
-                    <div className="mt-1 max-w-[200px] truncate text-xs text-muted-foreground">{connection.disconnectReason}</div>
-                  )}
                 </TableCell>
                 <TableCell>
-                  <div className="flex flex-wrap gap-1">
-                    <Badge variant="outline" className={connection.hasAccessToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"}>
-                      Access
-                    </Badge>
-                    <Badge variant="outline" className={connection.hasRefreshToken ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-zinc-200 bg-zinc-50 text-zinc-600"}>
-                      Refresh
-                    </Badge>
-                  </div>
-                  <div className="mt-1 text-xs text-muted-foreground">Expires {formatDateTime(connection.tokenExpiresAt)}</div>
+                  <StoreConnectionStatusPill item={buildStoreConnectionAuthJourney(connection)} />
                 </TableCell>
                 <TableCell>
-                  <div className="text-sm">Orders {formatDateTime(connection.lastOrderSyncAt)}</div>
-                  <div className="text-xs text-muted-foreground">Inventory {formatDateTime(connection.lastInventorySyncAt)}</div>
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline" className={connection.setupCheckSummary.errorCount > 0
-                    ? "border-rose-200 bg-rose-50 text-rose-800"
-                    : connection.setupCheckSummary.warningCount > 0
-                      ? "border-amber-200 bg-amber-50 text-amber-900"
-                      : "border-zinc-200 bg-zinc-50 text-zinc-700"}
-                  >
-                    {connection.setupCheckSummary.openCount} open
-                  </Badge>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {connection.setupCheckSummary.errorCount} error / {connection.setupCheckSummary.warningCount} warning
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline" className={listingConfigSummaryTone(connection)}>
-                    {listingConfigSummaryLabel(connection)}
-                  </Badge>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {connection.listingConfig.listingMode ? formatStatus(connection.listingConfig.listingMode) : "No mode"}
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mt-2 h-9 gap-2"
-                    disabled={loadingListingConfigId !== null}
-                    onClick={() => onEditListingConfig(connection)}
-                  >
-                    <FileSearch className={loadingListingConfigId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                    {loadingListingConfigId === connection.storeConnectionId ? "Loading" : "Edit"}
-                  </Button>
-                </TableCell>
-                <TableCell>
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <Input
-                      value={warehouseInputs[connection.storeConnectionId] ?? ""}
-                      onChange={(event) => onWarehouseInputChange(connection.storeConnectionId, event.target.value)}
-                      placeholder="Warehouse ID"
-                      className="h-9"
-                    />
+                  <div className="space-y-2">
+                    <StoreConnectionStatusPill item={buildStoreConnectionWarehouseJourney(connection)} />
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-9 gap-2"
-                      disabled={savingConnectionId !== null}
-                      onClick={() => onSaveWarehouseConfig(connection)}
+                      className="h-8 w-full gap-2"
+                      disabled={disabled || savingWarehouseConnectionId !== null}
+                      onClick={() => onOpenWarehouseConfig(connection)}
                     >
-                      <Save className="h-4 w-4" />
-                      {savingConnectionId === connection.storeConnectionId ? "Saving" : "Save"}
+                      <Truck className={savingWarehouseConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      {connection.orderProcessingConfig.defaultWarehouseId === null ? "Assign" : "Change"}
                     </Button>
                   </div>
                 </TableCell>
                 <TableCell>
-                  {canRepairShopifyWebhooks ? (
+                  <StoreConnectionStatusPill item={buildStoreConnectionListingJourney(connection)} />
+                </TableCell>
+                <TableCell>
+                  <StoreConnectionStatusPill item={buildStoreConnectionSetupJourney(connection)} />
+                </TableCell>
+                <TableCell>
+                  <div className="flex flex-col gap-2">
+                    {canRepairShopifyWebhooks && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-9 gap-2"
+                        disabled={repairingWebhookConnectionId !== null}
+                        onClick={() => onRepairShopifyWebhooks(connection)}
+                      >
+                        <RefreshCw className={repairingWebhookConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                        {repairingWebhookConnectionId === connection.storeConnectionId ? "Repairing" : "Repair webhooks"}
+                      </Button>
+                    )}
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-9 gap-2"
-                      disabled={repairingWebhookConnectionId !== null}
-                      onClick={() => onRepairShopifyWebhooks(connection)}
+                      className="h-9 gap-2 border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                      disabled={disabled || disablingConnectionId !== null}
+                      onClick={() => onDisableStoreConnection(connection)}
                     >
-                      <RefreshCw className={repairingWebhookConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                      {repairingWebhookConnectionId === connection.storeConnectionId ? "Repairing" : "Repair webhooks"}
+                      <ShieldAlert className={disablingConnectionId === connection.storeConnectionId ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
+                      {disabled ? "Disabled" : disablingConnectionId === connection.storeConnectionId ? "Disabling" : "Disable store"}
                     </Button>
-                  ) : (
-                    <span className="text-sm text-muted-foreground">Unavailable</span>
-                  )}
+                  </div>
                 </TableCell>
               </TableRow>
             );
@@ -5984,6 +6849,15 @@ function StoreConnectionsTable({
         </TableBody>
       </Table>
     </section>
+  );
+}
+
+function StoreConnectionStatusPill({ item }: { item: StoreConnectionJourneyItem }) {
+  return (
+    <div className={`rounded-md border px-3 py-2 ${storeConnectionJourneyTone(item.state)}`}>
+      <div className="text-sm font-semibold">{item.value}</div>
+      {item.detail && <div className="text-xs opacity-80">{item.detail}</div>}
+    </div>
   );
 }
 
@@ -6465,48 +7339,289 @@ function compactJsonPayload(payload: Record<string, unknown>): string {
 }
 
 function CatalogRuleTargetInput({
+  categoryOptions,
+  isLoadingCategories,
+  isLoadingProductLines,
+  isLoadingProducts,
+  isLoadingVariants,
+  productLineOptions,
+  productOptions,
   ruleForm,
   setRuleForm,
+  variantOptions,
 }: {
+  categoryOptions: DropshipProductCategoryOption[];
+  isLoadingCategories: boolean;
+  isLoadingProductLines: boolean;
+  isLoadingProducts: boolean;
+  isLoadingVariants: boolean;
+  productLineOptions: DropshipProductLineOption[];
+  productOptions: DropshipProductOption[];
   ruleForm: CatalogRuleFormState;
   setRuleForm: Dispatch<SetStateAction<CatalogRuleFormState>>;
+  variantOptions: DropshipProductVariantOption[];
 }) {
-  const config = catalogRuleTargetInputConfig(ruleForm.scopeType);
-  if (!config) return null;
+  if (ruleForm.scopeType === "catalog") return null;
+
+  if (ruleForm.scopeType === "product_line") {
+    return (
+      <SearchableOptionPicker
+        label="Product line"
+        value={ruleForm.productLineId}
+        onChange={(value) => setRuleForm((current) => ({ ...current, productLineId: value }))}
+        options={productLineOptions.map((line) => ({
+          value: String(line.id),
+          label: line.name,
+          detail: typeof line.productCount === "number" ? `${line.productCount} product${line.productCount === 1 ? "" : "s"}` : undefined,
+          search: `${line.name} ${line.id}`,
+        }))}
+        isLoading={isLoadingProductLines}
+        placeholder="Select product line"
+        searchPlaceholder="Search product lines..."
+        emptyText="No product lines found."
+      />
+    );
+  }
+
+  if (ruleForm.scopeType === "product") {
+    return (
+      <SearchableOptionPicker
+        label="Product"
+        value={ruleForm.productId}
+        onChange={(value) => setRuleForm((current) => ({ ...current, productId: value }))}
+        options={productOptions.map((product) => {
+          const sku = product.sku ?? product.baseSku ?? "";
+          return {
+            value: String(product.id),
+            label: product.name,
+            detail: sku || undefined,
+            search: `${product.name} ${sku} ${product.id}`,
+          };
+        })}
+        isLoading={isLoadingProducts}
+        placeholder="Select product"
+        searchPlaceholder="Search product or SKU..."
+        emptyText="No products found."
+      />
+    );
+  }
+
+  if (ruleForm.scopeType === "variant") {
+    return (
+      <ProductVariantSkuPicker
+        isLoading={isLoadingVariants}
+        label="SKU / variant"
+        onChange={(value) => setRuleForm((current) => ({ ...current, productVariantId: value }))}
+        value={ruleForm.productVariantId}
+        variants={variantOptions}
+      />
+    );
+  }
 
   return (
-    <div>
-      <label className="text-sm font-medium" htmlFor={`dropship-catalog-rule-${config.key}`}>
-        {config.label}
-      </label>
-      <Input
-        id={`dropship-catalog-rule-${config.key}`}
-        className="mt-2"
-        value={ruleForm[config.key]}
-        onChange={(event) => setRuleForm((current) => ({ ...current, [config.key]: event.target.value }))}
-        placeholder={config.placeholder}
-      />
-    </div>
+    <SearchableOptionPicker
+      label="Category"
+      value={ruleForm.category}
+      onChange={(value) => setRuleForm((current) => ({ ...current, category: value }))}
+      options={categoryOptions.map((category) => ({
+        value: category.name,
+        label: category.name,
+        detail: typeof category.productCount === "number" ? `${category.productCount} product${category.productCount === 1 ? "" : "s"}` : undefined,
+        search: `${category.name} ${category.id}`,
+      }))}
+      isLoading={isLoadingCategories}
+      placeholder="Select category"
+      searchPlaceholder="Search categories..."
+      emptyText="No categories found."
+    />
+  );
+}
+
+function CatalogRuleDialog({
+  categoryOptions,
+  isLoadingCategories,
+  isLoadingProductLines,
+  isLoadingProducts,
+  isLoadingVariants,
+  onOpenChange,
+  onSubmit,
+  open,
+  productLineOptions,
+  productOptions,
+  ruleForm,
+  setRuleForm,
+  variantOptions,
+}: {
+  categoryOptions: DropshipProductCategoryOption[];
+  isLoadingCategories: boolean;
+  isLoadingProductLines: boolean;
+  isLoadingProducts: boolean;
+  isLoadingVariants: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: () => void;
+  open: boolean;
+  productLineOptions: DropshipProductLineOption[];
+  productOptions: DropshipProductOption[];
+  ruleForm: CatalogRuleFormState;
+  setRuleForm: Dispatch<SetStateAction<CatalogRuleFormState>>;
+  variantOptions: DropshipProductVariantOption[];
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmit();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Add exposure rule</DialogTitle>
+            <DialogDescription>
+              Add a broad rule or an exception. Place exceptions lower in the run order when they should override broader rules.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <label className="text-sm font-medium">Scope</label>
+              <Select
+                value={ruleForm.scopeType}
+                onValueChange={(value) => setRuleForm((current) => ({
+                  ...current,
+                  scopeType: value as CatalogExposureScopeFilter,
+                }))}
+              >
+                <SelectTrigger className="mt-2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="catalog">Entire catalog</SelectItem>
+                  <SelectItem value="product_line">Product line</SelectItem>
+                  <SelectItem value="category">Category</SelectItem>
+                  <SelectItem value="product">Product</SelectItem>
+                  <SelectItem value="variant">Variant</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-sm font-medium">Action</label>
+              <Select
+                value={ruleForm.action}
+                onValueChange={(value) => setRuleForm((current) => ({
+                  ...current,
+                  action: value as CatalogExposureActionFilter,
+                }))}
+              >
+                <SelectTrigger className="mt-2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="include">Expose</SelectItem>
+                  <SelectItem value="exclude">Hide</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <CatalogRuleTargetInput
+              categoryOptions={categoryOptions}
+              isLoadingCategories={isLoadingCategories}
+              isLoadingProductLines={isLoadingProductLines}
+              isLoadingProducts={isLoadingProducts}
+              isLoadingVariants={isLoadingVariants}
+              productLineOptions={productLineOptions}
+              productOptions={productOptions}
+              ruleForm={ruleForm}
+              setRuleForm={setRuleForm}
+              variantOptions={variantOptions}
+            />
+
+            <div className="md:col-span-2">
+              <label className="text-sm font-medium" htmlFor="dropship-catalog-rule-notes">Notes</label>
+              <Input
+                id="dropship-catalog-rule-notes"
+                className="mt-2"
+                value={ruleForm.notes}
+                onChange={(event) => setRuleForm((current) => ({ ...current, notes: event.target.value }))}
+                placeholder="Optional admin note"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]">
+              <PlusCircle className="h-4 w-4" />
+              Add exposure rule
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function CatalogDraftRulesTable({
+  hasUnsavedChanges,
   isLoading,
+  isSaving,
+  onClearRules,
+  onMoveRule,
   onRemoveRule,
+  onSaveRules,
   rules,
+  targetLabels,
 }: {
+  hasUnsavedChanges: boolean;
   isLoading: boolean;
+  isSaving: boolean;
+  onClearRules: () => void;
+  onMoveRule: (rule: DropshipAdminCatalogExposureRuleInput, direction: -1 | 1) => void;
   onRemoveRule: (rule: DropshipAdminCatalogExposureRuleInput) => void;
+  onSaveRules: () => void;
   rules: DropshipAdminCatalogExposureRuleInput[];
+  targetLabels: CatalogRuleTargetLabels;
 }) {
   return (
     <section className="rounded-md border bg-card p-4">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Draft rule set</h2>
-          <p className="text-sm text-muted-foreground">Saving replaces the active admin exposure rule set.</p>
+          <h2 className="text-lg font-semibold">Exposure rule set</h2>
+          <p className="text-sm text-muted-foreground">
+            {hasUnsavedChanges
+              ? "Unpublished changes are staged. Publishing replaces the active admin exposure rules."
+              : "Published rules are loaded. Editing this set creates unpublished changes."}
+          </p>
         </div>
-        <Badge variant="outline">{rules.length} draft</Badge>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Badge variant="outline">
+            {hasUnsavedChanges ? `${rules.length} unsaved` : "Published"}
+          </Badge>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-2"
+            disabled={isSaving || !hasUnsavedChanges}
+            onClick={onClearRules}
+          >
+            <MinusCircle className="h-4 w-4" />
+            Clear changes
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            className="h-8 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+            disabled={isSaving || !hasUnsavedChanges || rules.length === 0}
+            onClick={onSaveRules}
+          >
+            <Save className="h-4 w-4" />
+            {isSaving ? "Publishing" : "Publish"}
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -6519,8 +7634,10 @@ function CatalogDraftRulesTable({
         <Empty className="mt-4 rounded-md border border-dashed p-8">
           <EmptyMedia variant="icon"><Boxes /></EmptyMedia>
           <EmptyHeader>
-            <EmptyTitle>No draft rules</EmptyTitle>
-            <EmptyDescription>No catalog is exposed until at least one include rule is saved.</EmptyDescription>
+            <EmptyTitle>No exposure rules</EmptyTitle>
+            <EmptyDescription>
+              Add an exposure rule before publishing. No catalog is visible without at least one expose rule.
+            </EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (
@@ -6528,38 +7645,62 @@ function CatalogDraftRulesTable({
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-[96px]">Run order</TableHead>
                 <TableHead>Rule</TableHead>
                 <TableHead>Target</TableHead>
-                <TableHead>Priority</TableHead>
                 <TableHead>Notes</TableHead>
-                <TableHead className="w-[92px]">Action</TableHead>
+                <TableHead className="w-[168px]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rules.map((rule) => (
+              {rules.map((rule, index) => (
                 <TableRow key={catalogExposureRuleKey(rule)}>
+                  <TableCell className="font-mono text-sm">#{index + 1}</TableCell>
                   <TableCell>
                     <Badge variant="outline" className={catalogExposureActionTone(rule.action)}>
-                      {formatStatus(rule.action)}
+                      {catalogExposureActionLabel(rule.action)}
                     </Badge>
                   </TableCell>
                   <TableCell>
                     <div className="font-medium">{formatStatus(rule.scopeType)}</div>
-                    <div className="text-xs text-muted-foreground">{catalogRuleTargetLabel(rule)}</div>
+                    <div className="text-xs text-muted-foreground">{catalogRuleTargetLabel(rule, targetLabels)}</div>
                   </TableCell>
-                  <TableCell className="font-mono">{rule.priority}</TableCell>
                   <TableCell className="max-w-[260px] truncate text-sm text-muted-foreground">{rule.notes || "None"}</TableCell>
                   <TableCell>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-8 gap-2"
-                      onClick={() => onRemoveRule(rule)}
-                    >
-                      <MinusCircle className="h-4 w-4" />
-                      Remove
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8"
+                        disabled={index === 0}
+                        title="Move up"
+                        onClick={() => onMoveRule(rule, -1)}
+                      >
+                        <ArrowUp className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8"
+                        disabled={index === rules.length - 1}
+                        title="Move down"
+                        onClick={() => onMoveRule(rule, 1)}
+                      >
+                        <ArrowDown className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 gap-2"
+                        onClick={() => onRemoveRule(rule)}
+                      >
+                        <MinusCircle className="h-4 w-4" />
+                        Remove
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -6573,19 +7714,25 @@ function CatalogDraftRulesTable({
 
 function CatalogPreviewTable({
   isLoading,
+  limit,
   onAddPreviewRule,
+  onPageChange,
+  page,
   rows,
   total,
+  totalPages,
 }: {
   isLoading: boolean;
+  limit: number;
   onAddPreviewRule: (
     row: DropshipAdminCatalogExposurePreviewRow,
-    scopeType: DropshipCatalogExposurePreviewRuleScope,
     action: CatalogExposureActionFilter,
-    productLineId?: number,
   ) => void;
+  onPageChange: (page: number) => void;
+  page: number;
   rows: DropshipAdminCatalogExposurePreviewRow[];
   total: number;
+  totalPages: number;
 }) {
   if (isLoading) {
     return (
@@ -6609,10 +7756,15 @@ function CatalogPreviewTable({
     );
   }
 
+  const firstRow = total === 0 ? 0 : ((page - 1) * limit) + 1;
+  const lastRow = Math.min(total, firstRow + rows.length - 1);
+
   return (
     <div className="mt-4 rounded-md border">
       <div className="flex items-center justify-between border-b px-3 py-2 text-sm text-muted-foreground">
-        <span>{total} row{total === 1 ? "" : "s"}</span>
+        <span>
+          Showing {firstRow}-{lastRow} of {total} row{total === 1 ? "" : "s"}
+        </span>
       </div>
       <Table>
         <TableHeader>
@@ -6620,8 +7772,8 @@ function CatalogPreviewTable({
             <TableHead>Catalog row</TableHead>
             <TableHead>Category</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Decision</TableHead>
-            <TableHead className="w-[320px]">Quick draft rules</TableHead>
+            <TableHead>Vendor visibility</TableHead>
+            <TableHead className="w-[180px] text-right">Exposure change</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -6652,9 +7804,9 @@ function CatalogPreviewTable({
                   ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                   : "border-zinc-200 bg-zinc-50 text-zinc-700"}
                 >
-                  {row.decision.exposed ? "Exposed" : "Blocked"}
+                  {row.decision.exposed ? "Visible" : "Hidden"}
                 </Badge>
-                <div className="mt-1 text-xs text-muted-foreground">{formatStatus(row.decision.reason)}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{catalogVisibilityReasonLabel(row.decision.reason)}</div>
               </TableCell>
               <TableCell>
                 <CatalogPreviewQuickRules row={row} onAddPreviewRule={onAddPreviewRule} />
@@ -6663,6 +7815,33 @@ function CatalogPreviewTable({
           ))}
         </TableBody>
       </Table>
+      <div className="flex flex-col gap-3 border-t px-3 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+        <span>Page {page} of {totalPages}</span>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-2"
+            disabled={page <= 1}
+            onClick={() => onPageChange(Math.max(1, page - 1))}
+          >
+            <ChevronLeft className="h-4 w-4" />
+            Previous
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-2"
+            disabled={page >= totalPages}
+            onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+          >
+            Next
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -6673,92 +7852,25 @@ function CatalogPreviewQuickRules({
 }: {
   onAddPreviewRule: (
     row: DropshipAdminCatalogExposurePreviewRow,
-    scopeType: DropshipCatalogExposurePreviewRuleScope,
     action: CatalogExposureActionFilter,
-    productLineId?: number,
   ) => void;
   row: DropshipAdminCatalogExposurePreviewRow;
 }) {
-  const productLineTargets = previewProductLineTargets(row);
+  const action: CatalogExposureActionFilter = row.decision.exposed ? "exclude" : "include";
+  const label = row.decision.exposed ? "Hide" : "Expose";
+  const Icon = row.decision.exposed ? MinusCircle : PlusCircle;
   return (
-    <div className="space-y-2">
-      <CatalogPreviewQuickRuleRow
-        label="Variant"
-        onInclude={() => onAddPreviewRule(row, "variant", "include")}
-        onExclude={() => onAddPreviewRule(row, "variant", "exclude")}
-      />
-      <CatalogPreviewQuickRuleRow
-        label="Product"
-        onInclude={() => onAddPreviewRule(row, "product", "include")}
-        onExclude={() => onAddPreviewRule(row, "product", "exclude")}
-      />
-      {row.category && (
-        <CatalogPreviewQuickRuleRow
-          label={`Category: ${formatStatus(row.category)}`}
-          onInclude={() => onAddPreviewRule(row, "category", "include")}
-          onExclude={() => onAddPreviewRule(row, "category", "exclude")}
-        />
-      )}
-      {productLineTargets.map((target) => (
-        <CatalogPreviewQuickRuleRow
-          key={target.productLineId}
-          label={`Line: ${target.label}`}
-          onInclude={() => onAddPreviewRule(row, "product_line", "include", target.productLineId)}
-          onExclude={() => onAddPreviewRule(row, "product_line", "exclude", target.productLineId)}
-        />
-      ))}
-    </div>
-  );
-}
-
-function CatalogPreviewQuickRuleRow({
-  label,
-  onExclude,
-  onInclude,
-}: {
-  label: string;
-  onExclude: () => void;
-  onInclude: () => void;
-}) {
-  return (
-    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center">
-      <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">{label}</span>
       <Button
         type="button"
         variant="outline"
         size="sm"
-        className="h-8 gap-2"
-        onClick={onInclude}
+        className="ml-auto h-8 gap-2"
+        onClick={() => onAddPreviewRule(row, action)}
       >
-        <PlusCircle className="h-4 w-4" />
-        Include
+        <Icon className="h-4 w-4" />
+        {label}
       </Button>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="h-8 gap-2"
-        onClick={onExclude}
-      >
-        <MinusCircle className="h-4 w-4" />
-        Exclude
-      </Button>
-    </div>
   );
-}
-
-function previewProductLineTargets(row: DropshipAdminCatalogExposurePreviewRow): Array<{
-  productLineId: number;
-  label: string;
-}> {
-  return row.productLineIds
-    .map((productLineId, index) => ({
-      productLineId,
-      label: row.productLineNames[index] || `Product line ${productLineId}`,
-    }))
-    .filter((target, index, targets) => Number.isInteger(target.productLineId)
-      && target.productLineId > 0
-      && targets.findIndex((candidate) => candidate.productLineId === target.productLineId) === index);
 }
 
 function CatalogMetric({
@@ -6781,37 +7893,68 @@ function CatalogMetric({
   );
 }
 
-function catalogRuleTargetInputConfig(scopeType: CatalogExposureScopeFilter): {
-  key: "productLineId" | "productId" | "productVariantId" | "category";
-  label: string;
-  placeholder: string;
-} | null {
-  if (scopeType === "product_line") {
-    return { key: "productLineId", label: "Product line ID", placeholder: "123" };
+function catalogRuleTargetLabel(
+  rule: DropshipAdminCatalogExposureRuleInput,
+  labels: CatalogRuleTargetLabels,
+): string {
+  if (rule.scopeType === "catalog") return "Entire active catalog";
+  if (rule.scopeType === "product_line") {
+    return targetNameLabel("Product line", rule.productLineId, labels.productLineNamesById);
   }
-  if (scopeType === "product") {
-    return { key: "productId", label: "Product ID", placeholder: "123" };
+  if (rule.scopeType === "product") {
+    return targetNameLabel("Product", rule.productId, labels.productLabelsById);
   }
-  if (scopeType === "variant") {
-    return { key: "productVariantId", label: "Variant ID", placeholder: "123" };
+  if (rule.scopeType === "variant") {
+    return targetNameLabel("Variant", rule.productVariantId, labels.variantLabelsById);
   }
-  if (scopeType === "category") {
-    return { key: "category", label: "Category", placeholder: "Sealed wax" };
+  if (rule.scopeType === "category") {
+    const category = rule.category?.trim();
+    if (!category) return "Category not selected";
+    return labels.categoryLabelsByKey.get(normalizeCatalogRuleLabelKey(category)) ?? category;
   }
-  return null;
+  return "Unknown target";
 }
 
-function catalogRuleTargetLabel(rule: DropshipAdminCatalogExposureRuleInput): string {
-  if (rule.scopeType === "catalog") return "Entire active catalog";
-  if (rule.scopeType === "product_line") return `Product line ${rule.productLineId}`;
-  if (rule.scopeType === "product") return `Product ${rule.productId}`;
-  if (rule.scopeType === "variant") return `Variant ${rule.productVariantId}`;
-  return rule.category || "Category";
+function targetNameLabel(prefix: string, id: number | null | undefined, namesById: Map<number, string>): string {
+  if (typeof id !== "number") return `${prefix} not selected`;
+  const name = namesById.get(id);
+  return name ? `${prefix}: ${name}` : `${prefix} #${id}`;
+}
+
+function normalizeCatalogRuleLabelKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeCatalogRuleOrder(
+  rules: DropshipAdminCatalogExposureRuleInput[],
+): DropshipAdminCatalogExposureRuleInput[] {
+  return rules.map((rule, index) => ({
+    ...rule,
+    priority: index,
+  }));
+}
+
+function catalogExposureRulesStateKey(rules: DropshipAdminCatalogExposureRuleInput[]): string {
+  return rules
+    .map((rule, index) => `${index}:${catalogExposureRuleKey(rule)}:${rule.priority}:${rule.notes ?? ""}`)
+    .join("|");
+}
+
+function catalogExposureActionLabel(action: CatalogExposureActionFilter): string {
+  return action === "include" ? "Expose" : "Hide";
 }
 
 function catalogExposureActionTone(action: CatalogExposureActionFilter): string {
   if (action === "include") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   return "border-rose-200 bg-rose-50 text-rose-800";
+}
+
+function catalogVisibilityReasonLabel(reason: string): string {
+  if (reason === "exposed") return "Allowed by exposure rule";
+  if (reason === "excluded_by_admin_rule") return "Hidden by exposure rule";
+  if (reason === "inactive_product_or_variant") return "Inactive product or variant";
+  if (reason === "missing_include_rule") return "No exposure rule";
+  return formatStatus(reason);
 }
 
 function orderOpsStatusLabel(status: OrderOpsStatusFilter): string {
@@ -7085,40 +8228,300 @@ function returnOpsStatusTone(status: DropshipRmaStatus): string {
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
 }
 
-function storeConnectionNeedsAttention(connection: DropshipAdminStoreConnectionListItem): boolean {
-  return connection.status !== "connected"
-    || connection.setupStatus !== "ready"
-    || connection.setupCheckSummary.errorCount > 0
-    || connection.setupCheckSummary.warningCount > 0
-    || !connection.hasAccessToken
-    || !connection.listingConfig.isConfigured
-    || !connection.listingConfig.isActive;
+type StoreConnectionJourneyState = "ready" | "warning" | "blocked" | "disabled";
+
+interface StoreConnectionJourneyItem {
+  key: string;
+  label: string;
+  value: string;
+  detail?: string;
+  state: StoreConnectionJourneyState;
 }
 
-function listingConfigResponseToForm(response: DropshipStoreListingConfigResponse): ListingConfigFormState {
+function buildStoreConnectionSummary(connections: DropshipAdminStoreConnectionListItem[]): {
+  ready: number;
+  setupIncomplete: number;
+  authAttention: number;
+  disabled: number;
+} {
   return {
-    storeConnectionId: response.storeConnection.storeConnectionId,
-    listingMode: response.config.listingMode,
-    inventoryMode: response.config.inventoryMode,
-    priceMode: response.config.priceMode,
-    marketplaceConfigJson: JSON.stringify(response.config.marketplaceConfig ?? {}, null, 2),
-    requiredConfigKeys: response.config.requiredConfigKeys.join(", "),
-    requiredProductFields: response.config.requiredProductFields.join(", "),
-    isActive: response.config.isActive,
+    ready: connections.filter((connection) => connection.launchReady).length,
+    setupIncomplete: connections.filter((connection) => !connection.launchReady && !storeConnectionIsDisabled(connection)).length,
+    authAttention: connections.filter((connection) => !storeConnectionIsDisabled(connection) && storeConnectionNeedsAuthAttention(connection)).length,
+    disabled: connections.filter((connection) => storeConnectionIsDisabled(connection)).length,
   };
 }
 
-function listingConfigSummaryLabel(connection: DropshipAdminStoreConnectionListItem): string {
-  if (!connection.listingConfig.isConfigured) return "Missing";
-  if (!connection.listingConfig.isActive) return "Inactive";
-  return "Active";
+function storeConnectionIsDisabled(connection: DropshipAdminStoreConnectionListItem): boolean {
+  return connection.status === "grace_period"
+    || connection.status === "paused"
+    || connection.status === "disconnected";
 }
 
-function listingConfigSummaryTone(connection: DropshipAdminStoreConnectionListItem): string {
-  if (!connection.listingConfig.isConfigured || !connection.listingConfig.isActive) {
+function storeConnectionNeedsAuthAttention(connection: DropshipAdminStoreConnectionListItem): boolean {
+  return connection.status === "needs_reauth"
+    || connection.status === "refresh_failed"
+    || !connection.hasAccessToken
+    || (connection.platform === "ebay" && !connection.hasRefreshToken);
+}
+
+function buildStoreConnectionAuthJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  if (storeConnectionIsDisabled(connection)) {
+    return { key: "auth", label: "Auth", value: "Disabled", detail: "Authorization removed", state: "disabled" };
+  }
+  if (connection.status === "needs_reauth" || connection.status === "refresh_failed") {
+    return { key: "auth", label: "Auth", value: "Reconnect", detail: formatStatus(connection.status), state: "blocked" };
+  }
+  if (!connection.hasAccessToken) {
+    return { key: "auth", label: "Auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
+  }
+  if (connection.platform === "ebay" && !connection.hasRefreshToken) {
+    return { key: "auth", label: "Auth", value: "Missing", detail: "Reconnect required", state: "blocked" };
+  }
+  return { key: "auth", label: "Auth", value: "Authorized", state: "ready" };
+}
+
+function buildStoreConnectionSetupJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  if (connection.setupCheckSummary.errorCount > 0) {
+    return {
+      key: "setup",
+      label: "Setup",
+      value: `${connection.setupCheckSummary.errorCount} blocker${connection.setupCheckSummary.errorCount === 1 ? "" : "s"}`,
+      detail: `${connection.setupCheckSummary.openCount} open check${connection.setupCheckSummary.openCount === 1 ? "" : "s"}`,
+      state: "blocked",
+    };
+  }
+  if (connection.setupCheckSummary.warningCount > 0) {
+    return {
+      key: "setup",
+      label: "Setup",
+      value: `${connection.setupCheckSummary.warningCount} warning${connection.setupCheckSummary.warningCount === 1 ? "" : "s"}`,
+      detail: `${connection.setupCheckSummary.openCount} open check${connection.setupCheckSummary.openCount === 1 ? "" : "s"}`,
+      state: "warning",
+    };
+  }
+  if (connection.setupStatus === "ready") {
+    return { key: "setup", label: "Setup", value: "Ready", state: "ready" };
+  }
+  return { key: "setup", label: "Setup", value: formatStatus(connection.setupStatus), state: "warning" };
+}
+
+function buildStoreConnectionWarehouseJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  if (connection.orderProcessingConfig.defaultWarehouseId !== null) {
+    return { key: "warehouse", label: "Warehouse", value: "Set", state: "ready" };
+  }
+  return { key: "warehouse", label: "Warehouse", value: "Missing", detail: "Order routing not assigned", state: "blocked" };
+}
+
+function buildStoreConnectionListingJourney(connection: DropshipAdminStoreConnectionListItem): StoreConnectionJourneyItem {
+  if (!connection.listingConfig.isConfigured) {
+    return { key: "listing", label: "Listing", value: "Missing", detail: "Push policy not configured", state: "blocked" };
+  }
+  if (!connection.listingConfig.isActive) {
+    return { key: "listing", label: "Listing", value: "Inactive", detail: "Pushes disabled", state: "warning" };
+  }
+  return { key: "listing", label: "Listing", value: "Ready", state: "ready" };
+}
+
+function storeConnectionJourneyTone(state: StoreConnectionJourneyState): string {
+  if (state === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-900";
+  if (state === "warning") return "border-amber-200 bg-amber-50 text-amber-950";
+  if (state === "blocked") return "border-rose-200 bg-rose-50 text-rose-900";
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function subscriptionStatusLabel(status: string): string {
+  if (status === "active") return "Active";
+  if (status === "grace") return "Grace";
+  if (status === "suspended") return "Suspended";
+  if (status === "lapsed" || status === "not_entitled") return "Expired";
+  return formatStatus(status);
+}
+
+function subscriptionStatusTone(status: string): string {
+  if (status === "active") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "grace") return "border-amber-200 bg-amber-50 text-amber-900";
+  if (status === "suspended" || status === "lapsed" || status === "not_entitled") {
     return "border-rose-200 bg-rose-50 text-rose-800";
   }
-  return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+function formatWarehouseOption(warehouse: DropshipWarehouseOption): string {
+  const defaultSuffix = warehouse.isDefault === 1 ? " default" : "";
+  return `${warehouse.name} (${warehouse.code}) - ID ${warehouse.id}${defaultSuffix}`;
+}
+
+function buildVendorSelectOptions(items: DropshipDogfoodReadinessItem[]): DropshipSelectOption[] {
+  const vendors = new Map<number, DropshipDogfoodReadinessItem["vendor"]>();
+  for (const item of items) {
+    vendors.set(item.vendor.vendorId, item.vendor);
+  }
+  return Array.from(vendors.values())
+    .sort((first, second) => vendorDisplayName(first).localeCompare(vendorDisplayName(second)))
+    .map((vendor) => ({
+      value: String(vendor.vendorId),
+      label: vendorDisplayName(vendor),
+      detail: [
+        vendor.email,
+        vendor.memberId,
+        formatStatus(vendor.status),
+        formatStatus(vendor.entitlementStatus),
+      ].filter(Boolean).join(" / "),
+      search: [
+        vendor.vendorId,
+        vendor.businessName,
+        vendor.email,
+        vendor.memberId,
+        vendor.status,
+        vendor.entitlementStatus,
+      ].filter(Boolean).join(" "),
+    }));
+}
+
+function vendorDisplayName(vendor: DropshipDogfoodReadinessItem["vendor"] | DropshipAdminOrderOpsVendorSummary): string {
+  return vendor.businessName || vendor.email || `Vendor ${vendor.vendorId}`;
+}
+
+function storeConnectionDisplayName(connection: DropshipAdminStoreConnectionListItem | DropshipAdminOrderOpsStoreSummary): string {
+  return connection.externalDisplayName
+    || connection.shopDomain
+    || `${formatStatus(connection.platform)} store`;
+}
+
+function storeConnectionOwnerLabel(connection: DropshipAdminStoreConnectionListItem): string {
+  return connection.vendor.businessName || connection.vendor.email || `Vendor ${connection.vendor.vendorId}`;
+}
+
+function storeConnectionOwnerDetail(connection: DropshipAdminStoreConnectionListItem): string {
+  if (connection.vendor.businessName && connection.vendor.email) {
+    return connection.vendor.email;
+  }
+  return "";
+}
+
+function storeConnectionSelectOption(connection: DropshipAdminStoreConnectionListItem): DropshipSelectOption {
+  const storeLabel = storeConnectionDisplayName(connection);
+  const vendorLabel = vendorDisplayName(connection.vendor);
+  return {
+    value: String(connection.storeConnectionId),
+    label: storeLabel,
+    detail: [
+      vendorLabel,
+      formatStatus(connection.platform),
+      formatStatus(connection.status),
+      `ID ${connection.storeConnectionId}`,
+    ].join(" / "),
+    search: [
+      connection.storeConnectionId,
+      storeLabel,
+      connection.externalAccountId,
+      connection.shopDomain,
+      connection.platform,
+      connection.status,
+      vendorLabel,
+      connection.vendor.email,
+      connection.vendor.memberId,
+      connection.vendor.vendorId,
+    ].filter(Boolean).join(" "),
+  };
+}
+
+function orderIntakeSelectOption(intake: DropshipAdminOrderOpsIntakeListItem): DropshipSelectOption {
+  const orderLabel = intake.externalOrderNumber || intake.externalOrderId || `Intake ${intake.intakeId}`;
+  const storeLabel = storeConnectionDisplayName(intake.storeConnection);
+  const vendorLabel = vendorDisplayName(intake.vendor);
+  return {
+    value: String(intake.intakeId),
+    label: orderLabel,
+    detail: [
+      `Intake ${intake.intakeId}`,
+      vendorLabel,
+      storeLabel,
+      intake.omsOrderId === null ? "" : `OMS ${intake.omsOrderId}`,
+      formatStatus(intake.status),
+    ].filter(Boolean).join(" / "),
+    search: [
+      intake.intakeId,
+      intake.omsOrderId,
+      intake.externalOrderId,
+      intake.externalOrderNumber,
+      intake.platform,
+      intake.status,
+      vendorLabel,
+      intake.vendor.email,
+      intake.vendor.memberId,
+      storeLabel,
+      intake.storeConnection.storeConnectionId,
+    ].filter(Boolean).join(" "),
+  };
+}
+
+function buildOmsOrderSelectOptions(intakes: DropshipAdminOrderOpsIntakeListItem[]): DropshipSelectOption[] {
+  const options = new Map<number, DropshipSelectOption>();
+  for (const intake of intakes) {
+    if (intake.omsOrderId === null) continue;
+    const intakeOption = orderIntakeSelectOption(intake);
+    options.set(intake.omsOrderId, {
+      value: String(intake.omsOrderId),
+      label: `OMS order ${intake.omsOrderId}`,
+      detail: intakeOption.detail,
+      search: `${intake.omsOrderId} ${intakeOption.search}`,
+    });
+  }
+  return Array.from(options.values()).sort((first, second) => Number(second.value) - Number(first.value));
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const sideLength = Math.max(3, Math.floor((maxLength - 3) / 2));
+  return `${value.slice(0, sideLength)}...${value.slice(-sideLength)}`;
+}
+
+function formatVariantOption(variant: DropshipProductVariantOption): string {
+  return `${variant.sku || `Variant ${variant.id}`} - ${variant.name}`;
+}
+
+function variantOptionSearchValue(variant: DropshipProductVariantOption): string {
+  return `${variant.sku ?? ""} ${variant.name} ${variant.id}`;
+}
+
+function inchesToMillimetersString(value: string, field: string): string {
+  const parsed = parsePositiveDecimal(value, field);
+  return String(Math.max(1, Math.round(parsed * 25.4)));
+}
+
+function poundsToGramsString(value: string, field: string): string {
+  const parsed = parseNonNegativeDecimal(value, field);
+  return String(Math.round(parsed * 453.59237));
+}
+
+function parsePositiveDecimal(value: string, field: string): number {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${field} must be a positive number.`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeDecimal(value: string, field: string): number {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${field} must be zero or greater.`);
+  }
+  return parsed;
+}
+
+function formatMmAsInches(value: number): string {
+  return formatMeasurement(value / 25.4);
+}
+
+function formatGramsAsPounds(value: number): string {
+  return formatMeasurement(value / 453.59237);
+}
+
+function formatMeasurement(value: number): string {
+  return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
 function storeConnectionStatusTone(status: DropshipStoreConnectionLifecycleStatus): string {

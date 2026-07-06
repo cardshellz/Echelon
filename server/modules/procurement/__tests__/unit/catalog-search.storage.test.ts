@@ -106,11 +106,13 @@ describe("Spec A follow-up \u2014 searchVendorCatalog", () => {
       ],
     });
     // Call #3: candidate outOfCatalog rows \u2014 note pid=1/vid=11 is still in the
-    // catalog exclusion set and must be filtered. pid=5 is blocked at product
-    // level. pid=7 is a fresh candidate.
+    // catalog exclusion set and must be filtered. Product-level purchasing also
+    // filters pid=2 even when the candidate variant differs. pid=5 is blocked
+    // at product level. pid=7 is a fresh candidate.
     dbMock.execute.mockResolvedValueOnce({
       rows: [
         { product_id: 1, product_variant_id: 11, sku: "SHLZ-TOP-1", product_name: "Shellz Top Box", variant_name: "1oz", rank: 0 },
+        { product_id: 2, product_variant_id: 22, sku: "SHLZ-TOP-2", product_name: "Shellz Top Box", variant_name: "different pack", rank: 0 },
         { product_id: 5, product_variant_id: 51, sku: "SHLZ-TOP-5", product_name: "Other", variant_name: null, rank: 1 },
         { product_id: 7, product_variant_id: 71, sku: "SHLZ-TOP-7", product_name: "Shellz Top 7", variant_name: null, rank: 1 },
       ],

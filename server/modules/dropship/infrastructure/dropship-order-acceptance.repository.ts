@@ -263,13 +263,17 @@ async function acceptOrderWithClient(
     omsOrderId,
     plan,
   });
-  await reserveInventoryWithClient(client, {
+  // P0.1a — SINGLE-WRITER RESERVATION: acceptance no longer writes
+  // reserved_qty. The old raw-SQL reserve here double-reserved every order
+  // (WMS sync reserves again with WMS ids and cannot see these rows) and had
+  // no release path — reserved stock leaked permanently on cancel. Acceptance
+  // now only VALIDATES availability; the one reservation happens at WMS sync
+  // (dispatched right after acceptance). P3.2 upgrades acceptance to await
+  // that reservation synchronously before confirming to the partner.
+  validateInventoryAvailability({
     plan,
     inventoryLevels,
     omsOrderId,
-    omsLines,
-    actorId: input.actor.actorId ?? input.actor.actorType,
-    acceptedAt: input.acceptedAt,
   });
   const walletLedgerEntryId = await debitWalletWithClient(client, {
     plan,
@@ -527,11 +531,25 @@ async function resolveAcceptanceLinesWithClient(
        p.is_active AS product_is_active,
        pv.is_active AS variant_is_active,
        pv.dropship_eligible,
-       pv.price_cents AS catalog_retail_price_cents
+       COALESCE((ROUND(retail_cache.price::numeric * 100))::bigint, pv.price_cents) AS catalog_retail_price_cents
      FROM dropship.dropship_vendor_listings dl
      INNER JOIN catalog.product_variants pv ON pv.id = dl.product_variant_id
      INNER JOIN catalog.products p ON p.id = pv.product_id
      LEFT JOIN catalog.product_line_products plp ON plp.product_id = p.id
+     LEFT JOIN LATERAL (
+       SELECT sv.price
+       FROM public.shopify_variants sv
+       WHERE (
+           pv.shopify_variant_id IS NOT NULL
+           AND sv.id::text = pv.shopify_variant_id::text
+         )
+         OR (
+           NULLIF(BTRIM(pv.sku), '') IS NOT NULL
+           AND UPPER(sv.sku) = UPPER(pv.sku)
+         )
+       ORDER BY CASE WHEN sv.id::text = pv.shopify_variant_id::text THEN 0 ELSE 1 END
+       LIMIT 1
+     ) retail_cache ON true
      WHERE dl.vendor_id = $1
        AND dl.store_connection_id = $2
        AND (
@@ -541,7 +559,7 @@ async function resolveAcceptanceLinesWithClient(
          OR UPPER(pv.sku) = ANY($6::text[])
          OR UPPER(p.sku) = ANY($6::text[])
        )
-     GROUP BY dl.id, p.id, pv.id`,
+     GROUP BY dl.id, p.id, pv.id, retail_cache.price`,
     [
       input.vendor.vendorId,
       input.storeConnectionId,
@@ -817,11 +835,11 @@ async function createOmsOrderLinesWithClient(
         (order_id, product_variant_id, external_line_item_id, external_product_id,
          sku, title, variant_title, quantity, paid_price_cents, total_price_cents,
          total_discount_cents, taxable, requires_shipping, fulfillable_quantity,
-         fulfillment_status, order_number, created_at, updated_at)
+         fulfillment_provider, fulfillment_status, order_number, created_at, updated_at)
        VALUES ($1, $2, $3, $4,
          $5, $6, NULL, $7, $8, $9,
          0, true, true, $7,
-         'unfulfilled', $10, $11, $11)
+         'dropship', 'unfulfilled', $10, $11, $11)
        RETURNING id, product_variant_id, quantity`,
       [
         input.omsOrderId,
@@ -842,17 +860,28 @@ async function createOmsOrderLinesWithClient(
   return rows;
 }
 
-async function reserveInventoryWithClient(
-  client: PoolClient,
+/**
+ * P0.1a — availability VALIDATION only (read-only, no writes).
+ *
+ * The predecessor (`reserveInventoryWithClient`) raw-SQL-incremented
+ * `inventory.inventory_levels.reserved_qty` and hand-wrote ledger rows here,
+ * bypassing `reserveForOrder()` (BOUNDARIES.md violation). WMS sync then
+ * reserved the same demand again with WMS ids — its per-item dedup cannot see
+ * these rows — so every accepted order was DOUBLE-reserved, and because no
+ * release path existed for the acceptance-time rows, the reserved stock
+ * leaked permanently (prod-confirmed 2026-07-02).
+ *
+ * Reservation now happens exactly once, at WMS sync (dispatched immediately
+ * after acceptance). This check keeps the same rejection semantics at
+ * acceptance time — same error code — using the same availability math.
+ */
+function validateInventoryAvailability(
   input: {
     plan: DropshipOrderAcceptancePlan;
     inventoryLevels: InventoryLevelRow[];
     omsOrderId: number;
-    omsLines: OmsLineRow[];
-    actorId: string;
-    acceptedAt: Date;
   },
-): Promise<void> {
+): void {
   const requiredByVariant = aggregatePlanQuantityByVariant(input.plan.lines);
   for (const [productVariantId, requiredQty] of requiredByVariant) {
     let remaining = requiredQty;
@@ -861,61 +890,16 @@ async function reserveInventoryWithClient(
       if (remaining <= 0) break;
       const available = inventoryLevelAvailableQty(level);
       if (available <= 0) continue;
-      const reserveQty = Math.min(available, remaining);
-      await client.query(
-        `UPDATE inventory.inventory_levels
-         SET reserved_qty = reserved_qty + $1,
-             updated_at = $2
-         WHERE id = $3`,
-        [reserveQty, input.acceptedAt, level.id],
-      );
-      await client.query(
-        `INSERT INTO inventory.inventory_transactions
-          (product_variant_id, to_location_id, transaction_type,
-           variant_qty_delta, variant_qty_before, variant_qty_after,
-           source_state, target_state, reference_type, reference_id,
-           notes, is_implicit, user_id, created_at)
-         VALUES ($1, $2, 'reserve',
-           0, $3, $3,
-           'on_hand', 'committed', 'dropship_order_intake', $4,
-           $5, 1, $6, $7)`,
-        [
-          productVariantId,
-          level.warehouse_location_id,
-          level.variant_qty,
-          String(input.plan.intakeId),
-          `Dropship OMS order ${input.omsOrderId}`,
-          input.actorId,
-          input.acceptedAt,
-        ],
-      );
-      remaining -= reserveQty;
+      remaining -= Math.min(available, remaining);
     }
     if (remaining > 0) {
       throw new DropshipError(
         "DROPSHIP_ORDER_INVENTORY_RESERVATION_FAILED",
-        "Dropship order inventory reservation failed after availability validation.",
+        "Dropship order inventory availability validation failed.",
         { productVariantId, requiredQty, remaining },
       );
     }
   }
-  await client.query(
-    `INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-     VALUES ($1, 'inventory_reserved', $2::jsonb, $3)`,
-    [
-      input.omsOrderId,
-      JSON.stringify({
-        source: "dropship_order_acceptance",
-        intakeId: input.plan.intakeId,
-        reservedLines: input.omsLines.map((line) => ({
-          omsOrderLineId: toSafeInteger(line.id, "oms_order_line_id"),
-          productVariantId: line.product_variant_id,
-          quantity: line.quantity,
-        })),
-      }),
-      input.acceptedAt,
-    ],
-  );
 }
 
 async function debitWalletWithClient(
