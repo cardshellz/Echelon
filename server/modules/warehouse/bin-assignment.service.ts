@@ -1,4 +1,5 @@
 import { eq, and, sql } from "drizzle-orm";
+import { backfillOpenOrderItemBinAssignment } from "./infrastructure/warehouse.repository";
 import {
   productLocations,
   productVariants,
@@ -281,7 +282,7 @@ export class BinAssignmentService {
     const isPrimary = params.isPrimary ?? 1;
     const upperSku = (variant.sku || product?.sku || "").toUpperCase();
 
-    return await this.db.transaction(async (tx) => {
+    const assigned = await this.db.transaction(async (tx) => {
       const existingResult = await tx.execute(sql`
         SELECT pl.id
         FROM warehouse.product_locations pl
@@ -382,6 +383,18 @@ export class BinAssignmentService {
         .returning();
       return result[0];
     });
+
+    // After the assignment commits, stamp the new bin onto open order items
+    // that were synced while this SKU had no bin (they carry "UNASSIGNED"
+    // forever otherwise — the picker gun never updates). Best-effort; never
+    // fails the assignment.
+    await backfillOpenOrderItemBinAssignment({
+      sku: assigned?.sku ?? upperSku,
+      locationCode: assigned?.location,
+      zone: assigned?.zone,
+    });
+
+    return assigned;
   }
 
   /**
