@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { backfillOpenOrderItemBinAssignment } from "../../infrastructure/warehouse.repository";
+import { backfillOpenOrderItemBinAssignment } from "../../bin-location-backfill";
 
 // Flatten a drizzle sql`` template to raw text (same approach as the OMS
 // push-shipment tests) so we can assert on the query's guards.
