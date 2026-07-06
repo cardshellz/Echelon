@@ -142,3 +142,55 @@ The action exists in the domain list (`domain/auth.ts:18`) and the vendor catalo
 5. Resume at Phase 3/4: readiness gate evidence → package data for the test SKU via Catalog > Variants (post-Decision-5) → narrow variant exposure → portal shows only that SKU → one-SKU push (EX-015) → verify the LIVE eBay listing ID + Echelon mapping on eBay itself → one small order.
 6. During dogfood (Decision 7): build listing end/zero + grace-expiry worker + lapse→zero push; add the lapse-simulation phase.
 7. Before first external vendor (Decisions 2, 3): allocation-engine wiring for channel 103 (+ quantity re-sync via `allocateAndGetSyncTargets`) and P3.2 synchronous reservation; auth hardening batch (Decision 1 backlog); honest readiness checks for `usdc_base_funding` (per Decision 6) and `split_shipment_handoff`.
+
+---
+
+## 8. Product/UX review — the vendor experience (added 2026-07-05)
+
+Method: all 10 portal pages (`client/src/pages/dropship/`) plus the vendor-facing DTO surface were read — Onboarding/Catalog/Dashboard directly, the rest via a full sweep — and every headline claim below was re-verified at the cited line. Same [V]/[R] tags.
+
+### 8.1 Overall opinion
+
+The plumbing is enterprise-grade; the portal is an **ops console wearing vendor clothes**. Visual quality is genuinely good (consistent shadcn, light/professional, `#C060E0` accents, skeletons/empty states everywhere), and the onboarding checklist + launch-gate pattern is the right shape. But the product never answers the only question a reseller has — **"am I making money?"** — and it routinely speaks Echelon ("intake", "OMS order", token Present/Missing, idempotency key + request hash in the Returns detail [V] Returns.tsx:819-824) instead of seller.
+
+Important framing [V]: in normal operation orders **auto-accept via the 10s worker** — the vendor's money moves without a click. That is the right model for dropship (speed wins), but it raises the bar: economics must be visible *before* the sale (at pricing time) and legible *after* it (per-order P&L), because there is no confirm moment in between.
+
+### 8.2 The structural gap: economics are invisible [V]
+
+Verified end-to-end: the catalog row DTO carries no wholesale, no suggested retail, no default price, no image (dropship-ops-surface.ts:1413-1425); the catalog table shows name/SKU/category/qty and a price input whose placeholder is "Default" without showing the default (DropshipPortalCatalog.tsx:1136-1171); the preview shows qty/price/status but no cost or margin; "suggested retail" (design §7) has **zero implementation anywhere**; the first time a vendor ever sees their wholesale cost is the order detail **after the debit** (DropshipPortalOrders.tsx:499). The order list has no money column; profit is never computed even though retail totals and total debit sit on the same detail screen; `feesCents` is in the DTO but never rendered.
+
+For a margin business, this is the #1 product gap — ahead of any bug in §3.
+
+### 8.3 Ranked vendor-experience fixes
+
+**Big rocks (make-or-break for external vendors):**
+
+1. **Margin-first everywhere** — wholesale cost, suggested retail, and computed margin %/$ in the catalog table and listing preview; estimated shipping at pricing time (the internal quote API exists); per-order P&L line (retail − wholesale − shipping − fees = profit) on order detail and list; profit summary on the dashboard. Requires exposing wholesale to the vendor surface plus a suggested-retail source (design §7 already names the model).
+2. **Close the payment-hold loop** [V]: holds show an expiry but no screen links a held order to funding — Wallet doesn't show open holds, order detail has no "Fund wallet" CTA, notifications carry no links, and the Stripe return params (`?wallet_funding=...`) are ignored by the Wallet page, so even a successful top-up gets no confirmation. Build: open-holds banner on Wallet + "Fund now" CTA on held orders + Stripe-return success/failure banner + auto-retry messaging.
+3. **My Listings page** [V]: vendors cannot see what is live — the only vendor listing endpoints are preview/push (dropship-listing.routes.ts:15,29). A Listings page (status, price, qty, failures, end/pause actions) pairs naturally with Decision 7's listing end/zero work and the future drift/quantity-sync work; without it, drift and stale quantity are invisible to the person they hurt.
+4. **Make the machine invisible** — a vendor-language pass over statuses/blockers/notifications (error-code → plain-language dictionary); remove idempotency key/request hash/token internals from vendor screens; notification deep links + an unread badge in the shell (today the chrome is silent even during a store outage [V] — Shell.tsx has no badge or attention surface); **passkey enrollment UI** (`registerPasskey` exists in the auth lib with zero callers [V] — vendors are stuck doing email-OTP step-up for every sensitive action, including single notification-preference toggles [V] dropship-notification.routes.ts:48).
+5. **Marketplace-readiness hand-holding** [R]: zero in-portal guidance for eBay business policies/category prerequisites — the highest-friction step of reseller onboarding happens entirely off-portal, and push failures give no remediation. Build a guided eBay setup step that pulls the seller's policies via the Account API into dropdowns (the internal admin already has policy UI to borrow from), with listing-push failures mapping to "fix it here" links.
+
+**Quick wins (days, not weeks):**
+
+- Pre-accept confirm dialog with the quoted debit breakdown on the *manual* Accept path [V] (accept currently posts blind; the amount appears only in the post-hoc success message, Orders.tsx:136-164).
+- Running-balance column in the wallet ledger — the data is already in the DTO and design §14 requires it [V] (only Type/Status/Amount/Created render today).
+- Pagination on Orders/Returns/ledger/alerts (all hardcoded page 1 / limit 50 while displaying a larger total [V] Orders.tsx:113-118).
+- Auto-generate RMA numbers; label RMA item rows with product title/SKU instead of "Variant 3021"; render inspection photos instead of a count [R].
+- Order-list money column; carrier-linked tracking numbers; alerts badge; drop the permanently-disabled SMS/webhook toggles; fix the literal backticks on the login page [R].
+- Relax step-up scope: money actions keep 10-minute proofs; catalog selection and notification preferences get session-long proofs (or none).
+- **Remove the USDC activation gate** [V] (`walletReady` requires a USDC funding method — dropship-vendor-provisioning-service.ts:303-305) as part of Decision 6, or no vendor activates without a crypto wallet.
+
+### 8.4 What the design doc itself should add (gaps in what was specced, not just what was built)
+
+1. **Pricing intelligence**: suggested retail (source + admin control), margin display rules, bulk pricing tools (CSV price import, cost-plus-percent rules). §7 names the four-price model; nothing specs where suggested retail comes from or how vendors use it.
+2. **Listings management** as a first-class portal page (§14 omits it) — including how drift, stale quantity, failures, and end/pause surface to the vendor.
+3. **Operating dashboard**: §14 lists "top SKUs" but the built dashboard is launch-checklist-only [V]; spec the post-launch state (sales, profit, sell-through, attention feed) and when the portal switches modes. Minimal profit reporting should be launch scope, not Phase-2 "analytics" — it is the product's pitch.
+4. **Notification contract**: every vendor notification should carry an entity deep link (the DTO has no entity/URL fields [R] dropship-ops-surface.ts:2092-2103); critical events should also drive a persistent "needs attention" surface in the chrome.
+5. **Vendor-facing error dictionary**: one table mapping every vendor-visible blocker/rejection/failure code to plain language + next step; make it a build requirement alongside §18 tests.
+6. **Account self-service**: Settings today is a status page — no business-name/contact/password/passkey management despite the backend actions existing [R]; the return/contact display section has no editor.
+7. **Support surface**: no help link, docs, or contact anywhere in the portal chrome [V]. Even a mailto + FAQ changes the feel for a paying vendor.
+
+### 8.5 Sequencing
+
+Nothing here blocks the dogfood order test. Suggested batches — **Batch A (pre-external-vendor, pairs with §7):** USDC gate removal, hold→fund loop, manual-accept confirm, pagination, passkey enrollment, language pass, alerts badge. **Batch B (vendor beta gate):** margin-first surfaces, My Listings, guided eBay setup, operating dashboard v1, RMA usability. Batch B is what turns ".ops works" into ".ops sells itself."
