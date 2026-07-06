@@ -13,6 +13,7 @@ import {
   enqueueShipStationShipmentPushRetry,
 } from "../oms/webhook-retry.worker";
 import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
+import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
 import { sql } from "drizzle-orm";
 import Papa from "papaparse";
 
@@ -506,7 +507,12 @@ export function registerPickingRoutes(app: Express) {
       // Local WMS state is authoritative; ShipStation sync is retried durably.
       await queueShipStationHoldSync(id, "release", "ReleaseHold");
       await queueShipStationSortRankSync(id, "ReleaseHoldSortRank");
-      
+
+      // An order held before its shipment ever reached the engine has nothing
+      // for the hold-release sync above to release — re-reserve and push its
+      // never-pushed shipments now so the release actually makes it shippable.
+      await reserveAndPushAfterHoldRelease(db, app.locals.services, id, "ReleaseHold");
+
       // Log the unhold action (non-blocking)
       storage.createPickingLog({
         actionType: "order_unhold",
