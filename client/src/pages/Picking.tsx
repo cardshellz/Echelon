@@ -4450,9 +4450,26 @@ export default function Picking() {
                       <div className="flex-shrink-0 flex gap-1 justify-end">
                         {!isCompleted ? (
                           <div className="flex gap-1">
+                            {/* Short Pick Button — wires the previously-orphaned
+                                handleListItemShort so LIST view has a short-pick
+                                path (it only existed in the single-item scan view;
+                                2026-07 #59825: out-of-stock items were unshortable
+                                from the list). */}
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              className="h-9 w-9 md:h-11 md:w-11 border-amber-300 text-amber-600 hover:bg-amber-50 flex-shrink-0"
+                              onClick={() => handleListItemShort(idx)}
+                              disabled={replenGuidanceLoading}
+                              aria-label={`Short pick ${item.sku}`}
+                              title={`Short pick ${item.sku}`}
+                              data-testid={`button-short-${item.id}`}
+                            >
+                              <AlertTriangle className="h-4 w-4 md:h-5 md:w-5" />
+                            </Button>
                             {/* -1 Button */}
-                            <Button 
-                              size="icon" 
+                            <Button
+                              size="icon"
                               variant="outline"
                               className="h-9 w-9 md:h-11 md:w-11 border-slate-300 text-slate-600 flex-shrink-0"
                               onClick={() => handleListItemDecrement(idx)}
