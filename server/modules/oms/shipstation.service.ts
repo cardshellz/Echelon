@@ -3652,6 +3652,104 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     return { touched };
   }
 
+  /**
+   * Push a WMS-side ship-to address change onto the order's PRE-LABEL
+   * ShipStation orders (2026-07 #58725 incident: Address Guard corrected the
+   * ship-to 45s after checkout; WMS/OMS updated but the already-queued
+   * ShipStation order kept the stale address, the advisory requires_review
+   * flag didn't stop labeling, and the package shipped to the old address).
+   *
+   * Non-clobbering by construction: ShipStation v1 has no address-only
+   * endpoint, so instead of rebuilding the payload from WMS (which would wipe
+   * operator splits/service/weight edits made in ShipStation), we fetch
+   * ShipStation's OWN current copy of the order, replace ONLY shipTo, and
+   * upsert it back — the same fetch-modify-writeback pattern updateSortRank
+   * uses for customField1.
+   *
+   * Scope guards:
+   *  - only WMS shipments in pre-label statuses (planned/queued/on_hold)
+   *  - only SS orders still awaiting_shipment / on_hold (label not created)
+   *  - skipped entirely when WMS has no shipping_address (never blank an
+   *    address in ShipStation)
+   * Labeled/shipped shipments keep today's requires_review flow — a printed
+   * label is a human decision. On each successful SS update the shipment's
+   * 'address_changed_after_push' review flag is cleared (other review reasons
+   * are left untouched).
+   */
+  async function syncWmsOrderShipStationShipToAddress(
+    wmsOrderId: number,
+  ): Promise<{ updated: number; skipped: number }> {
+    if (!isConfigured()) return { updated: 0, skipped: 0 };
+
+    const orderRows: any = await db.execute(sql`
+      SELECT shipping_name, shipping_company, shipping_address, shipping_address2,
+             shipping_city, shipping_state, shipping_postal_code, shipping_country,
+             customer_name
+      FROM wms.orders WHERE id = ${wmsOrderId} LIMIT 1
+    `);
+    const order = orderRows?.rows?.[0];
+    if (!order || !order.shipping_address) return { updated: 0, skipped: 0 };
+
+    const shipmentRows: any = await db.execute(sql`
+      SELECT id, status, shipstation_order_id
+      FROM wms.outbound_shipments
+      WHERE order_id = ${wmsOrderId}
+        AND shipstation_order_id IS NOT NULL
+        AND status IN ('planned', 'queued', 'on_hold')
+      ORDER BY id
+    `);
+
+    let updated = 0;
+    let skipped = 0;
+
+    for (const row of shipmentRows?.rows ?? []) {
+      const ssOrderId = Number(row.shipstation_order_id);
+      if (!Number.isInteger(ssOrderId) || ssOrderId <= 0) continue;
+
+      const ssOrder = await getOrderById(ssOrderId);
+      if (!ssOrder) {
+        skipped += 1;
+        continue;
+      }
+      // Pre-label authority is ShipStation's own status: once a label exists
+      // the SS order is shipped and an address swap would be a lie.
+      if (ssOrder.orderStatus !== "awaiting_shipment" && ssOrder.orderStatus !== "on_hold") {
+        skipped += 1;
+        continue;
+      }
+
+      await apiRequest("POST", "/orders/createorder", {
+        ...ssOrder,
+        shipTo: {
+          name: order.shipping_name || order.customer_name || "",
+          company: order.shipping_company || "",
+          street1: order.shipping_address || "",
+          street2: order.shipping_address2 || "",
+          city: order.shipping_city || "",
+          state: order.shipping_state || "",
+          postalCode: order.shipping_postal_code || "",
+          country: normalizeCountryToIso2(order.shipping_country) ?? "US",
+          phone: ssOrder.shipTo?.phone || "",
+        },
+      });
+      updated += 1;
+      console.log(
+        `[ShipStation] Ship-to address updated on SS order ${ssOrderId} (WMS order ${wmsOrderId}, shipment ${row.id}) after address change`,
+      );
+
+      // The address is now correct in ShipStation — the advisory flag for
+      // THIS reason is resolved. Other review reasons must survive.
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments
+        SET requires_review = false, review_reason = NULL, updated_at = ${new Date()}
+        WHERE id = ${Number(row.id)}
+          AND review_reason = 'address_changed_after_push'
+      `);
+    }
+
+    return { updated, skipped };
+  }
+
   // -------------------------------------------------------------------------
   // pushShipment — WMS-only reader (Commit 11 — §6 refactor plan).
   // -------------------------------------------------------------------------
@@ -4165,6 +4263,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     updateSortRank,
     updateSortRankSingle: updateShipStationCustomField1,
     syncWmsOrderShipStationHoldState,
+    syncWmsOrderShipStationShipToAddress,
   };
 }
 
