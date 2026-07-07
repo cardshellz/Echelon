@@ -584,7 +584,7 @@ export class ReceivingService {
 
   // ─── Close ────────────────────────────────────────────────────
 
-  async close(orderId: number, userId: string | null) {
+  async close(orderId: number, userId: string | null, options: { allowOverReceipt?: boolean } = {}) {
     const order = await this.storage.getReceivingOrderById(orderId);
     if (!order) throw new ReceivingError("Receiving order not found", 404);
     if (order.status === "cancelled") {
@@ -613,6 +613,34 @@ export class ReceivingService {
           expectedTotalUnits: lines.reduce((sum: number, line: any) => sum + (Number(line.expectedQty) || 0), 0),
         },
       );
+    }
+
+    // Over-receipt guard (shipment receipts): receiving more than a shipment
+    // line expects usually means the overage belongs to ANOTHER PO on the same
+    // shipment, or the PO quantity itself was entered wrong. Warn-with-override:
+    // the client shows the discrepancy and retries with allowOverReceipt once
+    // the operator confirms. Blind/PO-direct receipts are exempt — their
+    // expected quantities are advisory.
+    if (order.sourceType === "shipment" && !options.allowOverReceipt) {
+      const overLines = lines
+        .filter((line: any) => (Number(line.receivedQty) || 0) > (Number(line.expectedQty) || 0))
+        .map((line: any) => ({
+          lineId: line.id,
+          sku: line.sku ?? null,
+          expectedQty: Number(line.expectedQty) || 0,
+          receivedQty: Number(line.receivedQty) || 0,
+        }));
+      if (overLines.length > 0) {
+        throw new ReceivingError(
+          "Received quantity exceeds what this shipment expects for this PO. The overage may belong to another PO on this shipment, or the PO quantity is wrong. Confirm to close anyway.",
+          409,
+          {
+            code: "SHIPMENT_OVER_RECEIPT_CONFIRMATION_REQUIRED",
+            receivingOrderId: orderId,
+            overLines,
+          },
+        );
+      }
     }
 
     // Auto-resolve missing productVariantId from SKU before processing

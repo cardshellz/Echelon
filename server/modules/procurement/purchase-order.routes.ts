@@ -694,6 +694,21 @@ export function registerPurchaseOrderRoutes(app: Express) {
     }
   });
 
+  // Per-PO receive options for one shipment. Powers the shipment-page PO picker
+  // (multi-PO shipments) and the post-close "receive next PO" chaining.
+  app.get("/api/inbound-shipments/:id/po-receive-options", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const shipmentId = Number(req.params.id);
+      if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+        return res.status(400).json({ error: "Invalid shipment id" });
+      }
+      const options = await purchasing.getShipmentPoReceiveOptions(shipmentId);
+      res.json(options);
+    } catch (error: any) {
+      res.status(error?.statusCode || 500).json({ error: error?.message || "Failed to load shipment receive options" });
+    }
+  });
+
   // Receive AGAINST an inbound shipment: creates a receiving order linked to the
   // shipment (inbound_shipment_id + source_type='shipment'), lines defaulted from
   // the shipment's qtyShipped, so lots created at close inherit the shipment link
