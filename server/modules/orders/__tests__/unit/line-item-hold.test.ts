@@ -72,6 +72,28 @@ describe("line-item hold (P2a — held line does not ship)", () => {
   });
 });
 
+// P2a fix (migration 123): holdLineItemWithSplit creates a SECOND active shipment
+// (source='line_item_hold') for the order. The uq_outbound_shipments_active_per_order
+// partial index must EXCLUDE that source or the INSERT violates the "one active
+// shipment per order" invariant and the hold endpoint 500s (verified against the real
+// schema on a live order). This guards the exclusion from being dropped if the index
+// is ever recreated.
+describe("line-item hold (P2a fix — held shipment excluded from active-per-order invariant)", () => {
+  const MIGRATION = readFileSync(
+    resolve(__dirname, "../../../../../migrations/123_line_item_hold_active_shipment_index.sql"),
+    "utf8",
+  );
+  it("migration 123 recreates the active-per-order index excluding line_item_hold", () => {
+    expect(MIGRATION).toMatch(/DROP INDEX IF EXISTS wms\.uq_outbound_shipments_active_per_order/);
+    expect(MIGRATION).toMatch(/CREATE UNIQUE INDEX uq_outbound_shipments_active_per_order/);
+    expect(MIGRATION).toMatch(/'line_item_hold'/);
+    // the pre-existing combined/split child exclusions must be preserved.
+    expect(MIGRATION).toMatch(/echelon_combined_child/);
+    expect(MIGRATION).toMatch(/shipstation_combined_child/);
+    expect(MIGRATION).toMatch(/shipstation_split/);
+  });
+});
+
 // P2b: held shipments/lines must not look like stuck work or block the rest.
 describe("line-item hold (P2b — held-aware readers)", () => {
   it("the ready-to-ship gate ignores held lines (so the rest of the order can ship)", () => {
