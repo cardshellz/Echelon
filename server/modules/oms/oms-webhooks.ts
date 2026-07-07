@@ -1425,9 +1425,11 @@ export function registerOmsWebhooks(
     if (shipments.length === 0) return;
 
     const rollupModule = await import("../orders/shipment-rollup");
+    let anyRequiresReview = false;
     for (const shipment of shipments) {
       const result = await rollupModule.handleAddressChangeOnShipment(db, shipment.id, { now });
       if (result.mode !== "can_repush") {
+        if (result.mode === "requires_review") anyRequiresReview = true;
         console.log(
           `${LOG_PREFIX} address change for ${label} shipment ${shipment.id}: ${result.mode}`,
         );
@@ -1452,6 +1454,29 @@ export function registerOmsWebhooks(
           db,
           shipment.id,
           new Error(`address changed for ${label}; ShipStation push unavailable`),
+        );
+      }
+    }
+
+    // Already-pushed (queued/on-hold) shipments: push the corrected ship-to
+    // straight onto the pre-label ShipStation order(s) via the non-clobbering
+    // fetch-modify-writeback (2026-07 #58725: Address Guard corrections used
+    // to strand the stale address in ShipStation behind an advisory flag).
+    // Best-effort: on failure the requires_review flag set above remains as
+    // the operator-facing fallback, so we log rather than fail the webhook.
+    if (
+      anyRequiresReview &&
+      shipStationService?.isConfigured() &&
+      typeof (shipStationService as any).syncWmsOrderShipStationShipToAddress === "function"
+    ) {
+      try {
+        const sync = await (shipStationService as any).syncWmsOrderShipStationShipToAddress(wmsOrderId);
+        console.log(
+          `${LOG_PREFIX} address change for ${label}: ShipStation ship-to sync updated=${sync.updated} skipped=${sync.skipped}`,
+        );
+      } catch (err: any) {
+        console.warn(
+          `${LOG_PREFIX} address change for ${label}: ShipStation ship-to sync failed (requires_review flag remains): ${err?.message ?? err}`,
         );
       }
     }
