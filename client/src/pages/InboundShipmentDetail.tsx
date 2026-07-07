@@ -310,6 +310,13 @@ export default function InboundShipmentDetail() {
   const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
   const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
   const [creatingShipmentReceipt, setCreatingShipmentReceipt] = useState(false);
+  // Multi-PO shipments: per-PO receive picker (replaces the old "open the PO
+  // detail and receive there" dead-end toast).
+  const [poPickerOpen, setPoPickerOpen] = useState(false);
+  const { data: shipmentPoReceiveOptions, isLoading: loadingShipmentPoReceiveOptions } = useQuery<any>({
+    queryKey: [`/api/inbound-shipments/${shipmentId}/po-receive-options`],
+    enabled: poPickerOpen && !!shipmentId,
+  });
   const resumeShipmentReceiptHandled = useRef<string | null>(null);
 
   // Edit line dialog state
@@ -1262,11 +1269,9 @@ export default function InboundShipmentDetail() {
                   return;
                 }
                 if (poIds.length > 1) {
-                  toast({
-                    title: "Choose a PO first",
-                    description: "This shipment contains multiple POs. Open the PO detail and receive this shipment for the specific PO.",
-                    variant: "destructive",
-                  });
+                  // Multi-PO shipment: let the operator pick which PO to
+                  // receive next (one receiving order per shipment+PO).
+                  setPoPickerOpen(true);
                   return;
                 }
                 await checkAndCreateReceiptForShipment({ shipmentId: shipment.id, purchaseOrderId: poIds[0] });
@@ -3349,6 +3354,83 @@ export default function InboundShipmentDetail() {
         onRefresh={refreshShipmentReceiptPackResolution}
         onOpenCatalog={openReceiptVariantSetup}
       />
+
+      {/* Multi-PO shipment: pick which PO to receive next. Each PO gets its own
+          receiving order against this shipment; receive them one at a time. */}
+      <Dialog open={poPickerOpen} onOpenChange={setPoPickerOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Receive shipment — choose a PO</DialogTitle>
+            <DialogDescription>
+              This shipment has lines from multiple purchase orders. Each PO is received
+              as its own receipt; receive them one after another.
+            </DialogDescription>
+          </DialogHeader>
+          {loadingShipmentPoReceiveOptions ? (
+            <div className="py-6 text-center text-sm text-muted-foreground">Loading PO breakdown…</div>
+          ) : (
+            <div className="space-y-3">
+              {(shipmentPoReceiveOptions?.purchaseOrders ?? []).map((option: any) => {
+                const fullyReceived = !option.receivable && option.remainingBaseQty <= 0 && option.receivedBaseQty > 0;
+                return (
+                  <div key={option.purchaseOrderId} className="flex items-center justify-between gap-3 rounded-md border p-3">
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">{option.poNumber ?? `PO #${option.purchaseOrderId}`}</div>
+                      <div className="text-sm text-muted-foreground">
+                        {option.lineCount} line{option.lineCount === 1 ? "" : "s"} ·{" "}
+                        {option.remainingBaseQty > 0
+                          ? `${option.remainingBaseQty.toLocaleString()} of ${option.qtyShipped.toLocaleString()} units remaining`
+                          : `${option.qtyShipped.toLocaleString()} units`}
+                      </div>
+                      {!fullyReceived && option.reason && (
+                        <div className="text-xs text-muted-foreground mt-1">{option.reason}</div>
+                      )}
+                    </div>
+                    {fullyReceived ? (
+                      <Badge variant="outline" className="text-green-600 border-green-300 shrink-0">
+                        <CheckCircle className="h-3 w-3 mr-1" /> Received
+                      </Badge>
+                    ) : option.action === "open_existing_receipt" && option.existingReceiptId ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => {
+                          setPoPickerOpen(false);
+                          navigate(`/receiving?open=${option.existingReceiptId}`);
+                        }}
+                      >
+                        Open receipt
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        className="shrink-0"
+                        disabled={!option.receivable || checkingShipmentReceiptPacks || creatingShipmentReceipt}
+                        onClick={async () => {
+                          setPoPickerOpen(false);
+                          await checkAndCreateReceiptForShipment({
+                            shipmentId: option.shipmentId,
+                            purchaseOrderId: option.purchaseOrderId,
+                          });
+                        }}
+                      >
+                        <Truck className="h-4 w-4 mr-1" /> Receive
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+              {(shipmentPoReceiveOptions?.unlinkedLineCount ?? 0) > 0 && (
+                <div className="text-xs text-destructive">
+                  {shipmentPoReceiveOptions.unlinkedLineCount} positive line(s) have no PO link and are not receivable
+                  from this shipment. Link them to a PO first.
+                </div>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -134,6 +134,76 @@ describe("ReceivingService - close reconciliation semantics", () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  it("blocks closing a shipment receipt that over-receives a line unless allowOverReceipt is passed", async () => {
+    const order = {
+      id: 191,
+      status: "open",
+      sourceType: "shipment",
+      purchaseOrderId: 118,
+    };
+    const lines = [
+      { id: 2700, sku: "SHLZ-MAG-35PT-SLV", expectedQty: 50, receivedQty: 100, productVariantId: 472, putawayLocationId: 1387 },
+      { id: 2701, sku: "EG-SLV-THK-P50", expectedQty: 5, receivedQty: 5, productVariantId: 104, putawayLocationId: 1387 },
+    ];
+    const mockStorage = {
+      getReceivingOrderById: vi.fn().mockResolvedValue(order),
+      getReceivingLines: vi.fn().mockResolvedValue(lines),
+    };
+    const db = { transaction: vi.fn().mockRejectedValue(new Error("SENTINEL_PAST_GUARD")) };
+    const inventoryCore = { receiveInventory: vi.fn() };
+    const service = new ReceivingService(
+      db as any,
+      inventoryCore as any,
+      {} as any,
+      mockStorage as any,
+    );
+
+    // Without the override: structured 409 naming the offending lines.
+    await expect(service.close(191, "user-1")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({
+        code: "SHIPMENT_OVER_RECEIPT_CONFIRMATION_REQUIRED",
+        receivingOrderId: 191,
+        overLines: [
+          { lineId: 2700, sku: "SHLZ-MAG-35PT-SLV", expectedQty: 50, receivedQty: 100 },
+        ],
+      }),
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+
+    // With the override: the guard steps aside and close proceeds into the
+    // posting transaction (the sentinel proves we got past the guard).
+    await expect(service.close(191, "user-1", { allowOverReceipt: true })).rejects.toThrow("SENTINEL_PAST_GUARD");
+    expect(db.transaction).toHaveBeenCalled();
+  });
+
+  it("does not apply the over-receipt guard to non-shipment receipts", async () => {
+    const order = {
+      id: 192,
+      status: "open",
+      sourceType: "po",
+      purchaseOrderId: 119,
+    };
+    const lines = [
+      { id: 2710, sku: "SHLZ-TOP-35PT", expectedQty: 10, receivedQty: 25, productVariantId: 472, putawayLocationId: 1387 },
+    ];
+    const mockStorage = {
+      getReceivingOrderById: vi.fn().mockResolvedValue(order),
+      getReceivingLines: vi.fn().mockResolvedValue(lines),
+    };
+    const db = { transaction: vi.fn().mockRejectedValue(new Error("SENTINEL_PAST_GUARD")) };
+    const inventoryCore = { receiveInventory: vi.fn() };
+    const service = new ReceivingService(
+      db as any,
+      inventoryCore as any,
+      {} as any,
+      mockStorage as any,
+    );
+
+    await expect(service.close(192, "user-1")).rejects.toThrow("SENTINEL_PAST_GUARD");
+    expect(db.transaction).toHaveBeenCalled();
+  });
+
   it("retries PO reconciliation for an already closed receipt without reposting inventory", async () => {
     const lines = [
       {
