@@ -609,6 +609,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
           -- and must NOT be auto-re-enqueued (it surfaces in the requires-review
           -- bucket instead). Prevents the permanent-error dead-letter loop.
           AND COALESCE(os.requires_review, false) = false
+          AND COALESCE(os.held, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -644,6 +645,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
           -- and must NOT be auto-re-enqueued (it surfaces in the requires-review
           -- bucket instead). Prevents the permanent-error dead-letter loop.
           AND COALESCE(os.requires_review, false) = false
+          AND COALESCE(os.held, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1

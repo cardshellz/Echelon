@@ -416,6 +416,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.engine_order_ref IS NULL
+          -- A held shipment (line-item hold) is intentionally unpushed.
+          AND COALESCE(os.held, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -447,6 +449,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.engine_order_ref IS NULL
+          -- A held shipment (line-item hold) is intentionally unpushed.
+          AND COALESCE(os.held, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -767,8 +771,10 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
  * reservation failure would otherwise leave a ready order with zero
  * reservations and nothing retrying. This sweep finds ready, unheld orders
  * older than 15 minutes whose ledger shows NO reserve rows and re-runs the
- * idempotent reserveOrder. Shortfalls hold the order exactly like the sync
- * path does.
+ * idempotent reserveOrder. Shortfalls are logged only (2026-07-06: the
+ * order-level auto-hold was removed — it froze whole orders over one
+ * unreservable line with no auto-release; unreservable lines surface as
+ * pick shorts instead).
  *
  * Scoped to 'ready' only: 'pending' orders are unpaid (reservation happens on
  * promotion), and 'in_progress' orders may be partially picked — reserveOrder
@@ -811,18 +817,11 @@ async function remediateMissingReservations(db: any): Promise<void> {
     try {
       const result = await svc.reserveOrder(wmsOrderId);
       if (result.failed.length > 0) {
-        console.error(
+        console.warn(
           `${LOG_PREFIX} re-reservation shortfall for WMS order ${wmsOrderId}: ` +
             result.failed.map((f) => `${f.sku}: ${f.reason}`).join(", ") +
-            " — holding order",
+            " — proceeding without hold; unreservable lines surface as pick shorts",
         );
-        await db.execute(sql`
-          UPDATE wms.orders
-          SET on_hold = 1, updated_at = NOW()
-          WHERE id = ${wmsOrderId}
-            AND warehouse_status = 'ready'
-            AND on_hold = 0
-        `);
       } else if (result.reserved > 0) {
         console.warn(
           `${LOG_PREFIX} re-reserved WMS order ${wmsOrderId} (${result.reserved} item(s)) — ` +
