@@ -10,6 +10,13 @@ import { SS_PUSH_INVALID_SHIPMENT } from "./shipstation.service";
 
 const MAX_ATTEMPTS = 5;
 const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
+// Deterministic, non-retryable Shopify push rejection (zero-qty items, missing
+// shipment/order linkage — bad input that identical retries can never fix).
+// Local literal like SHOPIFY_PUSH_CLIENT_NOT_SET above: fulfillment-push.service
+// is resolved via the db stash, not imported, so we keep zero static coupling.
+// Must match SHOPIFY_PUSH_INVALID_INPUT in fulfillment-push.service.ts (guarded
+// by a unit test).
+const SHOPIFY_PUSH_INVALID_INPUT = "shopify_push_invalid_input";
 const RETRY_SCOPE_UNIQUE_INDEX_PREFIX = "uq_webhook_retry_pending_";
 type RetryDispatchItem = {
   id: number;
@@ -282,6 +289,26 @@ export async function enqueueShopifyFulfillmentRetry(
     scope: sql`payload->>'shipmentId' = ${String(shipmentId)}`,
   })) {
     return;
+  }
+
+  // Single chokepoint (mirrors enqueueShipStationShipmentPushRetry): never
+  // re-enqueue a shipment already flagged for operator review. A PERMANENT
+  // Shopify push failure (SHOPIFY_PUSH_INVALID_INPUT — e.g. zero-qty items from
+  // the split sync bug) dead-letters and stamps requires_review; without this
+  // guard the hourly fulfillment sweeper and the 15-min reconciler re-inserted a
+  // fresh pending row for the same shipment forever (one shipment accumulated
+  // 168 dead rows). pending-only dedupe above cannot stop that — dead rows
+  // don't dedupe. The operator fixes the data + clears requires_review to
+  // re-enter the pipeline.
+  if (typeof dbArg?.execute === "function") {
+    const flagged = await dbArg.execute(sql`
+      SELECT 1 FROM wms.outbound_shipments
+      WHERE id = ${shipmentId} AND requires_review = true
+      LIMIT 1
+    `);
+    if ((flagged?.rows?.length ?? 0) > 0) {
+      return;
+    }
   }
 
   try {
@@ -1357,6 +1384,30 @@ export async function dispatchShopifyFulfillmentRetry(
       return "pending";
     }
 
+    // PERMANENT failure classification (CLAUDE.md §6: never retry a permanent
+    // error). ShopifyFulfillmentPushError carries a structured context.code that
+    // was designed for exactly this decision and was previously ignored — every
+    // error burned 5 attempts and was then re-enqueued hourly by the fulfillment
+    // sweeper forever (796 dead rows for 83 shipments; one shipment reached 168).
+    // SHOPIFY_PUSH_INVALID_INPUT is deterministic bad input (zero-qty items from
+    // the split sync bug, missing shipment/order linkage): identical retries can
+    // never succeed, so dead-letter now and flag the shipment for an operator.
+    // NOTE: SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS stays on the transient ladder for
+    // now — it can be a void-race that a later retry genuinely resolves; its
+    // smarter wait-for-void / attach-tracking handling is the next step.
+    if (err?.context?.code === SHOPIFY_PUSH_INVALID_INPUT) {
+      await markShopifyFulfillmentPushPermanentlyFailed(
+        dbArg,
+        item,
+        shipmentId,
+        err?.message || String(err),
+      );
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) PERMANENT failure — dead-lettered + requires_review: ${err?.message}`,
+      );
+      return "dead";
+    }
+
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
       dbArg,
       item,
@@ -1641,6 +1692,44 @@ async function markRowDead(
  *     shipments, so a human must fix the data + clear the flag to re-enter.
  *   - dead-letter the queue row immediately (markRowDead also mirrors to inbox).
  */
+/**
+ * A Shopify FULFILLMENT push failed PERMANENTLY (SHOPIFY_PUSH_INVALID_INPUT —
+ * zero-qty items, missing shipment/order linkage). Shopify-side twin of
+ * markShipmentPushPermanentlyFailed below, with one deliberate difference in the
+ * status guard: fulfillment pushes target shipments that are ALREADY SHIPPED
+ * (we're writing tracking back to the channel), so 'shipped' must be flaggable —
+ * only cancelled/voided shipments are excluded (their push debt is moot).
+ * requires_review is the single chokepoint: enqueueShopifyFulfillmentRetry skips
+ * flagged shipments, which stops the sweeper/reconciler resurrection loop. The
+ * operator fixes the data (e.g. repairs the zero-qty split items) and clears the
+ * flag to re-enter the pipeline.
+ */
+async function markShopifyFulfillmentPushPermanentlyFailed(
+  dbArg: any,
+  item: { id: number; sourceInboxId?: number | null },
+  shipmentId: number,
+  reason: string,
+): Promise<void> {
+  if (typeof dbArg?.execute === "function") {
+    // Same review_reason preservation rules as the ShipStation twin: overwrite
+    // the auto-cleared inventory reason, preserve any other manual reason.
+    await dbArg.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET requires_review = true,
+          review_reason = CASE
+            WHEN review_reason IS NULL
+              OR review_reason = 'inventory_deduction_missing_item_data'
+            THEN ${`permanent_fulfillment_push_failure: ${reason}`}
+            ELSE review_reason
+          END,
+          updated_at = NOW()
+      WHERE id = ${shipmentId}
+        AND status NOT IN ('cancelled', 'voided')
+    `);
+  }
+  await markRowDead(dbArg, item, reason);
+}
+
 async function markShipmentPushPermanentlyFailed(
   dbArg: any,
   item: { id: number; sourceInboxId?: number | null },

@@ -23,6 +23,11 @@ function makeDb(opts: {
       if (queryText.includes("FROM oms.webhook_retry_queue")) {
         return { rows: [] };
       }
+      // enqueueShopifyFulfillmentRetry's requires_review chokepoint probe —
+      // these shipments are not flagged, so the enqueue proceeds.
+      if (queryText.includes("requires_review = true")) {
+        return { rows: [] };
+      }
       return { rows: opts.shipmentRows ?? [] };
     }),
     insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
