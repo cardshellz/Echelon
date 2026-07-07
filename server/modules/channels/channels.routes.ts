@@ -25,6 +25,8 @@ import { ShopifyAdapter } from "./adapters/shopify.adapter";
 import { runShopifyWeightBackfill, createShopifyWeightBackfillDeps } from "./shopify-weight-backfill.service";
 import { rowToListingDto } from "./channel-listings.transform";
 import { createOmsService } from "../oms/oms.service";
+import { enqueueShipStationHoldSyncRetry } from "../oms/webhook-retry.worker";
+import { reserveAndPushAfterHoldRelease } from "../orders/release-hold-push";
 import { WmsOrderInvariantError } from "../wms/insert-order";
 import { randomBytes } from "crypto";
 import {
@@ -497,8 +499,14 @@ export function registerChannelRoutes(app: Express) {
       if (updates.onHold !== undefined) {
         if (updates.onHold) {
           await storage.holdOrder(id);
+          await enqueueShipStationHoldSyncRetry(db, id, "hold", "OrderEditHold");
         } else {
           await storage.releaseHoldOrder(id);
+          await enqueueShipStationHoldSyncRetry(db, id, "release", "OrderEditRelease");
+          // An order held before its shipment ever reached the engine has
+          // nothing for the hold-release sync to release — re-reserve and push
+          // its never-pushed shipments so the release makes it shippable.
+          await reserveAndPushAfterHoldRelease(db, app.locals.services, id, "OrderEditRelease");
         }
         delete updates.onHold;
       }
