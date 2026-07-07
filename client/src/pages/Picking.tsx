@@ -38,8 +38,15 @@ import {
   Truck,
   Plus,
   Minus,
-  Edit3
+  Edit3,
+  MoreVertical
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
 import { useAuth } from "@/lib/auth";
@@ -4450,34 +4457,11 @@ export default function Picking() {
                       <div className="flex-shrink-0 flex gap-1 justify-end">
                         {!isCompleted ? (
                           <div className="flex gap-1">
-                            {/* Short Pick Button — wires the previously-orphaned
-                                handleListItemShort so LIST view has a short-pick
-                                path (it only existed in the single-item scan view;
-                                2026-07 #59825: out-of-stock items were unshortable
-                                from the list). */}
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              className="h-9 w-9 md:h-11 md:w-11 border-amber-300 text-amber-600 hover:bg-amber-50 flex-shrink-0"
-                              onClick={() => handleListItemShort(idx)}
-                              disabled={replenGuidanceLoading}
-                              aria-label={`Short pick ${item.sku}`}
-                              title={`Short pick ${item.sku}`}
-                              data-testid={`button-short-${item.id}`}
-                            >
-                              <AlertTriangle className="h-4 w-4 md:h-5 md:w-5" />
-                            </Button>
-                            {/* -1 Button */}
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              className="h-9 w-9 md:h-11 md:w-11 border-slate-300 text-slate-600 flex-shrink-0"
-                              onClick={() => handleListItemDecrement(idx)}
-                              disabled={item.picked <= 0}
-                              data-testid={`button-minus-${item.id}`}
-                            >
-                              <Minus className="h-4 w-4 md:h-5 md:w-5" />
-                            </Button>
+                            {/* Compact action row (gun screens): the two
+                                high-frequency actions stay visible (+1, Pick All);
+                                exception-path actions (Short pick, −1, edit qty,
+                                assign bin) live in the ⋯ menu. Four inline icons
+                                previously overflowed the card and clipped Pick All. */}
                             {/* +1 Button */}
                             <Button 
                               size="icon" 
@@ -4498,22 +4482,68 @@ export default function Picking() {
                             >
                               <CheckCircle2 className="h-4 w-4 md:h-5 md:w-5" />
                             </Button>
+                            {/* ⋯ Overflow — exception-path actions */}
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  size="icon"
+                                  variant="outline"
+                                  className="h-9 w-9 md:h-11 md:w-11 border-slate-300 text-slate-600 flex-shrink-0"
+                                  aria-label={`More actions for ${item.sku}`}
+                                  data-testid={`button-more-${item.id}`}
+                                >
+                                  <MoreVertical className="h-4 w-4 md:h-5 md:w-5" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem
+                                  className="text-amber-700 focus:text-amber-800"
+                                  disabled={replenGuidanceLoading}
+                                  onClick={() => handleListItemShort(idx)}
+                                  data-testid={`menu-short-${item.id}`}
+                                >
+                                  <AlertTriangle className="h-4 w-4 mr-2" />
+                                  Short pick
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  disabled={item.picked <= 0}
+                                  onClick={() => handleListItemDecrement(idx)}
+                                  data-testid={`menu-minus-${item.id}`}
+                                >
+                                  <Minus className="h-4 w-4 mr-2" />
+                                  Unpick one (−1)
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() => openEditQtyDialog(idx)}
+                                  data-testid={`menu-editqty-${item.id}`}
+                                >
+                                  <Edit3 className="h-4 w-4 mr-2" />
+                                  Edit quantity
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={() => openAllocationDialog(idx)}
+                                  data-testid={`menu-bin-${item.id}`}
+                                >
+                                  <MapPin className="h-4 w-4 mr-2" />
+                                  Assign bin
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
                           </div>
                         ) : (
                           item.status === "completed" ? (
                             <div className="flex gap-1">
                               <Button
-                                size="sm"
+                                size="icon"
                                 variant="outline"
-                                className="h-9 md:h-11 px-2 md:px-3 border-amber-300 text-amber-700 bg-white hover:bg-amber-50 flex-shrink-0 whitespace-nowrap"
+                                className="h-9 w-9 md:h-11 md:w-11 border-amber-300 text-amber-700 bg-white hover:bg-amber-50 flex-shrink-0"
                                 onClick={() => handleListItemDecrement(idx)}
                                 disabled={item.picked <= 0 || unpickItemMutation.isPending}
                                 aria-label={`Unpick one ${item.sku}`}
                                 title={`Unpick one ${item.sku}`}
                                 data-testid={`button-unpick-${item.id}`}
                               >
-                                <RotateCcw className="h-4 w-4 mr-1" />
-                                <span className="text-xs md:text-sm font-semibold">Unpick</span>
+                                <RotateCcw className="h-4 w-4 md:h-5 md:w-5" />
                               </Button>
                               <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
                                 <CheckCircle2 className="h-5 w-5 md:h-6 md:w-6 text-emerald-500" />
