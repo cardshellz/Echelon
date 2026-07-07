@@ -125,6 +125,46 @@ describe("oms-flow-reconciliation.service", () => {
     expect(OMS_FLOW_RECONCILIATION_SRC).toContain("provider_context_missing_or_mismatched");
   });
 
+  it("REGRESSION 9dec90c4: the drift sample CTE keeps its FROM clause", () => {
+    // The substring assertions above passed even when the sample query's
+    // second CTE lost its `FROM provider_reference_rows` (the token still
+    // appeared in the WITH definition) — the broken SQL then threw
+    // 'column "oms_order_id" does not exist' on EVERY 15-min run and silently
+    // killed all auto-remediation for 9+ days (2026-06-28 → 2026-07-07).
+    // This asserts the ORDER: every `END AS drift_reason` must be followed by
+    // `FROM provider_reference_rows` before its WHERE.
+    const driftSelects = OMS_FLOW_RECONCILIATION_SRC.match(
+      /END AS drift_reason[\s\S]{0,400}?(FROM provider_reference_rows|WHERE)/g,
+    ) ?? [];
+    expect(driftSelects.length).toBeGreaterThanOrEqual(1);
+    for (const block of driftSelects) {
+      expect(block).toContain("FROM provider_reference_rows");
+    }
+  });
+
+  it("per-step isolation: a throwing detector no longer aborts the remaining steps", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Every query throws — the pre-2026-07-07 behavior was a rejected promise
+    // from the first collect query, which meant autoClose/remediation never ran.
+    const db = {
+      execute: vi.fn(async () => {
+        throw new Error('column "oms_order_id" does not exist');
+      }),
+    };
+
+    const issues = await runOmsFlowReconciliation(db);
+
+    // Resolves (not rejects) with no issues…
+    expect(issues).toEqual([]);
+    // …and execution CONTINUED past the failed collect into later steps
+    // (auto-close + reservation remediation each issue their own queries).
+    expect(db.execute.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining("step 'collect' failed (continuing)"),
+    );
+    consoleError.mockRestore();
+  });
+
   it("treats refunded OMS financial status as final for WMS reconciliation", () => {
     const refundedFinancialStatusGuards = OMS_FLOW_RECONCILIATION_SRC.match(
       /oo\.financial_status = 'refunded'/g,
