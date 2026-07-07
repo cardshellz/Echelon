@@ -504,8 +504,8 @@ export class PickingUseCases {
             updated_at = ${now},
             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
               'supersededBy', 'newer_blocking_exception',
-              'supersededAt', ${now},
-              'supersededExceptionType', ${params.exceptionType}
+              'supersededAt', ${now}::timestamptz,
+              'supersededExceptionType', ${params.exceptionType}::text
             )
           WHERE order_item_id = ${params.item.id}
             AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
