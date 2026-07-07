@@ -25,6 +25,7 @@ import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import {
+  Activity,
   AlertTriangle,
   Box,
   FileSpreadsheet,
@@ -32,6 +33,7 @@ import {
   Package,
   PackageCheck,
   Pencil,
+  Play,
   Plus,
   Ruler,
   Save,
@@ -1955,6 +1957,222 @@ function RateTablesTab() {
   );
 }
 
+// ===== Shadow runs =====
+
+interface ShadowReport {
+  ordersRun: number;
+  packingComplete: number;
+  packingFallback: number;
+  ratesFound: number;
+  ratesEmpty: number;
+  topWarnings: Array<{ warning: string; count: number }>;
+}
+
+interface ShadowRunRecord {
+  report: ShadowReport;
+  days: number;
+  limit: number;
+  ranAt: Date;
+}
+
+const SHADOW_DAYS_OPTIONS = ["7", "30", "90"] as const;
+const SHADOW_LIMIT_OPTIONS = ["25", "50", "100"] as const;
+const SHADOW_RUN_HISTORY_LIMIT = 5;
+
+function formatRunPct(numerator: number, denominator: number): string {
+  if (denominator <= 0) return "—";
+  return `${Math.round((numerator / denominator) * 100)}%`;
+}
+
+function ShadowReportStat({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+}) {
+  return (
+    <div className="rounded-md border p-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="text-lg font-semibold tabular-nums">{value}</p>
+      {detail && <p className="text-xs text-muted-foreground">{detail}</p>}
+    </div>
+  );
+}
+
+function ShadowRunResult({ run }: { run: ShadowRunRecord }) {
+  const { report } = run;
+  return (
+    <div className="rounded-md border p-3 md:p-4 space-y-3">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+        <span className="text-sm font-medium">
+          Run at {run.ranAt.toLocaleTimeString()} · {run.ranAt.toLocaleDateString()}
+        </span>
+        <span className="text-xs text-muted-foreground">
+          last {run.days} days, up to {run.limit} orders
+        </span>
+      </div>
+      {report.ordersRun === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No matching orders found in the window — widen the day range or wait for new US orders.
+        </p>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <ShadowReportStat label="Orders run" value={report.ordersRun.toLocaleString()} />
+            <ShadowReportStat
+              label="Packed completely"
+              value={`${report.packingComplete.toLocaleString()} / ${report.ordersRun.toLocaleString()}`}
+              detail={`${formatRunPct(report.packingComplete, report.ordersRun)} · ${report.packingFallback.toLocaleString()} fell back`}
+            />
+            <ShadowReportStat
+              label="Rates found"
+              value={`${report.ratesFound.toLocaleString()} / ${report.ordersRun.toLocaleString()}`}
+              detail={`${formatRunPct(report.ratesFound, report.ordersRun)} · ${report.ratesEmpty.toLocaleString()} empty`}
+            />
+          </div>
+          {report.packingComplete === 0 && (
+            <p className="text-sm text-muted-foreground">
+              No orders packed completely yet — add boxes in the Box catalog and capture product
+              dims, then run again to watch readiness climb.
+            </p>
+          )}
+          {report.topWarnings.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Top blockers
+              </p>
+              <div className="space-y-1">
+                {report.topWarnings.map((entry) => (
+                  <div
+                    key={entry.warning}
+                    className="flex items-start justify-between gap-3 rounded-md bg-muted/50 px-2.5 py-1.5"
+                  >
+                    <span className="text-xs font-mono break-all">{entry.warning}</span>
+                    <span className="text-xs text-muted-foreground tabular-nums whitespace-nowrap">
+                      ×{entry.count.toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ShadowRunsTab() {
+  const { toast } = useToast();
+
+  const [days, setDays] = useState<string>("7");
+  const [limit, setLimit] = useState<string>("50");
+  // Session-only history — the server keeps snapshots, but there is no
+  // list endpoint yet, so we only show runs triggered from this page load.
+  const [runs, setRuns] = useState<ShadowRunRecord[]>([]);
+
+  const runMutation = useMutation({
+    mutationFn: (body: { days: number; limit: number }) =>
+      postJson<{ report: ShadowReport }>("/api/shipping/admin/shadow-run", body),
+    onSuccess: (data, body) => {
+      setRuns((prev) =>
+        [
+          { report: data.report, days: body.days, limit: body.limit, ranAt: new Date() },
+          ...prev,
+        ].slice(0, SHADOW_RUN_HISTORY_LIMIT),
+      );
+    },
+    onError: (e: Error) => {
+      toast({ title: "Shadow run failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Card>
+      <CardHeader className="p-3 md:p-6">
+        <CardTitle className="flex items-center gap-2 text-base md:text-lg">
+          <Activity className="w-5 h-5" />
+          Shadow runs
+        </CardTitle>
+        <CardDescription className="text-xs md:text-sm">
+          Replays recent real orders through the packing and rates pipeline without touching
+          checkout. Run it as you capture boxes, dims, and rate tables to see data readiness climb.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
+        <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
+          <div className="space-y-1.5">
+            <Label className="text-xs md:text-sm">Order window</Label>
+            <Select value={days} onValueChange={setDays}>
+              <SelectTrigger className="h-10 sm:w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SHADOW_DAYS_OPTIONS.map((opt) => (
+                  <SelectItem key={opt} value={opt}>
+                    Last {opt} days
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs md:text-sm">Max orders</Label>
+            <Select value={limit} onValueChange={setLimit}>
+              <SelectTrigger className="h-10 sm:w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SHADOW_LIMIT_OPTIONS.map((opt) => (
+                  <SelectItem key={opt} value={opt}>
+                    {opt}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button
+            onClick={() => runMutation.mutate({ days: parseInt(days), limit: parseInt(limit) })}
+            disabled={runMutation.isPending}
+            className="min-h-[40px]"
+          >
+            {runMutation.isPending ? (
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+            ) : (
+              <Play className="w-4 h-4 mr-2" />
+            )}
+            {runMutation.isPending ? "Running..." : "Run shadow quotes"}
+          </Button>
+        </div>
+        {runMutation.isPending && (
+          <p className="text-xs text-muted-foreground">
+            Replaying orders through the quote pipeline — this can take a moment for larger batches.
+          </p>
+        )}
+
+        {runs.length === 0 && !runMutation.isPending ? (
+          <div className="text-center p-8 text-muted-foreground">
+            <Activity className="w-12 h-12 mx-auto mb-2 opacity-50" />
+            <p>
+              No runs yet this session. Run shadow quotes to replay recent orders and see how much
+              of the catalog the engine can pack and rate today.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {runs.map((run) => (
+              <ShadowRunResult key={run.ranAt.getTime()} run={run} />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ===== Page =====
 
 export default function ShippingSettings() {
@@ -2017,6 +2235,7 @@ export default function ShippingSettings() {
           <TabsTrigger value="service-levels">Service levels</TabsTrigger>
           <TabsTrigger value="packing-attrs">Packing attributes</TabsTrigger>
           <TabsTrigger value="rate-tables">Rate tables</TabsTrigger>
+          <TabsTrigger value="shadow-runs">Shadow runs</TabsTrigger>
         </TabsList>
         <TabsContent value="boxes" className="mt-4">
           <BoxCatalogTab boxes={config?.boxes || []} warehouses={warehouses} isLoading={configLoading} />
@@ -2029,6 +2248,9 @@ export default function ShippingSettings() {
         </TabsContent>
         <TabsContent value="rate-tables" className="mt-4">
           <RateTablesTab />
+        </TabsContent>
+        <TabsContent value="shadow-runs" className="mt-4">
+          <ShadowRunsTab />
         </TabsContent>
       </Tabs>
     </div>
