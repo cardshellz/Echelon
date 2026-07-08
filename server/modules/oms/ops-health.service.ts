@@ -6,6 +6,13 @@ import {
 import { getOmsOpsAlertSchedulerHeartbeat } from "./oms-ops-alert-heartbeat";
 import { getWebhookRetryWorkerHeartbeat } from "./webhook-retry.worker";
 
+// P5 (LINE-ITEM-HOLD-DESIGN.md §6.8/§7): a held pre-order line older than this
+// is surfaced as an aging exception — by then the PO was most likely cancelled or
+// the stock never arrived ("held forever"), so a human should chase the PO or
+// cancel the line. Deliberately conservative: pre-orders can legitimately run
+// weeks out, and this threshold also drives an ops alert, so keep it low-noise.
+const HELD_LINE_AGING_DAYS = 30;
+
 export interface OmsOpsIssue {
   code: string;
   severity: "critical" | "warning" | "info";
@@ -112,6 +119,8 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     reviewShipments,
     onHoldShipments,
     shippedTrackingNotPushed,
+    heldLineAging,
+    allLinesHeldOrders,
   ] = await Promise.all([
     collectOmsFlowReconciliationIssues(db),
     countAndSample(
@@ -694,12 +703,14 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         SELECT COUNT(*)::int AS count
         FROM wms.outbound_shipments
         WHERE held = true
+          AND COALESCE(source, '') <> 'line_item_hold'
       `,
       sql`
         SELECT id AS shipment_id, order_id, status, on_hold_reason, review_reason,
                requires_review, updated_at
         FROM wms.outbound_shipments
         WHERE held = true
+          AND COALESCE(source, '') <> 'line_item_hold'
         ORDER BY updated_at DESC NULLS LAST, id DESC
         LIMIT 10
       `,
@@ -737,6 +748,83 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
               AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed')
           )
         ORDER BY oo.shipped_at ASC
+        LIMIT 10
+      `,
+    ),
+    // P5: line-item (pre-order) holds aged past HELD_LINE_AGING_DAYS. Each held
+    // line lives in its own held shipment (source='line_item_hold', held=true,
+    // held_at set at hold time); once released, held flips false and it ships. A
+    // still-held line this old likely means the PO was cancelled or never landed.
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM wms.outbound_shipments os
+        WHERE os.held = true
+          AND os.source = 'line_item_hold'
+          AND os.status NOT IN ('shipped', 'cancelled', 'voided')
+          AND os.held_at IS NOT NULL
+          AND os.held_at < NOW() - (${HELD_LINE_AGING_DAYS} * INTERVAL '1 day')
+      `,
+      sql`
+        SELECT os.id AS shipment_id, os.order_id AS wms_order_id, wo.order_number,
+               oi.sku, oi.quantity, os.on_hold_reason AS hold_reason,
+               os.held_at, (NOW()::date - os.held_at::date) AS days_held
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        LEFT JOIN wms.outbound_shipment_items osi ON osi.shipment_id = os.id
+        LEFT JOIN wms.order_items oi ON oi.id = osi.order_item_id
+        WHERE os.held = true
+          AND os.source = 'line_item_hold'
+          AND os.status NOT IN ('shipped', 'cancelled', 'voided')
+          AND os.held_at IS NOT NULL
+          AND os.held_at < NOW() - (${HELD_LINE_AGING_DAYS} * INTERVAL '1 day')
+        ORDER BY os.held_at ASC
+        LIMIT 10
+      `,
+    ),
+    // P5: whole-order pre-order exception — every shippable line is held and
+    // nothing has shipped yet, so there is no ship-now shipment and the order
+    // silently sits. Informational (an all-pre-order order is a valid state), but
+    // surfaced so ops can confirm it is intended rather than a mis-hold.
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count FROM (
+          SELECT wo.id
+          FROM wms.orders wo
+          JOIN wms.order_items oi ON oi.order_id = wo.id
+          WHERE wo.warehouse_status NOT IN ('cancelled', 'shipped')
+          GROUP BY wo.id
+          HAVING BOOL_OR(COALESCE(oi.on_hold, false)) = true
+             AND SUM(COALESCE(oi.fulfilled_quantity, 0)) = 0
+             AND COUNT(*) FILTER (
+                   WHERE COALESCE(oi.requires_shipping, 1) <> 0
+                     AND oi.status NOT IN ('cancelled', 'completed')
+                     AND COALESCE(oi.on_hold, false) = false
+                 ) = 0
+        ) t
+      `,
+      sql`
+        SELECT wo.id AS wms_order_id, wo.order_number, wo.warehouse_status,
+               COUNT(*) FILTER (WHERE COALESCE(oi.on_hold, false) = true)::int AS held_lines,
+               (SELECT MIN(os.held_at)
+                  FROM wms.outbound_shipments os
+                  WHERE os.order_id = wo.id
+                    AND os.source = 'line_item_hold'
+                    AND os.held = true) AS held_since
+        FROM wms.orders wo
+        JOIN wms.order_items oi ON oi.order_id = wo.id
+        WHERE wo.warehouse_status NOT IN ('cancelled', 'shipped')
+        GROUP BY wo.id, wo.order_number, wo.warehouse_status
+        HAVING BOOL_OR(COALESCE(oi.on_hold, false)) = true
+           AND SUM(COALESCE(oi.fulfilled_quantity, 0)) = 0
+           AND COUNT(*) FILTER (
+                 WHERE COALESCE(oi.requires_shipping, 1) <> 0
+                   AND oi.status NOT IN ('cancelled', 'completed')
+                   AND COALESCE(oi.on_hold, false) = false
+               ) = 0
+        ORDER BY held_since ASC NULLS LAST
         LIMIT 10
       `,
     ),
@@ -906,8 +994,22 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       code: "SHIPMENT_ON_HOLD",
       severity: "warning",
       count: onHoldShipments.count,
-      message: "WMS shipments are on hold and need warehouse-ops review.",
+      message: "Whole-shipment holds need warehouse-ops review (pre-order line holds excluded).",
       sample: onHoldShipments.sample,
+    }),
+    issue({
+      code: "LINE_HELD_AGING",
+      severity: "warning",
+      count: heldLineAging.count,
+      message: `Pre-order line holds have aged past ${HELD_LINE_AGING_DAYS} days — chase the PO or cancel the line.`,
+      sample: heldLineAging.sample,
+    }),
+    issue({
+      code: "ORDER_ALL_LINES_HELD",
+      severity: "info",
+      count: allLinesHeldOrders.count,
+      message: "Orders have every shippable line held with nothing shipped yet — no ship-now shipment exists.",
+      sample: allLinesHeldOrders.sample,
     }),
     issue({
       code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
