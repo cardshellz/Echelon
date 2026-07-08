@@ -47,6 +47,10 @@ const AUTHORIZING_TOPICS = new Set([
   "ebay/webhook",
   "manual/create",
   "shopify/bridge",
+  // Operator/reconciler backfill: re-authorize a paid line that was left
+  // unauthorized by a defect (e.g. the 2026-07 orders/paid+orders/updated race).
+  // Authorizes from order-paid truth, same as a first-party paid event.
+  "reconciler/authorize",
 ]);
 
 const PAID_FINANCIAL_STATUSES = new Set([
