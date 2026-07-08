@@ -129,6 +129,8 @@ export async function runInboundFulfillmentSweep(dbArg: any = db) {
               trackingNumber: tracking.trackingNumber,
               carrier: tracking.carrier || "other",
               source: "shopify_fulfillment_sweep",
+            }, {
+              shippingEngine: dbArg?.__shippingEngine ?? null,
             });
             synced++;
           }
