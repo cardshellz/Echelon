@@ -1495,10 +1495,14 @@ export function registerOmsWebhooks(
         buildShopifyWebhookInboxInput(req, topic, payload),
       );
 
-      if (!receipt.inserted && receipt.status === "succeeded") {
+      if (!receipt.inserted && receipt.status === "succeeded" && !isInternalRetry(req)) {
         console.log(`${LOG_PREFIX} ${topic} duplicate already succeeded (inbox=${receipt.id}), skipping`);
         acknowledgeProcessed(req, res);
         return { receipt, shouldProcess: false };
+      }
+
+      if (!receipt.inserted && receipt.status === "succeeded" && isInternalRetry(req)) {
+        console.log(`${LOG_PREFIX} ${topic} internal retry replaying succeeded inbox row (inbox=${receipt.id})`);
       }
 
       if (!receipt.inserted && receipt.status === "processing" && !isInternalRetry(req)) {

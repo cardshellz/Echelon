@@ -227,6 +227,15 @@ describe("oms-webhooks.ts :: internal retry loopback semantics", () => {
     );
   });
 
+  it("allows internal retries to reprocess already-succeeded inbox rows", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(
+      /!receipt\.inserted && receipt\.status === "succeeded" && !isInternalRetry\(req\)/,
+    );
+    expect(OMS_WEBHOOKS_SRC).toMatch(
+      /!receipt\.inserted && receipt\.status === "succeeded" && isInternalRetry\(req\)[\s\S]*internal retry replaying succeeded inbox row/,
+    );
+  });
+
   it("marks inbox rows succeeded or failed around processing", () => {
     expect(OMS_WEBHOOKS_SRC).toContain("markInboxSucceeded");
     expect(OMS_WEBHOOKS_SRC).toContain("markInboxFailed");
