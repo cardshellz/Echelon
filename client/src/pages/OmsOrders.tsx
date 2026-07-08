@@ -654,6 +654,32 @@ export default function OmsOrders() {
                         ))}
                       </div>
                     ) : issue.sample.length > 0 && (
+                      issue.code === "LINE_HELD_AGING" ||
+                      issue.code === "ORDER_ALL_LINES_HELD"
+                    ) ? (
+                      <div className="mt-3 space-y-2">
+                        {issue.sample.slice(0, 3).map((row: any) => (
+                          <div
+                            key={`${issue.code}-${row.wms_order_id}-${row.shipment_id ?? "order"}`}
+                            className="rounded bg-muted p-2 text-xs"
+                          >
+                            <div className="truncate font-medium">
+                              {row.order_number || `WMS #${row.wms_order_id}`}
+                              {row.sku ? ` | ${row.sku}` : ""}
+                              {row.held_lines != null ? ` | ${row.held_lines} line(s) held` : ""}
+                            </div>
+                            <div className="mt-1 truncate text-muted-foreground">
+                              {row.days_held != null
+                                ? `held ${row.days_held}d`
+                                : row.held_since
+                                ? `held since ${String(row.held_since).slice(0, 10)}`
+                                : "held"}
+                              {row.hold_reason ? ` | ${row.hold_reason}` : ""}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : issue.sample.length > 0 && (
                       <pre className="mt-3 max-h-28 overflow-auto rounded bg-muted p-2 text-xs">
                         {JSON.stringify(issue.sample.slice(0, 3), null, 2)}
                       </pre>
