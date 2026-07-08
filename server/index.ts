@@ -1214,7 +1214,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                  os.shipstation_order_id, os.status AS wms_shipment_status,
                  os.tracking_number, os.carrier,
                  os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
-                 os.shipstation_order_key,
+                 os.shipstation_order_key, os.created_at,
                  w.order_number,
                  w.oms_fulfillment_order_id AS oms_id,
                  (SELECT oo.status FROM oms.oms_orders oo
@@ -1253,9 +1253,76 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             // 1. Fetch engine order state + shipments
             const engineState = await engine.getState(ref);
             if (!engineState) {
-              console.warn(
-                `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}) — skipping`,
-              );
+              // The engine order 404s. A frequent cause is ShipStation "Combine
+              // Orders": it merges this order into another and DESTROYS this SS
+              // order, so no SHIP_NOTIFY will ever arrive here and the shipment
+              // is stranded 'queued'/'labeled' forever. We used to skip silently
+              // every hour. Instead, surface a stranded, non-terminal shipment
+              // (order not cancelled; not brand-new, so a transient API miss
+              // can't trip it) for review, and stamp last_reconciled_at so we
+              // stop hammering the engine API. Shipped rows / cancelled orders
+              // are left untouched.
+              const stranded =
+                (row.wms_shipment_status === "queued" ||
+                  row.wms_shipment_status === "labeled") &&
+                row.oms_order_status !== "cancelled" &&
+                row.created_at != null &&
+                new Date(row.created_at).getTime() <
+                  Date.now() - 2 * 60 * 60 * 1000;
+              if (stranded) {
+                console.warn(
+                  `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}, status=${row.wms_shipment_status}) — flagging stranded shipment for review`,
+                );
+                const already: any = await db.execute(sql`
+                  SELECT COALESCE(requires_review, false) AS rr
+                  FROM wms.outbound_shipments WHERE id = ${shipmentId}
+                `);
+                const alreadyFlagged = already?.rows?.[0]?.rr === true;
+                await db.execute(sql`
+                  UPDATE wms.outbound_shipments
+                  SET requires_review = true,
+                      review_reason = CASE WHEN COALESCE(requires_review, false)
+                                           THEN review_reason ELSE 'engine_order_not_found' END,
+                      last_reconciled_at = NOW(),
+                      updated_at = NOW()
+                  WHERE id = ${shipmentId}
+                `);
+                if (
+                  !alreadyFlagged &&
+                  row.oms_id &&
+                  String(row.oms_id).match(/^[0-9]+$/)
+                ) {
+                  try {
+                    await db.execute(sql`
+                      INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+                      VALUES (
+                        ${Number(row.oms_id)},
+                        'engine_order_not_found',
+                        ${JSON.stringify({
+                          wmsShipmentId: shipmentId,
+                          engineOrderRef: ref.engineOrderRef,
+                          wmsShipmentStatus: row.wms_shipment_status,
+                        })}::jsonb,
+                        NOW()
+                      )
+                    `);
+                  } catch (auditErr: any) {
+                    console.warn(
+                      `[Reconcile V2] not-found audit insert failed for shipment ${shipmentId}:`,
+                      auditErr?.message,
+                    );
+                  }
+                }
+              } else {
+                console.warn(
+                  `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}) — skipping`,
+                );
+                await db.execute(sql`
+                  UPDATE wms.outbound_shipments
+                  SET last_reconciled_at = NOW()
+                  WHERE id = ${shipmentId}
+                `);
+              }
               continue;
             }
 
