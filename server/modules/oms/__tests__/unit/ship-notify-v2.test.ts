@@ -1554,6 +1554,71 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   });
 });
 
+// ─── Combined / merged (ShipStation "Combine Orders") shipment recovery ──
+//     When ShipStation merges two of our orders into one label, the SHIP_NOTIFY
+//     can key to a shipment we already cancelled (merge orphaned it). A shipped
+//     notify must NOT be dropped: it recovers by mapping the notify's shipment
+//     items back to the owning WMS order(s) and shipping each, so tracking +
+//     the marketplace fulfillment push still flow to every merged order.
+describe("processShipNotify V2 :: combined/merged shipment recovery (source invariants)", () => {
+  const readSrc = () =>
+    readFileSync(resolve(__dirname, "../../shipstation.service.ts"), "utf-8");
+
+  it("recovers a shipped notify whose keyed shipment is dead by fanning out over shipment items", () => {
+    const src = readSrc();
+    const fnStart = src.indexOf("async function processShipNotifyV2(");
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnBlock = src.slice(
+      fnStart,
+      src.indexOf("async function applyShipNotifyV2EventToResolvedShipment("),
+    );
+
+    // When the primary resolves to no live shipment, a *shipped* notify must
+    // attempt item-based recovery BEFORE giving up (the legacy fallback).
+    const recoveryPos = fnBlock.indexOf(
+      "resolveCombinedShipmentGroupsFromShipStationItems(null",
+    );
+    const giveUpPos = fnBlock.indexOf(
+      "return { processed: false, fallback: resolved.fallback }",
+    );
+    expect(recoveryPos).toBeGreaterThan(-1);
+    expect(giveUpPos).toBeGreaterThan(-1);
+    expect(recoveryPos).toBeLessThan(giveUpPos);
+
+    // Recovery is gated to shipped notifies on the orderKey path (fallback ===
+    // false); genuine pre-cutover misses still use the legacy fallback.
+    expect(fnBlock).toMatch(/event\.kind === "shipped" && !resolved\.fallback/);
+    // Each recovered order-shipment gets the shared tracking applied.
+    expect(fnBlock).toContain("applyShipNotifyV2EventToResolvedShipment(");
+  });
+
+  it("fan-out lands on a LIVE shipment per order and tolerates a null anchor", () => {
+    const src = readSrc();
+    const fnStart = src.indexOf(
+      "async function resolveCombinedShipmentGroupsFromShipStationItems(",
+    );
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnBlock = src.slice(
+      fnStart,
+      src.indexOf("async function loadValidatedInventoryShipmentItems("),
+    );
+
+    // Per-order selection skips terminal shipments so a cancelled/voided row
+    // can't absorb the shipped event — the create-child path handles it.
+    expect(fnBlock).toMatch(/status NOT IN \('cancelled', 'voided'\)/);
+
+    // The single-order shortcut is gated on having an anchor row; the recovery
+    // path (null anchor) falls through to per-order resolve/create.
+    expect(fnBlock).toContain(
+      "resolvedShipmentRow && sourceIdsByOrder.size <= 1",
+    );
+
+    // Null-anchor safety: the tie-break deref is guarded so a null anchor
+    // never throws (recovery calls this with resolvedShipmentRow = null).
+    expect(fnBlock).toContain("resolvedShipmentRow?.id ?? 0");
+  });
+});
+
 // ─── Duplicate orderKey repair (merged from main; adoption is now the
 //     read-only resolveShipmentByOrderKey path — no INSERT fallback) ──
 
