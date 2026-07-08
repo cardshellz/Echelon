@@ -1882,20 +1882,42 @@ export function registerOmsWebhooks(
               existingLine.name,
               incomingDisplayName,
             );
-            const authority = deriveOmsLineAuthority({
-              sourceTopic: "orders/updated",
-              sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-              sourceInboxId: inbox.receipt.id,
-              financialStatus: shopifyOrder.financial_status,
-              quantity: item.quantity ?? existingLine.quantity,
-              fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
-                ? Number(item.fulfillable_quantity)
-                : existingLine.fulfillableQuantity,
-              previous: existingLine,
-            });
-
             // Update existing line and authority ledger atomically.
+            //
+            // RACE FIX (order #59930): derive authority from a FRESH, row-locked
+            // read INSIDE the transaction — never from the `existingLine`
+            // snapshot loaded before this handler ran. Reward/coupon orders make
+            // Shopify emit orders/paid and orders/updated in the same
+            // millisecond band; the old code read each line's authority BEFORE
+            // orders/paid committed (paid_quantity=0), and the non-authorizing
+            // orders/updated branch (paidQuantity = min(previous, observed) = 0)
+            // wrote that stale value back, clobbering the `authorized` state
+            // orders/paid had just written and reverting the line to `seen` — so
+            // it never materialized to WMS/ShipStation. Re-reading the row FOR
+            // UPDATE serializes this write-back against the concurrent
+            // authorizing write on the same row, so `previous` is always the
+            // latest committed authority (min(1,1)=1 preserves authorization).
             await db.transaction(async (tx: any) => {
+              const [lockedLine] = await tx
+                .select()
+                .from(omsOrderLines)
+                .where(eq(omsOrderLines.id, existingLine.id))
+                .for("update")
+                .limit(1);
+              const previousAuthority = lockedLine ?? existingLine;
+
+              const authority = deriveOmsLineAuthority({
+                sourceTopic: "orders/updated",
+                sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                sourceInboxId: inbox.receipt.id,
+                financialStatus: shopifyOrder.financial_status,
+                quantity: item.quantity ?? previousAuthority.quantity,
+                fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                  ? Number(item.fulfillable_quantity)
+                  : previousAuthority.fulfillableQuantity,
+                previous: previousAuthority,
+              });
+
               await tx
                 .update(omsOrderLines)
                 .set({
@@ -1903,11 +1925,11 @@ export function registerOmsWebhooks(
                   title: preservedTitle,
                   name: preservedName,
                   variantTitle: (normalizedLine?.variantTitle ?? item.variant_title) || existingLine.variantTitle,
-                  quantity: item.quantity ?? existingLine.quantity,
+                  quantity: item.quantity ?? previousAuthority.quantity,
                   ...authorityLinePatch(authority),
                   fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
                     ? Number(item.fulfillable_quantity)
-                    : existingLine.fulfillableQuantity,
+                    : previousAuthority.fulfillableQuantity,
                   fulfillmentStatus,
                   requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? existingLine.requiresShipping,
                   paidPriceCents: normalizedLine?.paidPriceCents ?? existingLine.paidPriceCents,
@@ -1926,7 +1948,7 @@ export function registerOmsWebhooks(
                 orderLineId: existingLine.id,
                 eventType: "line_updated",
                 sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-                previous: existingLine,
+                previous: previousAuthority,
                 authority,
               });
             });
