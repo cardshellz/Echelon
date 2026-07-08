@@ -28,6 +28,9 @@ const WRITEBACK_GUARDS_TEST_SRC = readSource("c7-writeback-guards.test.ts");
 const PUSH_SHOPIFY_FULFILLMENT_TEST_SRC = readSource(
   "push-shopify-fulfillment.test.ts",
 );
+const SHIPSTATION_SPLIT_INDEX_MIGRATION = readSource(
+  "../../../../../migrations/125_shipstation_split_engine_identity_indexes.sql",
+);
 
 describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
   it("keeps concurrent Shopify fulfillment pushes idempotent for the same WMS shipment", () => {
@@ -107,6 +110,34 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(itemSyncBlock).toContain("shipstation_split_source_item_missing");
     expect(itemSyncBlock).toContain("UPDATE wms.outbound_shipment_items");
     expect(itemSyncBlock).toContain("tracking_id = ${String(shipment.shipmentId)}");
+  });
+
+  it("exempts legitimate ShipStation split children from active engine identity uniqueness", () => {
+    expect(SHIPSTATION_SPLIT_INDEX_MIGRATION).toContain(
+      "DROP INDEX IF EXISTS wms.uq_outbound_shipments_active_shipstation_order_id",
+    );
+    expect(SHIPSTATION_SPLIT_INDEX_MIGRATION).toContain(
+      "DROP INDEX IF EXISTS wms.uq_outbound_shipments_active_shipstation_order_key",
+    );
+    expect(SHIPSTATION_SPLIT_INDEX_MIGRATION).toContain(
+      "DROP INDEX IF EXISTS wms.uq_outbound_shipments_active_engine_order_ref",
+    );
+
+    for (const indexName of [
+      "uq_outbound_shipments_active_shipstation_order_id",
+      "uq_outbound_shipments_active_shipstation_order_key",
+      "uq_outbound_shipments_active_engine_order_ref",
+    ]) {
+      const indexBlock = sourceBlock(
+        SHIPSTATION_SPLIT_INDEX_MIGRATION,
+        `CREATE UNIQUE INDEX ${indexName}`,
+        ";",
+      );
+
+      expect(indexBlock).toContain("'echelon_combined_child'");
+      expect(indexBlock).toContain("'shipstation_combined_child'");
+      expect(indexBlock).toContain("'shipstation_split'");
+    }
   });
 
   it("keeps combined shipment fan-out covered as a first-class conformance path", () => {
