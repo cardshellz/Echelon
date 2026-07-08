@@ -15,6 +15,9 @@ import {
   type ShipmentEvent,
 } from "../orders/shipment-rollup";
 import { deriveOmsFromWms } from "@shared/enums/order-status";
+import type { ShippingEngine } from "../shipping/engine";
+import type { EngineRef } from "../shipping/types";
+import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
 
 const LOG_PREFIX = "[ChannelFulfillment]";
 
@@ -30,6 +33,23 @@ export interface ChannelFulfillmentInput {
 export interface ChannelFulfillmentResult {
   processed: boolean;
   shipmentsMarked: number;
+  engineOrdersClosed: number;
+  engineCloseFailures: number;
+}
+
+export interface ChannelFulfillmentOptions {
+  shippingEngine?: Pick<ShippingEngine, "isConfigured" | "markShipped"> | null;
+}
+
+interface ShipmentRow {
+  id: number;
+  status: string;
+  tracking_number: string | null;
+  shipping_engine: string | null;
+  engine_order_ref: string | null;
+  engine_shipment_ref: string | null;
+  shipstation_order_id: number | null;
+  shipstation_order_key: string | null;
 }
 
 /**
@@ -44,17 +64,26 @@ export async function applyChannelFulfillment(
   db: any,
   wmsOrderId: number,
   input: ChannelFulfillmentInput,
+  options: ChannelFulfillmentOptions = {},
 ): Promise<ChannelFulfillmentResult> {
   const now = input.shipDate ?? new Date();
+  const shippingEngine = resolveShippingEngine(db, options);
 
   const shipmentResult: any = await db.execute(sql`
-    SELECT id, status, tracking_number
+    SELECT
+      id,
+      status,
+      tracking_number,
+      shipping_engine,
+      engine_order_ref,
+      engine_shipment_ref,
+      shipstation_order_id,
+      shipstation_order_key
     FROM wms.outbound_shipments
     WHERE order_id = ${wmsOrderId}
     ORDER BY id
   `);
-  const shipments: Array<{ id: number; status: string; tracking_number: string | null }> =
-    shipmentResult?.rows ?? [];
+  const shipments: ShipmentRow[] = shipmentResult?.rows ?? [];
 
   if (shipments.length === 0) {
     console.warn(
@@ -62,7 +91,7 @@ export async function applyChannelFulfillment(
     );
     const { markOrderShipped } = await import("../orders/order-status-core");
     await markOrderShipped(db, wmsOrderId, "channel_fulfillment_no_shipments");
-    return { processed: true, shipmentsMarked: 0 };
+    return { processed: true, shipmentsMarked: 0, engineOrdersClosed: 0, engineCloseFailures: 0 };
   }
 
   const event: ShipmentEvent = {
@@ -74,24 +103,45 @@ export async function applyChannelFulfillment(
   };
 
   let marked = 0;
+  let engineOrdersClosed = 0;
+  let engineCloseFailures = 0;
   for (const shipment of shipments) {
-    if (shipment.status === "shipped" && shipment.tracking_number === input.trackingNumber) {
-      continue;
-    }
     if (shipment.status === "cancelled" || shipment.status === "voided") {
       continue;
     }
 
+    const alreadyShippedWithSameTracking =
+      shipment.status === "shipped" && shipment.tracking_number === input.trackingNumber;
+    let shouldCloseEngineOrder = alreadyShippedWithSameTracking;
+
     try {
-      const fulfillmentPush = (db as any).__fulfillmentPush;
-      const { changed } = await dispatchShipmentEvent(db, shipment.id, event, {
-        now,
-        fulfillmentPush,
-      });
-      if (changed) marked++;
+      if (!alreadyShippedWithSameTracking) {
+        const fulfillmentPush = (db as any).__fulfillmentPush;
+        const { changed } = await dispatchShipmentEvent(db, shipment.id, event, {
+          now,
+          fulfillmentPush,
+        });
+        if (changed) marked++;
+        shouldCloseEngineOrder = changed;
+      }
     } catch (err: any) {
       console.error(
         `${LOG_PREFIX} Failed to mark shipment ${shipment.id} shipped: ${err.message}`,
+      );
+      continue;
+    }
+
+    if (!shouldCloseEngineOrder) {
+      continue;
+    }
+
+    try {
+      const closed = await closeShippingEngineOrder(shippingEngine, shipment, input, now);
+      if (closed) engineOrdersClosed++;
+    } catch (err: any) {
+      engineCloseFailures++;
+      console.error(
+        `${LOG_PREFIX} Failed to close shipping engine order for shipment ${shipment.id}: ${err.message}`,
       );
     }
   }
@@ -115,11 +165,54 @@ export async function applyChannelFulfillment(
         fulfillmentId: input.sourceFulfillmentId ?? null,
         wmsOrderId,
         shipmentsMarked: marked,
+        engineOrdersClosed,
+        engineCloseFailures,
       },
     });
   }
 
-  return { processed: true, shipmentsMarked: marked };
+  return {
+    processed: true,
+    shipmentsMarked: marked,
+    engineOrdersClosed,
+    engineCloseFailures,
+  };
+}
+
+function resolveShippingEngine(
+  db: any,
+  options: ChannelFulfillmentOptions,
+): Pick<ShippingEngine, "isConfigured" | "markShipped"> | null {
+  return options.shippingEngine ?? db?.__shippingEngine ?? null;
+}
+
+async function closeShippingEngineOrder(
+  shippingEngine: Pick<ShippingEngine, "isConfigured" | "markShipped"> | null,
+  shipment: ShipmentRow,
+  input: ChannelFulfillmentInput,
+  shipDate: Date,
+): Promise<boolean> {
+  if (!shippingEngine?.isConfigured?.()) return false;
+
+  const engineRef: EngineRef | null = engineRefFromRow(shipment);
+  if (!engineRef) return false;
+
+  await shippingEngine.markShipped(engineRef, {
+    shipDate,
+    trackingNumber: input.trackingNumber,
+    carrierCode: toEngineCarrierCode(input.carrier),
+    notifyCustomer: false,
+  });
+  return true;
+}
+
+function toEngineCarrierCode(carrier: string): string {
+  const normalized = carrier.trim().toLowerCase();
+  if (normalized.includes("usps") || normalized.includes("stamps")) return "usps";
+  if (normalized.includes("fedex")) return "fedex";
+  if (normalized.includes("ups")) return "ups";
+  if (normalized.includes("dhl")) return "dhl";
+  return normalized || "other";
 }
 
 async function resolveOmsOrderId(db: any, wmsOrderId: number): Promise<number | null> {
