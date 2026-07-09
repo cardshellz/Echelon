@@ -182,6 +182,10 @@ export class SyncRecoveryService {
         FROM wms.outbound_shipments
         WHERE status = 'planned'
           AND engine_order_ref IS NULL
+          -- P0.9: quarantined / intentionally-held shipments are for humans,
+          -- not the backfill sweep (mirror of the flow-reconciler guards)
+          AND COALESCE(requires_review, false) = false
+          AND COALESCE(held, false) = false
         ORDER BY created_at ASC
         LIMIT ${shipmentLimit}
       `);

@@ -1592,8 +1592,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             // this run — it's infra, not a shipment problem. Don't flag it for human review
             // (and don't attempt another DB write that would also fail); the next sweep
             // retries. Only a genuine reconcile failure gets a review flag.
-            const isTransientDbError = /timeout exceeded when trying to connect|connection terminated|ECONNRESET|too many clients|Client has encountered a connection error/i.test(errMsg);
-            if (!isTransientDbError) {
+            // P0.9: transient = retry next sweep. The old regex only matched DB/pool
+            // errors, so a ShipStation 429 or HTTP timeout QUARANTINED the shipment
+            // (requires_review) — inverted classification (CLAUDE.md §6).
+            const isTransientError = /timeout exceeded when trying to connect|connection terminated|ECONNRESET|too many clients|Client has encountered a connection error|\b429\b|rate limit|ETIMEDOUT|ESOCKETTIMEDOUT|socket hang up|request timeout|fetch failed|network|\b50[234]\b|Service Unavailable|Bad Gateway|Gateway Time-?out/i.test(errMsg);
+            if (!isTransientError) {
               await db.execute(sql`
                 UPDATE wms.outbound_shipments
                 SET last_reconciled_at = NOW(),

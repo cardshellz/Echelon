@@ -498,7 +498,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
             FROM oms.webhook_retry_queue q
             WHERE q.provider = 'internal'
               AND q.topic = 'shopify_fulfillment_push'
-              AND q.status = 'pending'
+              AND q.status IN ('pending', 'dead')
               AND q.payload->>'shipmentId' = os.id::text
           )
       `,
@@ -524,7 +524,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
             FROM oms.webhook_retry_queue q
             WHERE q.provider = 'internal'
               AND q.topic = 'shopify_fulfillment_push'
-              AND q.status = 'pending'
+              AND q.status IN ('pending', 'dead')
               AND q.payload->>'shipmentId' = os.id::text
           )
         ORDER BY os.shipped_at ASC
@@ -1102,7 +1102,7 @@ async function autoQueueStaleTrackingPushRetries(
       FROM oms.webhook_retry_queue
       WHERE provider = 'internal'
         AND topic = 'delayed_tracking_push'
-        AND status = 'pending'
+        AND status IN ('pending', 'dead')
         AND (
              (payload->>'shipmentId') = ${String(shipmentId)}
           OR (

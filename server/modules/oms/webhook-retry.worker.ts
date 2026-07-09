@@ -1,5 +1,5 @@
 import { webhookRetryQueue } from "@shared/schema";
-import { eq, lte, and, sql } from "drizzle-orm";
+import { eq, lte, and, sql, inArray } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
 import { createShipmentForOrder } from "../wms/create-shipment";
 // Stable error code for a deterministic, non-retryable ShipStation push
@@ -646,7 +646,7 @@ async function hasPendingRetryForScope(
     FROM oms.webhook_retry_queue
     WHERE provider = ${input.provider}
       AND topic = ${input.topic}
-      AND status = 'pending'
+      AND status IN ('pending', 'dead')
       AND ${input.scope}
     LIMIT 1
   `);
@@ -1884,16 +1884,34 @@ export async function dispatchShipStationRetry(
 
 async function processPendingWebhooks() {
   const defaultDb = getDefaultDb();
+  // P0.9: atomic cross-dyno claim. The old plain SELECT let two dynos pick
+  // up the same 50 rows and double-process them. FOR UPDATE SKIP LOCKED
+  // (single statement = atomic) plus a next_retry_at lease bump means a
+  // concurrent claimer skips these rows; if this worker dies mid-batch the
+  // lease simply expires and the rows re-sweep in 5 minutes.
+  const claimed: any = await defaultDb.execute(sql`
+    WITH candidates AS (
+      SELECT id
+      FROM oms.webhook_retry_queue
+      WHERE status = 'pending'
+        AND next_retry_at <= NOW()
+      ORDER BY next_retry_at ASC, id ASC
+      LIMIT 50
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE oms.webhook_retry_queue q
+    SET next_retry_at = NOW() + INTERVAL '5 minutes', updated_at = NOW()
+    FROM candidates
+    WHERE q.id = candidates.id
+    RETURNING q.id
+  `);
+  const claimedIds = (claimed?.rows ?? []).map((r: any) => Number(r.id));
+  if (claimedIds.length === 0) return;
+
   const pending = await defaultDb
     .select()
     .from(webhookRetryQueue)
-    .where(
-      and(
-        eq(webhookRetryQueue.status, "pending"),
-        lte(webhookRetryQueue.nextRetryAt, new Date())
-      )
-    )
-    .limit(50); // process in chunks
+    .where(inArray(webhookRetryQueue.id, claimedIds));
 
   if (pending.length === 0) return;
 
