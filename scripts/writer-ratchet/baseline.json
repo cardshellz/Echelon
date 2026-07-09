@@ -498,6 +498,15 @@
   "shipping.box_warehouse_stock": [
     "modules/shipping-engine"
   ],
+  "shipping.pack_plan_parcel_items": [
+    "modules/shipping-engine"
+  ],
+  "shipping.pack_plan_parcels": [
+    "modules/shipping-engine"
+  ],
+  "shipping.pack_plans": [
+    "modules/shipping-engine"
+  ],
   "shipping.quote_snapshots": [
     "modules/shipping-engine"
   ],

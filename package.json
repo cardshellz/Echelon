@@ -17,6 +17,8 @@
     "recover:replen-health": "tsx scripts/recover-replen-health.ts --json",
     "wms:reconcile-ledger": "tsx scripts/reconcile-inventory-ledger.ts",
     "wms:reconcile-lots": "tsx scripts/reconcile-lot-onhand.ts",
+    "wms:release-auto-holds": "tsx scripts/release-auto-held-orders.ts",
+    "oms:recover-unauthorized": "tsx scripts/recover-unauthorized-paid-lines.ts",
     "wms:remediate-lot-drift": "tsx scripts/remediate-lot-drift.ts",
     "dropship:dogfood-status": "tsx scripts/dropship-dogfood-status.ts",
     "db:push": "drizzle-kit push",

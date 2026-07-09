@@ -43,6 +43,7 @@ import {
   enqueueOmsWmsSyncRetry,
   enqueueShipStationShipmentPushRetry,
 } from "./webhook-retry.worker";
+import type { ShippingEngine } from "../shipping/engine";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1303,7 +1304,7 @@ export function registerOmsWebhooks(
   wmsServices: WmsServices | null,
   shipStationService: ShipStationService | null,
   wmsSyncService?: any, // WmsSyncService - will be set from server/index.ts
-  shippingEngine?: { cancel: (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => Promise<unknown> } | null,
+  shippingEngine?: Pick<ShippingEngine, "cancel" | "isConfigured" | "markShipped"> | null,
 ) {
   const webhookLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute
@@ -1425,9 +1426,11 @@ export function registerOmsWebhooks(
     if (shipments.length === 0) return;
 
     const rollupModule = await import("../orders/shipment-rollup");
+    let anyRequiresReview = false;
     for (const shipment of shipments) {
       const result = await rollupModule.handleAddressChangeOnShipment(db, shipment.id, { now });
       if (result.mode !== "can_repush") {
+        if (result.mode === "requires_review") anyRequiresReview = true;
         console.log(
           `${LOG_PREFIX} address change for ${label} shipment ${shipment.id}: ${result.mode}`,
         );
@@ -1455,6 +1458,29 @@ export function registerOmsWebhooks(
         );
       }
     }
+
+    // Already-pushed (queued/on-hold) shipments: push the corrected ship-to
+    // straight onto the pre-label ShipStation order(s) via the non-clobbering
+    // fetch-modify-writeback (2026-07 #58725: Address Guard corrections used
+    // to strand the stale address in ShipStation behind an advisory flag).
+    // Best-effort: on failure the requires_review flag set above remains as
+    // the operator-facing fallback, so we log rather than fail the webhook.
+    if (
+      anyRequiresReview &&
+      shipStationService?.isConfigured() &&
+      typeof (shipStationService as any).syncWmsOrderShipStationShipToAddress === "function"
+    ) {
+      try {
+        const sync = await (shipStationService as any).syncWmsOrderShipStationShipToAddress(wmsOrderId);
+        console.log(
+          `${LOG_PREFIX} address change for ${label}: ShipStation ship-to sync updated=${sync.updated} skipped=${sync.skipped}`,
+        );
+      } catch (err: any) {
+        console.warn(
+          `${LOG_PREFIX} address change for ${label}: ShipStation ship-to sync failed (requires_review flag remains): ${err?.message ?? err}`,
+        );
+      }
+    }
   }
 
   async function receiveShopifyWebhook(
@@ -1469,10 +1495,14 @@ export function registerOmsWebhooks(
         buildShopifyWebhookInboxInput(req, topic, payload),
       );
 
-      if (!receipt.inserted && receipt.status === "succeeded") {
+      if (!receipt.inserted && receipt.status === "succeeded" && !isInternalRetry(req)) {
         console.log(`${LOG_PREFIX} ${topic} duplicate already succeeded (inbox=${receipt.id}), skipping`);
         acknowledgeProcessed(req, res);
         return { receipt, shouldProcess: false };
+      }
+
+      if (!receipt.inserted && receipt.status === "succeeded" && isInternalRetry(req)) {
+        console.log(`${LOG_PREFIX} ${topic} internal retry replaying succeeded inbox row (inbox=${receipt.id})`);
       }
 
       if (!receipt.inserted && receipt.status === "processing" && !isInternalRetry(req)) {
@@ -1852,20 +1882,42 @@ export function registerOmsWebhooks(
               existingLine.name,
               incomingDisplayName,
             );
-            const authority = deriveOmsLineAuthority({
-              sourceTopic: "orders/updated",
-              sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-              sourceInboxId: inbox.receipt.id,
-              financialStatus: shopifyOrder.financial_status,
-              quantity: item.quantity ?? existingLine.quantity,
-              fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
-                ? Number(item.fulfillable_quantity)
-                : existingLine.fulfillableQuantity,
-              previous: existingLine,
-            });
-
             // Update existing line and authority ledger atomically.
+            //
+            // RACE FIX (order #59930): derive authority from a FRESH, row-locked
+            // read INSIDE the transaction — never from the `existingLine`
+            // snapshot loaded before this handler ran. Reward/coupon orders make
+            // Shopify emit orders/paid and orders/updated in the same
+            // millisecond band; the old code read each line's authority BEFORE
+            // orders/paid committed (paid_quantity=0), and the non-authorizing
+            // orders/updated branch (paidQuantity = min(previous, observed) = 0)
+            // wrote that stale value back, clobbering the `authorized` state
+            // orders/paid had just written and reverting the line to `seen` — so
+            // it never materialized to WMS/ShipStation. Re-reading the row FOR
+            // UPDATE serializes this write-back against the concurrent
+            // authorizing write on the same row, so `previous` is always the
+            // latest committed authority (min(1,1)=1 preserves authorization).
             await db.transaction(async (tx: any) => {
+              const [lockedLine] = await tx
+                .select()
+                .from(omsOrderLines)
+                .where(eq(omsOrderLines.id, existingLine.id))
+                .for("update")
+                .limit(1);
+              const previousAuthority = lockedLine ?? existingLine;
+
+              const authority = deriveOmsLineAuthority({
+                sourceTopic: "orders/updated",
+                sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                sourceInboxId: inbox.receipt.id,
+                financialStatus: shopifyOrder.financial_status,
+                quantity: item.quantity ?? previousAuthority.quantity,
+                fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
+                  ? Number(item.fulfillable_quantity)
+                  : previousAuthority.fulfillableQuantity,
+                previous: previousAuthority,
+              });
+
               await tx
                 .update(omsOrderLines)
                 .set({
@@ -1873,11 +1925,11 @@ export function registerOmsWebhooks(
                   title: preservedTitle,
                   name: preservedName,
                   variantTitle: (normalizedLine?.variantTitle ?? item.variant_title) || existingLine.variantTitle,
-                  quantity: item.quantity ?? existingLine.quantity,
+                  quantity: item.quantity ?? previousAuthority.quantity,
                   ...authorityLinePatch(authority),
                   fulfillableQuantity: Number.isFinite(Number(item.fulfillable_quantity))
                     ? Number(item.fulfillable_quantity)
-                    : existingLine.fulfillableQuantity,
+                    : previousAuthority.fulfillableQuantity,
                   fulfillmentStatus,
                   requiresShipping: normalizedLine?.requiresShipping ?? item.requires_shipping ?? existingLine.requiresShipping,
                   paidPriceCents: normalizedLine?.paidPriceCents ?? existingLine.paidPriceCents,
@@ -1896,7 +1948,7 @@ export function registerOmsWebhooks(
                 orderLineId: existingLine.id,
                 eventType: "line_updated",
                 sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-                previous: existingLine,
+                previous: previousAuthority,
                 authority,
               });
             });
@@ -2239,19 +2291,13 @@ export function registerOmsWebhooks(
       };
       const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
-      if (existing.status === "shipped") {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already shipped`);
-        await markInboxSucceeded(inbox.receipt);
-        acknowledgeProcessed(req, res);
-        return;
-      }
-
       // Extract tracking from fulfillments
       const fulfillments = shopifyOrder.fulfillments || [];
       const latestFulfillment = fulfillments[fulfillments.length - 1];
       const trackingNumber = latestFulfillment?.tracking_number || null;
       const carrier = latestFulfillment?.tracking_company || null;
       const now = new Date();
+      let fulfilledThroughWmsShipment = false;
 
       // Find WMS order
       const wmsOrder = await db.execute<{ id: number }>(sql`
@@ -2261,16 +2307,33 @@ export function registerOmsWebhooks(
         LIMIT 1
       `);
 
-      if (wmsOrder.rows.length > 0 && trackingNumber) {
-        // Flow through WMS shipment cascade — same path as SHIP_NOTIFY V2.
-        // This handles labels bought in Shopify instead of ShipStation.
+      const applyWmsChannelFulfillment = async (source: string): Promise<boolean> => {
+        if (wmsOrder.rows.length === 0 || !trackingNumber) return false;
+
+        // Flow through WMS shipment cascade: same state path as SHIP_NOTIFY V2.
         await applyChannelFulfillment(db, wmsOrder.rows[0].id, {
           trackingNumber,
           carrier: carrier || "other",
           shipDate: now,
-          source: "shopify_fulfilled_webhook",
+          source,
           sourceFulfillmentId: latestFulfillment?.id ? String(latestFulfillment.id) : null,
+        }, {
+          shippingEngine: shippingEngine ?? null,
         });
+        return true;
+      };
+
+      if (existing.status === "shipped") {
+        await applyWmsChannelFulfillment("shopify_fulfilled_webhook_replay");
+        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already shipped`);
+        await markInboxSucceeded(inbox.receipt);
+        acknowledgeProcessed(req, res);
+        return;
+      }
+
+      if (await applyWmsChannelFulfillment("shopify_fulfilled_webhook")) {
+        // Flow through WMS shipment cascade — same path as SHIP_NOTIFY V2.
+        fulfilledThroughWmsShipment = true;
       } else {
         // No WMS order or no tracking — update OMS directly
         await db
@@ -2308,7 +2371,7 @@ export function registerOmsWebhooks(
       }
 
       // Mirror to ShipStation so the order leaves Awaiting Shipment.
-      if (shipStationService?.isConfigured() && existing.shipstationOrderId) {
+      if (!fulfilledThroughWmsShipment && shipStationService?.isConfigured() && existing.shipstationOrderId) {
         try {
           await shipStationService.markAsShipped(existing.shipstationOrderId, {
             shipDate: now,

@@ -2447,6 +2447,68 @@ export function createPurchasingService(db: any, storage: Storage) {
     };
   }
 
+  // Shipment-scoped receive options: one option per PO with positive lines on
+  // this shipment. Powers the multi-PO receive picker on the shipment page and
+  // the post-close "receive next PO" chaining. Reuses the exact per-(shipment,
+  // PO) state machine the PO page uses (buildShipmentReceiveOption), so both
+  // surfaces always agree on receivability.
+  async function getShipmentPoReceiveOptions(inboundShipmentId: number) {
+    const shipment = await storage.getInboundShipmentById(inboundShipmentId);
+    if (!shipment) throw new PurchasingError("Inbound shipment not found", 404);
+
+    const shipmentLines = await storage.getInboundShipmentLines(inboundShipmentId);
+    const positiveLines = shipmentLines.filter((line: any) => Number(line.qtyShipped) > 0);
+    const linesByPo = new Map<number, any[]>();
+    let unlinkedLineCount = 0;
+    for (const line of positiveLines) {
+      const poId = parsePositiveInteger(line.purchaseOrderId);
+      if (!poId) {
+        unlinkedLineCount++;
+        continue;
+      }
+      const lines = linesByPo.get(poId) ?? [];
+      lines.push(line);
+      linesByPo.set(poId, lines);
+    }
+
+    const purchaseOrders: Array<ShipmentReceiveOption & { poNumber: string | null; poStatus: string | null }> = [];
+    for (const [poId, lines] of linesByPo) {
+      const [po, existing, receivedBaseQtyByPoLine] = await Promise.all([
+        storage.getPurchaseOrderById(poId),
+        getReceiptForShipmentPo(poId, inboundShipmentId),
+        getClosedShipmentReceivedBaseQtyByPoLine(poId, inboundShipmentId),
+      ]);
+      const coverage = summarizeShipmentReceiptCoverage(lines, receivedBaseQtyByPoLine);
+      const option = buildShipmentReceiveOption({
+        shipment,
+        purchaseOrderId: poId,
+        inboundShipmentId,
+        shipmentLines: lines,
+        existing,
+        coverage,
+      });
+      purchaseOrders.push({
+        ...option,
+        poNumber: (po as any)?.poNumber ?? null,
+        poStatus: (po as any)?.status ?? null,
+      });
+    }
+
+    purchaseOrders.sort((a, b) => {
+      const rank = Number(b.receivable) - Number(a.receivable);
+      if (rank !== 0) return rank;
+      return a.purchaseOrderId - b.purchaseOrderId;
+    });
+
+    return {
+      shipmentId: inboundShipmentId,
+      shipmentNumber: (shipment as any)?.shipmentNumber ?? null,
+      status: (shipment as any)?.status ?? null,
+      unlinkedLineCount,
+      purchaseOrders,
+    };
+  }
+
   async function getShipmentReceiptPackResolution(
     inboundShipmentId: number,
     options: { purchaseOrderId?: number } = {},
@@ -4550,6 +4612,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     createReceiptFromShipment,
     getShipmentReceiptPackResolution,
     getPurchaseOrderReceiveOptions,
+    getShipmentPoReceiveOptions,
     onReceivingOrderClosed,
 
     // Dual-track lifecycle (migration 0565)

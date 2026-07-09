@@ -239,6 +239,12 @@ export const shippingPackPlanParcels = shippingSchema.table("pack_plan_parcels",
   lengthMm: integer("length_mm").notNull(),
   widthMm: integer("width_mm").notNull(),
   heightMm: integer("height_mm").notNull(),
+  // Pack-station confirmation (migration 121): the ACTUAL box + weight used.
+  // Predicted vs actual on the same row is the cartonizer calibration dataset.
+  actualBoxId: integer("actual_box_id").references(() => shippingBoxCatalog.id, { onDelete: "set null" }),
+  actualWeightGrams: integer("actual_weight_grams"),
+  packedAt: timestamp("packed_at", { withTimezone: true }),
+  packedBy: varchar("packed_by", { length: 120 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("shipping_parcel_seq_idx").on(table.packPlanId, table.parcelSequence),
@@ -247,6 +253,7 @@ export const shippingPackPlanParcels = shippingSchema.table("pack_plan_parcels",
     OR (${table.boxId} IS NULL AND ${table.siocProductVariantId} IS NOT NULL)
   `),
   check("shipping_parcel_weights_chk", sql`${table.estWeightGrams} > 0 AND ${table.billableWeightGrams} > 0`),
+  check("shipping_parcel_actual_weight_chk", sql`${table.actualWeightGrams} IS NULL OR ${table.actualWeightGrams} > 0`),
 ]);
 
 export const shippingPackPlanParcelItems = shippingSchema.table("pack_plan_parcel_items", {

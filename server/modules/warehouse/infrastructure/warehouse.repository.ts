@@ -14,6 +14,8 @@ import {
   inArray,
   notInArray,
 } from "../../../storage/base";
+// wms.order_items belongs to modules/orders (writer-ratchet P2.1) — write via its public API.
+import { backfillOpenOrderItemBinAssignment } from "../../orders/bin-location-backfill";
 import type {
   Warehouse, InsertWarehouse, WarehouseZone, InsertWarehouseZone,
   WarehouseLocation, InsertWarehouseLocation, FulfillmentRoutingRule, InsertFulfillmentRoutingRule,
@@ -325,6 +327,7 @@ export async function addProductToLocation(data: {
       location: data.location.toUpperCase(), zone: data.zone.toUpperCase(), isPrimary: data.isPrimary ?? 1,
       imageUrl: data.imageUrl || existing.imageUrl, barcode: data.barcode || existing.barcode, updatedAt: new Date(),
     }).where(eq(productLocations.id, existing.id)).returning();
+    await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
     return result[0];
   }
 
@@ -338,6 +341,7 @@ export async function addProductToLocation(data: {
         name: data.name || existing.name, location: data.location.toUpperCase(), zone: data.zone.toUpperCase(),
         isPrimary: data.isPrimary ?? 1, imageUrl: data.imageUrl || existing.imageUrl, barcode: data.barcode || existing.barcode, updatedAt: new Date(),
       }).where(eq(productLocations.id, existing.id)).returning();
+      await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
       return result[0];
     }
   }
@@ -359,6 +363,7 @@ export async function addProductToLocation(data: {
     location: data.location.toUpperCase(), zone: data.zone.toUpperCase(),
     isPrimary: data.isPrimary ?? 1, status: "active", imageUrl: data.imageUrl || null, barcode: data.barcode || null,
   }).returning();
+  await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
   return result[0];
 }
 
@@ -372,6 +377,7 @@ export async function setPrimaryLocation(productLocationId: number, tx: Tx = db)
     await tx.update(productLocations).set({ isPrimary: 0, updatedAt: new Date() }).where(eq(productLocations.productId, location.productId));
   }
   const result = await tx.update(productLocations).set({ isPrimary: 1, updatedAt: new Date() }).where(eq(productLocations.id, productLocationId)).returning();
+  await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
   return result[0];
 }
 
@@ -392,6 +398,9 @@ export async function createProductLocation(location: InsertProductLocation, tx:
   const result = await tx.insert(productLocations).values({
     ...location, sku: location.sku?.toUpperCase() || null, location: location.location.toUpperCase(), zone: location.zone.toUpperCase(),
   }).returning();
+  if (result[0]?.status === "active") {
+    await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
+  }
   return result[0];
 }
 
@@ -403,6 +412,10 @@ export async function updateProductLocation(id: number, location: UpdateProductL
   updates.updatedAt = new Date();
   
   const result = await tx.update(productLocations).set(updates).where(eq(productLocations.id, id)).returning();
+  // Bin moved (or row re-activated at a bin): stamp still-unassigned open items.
+  if (result[0] && (updates.location || updates.warehouseLocationId || updates.status === "active")) {
+    await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
+  }
   return result[0];
 }
 

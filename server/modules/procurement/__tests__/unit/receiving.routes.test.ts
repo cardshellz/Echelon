@@ -120,7 +120,7 @@ describe("receiving routes", () => {
 
     expect(status).toBe(200);
     expect(body.success).toBe(true);
-    expect(receiving.close).toHaveBeenCalledWith(20, "test-user");
+    expect(receiving.close).toHaveBeenCalledWith(20, "test-user", { allowOverReceipt: false });
     expect(mocks.notifications.notify).toHaveBeenCalledWith("po_received", {
       title: "Receiving Complete: RCV-20",
       message: "12 units received",

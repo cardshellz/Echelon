@@ -416,6 +416,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.engine_order_ref IS NULL
+          -- A held shipment (line-item hold) is intentionally unpushed.
+          AND COALESCE(os.held, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -447,6 +449,8 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         WHERE os.status IN ('planned', 'queued')
           AND os.created_at < NOW() - INTERVAL '15 minutes'
           AND os.engine_order_ref IS NULL
+          -- A held shipment (line-item hold) is intentionally unpushed.
+          AND COALESCE(os.held, false) = false
           AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
           AND EXISTS (
             SELECT 1
@@ -650,6 +654,11 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
                 THEN 'fulfillment_order_line_item_id_mismatch'
               ELSE 'unknown'
             END AS drift_reason
+          -- The missing FROM here (commit 9dec90c4) made this CTE throw
+          -- 'column "oms_order_id" does not exist' on EVERY collect, which killed
+          -- the entire 15-min reconciliation (no per-step isolation then) from
+          -- ~2026-06-28 to 2026-07-07. Guarded by a static SQL test now.
+          FROM provider_reference_rows
           WHERE (
               normalized_fulfillment_provider = 'shopify'
               OR shopify_fulfillment_order_id IS NOT NULL
@@ -746,17 +755,42 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
 }
 
 export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Promise<OmsOpsIssue[]> {
-  const issues = await collectOmsFlowReconciliationIssues(dbArg);
+  // Per-step isolation. Before 2026-07-07 these were bare sequential awaits, so
+  // ONE failing step aborted every step after it — a single broken detector query
+  // (the missing-FROM bug in the drift sample) silently killed ALL
+  // auto-remediation for 9+ days. Each step now fails alone: the error is logged
+  // with a stable step name (grep '[OMS Flow Reconciliation] step') and the rest
+  // still run. The scheduler heartbeat also records per-step errors so a broken
+  // step is visible in ops-health instead of only killing work quietly.
+  const stepErrors: string[] = [];
+  const step = async <T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err);
+      stepErrors.push(`${name}: ${message}`);
+      console.error(`${LOG_PREFIX} step '${name}' failed (continuing): ${message}`);
+      return fallback;
+    }
+  };
+
+  const issues = await step("collect", () => collectOmsFlowReconciliationIssues(dbArg), [] as OmsOpsIssue[]);
   if (issues.length > 0) {
     const summary = issues.map((issue) => `${issue.code}=${issue.count}`).join(", ");
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
-  await autoCloseResolvedDeadFulfillmentRetries(dbArg);
-  await autoRemediateCriticalFlowIssues(dbArg, issues);
-  await autoQueueStaleTrackingPushRetries(dbArg, issues);
-  await autoQueueStaleShipStationPushRetries(dbArg, issues);
-  await autoQueueMissingShopifyFulfillmentRetries(dbArg, issues);
-  await remediateMissingReservations(dbArg);
+  await step("autoCloseResolvedDeadFulfillmentRetries", () => autoCloseResolvedDeadFulfillmentRetries(dbArg), 0);
+  await step("autoRemediateCriticalFlowIssues", () => autoRemediateCriticalFlowIssues(dbArg, issues), undefined);
+  await step("autoQueueStaleTrackingPushRetries", () => autoQueueStaleTrackingPushRetries(dbArg, issues), undefined);
+  await step("autoQueueStaleShipStationPushRetries", () => autoQueueStaleShipStationPushRetries(dbArg, issues), undefined);
+  await step("autoQueueMissingShopifyFulfillmentRetries", () => autoQueueMissingShopifyFulfillmentRetries(dbArg, issues), undefined);
+  await step("remediateMissingReservations", () => remediateMissingReservations(dbArg), undefined);
+
+  // Surface partial failures on the heartbeat (ops-health) without failing the
+  // run — completed steps' work is real and must count as progress.
+  if (stepErrors.length > 0) {
+    reconciliationSchedulerLastError = `partial: ${stepErrors.join(" | ")}`;
+  }
   return issues;
 }
 
@@ -767,8 +801,10 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
  * reservation failure would otherwise leave a ready order with zero
  * reservations and nothing retrying. This sweep finds ready, unheld orders
  * older than 15 minutes whose ledger shows NO reserve rows and re-runs the
- * idempotent reserveOrder. Shortfalls hold the order exactly like the sync
- * path does.
+ * idempotent reserveOrder. Shortfalls are logged only (2026-07-06: the
+ * order-level auto-hold was removed — it froze whole orders over one
+ * unreservable line with no auto-release; unreservable lines surface as
+ * pick shorts instead).
  *
  * Scoped to 'ready' only: 'pending' orders are unpaid (reservation happens on
  * promotion), and 'in_progress' orders may be partially picked — reserveOrder
@@ -811,18 +847,11 @@ async function remediateMissingReservations(db: any): Promise<void> {
     try {
       const result = await svc.reserveOrder(wmsOrderId);
       if (result.failed.length > 0) {
-        console.error(
+        console.warn(
           `${LOG_PREFIX} re-reservation shortfall for WMS order ${wmsOrderId}: ` +
             result.failed.map((f) => `${f.sku}: ${f.reason}`).join(", ") +
-            " — holding order",
+            " — proceeding without hold; unreservable lines surface as pick shorts",
         );
-        await db.execute(sql`
-          UPDATE wms.orders
-          SET on_hold = 1, updated_at = NOW()
-          WHERE id = ${wmsOrderId}
-            AND warehouse_status = 'ready'
-            AND on_hold = 0
-        `);
       } else if (result.reserved > 0) {
         console.warn(
           `${LOG_PREFIX} re-reserved WMS order ${wmsOrderId} (${result.reserved} item(s)) — ` +
@@ -869,6 +898,12 @@ export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<
       WHERE q.provider = 'internal'
         AND q.status = 'dead'
         AND q.topic IN ('delayed_tracking_push', 'shopify_fulfillment_push')
+        -- Bound the scan: unbounded, this statement measured 68.8s against the
+        -- all-time dead backlog (796+ rows joined to the events table) — far too
+        -- heavy for a 15-min cadence on the tiny shared pool. Rows older than 30
+        -- days belong to the one-time backlog triage, not the steady-state
+        -- auto-closer.
+        AND q.updated_at > NOW() - INTERVAL '30 days'
     ),
     scoped_candidates AS (
       SELECT
@@ -1627,9 +1662,12 @@ export function startOmsFlowReconciliationScheduler(dbArg: any = getDefaultDb())
   const runLocked = () => {
     reconciliationSchedulerLastRunAt = new Date();
     return withAdvisoryLock(LOCK_ID, async () => {
+      // Clear BEFORE the run — runOmsFlowReconciliation records per-step partial
+      // failures on the heartbeat during the run, so nulling it afterwards (the
+      // pre-2026-07-07 order) would hide them from ops-health.
+      reconciliationSchedulerLastError = null;
       await runOmsFlowReconciliation(dbArg);
       reconciliationSchedulerLastSuccessAt = new Date();
-      reconciliationSchedulerLastError = null;
     }).catch((err) => {
       reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);
       console.error(`${LOG_PREFIX} scheduled run error: ${reconciliationSchedulerLastError}`);

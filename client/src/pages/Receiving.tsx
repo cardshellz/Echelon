@@ -485,19 +485,39 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
   });
 
+  // Over-receipt confirmation (shipment receipts) + multi-PO shipment chaining.
+  const [overReceiptPrompt, setOverReceiptPrompt] = useState<{
+    id: number;
+    overLines: Array<{ sku: string | null; expectedQty: number; receivedQty: number }>;
+  } | null>(null);
+  const [nextPoPrompt, setNextPoPrompt] = useState<{
+    shipmentId: number;
+    shipmentNumber: string | null;
+    option: any;
+  } | null>(null);
+
   const closeReceiptMutation = useMutation({
-    mutationFn: async (id: number) => {
+    mutationFn: async ({ id, allowOverReceipt = false }: { id: number; allowOverReceipt?: boolean }) => {
       const res = await fetch(`/api/receiving/${id}/close`, {
         method: "POST",
         headers: {
+          "Content-Type": "application/json",
           "Idempotency-Key": createReceivingIdempotencyKey(`receiving-close-${id}`),
         },
+        body: JSON.stringify({ allowOverReceipt }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         if (body?.issues) {
           const err = new Error(body.error) as Error & { issues: any[] };
           err.issues = body.issues;
+          throw err;
+        }
+        if (body?.code === "SHIPMENT_OVER_RECEIPT_CONFIRMATION_REQUIRED") {
+          const err = new Error(body.error) as Error & { code: string; overLines: any[]; receivingOrderId: number };
+          err.code = body.code;
+          err.overLines = body.overLines ?? [];
+          err.receivingOrderId = id;
           throw err;
         }
         throw new Error(body?.error || "Failed to close receipt");
@@ -513,12 +533,40 @@ DEF-456,25,,,5.00,,Location TBD`;
         description: `${result.unitsReceived} units received across ${result.linesProcessed} lines`
       });
       setShowReceiptDetail(false);
+      const closedPoId = selectedReceipt?.purchaseOrderId;
+      const chainShipmentId = selectedReceipt?.inboundShipmentId;
+      // Multi-PO shipment chaining: if this receipt came from a shipment that
+      // still has unreceived PO lines, offer the next PO instead of bouncing
+      // back to the PO page and orphaning the rest of the truck.
+      if (chainShipmentId) {
+        void (async () => {
+          try {
+            const res = await fetch(`/api/inbound-shipments/${chainShipmentId}/po-receive-options`);
+            const summary = res.ok ? await res.json() : null;
+            const next = (summary?.purchaseOrders ?? []).find(
+              (o: any) => o.receivable && o.action === "create_receipt" && o.remainingBaseQty > 0,
+            );
+            if (next) {
+              setNextPoPrompt({ shipmentId: chainShipmentId, shipmentNumber: summary?.shipmentNumber ?? null, option: next });
+              return;
+            }
+          } catch {
+            // fall through to the default navigation
+          }
+          if (closedPoId) navigate(`/purchase-orders/${closedPoId}`);
+        })();
+        return;
+      }
       // Navigate back to the PO detail if this receipt was PO-linked
-      if (selectedReceipt?.purchaseOrderId) {
-        navigate(`/purchase-orders/${selectedReceipt.purchaseOrderId}`);
+      if (closedPoId) {
+        navigate(`/purchase-orders/${closedPoId}`);
       }
     },
     onError: (error: any) => {
+      if (error.code === "SHIPMENT_OVER_RECEIPT_CONFIRMATION_REQUIRED") {
+        setOverReceiptPrompt({ id: error.receivingOrderId, overLines: error.overLines ?? [] });
+        return;
+      }
       if (error.issues) {
         const missingSku = error.issues.filter((i: any) => i.missingVariant).length;
         const missingLoc = error.issues.filter((i: any) => i.missingLocation).length;
@@ -533,6 +581,38 @@ DEF-456,25,,,5.00,,Location TBD`;
       } else {
         toast({ title: "Failed to close receipt", description: error.message, variant: "destructive" });
       }
+    },
+  });
+
+  const receiveNextPoMutation = useMutation({
+    mutationFn: async ({ shipmentId, purchaseOrderId }: { shipmentId: number; purchaseOrderId: number }) => {
+      const res = await fetch(`/api/inbound-shipments/${shipmentId}/create-receipt`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": createReceivingIdempotencyKey(`shipment-receipt-${shipmentId}-${purchaseOrderId}`),
+        },
+        body: JSON.stringify({ purchaseOrderId }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Failed to create receipt");
+      return body;
+    },
+    onSuccess: (receipt) => {
+      setNextPoPrompt(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      toast({ title: "Receipt created", description: `${receipt.receiptNumber} created — continue receiving` });
+      fetch(`/api/receiving/${receipt.id}`).then(r => r.json()).then(full => {
+        setSelectedReceipt(full);
+        setShowReceiptDetail(true);
+      }).catch(() => {
+        setSelectedReceipt(receipt);
+        setShowReceiptDetail(true);
+      });
+    },
+    onError: (error: Error) => {
+      setNextPoPrompt(null);
+      toast({ title: "Error", description: error.message || "Failed to create receipt", variant: "destructive" });
     },
   });
 
@@ -947,7 +1027,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   // Close receipt — server auto-resolves SKU→variant and blocks if data is missing
   const handlePreCloseValidation = () => {
     if (!selectedReceipt?.lines) return;
-    closeReceiptMutation.mutate(selectedReceipt.id);
+    closeReceiptMutation.mutate({ id: selectedReceipt.id });
   };
 
   // Compute issue counts for the current receipt
@@ -2662,6 +2742,78 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* Pre-Close Validation Dialog removed — server now auto-resolves SKU→variant
           and returns 400 with structured issues if lines can't be processed */}
+
+      {/* Over-receipt confirmation: shipment receipts refuse to close with more
+          than the shipment expects unless the operator explicitly confirms. */}
+      <AlertDialog open={!!overReceiptPrompt} onOpenChange={(open) => { if (!open) setOverReceiptPrompt(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Received more than this shipment expects</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  The overage may belong to another PO on this shipment — or the PO quantity itself
+                  is wrong. Double-check before closing:
+                </p>
+                <ul className="list-disc pl-5 text-sm">
+                  {(overReceiptPrompt?.overLines ?? []).map((l, idx) => (
+                    <li key={idx}>
+                      <span className="font-mono">{l.sku ?? "(no SKU)"}</span>: expected {l.expectedQty.toLocaleString()},
+                      entered {l.receivedQty.toLocaleString()} (+{(l.receivedQty - l.expectedQty).toLocaleString()})
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-sm">
+                  Closing anyway books the full entered quantity to this PO and flags a quantity-over exception.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Go back and fix quantities</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const id = overReceiptPrompt?.id;
+                setOverReceiptPrompt(null);
+                if (id) closeReceiptMutation.mutate({ id, allowOverReceipt: true });
+              }}
+            >
+              Close anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Multi-PO shipment chaining: after closing one PO's receipt, offer the
+          next PO with unreceived lines on the same shipment. */}
+      <AlertDialog open={!!nextPoPrompt} onOpenChange={(open) => { if (!open) setNextPoPrompt(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Shipment has more to receive</AlertDialogTitle>
+            <AlertDialogDescription>
+              {nextPoPrompt?.shipmentNumber ? `Shipment ${nextPoPrompt.shipmentNumber}` : "This shipment"} still has{" "}
+              {Number(nextPoPrompt?.option?.remainingBaseQty ?? 0).toLocaleString()} unreceived unit(s) across{" "}
+              {nextPoPrompt?.option?.lineCount ?? 0} line(s) on{" "}
+              {nextPoPrompt?.option?.poNumber ?? `PO #${nextPoPrompt?.option?.purchaseOrderId}`}. Receive it now?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Later</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={receiveNextPoMutation.isPending}
+              onClick={() => {
+                if (!nextPoPrompt) return;
+                receiveNextPoMutation.mutate({
+                  shipmentId: nextPoPrompt.shipmentId,
+                  purchaseOrderId: nextPoPrompt.option.purchaseOrderId,
+                });
+              }}
+            >
+              {receiveNextPoMutation.isPending ? "Creating…" : "Receive next PO"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

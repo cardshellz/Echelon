@@ -1608,6 +1608,20 @@ describe("enqueueShopifyFulfillmentRetry :: happy path", () => {
 
     expect(inserts).toHaveLength(0);
   });
+
+  it("CHOKEPOINT: refuses to enqueue a shipment flagged requires_review", async () => {
+    // First execute = pending-dedupe check (empty), second = the requires_review
+    // guard (flagged). Without this guard, the hourly sweeper + 15-min reconciler
+    // re-inserted a fresh pending row for permanently-failed shipments forever
+    // (one shipment accumulated 168 dead rows).
+    const { db, inserts } = makeDb({
+      executeRows: [{ rows: [] }, { rows: [{ "?column?": 1 }] }],
+    });
+
+    await enqueueShopifyFulfillmentRetry(db, 501, new Error("no items with positive quantity"));
+
+    expect(inserts).toHaveLength(0);
+  });
 });
 
 describe("enqueueShopifyFulfillmentRetry :: validation", () => {
@@ -1637,6 +1651,82 @@ describe("enqueueShopifyFulfillmentRetry :: DB failure", () => {
 });
 
 // ─── dispatchShopifyFulfillmentRetry tests (C22d) ─────────────────────
+
+describe("dispatchShopifyFulfillmentRetry :: PERMANENT error classification", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("dead-letters SHOPIFY_PUSH_INVALID_INPUT immediately and flags the shipment requires_review", async () => {
+    // Deterministic bad input (e.g. zero-qty split items) — identical retries
+    // can never succeed (CLAUDE.md §6). Previously burned 5 attempts, then the
+    // sweeper re-enqueued forever.
+    const err = Object.assign(new Error("shipment 42 has no items with positive quantity"), {
+      context: { code: "shopify_push_invalid_input", shipmentId: 42 },
+    });
+    const push = vi.fn(async () => { throw err; });
+    const { db, updates, executes } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: push },
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 900,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 42 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("dead");
+    expect(push).toHaveBeenCalledTimes(1); // exactly one attempt, no retry ladder
+    // The requires_review stamp ran as a raw execute (UPDATE wms.outbound_shipments…).
+    expect(executes.length).toBeGreaterThanOrEqual(1);
+    // …and the queue row was marked dead (drizzle update path via markRowDead).
+    expect(updates.some((u) => u.set?.status === "dead")).toBe(true);
+  });
+
+  it("transient errors (no permanent code) still take the retry ladder, not the permanent path", async () => {
+    const err = Object.assign(new Error("ECONNRESET"), {
+      context: { code: "shopify_push_network_error", shipmentId: 42 },
+    });
+    const push = vi.fn(async () => { throw err; });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushShopifyFulfillment: push },
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 901,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 42 },
+      attempts: 0,
+    });
+
+    expect(outcome).toBe("pending"); // attempt 1 of MAX_ATTEMPTS → scheduled retry
+    expect(updates.some((u) => u.set?.status === "dead")).toBe(false);
+  });
+
+  it("keeps the worker's local error-code literal in sync with fulfillment-push.service", () => {
+    // The worker deliberately uses a local literal (no static import — the push
+    // service is resolved via the db stash). This pins the two definitions.
+    const FULFILLMENT_PUSH_SRC = readFileSync(
+      resolve(__dirname, "../../fulfillment-push.service.ts"),
+      "utf8",
+    );
+    const exported = FULFILLMENT_PUSH_SRC.match(
+      /export const SHOPIFY_PUSH_INVALID_INPUT = "([^"]+)"/,
+    )?.[1];
+    const local = WEBHOOK_RETRY_WORKER_SRC.match(
+      /const SHOPIFY_PUSH_INVALID_INPUT = "([^"]+)"/,
+    )?.[1];
+    expect(exported).toBeTruthy();
+    expect(local).toBe(exported);
+  });
+});
 
 describe("dispatchShopifyFulfillmentRetry :: happy path", () => {
   beforeEach(() => {

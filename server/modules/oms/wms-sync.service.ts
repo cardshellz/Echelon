@@ -486,7 +486,7 @@ export class WmsSyncService {
         );
 
         if (headerRefresh.promoted) {
-          await this.reserveWithShortfallGuard(wmsOrderId, omsOrderId, "post_promotion");
+          await this.reserveBestEffort(wmsOrderId, omsOrderId, "post_promotion");
         }
 
         return wmsOrderId;
@@ -875,12 +875,10 @@ export class WmsSyncService {
       // transaction is aborted", and COMMIT silently becomes ROLLBACK —
       // rolling back the WMS order and shipment we just created. Running
       // reservation after the tx commits isolates that blast radius.
-      let reservationShortfall = false;
       if ((txResult as any).warehouseStatus === "ready" && !(txResult as any).racedExistingWmsOrderId) {
         const wmsOrderId = (txResult as any).newWmsOrder?.id;
         if (wmsOrderId) {
-          const outcome = await this.reserveWithShortfallGuard(wmsOrderId, omsOrderId, "post_create");
-          reservationShortfall = outcome.shortfall;
+          await this.reserveBestEffort(wmsOrderId, omsOrderId, "post_create");
         }
       }
 
@@ -925,14 +923,7 @@ export class WmsSyncService {
       // Recheck OMS status: a cancellation webhook may have arrived
       // between step 5 (WMS order creation) and now.
       const engine = this.services.shippingEngine ?? this.services.shipStation;
-      if (reservationShortfall) {
-        // P0.1c: the order is held for review (inventory shortfall) — do NOT
-        // hand it to the shipping engine. Releasing the hold re-runs the
-        // reservation and push via the normal recovery paths.
-        console.warn(
-          `[WMS Sync] Skipping engine push for OMS order ${omsOrderId} — WMS order held on reservation shortfall`,
-        );
-      } else if (engine?.isConfigured?.()) {
+      if (engine?.isConfigured?.()) {
         if (shipmentIdForPush !== null) {
           const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
           if (recheckOms && this.isFinalOrCancelledOmsOrder(recheckOms)) {
@@ -1053,58 +1044,52 @@ export class WmsSyncService {
   }
 
   /**
-   * Reserve a WMS order's inventory and hold the order on shortfall (P0.1c).
+   * Reserve a WMS order's inventory, best-effort (P0.1c, revised 2026-07-06).
    *
-   * A shortfall order must NOT proceed toward picking/push — pickers would be
-   * routed to stock that isn't there (D-SHORTFALL). The hold is order-level
-   * `on_hold = 1`, which the pick-queue claim path already refuses.
-   * Reservation errors are logged and left for the ready-but-unreserved
-   * reconciler detector — reserveOrder is idempotent per item, so re-running
-   * is always safe.
+   * A shortfall (a line with no reservable stock — oversell, stale channel
+   * mapping, or a not-yet-modeled preorder) is logged and recorded as an OMS
+   * event, but the order is NOT held and the engine push proceeds. The earlier
+   * order-level auto-hold froze every order containing one unreservable line,
+   * never released it when stock arrived, and kept the order off ShipStation
+   * entirely; until preorder is modeled, the intended flow is that pickers
+   * short the unreservable line. Reservation errors are logged and left for
+   * the ready-but-unreserved reconciler detector — reserveOrder is idempotent
+   * per item, so re-running is always safe.
    */
-  private async reserveWithShortfallGuard(
+  private async reserveBestEffort(
     wmsOrderId: number,
     omsOrderId: number | null,
     context: string,
-  ): Promise<{ shortfall: boolean }> {
+  ): Promise<void> {
     try {
       const reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
       if (reserveResult.failed.length === 0) {
-        return { shortfall: false };
+        return;
       }
 
       const detail = reserveResult.failed
         .map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`)
         .join(", ");
-      console.error(
-        `[WMS Sync] Reservation shortfall for WMS order ${wmsOrderId} (${context}): ${detail} — holding order for review`,
+      console.warn(
+        `[WMS Sync] Reservation shortfall for WMS order ${wmsOrderId} (${context}): ${detail} — proceeding without hold; unreservable lines surface as pick shorts`,
       );
-      await db.execute(sql`
-        UPDATE wms.orders
-        SET on_hold = 1, updated_at = NOW()
-        WHERE id = ${wmsOrderId}
-          AND warehouse_status IN ('pending', 'ready')
-          AND on_hold = 0
-      `);
       if (omsOrderId) {
         try {
           await db.insert(omsOrderEvents).values({
             orderId: omsOrderId,
-            eventType: "reservation_shortfall_hold",
+            eventType: "reservation_shortfall",
             details: {
               wmsOrderId,
               context,
               failed: reserveResult.failed,
-              requiresReview: true,
             },
           });
         } catch (evtErr: any) {
           console.error(
-            `[WMS Sync] Failed to record shortfall-hold event for OMS order ${omsOrderId}: ${evtErr?.message}`,
+            `[WMS Sync] Failed to record shortfall event for OMS order ${omsOrderId}: ${evtErr?.message}`,
           );
         }
       }
-      return { shortfall: true };
     } catch (err: any) {
       // Reservation errored outright (not a shortfall). The order stays
       // unheld; the ready-but-unreserved detector re-reserves it — that is
@@ -1112,7 +1097,6 @@ export class WmsSyncService {
       console.error(
         `[WMS Sync] Reservation error for WMS order ${wmsOrderId} (${context}): ${err.message} — detector will retry`,
       );
-      return { shortfall: false };
     }
   }
 
