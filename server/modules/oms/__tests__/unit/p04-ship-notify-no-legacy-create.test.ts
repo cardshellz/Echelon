@@ -43,8 +43,10 @@ describe("P0.4 — SHIP_NOTIFY creation paths are closed", () => {
     expect(SS_SRC).toContain("'ship_notify_unresolved'");
   });
 
-  it("migration 119 voids duplicates and adds the (order, tracking) shipped unique", () => {
-    const sql = read("../../../../../migrations/119_outbound_shipment_tracking_dedup.sql");
+  it("outbound_shipment_tracking_dedup migration voids duplicates and adds the (order, tracking) shipped unique", () => {
+    // Renumbered 119 -> 121 to resolve a prefix collision with the already-applied
+    // 119_shipping_zone_seed. Internal SQL identifiers keep their _119 suffix.
+    const sql = read("../../../../../migrations/121_outbound_shipment_tracking_dedup.sql");
     expect(sql).toContain("dup_ship_notify_legacy_voided_119");
     expect(sql).toContain("uq_outbound_shipments_shipped_order_tracking");
     expect(sql).toContain("WHERE status = 'shipped' AND tracking_number IS NOT NULL");

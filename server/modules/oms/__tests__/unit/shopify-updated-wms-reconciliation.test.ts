@@ -64,4 +64,15 @@ describe("Shopify orders/updated WMS reconciliation", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/applyChannelFulfillment/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/shopify_fulfilled_webhook/);
   });
+
+  it("replays Shopify fulfilled webhooks through WMS before already-shipped acknowledgement", () => {
+    const fulfilledBlock = OMS_WEBHOOKS_SRC.match(
+      /app\.post\("\/api\/oms\/webhooks\/orders\/fulfilled"[\s\S]*?POST \/api\/oms\/webhooks\/refunds\/create/,
+    )?.[0] ?? "";
+
+    expect(fulfilledBlock).toMatch(/const applyWmsChannelFulfillment/);
+    expect(fulfilledBlock).toMatch(
+      /if \(existing\.status === "shipped"\)[\s\S]*applyWmsChannelFulfillment\("shopify_fulfilled_webhook_replay"\)[\s\S]*acknowledgeProcessed/,
+    );
+  });
 });

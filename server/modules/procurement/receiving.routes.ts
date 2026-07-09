@@ -189,7 +189,9 @@ export function registerReceivingRoutes(app: Express) {
   app.post("/api/receiving/:id/close", requirePermission("inventory", "adjust"), requireIdempotency(), async (req, res) => {
     try {
       const { receiving: rcvService } = req.app.locals.services;
-      const result = await rcvService.close(parseInt(req.params.id), req.session.user?.id || null);
+      const result = await rcvService.close(parseInt(req.params.id), req.session.user?.id || null, {
+        allowOverReceipt: req.body?.allowOverReceipt === true,
+      });
       notificationService.notify("po_received", {
         title: `Receiving Complete: ${(result.order as any)?.orderNumber || `#${req.params.id}`}`,
         message: result.unitsReceived ? `${result.unitsReceived} units received` : undefined,

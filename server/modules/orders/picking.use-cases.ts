@@ -504,8 +504,8 @@ export class PickingUseCases {
             updated_at = ${now},
             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
               'supersededBy', 'newer_blocking_exception',
-              'supersededAt', ${now},
-              'supersededExceptionType', ${params.exceptionType}
+              'supersededAt', ${now}::timestamptz,
+              'supersededExceptionType', ${params.exceptionType}::text
             )
           WHERE order_item_id = ${params.item.id}
             AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
@@ -1007,6 +1007,14 @@ export class PickingUseCases {
     const beforeItem = await this.storage.getOrderItemById(itemId);
     if (!beforeItem) {
       throw new IntegrityError(`Item ${itemId} not found`);
+    }
+    // Held lines (line-item hold) live in their own held shipment and must not be
+    // picked until released (LINE-ITEM-HOLD-DESIGN.md P2). Refuse a pick attempt.
+    if (beforeItem.onHold && status !== "pending") {
+      throw new IntegrityError(`Item ${itemId} is on hold and cannot be picked`, {
+        reason: "line_on_hold",
+        itemId,
+      });
     }
     const orderForPick = await this.storage.getOrderById(beforeItem.orderId);
 
@@ -2547,7 +2555,10 @@ export class PickingUseCases {
   private async getReadyToShipBlockers(orderId: number): Promise<string[]> {
     const blockers: string[] = [];
     const items = await this.storage.getOrderItems(orderId);
-    const shippableItems = items.filter(item => item.requiresShipping === 1);
+    // Held lines (line-item hold) live in their own held shipment and are not
+    // picked until released — they must NOT block the rest of the order from
+    // reaching ready_to_ship (LINE-ITEM-HOLD-DESIGN.md P2).
+    const shippableItems = items.filter(item => item.requiresShipping === 1 && !item.onHold);
 
     if (shippableItems.length === 0) {
       blockers.push("order has no shippable items");

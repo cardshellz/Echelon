@@ -21,6 +21,7 @@ import {
 } from "../orders/shipment-rollup";
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-status";
+import { maybeGetPackInstruction } from "../shipping-engine/application/pack-plan.service";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -1604,7 +1605,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     if (sourceShipmentItemIds.length === 0) {
-      return [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }];
+      return resolvedShipmentRow
+        ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }]
+        : [];
     }
 
     const sourceItemList = sql.join(
@@ -1625,7 +1628,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }> = sourceRowsResult?.rows ?? [];
 
     if (sourceRows.length === 0) {
-      return [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }];
+      return resolvedShipmentRow
+        ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }]
+        : [];
     }
 
     const sourceIdsByOrder = new Map<number, Set<number>>();
@@ -1646,7 +1651,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       sourceIdsByOrder.get(wmsOrderId)!.add(sourceShipmentItemId);
     }
 
-    if (sourceIdsByOrder.size <= 1) {
+    // With a resolved anchor shipment and a single owning order this is the
+    // ordinary (non-combined) case — keep the already-resolved row. When there
+    // is NO anchor (recovery path: the orderKey pointed at a cancelled/voided
+    // shipment), fall through to the per-order loop below so we resolve or
+    // create a LIVE shipment for the owning order instead of returning null.
+    if (resolvedShipmentRow && sourceIdsByOrder.size <= 1) {
       return [{
         row: resolvedShipmentRow,
         sourceShipmentItemIds:
@@ -1659,12 +1669,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     for (const [wmsOrderId, groupSourceIds] of sourceIdsByOrder.entries()) {
       let shipmentRow: any | null = null;
 
+      // Prefer a LIVE shipment for this order. Excluding terminal rows means
+      // that when the order's only shipment was cancelled (e.g. ShipStation
+      // "Combine Orders" merged it away and our shipment got cancelled), we
+      // fall into the create-synthetic-child path below and land the shipped
+      // event + tracking + marketplace push on a live row, not a dead one.
       const existing: any = await db.execute(sql`
         SELECT id, order_id, status, shipstation_order_id
         FROM wms.outbound_shipments
         WHERE order_id = ${wmsOrderId}
+          AND status NOT IN ('cancelled', 'voided')
         ORDER BY
-          CASE WHEN id = ${Number(resolvedShipmentRow.id)} THEN 0 ELSE 1 END,
+          CASE WHEN id = ${Number(resolvedShipmentRow?.id ?? 0)} THEN 0 ELSE 1 END,
           CASE WHEN source = ${SHIPSTATION_COMBINED_CHILD_SOURCE} THEN 0 ELSE 1 END,
           id ASC
         LIMIT 1
@@ -1733,9 +1749,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       );
     }
 
-    return groups.length > 0
-      ? groups
-      : [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set(sourceShipmentItemIds) }];
+    if (groups.length > 0) return groups;
+    return resolvedShipmentRow
+      ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set(sourceShipmentItemIds) }]
+      : [];
   }
 
   async function loadValidatedInventoryShipmentItems(
@@ -2356,8 +2373,41 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     const resolved = await resolveWmsShipmentForShipNotify(shipment);
     const wmsShipmentRow: any = resolved.row;
     if (!wmsShipmentRow) {
-      // Pre-cutover order (pushed via pushOrder, no shipstation_order_id
-      // on outbound_shipments). Fall back to legacy orderKey path.
+      // The orderKey resolved to no LIVE shipment (fallback === false means we
+      // matched an orderKey but its shipment was cancelled/voided with no
+      // active sibling — never a pre-cutover miss). A common cause is
+      // ShipStation "Combine Orders": it merges two of our orders into ONE
+      // label under the surviving order and destroys the other SS order (its
+      // id later 404s), and our shipment for the merged/primary order can end
+      // up cancelled. For a *shipped* notify we can still recover by mapping
+      // the SHIP_NOTIFY's shipmentItems back to the owning WMS order(s) and
+      // shipping each — so combined/merged shipments still flow tracking + the
+      // marketplace fulfillment push instead of being dropped as unresolved.
+      if (event.kind === "shipped" && !resolved.fallback) {
+        const recoveredGroups = (
+          await resolveCombinedShipmentGroupsFromShipStationItems(null, shipment)
+        ).filter((group) => group.row);
+        if (recoveredGroups.length > 0) {
+          console.warn(
+            `[ShipStation Webhook V2] orderKey ${shipment.orderKey} (SS order ${shipment.orderId}) resolved to no live shipment; ` +
+              `recovered ${recoveredGroups.length} order shipment(s) from shipment items (combined/merged shipment).`,
+          );
+          let processedAny = false;
+          for (const group of recoveredGroups) {
+            const result = await applyShipNotifyV2EventToResolvedShipment(
+              group.row,
+              shipment,
+              event,
+              group.sourceShipmentItemIds,
+            );
+            processedAny = processedAny || result.processed;
+          }
+          return { processed: processedAny, fallback: false };
+        }
+      }
+      // Pre-cutover order (pushed via pushOrder, no shipstation_order_id on
+      // outbound_shipments) or genuinely unknown — fall back to the legacy
+      // orderKey path.
       return { processed: false, fallback: resolved.fallback };
     }
 
@@ -3651,6 +3701,104 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     return { touched };
   }
 
+  /**
+   * Push a WMS-side ship-to address change onto the order's PRE-LABEL
+   * ShipStation orders (2026-07 #58725 incident: Address Guard corrected the
+   * ship-to 45s after checkout; WMS/OMS updated but the already-queued
+   * ShipStation order kept the stale address, the advisory requires_review
+   * flag didn't stop labeling, and the package shipped to the old address).
+   *
+   * Non-clobbering by construction: ShipStation v1 has no address-only
+   * endpoint, so instead of rebuilding the payload from WMS (which would wipe
+   * operator splits/service/weight edits made in ShipStation), we fetch
+   * ShipStation's OWN current copy of the order, replace ONLY shipTo, and
+   * upsert it back — the same fetch-modify-writeback pattern updateSortRank
+   * uses for customField1.
+   *
+   * Scope guards:
+   *  - only WMS shipments in pre-label statuses (planned/queued/on_hold)
+   *  - only SS orders still awaiting_shipment / on_hold (label not created)
+   *  - skipped entirely when WMS has no shipping_address (never blank an
+   *    address in ShipStation)
+   * Labeled/shipped shipments keep today's requires_review flow — a printed
+   * label is a human decision. On each successful SS update the shipment's
+   * 'address_changed_after_push' review flag is cleared (other review reasons
+   * are left untouched).
+   */
+  async function syncWmsOrderShipStationShipToAddress(
+    wmsOrderId: number,
+  ): Promise<{ updated: number; skipped: number }> {
+    if (!isConfigured()) return { updated: 0, skipped: 0 };
+
+    const orderRows: any = await db.execute(sql`
+      SELECT shipping_name, shipping_company, shipping_address, shipping_address2,
+             shipping_city, shipping_state, shipping_postal_code, shipping_country,
+             customer_name
+      FROM wms.orders WHERE id = ${wmsOrderId} LIMIT 1
+    `);
+    const order = orderRows?.rows?.[0];
+    if (!order || !order.shipping_address) return { updated: 0, skipped: 0 };
+
+    const shipmentRows: any = await db.execute(sql`
+      SELECT id, status, shipstation_order_id
+      FROM wms.outbound_shipments
+      WHERE order_id = ${wmsOrderId}
+        AND shipstation_order_id IS NOT NULL
+        AND status IN ('planned', 'queued', 'on_hold')
+      ORDER BY id
+    `);
+
+    let updated = 0;
+    let skipped = 0;
+
+    for (const row of shipmentRows?.rows ?? []) {
+      const ssOrderId = Number(row.shipstation_order_id);
+      if (!Number.isInteger(ssOrderId) || ssOrderId <= 0) continue;
+
+      const ssOrder = await getOrderById(ssOrderId);
+      if (!ssOrder) {
+        skipped += 1;
+        continue;
+      }
+      // Pre-label authority is ShipStation's own status: once a label exists
+      // the SS order is shipped and an address swap would be a lie.
+      if (ssOrder.orderStatus !== "awaiting_shipment" && ssOrder.orderStatus !== "on_hold") {
+        skipped += 1;
+        continue;
+      }
+
+      await apiRequest("POST", "/orders/createorder", {
+        ...ssOrder,
+        shipTo: {
+          name: order.shipping_name || order.customer_name || "",
+          company: order.shipping_company || "",
+          street1: order.shipping_address || "",
+          street2: order.shipping_address2 || "",
+          city: order.shipping_city || "",
+          state: order.shipping_state || "",
+          postalCode: order.shipping_postal_code || "",
+          country: normalizeCountryToIso2(order.shipping_country) ?? "US",
+          phone: ssOrder.shipTo?.phone || "",
+        },
+      });
+      updated += 1;
+      console.log(
+        `[ShipStation] Ship-to address updated on SS order ${ssOrderId} (WMS order ${wmsOrderId}, shipment ${row.id}) after address change`,
+      );
+
+      // The address is now correct in ShipStation — the advisory flag for
+      // THIS reason is resolved. Other review reasons must survive.
+      await db.execute(sql`
+        UPDATE wms.outbound_shipments
+        SET requires_review = false, review_reason = NULL, updated_at = ${new Date()}
+        WHERE id = ${Number(row.id)}
+          AND review_reason = 'address_changed_after_push'
+      `);
+    }
+
+    return { updated, skipped };
+  }
+
   // -------------------------------------------------------------------------
   // pushShipment — WMS-only reader (Commit 11 — §6 refactor plan).
   // -------------------------------------------------------------------------
@@ -3945,6 +4093,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       warehouseId: orderRow.warehouse_id,
     });
 
+    // PACKER INSTRUCTION v1: box choice from the shipping engine's pack plan.
+    // Feature-flagged (SHIPPING_PACK_INSTRUCTION_ENABLED), never throws, and
+    // all shipping.pack_plans* writes stay inside the shipping-engine module.
+    const packInstruction = await maybeGetPackInstruction(orderRow.id, shipmentId);
+    const provenanceNote = `Source: wms shipment ${shipmentId} (channel ${orderRow.channel_id ?? "unknown"}) via Echelon WMS`;
+
     const payload: Record<string, unknown> = {
       orderNumber,
       orderKey,
@@ -3982,7 +4136,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       amountPaid: orderRow.amount_paid_cents / 100,
       taxAmount: orderRow.tax_cents / 100,
       shippingAmount: orderRow.shipping_cents / 100,
-      internalNotes: `Source: wms shipment ${shipmentId} (channel ${orderRow.channel_id ?? "unknown"}) via Echelon WMS`,
+      internalNotes: packInstruction ? `${packInstruction} | ${provenanceNote}` : provenanceNote,
       advancedOptions: {
         warehouseId: routing.warehouseId,
         storeId: routing.storeId,
@@ -4158,6 +4312,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     updateSortRank,
     updateSortRankSingle: updateShipStationCustomField1,
     syncWmsOrderShipStationHoldState,
+    syncWmsOrderShipStationShipToAddress,
   };
 }
 
