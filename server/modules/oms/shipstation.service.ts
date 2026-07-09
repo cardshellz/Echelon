@@ -1605,7 +1605,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     );
 
     if (sourceShipmentItemIds.length === 0) {
-      return [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }];
+      return resolvedShipmentRow
+        ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }]
+        : [];
     }
 
     const sourceItemList = sql.join(
@@ -1626,7 +1628,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }> = sourceRowsResult?.rows ?? [];
 
     if (sourceRows.length === 0) {
-      return [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }];
+      return resolvedShipmentRow
+        ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set() }]
+        : [];
     }
 
     const sourceIdsByOrder = new Map<number, Set<number>>();
@@ -1647,7 +1651,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       sourceIdsByOrder.get(wmsOrderId)!.add(sourceShipmentItemId);
     }
 
-    if (sourceIdsByOrder.size <= 1) {
+    // With a resolved anchor shipment and a single owning order this is the
+    // ordinary (non-combined) case — keep the already-resolved row. When there
+    // is NO anchor (recovery path: the orderKey pointed at a cancelled/voided
+    // shipment), fall through to the per-order loop below so we resolve or
+    // create a LIVE shipment for the owning order instead of returning null.
+    if (resolvedShipmentRow && sourceIdsByOrder.size <= 1) {
       return [{
         row: resolvedShipmentRow,
         sourceShipmentItemIds:
@@ -1660,12 +1669,18 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     for (const [wmsOrderId, groupSourceIds] of sourceIdsByOrder.entries()) {
       let shipmentRow: any | null = null;
 
+      // Prefer a LIVE shipment for this order. Excluding terminal rows means
+      // that when the order's only shipment was cancelled (e.g. ShipStation
+      // "Combine Orders" merged it away and our shipment got cancelled), we
+      // fall into the create-synthetic-child path below and land the shipped
+      // event + tracking + marketplace push on a live row, not a dead one.
       const existing: any = await db.execute(sql`
         SELECT id, order_id, status, shipstation_order_id
         FROM wms.outbound_shipments
         WHERE order_id = ${wmsOrderId}
+          AND status NOT IN ('cancelled', 'voided')
         ORDER BY
-          CASE WHEN id = ${Number(resolvedShipmentRow.id)} THEN 0 ELSE 1 END,
+          CASE WHEN id = ${Number(resolvedShipmentRow?.id ?? 0)} THEN 0 ELSE 1 END,
           CASE WHEN source = ${SHIPSTATION_COMBINED_CHILD_SOURCE} THEN 0 ELSE 1 END,
           id ASC
         LIMIT 1
@@ -1734,9 +1749,10 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       );
     }
 
-    return groups.length > 0
-      ? groups
-      : [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set(sourceShipmentItemIds) }];
+    if (groups.length > 0) return groups;
+    return resolvedShipmentRow
+      ? [{ row: resolvedShipmentRow, sourceShipmentItemIds: new Set(sourceShipmentItemIds) }]
+      : [];
   }
 
   async function loadValidatedInventoryShipmentItems(
@@ -2357,8 +2373,41 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     const resolved = await resolveWmsShipmentForShipNotify(shipment);
     const wmsShipmentRow: any = resolved.row;
     if (!wmsShipmentRow) {
-      // Pre-cutover order (pushed via pushOrder, no shipstation_order_id
-      // on outbound_shipments). Fall back to legacy orderKey path.
+      // The orderKey resolved to no LIVE shipment (fallback === false means we
+      // matched an orderKey but its shipment was cancelled/voided with no
+      // active sibling — never a pre-cutover miss). A common cause is
+      // ShipStation "Combine Orders": it merges two of our orders into ONE
+      // label under the surviving order and destroys the other SS order (its
+      // id later 404s), and our shipment for the merged/primary order can end
+      // up cancelled. For a *shipped* notify we can still recover by mapping
+      // the SHIP_NOTIFY's shipmentItems back to the owning WMS order(s) and
+      // shipping each — so combined/merged shipments still flow tracking + the
+      // marketplace fulfillment push instead of being dropped as unresolved.
+      if (event.kind === "shipped" && !resolved.fallback) {
+        const recoveredGroups = (
+          await resolveCombinedShipmentGroupsFromShipStationItems(null, shipment)
+        ).filter((group) => group.row);
+        if (recoveredGroups.length > 0) {
+          console.warn(
+            `[ShipStation Webhook V2] orderKey ${shipment.orderKey} (SS order ${shipment.orderId}) resolved to no live shipment; ` +
+              `recovered ${recoveredGroups.length} order shipment(s) from shipment items (combined/merged shipment).`,
+          );
+          let processedAny = false;
+          for (const group of recoveredGroups) {
+            const result = await applyShipNotifyV2EventToResolvedShipment(
+              group.row,
+              shipment,
+              event,
+              group.sourceShipmentItemIds,
+            );
+            processedAny = processedAny || result.processed;
+          }
+          return { processed: processedAny, fallback: false };
+        }
+      }
+      // Pre-cutover order (pushed via pushOrder, no shipstation_order_id on
+      // outbound_shipments) or genuinely unknown — fall back to the legacy
+      // orderKey path.
       return { processed: false, fallback: resolved.fallback };
     }
 
