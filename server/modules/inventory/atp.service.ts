@@ -164,7 +164,12 @@ class InventoryAtpService {
     const row = (result.rows as any[])[0] || {};
     const onHand = Number(row.on_hand ?? 0);
     const reserved = Number(row.reserved ?? 0);
-    return onHand - reserved;
+    // P0.8: picked/packed units are physically committed — omitting them
+    // overstated per-warehouse ATP vs getAtpBase and
+    // getDirectVariantAtpByWarehouse (prod-confirmed; audit F8e).
+    const picked = Number(row.picked ?? 0);
+    const packed = Number(row.packed ?? 0);
+    return onHand - reserved - picked - packed;
   }
 
   // --------------------------------------------------------------------------

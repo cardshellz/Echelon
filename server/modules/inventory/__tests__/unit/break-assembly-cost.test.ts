@@ -56,6 +56,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
 
     const adjustCalls: any[] = [];
     const inventoryUseCases = {
+      withTx(this: any) { return this; },
       adjustInventory: vi.fn(async (params: any) => {
         adjustCalls.push(params);
         if (params.qtyDelta < 0) {
@@ -101,6 +102,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
 
     const adjustCalls: any[] = [];
     const inventoryUseCases = {
+      withTx(this: any) { return this; },
       adjustInventory: vi.fn(async (params: any) => {
         adjustCalls.push(params);
         if (params.qtyDelta < 0) {

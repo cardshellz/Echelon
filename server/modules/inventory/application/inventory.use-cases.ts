@@ -173,7 +173,11 @@ export class InventoryUseCases {
         }, tx);
       } catch (err: any) {
         if (err?.code === "23505" && String(err?.constraint ?? "").includes("receipt_dedup")) {
-          return;
+          // P0.8: RETHROW — the 23505 already aborted the enclosing Postgres
+          // tx, so swallowing left callers writing into a poisoned
+          // transaction. The route's Idempotency-Key gives a clean replay.
+          err.duplicateReceipt = true;
+          throw err;
         }
         throw err;
       }
@@ -1238,8 +1242,9 @@ export class InventoryUseCases {
                 productVariantId: variantId,
                 warehouseLocationId: virtualLocationId,
                 qtyDelta: delta,
+                // P0.8: never force negative on-hand (CLAUDE.md §16) — a 3PL
+                // shortfall throws and lands in result.errors for review.
                 reason: `3PL sync (set to ${qty}, delta ${delta > 0 ? "+" : ""}${delta})`,
-                allowNegative: true,
               });
             }
             result.synced++;

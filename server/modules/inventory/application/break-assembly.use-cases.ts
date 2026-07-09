@@ -174,7 +174,7 @@ export class BreakAssemblyUseCases {
       const noteText = notes ?? `Break ${sourceQty} x ${sourceVariant.sku ?? sourceVariant.name} into ${targetQty} x ${targetVariant.sku ?? targetVariant.name}`;
 
       // Decrement source variant — captures the total cost of consumed lots
-      const sourceResult = await this.inventoryUseCases.adjustInventory({
+      const sourceResult = await this.inventoryUseCases.withTx(tx).adjustInventory({
         productVariantId: sourceVariantId,
         warehouseLocationId,
         qtyDelta: -sourceQty,
@@ -187,7 +187,7 @@ export class BreakAssemblyUseCases {
       const targetUnitCost = targetQty > 0 ? Math.round(sourceTotalCost / targetQty) : 0;
 
       // Increment target variant with propagated cost
-      await this.inventoryUseCases.adjustInventory({
+      await this.inventoryUseCases.withTx(tx).adjustInventory({
         productVariantId: targetVariantId,
         warehouseLocationId: resolvedTargetLocationId,
         qtyDelta: targetQty,
@@ -276,7 +276,7 @@ export class BreakAssemblyUseCases {
       const noteText = notes ?? `Assemble ${targetQty} x ${targetVariant.sku ?? targetVariant.name} from ${sourceQtyNeeded} x ${sourceVariant.sku ?? sourceVariant.name}`;
 
       // Decrement source variant — captures the total cost of consumed lots
-      const sourceResult = await this.inventoryUseCases.adjustInventory({
+      const sourceResult = await this.inventoryUseCases.withTx(tx).adjustInventory({
         productVariantId: sourceVariantId,
         warehouseLocationId,
         qtyDelta: -sourceQtyNeeded,
@@ -289,7 +289,7 @@ export class BreakAssemblyUseCases {
       const targetUnitCost = targetQty > 0 ? Math.round(sourceTotalCost / targetQty) : 0;
 
       // Increment target variant with propagated cost
-      await this.inventoryUseCases.adjustInventory({
+      await this.inventoryUseCases.withTx(tx).adjustInventory({
         productVariantId: targetVariantId,
         warehouseLocationId,
         qtyDelta: targetQty,

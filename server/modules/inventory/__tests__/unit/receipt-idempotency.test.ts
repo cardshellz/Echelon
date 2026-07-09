@@ -95,7 +95,7 @@ describe("Receipt idempotency (H4)", () => {
     expect(mockStorage.adjustInventoryLevel).toHaveBeenCalled();
   });
 
-  it("catches 23505 receipt_dedup constraint as belt-and-suspenders", async () => {
+  it("rethrows 23505 receipt_dedup so the enclosing tx rolls back (P0.8)", async () => {
     const { uc, mockStorage, setExistingRows } = makeHarness();
     setExistingRows([]);
 
@@ -112,6 +112,6 @@ describe("Receipt idempotency (H4)", () => {
         referenceId: "RCV-1-batch",
         receivingOrderId: 100,
       }),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({ code: "23505", duplicateReceipt: true });
   });
 });

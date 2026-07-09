@@ -185,6 +185,10 @@ export class COGSService {
         packaging_cost_cents = ${packagingCost},
         landed_cost_cents = ${landedCost},
         total_unit_cost_cents = ${totalUnitCost},
+        po_unit_cost_mills = ${centsToMills(poUnitCost)},
+        packaging_cost_mills = ${centsToMills(packagingCost)},
+        landed_cost_mills = ${centsToMills(landedCost)},
+        total_unit_cost_mills = ${centsToMills(totalUnitCost)},
         qty_received = ${params.qtyPieces},
         qty_consumed = 0,
         cost_source = ${costSource},
@@ -297,6 +301,9 @@ export class COGSService {
         landed_cost_cents = ${landedCostCents},
         total_unit_cost_cents = ${newTotal},
         unit_cost_cents = ${newTotal},
+        landed_cost_mills = ${centsToMills(landedCostCents)},
+        total_unit_cost_mills = ${centsToMills(newTotal)},
+        unit_cost_mills = ${centsToMills(newTotal)},
         cost_provisional = 0,
         cost_source = CASE
           WHEN cost_source = 'po' THEN 'po_landed'
@@ -434,6 +441,9 @@ export class COGSService {
         SET unit_cost_cents = ${invoiceUnitCostCents},
             po_unit_cost_cents = ${invoiceUnitCostCents},
             total_unit_cost_cents = ${newTotal},
+            unit_cost_mills = ${centsToMills(invoiceUnitCostCents)},
+            po_unit_cost_mills = ${centsToMills(invoiceUnitCostCents)},
+            total_unit_cost_mills = ${centsToMills(newTotal)},
             cost_source = 'invoice'
         WHERE id = ${lot.id}
       `);
@@ -1017,7 +1027,10 @@ export class COGSService {
         UPDATE inventory_lots SET
           po_unit_cost_cents = ${updates.unitCostCents},
           total_unit_cost_cents = ${updates.unitCostCents},
-          unit_cost_cents = ${updates.unitCostCents}
+          unit_cost_cents = ${updates.unitCostCents},
+          po_unit_cost_mills = ${centsToMills(updates.unitCostCents)},
+          total_unit_cost_mills = ${centsToMills(updates.unitCostCents)},
+          unit_cost_mills = ${centsToMills(updates.unitCostCents)}
         WHERE id = ${lotId}
       `);
     }
@@ -1171,6 +1184,9 @@ export class COGSService {
           SET unit_cost_cents = ${entry.unitCostCents},
               po_unit_cost_cents = ${entry.unitCostCents},
               total_unit_cost_cents = ${newTotal},
+              unit_cost_mills = ${centsToMills(entry.unitCostCents)},
+              po_unit_cost_mills = ${centsToMills(entry.unitCostCents)},
+              total_unit_cost_mills = ${centsToMills(newTotal)},
               cost_provisional = 0,
               cost_source = 'backfill'
           WHERE id = ${lot.id}
