@@ -528,10 +528,15 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       logSchedulerDisabled("oms", "eBay order polling", "EBAY_ORDER_POLLING_DISABLED");
     }
 
-    // Register eBay order webhook
+    // Register eBay order webhook — PUBLIC (P0.6): eBay cannot hold a
+    // session, so requireAuth 401'd every challenge GET and notification
+    // POST, silently disabling real-time intake. The handler verifies the
+    // challenge hash (GET) and requires the notification signature header +
+    // re-fetches order data from eBay's authenticated API (POST) — the
+    // payload itself is never trusted.
     const webhookHandler = createEbayOrderWebhookHandler(services.oms, ebayApiClient);
-    app.get("/api/ebay/webhooks/order", requireAuth, webhookHandler);
-    app.post("/api/ebay/webhooks/order", requireAuth, webhookHandler);
+    app.get("/api/ebay/webhooks/order", webhookHandler);
+    app.post("/api/ebay/webhooks/order", webhookHandler);
 
     // Admin: manually reingest an eBay order that the poller missed.
     // POST /api/admin/ebay/reingest { orderId: '21-14508-76944' }
