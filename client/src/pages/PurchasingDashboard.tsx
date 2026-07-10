@@ -339,6 +339,7 @@ type SupplierSetupGaps = {
     preferredVendorName: string | null;
     suggestedOrderQty: number;
     orderUomLabel: string;
+    blocksCurrentRecommendation: boolean;
     candidateScore?: RecommendationCandidateScore;
     gaps: RecommendationQualityControl[];
     action: {
@@ -1105,7 +1106,7 @@ export default function PurchasingDashboard() {
                   <div key={item.recommendationId} className="flex flex-col gap-2 rounded-md border bg-background/90 p-2.5 md:flex-row md:items-center">
                     <div className="flex-1 min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant={item.gaps.some((gap) => gap.severity === "block") ? "destructive" : "outline"} className="text-[10px]">
+                        <Badge variant={item.blocksCurrentRecommendation ? "destructive" : "outline"} className="text-[10px]">
                           {item.gaps[0]?.label ?? "Supplier setup"}
                         </Badge>
                         <span className="font-mono text-[11px] text-primary font-semibold">{item.sku}</span>
