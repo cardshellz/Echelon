@@ -134,4 +134,51 @@ describe("getFlowTrace :: ingestion stage vs recovered webhook failures", () => 
     expect(ingested?.status).toBe("done");
     expect(ingested?.detail).toBeUndefined();
   });
+
+  it("does not let one successful split shipment hide another missing writeback", async () => {
+    const trace = await getFlowTrace(
+      fakeDb([
+        { rows: [{ ...OMS_ROW, status: "partially_shipped" }] },
+        { rows: [WMS_ROW] },
+        {
+          rows: [
+            {
+              ...SHIPMENT_ROW,
+              id: 4001,
+              status: "shipped",
+              tracking_number: "1ZGOOD",
+              shopify_fulfillment_id: "gid://shopify/Fulfillment/1",
+              has_shippable_items: true,
+            },
+            {
+              ...SHIPMENT_ROW,
+              id: 4002,
+              status: "shipped",
+              tracking_number: "1ZMISS",
+              shopify_fulfillment_id: null,
+              has_shippable_items: true,
+            },
+          ],
+        },
+        {
+          rows: [
+            CREATED_EVENT,
+            {
+              event_type: "shopify_fulfillment_pushed",
+              details: { wmsShipmentId: 4001, shopifyFulfillmentId: "gid://shopify/Fulfillment/1" },
+              created_at: "2026-06-11T06:18:00.000Z",
+            },
+          ],
+        },
+        { rows: [inboxRow({ id: 1, status: "succeeded" })] },
+        { rows: [] },
+      ]),
+      "#58780",
+    );
+
+    const writeback = trace.stages.find((stage) => stage.key === "writeback");
+    expect(writeback?.status).toBe("failed");
+    expect(writeback?.detail).toContain("1/2 shipped shipments confirmed");
+    expect(trace.diverged?.stage).toBe("Written back to channel");
+  });
 });

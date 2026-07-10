@@ -27,6 +27,9 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(
       /code: "WMS_PENDING_ITEM_WITHOUT_SHIPMENT"[\s\S]*severity: "critical"/,
     );
+    expect(OPS_HEALTH_SRC).toMatch(
+      /code: "CHANNEL_WRITEBACK_MASKED_SPLIT"[\s\S]*severity: "critical"/,
+    );
   });
 
   it("only reports missing shipments and ShipStation pushes for shippable work", () => {
