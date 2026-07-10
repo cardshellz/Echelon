@@ -174,6 +174,35 @@ describe("WMS inventory integrity registry", () => {
     expect(sql).not.toMatch(/(?:insert into|update|delete from)\s+inventory\.inventory_(?:levels|lots|transactions)/);
   });
 
+  it("reports the full SQL lifecycle count instead of one row per observation kind", async () => {
+    const findings = ["a", "b", "c"].map((character) => ({
+      checkId: "negative_inventory_level_bucket",
+      category: "balances",
+      severity: "blocker" as const,
+      entityFingerprint: hash(character),
+      entityKey: { inventory_level_id: character },
+      evidence: { inventory_level_id: character },
+      evidenceHash: hash(character === "a" ? "d" : character === "b" ? "e" : "f"),
+      metricValue: "1",
+    }));
+    const query = vi.fn(async (text: string) => {
+      if (text.includes("resolved_count")) return { rows: [{ resolved_count: 0 }] };
+      if (text.includes("GROUP BY observation_kind")) {
+        return { rows: [{ observation_kind: "new", count: 3 }] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await persistIntegrityAuditRegistry({ query } as any, input({
+      blockerCount: 3,
+      checks: [{ ...input().checks[0], findingCount: 3 }],
+      findings,
+    }));
+
+    expect(result.findings).toBe(3);
+    expect(result.new).toBe(3);
+  });
+
   it("rolls back the complete registry run on persistence failure", async () => {
     const calls: string[] = [];
     const query = vi.fn(async (text: string) => {
@@ -203,6 +232,28 @@ describe("WMS inventory integrity registry", () => {
     await expect(persistIntegrityAuditRegistry({ query } as any, input())).rejects.toThrow(/stale integrity audit run/);
     expect(calls[1]).toContain("pg_advisory_xact_lock");
     expect(calls.at(-1)).toBe("ROLLBACK");
+  });
+
+  it("requires activation and updates monitor state inside a continuous run transaction", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (text: string) => {
+      calls.push(text);
+      if (text.includes("resolved_count")) return { rows: [{ resolved_count: 0 }] };
+      if (text.includes("GROUP BY observation_kind")) return { rows: [] };
+      if (text.includes("FOR UPDATE") && text.includes("integrity_monitor_state")) {
+        return { rows: [{ baseline_run_id: "33333333-3333-4333-8333-333333333333" }] };
+      }
+      if (text.includes("id <>")) return { rows: [{ blocker_count: 0 }] };
+      if (text.includes("AS new_blockers")) {
+        return { rows: [{ new_blockers: 0, worsened: 0, recurred: 0 }] };
+      }
+      return { rows: [] };
+    });
+
+    await persistIntegrityAuditRegistry({ query } as any, input({ scope: "continuous" }));
+
+    expect(calls.some((text) => text.includes("last_successful_run_id"))).toBe(true);
+    expect(calls.at(-1)).toBe("COMMIT");
   });
 
   it("defines append-only registry observations without inventory counter DML", () => {

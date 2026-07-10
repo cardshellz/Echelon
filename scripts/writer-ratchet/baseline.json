@@ -282,6 +282,9 @@
   "inventory.cycle_counts": [
     "modules/inventory"
   ],
+  "inventory.integrity_alert_outbox": [
+    "modules/inventory"
+  ],
   "inventory.integrity_audit_run_checks": [
     "modules/inventory"
   ],
@@ -292,6 +295,9 @@
     "modules/inventory"
   ],
   "inventory.integrity_findings": [
+    "modules/inventory"
+  ],
+  "inventory.integrity_monitor_state": [
     "modules/inventory"
   ],
   "inventory.inventory_levels": [

@@ -29,6 +29,16 @@ inventory attributed to another order.
 The gated execution plan is documented in
 `docs/WMS-INVENTORY-STABILIZATION-AND-REMEDIATION-PLAN.md`.
 
+### Durable Registry Watermark
+
+Release `v2321` deployed the lifecycle registry. The first complete production
+watermark was persisted as run `864c28b7-f8c8-4146-963d-1e89ae02e099` at snapshot
+`2026-07-10T09:10:06.971Z`: 31 checks, 1,773 blockers, 25,888 warnings, and 27,661
+findings. The immediate post-write dry-run classified all 27,661 as `unchanged` and
+classified zero findings as new, worsened, recurred, or resolved. This is the baseline
+for detecting discrepancies introduced after stabilization begins; it does not
+authorize correction of historical rows.
+
 ## Current Material Risks
 
 ### 1. Terminal orders retain live reservation ownership

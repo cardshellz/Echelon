@@ -173,7 +173,146 @@ GROUP BY observation_kind
 ORDER BY observation_kind;
 ```
 
-Automatic scheduling is intentionally not enabled by this change. First deploy the
-migration, complete the dry-run/execute/dry-run verification above, inspect runtime and
-query load, and then enable the 15-minute/current plus daily/full cadence in a separate
-reviewed deployment.
+## Verified First Watermark
+
+Release `v2321` (`05802478`) deployed the measurement foundation. The required
+production sequence completed on July 10, 2026:
+
+- dry-run: 31 checks, 1,773 blockers, 25,888 warnings, 27,661 findings classified
+  `new`;
+- execute: run `864c28b7-f8c8-4146-963d-1e89ae02e099`, snapshot
+  `2026-07-10T09:10:06.971Z`;
+- second dry-run: all 27,661 findings classified `unchanged`, with zero new,
+  worsened, recurred, or resolved findings.
+
+The execute command displayed `new: 1` because its SQL summary reader counted one
+group row instead of the group's `COUNT(*)`. The complete second dry-run proved the
+27,661 finding rows were persisted. Measurement activation corrects that display bug
+and adds a regression test.
+
+## Continuous Monitoring Activation
+
+Migration `127_inventory_integrity_monitoring.sql` adds:
+
+- a singleton stabilization watermark tied to one completed all-check audit run;
+- a durable alert outbox with leases, retry backoff, terminal dead-letter state, and
+  one alert identity per continuous run.
+
+The continuous command is deliberately not an inventory writer. The audit connection
+must use `WMS_INTEGRITY_AUDIT_DATABASE_URL`; startup rejects that credential if it can
+insert, update, delete, or truncate any operational table in the audited schemas. The
+registry transaction uses `WMS_INTEGRITY_REGISTRY_DATABASE_URL` when configured and
+otherwise the application database credential, but its SQL is limited to
+`inventory.integrity_*` tables.
+
+### Deployment Verification
+
+```sql
+SELECT
+  to_regclass('inventory.integrity_monitor_state') AS monitor_state,
+  to_regclass('inventory.integrity_alert_outbox') AS alert_outbox;
+```
+
+Both values must be non-null before activation.
+
+### Activate The Stabilization Watermark
+
+Preview the exact baseline selection:
+
+```powershell
+heroku run "npx tsx scripts/activate-wms-inventory-integrity-monitor.ts --dry-run --baseline-run-id=864c28b7-f8c8-4146-963d-1e89ae02e099" -a cardshellz-echelon
+```
+
+Activate it once, with an attributable operator identity:
+
+```powershell
+heroku run "npx tsx scripts/activate-wms-inventory-integrity-monitor.ts --execute --baseline-run-id=864c28b7-f8c8-4146-963d-1e89ae02e099 --actor=owner@cardshellz.com" -a cardshellz-echelon
+```
+
+The command is idempotent for that baseline and refuses to replace it with a different
+run. Changing the watermark requires a reviewed migration, not an ad hoc update.
+
+### Credential And Alert Preflight
+
+Create a dedicated Heroku Postgres credential. Heroku creates custom credentials with
+CONNECT only; do not grant a schema-wide writer role:
+
+```powershell
+heroku pg:credentials:create DATABASE_URL --name wms_integrity_auditor -a cardshellz-echelon
+```
+
+Preview and apply the exact relation-level grants derived from the deployed audit
+queries:
+
+```powershell
+heroku run "npx tsx scripts/configure-wms-integrity-audit-credential.ts --dry-run --credential=wms_integrity_auditor" -a cardshellz-echelon
+heroku run "npx tsx scripts/configure-wms-integrity-audit-credential.ts --execute --credential=wms_integrity_auditor" -a cardshellz-echelon
+```
+
+Attach that credential to the app using the exact config-var name consumed by the
+monitor:
+
+```powershell
+heroku addons:attach <postgres-addon-name> --credential wms_integrity_auditor --as WMS_INTEGRITY_AUDIT_DATABASE -a cardshellz-echelon
+```
+
+Do not copy or print the credential URL. The attachment manages
+`WMS_INTEGRITY_AUDIT_DATABASE_URL` and credential rotation.
+
+`WMS_INTEGRITY_ALERT_WEBHOOK_URL` is preferred. Until a dedicated endpoint is set, the
+runner can use the existing `OMS_OPS_ALERT_WEBHOOK_URL`. Never print either value in
+run evidence.
+
+Run the full read-only audit and lifecycle preview through the exact scheduled path:
+
+```powershell
+heroku run "npx tsx scripts/run-wms-inventory-integrity-monitor.ts --dry-run --statement-timeout-ms=120000" -a cardshellz-echelon
+```
+
+The output must name the read-only database user and report no role-privilege error.
+
+### Schedule
+
+Configure Heroku Scheduler to run this command hourly:
+
+```text
+npm run wms:monitor-integrity
+```
+
+Hourly is the initial reviewed cadence because the verified full production runs took
+approximately 20 seconds. Revisit the cadence from recorded runtime and database-load
+evidence; do not silently add a faster web-dyno interval.
+
+Each scheduled execution:
+
+1. acquires a cross-dyno PostgreSQL advisory lock;
+2. verifies the audit credential has zero operational DML privileges;
+3. runs all checks in one repeatable-read, read-only transaction;
+4. records one `continuous` lifecycle run atomically;
+5. alerts only for new blocker fingerprints, worsening metrics, recurrences, or
+   blocker-count growth;
+6. leases and delivers pending alerts from the durable outbox.
+
+Stable historical findings do not repeatedly alert.
+
+### Monitoring Inspection And Rollback
+
+```sql
+SELECT * FROM inventory.integrity_monitor_state;
+
+SELECT status, COUNT(*)
+FROM inventory.integrity_alert_outbox
+GROUP BY status
+ORDER BY status;
+
+SELECT id, run_id, status, attempt_count, next_attempt_at, sent_at, last_error
+FROM inventory.integrity_alert_outbox
+WHERE status <> 'sent'
+ORDER BY created_at;
+```
+
+Rollback is operational: disable the Heroku Scheduler entry. Do not delete the
+watermark, audit runs, findings, observations, or alert history. A delivered alert can
+be duplicated if the process exits after the remote webhook accepts it but before the
+outbox row is marked sent; the run ID makes that retry recognizable, and retrying is
+safer than losing an integrity regression.

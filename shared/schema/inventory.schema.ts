@@ -754,3 +754,53 @@ export const inventoryIntegrityFindingObservations = inventorySchema.table(
     ),
   }),
 );
+
+export const inventoryIntegrityMonitorState = inventorySchema.table("integrity_monitor_state", {
+  singletonKey: boolean("singleton_key").primaryKey().default(true),
+  baselineRunId: varchar("baseline_run_id", { length: 36 }).notNull().references(
+    () => inventoryIntegrityAuditRuns.id,
+    { onDelete: "restrict" },
+  ),
+  stabilizationStartedAt: timestamp("stabilization_started_at", { withTimezone: true }).notNull(),
+  activatedAt: timestamp("activated_at", { withTimezone: true }).notNull(),
+  activatedBy: varchar("activated_by", { length: 120 }).notNull(),
+  lastSuccessfulRunId: varchar("last_successful_run_id", { length: 36 }).references(
+    () => inventoryIntegrityAuditRuns.id,
+    { onDelete: "restrict" },
+  ),
+  lastSuccessfulAt: timestamp("last_successful_at", { withTimezone: true }),
+  lastFailureAt: timestamp("last_failure_at", { withTimezone: true }),
+  lastFailureCode: varchar("last_failure_code", { length: 100 }),
+  lastFailureMessage: text("last_failure_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  baselineRunUq: uniqueIndex("integrity_monitor_state_baseline_run_id_key").on(table.baselineRunId),
+}));
+
+export const inventoryIntegrityAlertOutbox = inventorySchema.table("integrity_alert_outbox", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  runId: varchar("run_id", { length: 36 }).notNull().references(
+    () => inventoryIntegrityAuditRuns.id,
+    { onDelete: "restrict" },
+  ),
+  signature: varchar("signature", { length: 64 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  triggerCounts: jsonb("trigger_counts").notNull(),
+  payload: jsonb("payload").notNull(),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).defaultNow().notNull(),
+  leaseOwner: varchar("lease_owner", { length: 120 }),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  runUq: uniqueIndex("integrity_alert_outbox_run_id_key").on(table.runId),
+  signatureUq: uniqueIndex("integrity_alert_outbox_signature_key").on(table.signature),
+  statusIdx: index("idx_integrity_alert_outbox_status").on(table.status, table.createdAt),
+  dueIdx: index("idx_integrity_alert_outbox_due")
+    .on(table.nextAttemptAt, table.id)
+    .where(sql`${table.status} IN ('pending', 'sending')`),
+}));
