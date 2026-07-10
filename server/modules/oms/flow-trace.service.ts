@@ -51,6 +51,8 @@ export interface FlowTrace {
   shipments: Array<{
     id: number; wmsOrderId: number | null; status: string | null;
     engineOrderRef: string | null; shipstationOrderId: number | null;
+    trackingNumber: string | null; shopifyFulfillmentId: string | null;
+    hasShippableItems: boolean;
     requiresReview: boolean | null; reviewReason: string | null; onHoldReason: string | null;
     createdAt: string | null;
   }>;
@@ -118,6 +120,15 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
     ? rows(
         await db.execute(sql`
           SELECT id, order_id, status, engine_order_ref, shipstation_order_id,
+                 tracking_number, shopify_fulfillment_id,
+                 EXISTS (
+                   SELECT 1
+                   FROM wms.outbound_shipment_items osi
+                   JOIN wms.order_items oi ON oi.id = osi.order_item_id
+                   WHERE osi.shipment_id = wms.outbound_shipments.id
+                     AND COALESCE(oi.requires_shipping, 1) <> 0
+                     AND COALESCE(osi.qty, 0) > 0
+                 ) AS has_shippable_items,
                  requires_review, review_reason, on_hold_reason, created_at
           FROM wms.outbound_shipments
           WHERE order_id = ANY(${wmsIds})
@@ -172,8 +183,23 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
   const activeWms = wmsRows.filter((w) => String(w.warehouse_status) !== "cancelled");
   const activeShipments = shipmentRows.filter((s) => !["voided", "cancelled"].includes(String(s.status)));
   const pushedShipments = activeShipments.filter((s) => s.engine_order_ref != null);
-  const shippedShipments = shipmentRows.filter((s) => String(s.status) === "shipped");
-  const wroteBack = eventTypes.has("tracking_pushed") || eventTypes.has("shopify_fulfillment_pushed");
+  const shippedShipments = shipmentRows.filter(
+    (s) => String(s.status) === "shipped" && s.has_shippable_items !== false,
+  );
+  const channelWritebackRequired = ["shopify", "ebay"].includes(String(o.provider));
+  const writebackCompleteCount = shippedShipments.filter((s) => {
+    if (String(o.provider) === "shopify" && String(s.shopify_fulfillment_id ?? "").trim().length > 0) {
+      return true;
+    }
+    return eventRows.some((event) => {
+      const details = event.details && typeof event.details === "object" ? event.details : {};
+      return String(details.wmsShipmentId ?? "") === String(s.id)
+        && ((String(o.provider) === "shopify" && String(event.event_type) === "shopify_fulfillment_pushed")
+          || (String(o.provider) === "ebay" && String(event.event_type) === "tracking_pushed"));
+    });
+  }).length;
+  const allShippedShipmentsWrittenBack = shippedShipments.length > 0
+    && writebackCompleteCount === shippedShipments.length;
   // A failed/dead inbox row only fails the ingestion stage when it was NOT
   // superseded by a later successful delivery of the same provider/topic.
   // Channels redeliver webhooks (and the retry worker replays them), so a
@@ -233,10 +259,14 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
       : pushedShipments.length ? "current" : "pending",
     deadRetry && /SHIP_NOTIFY/.test(String(deadRetry.topic)) ? String(deadRetry.last_error).slice(0, 120) : undefined);
   add("writeback", "Written back to channel",
-    wroteBack ? "done"
-      : (shippedShipments.length > 0 || String(o.status) === "shipped") ? "failed"
+    !channelWritebackRequired ? "skipped"
+      : allShippedShipmentsWrittenBack ? "done"
+      : shippedShipments.length > 0 ? "failed"
+      : String(o.status) === "shipped" ? "failed"
       : "pending",
-    !wroteBack && (shippedShipments.length > 0 || String(o.status) === "shipped") ? "shipped but no tracking-confirmation event" : undefined);
+    channelWritebackRequired && shippedShipments.length > 0 && !allShippedShipmentsWrittenBack
+      ? `${writebackCompleteCount}/${shippedShipments.length} shipped shipment${shippedShipments.length === 1 ? "" : "s"} confirmed`
+      : !channelWritebackRequired ? "no channel writeback adapter is configured" : undefined);
 
   const divergedStage = stages.find((s) => s.status === "failed") ?? stages.find((s) => s.status === "current");
   const diverged = divergedStage && divergedStage.status === "failed"
@@ -259,7 +289,7 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
       shippedAt: o.shipped_at ?? null,
     },
     wms: wmsRows.map((w) => ({ id: Number(w.id), warehouseStatus: w.warehouse_status ?? null, createdAt: w.created_at ?? null, linkVia: w.link_via ?? null, active: String(w.warehouse_status) !== "cancelled" })),
-    shipments: shipmentRows.map((s) => ({ id: Number(s.id), wmsOrderId: s.order_id != null ? Number(s.order_id) : null, status: s.status ?? null, engineOrderRef: s.engine_order_ref ?? null, shipstationOrderId: s.shipstation_order_id != null ? Number(s.shipstation_order_id) : null, requiresReview: s.requires_review ?? null, reviewReason: s.review_reason ?? null, onHoldReason: s.on_hold_reason ?? null, createdAt: s.created_at ?? null })),
+    shipments: shipmentRows.map((s) => ({ id: Number(s.id), wmsOrderId: s.order_id != null ? Number(s.order_id) : null, status: s.status ?? null, engineOrderRef: s.engine_order_ref ?? null, shipstationOrderId: s.shipstation_order_id != null ? Number(s.shipstation_order_id) : null, trackingNumber: s.tracking_number ?? null, shopifyFulfillmentId: s.shopify_fulfillment_id ?? null, hasShippableItems: s.has_shippable_items !== false, requiresReview: s.requires_review ?? null, reviewReason: s.review_reason ?? null, onHoldReason: s.on_hold_reason ?? null, createdAt: s.created_at ?? null })),
     events: eventRows.map((e) => ({ eventType: String(e.event_type), details: e.details, createdAt: e.created_at ?? null })),
     timeline,
     stages,
