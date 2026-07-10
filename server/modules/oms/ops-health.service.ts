@@ -3,6 +3,10 @@ import {
   collectOmsFlowReconciliationIssues,
   getOmsFlowReconciliationSchedulerHeartbeat,
 } from "./oms-flow-reconciliation.service";
+import {
+  getChannelWritebackHealth,
+  type ChannelWritebackHealth,
+} from "./channel-writeback.service";
 import { getOmsOpsAlertSchedulerHeartbeat } from "./oms-ops-alert-heartbeat";
 import { getWebhookRetryWorkerHeartbeat } from "./webhook-retry.worker";
 
@@ -35,6 +39,7 @@ export interface OmsOpsHealthSummary {
     info: number;
   };
   issues: OmsOpsIssue[];
+  channelWriteback: ChannelWritebackHealth;
 }
 
 function rows(result: any): any[] {
@@ -719,35 +724,84 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       db,
       sql`
         SELECT COUNT(*)::int AS count
-        FROM oms.oms_orders oo
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
         JOIN channels.channels c ON c.id = oo.channel_id
-        WHERE oo.status = 'shipped'
-          AND oo.shipped_at < NOW() - INTERVAL '1 hour'
-          AND oo.shipped_at > NOW() - INTERVAL '14 days'
+        WHERE oo.status IN ('shipped', 'partially_shipped')
+          AND os.status = 'shipped'
+          AND os.shipped_at < NOW() - INTERVAL '1 hour'
+          AND os.shipped_at > NOW() - INTERVAL '14 days'
           AND c.provider IN ('ebay', 'shopify')
-          AND NOT EXISTS (
+          AND EXISTS (
             SELECT 1
-            FROM oms.oms_order_events e
-            WHERE e.order_id = oo.id
-              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed')
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
+          )
+          AND NOT (
+            (
+              c.provider = 'shopify'
+              AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM oms.oms_order_events e
+              WHERE e.order_id = oo.id
+                AND e.details->>'wmsShipmentId' = os.id::text
+                AND (
+                  (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                  OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                )
+            )
           )
       `,
       sql`
-        SELECT oo.id, oo.external_order_number, c.provider, oo.shipped_at,
-               oo.tracking_number, oo.tracking_carrier
-        FROM oms.oms_orders oo
+        SELECT oo.id, os.id AS shipment_id, oo.external_order_number,
+               c.provider, os.shipped_at, os.tracking_number,
+               os.carrier, oo.status AS oms_status
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        JOIN oms.oms_orders oo ON (
+             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+          OR (wo.source_table_id = oo.id::text)
+        )
         JOIN channels.channels c ON c.id = oo.channel_id
-        WHERE oo.status = 'shipped'
-          AND oo.shipped_at < NOW() - INTERVAL '1 hour'
-          AND oo.shipped_at > NOW() - INTERVAL '14 days'
+        WHERE oo.status IN ('shipped', 'partially_shipped')
+          AND os.status = 'shipped'
+          AND os.shipped_at < NOW() - INTERVAL '1 hour'
+          AND os.shipped_at > NOW() - INTERVAL '14 days'
           AND c.provider IN ('ebay', 'shopify')
-          AND NOT EXISTS (
+          AND EXISTS (
             SELECT 1
-            FROM oms.oms_order_events e
-            WHERE e.order_id = oo.id
-              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed')
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
           )
-        ORDER BY oo.shipped_at ASC
+          AND NOT (
+            (
+              c.provider = 'shopify'
+              AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM oms.oms_order_events e
+              WHERE e.order_id = oo.id
+                AND e.details->>'wmsShipmentId' = os.id::text
+                AND (
+                  (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                  OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                )
+            )
+          )
+        ORDER BY os.shipped_at ASC, os.id ASC
         LIMIT 10
       `,
     ),
@@ -829,6 +883,10 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       `,
     ),
   ]);
+  const channelWriteback = await getChannelWritebackHealth(db, {
+    windowDays: 14,
+    sampleLimit: 50,
+  });
 
   const issues: OmsOpsIssue[] = [
     ...flowReconciliationIssues,
@@ -1015,8 +1073,15 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
       severity: "critical",
       count: shippedTrackingNotPushed.count,
-      message: "Shipped OMS orders do not have a tracking/fulfillment push success event.",
+      message: "Shipped WMS shipments do not have a tracking/fulfillment push success event.",
       sample: shippedTrackingNotPushed.sample,
+    }),
+    issue({
+      code: "CHANNEL_WRITEBACK_MASKED_SPLIT",
+      severity: "critical",
+      count: channelWriteback.masked,
+      message: "A channel writeback is missing but another shipment made the order look complete.",
+      sample: channelWriteback.exceptions.filter((row) => row.state === "masked"),
     }),
   ].filter((entry) => entry.count > 0);
 
@@ -1038,5 +1103,6 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     },
     counts,
     issues,
+    channelWriteback,
   };
 }

@@ -73,6 +73,35 @@ interface FlowWaterfall {
   sla: { breached: number; sample: any[] };
   issues: FlowIssue[];
   health: { generatedAt: string; status: "healthy" | "degraded" | "critical"; counts: { critical: number; warning: number; info: number } };
+  channelWriteback: {
+    generatedAt: string;
+    windowDays: number;
+    shipped: number;
+    complete: number;
+    missing: number;
+    masked: number;
+    partialOrders: number;
+    retrying: number;
+    dead: number;
+    byProvider: Array<{
+      provider: string;
+      shipped: number;
+      complete: number;
+      missing: number;
+      masked: number;
+      partialOrders: number;
+      retrying: number;
+      dead: number;
+    }>;
+    exceptions: Array<{
+      shipment_id: number;
+      order_number: string | null;
+      provider: string;
+      tracking_number: string | null;
+      state: string;
+      shipped_at: string | null;
+    }>;
+  };
 }
 
 interface FlowTraceShipment { id: number; status: string | null; engineOrderRef: string | null; carrier?: string | null; trackingNumber?: string | null }
@@ -211,7 +240,7 @@ export default function FlowMonitor() {
     { n: 4, name: "Picked & packed", desc: "Picked, packed, outbound shipment row created", reached: d.funnel.hasShipment, reachedLabel: "shipment created", stage: "wms_fulfill" },
     { n: 5, name: "Pushed to ShipStation", desc: "Shipment pushed to the shipping engine (engine-agnostic)", reached: d.funnel.shipped, reachedLabel: "downstream", stage: "engine_push" },
     { n: 6, name: "Shipped & confirmed", desc: "SHIP_NOTIFY recorded; inventory ledgered", reached: d.funnel.shipped, reachedLabel: "shipped", stage: "shipped" },
-    { n: 7, name: "Written back to channel", desc: "Fulfillment + tracking pushed to Shopify / eBay", reached: d.funnel.trackingConfirmed, reachedLabel: "tracking confirmed", stage: "writeback" },
+    { n: 7, name: "Written back to channel", desc: "Every shipped physical shipment has a channel fulfillment/tracking confirmation", reached: d.funnel.trackingConfirmed, reachedLabel: "orders fully written back", stage: "writeback" },
   ];
 
   const KPI = ({ label, value, sub, tone }: { label: string; value: string; sub: string; tone?: "red" | "green" }) => (
@@ -240,9 +269,9 @@ export default function FlowMonitor() {
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Order Flow Monitor</h1>
+          <h1 className="text-2xl font-bold">Operations Control Tower</h1>
           <p className="text-sm text-muted-foreground">
-            Channel → OMS → WMS → shipping engine. Where orders fall off the happy path, drillable to the webhook.
+            Channel → OMS → WMS → shipping engine → channel writeback. Open failures are drillable to the order and shipment.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -366,6 +395,66 @@ export default function FlowMonitor() {
           </CardContent>
         </Card>
       )}
+
+      <Card className={cn(
+        "border",
+        d.channelWriteback.missing > 0 ? "border-red-300" : "border-emerald-200",
+      )}>
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">Channel writeback</CardTitle>
+            <Badge variant={d.channelWriteback.missing > 0 ? "destructive" : "outline"}>
+              {d.channelWriteback.missing > 0 ? `${fmt(d.channelWriteback.missing)} open` : "complete"}
+            </Badge>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Shipment-level confirmation back to Shopify and eBay. A successful sibling shipment never closes another split shipment.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+            <Stat label="Shipped" value={d.channelWriteback.shipped} />
+            <Stat label="Complete" value={d.channelWriteback.complete} good />
+            <Stat label="Missing" value={d.channelWriteback.missing} warn={d.channelWriteback.missing > 0} />
+            <Stat label="Masked" value={d.channelWriteback.masked} warn={d.channelWriteback.masked > 0} />
+            <Stat label="Retrying" value={d.channelWriteback.retrying} />
+            <Stat label="Dead" value={d.channelWriteback.dead} warn={d.channelWriteback.dead > 0} />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {d.channelWriteback.byProvider.map((provider) => (
+              <span key={provider.provider} className="inline-flex items-center gap-2 rounded-md border bg-muted/30 px-2 py-1 text-xs">
+                {channelIcon(provider.provider)}
+                <span className="font-medium capitalize">{provider.provider}</span>
+                <span className="text-muted-foreground">{fmt(provider.complete)}/{fmt(provider.shipped)} complete</span>
+              </span>
+            ))}
+          </div>
+          {d.channelWriteback.exceptions.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Oldest open shipments</div>
+              {d.channelWriteback.exceptions.slice(0, 8).map((row) => (
+                <button
+                  key={row.shipment_id}
+                  className="flex w-full items-center justify-between gap-3 rounded-md border bg-muted/20 px-2.5 py-2 text-left text-xs hover:bg-muted/50"
+                  onClick={() => {
+                    if (row.order_number) {
+                      setSubmittedRef(String(row.order_number));
+                      setRefInput(String(row.order_number));
+                      setTimeout(() => traceRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+                    }
+                  }}
+                >
+                  <span className="min-w-0 truncate">
+                    <span className="font-semibold">{row.order_number ?? `OMS shipment ${row.shipment_id}`}</span>
+                    <span className="ml-2 text-muted-foreground">{row.provider} · {row.tracking_number ?? "no tracking"}</span>
+                  </span>
+                  <Badge variant={row.state === "dead" ? "destructive" : "outline"}>{row.state.replace("_", " ")}</Badge>
+                </button>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_320px]">
         {/* Waterfall */}

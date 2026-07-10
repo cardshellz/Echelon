@@ -8,6 +8,7 @@ import {
   enqueueShipStationShipmentPushRetry,
   enqueueWmsShipmentCreateRetry,
 } from "./webhook-retry.worker";
+import { findChannelWritebackCandidates } from "./channel-writeback.service";
 
 const LOG_PREFIX = "[OMS Flow Reconciliation]";
 const LOCK_ID = 918405;
@@ -23,6 +24,7 @@ const REMEDIABLE_CODES = new Set([
   "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
+const AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT = 100;
 const AUTO_FLOW_REMEDIATION_LIMIT = 10;
 const AUTO_RESERVATION_REPAIR_LIMIT = 25;
 
@@ -375,11 +377,21 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND os.shipped_at < NOW() - INTERVAL '1 hour'
           AND os.shipped_at > NOW() - INTERVAL '14 days'
           AND c.provider IN ('ebay', 'shopify')
-          AND NOT EXISTS (
-            SELECT 1
-            FROM oms.oms_order_events e
-            WHERE e.order_id = oo.id
-              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed')
+          AND NOT (
+            (
+              c.provider = 'shopify'
+              AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM oms.oms_order_events e
+              WHERE e.order_id = oo.id
+                AND e.details->>'wmsShipmentId' = os.id::text
+                AND (
+                  (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                  OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                )
+            )
           )
       `,
       sql`
@@ -397,11 +409,21 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND os.shipped_at < NOW() - INTERVAL '1 hour'
           AND os.shipped_at > NOW() - INTERVAL '14 days'
           AND c.provider IN ('ebay', 'shopify')
-          AND NOT EXISTS (
-            SELECT 1
-            FROM oms.oms_order_events e
-            WHERE e.order_id = oo.id
-              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed')
+          AND NOT (
+            (
+              c.provider = 'shopify'
+              AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM oms.oms_order_events e
+              WHERE e.order_id = oo.id
+                AND e.details->>'wmsShipmentId' = os.id::text
+                AND (
+                  (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                  OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                )
+            )
           )
         ORDER BY os.shipped_at ASC
         LIMIT 10
@@ -491,8 +513,14 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND os.shipped_at < NOW() - INTERVAL '10 minutes'
           AND os.shipped_at > NOW() - INTERVAL '14 days'
           AND c.provider = 'shopify'
-          AND os.shopify_fulfillment_id IS NULL
-          AND COALESCE(oo.fulfillment_status, 'unfulfilled') <> 'fulfilled'
+          AND NULLIF(os.shopify_fulfillment_id, '') IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_order_events e
+            WHERE e.order_id = oo.id
+              AND e.event_type = 'shopify_fulfillment_pushed'
+              AND e.details->>'wmsShipmentId' = os.id::text
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM oms.webhook_retry_queue q
@@ -517,8 +545,14 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
           AND os.shipped_at < NOW() - INTERVAL '10 minutes'
           AND os.shipped_at > NOW() - INTERVAL '14 days'
           AND c.provider = 'shopify'
-          AND os.shopify_fulfillment_id IS NULL
-          AND COALESCE(oo.fulfillment_status, 'unfulfilled') <> 'fulfilled'
+          AND NULLIF(os.shopify_fulfillment_id, '') IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM oms.oms_order_events e
+            WHERE e.order_id = oo.id
+              AND e.event_type = 'shopify_fulfillment_pushed'
+              AND e.details->>'wmsShipmentId' = os.id::text
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM oms.webhook_retry_queue q
@@ -1083,9 +1117,18 @@ async function autoQueueStaleTrackingPushRetries(
   const issue = issues.find((entry) => entry.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED");
   if (!issue) return;
 
+  const candidates = await findChannelWritebackCandidates(db, {
+    minAgeMinutes: 10,
+    maxAgeDays: 14,
+    limit: AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT,
+    excludeRetryStates: true,
+  });
   let queued = 0;
-  for (const sample of issue.sample.slice(0, AUTO_TRACKING_RETRY_LIMIT)) {
-    const row = sample as any;
+  for (const row of candidates) {
+    if (row.provider !== "ebay" || row.pending_retry || row.dead_retry) {
+      continue;
+    }
+
     const omsOrderId = Number(row.oms_order_id);
     const shipmentId = Number(row.shipment_id);
     if (
@@ -1159,9 +1202,19 @@ async function autoQueueMissingShopifyFulfillmentRetries(
   const issue = issues.find((entry) => entry.code === "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED");
   if (!issue) return;
 
+  const candidates = await findChannelWritebackCandidates(db, {
+    minAgeMinutes: 10,
+    maxAgeDays: 14,
+    limit: AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT,
+    excludeRetryStates: true,
+  });
   let queued = 0;
-  for (const sample of issue.sample.slice(0, AUTO_TRACKING_RETRY_LIMIT)) {
-    const shipmentId = Number((sample as any).shipment_id);
+  for (const row of candidates) {
+    if (row.provider !== "shopify" || row.pending_retry || row.dead_retry) {
+      continue;
+    }
+
+    const shipmentId = Number(row.shipment_id);
     if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
       continue;
     }

@@ -6,8 +6,10 @@ import { EbayFulfillmentReconciler } from "./reconcilers/ebay.reconciler";
 import { ShopifyFulfillmentReconciler } from "./reconcilers/shopify.reconciler";
 import type { FulfillmentReconciler } from "./reconcilers/reconciler.interface";
 import { applyChannelFulfillment } from "./channel-fulfillment.service";
+import { findChannelWritebackCandidates } from "./channel-writeback.service";
 
 const LOG_PREFIX = "[Fulfillment Sweeper]";
+const OUTBOUND_SWEEP_LIMIT = 200;
 
 function getReconciler(provider: string, dbArg: any): FulfillmentReconciler | null {
   if (provider === "ebay") {
@@ -22,56 +24,61 @@ function getReconciler(provider: string, dbArg: any): FulfillmentReconciler | nu
 
 export async function runFulfillmentSweep(dbArg: any = db) {
   try {
-    console.log(`${LOG_PREFIX} Starting hourly fulfillment sweep...`);
+    console.log(`${LOG_PREFIX} Starting hourly outbound channel writeback sweep...`);
 
-    // Find orders shipped between 1 hour ago and 7 days ago
-    // We ignore the first hour to allow the standard 5-minute delayed push queue to complete
-    const sweepOrders = await dbArg.execute(sql`
-      SELECT o.*, c.provider 
-      FROM oms.oms_orders o
-      JOIN channels.channels c ON o.channel_id = c.id
-      WHERE o.status = 'shipped'
-        AND o.shipped_at < NOW() - INTERVAL '1 hour'
-        AND o.shipped_at > NOW() - INTERVAL '7 days'
-    `);
+    // Shipment scope is required here: an order can be partially shipped, and
+    // one successful sibling must never hide another missing writeback.
+    const candidates = await findChannelWritebackCandidates(dbArg, {
+      minAgeMinutes: 60,
+      maxAgeDays: 7,
+      limit: OUTBOUND_SWEEP_LIMIT,
+      excludeRetryStates: true,
+    });
 
-    if (sweepOrders.rows.length === 0) {
-      console.log(`${LOG_PREFIX} No shipped orders in the sweep window.`);
+    if (candidates.length === 0) {
+      console.log(`${LOG_PREFIX} No missing channel writebacks in the sweep window.`);
       return;
     }
 
     let processed = 0;
     let repushed = 0;
+    const fulfillmentPush = dbArg.__fulfillmentPush;
+    if (!fulfillmentPush) {
+      console.error(`${LOG_PREFIX} Fulfillment push service is unavailable; leaving candidates pending.`);
+      return;
+    }
 
-    for (const row of sweepOrders.rows) {
-      const provider = row.provider;
-      const orderId = row.id;
-      
-      const reconciler = getReconciler(provider, dbArg);
-      if (!reconciler) {
-        // Skip channels we don't have a reconciler for yet
+    for (const row of candidates) {
+      if (row.pending_retry || row.dead_retry) {
         continue;
       }
 
       processed++;
-      
       try {
-        const status = await reconciler.checkStatus(row);
-        if (status === "unfulfilled") {
-          console.warn(`${LOG_PREFIX} Order ${orderId} (${row.external_order_id}) is still unfulfilled on ${provider}. Repushing...`);
-          const success = await reconciler.repush(row);
-          if (success) {
-            repushed++;
-          } else {
-            console.error(`${LOG_PREFIX} Repush failed for order ${orderId} on ${provider}.`);
-          }
+        const result = row.provider === "shopify"
+          ? await fulfillmentPush.pushShopifyFulfillment(row.shipment_id)
+          : row.provider === "ebay"
+            ? await fulfillmentPush.pushTrackingForShipment(row.shipment_id)
+            : false;
+
+        const succeeded = row.provider === "shopify"
+          ? Boolean(result?.alreadyPushed || result?.shopifyFulfillmentId)
+          : result === true;
+        if (succeeded) {
+          repushed++;
+        } else {
+          console.error(
+            `${LOG_PREFIX} Writeback returned false for shipment ${row.shipment_id} (${row.provider}, order ${row.order_number ?? row.oms_order_id}).`,
+          );
         }
       } catch (err: any) {
-        console.error(`${LOG_PREFIX} Error reconciling order ${orderId} on ${provider}: ${err.message}`);
+        console.error(
+          `${LOG_PREFIX} Error writing shipment ${row.shipment_id} back to ${row.provider}: ${err.message}`,
+        );
       }
     }
 
-    console.log(`${LOG_PREFIX} Complete. Processed: ${processed}, Repushed: ${repushed}`);
+    console.log(`${LOG_PREFIX} Complete. Processed: ${processed}/${candidates.length}, Repushed: ${repushed}`);
   } catch (err: any) {
     console.error(`${LOG_PREFIX} Critical error during sweep: ${err.message}`);
   }

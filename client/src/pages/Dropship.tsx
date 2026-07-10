@@ -3793,7 +3793,7 @@ function ShippingConfigTab() {
               onChange={setMarkupForm}
               onSave={saveMarkupPolicy}
             />
-            <ShippingMarkupPolicyTable activePolicy={config?.activeMarkupPolicy ?? null} isLoading={shippingQuery.isLoading} />
+            <ShippingMarkupPolicyTable policies={config?.markupPolicies ?? []} isLoading={shippingQuery.isLoading} />
           </div>
         </TabsContent>
 
@@ -3806,7 +3806,7 @@ function ShippingConfigTab() {
               onChange={setInsuranceForm}
               onSave={saveInsurancePolicy}
             />
-            <ShippingInsurancePolicyTable activePolicy={config?.activeInsurancePolicy ?? null} isLoading={shippingQuery.isLoading} />
+            <ShippingInsurancePolicyTable policies={config?.insurancePolicies ?? []} isLoading={shippingQuery.isLoading} />
           </div>
         </TabsContent>
       </Tabs>
@@ -4473,48 +4473,50 @@ function ShippingRateTablesTable({
 }
 
 function ShippingMarkupPolicyTable({
-  activePolicy,
+  policies,
   isLoading,
 }: {
-  activePolicy: DropshipShippingConfigOverview["activeMarkupPolicy"];
+  policies: DropshipShippingConfigOverview["markupPolicies"];
   isLoading: boolean;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
   return (
     <ShippingSimpleTable
-      title="Active markup policy"
-      emptyTitle="No active markup policy"
-      headers={["Name", "Variable", "Fixed", "Range", "Effective"]}
-      rows={activePolicy ? [[
-        activePolicy.name,
-        `${activePolicy.markupBps} bps`,
-        formatCents(activePolicy.fixedMarkupCents),
-        formatShippingMoneyRange(activePolicy.minMarkupCents, activePolicy.maxMarkupCents),
-        formatDateTime(activePolicy.effectiveFrom),
-      ]] : []}
+      title="Markup policies"
+      emptyTitle="No markup policies"
+      headers={["Name", "Status", "Variable", "Fixed", "Range", "Effective"]}
+      rows={policies.map((policy) => [
+        policy.name,
+        policy.isActive ? "Active" : "Inactive",
+        `${policy.markupBps} bps`,
+        formatCents(policy.fixedMarkupCents),
+        formatShippingMoneyRange(policy.minMarkupCents, policy.maxMarkupCents),
+        `${formatDateTime(policy.effectiveFrom)}${policy.effectiveTo ? ` - ${formatDateTime(policy.effectiveTo)}` : " - Open"}`,
+      ])}
     />
   );
 }
 
 function ShippingInsurancePolicyTable({
-  activePolicy,
+  policies,
   isLoading,
 }: {
-  activePolicy: DropshipShippingConfigOverview["activeInsurancePolicy"];
+  policies: DropshipShippingConfigOverview["insurancePolicies"];
   isLoading: boolean;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
   return (
     <ShippingSimpleTable
-      title="Active insurance pool policy"
-      emptyTitle="No active insurance pool policy"
-      headers={["Name", "Fee", "Range", "Effective"]}
-      rows={activePolicy ? [[
-        activePolicy.name,
-        `${activePolicy.feeBps} bps`,
-        formatShippingMoneyRange(activePolicy.minFeeCents, activePolicy.maxFeeCents),
-        formatDateTime(activePolicy.effectiveFrom),
-      ]] : []}
+      title="Insurance pool policies"
+      emptyTitle="No insurance pool policies"
+      headers={["Name", "Status", "Fee", "Range", "Effective"]}
+      rows={policies.map((policy) => [
+        policy.name,
+        policy.isActive ? "Active" : "Inactive",
+        `${policy.feeBps} bps`,
+        formatShippingMoneyRange(policy.minFeeCents, policy.maxFeeCents),
+        `${formatDateTime(policy.effectiveFrom)}${policy.effectiveTo ? ` - ${formatDateTime(policy.effectiveTo)}` : " - Open"}`,
+      ])}
     />
   );
 }

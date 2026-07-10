@@ -141,6 +141,8 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
       const rateTables = await listRateTablesWithClient(client, input.rateTableLimit);
       const activeMarkupPolicy = await loadActiveMarkupPolicyWithClient(client, input.generatedAt);
       const activeInsurancePolicy = await loadActiveInsurancePolicyWithClient(client, input.generatedAt);
+      const markupPolicies = await listMarkupPoliciesWithClient(client);
+      const insurancePolicies = await listInsurancePoliciesWithClient(client);
 
       return {
         boxes,
@@ -149,6 +151,8 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
         rateTables,
         activeMarkupPolicy,
         activeInsurancePolicy,
+        markupPolicies,
+        insurancePolicies,
         generatedAt: input.generatedAt,
       };
     } finally {
@@ -850,6 +854,18 @@ async function loadActiveMarkupPolicyWithClient(
   return result.rows[0] ? mapMarkupPolicyRow(result.rows[0]) : null;
 }
 
+async function listMarkupPoliciesWithClient(
+  client: PoolClient,
+): Promise<DropshipShippingMarkupPolicyRecord[]> {
+  const result = await client.query<MarkupPolicyRow>(
+    `SELECT id, name, markup_bps, fixed_markup_cents, min_markup_cents,
+            max_markup_cents, is_active, effective_from, effective_to, created_at
+     FROM dropship.dropship_shipping_markup_config
+     ORDER BY effective_from DESC, id DESC`,
+  );
+  return result.rows.map(mapMarkupPolicyRow);
+}
+
 async function loadActiveInsurancePolicyWithClient(
   client: PoolClient,
   at: Date,
@@ -866,6 +882,18 @@ async function loadActiveInsurancePolicyWithClient(
     [at],
   );
   return result.rows[0] ? mapInsurancePolicyRow(result.rows[0]) : null;
+}
+
+async function listInsurancePoliciesWithClient(
+  client: PoolClient,
+): Promise<DropshipInsurancePoolPolicyRecord[]> {
+  const result = await client.query<InsurancePolicyRow>(
+    `SELECT id, name, fee_bps, min_fee_cents, max_fee_cents,
+            is_active, effective_from, effective_to, created_at
+     FROM dropship.dropship_insurance_pool_config
+     ORDER BY effective_from DESC, id DESC`,
+  );
+  return result.rows.map(mapInsurancePolicyRow);
 }
 
 async function assertProductVariantExists(client: PoolClient, productVariantId: number): Promise<void> {
