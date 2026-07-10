@@ -435,6 +435,82 @@ describe("createReceiptFromPO — receipt idempotency", () => {
   });
 });
 
+describe("createReceiptFromPO — expected-qty pack conversion (RCV-20260710-003)", () => {
+  let svc: ReturnType<typeof createPurchasingService>;
+  let storage: ReturnType<typeof buildMockStorage>;
+  let mockDb: ReturnType<typeof buildMockDb>;
+
+  beforeEach(() => {
+    storage = buildMockStorage();
+    mockDb = buildMockDb();
+    svc = createPurchasingService(mockDb, storage);
+    storage.getPurchaseOrderById.mockResolvedValue(makePo({ id: 1, status: "sent" }));
+    storage.getReceivingOrdersForPurchaseOrder.mockResolvedValue([]);
+    storage.generateReceiptNumber.mockResolvedValue("RCV-TEST-CASE");
+    storage.createReceivingOrder.mockResolvedValue({
+      id: 90, receiptNumber: "RCV-TEST-CASE", purchaseOrderId: 1, status: "draft",
+    });
+  });
+
+  it("divides ordered pieces by the STAMPED variant's unitsPerVariant even when the PO UOM field is unset", async () => {
+    // The bug: line stamps the Case-of-750 variant but expectedReceiveUnitsPerVariant
+    // is null, so packSize fell back to unitsPerUom (1) → 269640 pieces shown as
+    // "269640 cases" instead of ceil(269640/750) = 360.
+    storage.getPurchaseOrderLines.mockResolvedValue([
+      {
+        id: 100,
+        expectedReceiveVariantId: 42,          // "Case of 750" variant
+        productVariantId: 7,                    // base/piece variant
+        productId: 50,
+        sku: "ARM-ENV-SGL-C750",
+        productName: "Armalope Envelope Single Pocket",
+        orderQty: 269640,                       // ordered pieces
+        receivedQty: 0,
+        cancelledQty: 0,
+        expectedReceiveUnitsPerVariant: null,   // ← the drifted/unset pair field
+        unitsPerUom: 1,
+        status: "open",
+        lineType: "product",
+      },
+    ]);
+    storage.getProductVariantById.mockImplementation(async (id: number) =>
+      id === 42 ? { id: 42, unitsPerVariant: 750 } : { id, unitsPerVariant: 1 },
+    );
+
+    await svc.createReceiptFromPO(1, "user-1");
+
+    const lines = (storage.bulkCreateReceivingLines as any).mock.calls[0][0];
+    expect(lines).toHaveLength(1);
+    expect(lines[0].productVariantId).toBe(42);
+    expect(lines[0].expectedQty).toBe(360); // ceil(269640 / 750), NOT 269640
+  });
+
+  it("falls back to the PO UOM field when the variant cannot be resolved", async () => {
+    storage.getPurchaseOrderLines.mockResolvedValue([
+      {
+        id: 101,
+        expectedReceiveVariantId: 99,
+        productId: 51,
+        sku: "SKU-NOVAR",
+        productName: "No Variant",
+        orderQty: 1000,
+        receivedQty: 0,
+        cancelledQty: 0,
+        expectedReceiveUnitsPerVariant: 10,
+        unitsPerUom: 1,
+        status: "open",
+        lineType: "product",
+      },
+    ]);
+    storage.getProductVariantById.mockResolvedValue(null); // unresolvable
+
+    await svc.createReceiptFromPO(1, "user-1");
+
+    const lines = (storage.bulkCreateReceivingLines as any).mock.calls[0][0];
+    expect(lines[0].expectedQty).toBe(100); // ceil(1000 / 10) via PO UOM fallback
+  });
+});
+
 describe("recomputeFinancialAggregates", () => {
   let db: ReturnType<typeof buildMockDb>;
   let storage: ReturnType<typeof buildMockStorage>;
