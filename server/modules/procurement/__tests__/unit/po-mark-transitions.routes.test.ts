@@ -63,6 +63,7 @@ function buildPurchasingMock(overrides: Record<string, any> = {}): any {
     getNewPoPreload: vi.fn(),
     getProcurementSettings: vi.fn(),
     updateProcurementSetting: vi.fn(),
+    updateDeliverySchedule: vi.fn(),
     acknowledge: vi.fn(),
     cancel: vi.fn(),
     voidPO: vi.fn(),
@@ -113,6 +114,16 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 async function post(baseUrl: string, path: string, body: any = {}): Promise<{ status: number; body: any }> {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+async function patch(baseUrl: string, path: string, body: any = {}): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -226,5 +237,48 @@ describe("POST /api/purchase-orders/:id/mark-arrived", () => {
       { notes: "Arrived at warehouse" },
       "test-user",
     );
+  });
+});
+
+describe("PATCH /api/purchase-orders/:id/delivery-schedule", () => {
+  let server: { url: string; close: () => Promise<void> };
+  let purchasing: ReturnType<typeof buildPurchasingMock>;
+
+  beforeEach(async () => {
+    purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+  });
+
+  afterEach(async () => { await server.close(); });
+
+  it("parses nullable schedule dates and forwards the audited update", async () => {
+    purchasing.updateDeliverySchedule.mockResolvedValue({ id: 15, status: "acknowledged" });
+
+    const { status } = await patch(server.url, "/api/purchase-orders/15/delivery-schedule", {
+      expectedDeliveryDate: "2026-08-20",
+      confirmedDeliveryDate: null,
+      notes: "Correct vendor schedule",
+    });
+
+    expect(status).toBe(200);
+    expect(purchasing.updateDeliverySchedule).toHaveBeenCalledWith(
+      15,
+      {
+        expectedDeliveryDate: new Date("2026-08-20"),
+        confirmedDeliveryDate: null,
+        notes: "Correct vendor schedule",
+      },
+      "test-user",
+    );
+  });
+
+  it("rejects malformed dates before calling the service", async () => {
+    const { status, body } = await patch(server.url, "/api/purchase-orders/15/delivery-schedule", {
+      confirmedDeliveryDate: "not-a-date",
+    });
+
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/valid date/i);
+    expect(purchasing.updateDeliverySchedule).not.toHaveBeenCalled();
   });
 });

@@ -1178,6 +1178,7 @@ export type PurchasingRecommendationDecision = typeof purchasingRecommendationDe
 //   'sent_to_vendor', 'vendor_acknowledged', 'marked_shipped',
 //   'marked_in_transit', 'marked_arrived', 'receiving_started',
 //   'received', 'closed', 'closed_short', 'cancelled',
+//   'delivery_schedule_updated',
 //   'edited', 'duplicated_from'
 // Other modules (receiving, AP) will add more types over time.
 //

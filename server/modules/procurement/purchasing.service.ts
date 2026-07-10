@@ -60,6 +60,12 @@ import {
   reconcilePurchaseOrderReceipt,
   type ReceivingReconciliationLine,
 } from "./purchase-order-receipt-reconciliation.service";
+import {
+  deliveryDateIso,
+  sameDeliveryDate,
+  validateDeliverySchedulePatch,
+  type DeliverySchedulePatch,
+} from "./purchase-order-delivery-schedule";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -160,6 +166,7 @@ const CANCELLABLE_FROM = new Set(["draft", "pending_approval", "approved"]);
 const VOIDABLE_FROM = new Set(["sent", "acknowledged"]);
 const RECEIVABLE_SHIPMENT_STATUSES = new Set(["at_port", "customs_clearance", "delivered", "costing", "closed"]);
 const ACTIVE_RECEIPT_STATUSES = new Set(["draft", "open", "receiving", "verified"]);
+const TERMINAL_DELIVERY_SCHEDULE_STATUSES = new Set(["received", "closed", "cancelled", "short_closed"]);
 const PHYSICAL_LIFECYCLE_EVENTS: Partial<Record<PoPhysicalStatus, string>> = {
   sent: "sent_to_vendor",
   acknowledged: "vendor_acknowledged",
@@ -982,12 +989,101 @@ export function createPurchasingService(db: any, storage: Storage) {
       throw new PurchasingError(`Cannot edit PO in '${po.status}' status`, 400);
     }
 
+    const deliveryPatch: DeliverySchedulePatch = {};
+    if (Object.prototype.hasOwnProperty.call(updates, "expectedDeliveryDate")) {
+      deliveryPatch.expectedDeliveryDate = updates.expectedDeliveryDate;
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, "confirmedDeliveryDate")) {
+      deliveryPatch.confirmedDeliveryDate = updates.confirmedDeliveryDate;
+    }
+    const deliveryIssues = validateDeliverySchedulePatch(po, deliveryPatch);
+    if (deliveryIssues.length > 0) {
+      const issue = deliveryIssues[0];
+      throw new PurchasingError(issue.message, 400, issue);
+    }
+
     // updatePO is a generic edit (notes, priority, etc.). No status change,
     // so we use the plain update helper. Previously used
     // updatePurchaseOrderStatusWithHistory which required historyData we
     // weren't supplying, causing to_status NOT NULL violations on any
     // non-status field edit.
     return await storage.updatePurchaseOrder(id, { ...updates, updatedBy: userId });
+  }
+
+  async function updateDeliverySchedule(
+    id: number,
+    input: DeliverySchedulePatch & { notes?: string },
+    userId?: string,
+  ) {
+    const po = await storage.getPurchaseOrderById(id);
+    if (!po) throw new PurchasingError("Purchase order not found", 404);
+
+    const physicalStatus = po.physicalStatus ?? po.status;
+    if (
+      TERMINAL_DELIVERY_SCHEDULE_STATUSES.has(po.status) ||
+      TERMINAL_DELIVERY_SCHEDULE_STATUSES.has(physicalStatus)
+    ) {
+      throw new PurchasingError("Cannot update the delivery schedule on a terminal PO", 400, {
+        code: "DELIVERY_SCHEDULE_TERMINAL_PO",
+        status: po.status,
+        physicalStatus,
+      });
+    }
+
+    const hasExpected = input.expectedDeliveryDate !== undefined;
+    const hasConfirmed = input.confirmedDeliveryDate !== undefined;
+    if (!hasExpected && !hasConfirmed) {
+      throw new PurchasingError("At least one delivery schedule date is required", 400, {
+        code: "DELIVERY_SCHEDULE_EMPTY_PATCH",
+      });
+    }
+
+    const issues = validateDeliverySchedulePatch(po, input);
+    if (issues.length > 0) {
+      const issue = issues[0];
+      throw new PurchasingError(issue.message, 400, issue);
+    }
+
+    const patch: Record<string, Date | null | string | undefined> = {};
+    const changes: string[] = [];
+    if (hasExpected && !sameDeliveryDate(po.expectedDeliveryDate, input.expectedDeliveryDate)) {
+      patch.expectedDeliveryDate = input.expectedDeliveryDate ?? null;
+      changes.push("requested delivery date");
+    }
+    if (hasConfirmed && !sameDeliveryDate(po.confirmedDeliveryDate, input.confirmedDeliveryDate)) {
+      patch.confirmedDeliveryDate = input.confirmedDeliveryDate ?? null;
+      changes.push("vendor confirmed delivery date");
+    }
+
+    if (changes.length === 0) return po;
+
+    const before = {
+      expected_delivery_date: deliveryDateIso(po.expectedDeliveryDate),
+      confirmed_delivery_date: deliveryDateIso(po.confirmedDeliveryDate),
+    };
+    const after = {
+      expected_delivery_date: hasExpected
+        ? deliveryDateIso(input.expectedDeliveryDate)
+        : before.expected_delivery_date,
+      confirmed_delivery_date: hasConfirmed
+        ? deliveryDateIso(input.confirmedDeliveryDate)
+        : before.confirmed_delivery_date,
+    };
+    const notes = input.notes?.trim() || `Updated ${changes.join(" and ")}`;
+
+    return updatePurchaseOrderStatusWithEvent(
+      id,
+      { ...patch, updatedBy: userId },
+      {
+        fromStatus: po.status,
+        toStatus: po.status,
+        changedBy: userId,
+        notes,
+      },
+      "delivery_schedule_updated",
+      userId,
+      { before, after, notes },
+    );
   }
 
   async function deletePO(id: number) {
@@ -1545,6 +1641,16 @@ export function createPurchasingService(db: any, storage: Storage) {
     const po = await storage.getPurchaseOrderById(id);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertTransition(po.status, "acknowledged");
+
+    if (data.confirmedDeliveryDate !== undefined) {
+      const issues = validateDeliverySchedulePatch(po, {
+        confirmedDeliveryDate: data.confirmedDeliveryDate,
+      });
+      if (issues.length > 0) {
+        const issue = issues[0];
+        throw new PurchasingError(issue.message, 400, issue);
+      }
+    }
 
     const result = await transitionPhysical(id, "acknowledged", userId, "Vendor acknowledged", {
       vendorAckDate: new Date(),
@@ -4599,6 +4705,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     // PO CRUD
     createPO,
     updatePO,
+    updateDeliverySchedule,
     deletePO,
     getPurchaseOrders: (filters?: any) => storage.getPurchaseOrders(filters),
     getPurchaseOrdersCount: (filters?: any) => storage.getPurchaseOrdersCount(filters),

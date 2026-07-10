@@ -107,6 +107,30 @@ describe("buildInFlightPoAgingDiagnostics", () => {
     });
   });
 
+  it("does not trust a confirmed delivery date that predates PO submission", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 207,
+      sentToVendorAt: "2026-05-01T00:00:00.000Z",
+      orderDate: "2026-05-01T00:00:00.000Z",
+      expectedDeliveryDate: "2026-05-10T00:00:00.000Z",
+      confirmedDeliveryDate: "2026-04-15T00:00:00.000Z",
+    })], { now });
+
+    expect(result.counts.invalidConfirmedDeliveryDate).toBe(1);
+    expect(result.items[0]).toMatchObject({
+      poId: 207,
+      ageDays: 10,
+      severity: "warning",
+      expectedDeliveryDate: "2026-05-10T00:00:00.000Z",
+      hasInvalidConfirmedDeliveryDate: true,
+      action: {
+        action: "correct_delivery_schedule",
+        label: "Correct schedule",
+      },
+    });
+    expect(result.items[0]?.detail).toContain("predates the PO submission date");
+  });
+
   it("ages partially received POs from the latest receiving activity", () => {
     const result = buildInFlightPoAgingDiagnostics([row({
       id: 205,
