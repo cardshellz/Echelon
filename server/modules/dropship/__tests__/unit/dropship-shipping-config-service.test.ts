@@ -103,6 +103,8 @@ class FakeShippingConfigRepository implements DropshipShippingConfigRepository {
       rateTables: [],
       activeMarkupPolicy: null,
       activeInsurancePolicy: null,
+      markupPolicies: [],
+      insurancePolicies: [],
       generatedAt: input.generatedAt,
     };
   }
