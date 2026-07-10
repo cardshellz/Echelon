@@ -2255,6 +2255,64 @@ export class ReplenishmentUseCases {
     };
   }
 
+  /**
+   * Resolve the SINGLE dedicated replenishment source bin for a pick location,
+   * regardless of whether replen is currently NEEDED. This is the exact bin the
+   * replen engine would pull from (assigned feeder → configured source variant →
+   * source-type + priority), so the gun's pick screen can show a "grab more from
+   * BULK-A-02" hint per line item, always — not only when a shortage fires.
+   *
+   * Returns null when the feature does not apply:
+   *   - pallet-pick items (replenMethod 'pallet_drop'): replen there is a
+   *     warehouse-manager job spanning multiple reserves, not one picker-facing
+   *     bin — intentionally excluded per WMS design.
+   *   - no configured/resolvable source, or no source stock currently on hand.
+   *
+   * Unlike checkReplenNeeded, this deliberately SKIPS the trigger/threshold
+   * evaluation — it answers "where is this item's backup?", not "does it need
+   * topping up right now?".
+   */
+  async resolveDedicatedReplenBin(
+    productVariantId: number,
+    warehouseLocationId: number,
+  ): Promise<{ locationId: number; locationCode: string } | null> {
+    const contextResult = await this.loadReplenEvaluationContext(productVariantId, warehouseLocationId);
+    if (contextResult.status === "skip") return null;
+    const { location, variant } = contextResult.context;
+
+    const locConfig = await this.loadLocationConfig(warehouseLocationId, productVariantId);
+    const params = await this.resolveReplenParams(
+      productVariantId,
+      variant,
+      location.warehouseId ?? undefined,
+      locConfig,
+    );
+
+    // Pallet-pick replen is a manager-job workflow across multiple reserves,
+    // not a single dedicated picker bin — no gun label for these.
+    if (params.replenMethod === "pallet_drop") return null;
+
+    const sourceDecision = await this.resolveReplenSourceForNeed({
+      tag: `[Replen dedicated-bin] variant=${productVariantId} loc=${warehouseLocationId}`,
+      pickVariant: variant,
+      pickVariantId: productVariantId,
+      warehouseId: location.warehouseId ?? undefined,
+      parentLocationId: location.parentLocationId,
+      sourceLocationType: params.sourceLocationType,
+      sourcePriority: params.sourcePriority,
+      sourceHierarchyLevel: params.sourceHierarchyLevel,
+      qtyNeeded: 1,
+      configuredSourceVariantId: params.sourceVariantId,
+      replenMethod: params.replenMethod,
+    });
+
+    if (!sourceDecision.sourceLocation) return null;
+    return {
+      locationId: sourceDecision.sourceLocation.id,
+      locationCode: sourceDecision.sourceLocation.code,
+    };
+  }
+
   async predictReplenAfterPick(
     productVariantId: number,
     warehouseLocationId: number,
