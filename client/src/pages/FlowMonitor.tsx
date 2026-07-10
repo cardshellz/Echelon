@@ -191,8 +191,8 @@ export default function FlowMonitor() {
   const [pendingAction, setPendingAction] = useState<{ item: WorkItem; action: Action; record?: unknown } | null>(null);
 
   const query = useQuery<TowerResponse>({
-    queryKey: ["operations-control-tower", domain, severity, status, search],
-    queryFn: () => fetchJson(`/api/operations/control-tower?domain=${encodeURIComponent(domain)}&severity=${encodeURIComponent(severity)}&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}&limit=250`),
+    queryKey: ["operations-control-tower"],
+    queryFn: () => fetchJson("/api/operations/control-tower?limit=250"),
     refetchInterval: 60_000,
   });
 
@@ -218,9 +218,31 @@ export default function FlowMonitor() {
   });
 
   const data = query.data;
-  const workItems = data?.workItems ?? [];
+  const workItems = useMemo(() => {
+    const normalizedSearch = search.trim().toLowerCase();
+    return (data?.workItems ?? []).filter((item) => {
+      if (domain !== "all" && item.domain !== domain) return false;
+      if (severity !== "all" && item.severity !== severity) return false;
+      if (status !== "all" && item.status !== status) return false;
+      if (!normalizedSearch) return true;
+      return JSON.stringify({
+        id: item.id,
+        code: item.code,
+        title: item.title,
+        summary: item.summary,
+        affected: item.affected,
+      }).toLowerCase().includes(normalizedSearch);
+    });
+  }, [data?.workItems, domain, search, severity, status]);
   const selected = detailQuery.data;
   const domainCards = useMemo(() => DOMAINS.filter((entry): entry is { value: Domain; label: string } => entry.value !== "all"), []);
+
+  const selectDomain = (value: Domain) => {
+    setDomain(domain === value ? "all" : value);
+    window.requestAnimationFrame(() => {
+      document.getElementById("operations-control-tower-work-queue")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
 
   const navigate = (href?: string) => {
     if (href) window.location.href = href;
@@ -287,7 +309,9 @@ export default function FlowMonitor() {
               return (
                 <button
                   key={entry.value}
-                  onClick={() => setDomain(domain === entry.value ? "all" : entry.value)}
+                  onClick={() => selectDomain(entry.value)}
+                  aria-pressed={domain === entry.value}
+                  aria-label={`Filter exception work queue to ${entry.label}`}
                   className={cn("rounded-lg border bg-background p-3 text-left transition-colors hover:border-primary/50", domain === entry.value && "border-primary ring-1 ring-primary")}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -295,7 +319,8 @@ export default function FlowMonitor() {
                     {source?.status === "ok" ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <AlertTriangle className="h-4 w-4 text-amber-600" />}
                   </div>
                   <div className="mt-2 text-2xl font-semibold tabular-nums">{count.toLocaleString()}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">{source?.status === "ok" ? "source healthy" : source?.error || "source degraded"}</div>
+                   <div className="mt-1 text-xs text-muted-foreground">{domain === entry.value ? "Showing this queue" : "Click to filter queue"}</div>
+                   {source?.status !== "ok" && <div className="mt-1 text-xs text-amber-700">{source?.error || "source degraded"}</div>}
                 </button>
               );
             })}
@@ -327,13 +352,13 @@ export default function FlowMonitor() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-base">Work queue</CardTitle>
-                <p className="mt-1 text-xs text-muted-foreground">Sorted by severity, then oldest evidence. Select a row to inspect the live records behind it.</p>
-              </div>
-              <Badge variant="outline">{workItems.length} shown</Badge>
+           <Card id="operations-control-tower-work-queue">
+             <CardHeader className="flex flex-row items-center justify-between gap-3">
+               <div>
+                 <CardTitle className="text-base">Exception work queue</CardTitle>
+                 <p className="mt-1 text-xs text-muted-foreground">This is the list of unresolved operational exceptions. Domain cards above filter this list; select a row to inspect live records and available actions.</p>
+               </div>
+               <Badge variant="outline">{workItems.length} shown / {data.summary.open.toLocaleString()} total</Badge>
             </CardHeader>
             <CardContent className="p-0">
               {query.isLoading ? (

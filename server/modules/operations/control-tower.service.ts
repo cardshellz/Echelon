@@ -303,15 +303,17 @@ function wmsActions(item: any, replenishmentAvailable: boolean): ControlTowerAct
   return actions;
 }
 
-async function loadOms(deps: ControlTowerDependencies): Promise<SourceLoadResult> {
+async function loadOms(deps: ControlTowerDependencies, includeOverview = true): Promise<SourceLoadResult> {
   const health = await getOmsOpsHealth(deps.db);
   let waterfall: Awaited<ReturnType<typeof getFlowWaterfall>> | null = null;
   let waterfallError: string | null = null;
-  try {
-    waterfall = await getFlowWaterfall(deps.db, { windowDays: 30 });
-  } catch (error) {
-    waterfallError = error instanceof Error ? error.message : String(error);
-    console.error("[Operations Control Tower] OMS waterfall snapshot failed:", error);
+  if (includeOverview) {
+    try {
+      waterfall = await getFlowWaterfall(deps.db, { windowDays: 30 });
+    } catch (error) {
+      waterfallError = error instanceof Error ? error.message : String(error);
+      console.error("[Operations Control Tower] OMS waterfall snapshot failed:", error);
+    }
   }
   const items = health.issues
     .filter((issue) => issue.count > 0)
@@ -766,26 +768,32 @@ export function parseControlTowerFilters(input: {
 export async function getOperationsControlTower(
   deps: ControlTowerDependencies,
   filters: ControlTowerFilters,
+  options: { onlyDomain?: ControlTowerDomain; includeOverview?: boolean } = {},
 ): Promise<ControlTowerResponse> {
-  const loaders: Array<{ domain: ControlTowerDomain; load: () => Promise<SourceLoadResult> }> = [
-    { domain: "oms", load: () => loadOms(deps) },
+  const allLoaders: Array<{ domain: ControlTowerDomain; load: () => Promise<SourceLoadResult> }> = [
+    { domain: "oms", load: () => loadOms(deps, options.includeOverview !== false) },
     { domain: "wms", load: () => loadWms(deps, filters.limit) },
     { domain: "shipping", load: () => loadShipping(deps, filters.limit) },
     { domain: "inventory", load: () => loadInventory(deps, filters.limit) },
     { domain: "procurement", load: () => loadProcurement(deps) },
   ];
+  const loaders = options.onlyDomain
+    ? allLoaders.filter((entry) => entry.domain === options.onlyDomain)
+    : allLoaders;
 
-  // The app pool is intentionally small. Several existing domain health
-  // services use their own bounded query batches, so run domain loaders
-  // sequentially here instead of multiplying those batches concurrently.
   const loaded: Array<typeof loaders[number] & { result: SourceLoadResult; error: unknown }> = [];
-  for (const entry of loaders) {
+  // Existing domain sources already bound their own query batches. Keep the
+  // tower fan-out bounded as well, while avoiding a five-source serial wait.
+  const loadOne = async (entry: typeof loaders[number]) => {
     try {
       const result = await entry.load();
-      loaded.push({ ...entry, result, error: null });
+      return { ...entry, result, error: null };
     } catch (error) {
-      loaded.push({ ...entry, result: { items: [] }, error });
+      return { ...entry, result: { items: [] }, error };
     }
+  };
+  for (let index = 0; index < loaders.length; index += 2) {
+    loaded.push(...await Promise.all(loaders.slice(index, index + 2).map(loadOne)));
   }
 
   const allItems = loaded.flatMap((entry) => entry.result.items);
@@ -845,7 +853,15 @@ export async function getOperationsControlTowerDetail(
   deps: ControlTowerDependencies,
   id: string,
 ): Promise<ControlTowerDetail | null> {
-  const response = await getOperationsControlTower(deps, parseControlTowerFilters({ limit: 250 }));
+  const domain = CONTROL_TOWER_DOMAINS.find((candidate) => id.startsWith(`${candidate}:`));
+  const response = await getOperationsControlTower(
+    deps,
+    parseControlTowerFilters({ limit: 250 }),
+    {
+      onlyDomain: domain,
+      includeOverview: id === "oms:monitor:flow-waterfall",
+    },
+  );
   const item = response.workItems.find((candidate) => candidate.id === id);
   if (!item) return null;
 

@@ -20,6 +20,7 @@ import { remediateOmsFlowIssue } from "../../oms/oms-flow-reconciliation.service
 import {
   executeOperationsControlTowerAction,
   getOperationsControlTower,
+  getOperationsControlTowerDetail,
   parseControlTowerFilters,
 } from "../control-tower.service";
 
@@ -131,5 +132,21 @@ describe("operations control tower service", () => {
       omsOrderId: 42,
       operator: "admin@example.com",
     });
+  });
+
+  it("loads only the selected domain when opening detail", async () => {
+    vi.mocked(getFlowWaterfall).mockClear();
+
+    const detail = await getOperationsControlTowerDetail({
+      db: fakeDb(),
+      canViewProcurement: false,
+      operationsDashboard: {
+        getPickReplenHealth: vi.fn().mockResolvedValue({ total: 0, items: [] }),
+      },
+    }, "oms:issue:OMS_PAID_WITHOUT_WMS");
+
+    expect(detail?.records).toEqual([{ oms_order_id: 42, order_number: "#1234" }]);
+    expect(getFlowBucketSamples).toHaveBeenCalledOnce();
+    expect(getFlowWaterfall).not.toHaveBeenCalled();
   });
 });
