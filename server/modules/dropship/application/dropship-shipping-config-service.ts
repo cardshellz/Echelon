@@ -129,6 +129,11 @@ const createInsurancePolicyInputSchema = z.object({
   validateCentsBounds(input.minFeeCents ?? null, input.maxFeeCents ?? null, context);
   validateEffectiveWindow(input.effectiveFrom, input.effectiveTo ?? null, context);
 });
+const deactivatePolicyInputSchema = z.object({
+  policyId: positiveIdSchema,
+  idempotencyKey: idempotencyKeySchema,
+  actor: commandActorSchema,
+}).strict();
 
 export type ListDropshipShippingConfigInput = z.infer<typeof listShippingConfigInputSchema>;
 export type UpsertDropshipBoxInput = z.infer<typeof upsertBoxInputSchema>;
@@ -137,6 +142,7 @@ export type UpsertDropshipZoneRuleInput = z.infer<typeof upsertZoneRuleInputSche
 export type CreateDropshipRateTableInput = z.infer<typeof createRateTableInputSchema>;
 export type CreateDropshipMarkupPolicyInput = z.infer<typeof createMarkupPolicyInputSchema>;
 export type CreateDropshipInsurancePolicyInput = z.infer<typeof createInsurancePolicyInputSchema>;
+export type DeactivateDropshipPolicyInput = z.infer<typeof deactivatePolicyInputSchema>;
 
 export interface DropshipBoxConfigRecord {
   boxId: number;
@@ -272,6 +278,12 @@ export interface DropshipShippingConfigRepository {
   createInsurancePolicy(
     input: NormalizedCreateDropshipInsurancePolicyInput & DropshipShippingConfigCommandContext,
   ): Promise<DropshipShippingConfigMutationResult<DropshipInsurancePoolPolicyRecord>>;
+  deactivateMarkupPolicy(
+    input: DeactivateDropshipPolicyInput & DropshipShippingConfigCommandContext,
+  ): Promise<DropshipShippingConfigMutationResult<DropshipShippingMarkupPolicyRecord>>;
+  deactivateInsurancePolicy(
+    input: DeactivateDropshipPolicyInput & DropshipShippingConfigCommandContext,
+  ): Promise<DropshipShippingConfigMutationResult<DropshipInsurancePoolPolicyRecord>>;
 }
 
 export interface DropshipShippingConfigCommandContext {
@@ -290,6 +302,7 @@ export type NormalizedUpsertDropshipZoneRuleInput = Omit<UpsertDropshipZoneRuleI
 export type NormalizedCreateDropshipRateTableInput = Omit<CreateDropshipRateTableInput, "idempotencyKey" | "actor">;
 export type NormalizedCreateDropshipMarkupPolicyInput = Omit<CreateDropshipMarkupPolicyInput, "idempotencyKey" | "actor">;
 export type NormalizedCreateDropshipInsurancePolicyInput = Omit<CreateDropshipInsurancePolicyInput, "idempotencyKey" | "actor">;
+export type NormalizedDeactivateDropshipPolicyInput = Omit<DeactivateDropshipPolicyInput, "idempotencyKey" | "actor">;
 
 export class DropshipShippingConfigService {
   constructor(private readonly deps: {
@@ -436,6 +449,20 @@ export class DropshipShippingConfigService {
       policyId: result.record.policyId,
       feeBps: result.record.feeBps,
     });
+    return result;
+  }
+
+  async deactivateMarkupPolicy(input: unknown): Promise<DropshipShippingConfigMutationResult<DropshipShippingMarkupPolicyRecord>> {
+    const parsed = deactivatePolicyInputSchema.parse(input);
+    const result = await this.deps.repository.deactivateMarkupPolicy(this.withCommandContext("shipping_markup_policy_deactivated", parsed, parsed));
+    this.logMutation("DROPSHIP_SHIPPING_MARKUP_POLICY_DEACTIVATED", result, { policyId: result.record.policyId });
+    return result;
+  }
+
+  async deactivateInsurancePolicy(input: unknown): Promise<DropshipShippingConfigMutationResult<DropshipInsurancePoolPolicyRecord>> {
+    const parsed = deactivatePolicyInputSchema.parse(input);
+    const result = await this.deps.repository.deactivateInsurancePolicy(this.withCommandContext("shipping_insurance_policy_deactivated", parsed, parsed));
+    this.logMutation("DROPSHIP_SHIPPING_INSURANCE_POLICY_DEACTIVATED", result, { policyId: result.record.policyId });
     return result;
   }
 
