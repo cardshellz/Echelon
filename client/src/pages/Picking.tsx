@@ -1522,6 +1522,28 @@ export default function Picking() {
   const totalItems = activeWork?.items.length || 0;
   const progressPercent = totalItems > 0 ? (completedItems / totalItems) * 100 : 0;
 
+  // Dedicated replen bin per line item — fetched lazily only while an order is
+  // open for picking (keeps the queue poll light). Informational: the exact
+  // single bin the replen engine would pull from; pallet-pick items and items
+  // with no assigned/resolvable source are absent from the map.
+  const activePickItemIds = useMemo(
+    () => (activeWork?.items ?? []).map((item) => item.id).sort((a, b) => a - b),
+    [activeWork],
+  );
+  const { data: replenBinsData } = useQuery<{ replenBins: Record<string, { locationCode: string }> }>({
+    queryKey: ["pick-replen-bins", activePickItemIds.join(",")],
+    enabled: activePickItemIds.length > 0,
+    staleTime: 5 * 60 * 1000,
+    queryFn: async () => {
+      const res = await fetch(`/api/picking/replen-bins?itemIds=${activePickItemIds.join(",")}`, {
+        credentials: "include",
+      });
+      if (!res.ok) return { replenBins: {} };
+      return res.json();
+    },
+  });
+  const replenBins = replenBinsData?.replenBins ?? {};
+
   function applyResolvedAllocation(updatedItem: OrderItem) {
     const patchPickItem = (item: PickItem): PickItem =>
       item.id === updatedItem.id
@@ -4215,6 +4237,11 @@ export default function Picking() {
                     Set Bin
                   </Button>
                 )}
+                {replenBins[String(currentItem.id)] && (
+                  <div className="mt-1 text-xs font-mono text-muted-foreground" data-testid="replen-bin-focus">
+                    ↻ Replen: <span className="font-semibold">{replenBins[String(currentItem.id)].locationCode}</span>
+                  </div>
+                )}
                 {currentItem.replenPrediction && (currentItem.replenPrediction.replenNeeded || currentItem.replenPrediction.existingTaskId) && (
                   <div className="mt-2 flex justify-center">
                     <ReplenPredictionBadge prediction={currentItem.replenPrediction} canOpenTask={canViewReplenTasks} />
@@ -4424,6 +4451,14 @@ export default function Picking() {
                           <span className={cn("text-base md:text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
                             {item.location}
                           </span>
+                          {replenBins[String(item.id)] && !isCompleted && (
+                            <span
+                              className="text-[10px] md:text-xs font-mono text-muted-foreground flex-shrink-0"
+                              data-testid={`replen-bin-${item.id}`}
+                            >
+                              ↻ {replenBins[String(item.id)].locationCode}
+                            </span>
+                          )}
                           {(item.location === "UNASSIGNED" || item.location === "U") && !isCompleted && (
                             <Button
                               size="icon"
