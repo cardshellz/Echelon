@@ -1,5 +1,13 @@
 # WMS Inventory — Trust → Enterprise Roadmap
 
+> **Production supersession note (2026-07-09):** The live read-only inventory
+> baseline contradicts several historical `COMPLETE` assertions in this roadmap,
+> including reservation lifecycle, lot/level parity, database guards, journal
+> immutability, and conversion operation identity. Treat those status labels as
+> historical implementation milestones, not current production proof. Current
+> execution authority is `docs/WMS-PRODUCTION-INVENTORY-BASELINE-2026-07-09.md` and
+> `docs/WMS-INVENTORY-STABILIZATION-AND-REMEDIATION-PLAN.md`.
+
 > Companion to `BOUNDARIES.md` / `SYSTEM.md` / `WMS_ARCHITECTURE.md`. Authoritative
 > tracking doc for taking the WMS inventory subsystem from "functional but untrusted" to
 > **enterprise-grade**. Same contract as `CLAUDE.md`.

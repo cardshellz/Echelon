@@ -1,5 +1,19 @@
 import { sql } from "drizzle-orm";
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, check, numeric } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  pgSchema,
+  text,
+  varchar,
+  integer,
+  timestamp,
+  jsonb,
+  bigint,
+  boolean,
+  check,
+  numeric,
+  index,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
@@ -622,3 +636,121 @@ export const orderLineCosts = inventorySchema.table('order_line_costs', {
 });
 
 export type OrderLineCost = typeof orderLineCosts.$inferSelect;
+
+// WMS inventory integrity audit lifecycle. These tables persist audit evidence
+// only; they never own or mutate inventory quantities.
+export const inventoryIntegrityAuditRuns = inventorySchema.table("integrity_audit_runs", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  scope: varchar("scope", { length: 20 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull(),
+  sourceVersion: varchar("source_version", { length: 100 }),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  snapshotAt: timestamp("snapshot_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+  databaseName: varchar("database_name", { length: 200 }).notNull(),
+  databaseUser: varchar("database_user", { length: 200 }).notNull(),
+  serverVersion: varchar("server_version", { length: 100 }).notNull(),
+  recoveryMode: boolean("recovery_mode").notNull(),
+  checkCount: integer("check_count").notNull(),
+  blockerCount: bigint("blocker_count", { mode: "number" }).notNull(),
+  warningCount: bigint("warning_count", { mode: "number" }).notNull(),
+  findingCount: bigint("finding_count", { mode: "number" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  snapshotIdx: index("idx_integrity_audit_runs_snapshot").on(table.snapshotAt),
+}));
+
+export const inventoryIntegrityAuditRunChecks = inventorySchema.table("integrity_audit_run_checks", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  runId: varchar("run_id", { length: 36 }).notNull().references(
+    () => inventoryIntegrityAuditRuns.id,
+    { onDelete: "restrict" },
+  ),
+  checkId: varchar("check_id", { length: 100 }).notNull(),
+  category: varchar("category", { length: 30 }).notNull(),
+  severity: varchar("severity", { length: 20 }).notNull(),
+  findingCount: bigint("finding_count", { mode: "number" }).notNull(),
+  elapsedMs: integer("elapsed_ms").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  runCheckUq: uniqueIndex("uq_integrity_audit_run_checks_run_check").on(table.runId, table.checkId),
+  checkIdx: index("idx_integrity_audit_run_checks_check").on(table.checkId, table.runId),
+}));
+
+export const inventoryIntegrityFindings = inventorySchema.table("integrity_findings", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  checkId: varchar("check_id", { length: 100 }).notNull(),
+  entityFingerprint: varchar("entity_fingerprint", { length: 64 }).notNull(),
+  category: varchar("category", { length: 30 }).notNull(),
+  severity: varchar("severity", { length: 20 }).notNull(),
+  status: varchar("status", { length: 30 }).notNull().default("open"),
+  entityKey: jsonb("entity_key").notNull(),
+  currentEvidence: jsonb("current_evidence").notNull(),
+  currentEvidenceHash: varchar("current_evidence_hash", { length: 64 }).notNull(),
+  currentMetric: numeric("current_metric", { precision: 38, scale: 0 }).notNull(),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  lastChangedAt: timestamp("last_changed_at", { withTimezone: true }).notNull(),
+  firstSeenRunId: varchar("first_seen_run_id", { length: 36 }).notNull().references(
+    () => inventoryIntegrityAuditRuns.id,
+    { onDelete: "restrict" },
+  ),
+  lastSeenRunId: varchar("last_seen_run_id", { length: 36 }).notNull().references(
+    () => inventoryIntegrityAuditRuns.id,
+    { onDelete: "restrict" },
+  ),
+  occurrenceCount: bigint("occurrence_count", { mode: "number" }).notNull().default(1),
+  recurrenceCount: integer("recurrence_count").notNull().default(0),
+  worsenedCount: integer("worsened_count").notNull().default(0),
+  lastObservationKind: varchar("last_observation_kind", { length: 20 }).notNull(),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+  acknowledgedBy: varchar("acknowledged_by", { length: 120 }),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  resolvedBy: varchar("resolved_by", { length: 120 }),
+  resolution: text("resolution"),
+  remediationRunId: varchar("remediation_run_id", { length: 100 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  checkEntityUq: uniqueIndex("uq_integrity_findings_check_entity").on(
+    table.checkId,
+    table.entityFingerprint,
+  ),
+  statusIdx: index("idx_integrity_findings_status").on(table.status, table.checkId, table.lastSeenAt),
+  openIdx: index("idx_integrity_findings_open")
+    .on(table.severity, table.checkId, table.lastSeenAt)
+    .where(sql`${table.status} IN ('open', 'acknowledged')`),
+}));
+
+export const inventoryIntegrityFindingObservations = inventorySchema.table(
+  "integrity_finding_observations",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    findingId: bigint("finding_id", { mode: "number" }).notNull().references(
+      () => inventoryIntegrityFindings.id,
+      { onDelete: "restrict" },
+    ),
+    runId: varchar("run_id", { length: 36 }).notNull().references(
+      () => inventoryIntegrityAuditRuns.id,
+      { onDelete: "restrict" },
+    ),
+    observationKind: varchar("observation_kind", { length: 20 }).notNull(),
+    priorStatus: varchar("prior_status", { length: 30 }),
+    observedMetric: numeric("observed_metric", { precision: 38, scale: 0 }).notNull(),
+    evidenceHash: varchar("evidence_hash", { length: 64 }).notNull(),
+    evidence: jsonb("evidence").notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => ({
+    runFindingKindUq: uniqueIndex("uq_integrity_finding_observations_run_finding_kind").on(
+      table.runId,
+      table.findingId,
+      table.observationKind,
+    ),
+    findingIdx: index("idx_integrity_finding_observations_finding").on(
+      table.findingId,
+      table.observedAt,
+    ),
+  }),
+);
