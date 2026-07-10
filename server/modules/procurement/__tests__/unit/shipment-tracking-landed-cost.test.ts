@@ -416,6 +416,30 @@ describe("ShipmentTrackingService.finalizeAllocations", () => {
     expect(storage.getInboundShipmentLines).not.toHaveBeenCalled();
   });
 
+  it("rejects direct finalization when a dimensional allocation is missing its basis", async () => {
+    const storage = buildStorage({
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_weight" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 11, sku: "SKU-1", qtyShipped: 5, totalWeightKg: "0" },
+      ]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([
+        { id: 31, costType: "freight", actualCents: 1200, allocationMethod: "by_weight" },
+      ]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([
+        { shipmentCostId: 31, inboundShipmentLineId: 11, allocatedCents: 1200 },
+      ]),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    await expect(service.finalizeAllocations(1, "user-1")).rejects.toMatchObject({
+      statusCode: 400,
+      details: expect.objectContaining({ code: "MISSING_ALLOCATION_DIMENSIONS" }),
+    });
+    expect(storage.deleteAllocationsForShipment).not.toHaveBeenCalled();
+    expect(storage.deleteLandedCostSnapshotsForShipment).not.toHaveBeenCalled();
+    expect(storage.bulkCreateLandedCostSnapshots).not.toHaveBeenCalled();
+  });
+
   it("does not delete and recreate matching finalized snapshots on retry", async () => {
     const storage = buildStorage({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
@@ -438,7 +462,7 @@ describe("ShipmentTrackingService.finalizeAllocations", () => {
     const storage = buildStorage({
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "closed" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5 },
+        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5, totalVolumeCbm: "1" },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
         { id: 31, costType: "freight", actualCents: 50 },
