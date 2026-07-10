@@ -28,11 +28,21 @@ describe("COGSService.reconcileInvoiceVariance", () => {
           };
         }
         if (executeCallCount === 2) {
-          // UPDATE inventory_lots
-          return { rows: [] };
+          // revalueLotCostMills: SELECT lot FOR UPDATE
+          return {
+            rows: [{
+              id: 10,
+              lot_number: "LOT-001",
+              product_variant_id: 5,
+              po_unit_cost_cents: 500,
+              landed_cost_cents: 100,
+              total_unit_cost_cents: 600,
+              sku: "TEST-SKU",
+            }],
+          };
         }
         if (executeCallCount === 3) {
-          // INSERT cost_adjustment_log
+          // revalueLotCostMills: UPDATE inventory_lots
           return { rows: [] };
         }
         if (executeCallCount === 4) {
@@ -45,6 +55,10 @@ describe("COGSService.reconcileInvoiceVariance", () => {
         }
         if (executeCallCount === 5) {
           // cascadeRecostForLot: UPDATE order_item_costs
+          return { rows: [] };
+        }
+        if (executeCallCount === 6) {
+          // revalueLotCostMills: INSERT cost_adjustment_log
           return { rows: [] };
         }
         return { rows: [] };
