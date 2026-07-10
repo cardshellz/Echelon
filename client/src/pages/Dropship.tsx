@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Dispatch, SetStateAction } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -3548,6 +3548,11 @@ function ShippingConfigTab() {
   const [markupForm, setMarkupForm] = useState<ShippingMarkupPolicyFormState>(emptyShippingMarkupPolicyForm);
   const [insuranceForm, setInsuranceForm] = useState<ShippingInsurancePolicyFormState>(emptyShippingInsurancePolicyForm);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [policyToDeactivate, setPolicyToDeactivate] = useState<{
+    kind: "markup" | "insurance";
+    policyId: number;
+    name: string;
+  } | null>(null);
   const [activeSection, setActiveSection] = useState<ShippingConfigSectionKey>("overview");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -3689,6 +3694,19 @@ function ShippingConfigTab() {
     });
   }
 
+  async function deactivatePolicy() {
+    if (!policyToDeactivate) return;
+    const policy = policyToDeactivate;
+    await runShippingAction(`deactivate-${policy.kind}-${policy.policyId}`, async () => {
+      await postJson(
+        `/api/dropship/admin/shipping/${policy.kind === "markup" ? "markup" : "insurance"}-policies/${policy.policyId}/deactivate`,
+        { idempotencyKey: createDropshipIdempotencyKey(`shipping-${policy.kind}-policy-deactivate`) },
+      );
+      setMessage(`${policy.name} deactivated.`);
+      setPolicyToDeactivate(null);
+    });
+  }
+
   return (
     <div className="space-y-5">
       {(shippingQuery.error || warehousesQuery.error || error) && (
@@ -3793,7 +3811,13 @@ function ShippingConfigTab() {
               onChange={setMarkupForm}
               onSave={saveMarkupPolicy}
             />
-            <ShippingMarkupPolicyTable policies={config?.markupPolicies ?? []} isLoading={shippingQuery.isLoading} />
+            <ShippingMarkupPolicyTable
+              activePolicyId={config?.activeMarkupPolicy?.policyId ?? null}
+              generatedAt={config?.generatedAt}
+              policies={config?.markupPolicies ?? []}
+              isLoading={shippingQuery.isLoading}
+              onDeactivate={(policy) => setPolicyToDeactivate({ kind: "markup", policyId: policy.policyId, name: policy.name })}
+            />
           </div>
         </TabsContent>
 
@@ -3806,10 +3830,33 @@ function ShippingConfigTab() {
               onChange={setInsuranceForm}
               onSave={saveInsurancePolicy}
             />
-            <ShippingInsurancePolicyTable policies={config?.insurancePolicies ?? []} isLoading={shippingQuery.isLoading} />
+            <ShippingInsurancePolicyTable
+              activePolicyId={config?.activeInsurancePolicy?.policyId ?? null}
+              generatedAt={config?.generatedAt}
+              policies={config?.insurancePolicies ?? []}
+              isLoading={shippingQuery.isLoading}
+              onDeactivate={(policy) => setPolicyToDeactivate({ kind: "insurance", policyId: policy.policyId, name: policy.name })}
+            />
           </div>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={policyToDeactivate !== null} onOpenChange={(open) => { if (!open && pendingAction === null) setPolicyToDeactivate(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Deactivate shipping policy?</DialogTitle>
+            <DialogDescription>
+              {policyToDeactivate?.name} will stop applying to new quotes. Existing quote snapshots and audit history will remain unchanged.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPolicyToDeactivate(null)} disabled={pendingAction !== null}>Cancel</Button>
+            <Button variant="destructive" onClick={() => void deactivatePolicy()} disabled={pendingAction !== null}>
+              {pendingAction?.startsWith("deactivate-") ? "Deactivating..." : "Deactivate policy"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -4473,49 +4520,63 @@ function ShippingRateTablesTable({
 }
 
 function ShippingMarkupPolicyTable({
+  activePolicyId,
+  generatedAt,
   policies,
   isLoading,
+  onDeactivate,
 }: {
+  activePolicyId: number | null;
+  generatedAt?: string;
   policies: DropshipShippingConfigOverview["markupPolicies"];
   isLoading: boolean;
+  onDeactivate: (policy: DropshipShippingConfigOverview["markupPolicies"][number]) => void;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
   return (
     <ShippingSimpleTable
       title="Markup policies"
       emptyTitle="No markup policies"
-      headers={["Name", "Status", "Variable", "Fixed", "Range", "Effective"]}
+      headers={["Name", "Status", "Variable", "Fixed", "Range", "Effective", "Actions"]}
       rows={policies.map((policy) => [
         policy.name,
-        policy.isActive ? "Active" : "Inactive",
+        shippingPolicyStatus(policy, activePolicyId, generatedAt),
         `${policy.markupBps} bps`,
         formatCents(policy.fixedMarkupCents),
         formatShippingMoneyRange(policy.minMarkupCents, policy.maxMarkupCents),
         `${formatDateTime(policy.effectiveFrom)}${policy.effectiveTo ? ` - ${formatDateTime(policy.effectiveTo)}` : " - Open"}`,
+        policy.isActive ? <Button key={policy.policyId} variant="outline" size="sm" onClick={() => onDeactivate(policy)}>Deactivate</Button> : "-",
       ])}
     />
   );
 }
 
 function ShippingInsurancePolicyTable({
+  activePolicyId,
+  generatedAt,
   policies,
   isLoading,
+  onDeactivate,
 }: {
+  activePolicyId: number | null;
+  generatedAt?: string;
   policies: DropshipShippingConfigOverview["insurancePolicies"];
   isLoading: boolean;
+  onDeactivate: (policy: DropshipShippingConfigOverview["insurancePolicies"][number]) => void;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
   return (
     <ShippingSimpleTable
       title="Insurance pool policies"
       emptyTitle="No insurance pool policies"
-      headers={["Name", "Status", "Fee", "Range", "Effective"]}
+      headers={["Name", "Status", "Fee", "Range", "Effective", "Actions"]}
       rows={policies.map((policy) => [
         policy.name,
-        policy.isActive ? "Active" : "Inactive",
+        shippingPolicyStatus(policy, activePolicyId, generatedAt),
         `${policy.feeBps} bps`,
         formatShippingMoneyRange(policy.minFeeCents, policy.maxFeeCents),
         `${formatDateTime(policy.effectiveFrom)}${policy.effectiveTo ? ` - ${formatDateTime(policy.effectiveTo)}` : " - Open"}`,
+        policy.isActive ? <Button key={policy.policyId} variant="outline" size="sm" onClick={() => onDeactivate(policy)}>Deactivate</Button> : "-",
       ])}
     />
   );
@@ -4538,7 +4599,7 @@ function ShippingSimpleTable({
 }: {
   emptyTitle: string;
   headers: string[];
-  rows: string[][];
+  rows: ReactNode[][];
   title: string;
 }) {
   return (
@@ -4577,6 +4638,18 @@ function ShippingSimpleTable({
       )}
     </section>
   );
+}
+
+function shippingPolicyStatus(
+  policy: { policyId: number; isActive: boolean; effectiveFrom: string; effectiveTo: string | null },
+  activePolicyId: number | null,
+  generatedAt?: string,
+): string {
+  if (!policy.isActive) return "Inactive";
+  const at = new Date(generatedAt ?? Date.now()).getTime();
+  if (new Date(policy.effectiveFrom).getTime() > at) return "Scheduled";
+  if (policy.effectiveTo && new Date(policy.effectiveTo).getTime() <= at) return "Expired";
+  return policy.policyId === activePolicyId ? "Effective" : "Superseded";
 }
 
 function PanelHeader({ detail, title }: { detail: string; title: string }) {
