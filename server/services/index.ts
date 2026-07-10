@@ -131,7 +131,7 @@ export function createServices(db: any) {
   const shipmentTracking = createShipmentTrackingService(db, {
     ...procurementStorage,
     ...catalogStorage,
-  });
+  }, cogs);
 
   // Depends on inventoryCore + channelSync + multi-module storage + purchasing + shipmentTracking
   const receiving = createReceivingService(db, inventoryCore, channelSync, {

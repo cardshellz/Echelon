@@ -460,6 +460,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
 
   it("matches lots to landed cost by PO LINE — even when the shipment line is product-level (null variant) and the lot is a case variant", async () => {
     const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
+    const cogs = { updateLotLandedCostMills: vi.fn().mockResolvedValue({ lotId: 501 }) };
     const storage = buildStorage({
       getProvisionalLotsByShipment: vi.fn().mockResolvedValue([
         { id: 501, productVariantId: 469, poLineId: 21, poUnitCostMills: 70000, packagingCostMills: 0, costProvisional: 1 },
@@ -472,12 +473,13 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
       ]),
       getProductVariantById: vi.fn().mockResolvedValue({ id: 469, unitsPerVariant: 10 }),
     });
-    const service = createShipmentTrackingService(db as any, storage);
+    const service = createShipmentTrackingService(db as any, storage, cogs as any);
 
     const result = await service.pushLandedCostsToLots(1);
 
-    // Joined on po_line 21 despite variant null vs 469; lot updated via raw SQL.
-    expect(db.execute).toHaveBeenCalled();
+    // Joined on po_line 21 despite variant null vs 469; COGS owns lot recost + cascade.
+    expect(cogs.updateLotLandedCostMills).toHaveBeenCalledWith(501, 50000);
+    expect(db.execute).not.toHaveBeenCalled();
     expect(result).toEqual({ updated: 1, total: 1, skipped: [] });
   });
 
@@ -531,6 +533,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
 
   it("close() finalizes AND pushes landed cost to lots — no manual Push step", async () => {
     const db = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
+    const cogs = { updateLotLandedCostMills: vi.fn().mockResolvedValue({ lotId: 501 }) };
     const storage = buildStorage({
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
       updateInboundShipment: vi.fn().mockResolvedValue({}),
@@ -553,14 +556,14 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
       ]),
       getProductVariantById: vi.fn().mockResolvedValue({ id: 469, unitsPerVariant: 10 }),
     });
-    const service = createShipmentTrackingService(db as any, storage);
+    const service = createShipmentTrackingService(db as any, storage, cogs as any);
 
     await service.close(1, "user-1");
 
-    // Transitioned to closed AND pushed the finalized landed cost onto the lot (db.execute
-    // is only used by the push's raw-SQL lot update) — no separate "Push Costs to Lots".
+    // Transitioned to closed AND pushed finalized landed cost through the COGS authority.
     expect(storage.updateInboundShipment).toHaveBeenCalled();
-    expect(db.execute).toHaveBeenCalled();
+    expect(cogs.updateLotLandedCostMills).toHaveBeenCalledWith(501, 50000);
+    expect(db.execute).not.toHaveBeenCalled();
   });
 });
 

@@ -122,7 +122,7 @@ export interface CostAdjustmentLog {
   reason: string;
 }
 
-interface LotCostRevalueResult extends CostAdjustmentLog {
+export interface LotCostRevalueResult extends CostAdjustmentLog {
   cogsRowsUpdated: number;
   totalCogsDeltaCents: number;
 }
@@ -479,15 +479,21 @@ export class COGSService {
   async updateLotLandedCost(
     lotId: number,
     landedCostCents: number,
-  ): Promise<CostAdjustmentLog | null> {
+  ): Promise<LotCostRevalueResult | null> {
+    return this.updateLotLandedCostMills(lotId, centsToMills(landedCostCents));
+  }
+
+  async updateLotLandedCostMills(
+    lotId: number,
+    landedCostMills: number,
+  ): Promise<LotCostRevalueResult | null> {
     return this.revalueLotCostMills({
       lotId,
-      landedCostMills: centsToMills(landedCostCents),
+      landedCostMills,
       costSource: "po_landed",
       reason: "landed_cost_finalized",
       preserveExistingCostSourceUnlessPo: true,
     });
-
   }
 
   // ---------------------------------------------------------------------------
