@@ -22,6 +22,10 @@ export type InFlightPoAgingRow = {
   actualDeliveryDate: string | Date | null;
   firstShippedAt?: string | Date | null;
   firstArrivedAt?: string | Date | null;
+  latestReceivingActivityAt?: string | Date | null;
+  activeReceivingOrderId?: number | null;
+  activeReceiptNumber?: string | null;
+  activeReceiptStatus?: string | null;
   createdAt: string | Date | null;
   updatedAt: string | Date | null;
   openExceptionCount: number | null;
@@ -52,6 +56,10 @@ export type InFlightPoAgingItem = {
   totalCents: number | null;
   expectedDeliveryDate: string | null;
   openExceptionCount: number;
+  latestReceivingActivityAt: string | null;
+  activeReceivingOrderId: number | null;
+  activeReceiptNumber: string | null;
+  activeReceiptStatus: string | null;
 };
 
 export type InFlightPoAgingDiagnostics = {
@@ -103,6 +111,15 @@ function firstDate(...values: Array<string | Date | null | undefined>): Date | n
   return null;
 }
 
+function latestDate(...values: Array<string | Date | null | undefined>): Date | null {
+  let latest: Date | null = null;
+  for (const value of values) {
+    const date = coerceDate(value);
+    if (date && (!latest || date.getTime() > latest.getTime())) latest = date;
+  }
+  return latest;
+}
+
 function classifyStage(row: InFlightPoAgingRow): InFlightPoAgingStage | null {
   const physicalStatus = resolveCurrentPhysicalStatus(row);
   const legacyStatus = row.status ?? "draft";
@@ -119,7 +136,13 @@ function classifyStage(row: InFlightPoAgingRow): InFlightPoAgingStage | null {
 
 function stageStartedAt(row: InFlightPoAgingRow, stage: InFlightPoAgingStage, now: Date): Date | null {
   if (stage === "receiving_pending") {
-    return firstDate(row.firstArrivedAt, row.confirmedDeliveryDate, row.expectedDeliveryDate, row.sentToVendorAt, row.orderDate, row.createdAt);
+    const latestReceivingProgress = latestDate(
+      row.latestReceivingActivityAt,
+      row.actualDeliveryDate,
+      row.firstArrivedAt,
+    );
+    if (latestReceivingProgress) return latestReceivingProgress;
+    return firstDate(row.confirmedDeliveryDate, row.expectedDeliveryDate, row.sentToVendorAt, row.orderDate, row.createdAt);
   }
 
   const eta = firstDate(row.confirmedDeliveryDate, row.expectedDeliveryDate);
@@ -154,6 +177,13 @@ function isArrivedNotReceiving(row: InFlightPoAgingRow): boolean {
 
 function buildDetail(row: InFlightPoAgingRow, stage: InFlightPoAgingStage, ageDays: number): string {
   if (stage === "receiving_pending") {
+    if (row.activeReceivingOrderId) {
+      const receipt = row.activeReceiptNumber ? `Receipt ${row.activeReceiptNumber}` : "The active receipt";
+      return `${receipt} has had no activity for ${ageDays} day${ageDays === 1 ? "" : "s"}; continue or finish receiving.`;
+    }
+    if (row.latestReceivingActivityAt) {
+      return `PO has had no receiving progress for ${ageDays} day${ageDays === 1 ? "" : "s"} since the latest receipt activity.`;
+    }
     if (isArrivedNotReceiving(row)) {
       return `PO has been marked arrived for ${ageDays} day${ageDays === 1 ? "" : "s"}; create or finish the receipt.`;
     }
@@ -198,8 +228,11 @@ export function buildInFlightPoAgingDiagnostics(
     const poId = Number(row.id);
     if (!Number.isFinite(poId)) continue;
     const physicalStatus = resolveCurrentPhysicalStatus(row);
+    const activeReceivingOrderId = nullableNumber(row.activeReceivingOrderId);
     const action = stage === "receiving_pending"
-      ? { action: "create_receipt", label: "Create receipt", href: `/purchase-orders/${poId}` }
+      ? activeReceivingOrderId !== null
+        ? { action: "continue_receipt", label: "Continue receipt", href: `/receiving?open=${activeReceivingOrderId}` }
+        : { action: "create_receipt", label: "Create receipt", href: `/purchase-orders/${poId}` }
       : { action: "follow_up_supplier", label: "Follow up", href: `/purchase-orders/${poId}` };
 
     items.push({
@@ -223,6 +256,10 @@ export function buildInFlightPoAgingDiagnostics(
       totalCents: nullableNumber(row.totalCents),
       expectedDeliveryDate: isoOrNull(row.confirmedDeliveryDate) ?? isoOrNull(row.expectedDeliveryDate),
       openExceptionCount: Math.max(0, Number(row.openExceptionCount ?? 0) || 0),
+      latestReceivingActivityAt: isoOrNull(row.latestReceivingActivityAt),
+      activeReceivingOrderId,
+      activeReceiptNumber: row.activeReceiptNumber ?? null,
+      activeReceiptStatus: row.activeReceiptStatus ?? null,
     });
   }
 

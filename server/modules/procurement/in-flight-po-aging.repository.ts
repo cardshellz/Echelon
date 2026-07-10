@@ -29,6 +29,10 @@ export async function fetchInFlightPoAgingRows(
       po.actual_delivery_date AS "actualDeliveryDate",
       po.first_shipped_at AS "firstShippedAt",
       po.first_arrived_at AS "firstArrivedAt",
+      receiving_activity.latest_receiving_activity_at AS "latestReceivingActivityAt",
+      receiving_activity.active_receiving_order_id AS "activeReceivingOrderId",
+      receiving_activity.active_receipt_number AS "activeReceiptNumber",
+      receiving_activity.active_receipt_status AS "activeReceiptStatus",
       po.created_at AS "createdAt",
       po.updated_at AS "updatedAt",
       COALESCE(open_exceptions.open_exception_count, 0)::int AS "openExceptionCount"
@@ -40,6 +44,33 @@ export async function fetchInFlightPoAgingRows(
       WHERE status IN ('open', 'acknowledged')
       GROUP BY po_id
     ) open_exceptions ON open_exceptions.po_id = po.id
+    LEFT JOIN (
+      SELECT
+        ro.purchase_order_id,
+        MAX(
+          GREATEST(
+            ro.created_at,
+            ro.updated_at,
+            COALESCE(ro.received_date, ro.created_at),
+            COALESCE(ro.closed_date, ro.created_at)
+          )
+        ) FILTER (WHERE ro.status <> 'cancelled') AS latest_receiving_activity_at,
+        (
+          ARRAY_AGG(ro.id ORDER BY ro.updated_at DESC, ro.id DESC)
+          FILTER (WHERE ro.status IN ('draft', 'open', 'receiving', 'verified'))
+        )[1] AS active_receiving_order_id,
+        (
+          ARRAY_AGG(ro.receipt_number ORDER BY ro.updated_at DESC, ro.id DESC)
+          FILTER (WHERE ro.status IN ('draft', 'open', 'receiving', 'verified'))
+        )[1] AS active_receipt_number,
+        (
+          ARRAY_AGG(ro.status ORDER BY ro.updated_at DESC, ro.id DESC)
+          FILTER (WHERE ro.status IN ('draft', 'open', 'receiving', 'verified'))
+        )[1] AS active_receipt_status
+      FROM procurement.receiving_orders ro
+      WHERE ro.purchase_order_id IS NOT NULL
+      GROUP BY ro.purchase_order_id
+    ) receiving_activity ON receiving_activity.purchase_order_id = po.id
     WHERE COALESCE(po.source, 'manual') <> 'auto_draft'
       AND COALESCE(po.status, 'draft') NOT IN ('draft', 'pending_approval', 'received', 'closed', 'cancelled')
       AND (

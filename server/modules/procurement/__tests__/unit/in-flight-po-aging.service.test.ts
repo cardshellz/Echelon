@@ -20,6 +20,10 @@ function row(overrides: Partial<InFlightPoAgingRow>): InFlightPoAgingRow {
     actualDeliveryDate: null,
     firstShippedAt: null,
     firstArrivedAt: null,
+    latestReceivingActivityAt: null,
+    activeReceivingOrderId: null,
+    activeReceiptNumber: null,
+    activeReceiptStatus: null,
     createdAt: "2026-05-01T00:00:00.000Z",
     updatedAt: "2026-05-01T00:00:00.000Z",
     openExceptionCount: 0,
@@ -101,6 +105,48 @@ describe("buildInFlightPoAgingDiagnostics", () => {
       stage: "receiving_pending",
       severity: "warning",
     });
+  });
+
+  it("ages partially received POs from the latest receiving activity", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 205,
+      status: "partially_received",
+      physicalStatus: "receiving",
+      firstArrivedAt: "2026-04-01T00:00:00.000Z",
+      latestReceivingActivityAt: "2026-05-18T00:00:00.000Z",
+    })], { now });
+
+    expect(result.totalAging).toBe(0);
+    expect(result.items).toHaveLength(0);
+  });
+
+  it("continues an active receipt instead of offering to create another", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 206,
+      status: "partially_received",
+      physicalStatus: "receiving",
+      firstArrivedAt: "2026-04-01T00:00:00.000Z",
+      latestReceivingActivityAt: "2026-05-15T00:00:00.000Z",
+      activeReceivingOrderId: 501,
+      activeReceiptNumber: "RCV-501",
+      activeReceiptStatus: "open",
+    })], { now });
+
+    expect(result.items[0]).toMatchObject({
+      poId: 206,
+      stageStartedAt: "2026-05-15T00:00:00.000Z",
+      ageDays: 5,
+      severity: "warning",
+      activeReceivingOrderId: 501,
+      activeReceiptNumber: "RCV-501",
+      activeReceiptStatus: "open",
+      action: {
+        action: "continue_receipt",
+        label: "Continue receipt",
+        href: "/receiving?open=501",
+      },
+    });
+    expect(result.items[0]?.detail).toContain("Receipt RCV-501");
   });
 
   it("does not report supplier POs still inside the follow-up threshold", () => {
