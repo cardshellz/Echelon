@@ -122,10 +122,207 @@ export interface CostAdjustmentLog {
   reason: string;
 }
 
+interface LotCostRevalueResult extends CostAdjustmentLog {
+  cogsRowsUpdated: number;
+  totalCogsDeltaCents: number;
+}
+
 // ─── Service ────────────────────────────────────────────────────────
 
 export class COGSService {
   constructor(private readonly db: DrizzleDb) {}
+
+  private assertNonNegativeMills(value: number, field: string) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${field} must be a non-negative integer mills value`);
+    }
+  }
+
+  private async runInTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
+    const transaction = (this.db as any).transaction;
+    if (typeof transaction === "function") {
+      return transaction.call(this.db, fn);
+    }
+    return fn(this.db);
+  }
+
+  private async cascadeRecostForLotMills(
+    lotId: number,
+    newUnitCostMills: number,
+    tx: any = this.db,
+  ): Promise<{ rowsUpdated: number; totalDeltaCents: number }> {
+    this.assertNonNegativeMills(newUnitCostMills, "newUnitCostMills");
+
+    const newUnitCostCents = millsToCents(newUnitCostMills);
+    const affected = await tx.execute(sql`
+      SELECT
+        id,
+        qty,
+        unit_cost_cents,
+        CASE
+          WHEN COALESCE(unit_cost_mills, 0) != 0 THEN unit_cost_mills
+          ELSE COALESCE(unit_cost_cents, 0) * 100
+        END AS old_unit_cost_mills
+      FROM oms.order_item_costs
+      WHERE inventory_lot_id = ${lotId}
+        AND (
+          CASE
+            WHEN COALESCE(unit_cost_mills, 0) != 0 THEN unit_cost_mills
+            ELSE COALESCE(unit_cost_cents, 0) * 100
+          END
+        ) != ${newUnitCostMills}
+    `);
+
+    const rows = affected.rows || [];
+    if (rows.length === 0) {
+      return { rowsUpdated: 0, totalDeltaCents: 0 };
+    }
+
+    let totalDeltaCents = 0;
+    for (const row of rows) {
+      const oldUnitMills = Number(row.old_unit_cost_mills) || centsToMills(Number(row.unit_cost_cents) || 0);
+      const qty = Number(row.qty) || 0;
+      totalDeltaCents += millsToCents(newUnitCostMills * qty) - millsToCents(oldUnitMills * qty);
+    }
+
+    await tx.execute(sql`
+      UPDATE oms.order_item_costs
+      SET unit_cost_mills = ${newUnitCostMills},
+          total_cost_mills = qty::bigint * ${newUnitCostMills},
+          unit_cost_cents = ${newUnitCostCents},
+          total_cost_cents = ((qty::bigint * ${newUnitCostMills}) + 50) / 100
+      WHERE inventory_lot_id = ${lotId}
+        AND (
+          CASE
+            WHEN COALESCE(unit_cost_mills, 0) != 0 THEN unit_cost_mills
+            ELSE COALESCE(unit_cost_cents, 0) * 100
+          END
+        ) != ${newUnitCostMills}
+    `);
+
+    return { rowsUpdated: rows.length, totalDeltaCents };
+  }
+
+  private async revalueLotCostMills(params: {
+    lotId: number;
+    productCostMills?: number;
+    packagingCostMills?: number;
+    landedCostMills?: number;
+    costSource: string;
+    reason: string;
+    preserveExistingCostSourceUnlessPo?: boolean;
+    clearProvisional?: boolean;
+    requiredCostSource?: string;
+  }): Promise<LotCostRevalueResult | null> {
+    return this.runInTransaction(async (tx) => {
+      const result = await tx.execute(sql`
+        SELECT
+          il.id,
+          il.lot_number,
+          il.product_variant_id,
+          il.cost_source,
+          COALESCE(NULLIF(il.po_unit_cost_mills, 0), ROUND(COALESCE(il.po_unit_cost_cents, 0)::numeric * 100)::bigint, 0) AS product_mills,
+          COALESCE(NULLIF(il.packaging_cost_mills, 0), ROUND(COALESCE(il.packaging_cost_cents, 0)::numeric * 100)::bigint, 0) AS packaging_mills,
+          COALESCE(NULLIF(il.landed_cost_mills, 0), ROUND(COALESCE(il.landed_cost_cents, 0)::numeric * 100)::bigint, 0) AS landed_mills,
+          COALESCE(
+            NULLIF(il.total_unit_cost_mills, 0),
+            NULLIF(il.unit_cost_mills, 0),
+            ROUND(COALESCE(NULLIF(il.total_unit_cost_cents, 0), il.unit_cost_cents, 0)::numeric * 100)::bigint,
+            0
+          ) AS old_total_mills,
+          pv.sku
+        FROM inventory.inventory_lots il
+        LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
+        WHERE il.id = ${params.lotId}
+        FOR UPDATE
+      `);
+      const lot = result.rows?.[0];
+      if (!lot) return null;
+      if (params.requiredCostSource && String(lot.cost_source || "") !== params.requiredCostSource) {
+        return null;
+      }
+
+      const currentProductMills =
+        Number(lot.product_mills) || centsToMills(Number(lot.po_unit_cost_cents) || 0);
+      const currentPackagingMills =
+        Number(lot.packaging_mills) || centsToMills(Number(lot.packaging_cost_cents) || 0);
+      const currentLandedMills =
+        Number(lot.landed_mills) || centsToMills(Number(lot.landed_cost_cents) || 0);
+      const productCostMills = params.productCostMills ?? currentProductMills;
+      const packagingCostMills = params.packagingCostMills ?? currentPackagingMills;
+      const landedCostMills = params.landedCostMills ?? currentLandedMills;
+
+      this.assertNonNegativeMills(productCostMills, "productCostMills");
+      this.assertNonNegativeMills(packagingCostMills, "packagingCostMills");
+      this.assertNonNegativeMills(landedCostMills, "landedCostMills");
+
+      const totalUnitCostMills = productCostMills + packagingCostMills + landedCostMills;
+      this.assertNonNegativeMills(totalUnitCostMills, "totalUnitCostMills");
+
+      const oldTotalMills =
+        Number(lot.old_total_mills)
+        || centsToMills(Number(lot.total_unit_cost_cents) || Number(lot.unit_cost_cents) || 0);
+      const oldCostCents = millsToCents(oldTotalMills);
+      const newCostCents = millsToCents(totalUnitCostMills);
+      const productCostCents = millsToCents(productCostMills);
+      const packagingCostCents = millsToCents(packagingCostMills);
+      const landedCostCents = millsToCents(landedCostMills);
+      const existingCostSource = String(lot.cost_source || "");
+      const costSource =
+        params.preserveExistingCostSourceUnlessPo && existingCostSource && existingCostSource !== "po"
+          ? existingCostSource
+          : params.costSource;
+
+      await tx.execute(sql`
+        UPDATE inventory.inventory_lots
+        SET po_unit_cost_mills = ${productCostMills},
+            packaging_cost_mills = ${packagingCostMills},
+            landed_cost_mills = ${landedCostMills},
+            total_unit_cost_mills = ${totalUnitCostMills},
+            unit_cost_mills = ${totalUnitCostMills},
+            po_unit_cost_cents = ${productCostCents},
+            packaging_cost_cents = ${packagingCostCents},
+            landed_cost_cents = ${landedCostCents},
+            total_unit_cost_cents = ${newCostCents},
+            unit_cost_cents = ${newCostCents},
+            cost_provisional = CASE WHEN ${params.clearProvisional === false ? 0 : 1} = 1 THEN 0 ELSE cost_provisional END,
+            cost_source = ${costSource}
+        WHERE id = ${params.lotId}
+      `);
+
+      const cascade = await this.cascadeRecostForLotMills(params.lotId, totalUnitCostMills, tx);
+
+      await tx.execute(sql`
+        INSERT INTO inventory.cost_adjustment_log
+          (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
+        VALUES (
+          ${params.lotId},
+          ${lot.lot_number},
+          ${lot.product_variant_id},
+          ${lot.sku || ""},
+          ${oldCostCents},
+          ${newCostCents},
+          ${newCostCents - oldCostCents},
+          ${params.reason},
+          NOW()
+        )
+      `);
+
+      return {
+        lotId: params.lotId,
+        lotNumber: lot.lot_number,
+        productVariantId: lot.product_variant_id,
+        sku: lot.sku || "",
+        oldCostCents,
+        newCostCents,
+        deltaCents: newCostCents - oldCostCents,
+        adjustedAt: new Date(),
+        reason: params.reason,
+        cogsRowsUpdated: cascade.rowsUpdated,
+        totalCogsDeltaCents: cascade.totalDeltaCents,
+      };
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // CREATE LOT (with full cost columns)
@@ -151,6 +348,10 @@ export class COGSService {
     const packagingCost = params.packagingCostCents ?? 0;
     const landedCost = params.landedCostCents ?? 0;
     const totalUnitCost = poUnitCost + packagingCost + landedCost;
+    const poUnitCostMills = centsToMills(poUnitCost);
+    const packagingCostMills = centsToMills(packagingCost);
+    const landedCostMills = centsToMills(landedCost);
+    const totalUnitCostMills = poUnitCostMills + packagingCostMills + landedCostMills;
     const costSource = params.costSource ?? 'manual';
 
     const lotNumber = await this.generateLotNumber();
@@ -185,6 +386,11 @@ export class COGSService {
         packaging_cost_cents = ${packagingCost},
         landed_cost_cents = ${landedCost},
         total_unit_cost_cents = ${totalUnitCost},
+        po_unit_cost_mills = ${poUnitCostMills},
+        packaging_cost_mills = ${packagingCostMills},
+        landed_cost_mills = ${landedCostMills},
+        total_unit_cost_mills = ${totalUnitCostMills},
+        unit_cost_mills = ${totalUnitCostMills},
         qty_received = ${params.qtyPieces},
         qty_consumed = 0,
         cost_source = ${costSource},
@@ -274,57 +480,14 @@ export class COGSService {
     lotId: number,
     landedCostCents: number,
   ): Promise<CostAdjustmentLog | null> {
-    // Get current state
-    const result = await this.db.execute(sql`
-      SELECT il.id, il.lot_number, il.product_variant_id,
-             il.po_unit_cost_cents, il.packaging_cost_cents, il.landed_cost_cents, il.total_unit_cost_cents,
-             pv.sku
-      FROM inventory.inventory_lots il
-      LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
-      WHERE il.id = ${lotId}
-    `);
-    const lot = result.rows?.[0];
-    if (!lot) return null;
-
-    const oldTotal = Number(lot.total_unit_cost_cents) || 0;
-    const poUnit = Number(lot.po_unit_cost_cents) || 0;
-    const packaging = Number(lot.packaging_cost_cents) || 0;
-    // Total landed cost = product + packaging + landed (freight) — the COGS source of truth.
-    const newTotal = poUnit + packaging + landedCostCents;
-
-    await this.db.execute(sql`
-      UPDATE inventory_lots SET
-        landed_cost_cents = ${landedCostCents},
-        total_unit_cost_cents = ${newTotal},
-        unit_cost_cents = ${newTotal},
-        cost_provisional = 0,
-        cost_source = CASE
-          WHEN cost_source = 'po' THEN 'po_landed'
-          ELSE cost_source
-        END
-      WHERE id = ${lotId}
-    `);
-
-    // Cascade the new cost to any COGS rows written from this lot
-    await this.cascadeRecostForLot(lotId, newTotal);
-
-    // Log the adjustment
-    await this.db.execute(sql`
-      INSERT INTO inventory.cost_adjustment_log (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
-      VALUES (${lotId}, ${lot.lot_number}, ${lot.product_variant_id}, ${lot.sku || ''}, ${oldTotal}, ${newTotal}, ${newTotal - oldTotal}, 'landed_cost_finalized', NOW())
-    `);
-
-    return {
+    return this.revalueLotCostMills({
       lotId,
-      lotNumber: lot.lot_number,
-      productVariantId: lot.product_variant_id,
-      sku: lot.sku || '',
-      oldCostCents: oldTotal,
-      newCostCents: newTotal,
-      deltaCents: newTotal - oldTotal,
-      adjustedAt: new Date(),
-      reason: 'landed_cost_finalized',
-    };
+      landedCostMills: centsToMills(landedCostCents),
+      costSource: "po_landed",
+      reason: "landed_cost_finalized",
+      preserveExistingCostSourceUnlessPo: true,
+    });
+
   }
 
   // ---------------------------------------------------------------------------
@@ -342,38 +505,7 @@ export class COGSService {
     lotId: number,
     newUnitCostCents: number,
   ): Promise<{ rowsUpdated: number; totalDeltaCents: number }> {
-    // Find all COGS rows referencing this lot with a different cost
-    const affected = await this.db.execute(sql`
-      SELECT id, qty, unit_cost_cents
-      FROM oms.order_item_costs
-      WHERE inventory_lot_id = ${lotId}
-        AND unit_cost_cents != ${newUnitCostCents}
-    `);
-
-    const rows = affected.rows || [];
-    if (rows.length === 0) {
-      return { rowsUpdated: 0, totalDeltaCents: 0 };
-    }
-
-    let totalDeltaCents = 0;
-    for (const row of rows) {
-      const oldCost = Number(row.unit_cost_cents) || 0;
-      const qty = Number(row.qty) || 0;
-      totalDeltaCents += (newUnitCostCents - oldCost) * qty;
-    }
-
-    // Bulk update: set new unit cost and recalculate total
-    await this.db.execute(sql`
-      UPDATE oms.order_item_costs
-      SET unit_cost_cents = ${newUnitCostCents},
-          total_cost_cents = qty * ${newUnitCostCents},
-          unit_cost_mills = ${centsToMills(newUnitCostCents)},
-          total_cost_mills = qty * ${centsToMills(newUnitCostCents)}
-      WHERE inventory_lot_id = ${lotId}
-        AND unit_cost_cents != ${newUnitCostCents}
-    `);
-
-    return { rowsUpdated: rows.length, totalDeltaCents };
+    return this.cascadeRecostForLotMills(lotId, centsToMills(newUnitCostCents));
   }
 
   // ---------------------------------------------------------------------------
@@ -398,12 +530,24 @@ export class COGSService {
     invoiceNumber?: string;
   }): Promise<{ lotsUpdated: number; cogsRowsUpdated: number; totalCogsDeltaCents: number }> {
     const { purchaseOrderId, productVariantId, invoiceUnitCostCents } = params;
+    const invoiceUnitCostMills = centsToMills(invoiceUnitCostCents);
 
     // Find lots linked to this PO + variant
     const affectedLots = await this.db.execute(sql`
-      SELECT id, lot_number, unit_cost_cents,
-             COALESCE(landed_cost_cents, 0) AS landed_cost_cents,
-             COALESCE(total_unit_cost_cents, unit_cost_cents) AS total_unit_cost_cents
+      SELECT
+        id,
+        unit_cost_cents,
+        landed_cost_cents,
+        total_unit_cost_cents,
+        COALESCE(NULLIF(po_unit_cost_mills, 0), ROUND(COALESCE(po_unit_cost_cents, 0)::numeric * 100)::bigint, 0) AS product_mills,
+        COALESCE(NULLIF(packaging_cost_mills, 0), ROUND(COALESCE(packaging_cost_cents, 0)::numeric * 100)::bigint, 0) AS packaging_mills,
+        COALESCE(NULLIF(landed_cost_mills, 0), ROUND(COALESCE(landed_cost_cents, 0)::numeric * 100)::bigint, 0) AS landed_mills,
+        COALESCE(
+          NULLIF(total_unit_cost_mills, 0),
+          NULLIF(unit_cost_mills, 0),
+          ROUND(COALESCE(NULLIF(total_unit_cost_cents, 0), unit_cost_cents, 0)::numeric * 100)::bigint,
+          0
+        ) AS total_mills
       FROM inventory.inventory_lots
       WHERE purchase_order_id = ${purchaseOrderId}
         AND product_variant_id = ${productVariantId}
@@ -419,42 +563,32 @@ export class COGSService {
     let totalCogsDeltaCents = 0;
 
     for (const lot of lots) {
-      const oldCost = Number(lot.unit_cost_cents) || 0;
-      const landedAddon = Number(lot.landed_cost_cents) || 0;
-      // New total = invoice base cost + existing landed addon
-      const newTotal = invoiceUnitCostCents + landedAddon;
+      const packagingMills = Number(lot.packaging_mills) || 0;
+      const landedMills = Number(lot.landed_mills) || centsToMills(Number(lot.landed_cost_cents) || 0);
+      const newTotalMills = invoiceUnitCostMills + packagingMills + landedMills;
+      const currentProductMills = Number(lot.product_mills) || centsToMills(Number(lot.unit_cost_cents) || 0);
+      const currentTotalMills =
+        Number(lot.total_mills)
+        || centsToMills(Number(lot.total_unit_cost_cents) || Number(lot.unit_cost_cents) || 0);
 
-      if (oldCost === invoiceUnitCostCents && Number(lot.total_unit_cost_cents) === newTotal) {
+      if (currentProductMills === invoiceUnitCostMills && currentTotalMills === newTotalMills) {
         continue; // Already at the right cost
       }
 
-      // Update the lot
-      await this.db.execute(sql`
-        UPDATE inventory.inventory_lots
-        SET unit_cost_cents = ${invoiceUnitCostCents},
-            po_unit_cost_cents = ${invoiceUnitCostCents},
-            total_unit_cost_cents = ${newTotal},
-            cost_source = 'invoice'
-        WHERE id = ${lot.id}
-      `);
-
-      // Log the adjustment
       const reason = params.invoiceNumber
         ? `invoice_variance:${params.invoiceNumber}`
         : "invoice_variance";
-      await this.db.execute(sql`
-        INSERT INTO inventory.cost_adjustment_log
-          (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
-        SELECT ${lot.id}, ${lot.lot_number}, ${productVariantId}, COALESCE(pv.sku, ''),
-               ${Number(lot.total_unit_cost_cents)}, ${newTotal}, ${newTotal - Number(lot.total_unit_cost_cents)},
-               ${reason}, NOW()
-        FROM catalog.product_variants pv WHERE pv.id = ${productVariantId}
-      `);
 
-      // Cascade to COGS
-      const cascadeResult = await this.cascadeRecostForLot(lot.id, newTotal);
-      cogsRowsUpdated += cascadeResult.rowsUpdated;
-      totalCogsDeltaCents += cascadeResult.totalDeltaCents;
+      const revalue = await this.revalueLotCostMills({
+        lotId: Number(lot.id),
+        productCostMills: invoiceUnitCostMills,
+        costSource: "invoice",
+        reason,
+      });
+      if (!revalue) continue;
+
+      cogsRowsUpdated += revalue.cogsRowsUpdated;
+      totalCogsDeltaCents += revalue.totalCogsDeltaCents;
       lotsUpdated++;
     }
 
@@ -877,45 +1011,20 @@ export class COGSService {
     productCostMills: number,
     reason: string = 'csv_cost_upload',
   ): Promise<{ lotId: number; lotNumber: string; sku: string; oldCostCents: number; newCostCents: number } | null> {
-    const result = await this.db.execute(sql`
-      SELECT il.id, il.lot_number, il.product_variant_id,
-             COALESCE(il.packaging_cost_mills, 0) AS packaging_mills,
-             COALESCE(il.landed_cost_mills, 0) AS landed_mills,
-             COALESCE(il.total_unit_cost_cents, 0) AS old_total_cents, pv.sku
-      FROM inventory.inventory_lots il
-      LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
-      WHERE il.id = ${lotId}
-    `);
-    const lot = result.rows?.[0];
-    if (!lot) return null;
-
-    const totalMills = productCostMills + Number(lot.packaging_mills) + Number(lot.landed_mills);
-    const totalCents = millsToCents(totalMills);
-    const poCents = millsToCents(productCostMills);
-
-    await this.db.execute(sql`
-      UPDATE inventory.inventory_lots SET
-        po_unit_cost_mills = ${productCostMills},
-        total_unit_cost_mills = ${totalMills},
-        unit_cost_mills = ${totalMills},
-        po_unit_cost_cents = ${poCents},
-        total_unit_cost_cents = ${totalCents},
-        unit_cost_cents = ${totalCents},
-        cost_provisional = 0,
-        cost_source = 'manual'
-      WHERE id = ${lotId}
-    `);
-
-    // Cascade to any booked COGS rows (legacy lots usually have none yet).
-    await this.cascadeRecostForLot(lotId, totalCents);
-
-    const oldCents = Number(lot.old_total_cents) || 0;
-    await this.db.execute(sql`
-      INSERT INTO inventory.cost_adjustment_log (lot_id, lot_number, product_variant_id, sku, old_cost_cents, new_cost_cents, delta_cents, reason, created_at)
-      VALUES (${lotId}, ${lot.lot_number}, ${lot.product_variant_id}, ${lot.sku || ''}, ${oldCents}, ${totalCents}, ${totalCents - oldCents}, ${reason}, NOW())
-    `);
-
-    return { lotId, lotNumber: lot.lot_number, sku: lot.sku || '', oldCostCents: oldCents, newCostCents: totalCents };
+    const revalue = await this.revalueLotCostMills({
+      lotId,
+      productCostMills,
+      costSource: "manual",
+      reason,
+    });
+    if (!revalue) return null;
+    return {
+      lotId: revalue.lotId,
+      lotNumber: revalue.lotNumber,
+      sku: revalue.sku,
+      oldCostCents: revalue.oldCostCents,
+      newCostCents: revalue.newCostCents,
+    };
   }
 
   /**
@@ -1011,15 +1120,15 @@ export class COGSService {
       return false;
     }
 
-    const sets: string[] = [];
     if (updates.unitCostCents !== undefined) {
-      await this.db.execute(sql`
-        UPDATE inventory_lots SET
-          po_unit_cost_cents = ${updates.unitCostCents},
-          total_unit_cost_cents = ${updates.unitCostCents},
-          unit_cost_cents = ${updates.unitCostCents}
-        WHERE id = ${lotId}
-      `);
+      const revalue = await this.revalueLotCostMills({
+        lotId,
+        productCostMills: centsToMills(updates.unitCostCents),
+        costSource: "manual",
+        reason: "manual_lot_update",
+        requiredCostSource: "manual",
+      });
+      if (!revalue) return false;
     }
     if (updates.batchNumber !== undefined) {
       await this.db.execute(sql`
@@ -1149,10 +1258,14 @@ export class COGSService {
       const variantId = variant.id;
 
       const lotsResult = await this.db.execute(sql`
-        SELECT id, lot_number, COALESCE(landed_cost_cents, 0) AS landed_cost_cents
+        SELECT id, lot_number
         FROM inventory.inventory_lots
         WHERE product_variant_id = ${variantId}
-          AND (unit_cost_cents = 0 OR unit_cost_cents IS NULL)
+          AND (
+            COALESCE(total_unit_cost_mills, 0) = 0
+            OR unit_cost_cents = 0
+            OR unit_cost_cents IS NULL
+          )
       `);
       const lots = lotsResult.rows || [];
 
@@ -1163,21 +1276,15 @@ export class COGSService {
       }
 
       for (const lot of lots) {
-        const landedAddon = Number(lot.landed_cost_cents) || 0;
-        const newTotal = entry.unitCostCents + landedAddon;
-
-        await this.db.execute(sql`
-          UPDATE inventory.inventory_lots
-          SET unit_cost_cents = ${entry.unitCostCents},
-              po_unit_cost_cents = ${entry.unitCostCents},
-              total_unit_cost_cents = ${newTotal},
-              cost_provisional = 0,
-              cost_source = 'backfill'
-          WHERE id = ${lot.id}
-        `);
-
-        const cascade = await this.cascadeRecostForLot(lot.id, newTotal);
-        cogsRowsUpdated += cascade.rowsUpdated;
+        const revalue = await this.revalueLotCostMills({
+          lotId: Number(lot.id),
+          productCostMills: centsToMills(entry.unitCostCents),
+          costSource: "backfill",
+          reason: "backfill",
+        });
+        if (revalue) {
+          cogsRowsUpdated += revalue.cogsRowsUpdated;
+        }
         lotsUpdated++;
       }
 

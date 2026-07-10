@@ -30,26 +30,59 @@ describe("COGSService.backfillLotCostsBySku", () => {
           };
         }
         if (executeCallCount === 3) {
-          // UPDATE lot 10
-          return { rows: [] };
+          // revalue lot 10: SELECT lot FOR UPDATE
+          return {
+            rows: [{
+              id: 10,
+              lot_number: "LOT-001",
+              product_variant_id: 5,
+              total_unit_cost_cents: 0,
+              sku: "TEST-SKU",
+            }],
+          };
         }
         if (executeCallCount === 4) {
-          // cascadeRecostForLot lot 10: SELECT
-          return { rows: [{ id: 1, qty: 3, unit_cost_cents: 0 }] };
-        }
-        if (executeCallCount === 5) {
-          // cascadeRecostForLot lot 10: UPDATE
+          // revalue lot 10: UPDATE lot
           return { rows: [] };
         }
+        if (executeCallCount === 5) {
+          // revalue lot 10: cascade SELECT
+          return { rows: [{ id: 1, qty: 3, unit_cost_cents: 0 }] };
+        }
         if (executeCallCount === 6) {
-          // UPDATE lot 11
+          // revalue lot 10: cascade UPDATE
           return { rows: [] };
         }
         if (executeCallCount === 7) {
-          // cascadeRecostForLot lot 11: SELECT (no affected rows)
+          // revalue lot 10: INSERT cost_adjustment_log
           return { rows: [] };
         }
         if (executeCallCount === 8) {
+          // revalue lot 11: SELECT lot FOR UPDATE
+          return {
+            rows: [{
+              id: 11,
+              lot_number: "LOT-002",
+              product_variant_id: 5,
+              landed_cost_cents: 50,
+              total_unit_cost_cents: 50,
+              sku: "TEST-SKU",
+            }],
+          };
+        }
+        if (executeCallCount === 9) {
+          // revalue lot 11: UPDATE lot
+          return { rows: [] };
+        }
+        if (executeCallCount === 10) {
+          // revalue lot 11: cascade SELECT (no affected rows)
+          return { rows: [] };
+        }
+        if (executeCallCount === 11) {
+          // revalue lot 11: INSERT cost_adjustment_log
+          return { rows: [] };
+        }
+        if (executeCallCount === 12) {
           // UPDATE variant catalog costs
           return { rows: [] };
         }
