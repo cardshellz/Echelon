@@ -22,6 +22,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { getChannelWritebackHealth, type ChannelWritebackHealth } from "./channel-writeback.service";
 
 const DEFAULT_WINDOW_DAYS = 30;
 const MAX_WINDOW_DAYS = 365;
@@ -81,6 +82,7 @@ export interface FlowWaterfall {
   sla: { breached: number; sample: any[] };
   issues: FlowIssue[];
   health: { generatedAt: string; status: "healthy" | "degraded" | "critical"; counts: { critical: number; warning: number; info: number } };
+  channelWriteback: ChannelWritebackHealth;
 }
 
 interface FlowIssueDef {
@@ -322,22 +324,169 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Shipped, but tracking not sent to the channel",
     why: "These shipped but the tracking number was never sent back to the sales channel, so the customer sees no shipping update. Re-send the tracking to the channel.",
     remediation: "REQUEUE", replaySafe: true,
-    count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.status = 'shipped' AND oo.shipped_at < NOW() - INTERVAL '1 hour' AND oo.shipped_at > ${win} AND c.provider IN ('ebay','shopify') AND NOT EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed'))`,
-    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, c.provider, oo.shipped_at AS at FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.status = 'shipped' AND oo.shipped_at < NOW() - INTERVAL '1 hour' AND oo.shipped_at > ${win} AND c.provider IN ('ebay','shopify') AND NOT EXISTS (SELECT 1 FROM oms.oms_order_events e WHERE e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed')) ORDER BY oo.shipped_at DESC LIMIT 50`,
+    count: (win: any) => sql`
+      WITH shipped AS (
+        SELECT os.id AS shipment_id,
+               (
+                 (c.provider = 'shopify' AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL)
+                 OR EXISTS (
+                   SELECT 1
+                   FROM oms.oms_order_events e
+                   WHERE e.order_id = oo.id
+                     AND e.details->>'wmsShipmentId' = os.id::text
+                     AND (
+                       (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                       OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                     )
+                 )
+               ) AS writeback_complete
+        FROM oms.oms_orders oo
+        JOIN channels.channels c ON c.id = oo.channel_id
+        JOIN wms.orders wo ON ${LINK}
+        JOIN wms.outbound_shipments os ON os.order_id = wo.id
+        WHERE oo.status IN ('shipped', 'partially_shipped')
+          AND os.status = 'shipped'
+          AND os.shipped_at < NOW() - INTERVAL '1 hour'
+          AND os.shipped_at > ${win}
+          AND c.provider IN ('ebay', 'shopify')
+          AND EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
+          )
+      )
+      SELECT COUNT(*)::int AS count FROM shipped WHERE writeback_complete = false
+    `,
+    sample: (win: any) => sql`
+      WITH shipped AS (
+        SELECT os.id AS shipment_id,
+               oo.external_order_number AS order_number,
+               c.provider,
+               os.tracking_number,
+               os.shipped_at AS at,
+               (
+                 (c.provider = 'shopify' AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL)
+                 OR EXISTS (
+                   SELECT 1
+                   FROM oms.oms_order_events e
+                   WHERE e.order_id = oo.id
+                     AND e.details->>'wmsShipmentId' = os.id::text
+                     AND (
+                       (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                       OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                     )
+                 )
+               ) AS writeback_complete
+        FROM oms.oms_orders oo
+        JOIN channels.channels c ON c.id = oo.channel_id
+        JOIN wms.orders wo ON ${LINK}
+        JOIN wms.outbound_shipments os ON os.order_id = wo.id
+        WHERE oo.status IN ('shipped', 'partially_shipped')
+          AND os.status = 'shipped'
+          AND os.shipped_at < NOW() - INTERVAL '1 hour'
+          AND os.shipped_at > ${win}
+          AND c.provider IN ('ebay', 'shopify')
+          AND EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
+          )
+      )
+      SELECT shipment_id, order_number, provider, tracking_number, at
+      FROM shipped
+      WHERE writeback_complete = false
+      ORDER BY at ASC, shipment_id ASC
+      LIMIT 50
+    `,
   },
   {
-    // Catches the "re-shipped after a void, but the new tracking was never re-pushed"
-    // case (e.g. #58910): the tracking the channel holds is no longer on any live shipped
-    // shipment, so the customer is following a dead/voided label. SHIPPED_TRACKING_NOT_
-    // CONFIRMED_PUSHED misses these because a (stale) push event DOES exist. `last_push`
-    // = the most recent fulfillment-push tracking per order (windowed); flagged when it
-    // isn't on any currently-shipped shipment.
+    // Catches a channel push that is tied to a physical shipment but carries a
+    // different tracking number than the shipment currently marked shipped.
+    // This is intentionally shipment-scoped: an order-level last push cannot
+    // identify which split package a stale tracking number belongs to.
     code: "CHANNEL_TRACKING_STALE", kind: "contradiction", stage: "writeback", severity: "warning",
     message: "Shipped, but the channel has stale tracking",
     why: "The tracking we sent the sales channel no longer matches the shipment that actually went out — usually the original label was voided and the order re-shipped with a new tracking that was never re-pushed. The customer is following a dead/voided tracking link. Re-push the current tracking to the channel.",
     remediation: "REQUEUE", replaySafe: true,
-    count: (win: any) => sql`WITH last_push AS (SELECT DISTINCT ON (e.order_id) e.order_id, e.details->>'trackingNumber' AS pushed FROM oms.oms_order_events e WHERE e.event_type IN ('shopify_fulfillment_pushed','tracking_pushed') AND e.details->>'trackingNumber' IS NOT NULL AND e.created_at > ${win} ORDER BY e.order_id, e.created_at DESC) SELECT COUNT(*)::int AS count FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id JOIN last_push lp ON lp.order_id = oo.id WHERE oo.status = 'shipped' AND c.provider IN ('ebay','shopify') AND oo.shipped_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ${LINK} AND os.status = 'shipped' AND os.tracking_number = lp.pushed)`,
-    sample: (win: any) => sql`WITH last_push AS (SELECT DISTINCT ON (e.order_id) e.order_id, e.details->>'trackingNumber' AS pushed FROM oms.oms_order_events e WHERE e.event_type IN ('shopify_fulfillment_pushed','tracking_pushed') AND e.details->>'trackingNumber' IS NOT NULL AND e.created_at > ${win} ORDER BY e.order_id, e.created_at DESC) SELECT oo.external_order_number AS order_number, c.provider, lp.pushed AS channel_tracking, (SELECT string_agg(DISTINCT os.tracking_number, ', ') FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ${LINK} AND os.status = 'shipped' AND os.tracking_number IS NOT NULL) AS actual_tracking, oo.shipped_at AS at FROM oms.oms_orders oo JOIN channels.channels c ON c.id = oo.channel_id JOIN last_push lp ON lp.order_id = oo.id WHERE oo.status = 'shipped' AND c.provider IN ('ebay','shopify') AND oo.shipped_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo JOIN wms.outbound_shipments os ON os.order_id = wo.id WHERE ${LINK} AND os.status = 'shipped' AND os.tracking_number = lp.pushed) ORDER BY oo.shipped_at DESC LIMIT 50`,
+    count: (win: any) => sql`
+      SELECT COUNT(*)::int AS count
+      FROM oms.oms_orders oo
+      JOIN channels.channels c ON c.id = oo.channel_id
+      JOIN wms.orders wo ON ${LINK}
+      JOIN wms.outbound_shipments os ON os.order_id = wo.id
+      JOIN LATERAL (
+        SELECT NULLIF(e.details->>'trackingNumber', '') AS pushed
+        FROM oms.oms_order_events e
+        WHERE e.order_id = oo.id
+          AND e.details->>'wmsShipmentId' = os.id::text
+          AND NULLIF(e.details->>'trackingNumber', '') IS NOT NULL
+          AND (
+            (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+            OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+          )
+        ORDER BY e.created_at DESC, e.id DESC
+        LIMIT 1
+      ) latest_push ON latest_push.pushed <> NULLIF(os.tracking_number, '')
+      WHERE oo.status IN ('shipped', 'partially_shipped')
+        AND c.provider IN ('ebay', 'shopify')
+        AND os.status = 'shipped'
+        AND os.shipped_at > ${win}
+        AND NULLIF(os.tracking_number, '') IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipment_items osi
+          JOIN wms.order_items oi ON oi.id = osi.order_item_id
+          WHERE osi.shipment_id = os.id
+            AND COALESCE(oi.requires_shipping, 1) <> 0
+            AND COALESCE(osi.qty, 0) > 0
+        )
+    `,
+    sample: (win: any) => sql`
+      SELECT oo.external_order_number AS order_number,
+             os.id AS shipment_id,
+             c.provider,
+             latest_push.pushed AS channel_tracking,
+             os.tracking_number AS actual_tracking,
+             os.shipped_at AS at
+      FROM oms.oms_orders oo
+      JOIN channels.channels c ON c.id = oo.channel_id
+      JOIN wms.orders wo ON ${LINK}
+      JOIN wms.outbound_shipments os ON os.order_id = wo.id
+      JOIN LATERAL (
+        SELECT NULLIF(e.details->>'trackingNumber', '') AS pushed
+        FROM oms.oms_order_events e
+        WHERE e.order_id = oo.id
+          AND e.details->>'wmsShipmentId' = os.id::text
+          AND NULLIF(e.details->>'trackingNumber', '') IS NOT NULL
+          AND (
+            (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+            OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+          )
+        ORDER BY e.created_at DESC, e.id DESC
+        LIMIT 1
+      ) latest_push ON latest_push.pushed <> NULLIF(os.tracking_number, '')
+      WHERE oo.status IN ('shipped', 'partially_shipped')
+        AND c.provider IN ('ebay', 'shopify')
+        AND os.status = 'shipped'
+        AND os.shipped_at > ${win}
+        AND NULLIF(os.tracking_number, '') IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM wms.outbound_shipment_items osi
+          JOIN wms.order_items oi ON oi.id = osi.order_item_id
+          WHERE osi.shipment_id = os.id
+            AND COALESCE(oi.requires_shipping, 1) <> 0
+            AND COALESCE(osi.qty, 0) > 0
+        )
+      ORDER BY os.shipped_at DESC, os.id DESC
+      LIMIT 50
+    `,
   },
 ];
 
@@ -461,8 +610,47 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     const entered = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win}`));
     const reachedWms = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE oo.ordered_at > ${win}`));
     const hasShipment = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} JOIN wms.outbound_shipments os ON os.order_id = wo.id AND os.status <> 'voided' WHERE oo.ordered_at > ${win}`));
-    const shipped = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win} AND oo.status = 'shipped'`));
-    const trackingConfirmed = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN oms.oms_order_events e ON e.order_id = oo.id AND e.event_type IN ('tracking_pushed','shopify_fulfillment_pushed') WHERE oo.ordered_at > ${win}`));
+    const shipped = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win} AND oo.status IN ('shipped', 'partially_shipped')`));
+    const trackingConfirmed = num(await tx.execute(sql`
+      WITH shipped_orders AS (
+        SELECT oo.id,
+               BOOL_AND(
+                 (
+                   (c.provider = 'shopify' AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL)
+                   OR EXISTS (
+                     SELECT 1
+                     FROM oms.oms_order_events e
+                     WHERE e.order_id = oo.id
+                       AND e.details->>'wmsShipmentId' = os.id::text
+                       AND (
+                         (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                         OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
+                       )
+                   )
+                 )
+               ) AS all_shipments_written
+        FROM oms.oms_orders oo
+        JOIN channels.channels c ON c.id = oo.channel_id
+        JOIN wms.orders wo ON ${LINK}
+        JOIN wms.outbound_shipments os ON os.order_id = wo.id
+        WHERE oo.ordered_at > ${win}
+          AND oo.status IN ('shipped', 'partially_shipped')
+          AND os.status = 'shipped'
+          AND c.provider IN ('ebay', 'shopify')
+          AND EXISTS (
+            SELECT 1
+            FROM wms.outbound_shipment_items osi
+            JOIN wms.order_items oi ON oi.id = osi.order_item_id
+            WHERE osi.shipment_id = os.id
+              AND COALESCE(oi.requires_shipping, 1) <> 0
+              AND COALESCE(osi.qty, 0) > 0
+          )
+        GROUP BY oo.id
+      )
+      SELECT COUNT(*)::int AS count
+      FROM shipped_orders
+      WHERE all_shipments_written
+    `));
 
     const channels = rows(await tx.execute(sql`SELECT COALESCE(c.provider,'unknown') AS provider, COUNT(*)::int AS entered FROM oms.oms_orders oo LEFT JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.ordered_at > ${win} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ provider: String(r.provider), entered: Number(r.entered) || 0 }));
     const volumePerDay = rows(await tx.execute(sql`SELECT to_char(date_trunc('day', ordered_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS orders FROM oms.oms_orders WHERE ordered_at > ${win} GROUP BY 1 ORDER BY 1`)).map((r) => ({ day: String(r.day), orders: Number(r.orders) || 0 }));
@@ -489,6 +677,10 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       });
     }
     const issues = allIssues.filter((i) => i.count > 0);
+    const channelWriteback = await getChannelWritebackHealth(tx, {
+      windowDays,
+      sampleLimit: 50,
+    });
     const counts = issues.reduce((a, i) => { (a as any)[i.severity] += i.count; return a; }, { critical: 0, warning: 0, info: 0 });
 
     // ---- dead-letter reason breakdown for the sidebar (from the same grouped pass) ----
@@ -516,6 +708,7 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       sla: { breached: bc.SLA_BREACHED ?? 0, sample: [] },
       issues,
       health: { generatedAt: new Date().toISOString(), status: counts.critical > 0 ? "critical" : counts.warning > 0 ? "degraded" : "healthy", counts },
+      channelWriteback,
     };
   });
 }

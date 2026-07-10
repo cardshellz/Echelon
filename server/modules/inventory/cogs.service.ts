@@ -746,7 +746,7 @@ export class COGSService {
         SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0)) as total_value_mills,
         COUNT(il.id) as active_lots,
         SUM(CASE WHEN COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0) = 0 THEN il.qty_on_hand ELSE 0 END) as zero_cost_qty,
-        BOOL_OR(COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
+        BOOL_OR(il.cost_provisional = 1 AND il.inbound_shipment_id IS NOT NULL) as has_landed_pending
       FROM inventory.inventory_lots il
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN catalog.products p ON p.id = pv.product_id
@@ -774,9 +774,9 @@ export class COGSService {
     // Provisional + landed pending summary
     const pendingResult = await this.db.execute(sql`
       SELECT
-        COUNT(*) FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL) as landed_pending_count,
+        COUNT(*) FILTER (WHERE il.cost_provisional = 1 AND il.inbound_shipment_id IS NOT NULL) as landed_pending_count,
         COALESCE(SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0))
-          FILTER (WHERE COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL), 0) as landed_pending_value_mills,
+          FILTER (WHERE il.cost_provisional = 1 AND il.inbound_shipment_id IS NOT NULL), 0) as landed_pending_value_mills,
         COALESCE(SUM(il.qty_on_hand) FILTER (WHERE il.cost_provisional = 1), 0) as provisional_qty
       FROM inventory.inventory_lots il
       WHERE il.status = 'active'
@@ -939,7 +939,7 @@ export class COGSService {
       whereClause = sql`${whereClause} AND pv.product_id = ${params.productId}`;
     }
     if (params?.onlyPending) {
-      whereClause = sql`${whereClause} AND COALESCE(il.landed_cost_cents, 0) = 0 AND il.inbound_shipment_id IS NOT NULL`;
+      whereClause = sql`${whereClause} AND il.cost_provisional = 1 AND il.inbound_shipment_id IS NOT NULL`;
     }
     if (params?.search) {
       const pattern = `%${params.search}%`;
