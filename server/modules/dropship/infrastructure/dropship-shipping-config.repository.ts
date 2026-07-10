@@ -16,6 +16,7 @@ import type {
   DropshipZoneRuleConfigRecord,
   ListDropshipShippingConfigInput,
   NormalizedCreateDropshipInsurancePolicyInput,
+  NormalizedDeactivateDropshipPolicyInput,
   NormalizedCreateDropshipMarkupPolicyInput,
   NormalizedCreateDropshipRateTableInput,
   NormalizedUpsertDropshipBoxInput,
@@ -567,6 +568,40 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
     } finally {
       client.release();
     }
+  }
+
+  async deactivateMarkupPolicy(input: NormalizedDeactivateDropshipPolicyInput & DropshipShippingConfigCommandContext): Promise<DropshipShippingConfigMutationResult<DropshipShippingMarkupPolicyRecord>> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const command = await claimAdminConfigCommand(client, "shipping_markup_policy_deactivated", input);
+      const policyId = command.idempotentReplay ? parseEntityId(command.entityId, "dropship_shipping_markup_config") : input.policyId;
+      const result = await client.query<MarkupPolicyRow>(`UPDATE dropship.dropship_shipping_markup_config SET is_active = false, effective_to = COALESCE(effective_to, $2) WHERE id = $1 RETURNING id, name, markup_bps, fixed_markup_cents, min_markup_cents, max_markup_cents, is_active, effective_from, effective_to, created_at`, [policyId, input.now]);
+      const policy = mapMarkupPolicyRow(requiredRow(result.rows[0], "Dropship shipping markup policy was not found."));
+      if (!command.idempotentReplay) {
+        await completeAdminConfigCommand(client, command.commandId, "dropship_shipping_markup_config", policy.policyId, input.now);
+        await recordAdminShippingAuditEvent(client, input, "dropship_shipping_markup_config", policy.policyId, "shipping_markup_policy_deactivated", {});
+      }
+      await client.query("COMMIT");
+      return { record: policy, idempotentReplay: command.idempotentReplay };
+    } catch (error) { await rollbackQuietly(client); throw mapForeignKeyError(error); } finally { client.release(); }
+  }
+
+  async deactivateInsurancePolicy(input: NormalizedDeactivateDropshipPolicyInput & DropshipShippingConfigCommandContext): Promise<DropshipShippingConfigMutationResult<DropshipInsurancePoolPolicyRecord>> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const command = await claimAdminConfigCommand(client, "shipping_insurance_policy_deactivated", input);
+      const policyId = command.idempotentReplay ? parseEntityId(command.entityId, "dropship_insurance_pool_config") : input.policyId;
+      const result = await client.query<InsurancePolicyRow>(`UPDATE dropship.dropship_insurance_pool_config SET is_active = false, effective_to = COALESCE(effective_to, $2) WHERE id = $1 RETURNING id, name, fee_bps, min_fee_cents, max_fee_cents, is_active, effective_from, effective_to, created_at`, [policyId, input.now]);
+      const policy = mapInsurancePolicyRow(requiredRow(result.rows[0], "Dropship insurance pool policy was not found."));
+      if (!command.idempotentReplay) {
+        await completeAdminConfigCommand(client, command.commandId, "dropship_insurance_pool_config", policy.policyId, input.now);
+        await recordAdminShippingAuditEvent(client, input, "dropship_insurance_pool_config", policy.policyId, "shipping_insurance_policy_deactivated", {});
+      }
+      await client.query("COMMIT");
+      return { record: policy, idempotentReplay: command.idempotentReplay };
+    } catch (error) { await rollbackQuietly(client); throw mapForeignKeyError(error); } finally { client.release(); }
   }
 }
 

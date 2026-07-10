@@ -146,6 +146,20 @@ export function registerDropshipAdminShippingConfigRoutes(
       }
     },
   );
+
+  app.post("/api/dropship/admin/shipping/markup-policies/:policyId/deactivate", requirePermission("dropship", "manage_operations"), async (req, res) => {
+    try {
+      const result = await service.deactivateMarkupPolicy({ policyId: Number(req.params.policyId), idempotencyKey: resolveIdempotencyKey(req), actor: adminActor(req) });
+      return res.json({ markupPolicy: result.record, idempotentReplay: result.idempotentReplay });
+    } catch (error) { return sendDropshipShippingConfigError(res, error); }
+  });
+
+  app.post("/api/dropship/admin/shipping/insurance-policies/:policyId/deactivate", requirePermission("dropship", "manage_operations"), async (req, res) => {
+    try {
+      const result = await service.deactivateInsurancePolicy({ policyId: Number(req.params.policyId), idempotencyKey: resolveIdempotencyKey(req), actor: adminActor(req) });
+      return res.json({ insurancePolicy: result.record, idempotentReplay: result.idempotentReplay });
+    } catch (error) { return sendDropshipShippingConfigError(res, error); }
+  });
 }
 
 function resolveIdempotencyKey(req: Request): string {
