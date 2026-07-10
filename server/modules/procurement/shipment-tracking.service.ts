@@ -697,20 +697,8 @@ export function createShipmentTrackingService(
     // Best-effort: a push failure (e.g. nothing received yet) must NOT block the close;
     // the snapshots persist, the manual push remains as a re-trigger, and any receipt
     // created after close still picks up the landed cost at receive time.
-    //
-    // HARD GATE (dimensions): refuse to close if any cost is allocated by a physical
-    // dimension (volume/weight) but some lines lack that dimension — otherwise freight
-    // silently equal-splits or drops $0 onto the dimensionless lines. Scoped to ONLY this
-    // blocker; other advisory blockers (unallocated/stale/mismatch) still don't gate close.
-    const allocationStatus = await getAllocationStatus(id);
-    const dimIssues = allocationStatus.issues.filter((issue) => issue.code === "missing_dimensions");
-    if (dimIssues.length > 0) {
-      throw new ShipmentTrackingError(
-        `Cannot close — freight is allocated by dimensions but some lines are missing them. ${dimIssues.map((i) => i.message).join(" ")}`,
-        400,
-      );
-    }
-
+    // finalizeAllocations owns the dimension gate so all finalization entry points
+    // enforce the same landed-cost invariant.
     await finalizeAllocations(id, userId);
     const closed = await transitionTo(id, "closed", userId, notes || "Shipment closed — landed costs finalized");
     try {
@@ -1643,6 +1631,22 @@ export function createShipmentTrackingService(
 
     if (lines.length === 0) {
       throw new ShipmentTrackingError("No lines to finalize");
+    }
+
+    // A dimensional cost with an incomplete basis would otherwise equal-split when
+    // all values are absent or assign $0 to individual dimensionless lines. Keep the
+    // gate inside finalization so the standalone finalize action cannot bypass it.
+    const allocationStatus = await getAllocationStatus(shipmentId);
+    const dimensionIssues = allocationStatus.issues.filter((issue) => issue.code === "missing_dimensions");
+    if (dimensionIssues.length > 0) {
+      throw new ShipmentTrackingError(
+        `Cannot finalize landed costs — freight is allocated by dimensions but some lines are missing them. ${dimensionIssues.map((issue) => issue.message).join(" ")}`,
+        400,
+        {
+          code: "MISSING_ALLOCATION_DIMENSIONS",
+          issues: dimensionIssues,
+        },
+      );
     }
 
     // Run allocation first to ensure fresh numbers
