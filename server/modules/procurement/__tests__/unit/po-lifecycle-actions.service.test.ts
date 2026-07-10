@@ -307,6 +307,81 @@ describe("PO lifecycle actions", () => {
     );
   });
 
+  it("rejects vendor confirmed delivery before the PO submission date", async () => {
+    const db = buildMockDb();
+    const storage = buildMockStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 35,
+        status: "sent",
+        physicalStatus: "sent",
+        sentToVendorAt: new Date("2026-05-10T18:00:00.000Z"),
+        orderDate: new Date("2026-05-10T18:00:00.000Z"),
+      }),
+    });
+    const svc = createPurchasingService(db, storage);
+
+    await expect(svc.acknowledge(
+      35,
+      { confirmedDeliveryDate: new Date("2026-05-09T00:00:00.000Z") },
+      "user-35",
+    )).rejects.toMatchObject({
+      statusCode: 400,
+      details: expect.objectContaining({ code: "CONFIRMED_DELIVERY_BEFORE_PO" }),
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("updates a nonterminal delivery schedule with history and event audit", async () => {
+    const db = buildMockDb();
+    const storage = buildMockStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue({
+        id: 36,
+        status: "acknowledged",
+        physicalStatus: "acknowledged",
+        sentToVendorAt: new Date("2026-05-10T18:00:00.000Z"),
+        orderDate: new Date("2026-05-10T18:00:00.000Z"),
+        expectedDeliveryDate: null,
+        confirmedDeliveryDate: new Date("2026-05-01T00:00:00.000Z"),
+      }),
+    });
+    const svc = createPurchasingService(db, storage);
+    const expectedDeliveryDate = new Date("2026-06-15T00:00:00.000Z");
+
+    await svc.updateDeliverySchedule(36, {
+      expectedDeliveryDate,
+      confirmedDeliveryDate: null,
+      notes: "Correct vendor schedule",
+    }, "user-36");
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.updateCalls).toContainEqual(expect.objectContaining({
+      patch: expect.objectContaining({
+        expectedDeliveryDate,
+        confirmedDeliveryDate: null,
+        updatedBy: "user-36",
+      }),
+    }));
+    expect(db.insertedRows).toContainEqual(expect.objectContaining({
+      purchaseOrderId: 36,
+      fromStatus: "acknowledged",
+      toStatus: "acknowledged",
+      changedBy: "user-36",
+      notes: "Correct vendor schedule",
+    }));
+    expect(db.insertedRows).toContainEqual(expect.objectContaining({
+      poId: 36,
+      eventType: "delivery_schedule_updated",
+      actorId: "user-36",
+      payloadJson: expect.objectContaining({
+        before: expect.objectContaining({ confirmed_delivery_date: "2026-05-01T00:00:00.000Z" }),
+        after: expect.objectContaining({
+          expected_delivery_date: "2026-06-15T00:00:00.000Z",
+          confirmed_delivery_date: null,
+        }),
+      }),
+    }));
+  });
+
   it("rejects unknown lifecycle commands", async () => {
     const db = buildMockDb();
     const storage = buildMockStorage();
