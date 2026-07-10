@@ -242,6 +242,8 @@ export interface DropshipShippingConfigOverview {
   rateTables: DropshipRateTableConfigRecord[];
   activeMarkupPolicy: DropshipShippingMarkupPolicyRecord | null;
   activeInsurancePolicy: DropshipInsurancePoolPolicyRecord | null;
+  markupPolicies: DropshipShippingMarkupPolicyRecord[];
+  insurancePolicies: DropshipInsurancePoolPolicyRecord[];
   generatedAt: Date;
 }
 

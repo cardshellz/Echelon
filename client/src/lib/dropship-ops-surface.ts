@@ -740,6 +740,8 @@ export interface DropshipShippingConfigOverview {
   rateTables: DropshipShippingRateTableConfig[];
   activeMarkupPolicy: DropshipShippingMarkupPolicyConfig | null;
   activeInsurancePolicy: DropshipShippingInsurancePolicyConfig | null;
+  markupPolicies: DropshipShippingMarkupPolicyConfig[];
+  insurancePolicies: DropshipShippingInsurancePolicyConfig[];
   generatedAt: string;
 }
 
