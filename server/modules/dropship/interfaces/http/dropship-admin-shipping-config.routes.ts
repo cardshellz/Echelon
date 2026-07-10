@@ -238,6 +238,7 @@ function statusForDropshipShippingConfigError(code: string): number {
     case "DROPSHIP_IDEMPOTENCY_KEY_REQUIRED":
       return 400;
     case "DROPSHIP_SHIPPING_CONFIG_IDEMPOTENCY_CONFLICT":
+    case "DROPSHIP_SHIPPING_POLICY_WINDOW_CONFLICT":
       return 409;
     case "DROPSHIP_PRODUCT_VARIANT_NOT_FOUND":
     case "DROPSHIP_SHIPPING_BOX_NOT_FOUND":

@@ -479,6 +479,13 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
         return { record: policy, idempotentReplay: true };
       }
 
+      await assertNoActivePolicyWindowConflict(client, {
+        kind: "markup",
+        isActive: input.isActive,
+        effectiveFrom: input.effectiveFrom ?? input.now,
+        effectiveTo: input.effectiveTo ?? null,
+      });
+
       const inserted = await client.query<MarkupPolicyRow>(
         `INSERT INTO dropship.dropship_shipping_markup_config
           (name, markup_bps, fixed_markup_cents, min_markup_cents,
@@ -536,6 +543,13 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
         await client.query("COMMIT");
         return { record: policy, idempotentReplay: true };
       }
+
+      await assertNoActivePolicyWindowConflict(client, {
+        kind: "insurance",
+        isActive: input.isActive,
+        effectiveFrom: input.effectiveFrom ?? input.now,
+        effectiveTo: input.effectiveTo ?? null,
+      });
 
       const inserted = await client.query<InsurancePolicyRow>(
         `INSERT INTO dropship.dropship_insurance_pool_config
@@ -602,6 +616,49 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
       await client.query("COMMIT");
       return { record: policy, idempotentReplay: command.idempotentReplay };
     } catch (error) { await rollbackQuietly(client); throw mapForeignKeyError(error); } finally { client.release(); }
+  }
+}
+
+async function assertNoActivePolicyWindowConflict(
+  client: PoolClient,
+  input: {
+    kind: "markup" | "insurance";
+    isActive: boolean;
+    effectiveFrom: Date;
+    effectiveTo: Date | null;
+  },
+): Promise<void> {
+  if (!input.isActive) return;
+
+  const lockKey = input.kind === "markup" ? 93001 : 93002;
+  await client.query("SELECT pg_advisory_xact_lock($1)", [lockKey]);
+
+  const table = input.kind === "markup"
+    ? "dropship.dropship_shipping_markup_config"
+    : "dropship.dropship_insurance_pool_config";
+  const conflict = await client.query<{ id: number; name: string }>(
+    `SELECT id, name
+     FROM ${table}
+     WHERE is_active = true
+       AND effective_from < COALESCE($2::timestamptz, 'infinity'::timestamptz)
+       AND COALESCE(effective_to, 'infinity'::timestamptz) > $1
+     ORDER BY effective_from DESC, id DESC
+     LIMIT 1`,
+    [input.effectiveFrom, input.effectiveTo],
+  );
+  const existing = conflict.rows[0];
+  if (existing) {
+    throw new DropshipError(
+      "DROPSHIP_SHIPPING_POLICY_WINDOW_CONFLICT",
+      `Active ${input.kind} policy effective window overlaps ${existing.name}.`,
+      {
+        policyKind: input.kind,
+        conflictingPolicyId: existing.id,
+        conflictingPolicyName: existing.name,
+        effectiveFrom: input.effectiveFrom.toISOString(),
+        effectiveTo: input.effectiveTo?.toISOString() ?? null,
+      },
+    );
   }
 }
 
