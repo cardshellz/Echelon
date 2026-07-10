@@ -95,6 +95,7 @@ interface Purchasing {
 
 interface ShipmentTracking {
   getLandedCostForPoLine(purchaseOrderLineId: number): Promise<number | null>;
+  getLandedCostMillsForPoLine?(purchaseOrderLineId: number): Promise<number | null>;
 }
 
 interface Storage {
@@ -708,15 +709,22 @@ export class ReceivingService {
 
         if (line.purchaseOrderLineId && this.shipmentTracking) {
           try {
-            const landedCost = await this.shipmentTracking.getLandedCostForPoLine(line.purchaseOrderLineId);
-            if (landedCost !== null) {
-              // Landed cost is delivered in cents (shipment-tracking does
-              // its own rounding over freight + duties). We don't have a
-              // mills-precision variant of landed cost yet, so mirror
-              // cents → mills exactly (no precision loss — just *100).
-              // If landed-cost ever migrates to mills, update here.
-              unitCostCents = landedCost;
-              unitCostMills = centsToMills(landedCost);
+            const landedCostCents = await this.shipmentTracking.getLandedCostForPoLine(line.purchaseOrderLineId);
+            const landedCostMills =
+              this.shipmentTracking.getLandedCostMillsForPoLine
+                ? await this.shipmentTracking.getLandedCostMillsForPoLine(line.purchaseOrderLineId)
+                : null;
+            if (landedCostCents !== null || landedCostMills !== null) {
+              // Keep the legacy cents mirror when shipment tracking has it,
+              // and preserve exact mills when finalized allocation data can reconstruct it.
+              unitCostMills =
+                landedCostMills !== null
+                  ? landedCostMills
+                  : centsToMills(landedCostCents!);
+              unitCostCents =
+                landedCostCents !== null
+                  ? landedCostCents
+                  : millsToCents(unitCostMills);
             } else if (inboundShipmentId) {
               // Shipment exists but costs not finalized - mark provisional.
               costProvisional = 1;

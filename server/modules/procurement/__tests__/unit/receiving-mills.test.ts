@@ -139,6 +139,7 @@ function buildService(
   poLines: Record<number, { unitCostMills?: number | null; unitCostCents?: number | null }> = {},
   opts: {
     shipmentLandedCost?: number | null;
+    shipmentLandedCostMills?: number | null;
     shipmentLandedCostError?: Error;
     inboundShipmentId?: number | null;
     unitsPerVariant?: number;
@@ -193,13 +194,22 @@ function buildService(
   } as any;
 
   const shipmentTracking =
-    opts.shipmentLandedCost !== undefined || opts.shipmentLandedCostError
+    opts.shipmentLandedCost !== undefined ||
+    opts.shipmentLandedCostMills !== undefined ||
+    opts.shipmentLandedCostError
       ? {
           getLandedCostForPoLine: vi.fn(() =>
             opts.shipmentLandedCostError
               ? Promise.reject(opts.shipmentLandedCostError)
-              : Promise.resolve(opts.shipmentLandedCost),
+              : Promise.resolve(opts.shipmentLandedCost ?? null),
           ),
+          ...(opts.shipmentLandedCostMills !== undefined
+            ? {
+                getLandedCostMillsForPoLine: vi.fn(() =>
+                  Promise.resolve(opts.shipmentLandedCostMills ?? null),
+                ),
+              }
+            : {}),
         }
       : null;
 
@@ -325,6 +335,36 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     const putaway = updateReceivingLineCalls.find((c) => c.id === 505 && c.updates.putawayComplete === 1);
     expect(putaway!.updates.unitCost).toBe(250);
     expect(putaway!.updates.unitCostMills).toBe(25000); // centsToMills(250)
+  });
+
+  it("uses finalized shipment landed mills when shipment tracking exposes mills precision", async () => {
+    const { svc, updateReceivingLineCalls, receiveInventoryCalls } = buildService(
+      [
+        {
+          id: 509,
+          receivedQty: 3,
+          productVariantId: 11,
+          putawayLocationId: 22,
+          purchaseOrderLineId: 42,
+        },
+      ],
+      { 42: { unitCostMills: 10000 } },
+      {
+        shipmentLandedCost: 250,
+        shipmentLandedCostMills: 24995,
+        inboundShipmentId: 77,
+      },
+    );
+
+    await svc.close(1, "u1");
+
+    expect(receiveInventoryCalls[0].unitCostCents).toBe(250);
+    expect(receiveInventoryCalls[0].unitCostMills).toBe(24995);
+    expect(receiveInventoryCalls[0].inboundShipmentId).toBe(77);
+    expect(receiveInventoryCalls[0].costProvisional).toBe(0);
+    const putaway = updateReceivingLineCalls.find((c) => c.id === 509 && c.updates.putawayComplete === 1);
+    expect(putaway!.updates.unitCost).toBe(250);
+    expect(putaway!.updates.unitCostMills).toBe(24995);
   });
 
   it("marks shipment-linked receipt provisional when landed cost is not finalized", async () => {
