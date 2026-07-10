@@ -85,6 +85,10 @@ function formatPct(pct: number): string {
   return `${pct.toFixed(1)}%`;
 }
 
+function isLandedPendingLot(lot: any): boolean {
+  return Number(lot?.cost_provisional || 0) === 1 && Boolean(lot?.inbound_shipment_id);
+}
+
 // ─── Main Component ─────────────────────────────────────────────────
 
 export default function CostDashboard() {
@@ -532,9 +536,7 @@ function CostExplorer() {
               (s: number, l: any) => s + Number(l.qty_on_hand || 0) * Number(l.total_unit_cost_cents || l.unit_cost_cents || 0),
               0,
             );
-            const hasLandedPending = productLots.some(
-              (l: any) => Number(l.landed_cost_cents || 0) === 0 && l.inbound_shipment_id,
-            );
+            const hasLandedPending = productLots.some(isLandedPendingLot);
 
             return (
               <Card key={product.id}>
@@ -597,8 +599,7 @@ function CostExplorer() {
                         </TableHeader>
                         <TableBody>
                           {productLots.map((lot: any) => {
-                            const landedPending =
-                              Number(lot.landed_cost_cents || 0) === 0 && lot.inbound_shipment_id;
+                            const landedPending = isLandedPendingLot(lot);
                             return (
                               <TableRow key={lot.id} className={landedPending ? "bg-amber-50/50 dark:bg-amber-950/10" : ""}>
                                 <TableCell className="font-mono text-xs">
