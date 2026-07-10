@@ -213,6 +213,69 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
+  // Dedicated replen bin per pick item — informational label for the gun.
+  // Returns, for each order item, the SINGLE source bin the replen engine
+  // would pull from (exact mirror via resolveDedicatedReplenBin), regardless
+  // of whether replen is currently needed. Pallet-pick items and items with
+  // no assigned/resolvable source are simply absent from the map. This
+  // endpoint must NEVER block picking: on any failure it degrades to {}.
+  app.get("/api/picking/replen-bins", requireAuth, async (req, res) => {
+    const empty = { replenBins: {} as Record<string, { locationCode: string }> };
+    try {
+      const itemIds = String(req.query.itemIds ?? "")
+        .split(",")
+        .map((part) => parseInt(part.trim(), 10))
+        .filter((id) => Number.isInteger(id) && id > 0)
+        .slice(0, 100);
+      if (itemIds.length === 0) return res.json(empty);
+
+      const { replenishment } = req.app.locals.services as any;
+      if (!replenishment?.resolveDedicatedReplenBin) return res.json(empty);
+
+      // Resolve each item's pick variant + pick bin. order_items carries the
+      // picker-facing location CODE and the sku; map both to ids. DISTINCT ON
+      // guards against duplicate-SKU variants (prefer lowest active variant id).
+      const rows: any = await db.execute(sql`
+        SELECT DISTINCT ON (oi.id)
+          oi.id AS order_item_id,
+          pv.id AS variant_id,
+          wl.id AS location_id
+        FROM wms.order_items oi
+        JOIN wms.orders o ON o.id = oi.order_id
+        JOIN catalog.product_variants pv
+          ON UPPER(pv.sku) = UPPER(oi.sku)
+         AND pv.is_active = true
+        JOIN warehouse.warehouse_locations wl
+          ON wl.code = oi.location
+         AND (o.warehouse_id IS NULL OR wl.warehouse_id = o.warehouse_id)
+        WHERE oi.id = ANY(${itemIds})
+          AND oi.location IS NOT NULL
+          AND oi.location NOT IN ('UNASSIGNED', 'U')
+        ORDER BY oi.id, pv.id
+      `);
+
+      const replenBins: Record<string, { locationCode: string }> = {};
+      for (const row of rows?.rows ?? []) {
+        try {
+          const bin = await replenishment.resolveDedicatedReplenBin(
+            Number(row.variant_id),
+            Number(row.location_id),
+          );
+          // Don't echo the pick bin back as its own backup.
+          if (bin && bin.locationId !== Number(row.location_id)) {
+            replenBins[String(row.order_item_id)] = { locationCode: bin.locationCode };
+          }
+        } catch {
+          // Informational only — skip this item, never fail the request.
+        }
+      }
+      res.json({ replenBins });
+    } catch (error: any) {
+      console.error("Error resolving pick replen bins:", error?.message ?? error);
+      res.json(empty);
+    }
+  });
+
   app.post("/api/picking/orders/:id/claim", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services;

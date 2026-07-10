@@ -54,3 +54,33 @@ describe("resolveDedicatedReplenBin", () => {
     expect(body).not.toContain("thresholdMet");
   });
 });
+
+describe("GET /api/picking/replen-bins (gun pick-screen label)", () => {
+  const ROUTES_SRC = readFileSync(
+    resolve(__dirname, "../../orders/picking.routes.ts"),
+    "utf8",
+  );
+  const start = ROUTES_SRC.indexOf('"/api/picking/replen-bins"');
+  const block = ROUTES_SRC.slice(start, start + 3200);
+
+  it("exists and resolves via the exact engine resolver", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(block).toContain("resolveDedicatedReplenBin");
+  });
+
+  it("never blocks picking — degrades to an empty map on failure", () => {
+    // Both the outer catch and the per-item catch must degrade, not 500.
+    expect(block).toContain("res.json(empty)");
+    expect(block).not.toContain("res.status(500)");
+  });
+
+  it("guards against duplicate-SKU variants and skips unassigned bins", () => {
+    expect(block).toContain("DISTINCT ON (oi.id)");
+    expect(block).toContain("pv.is_active = true");
+    expect(block).toContain("'UNASSIGNED'");
+  });
+
+  it("does not echo the pick bin back as its own backup", () => {
+    expect(block).toContain("bin.locationId !== Number(row.location_id)");
+  });
+});
