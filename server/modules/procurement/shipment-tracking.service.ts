@@ -197,6 +197,32 @@ function poUnitCostMillsFromLine(poLine: any): number | null {
   return cents !== null ? centsToMills(cents) : null;
 }
 
+function snapshotPoUnitCostMills(snapshot: any): number | null {
+  const cents = nonNegativeIntegerOrNull(snapshot?.poUnitCostCents);
+  return cents !== null ? centsToMills(cents) : null;
+}
+
+function snapshotLandedUnitCostMills(snapshot: any): number | null {
+  const cents = nonNegativeIntegerOrNull(snapshot?.landedUnitCostCents);
+  return cents !== null ? centsToMills(cents) : null;
+}
+
+function snapshotAllocatedCostCents(snapshot: any): number | null {
+  const fields = [
+    "freightAllocatedCents",
+    "dutyAllocatedCents",
+    "insuranceAllocatedCents",
+    "otherAllocatedCents",
+  ];
+  let total = 0;
+  for (const field of fields) {
+    const cents = nonNegativeIntegerOrNull(snapshot?.[field] ?? 0);
+    if (cents === null) return null;
+    total += cents;
+  }
+  return total;
+}
+
 // Cost types with hard-coded allocation method overrides
 const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   duty: "by_value",
@@ -1836,6 +1862,30 @@ export function createShipmentTrackingService(
   }
 
   /**
+   * Get the landed unit cost in mills for a PO line (used by receiving.close).
+   * Reconstructs mills from finalized snapshot allocation buckets because the
+   * persisted snapshot stores the legacy cents mirror only.
+   */
+  async function getLandedCostMillsForPoLine(purchaseOrderLineId: number): Promise<number | null> {
+    const snapshot = await storage.getLandedCostSnapshotByPoLine(purchaseOrderLineId);
+    if (!snapshot) return null;
+
+    const fallbackMills = snapshotLandedUnitCostMills(snapshot);
+    const poLine = await storage.getPurchaseOrderLineById(purchaseOrderLineId);
+    const poUnitCostMills = poUnitCostMillsFromLine(poLine) ?? snapshotPoUnitCostMills(snapshot);
+    const allocatedCostCents = snapshotAllocatedCostCents(snapshot);
+    if (poUnitCostMills === null || allocatedCostCents === null) return fallbackMills;
+
+    const allocatedCostMills =
+      allocatedCostCents === 0
+        ? 0
+        : allocatedCentsPerUnitMills(allocatedCostCents, snapshot.qty);
+    if (allocatedCostMills === null) return fallbackMills;
+
+    return poUnitCostMills + allocatedCostMills;
+  }
+
+  /**
    * Create a receiving order from a shipment (convenience).
    * Sets up the receiving order linked to the shipment.
    */
@@ -1918,6 +1968,7 @@ export function createShipmentTrackingService(
     // Receiving integration
     pushLandedCostsToLots,
     getLandedCostForPoLine,
+    getLandedCostMillsForPoLine,
     getShipmentForReceiving,
 
     // Cross-references

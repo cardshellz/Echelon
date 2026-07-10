@@ -19,6 +19,7 @@ function buildStorage(overrides: Record<string, any> = {}) {
     getInboundFreightCostById: vi.fn().mockResolvedValue(null),
     getPurchaseOrderLineById: vi.fn().mockResolvedValue(null),
     getLandedCostSnapshots: vi.fn().mockResolvedValue([]),
+    getLandedCostSnapshotByPoLine: vi.fn().mockResolvedValue(null),
     deleteLandedCostSnapshotsForShipment: vi.fn().mockResolvedValue(undefined),
     bulkCreateLandedCostSnapshots: vi.fn().mockResolvedValue([]),
     createLandedCostAdjustment: vi.fn().mockResolvedValue({}),
@@ -222,6 +223,35 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
       totalAllocatedMillsPerUnit: 25500,
       landedUnitCostMills: 35500,
     }));
+  });
+});
+
+describe("ShipmentTrackingService.getLandedCostMillsForPoLine", () => {
+  it("reconstructs finalized landed unit cost in mills from snapshot allocations", async () => {
+    const storage = buildStorage({
+      getLandedCostSnapshotByPoLine: vi.fn().mockResolvedValue({
+        purchaseOrderLineId: 21,
+        poUnitCostCents: 100,
+        freightAllocatedCents: 1,
+        dutyAllocatedCents: 0,
+        insuranceAllocatedCents: 0,
+        otherAllocatedCents: 0,
+        landedUnitCostCents: 100,
+        qty: 3,
+      }),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({
+        id: 21,
+        unitCostMills: 10000,
+        unitCostCents: 100,
+      }),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getLandedCostMillsForPoLine(21);
+
+    expect(result).toBe(10033);
+    expect(storage.getLandedCostSnapshotByPoLine).toHaveBeenCalledWith(21);
+    expect(storage.getPurchaseOrderLineById).toHaveBeenCalledWith(21);
   });
 });
 
