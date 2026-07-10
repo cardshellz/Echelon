@@ -99,4 +99,70 @@ describe("buildForecastTrustHealth", () => {
       ]),
     });
   });
+
+  it("does not classify no-recent-demand rows as velocity source repairs only because latest demand is blank", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      asOf: "2026-05-24T00:00:00.000Z",
+      rows: [
+        {
+          product_id: 65,
+          variant_id: 651,
+          base_sku: "NO-DEMAND-NO-LATEST",
+          product_name: "No Demand No Latest Product",
+          total_pieces: 100,
+          total_reserved_pieces: 0,
+          total_outbound_pieces: 0,
+          previous_outbound_pieces: 0,
+          demand_order_count: 0,
+          demand_active_days: 0,
+          latest_demand_at: null,
+          short_window_days: 7,
+          short_outbound_pieces: 0,
+          previous_short_outbound_pieces: 0,
+          short_demand_order_count: 0,
+          short_demand_active_days: 0,
+          short_latest_demand_at: null,
+          long_window_days: 90,
+          long_outbound_pieces: 0,
+          previous_long_outbound_pieces: 0,
+          long_demand_order_count: 0,
+          long_demand_active_days: 0,
+          long_latest_demand_at: null,
+          seasonal_window_days: 30,
+          seasonal_outbound_pieces: 0,
+          previous_seasonal_outbound_pieces: 0,
+          seasonal_demand_order_count: 0,
+          seasonal_demand_active_days: 0,
+          seasonal_latest_demand_at: null,
+          on_order_pieces: 0,
+          vendor_lead_time_days: 3,
+          safety_stock_days: 1,
+          order_uom_units: 10,
+          vendor_product_id: 6510,
+          preferred_vendor_id: 10,
+          estimated_cost_cents: 250,
+          vendor_product_updated_at: "2026-05-20T00:00:00.000Z",
+        },
+      ],
+    });
+    const health = buildForecastTrustHealth(result);
+
+    expect(result.items[0].forecastProvenance.forecastTrust).toMatchObject({
+      signal: "no_recent_demand",
+      inputGaps: ["missing_latest_demand_at"],
+    });
+    expect(health).toMatchObject({
+      actionCounts: {
+        verify_recent_demand: 1,
+      },
+      actions: [
+        expect.objectContaining({
+          code: "verify_recent_demand",
+          count: 1,
+        }),
+      ],
+    });
+    expect(health.actionCounts.repair_order_velocity_source).toBeUndefined();
+  });
 });

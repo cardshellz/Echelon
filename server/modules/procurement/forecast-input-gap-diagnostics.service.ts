@@ -67,12 +67,11 @@ function increment(counts: Record<string, number>, key: string | null | undefine
 export function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInputGapAction {
   const gaps = item.forecastProvenance.forecastTrust.inputGaps;
   const signal = item.forecastProvenance.forecastTrust.signal;
+  const hasMissingDemandSampleMetadata =
+    gaps.includes("missing_demand_order_count") || gaps.includes("missing_demand_active_days");
+  const hasMissingLatestDemandTimestamp = gaps.includes("missing_latest_demand_at");
 
-  if (
-    gaps.includes("missing_latest_demand_at") ||
-    gaps.includes("missing_demand_order_count") ||
-    gaps.includes("missing_demand_active_days")
-  ) {
+  if (hasMissingDemandSampleMetadata || (hasMissingLatestDemandTimestamp && signal !== "no_recent_demand")) {
     return {
       code: "repair_order_velocity_source",
       label: "Repair velocity source",
