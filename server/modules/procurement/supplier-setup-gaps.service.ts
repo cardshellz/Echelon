@@ -52,6 +52,13 @@ function supplierGapControls(item: PurchasingRecommendationItem): PurchasingReco
   return Array.from(controlsByCode.values()).sort((a, b) => supplierSetupGapPriority(a.code) - supplierSetupGapPriority(b.code));
 }
 
+function supplierSetupBlocksCurrentRecommendation(
+  item: PurchasingRecommendationItem,
+  controls: PurchasingRecommendationQualityControl[],
+): boolean {
+  return item.skippedReason === "no_vendor" && controls.some((control) => control.code === "missing_vendor");
+}
+
 export function buildSupplierSetupGaps(result: ReturnType<typeof generatePurchasingRecommendations>) {
   const sourceItems = new Map<string, PurchasingRecommendationItem>();
   for (const item of [...result.items, ...result.skippedItems]) {
@@ -86,7 +93,9 @@ export function buildSupplierSetupGaps(result: ReturnType<typeof generatePurchas
       if (control.code === "product_lead_time_fallback") counts.productLeadTimeFallback++;
     }
 
-    if (controls.some((control) => control.severity === "block")) {
+    const blocksCurrentRecommendation = supplierSetupBlocksCurrentRecommendation(item, controls);
+
+    if (blocksCurrentRecommendation) {
       counts.blockedRecommendations++;
     } else {
       counts.reviewRecommendations++;
@@ -112,6 +121,7 @@ export function buildSupplierSetupGaps(result: ReturnType<typeof generatePurchas
       preferredVendorName: item.preferredVendorName,
       suggestedOrderQty: item.suggestedOrderQty,
       orderUomLabel: item.orderUomLabel,
+      blocksCurrentRecommendation,
       candidateScore: item.recommendationCandidateScore,
       qualityGate: item.qualityGate,
       gaps: controls.map((control) => ({
@@ -124,8 +134,8 @@ export function buildSupplierSetupGaps(result: ReturnType<typeof generatePurchas
       action,
     }];
   }).sort((a, b) => {
-    const aSeverity = a.gaps.some((gap) => gap.severity === "block") ? 0 : 1;
-    const bSeverity = b.gaps.some((gap) => gap.severity === "block") ? 0 : 1;
+    const aSeverity = a.blocksCurrentRecommendation ? 0 : 1;
+    const bSeverity = b.blocksCurrentRecommendation ? 0 : 1;
     if (aSeverity !== bSeverity) return aSeverity - bSeverity;
     const aPriority = supplierSetupGapPriority(a.gaps[0]?.code ?? "");
     const bPriority = supplierSetupGapPriority(b.gaps[0]?.code ?? "");
