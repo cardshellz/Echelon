@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
+function sqlText(query: any): string {
+  if (!query) return "";
+  if (typeof query === "string") return query.toLowerCase();
+  if (Array.isArray(query)) return query.map(sqlText).join(" ");
+  if (typeof query.sql === "string") return query.sql.toLowerCase();
+  if (Array.isArray(query.value)) return query.value.map(sqlText).join(" ");
+  if (Array.isArray(query.queryChunks)) return query.queryChunks.map(sqlText).join(" ");
+  return String(query).toLowerCase();
+}
+
 /**
  * COGS Phase 8: unified valuation uses total_unit_cost_cents (PO + landed)
  * instead of unit_cost_cents alone, and reports zero-cost / provisional flags.
@@ -159,5 +169,30 @@ describe("COGSService.getInventoryValuation (product-level)", () => {
       baseSku: "WDG",
       zeroCostQty: 3,
     });
+
+    const executedSql = db.execute.mock.calls.map(([query]: any[]) => sqlText(query)).join("\n");
+    expect(executedSql).toContain("il.cost_provisional = 1 and il.inbound_shipment_id is not null");
+    expect(executedSql).not.toContain("coalesce(il.landed_cost_cents, 0) = 0");
+  });
+
+  it("filters landed pending lots by provisional shipment-linked lots", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { COGSService } = await import("../../cogs.service");
+
+    const db = {
+      select: vi.fn(),
+      insert: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      execute: vi.fn(async () => ({ rows: [] })),
+      transaction: vi.fn(async (fn: any) => fn(db)),
+    } as any;
+
+    const svc = new COGSService(db);
+    await svc.getAllCostLots({ onlyPending: true });
+
+    const executedSql = db.execute.mock.calls.map(([query]: any[]) => sqlText(query)).join("\n");
+    expect(executedSql).toContain("il.cost_provisional = 1 and il.inbound_shipment_id is not null");
+    expect(executedSql).not.toContain("coalesce(il.landed_cost_cents, 0) = 0");
   });
 });
