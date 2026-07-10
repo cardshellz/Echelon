@@ -15,11 +15,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 import {
-  buildObservedIntegrityFindings,
   connectionStringFromEnv,
   parseFlags as parseAuditFlags,
   runWmsInventoryAudit,
 } from "./audit-wms-inventory-integrity";
+import { buildIntegrityAuditRegistryInput } from "../server/modules/inventory/integrity/integrity-audit-run.domain";
 import {
   persistIntegrityAuditRegistry,
   previewIntegrityAuditRegistry,
@@ -103,28 +103,7 @@ export function buildRegistryInput(params: {
   completedAt: string;
   audit: Awaited<ReturnType<typeof runWmsInventoryAudit>>;
 }): IntegrityAuditRegistryInput {
-  return {
-    runId: params.runId,
-    scope: params.scope,
-    sourceVersion: sourceVersion(),
-    startedAt: params.startedAt,
-    snapshotAt: params.audit.snapshot.snapshotAt,
-    completedAt: params.completedAt,
-    databaseName: params.audit.snapshot.databaseName,
-    databaseUser: params.audit.snapshot.databaseUser,
-    serverVersion: params.audit.snapshot.serverVersion,
-    recoveryMode: params.audit.snapshot.recoveryMode,
-    blockerCount: params.audit.summary.blockers,
-    warningCount: params.audit.summary.warnings,
-    checks: params.audit.results.map((result) => ({
-      checkId: result.check.id,
-      category: result.check.category,
-      severity: result.check.severity,
-      findingCount: result.count,
-      elapsedMs: result.elapsedMs,
-    })),
-    findings: buildObservedIntegrityFindings(params.audit),
-  };
+  return buildIntegrityAuditRegistryInput({ ...params, sourceVersion: sourceVersion() });
 }
 
 function printResult(params: {

@@ -187,10 +187,14 @@ Implementation checkpoint:
 
 - The read-only audit, stable entity fingerprints, quantitative magnitude contract,
   lifecycle registry schema, immutable observations, dry-run preview, and atomic
-  recorder are implemented on the audit branch.
-- Production migration verification and the first dry-run/execute/dry-run sequence
-  remain required before scheduling is enabled or the stabilization watermark is
-  declared live.
+  recorder were deployed in release `v2321`.
+- The first production dry-run/execute/dry-run sequence completed on July 10, 2026.
+  Run `864c28b7-f8c8-4146-963d-1e89ae02e099` is the verified all-check baseline:
+  31 checks, 1,773 blockers, 25,888 warnings, and 27,661 stable findings.
+- Measurement activation adds the explicit stabilization watermark, read-only-role
+  enforcement, advisory-locked scheduled runner, and durable alert outbox. The
+  watermark must be activated and the scheduled path must pass dry-run before the
+  hourly scheduler is enabled.
 
 ### A1. Close And Shrink The Writer Topology
 

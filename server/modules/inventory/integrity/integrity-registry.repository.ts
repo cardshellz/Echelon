@@ -5,6 +5,7 @@ import {
   type IntegrityObservationKind,
   type ObservedIntegrityFinding,
 } from "./integrity-registry.domain";
+import { enqueueContinuousIntegrityAlert } from "./integrity-monitor.repository";
 
 const REGISTRY_LOCK_NAME = "wms_inventory_integrity_registry";
 const STAGE_BATCH_SIZE = 500;
@@ -92,8 +93,15 @@ function assertRegistryInput(input: IntegrityAuditRegistryInput): void {
   }
 }
 
-function incrementSummary(summary: IntegrityLifecycleSummary, kind: IntegrityObservationKind): void {
-  summary[kind] += 1;
+function incrementSummary(
+  summary: IntegrityLifecycleSummary,
+  kind: IntegrityObservationKind,
+  amount = 1,
+): void {
+  if (!Number.isSafeInteger(amount) || amount < 0) {
+    throw new Error(`Invalid integrity lifecycle count for ${kind}: ${amount}`);
+  }
+  summary[kind] += amount;
 }
 
 async function readExistingFindings(
@@ -522,7 +530,7 @@ async function readStageSummary(
   const summary = emptySummary(findings);
   for (const row of result.rows) {
     const kind = String(row.observation_kind) as IntegrityObservationKind;
-    incrementSummary(summary, kind);
+    incrementSummary(summary, kind, Number(row.count));
   }
   summary.resolved = resolved;
   return summary;
@@ -543,6 +551,15 @@ export async function persistIntegrityAuditRegistry(
     await classifyStage(client);
     await upsertFindings(client, input);
     const resolved = await resolveMissingFindings(client, input);
+    if (input.scope === "continuous") {
+      await enqueueContinuousIntegrityAlert(client, {
+        runId: input.runId,
+        snapshotAt: input.snapshotAt,
+        sourceVersion: input.sourceVersion,
+        blockerCount: input.blockerCount,
+        warningCount: input.warningCount,
+      });
+    }
     const summary = await readStageSummary(client, input.findings.length, resolved);
     await client.query("COMMIT");
     return summary;

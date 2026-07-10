@@ -1239,6 +1239,18 @@ export function buildWmsIntegrityChecks(): WmsIntegrityCheck[] {
   });
 }
 
+export function requiredWmsIntegrityAuditRelations(): string[] {
+  const relations = new Set<string>();
+  for (const check of buildWmsIntegrityChecks()) {
+    for (const match of check.sql.matchAll(
+      /\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*)/gi,
+    )) {
+      relations.add(match[1].toLowerCase());
+    }
+  }
+  return [...relations].sort();
+}
+
 function loadDotenvIfAvailable(): void {
   if (process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL) return;
   const envPath = path.resolve(process.cwd(), ".env");
