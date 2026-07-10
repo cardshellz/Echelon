@@ -6,6 +6,7 @@ import { registerAuthRoutes } from "./modules/identity/identity.routes";
 import { registerLocationRoutes } from "./modules/warehouse/locations.routes";
 import { registerPickingRoutes } from "./modules/orders/picking.routes";
 import { registerOperationsDashboardRoutes } from "./modules/orders/operations-dashboard.routes";
+import { registerOperationsControlTowerRoutes } from "./modules/operations/control-tower.routes";
 import { registerShopifyRoutes } from "./routes/shopify.routes";
 import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
 import { registerProductRoutes } from "./modules/catalog/catalog.routes";
@@ -102,6 +103,7 @@ export async function registerRoutes(
   registerLocationRoutes(app);
   registerPickingRoutes(app);
   registerOperationsDashboardRoutes(app);
+  registerOperationsControlTowerRoutes(app);
   registerShopifyRoutes(app);
   registerWarehouseRoutes(app);
   await registerProductRoutes(app);
