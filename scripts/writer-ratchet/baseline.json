@@ -282,6 +282,18 @@
   "inventory.cycle_counts": [
     "modules/inventory"
   ],
+  "inventory.integrity_audit_run_checks": [
+    "modules/inventory"
+  ],
+  "inventory.integrity_audit_runs": [
+    "modules/inventory"
+  ],
+  "inventory.integrity_finding_observations": [
+    "modules/inventory"
+  ],
+  "inventory.integrity_findings": [
+    "modules/inventory"
+  ],
   "inventory.inventory_levels": [
     "modules/catalog",
     "modules/channels",
