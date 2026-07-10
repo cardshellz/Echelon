@@ -103,6 +103,7 @@ function isNavHrefActive(pathname: string, currentHref: string, href: string): b
 
 const navStructure: NavEntry[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
+  { label: "Operations Control Tower", icon: BarChart3, href: "/oms/flow-monitor", roles: ["admin", "lead"] },
   {
     label: "Procurement",
     icon: ShoppingBag,
@@ -149,7 +150,6 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Orders", icon: Globe, href: "/oms/orders" },
-      { label: "Operations Control Tower", icon: BarChart3, href: "/oms/flow-monitor" },
       { label: "Returns", icon: RotateCcw, href: "/returns" },
       { label: "Order History", icon: History, href: "/order-history" },
     ],
