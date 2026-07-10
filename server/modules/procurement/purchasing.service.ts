@@ -1886,6 +1886,29 @@ export function createPurchasingService(db: any, storage: Storage) {
       // Non-critical — if product_locations lookup fails, just skip auto-assign
     }
 
+    // The divisor that turns ordered pieces into receive-pack (case) counts
+    // MUST come from the SAME variant we stamp on the line. Previously packSize
+    // was sourced from poLine.expectedReceiveUnitsPerVariant/unitsPerUom, a
+    // field that can be unset (→ 1) even when expectedReceiveVariantId points
+    // at a "Case of N" variant — so we stamped the case variant but divided by
+    // 1, showing ordered PIECES labeled as cases (269640 pieces → "269640
+    // cases" instead of 360; RCV-20260710-003). Look up each resolved
+    // variant's authoritative unitsPerVariant so variant and divisor can never
+    // disagree — the same discipline createReceiptFromShipment and the client's
+    // applyVariant already use.
+    const poUnitsPerVariantById = new Map<number, number>();
+    for (const poLine of receivableLines) {
+      const variantId = poLine.expectedReceiveVariantId ?? poLine.productVariantId ?? null;
+      if (variantId && !poUnitsPerVariantById.has(variantId)) {
+        try {
+          const variant = await storage.getProductVariantById(variantId);
+          if (variant) {
+            poUnitsPerVariantById.set(variantId, Math.max(1, variant.unitsPerVariant || 1));
+          }
+        } catch { /* non-critical: fall back to PO receive units below */ }
+      }
+    }
+
     // Create receiving lines from PO lines.
     //
     // Stamp BOTH cents and mills on the new receiving_line so receive-time
@@ -1896,8 +1919,13 @@ export function createPurchasingService(db: any, storage: Storage) {
     const receivingLineData = receivableLines.map((poLine: any) => {
       const resolvedVariantId =
         poLine.expectedReceiveVariantId ?? poLine.productVariantId ?? null;
+      // Prefer the stamped variant's own unitsPerVariant; only fall back to the
+      // PO's UOM fields when the variant is unknown/unresolvable.
       const packSize =
-        poLine.expectedReceiveUnitsPerVariant ?? poLine.unitsPerUom ?? 1;
+        (resolvedVariantId ? poUnitsPerVariantById.get(resolvedVariantId) : undefined) ??
+        poLine.expectedReceiveUnitsPerVariant ??
+        poLine.unitsPerUom ??
+        1;
       const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
       const hasPoMills =
         typeof poLine.unitCostMills === "number" &&
