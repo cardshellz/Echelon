@@ -23,6 +23,7 @@ import type {
 } from "@shared/schema";
 import { inboundShipmentLines, inboundFreightCosts, vendors } from "@shared/schema";
 import { centsToMills, millsToCents, perUnitMills } from "@shared/utils/money";
+import { createCOGSService } from "../inventory/cogs.service";
 
 /**
  * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
@@ -104,6 +105,10 @@ interface Storage {
   getProductById(id: number): Promise<any>;
   // Inventory lots
   updateInventoryLot(id: number, updates: any): Promise<any>;
+}
+
+interface LotCostRevalueService {
+  updateLotLandedCostMills(lotId: number, landedCostMills: number): Promise<any | null>;
 }
 
 // ── Custom error ────────────────────────────────────────────────────
@@ -236,7 +241,11 @@ function getReceiveUnitsPerVariant(row: any): number | null {
 
 export type ShipmentTrackingService = ReturnType<typeof createShipmentTrackingService>;
 
-export function createShipmentTrackingService(db: any, storage: Storage) {
+export function createShipmentTrackingService(
+  db: any,
+  storage: Storage,
+  lotCostRevalueService: LotCostRevalueService = createCOGSService(db),
+) {
 
   // ─── Private helpers ────────────────────────────────────────────
 
@@ -1788,12 +1797,10 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
         continue;
       }
 
-      // Allocate the line's non-product landed cost to THIS lot's variant unit (case),
-      // in MILLS: round_half_up(nonProductCents × 100 × units_per_variant ÷ qty). The lot
-      // already carries product + packaging mills from receive; set landed and recompute
-      // total = product + packaging + landed (cents columns derived as display mirrors).
+      // Allocate the line's non-product landed cost to THIS lot's variant unit, then
+      // delegate row locking, layer recompute, COGS cascade, and audit logging to COGS.
       const variant = await storage.getProductVariantById(Number(lot.productVariantId));
-      const { landedCostMills, totalMills, totalCents } = computeLotLandedMills({
+      const { landedCostMills } = computeLotLandedMills({
         landedNonProductCents: finalized.landedNonProductCents,
         unitsPerVariant: Number(variant?.unitsPerVariant) || 1,
         qty: finalized.qty,
@@ -1802,39 +1809,15 @@ export function createShipmentTrackingService(db: any, storage: Storage) {
       });
 
       try {
-        await db.execute(sqlTag`
-          UPDATE inventory.inventory_lots SET
-            landed_cost_mills = ${landedCostMills},
-            total_unit_cost_mills = ${totalMills},
-            unit_cost_mills = ${totalMills},
-            landed_cost_cents = ${millsToCents(landedCostMills)},
-            total_unit_cost_cents = ${totalCents},
-            unit_cost_cents = ${totalCents},
-            cost_provisional = 0,
-            cost_source = CASE WHEN cost_source = 'po' THEN 'po_landed' ELSE cost_source END
-          WHERE id = ${lot.id}
-        `);
+        const revalue = await lotCostRevalueService.updateLotLandedCostMills(lot.id, landedCostMills);
+        if (!revalue) {
+          skipped.push({ lotId: lot.id, productVariantId: lot.productVariantId, reason: "lot_update_failed", lineIds: finalized.lineIds });
+          continue;
+        }
       } catch (e: any) {
-        console.warn(`[ShipmentTracking] landed-cost lot update for lot ${lot.id} failed: ${e.message}`);
+        console.warn(`[ShipmentTracking] landed-cost lot revalue for lot ${lot.id} failed: ${e.message}`);
         skipped.push({ lotId: lot.id, productVariantId: lot.productVariantId, reason: "lot_update_failed", lineIds: finalized.lineIds });
         continue;
-      }
-
-      // Cascade to any order_item_costs already booked from this lot (rare — provisional
-      // lots are usually unsold) so shipped COGS reflects the finalized landed cost. The
-      // lot's per-variant-unit total now includes freight; mirror it (mills + cents).
-      try {
-        await db.execute(sqlTag`
-          UPDATE oms.order_item_costs
-          SET unit_cost_mills = ${totalMills},
-              total_cost_mills = qty * ${totalMills},
-              unit_cost_cents = ${totalCents},
-              total_cost_cents = qty * ${totalCents}
-          WHERE inventory_lot_id = ${lot.id}
-            AND unit_cost_mills != ${totalMills}
-        `);
-      } catch (e: any) {
-        console.warn(`[ShipmentTracking] COGS cascade for lot ${lot.id} failed (non-fatal): ${e.message}`);
       }
 
       updated++;
