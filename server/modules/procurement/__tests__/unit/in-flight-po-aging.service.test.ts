@@ -60,6 +60,68 @@ describe("buildInFlightPoAgingDiagnostics", () => {
         href: "/purchase-orders/201",
       },
     });
+    expect(result.items[0]?.detail).toContain("without vendor acknowledgement or an expected delivery date");
+  });
+
+  it("continues aging sent POs from submission while vendor acknowledgement is missing", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 208,
+      sentToVendorAt: "2026-05-01T00:00:00.000Z",
+      expectedDeliveryDate: "2026-06-15T00:00:00.000Z",
+    })], { now });
+
+    expect(result.items[0]).toMatchObject({
+      poId: 208,
+      stageStartedAt: "2026-05-01T00:00:00.000Z",
+      ageDays: 19,
+      severity: "critical",
+    });
+    expect(result.items[0]?.detail).toContain("without vendor acknowledgement");
+  });
+
+  it("does not age acknowledged POs before their effective delivery date", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 209,
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
+      sentToVendorAt: "2026-05-01T00:00:00.000Z",
+      expectedDeliveryDate: "2026-06-15T00:00:00.000Z",
+    })], { now });
+
+    expect(result.totalAging).toBe(0);
+    expect(result.items).toHaveLength(0);
+    expect(result.counts.overdueEta).toBe(0);
+  });
+
+  it("ages acknowledged POs from the effective delivery date", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 210,
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
+      sentToVendorAt: "2026-05-01T00:00:00.000Z",
+      confirmedDeliveryDate: "2026-05-10T00:00:00.000Z",
+    })], { now });
+
+    expect(result.items[0]).toMatchObject({
+      poId: 210,
+      stageStartedAt: "2026-05-10T00:00:00.000Z",
+      ageDays: 10,
+      severity: "warning",
+    });
+    expect(result.items[0]?.detail).toContain("past its vendor-confirmed delivery date");
+  });
+
+  it("does not age in-transit POs before their effective delivery date", () => {
+    const result = buildInFlightPoAgingDiagnostics([row({
+      id: 211,
+      status: "acknowledged",
+      physicalStatus: "in_transit",
+      sentToVendorAt: "2026-05-01T00:00:00.000Z",
+      expectedDeliveryDate: "2026-06-15T00:00:00.000Z",
+    })], { now });
+
+    expect(result.totalAging).toBe(0);
+    expect(result.items).toHaveLength(0);
   });
 
   it("flags arrived POs waiting on receiving", () => {
@@ -110,6 +172,8 @@ describe("buildInFlightPoAgingDiagnostics", () => {
   it("does not trust a confirmed delivery date that predates PO submission", () => {
     const result = buildInFlightPoAgingDiagnostics([row({
       id: 207,
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
       sentToVendorAt: "2026-05-01T00:00:00.000Z",
       orderDate: "2026-05-01T00:00:00.000Z",
       expectedDeliveryDate: "2026-05-10T00:00:00.000Z",
