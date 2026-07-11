@@ -8,7 +8,9 @@ import {
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowRight,
   ArrowUpRight,
+  Boxes,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -19,10 +21,13 @@ import {
   History,
   Inbox,
   Loader2,
+  PackageCheck,
+  RadioTower,
   RefreshCw,
   Search,
   ServerCog,
   ShieldAlert,
+  Truck,
   UserRound,
   X,
 } from "lucide-react";
@@ -52,6 +57,8 @@ import { cn } from "@/lib/utils";
 type Domain = "oms" | "wms" | "shipping" | "inventory" | "procurement";
 type Severity = "blocker" | "high" | "medium" | "low";
 type TowerView = "attention" | "in_progress" | "waiting" | "resolved";
+type FlowIssueStage = "intake" | "oms_to_wms" | "wms_fulfill" | "engine_push" | "shipped" | "writeback" | "other";
+type FlowIssueSeverity = "critical" | "warning" | "info";
 
 interface QueueItem {
   id: number;
@@ -86,18 +93,109 @@ interface QueueItem {
   sourceName: string;
 }
 
-interface QueueResponse {
+interface IssueGroup {
+  groupKey: string;
+  domain: Domain;
+  code: string;
+  title: string;
+  summary: string;
+  expectedState: string;
+  actualState: string;
+  recommendedAction: string;
+  severity: Severity;
+  urgency: "overdue" | "due_soon" | "normal" | "deferred";
+  triageStatus: string;
+  ownerTeam: string | null;
+  affectedRecords: number;
+  affectedEntities: number;
+  recurrenceCount: number;
+  worsenedCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastChangedAt: string;
+  responseDueAt: string | null;
+  ageMinutes: number;
+  representativeId: number;
+  sampleEntityRefs: string[];
+  sourceNames: string[];
+}
+
+interface GroupResponse {
   generatedAt: string;
-  total: number;
+  totalGroups: number;
+  totalAffectedRecords: number;
   viewCounts: {
     attention: number;
     inProgress: number;
     waiting: number;
     resolved: number;
   };
+  viewAffectedRecords: {
+    attention: number;
+    inProgress: number;
+    waiting: number;
+    resolved: number;
+  };
   domainCounts: Record<Domain, number>;
-  items: QueueItem[];
+  domainAffectedRecords: Record<Domain, number>;
+  groups: IssueGroup[];
   nextCursor: string | null;
+}
+
+interface GroupDetailResponse {
+  generatedAt: string;
+  group: IssueGroup;
+  instances: QueueItem[];
+  nextCursor: string | null;
+}
+
+interface FlowWaterfallSnapshot {
+  generatedAt: string;
+  windowDays: number;
+  funnel: {
+    entered: number;
+    reachedWms: number;
+    hasShipment: number;
+    shipped: number;
+    trackingConfirmed: number;
+  };
+  channels: Array<{ provider: string; entered: number }>;
+  crossSystem: { wmsShippedOmsOpen: number; omsNotUpdated: number };
+  sla: { breached: number };
+  issues: FlowIssueSnapshot[];
+}
+
+interface FlowIssueSnapshot {
+  code: string;
+  kind: "stuck" | "contradiction" | "duplicate" | "queue_failure" | "sla";
+  severity: FlowIssueSeverity;
+  stage: FlowIssueStage;
+  count: number;
+  message: string;
+  why?: string;
+  remediation: string;
+  replaySafe: boolean;
+}
+
+interface FlowBucketResponse {
+  code: string;
+  rows: Array<Record<string, unknown>>;
+}
+
+interface FlowOverviewResponse {
+  status: "pending" | "refreshing" | "degraded" | "failed" | "stale" | "current";
+  stale: boolean;
+  staleAfterMinutes: number;
+  snapshot: FlowWaterfallSnapshot | null;
+  lastAttempt: {
+    status: string;
+    startedAt: string | null;
+    completedAt: string | null;
+    durationMs: number | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+    updatedAt: string | null;
+  } | null;
 }
 
 interface Observation {
@@ -151,11 +249,24 @@ interface SourceHealthResponse {
   sources: Array<{
     name: string;
     sourceNamespace: string;
-    status: "healthy" | "degraded" | "failed" | "stale" | "never_run" | "version_mismatch";
+    status: "healthy" | "refreshing" | "degraded" | "failed" | "stale" | "never_run" | "version_mismatch";
     projectionVersion: number;
     openItemCount: number;
+    controlGapCount: number;
     ageMinutes?: number | null;
     lastRun: Record<string, unknown> | null;
+  }>;
+  controlGaps: Array<{
+    groupKey: string;
+    domain: Domain;
+    code: string;
+    title: string;
+    summary: string;
+    severity: Severity;
+    affectedRecords: number;
+    firstSeenAt: string;
+    lastSeenAt: string;
+    lastChangedAt: string;
   }>;
 }
 
@@ -173,7 +284,7 @@ const DOMAIN_LABEL: Record<Domain, string> = {
   procurement: "Procurement",
 };
 
-const VIEW_CONFIG: Array<{ value: TowerView; label: string; countKey: keyof QueueResponse["viewCounts"] }> = [
+const VIEW_CONFIG: Array<{ value: TowerView; label: string; countKey: keyof GroupResponse["viewCounts"] }> = [
   { value: "attention", label: "Needs Attention", countKey: "attention" },
   { value: "in_progress", label: "In Progress", countKey: "inProgress" },
   { value: "waiting", label: "Waiting", countKey: "waiting" },
@@ -226,6 +337,56 @@ function humanize(value: string): string {
   return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+const FLOW_SEVERITY_ORDER: Record<FlowIssueSeverity, number> = {
+  critical: 0,
+  warning: 1,
+  info: 2,
+};
+
+function flowSeverityClass(severity: FlowIssueSeverity): string {
+  if (severity === "critical") return "border-red-300 bg-red-50 text-red-800";
+  if (severity === "warning") return "border-orange-300 bg-orange-50 text-orange-800";
+  return "border-slate-300 bg-slate-50 text-slate-700";
+}
+
+function flowOrderReference(row: Record<string, unknown>): string | null {
+  for (const key of ["order_number", "external_order_number", "channel_order_number"]) {
+    const value = row[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return null;
+}
+
+function flowRecordTitle(row: Record<string, unknown>, index: number): string {
+  const orderReference = flowOrderReference(row);
+  if (orderReference) return orderReference;
+
+  for (const [key, label] of [
+    ["shipment_id", "Shipment"],
+    ["inbox_id", "Inbox event"],
+    ["retry_id", "Retry"],
+    ["oms_order_id", "OMS order"],
+    ["wms_order_id", "WMS order"],
+  ] as const) {
+    const value = row[key];
+    if (value !== null && value !== undefined && String(value).trim()) return `${label} ${String(value)}`;
+  }
+
+  return `Evidence row ${index + 1}`;
+}
+
+function formatFlowRecordValue(key: string, value: unknown): string {
+  if (value === null || value === undefined) return "Not available";
+  if (typeof value === "object") return JSON.stringify(value);
+  const text = String(value);
+  if (key === "at" || key.endsWith("_at")) {
+    const timestamp = new Date(text);
+    if (!Number.isNaN(timestamp.getTime())) return timestamp.toLocaleString();
+  }
+  return text;
+}
+
 function localDateTimeValue(date: Date): string {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
@@ -240,7 +401,7 @@ async function fetchJson<T>(url: string): Promise<T> {
   return response.json();
 }
 
-function buildQueueUrl(params: {
+function buildGroupUrl(params: {
   view: TowerView;
   domain: Domain | "all";
   severity: Severity | "all";
@@ -255,7 +416,26 @@ function buildQueueUrl(params: {
   });
   if (params.search) query.set("search", params.search);
   if (params.cursor) query.set("cursor", params.cursor);
-  return `/api/operations/control-tower/v2/work-items?${query.toString()}`;
+  return `/api/operations/control-tower/v2/groups?${query.toString()}`;
+}
+
+function buildGroupDetailUrl(params: {
+  groupKey: string;
+  view: TowerView;
+  domain: Domain | "all";
+  severity: Severity | "all";
+  search: string;
+  cursor: string | null;
+}): string {
+  const query = new URLSearchParams({
+    view: params.view,
+    domain: params.domain,
+    severity: params.severity,
+    limit: "25",
+  });
+  if (params.search) query.set("search", params.search);
+  if (params.cursor) query.set("cursor", params.cursor);
+  return `/api/operations/control-tower/v2/groups/${encodeURIComponent(params.groupKey)}?${query.toString()}`;
 }
 
 function QueueSkeleton() {
@@ -293,6 +473,7 @@ export default function FlowMonitor() {
   const [severity, setSeverity] = useState<Severity | "all">("all");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [compactDetailOpen, setCompactDetailOpen] = useState(false);
   const [showSystemHealth, setShowSystemHealth] = useState(false);
@@ -307,10 +488,10 @@ export default function FlowMonitor() {
     return () => window.clearTimeout(timer);
   }, [searchInput]);
 
-  const queueQuery = useInfiniteQuery({
+  const groupQuery = useInfiniteQuery({
     queryKey: ["operations-control-tower-v2", view, domain, severity, search],
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam }) => fetchJson<QueueResponse>(buildQueueUrl({
+    queryFn: ({ pageParam }) => fetchJson<GroupResponse>(buildGroupUrl({
       view,
       domain,
       severity,
@@ -322,14 +503,39 @@ export default function FlowMonitor() {
     refetchInterval: 30_000,
   });
 
-  const pages = queueQuery.data?.pages ?? [];
-  const queueSummary = pages[0] ?? null;
-  const items = useMemo(() => pages.flatMap((page) => page.items), [pages]);
+  const pages = groupQuery.data?.pages ?? [];
+  const groupSummary = pages[0] ?? null;
+  const groups = useMemo(() => pages.flatMap((page) => page.groups), [pages]);
 
   useEffect(() => {
-    if (selectedId !== null && items.some((item) => item.id === selectedId)) return;
-    setSelectedId(items[0]?.id ?? null);
-  }, [items, selectedId]);
+    if (selectedGroupKey !== null && groups.some((group) => group.groupKey === selectedGroupKey)) return;
+    setSelectedGroupKey(groups[0]?.groupKey ?? null);
+    setSelectedId(null);
+  }, [groups, selectedGroupKey]);
+
+  const groupDetailQuery = useInfiniteQuery({
+    queryKey: ["operations-control-tower-v2-group", selectedGroupKey, view, domain, severity, search],
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam }) => fetchJson<GroupDetailResponse>(buildGroupDetailUrl({
+      groupKey: selectedGroupKey!,
+      view,
+      domain,
+      severity,
+      search,
+      cursor: pageParam,
+    })),
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    enabled: selectedGroupKey !== null && selectedId === null && !showSystemHealth,
+  });
+
+  const groupDetailPages = groupDetailQuery.data?.pages ?? [];
+  const selectedGroup = groupDetailPages[0]?.group
+    ?? groups.find((group) => group.groupKey === selectedGroupKey)
+    ?? null;
+  const groupInstances = useMemo(
+    () => groupDetailPages.flatMap((page) => page.instances),
+    [groupDetailPages],
+  );
 
   useEffect(() => {
     setTechnicalEvidenceRequested(false);
@@ -341,6 +547,12 @@ export default function FlowMonitor() {
       `/api/operations/control-tower/v2/work-items/${selectedId}${technicalEvidenceRequested ? "?includeTechnical=1" : ""}`,
     ),
     enabled: selectedId !== null && !showSystemHealth,
+  });
+
+  const flowQuery = useQuery({
+    queryKey: ["operations-control-tower-v2-flow-overview"],
+    queryFn: () => fetchJson<FlowOverviewResponse>("/api/operations/control-tower/v2/flow-overview"),
+    refetchInterval: 2 * 60_000,
   });
 
   const sourcesQuery = useQuery({
@@ -358,6 +570,7 @@ export default function FlowMonitor() {
   const invalidateTower = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2"] }),
+      queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2-group"] }),
       queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2-detail"] }),
       queryClient.invalidateQueries({ queryKey: ["operations-control-tower-v2-sources"] }),
     ]);
@@ -411,9 +624,10 @@ export default function FlowMonitor() {
     },
   });
 
-  const selected = detailQuery.data?.item ?? items.find((item) => item.id === selectedId) ?? null;
+  const selected = detailQuery.data?.item ?? groupInstances.find((item) => item.id === selectedId) ?? null;
   const sourceSummary = sourcesQuery.data?.sources ?? [];
-  const unhealthySources = sourceSummary.filter((source) => source.status !== "healthy");
+  const unhealthySources = sourceSummary.filter((source) => !["healthy", "refreshing"].includes(source.status));
+  const refreshingSources = sourceSummary.filter((source) => source.status === "refreshing");
   const mutationError = acknowledgeMutation.error || assignMutation.error || snoozeMutation.error;
 
   const resetFilters = () => {
@@ -424,7 +638,12 @@ export default function FlowMonitor() {
   };
 
   const refresh = async () => {
-    await Promise.all([queueQuery.refetch(), sourcesQuery.refetch(), detailQuery.refetch()]);
+    await Promise.all([
+      groupQuery.refetch(),
+      sourcesQuery.refetch(),
+      flowQuery.refetch(),
+      selectedId !== null ? detailQuery.refetch() : groupDetailQuery.refetch(),
+    ]);
   };
 
   const openWorkItem = (id: number) => {
@@ -432,13 +651,43 @@ export default function FlowMonitor() {
     if (compactDetailLayout) setCompactDetailOpen(true);
   };
 
+  const openGroup = (groupKey: string) => {
+    setSelectedGroupKey(groupKey);
+    setSelectedId(null);
+    if (compactDetailLayout) setCompactDetailOpen(true);
+  };
+
   const renderDetailPane = () => {
-    if (selectedId === null) {
+    if (selectedId === null && selectedGroupKey === null) {
       return (
         <div className="flex h-full min-h-[420px] flex-col items-center justify-center gap-2 p-8 text-center text-muted-foreground">
           <Inbox className="h-8 w-8" />
-          <span className="text-sm">Select a work item</span>
+          <span className="text-sm">Select an issue group</span>
         </div>
+      );
+    }
+    if (selectedId === null) {
+      if (groupDetailQuery.isLoading && !groupDetailQuery.data) return <DetailSkeleton />;
+      if (groupDetailQuery.isError) {
+        return (
+          <div className="flex min-h-[420px] flex-col items-center justify-center gap-3 p-8 text-center">
+            <AlertTriangle className="h-8 w-8 text-red-600" />
+            <div className="font-medium">Issue group failed to load</div>
+            <div className="text-sm text-muted-foreground">{groupDetailQuery.error instanceof Error ? groupDetailQuery.error.message : "Unknown error"}</div>
+            <Button variant="outline" onClick={() => groupDetailQuery.refetch()}>Retry</Button>
+          </div>
+        );
+      }
+      if (!selectedGroup) return null;
+      return (
+        <IssueGroupDetailPanel
+          group={selectedGroup}
+          instances={groupInstances}
+          hasNextPage={groupDetailQuery.hasNextPage}
+          loadingMore={groupDetailQuery.isFetchingNextPage}
+          onLoadMore={() => groupDetailQuery.fetchNextPage()}
+          onOpenInstance={openWorkItem}
+        />
       );
     }
     if (detailQuery.isLoading && !detailQuery.data) return <DetailSkeleton />;
@@ -468,6 +717,7 @@ export default function FlowMonitor() {
         onAssign={(assignedUserId) => assignMutation.mutate({ item: detailQuery.data!.item, assignedUserId })}
         onSnooze={() => setSnoozeOpen(true)}
         onSelectRelated={openWorkItem}
+        onBack={() => setSelectedId(null)}
         busy={acknowledgeMutation.isPending || assignMutation.isPending || snoozeMutation.isPending}
       />
     );
@@ -483,7 +733,9 @@ export default function FlowMonitor() {
               {sourcesQuery.isLoading ? (
                 <Badge variant="outline">Loading sources</Badge>
               ) : unhealthySources.length === 0 && sourceSummary.length > 0 ? (
-                <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-800">Sources current</Badge>
+                <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-800">
+                  {refreshingSources.length > 0 ? `${refreshingSources.length} source${refreshingSources.length === 1 ? "" : "s"} refreshing` : "Sources current"}
+                </Badge>
               ) : (
                 <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
                   {unhealthySources.length || sourceSummary.length} source issue{(unhealthySources.length || sourceSummary.length) === 1 ? "" : "s"}
@@ -491,8 +743,10 @@ export default function FlowMonitor() {
               )}
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              {queueSummary ? `${queueSummary.total.toLocaleString()} matching work item${queueSummary.total === 1 ? "" : "s"}` : "Loading work queue"}
-              {queueSummary?.generatedAt ? ` - updated ${new Date(queueSummary.generatedAt).toLocaleTimeString()}` : ""}
+              {groupSummary
+                ? `${groupSummary.totalGroups.toLocaleString()} issue group${groupSummary.totalGroups === 1 ? "" : "s"} · ${groupSummary.totalAffectedRecords.toLocaleString()} affected record${groupSummary.totalAffectedRecords === 1 ? "" : "s"}`
+                : "Loading operational issues"}
+              {groupSummary?.generatedAt ? ` · updated ${new Date(groupSummary.generatedAt).toLocaleTimeString()}` : ""}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -501,7 +755,7 @@ export default function FlowMonitor() {
               size="sm"
               onClick={() => setShowSystemHealth(false)}
             >
-              <Inbox className="mr-2 h-4 w-4" /> Work Queue
+              <RadioTower className="mr-2 h-4 w-4" /> Order Flow & Issues
             </Button>
             <Button
               variant={showSystemHealth ? "default" : "outline"}
@@ -510,17 +764,23 @@ export default function FlowMonitor() {
             >
               <ServerCog className="mr-2 h-4 w-4" /> System Health
             </Button>
-            <Button variant="outline" size="icon" onClick={refresh} disabled={queueQuery.isFetching} title="Refresh Control Tower">
-              <RefreshCw className={cn("h-4 w-4", queueQuery.isFetching && "animate-spin")} />
+            <Button variant="outline" size="icon" onClick={refresh} disabled={groupQuery.isFetching} title="Refresh Control Tower">
+              <RefreshCw className={cn("h-4 w-4", groupQuery.isFetching && "animate-spin")} />
             </Button>
           </div>
         </div>
       </header>
 
       {showSystemHealth ? (
-        <SystemHealthView data={sourcesQuery.data} loading={sourcesQuery.isLoading} error={sourcesQuery.error} />
+        <SystemHealthView
+          data={sourcesQuery.data}
+          flow={flowQuery.data}
+          loading={sourcesQuery.isLoading}
+          error={sourcesQuery.error}
+        />
       ) : (
         <>
+          <FlowOverview data={flowQuery.data} loading={flowQuery.isLoading} error={flowQuery.error} />
           <div className="border-b px-4 lg:px-6">
             <div className="grid grid-cols-2 gap-1 py-2 sm:grid-cols-4">
               {VIEW_CONFIG.map((tab) => (
@@ -536,7 +796,7 @@ export default function FlowMonitor() {
                 >
                   {tab.label}
                   <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs tabular-nums">
-                    {queueSummary?.viewCounts[tab.countKey] ?? 0}
+                    {groupSummary?.viewCounts[tab.countKey] ?? 0}
                   </span>
                 </Button>
               ))}
@@ -597,75 +857,76 @@ export default function FlowMonitor() {
 
           <main className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1fr)_440px]">
             <section className="min-w-0 border-r">
-              <div className="hidden grid-cols-[96px_minmax(0,1fr)_86px_150px_28px] gap-3 border-b bg-muted/30 px-4 py-2 text-xs font-medium uppercase text-muted-foreground md:grid">
-                <span>Severity</span><span>Issue</span><span>Age</span><span>Owner</span><span />
+              <div className="hidden grid-cols-[96px_minmax(0,1fr)_110px_86px_150px_28px] gap-3 border-b bg-muted/30 px-4 py-2 text-xs font-medium uppercase text-muted-foreground md:grid">
+                <span>Severity</span><span>Root cause</span><span>Affected</span><span>Oldest</span><span>Owner</span><span />
               </div>
-              {queueQuery.isLoading ? (
+              {groupQuery.isLoading ? (
                 <QueueSkeleton />
-              ) : queueQuery.isError ? (
+              ) : groupQuery.isError ? (
                 <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 p-8 text-center">
                   <AlertTriangle className="h-8 w-8 text-red-600" />
-                  <div className="font-medium">Work queue failed to load</div>
-                  <div className="max-w-lg text-sm text-muted-foreground">{queueQuery.error instanceof Error ? queueQuery.error.message : "Unknown error"}</div>
-                  <Button variant="outline" onClick={() => queueQuery.refetch()}><RefreshCw className="mr-2 h-4 w-4" /> Retry</Button>
+                  <div className="font-medium">Issue groups failed to load</div>
+                  <div className="max-w-lg text-sm text-muted-foreground">{groupQuery.error instanceof Error ? groupQuery.error.message : "Unknown error"}</div>
+                  <Button variant="outline" onClick={() => groupQuery.refetch()}><RefreshCw className="mr-2 h-4 w-4" /> Retry</Button>
                 </div>
-              ) : items.length === 0 ? (
+              ) : groups.length === 0 ? (
                 <div className="flex min-h-[320px] flex-col items-center justify-center gap-2 p-8 text-center">
                   <CheckCircle2 className="h-9 w-9 text-emerald-600" />
-                  <div className="font-medium">No matching work items</div>
-                  <div className="text-sm text-muted-foreground">No projected exception matches the current view and filters.</div>
+                  <div className="font-medium">No matching issue groups</div>
+                  <div className="text-sm text-muted-foreground">No operational root cause matches the current view and filters.</div>
                 </div>
               ) : (
                 <div className="divide-y">
-                  {items.map((item) => (
+                  {groups.map((group) => (
                     <button
                       type="button"
-                      key={item.id}
-                      onClick={() => openWorkItem(item.id)}
+                      key={group.groupKey}
+                      onClick={() => openGroup(group.groupKey)}
                       className={cn(
-                        "grid w-full gap-2 px-4 py-3 text-left transition-colors hover:bg-muted/40 md:grid-cols-[96px_minmax(0,1fr)_86px_150px_28px] md:gap-3",
-                        selectedId === item.id && "bg-primary/5 ring-1 ring-inset ring-primary/30",
+                        "grid w-full grid-cols-[86px_minmax(0,1fr)] gap-2 px-4 py-3 text-left transition-colors hover:bg-muted/40 md:grid-cols-[96px_minmax(0,1fr)_110px_86px_150px_28px] md:gap-3",
+                        selectedGroupKey === group.groupKey && selectedId === null && "bg-primary/5 ring-1 ring-inset ring-primary/30",
                       )}
                     >
                       <div>
-                        <Badge variant="outline" className={cn("gap-1 text-[10px] uppercase", severityClass(item.severity))}>
-                          {severityIcon(item.severity)} {item.severity}
+                        <Badge variant="outline" className={cn("gap-1 text-[10px] uppercase", severityClass(group.severity))}>
+                          {severityIcon(group.severity)} {group.severity}
                         </Badge>
                       </div>
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="truncate font-medium">{item.title}</span>
-                          <Badge variant="outline" className="text-[10px]">{DOMAIN_LABEL[item.domain]}</Badge>
-                          {item.urgency !== "normal" && (
-                            <span className="text-xs font-medium text-orange-700">{humanize(item.urgency)}</span>
+                          <span className="truncate font-medium">{group.title}</span>
+                          <Badge variant="outline" className="text-[10px]">{DOMAIN_LABEL[group.domain]}</Badge>
+                          {group.urgency !== "normal" && (
+                            <span className="text-xs font-medium text-orange-700">{humanize(group.urgency)}</span>
                           )}
                         </div>
-                        <p className="mt-1 line-clamp-1 text-sm text-muted-foreground">{item.summary}</p>
+                        <p className="mt-1 line-clamp-1 text-sm text-muted-foreground">{group.summary}</p>
                         <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
-                          <span className="font-medium text-foreground/80">{item.entityRef || `${humanize(item.entityType)} ${item.entityId}`}</span>
-                          <span className="font-mono">{item.code}</span>
-                          {item.occurrenceCount > 1 && <span>{item.occurrenceCount} observations</span>}
-                          {item.recurrenceCount > 0 && <span>{item.recurrenceCount} recurrence{item.recurrenceCount === 1 ? "" : "s"}</span>}
+                          <span className="font-mono">{group.code}</span>
+                          {group.sampleEntityRefs.slice(0, 2).map((entityRef) => <span className="hidden sm:inline" key={entityRef}>{entityRef}</span>)}
                         </div>
                       </div>
-                      <div className="text-sm tabular-nums text-muted-foreground md:pt-1">{formatAge(item.ageMinutes)}</div>
-                      <div className="min-w-0 text-sm md:pt-1">
-                        <div className="truncate">{item.assignedUserName || item.ownerTeam || "Unassigned"}</div>
-                        {item.assignedUserName && item.ownerTeam && <div className="truncate text-xs text-muted-foreground">{item.ownerTeam}</div>}
+                      <div className="col-start-2 flex gap-3 text-sm tabular-nums md:col-start-auto md:block md:pt-1">
+                        <div className="font-medium">{group.affectedRecords.toLocaleString()} record{group.affectedRecords === 1 ? "" : "s"}</div>
+                        <div className="text-xs text-muted-foreground">{group.affectedEntities.toLocaleString()} entities</div>
+                      </div>
+                      <div className="hidden text-sm tabular-nums text-muted-foreground md:block md:pt-1">{formatAge(group.ageMinutes)}</div>
+                      <div className="hidden min-w-0 text-sm md:block md:pt-1">
+                        <div className="truncate">{group.ownerTeam || "Unassigned"}</div>
                       </div>
                       <ChevronRight className="hidden h-4 w-4 self-center text-muted-foreground md:block" />
                     </button>
                   ))}
-                  {queueQuery.hasNextPage && (
+                  {groupQuery.hasNextPage && (
                     <div className="p-3 text-center">
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => queueQuery.fetchNextPage()}
-                        disabled={queueQuery.isFetchingNextPage}
+                        onClick={() => groupQuery.fetchNextPage()}
+                        disabled={groupQuery.isFetchingNextPage}
                       >
-                        {queueQuery.isFetchingNextPage && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                        Load more
+                        {groupQuery.isFetchingNextPage && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                        Load more groups
                       </Button>
                     </div>
                   )}
@@ -730,6 +991,345 @@ export default function FlowMonitor() {
   );
 }
 
+function FlowOverview(props: {
+  data: FlowOverviewResponse | undefined;
+  loading: boolean;
+  error: Error | null;
+}) {
+  const snapshot = props.data?.snapshot ?? null;
+  const [selectedStageKey, setSelectedStageKey] = useState<string | null>(null);
+  const [selectedIssueCode, setSelectedIssueCode] = useState<string | null>(null);
+  const stages = useMemo(() => {
+    if (!snapshot) return [];
+    return [
+      { key: "entered", label: "Channel accepted", count: snapshot.funnel.entered, icon: RadioTower, issueStages: ["intake"] as FlowIssueStage[] },
+      { key: "wms", label: "Reached WMS", count: snapshot.funnel.reachedWms, icon: Boxes, issueStages: ["oms_to_wms"] as FlowIssueStage[] },
+      { key: "shipment", label: "Shipment created", count: snapshot.funnel.hasShipment, icon: PackageCheck, issueStages: ["wms_fulfill", "engine_push"] as FlowIssueStage[] },
+      { key: "shipped", label: "Shipped", count: snapshot.funnel.shipped, icon: Truck, issueStages: ["shipped"] as FlowIssueStage[] },
+      { key: "confirmed", label: "Channel updated", count: snapshot.funnel.trackingConfirmed, icon: CheckCircle2, issueStages: ["writeback"] as FlowIssueStage[] },
+    ].map((stage) => {
+      const issues = snapshot.issues
+        .filter((issue) => stage.issueStages.includes(issue.stage))
+        .sort((left, right) => FLOW_SEVERITY_ORDER[left.severity] - FLOW_SEVERITY_ORDER[right.severity] || right.count - left.count);
+      return {
+        ...stage,
+        issues,
+        monitorMatches: issues.reduce((total, issue) => total + issue.count, 0),
+      };
+    });
+  }, [snapshot]);
+  const selectedStage = stages.find((stage) => stage.key === selectedStageKey) ?? null;
+  const selectedIssue = selectedStage?.issues.find((issue) => issue.code === selectedIssueCode) ?? null;
+
+  useEffect(() => {
+    if (!selectedStage) return;
+    if (selectedStage.issues.some((issue) => issue.code === selectedIssueCode)) return;
+    setSelectedIssueCode(selectedStage.issues[0]?.code ?? null);
+  }, [selectedIssueCode, selectedStage]);
+
+  const bucketQuery = useQuery({
+    queryKey: ["oms-flow-bucket", selectedIssueCode, snapshot?.windowDays],
+    queryFn: () => fetchJson<FlowBucketResponse>(
+      `/api/oms/ops/flow-bucket/${encodeURIComponent(selectedIssueCode!)}?windowDays=${snapshot!.windowDays}`,
+    ),
+    enabled: selectedIssueCode !== null && selectedStage !== null && snapshot !== null,
+    staleTime: 60_000,
+  });
+
+  const openStage = (stage: (typeof stages)[number]) => {
+    if (stage.issues.length === 0) return;
+    setSelectedStageKey(stage.key);
+    setSelectedIssueCode(stage.issues[0].code);
+  };
+
+  const closeStage = () => {
+    setSelectedStageKey(null);
+    setSelectedIssueCode(null);
+  };
+
+  return (
+    <section className="border-b bg-muted/10 px-4 py-4 lg:px-6">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold">Order flow</h2>
+          <p className="text-xs text-muted-foreground">
+            {snapshot ? `Last ${snapshot.windowDays} days · refreshed ${formatTimestamp(snapshot.generatedAt)}` : "Waiting for the first background snapshot"}
+          </p>
+        </div>
+        {props.data && (
+          <Badge
+            variant="outline"
+            className={cn(
+              props.data.status === "current" && "border-emerald-300 bg-emerald-50 text-emerald-800",
+              props.data.status === "refreshing" && "border-blue-300 bg-blue-50 text-blue-800",
+              !["current", "refreshing"].includes(props.data.status) && "border-amber-300 bg-amber-50 text-amber-800",
+            )}
+          >
+            {humanize(props.data.status)}
+          </Badge>
+        )}
+      </div>
+
+      {props.loading ? (
+        <div className="grid gap-2 md:grid-cols-5">
+          {Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-20 w-full" />)}
+        </div>
+      ) : props.error ? (
+        <div className="border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{props.error.message}</div>
+      ) : snapshot ? (
+        <>
+          <div className="grid grid-cols-2 overflow-hidden border md:grid-cols-5">
+            {stages.map((stage, index) => {
+              const priorCount = index === 0 ? null : stages[index - 1].count;
+              const gap = priorCount === null ? null : Math.max(0, priorCount - stage.count);
+              const Icon = stage.icon;
+              return (
+                <button
+                  type="button"
+                  key={stage.key}
+                  onClick={() => openStage(stage)}
+                  disabled={stage.issues.length === 0}
+                  className={cn(
+                    "relative min-w-0 border-b border-r p-3 text-left even:border-r-0 last:col-span-2 last:border-b-0 md:border-b-0 md:border-r md:even:border-r md:last:col-span-1 md:last:border-r-0",
+                    stage.issues.length > 0 && "cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
+                  )}
+                  aria-label={stage.issues.length > 0 ? `Review ${stage.label} exceptions` : `${stage.label}: no open exceptions`}
+                >
+                  <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                    <Icon className="h-4 w-4" /> {stage.label}
+                  </div>
+                  <div className="mt-2 text-2xl font-semibold tabular-nums">{stage.count.toLocaleString()}</div>
+                  {gap !== null && <div className="mt-1 text-xs text-orange-700">{gap.toLocaleString()} not yet advanced</div>}
+                  {stage.issues.length > 0 ? (
+                    <div className="mt-2 text-xs font-medium text-red-700">
+                      {stage.issues.length.toLocaleString()} exception type{stage.issues.length === 1 ? "" : "s"} · {stage.monitorMatches.toLocaleString()} monitor matches
+                    </div>
+                  ) : (
+                    <div className="mt-2 text-xs text-emerald-700">No open exceptions</div>
+                  )}
+                  {index < stages.length - 1 && <ArrowRight className="absolute -right-2.5 top-1/2 z-10 hidden h-5 w-5 -translate-y-1/2 bg-background text-muted-foreground md:block" />}
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm">
+            <span><strong>{snapshot.crossSystem.wmsShippedOmsOpen.toLocaleString()}</strong> shipped orders still open upstream</span>
+            <span><strong>{snapshot.crossSystem.omsNotUpdated.toLocaleString()}</strong> fulfillment writebacks incomplete</span>
+            <span><strong>{snapshot.sla.breached.toLocaleString()}</strong> SLA breaches</span>
+            <span className="text-muted-foreground">
+              {snapshot.channels.map((channel) => `${humanize(channel.provider)} ${channel.entered.toLocaleString()}`).join(" · ")}
+            </span>
+          </div>
+        </>
+      ) : (
+        <div className="border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          The background projector has not produced an order-flow snapshot yet.
+          {props.data?.lastAttempt?.errorMessage ? ` Last attempt: ${props.data.lastAttempt.errorMessage}` : ""}
+        </div>
+      )}
+
+      <Dialog open={selectedStage !== null} onOpenChange={(open) => { if (!open) closeStage(); }}>
+        <DialogContent className="max-h-[92vh] overflow-hidden p-0 sm:max-w-5xl">
+          <DialogHeader className="border-b px-5 py-4 text-left">
+            <DialogTitle>{selectedStage?.label} exceptions</DialogTitle>
+            <DialogDescription>
+              {selectedStage
+                ? `${selectedStage.issues.length.toLocaleString()} root cause${selectedStage.issues.length === 1 ? "" : "s"} · ${selectedStage.monitorMatches.toLocaleString()} monitor matches in the last ${snapshot?.windowDays ?? 30} days`
+                : "Order-flow exceptions"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid min-h-0 md:grid-cols-[310px_minmax(0,1fr)]">
+            <ScrollArea className="max-h-52 border-b md:h-[68vh] md:max-h-none md:border-b-0 md:border-r">
+              <div className="divide-y">
+                {selectedStage?.issues.map((issue) => (
+                  <button
+                    type="button"
+                    key={issue.code}
+                    onClick={() => setSelectedIssueCode(issue.code)}
+                    className={cn(
+                      "w-full px-4 py-3 text-left hover:bg-muted/50",
+                      selectedIssueCode === issue.code && "bg-primary/5 ring-1 ring-inset ring-primary/30",
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <Badge variant="outline" className={cn("text-[10px] uppercase", flowSeverityClass(issue.severity))}>{issue.severity}</Badge>
+                      <span className="text-sm font-semibold tabular-nums">{issue.count.toLocaleString()}</span>
+                    </div>
+                    <div className="mt-2 text-sm font-medium leading-snug">{issue.message}</div>
+                    <div className="mt-1 font-mono text-[11px] text-muted-foreground">{issue.code}</div>
+                  </button>
+                ))}
+              </div>
+            </ScrollArea>
+
+            <ScrollArea className="h-[55vh] md:h-[68vh]">
+              {selectedIssue ? (
+                <div className="space-y-5 p-5">
+                  <section>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className={cn("text-[10px] uppercase", flowSeverityClass(selectedIssue.severity))}>{selectedIssue.severity}</Badge>
+                      <Badge variant="outline">{humanize(selectedIssue.kind)}</Badge>
+                      <Badge variant="secondary">{humanize(selectedIssue.remediation)}</Badge>
+                    </div>
+                    <h3 className="mt-3 text-lg font-semibold">{selectedIssue.message}</h3>
+                    <p className="mt-2 text-sm text-muted-foreground">{selectedIssue.why || "No operator guidance is recorded for this exception."}</p>
+                    <div className="mt-3 text-xs text-muted-foreground">
+                      Replay {selectedIssue.replaySafe ? "is marked safe after the underlying cause is corrected" : "requires review before it is attempted"}.
+                    </div>
+                  </section>
+
+                  <section className="border-t pt-4">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-xs font-semibold uppercase text-muted-foreground">Current evidence</div>
+                        <p className="mt-1 text-xs text-muted-foreground">Up to 50 current records from this exact monitor condition.</p>
+                      </div>
+                      <span className="text-xs tabular-nums text-muted-foreground">Snapshot count {selectedIssue.count.toLocaleString()}</span>
+                    </div>
+
+                    {bucketQuery.isLoading ? (
+                      <div className="space-y-3"><Skeleton className="h-20 w-full" /><Skeleton className="h-20 w-full" /></div>
+                    ) : bucketQuery.isError ? (
+                      <div className="border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                        <div>{bucketQuery.error instanceof Error ? bucketQuery.error.message : "Evidence failed to load"}</div>
+                        <Button className="mt-3" size="sm" variant="outline" onClick={() => bucketQuery.refetch()}>Retry evidence query</Button>
+                      </div>
+                    ) : bucketQuery.data?.rows.length ? (
+                      <div className="divide-y border-y">
+                        {bucketQuery.data.rows.map((row, index) => {
+                          const orderReference = flowOrderReference(row);
+                          const fields = Object.entries(row).filter(([key, value]) => (
+                            value !== null
+                            && value !== undefined
+                            && !["order_number", "external_order_number", "channel_order_number"].includes(key)
+                          ));
+                          return (
+                            <div key={`${selectedIssue.code}-${index}`} className="py-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0 truncate text-sm font-medium">{flowRecordTitle(row, index)}</div>
+                                {orderReference && (
+                                  <Button variant="ghost" size="sm" asChild>
+                                    <a href={`/oms/orders?search=${encodeURIComponent(orderReference)}`}>Open order<ExternalLink className="ml-2 h-3.5 w-3.5" /></a>
+                                  </Button>
+                                )}
+                              </div>
+                              <dl className="mt-2 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
+                                {fields.map(([key, value]) => (
+                                  <div key={key} className={cn("min-w-0", ["last_error", "review_reason", "why"].includes(key) && "sm:col-span-2")}>
+                                    <dt className="font-medium text-muted-foreground">{humanize(key)}</dt>
+                                    <dd className="mt-0.5 break-words">{formatFlowRecordValue(key, value)}</dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="border bg-muted/20 p-4 text-sm text-muted-foreground">
+                        No rows currently match. The background snapshot may be older than the live evidence query.
+                      </div>
+                    )}
+                  </section>
+                </div>
+              ) : (
+                <div className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">Select an exception type.</div>
+              )}
+            </ScrollArea>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </section>
+  );
+}
+
+function IssueGroupDetailPanel(props: {
+  group: IssueGroup;
+  instances: QueueItem[];
+  hasNextPage: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
+  onOpenInstance: (id: number) => void;
+}) {
+  return (
+    <ScrollArea className="h-full lg:max-h-[calc(100vh-64px)]">
+      <div className="border-b p-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline" className={cn("gap-1 text-[10px] uppercase", severityClass(props.group.severity))}>
+            {severityIcon(props.group.severity)} {props.group.severity}
+          </Badge>
+          <Badge variant="outline">{DOMAIN_LABEL[props.group.domain]}</Badge>
+          <Badge variant="secondary">{humanize(props.group.triageStatus)}</Badge>
+        </div>
+        <h2 className="mt-3 text-lg font-semibold leading-tight">{props.group.title}</h2>
+        <div className="mt-1 font-mono text-xs text-muted-foreground">{props.group.code}</div>
+        <div className="mt-4 grid grid-cols-2 gap-4 border-y py-3 text-sm">
+          <div><div className="text-xs uppercase text-muted-foreground">Affected records</div><div className="mt-1 text-xl font-semibold tabular-nums">{props.group.affectedRecords.toLocaleString()}</div></div>
+          <div><div className="text-xs uppercase text-muted-foreground">Affected entities</div><div className="mt-1 text-xl font-semibold tabular-nums">{props.group.affectedEntities.toLocaleString()}</div></div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <span>First detected {formatTimestamp(props.group.firstSeenAt)}</span>
+          <span>Last checked {formatTimestamp(props.group.lastSeenAt)}</span>
+          <span>Last changed {formatTimestamp(props.group.lastChangedAt)}</span>
+        </div>
+      </div>
+
+      <div className="space-y-5 p-5">
+        <section className="grid gap-3">
+          <div className="border-l-4 border-emerald-500 bg-emerald-50 p-3">
+            <div className="text-xs font-semibold uppercase text-emerald-800">Expected</div>
+            <p className="mt-1 text-sm text-emerald-950">{props.group.expectedState}</p>
+          </div>
+          <div className="border-l-4 border-orange-500 bg-orange-50 p-3">
+            <div className="text-xs font-semibold uppercase text-orange-800">Observed pattern</div>
+            <p className="mt-1 text-sm text-orange-950">{props.group.actualState}</p>
+          </div>
+        </section>
+
+        <section className="border-y py-4">
+          <div className="text-xs font-semibold uppercase text-muted-foreground">Next action</div>
+          <p className="mt-1 text-sm">{props.group.recommendedAction}</p>
+        </section>
+
+        <section>
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">Affected records</div>
+              <div className="mt-1 text-xs text-muted-foreground">Inspect an exact record before changing source data.</div>
+            </div>
+            <span className="text-xs tabular-nums text-muted-foreground">{props.instances.length.toLocaleString()} loaded</span>
+          </div>
+          <div className="divide-y border-y">
+            {props.instances.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => props.onOpenInstance(item.id)}
+                className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-3 text-left hover:text-primary"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{item.entityRef || `${humanize(item.entityType)} ${item.entityId}`}</div>
+                  <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+                    <span>{humanize(item.triageStatus)}</span>
+                    <span>Changed {formatTimestamp(item.lastChangedAt)}</span>
+                  </div>
+                </div>
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            ))}
+          </div>
+          {props.hasNextPage && (
+            <Button className="mt-3 w-full" variant="outline" size="sm" onClick={props.onLoadMore} disabled={props.loadingMore}>
+              {props.loadingMore && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Load more affected records
+            </Button>
+          )}
+        </section>
+      </div>
+    </ScrollArea>
+  );
+}
+
 function WorkItemDetailPanel(props: {
   detail: WorkItemDetail;
   users: UserOption[];
@@ -743,6 +1343,7 @@ function WorkItemDetailPanel(props: {
   onAssign: (userId: string | null) => void;
   onSnooze: () => void;
   onSelectRelated: (id: number) => void;
+  onBack: () => void;
   busy: boolean;
 }) {
   const { item } = props.detail;
@@ -753,6 +1354,9 @@ function WorkItemDetailPanel(props: {
   return (
     <ScrollArea className="h-full lg:max-h-[calc(100vh-64px)]">
       <div className="border-b p-5">
+        <Button variant="ghost" size="sm" className="mb-3 -ml-2" onClick={props.onBack}>
+          <ArrowRight className="mr-2 h-4 w-4 rotate-180" /> Back to root cause
+        </Button>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -776,7 +1380,7 @@ function WorkItemDetailPanel(props: {
         <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span>{formatAge(item.ageMinutes)} old</span>
           <span className="font-mono">{item.code}</span>
-          <span>{item.occurrenceCount} observation{item.occurrenceCount === 1 ? "" : "s"}</span>
+          <span>{item.occurrenceCount} monitor check{item.occurrenceCount === 1 ? "" : "s"}</span>
           {item.recurrenceCount > 0 && <span>{item.recurrenceCount} recurrence{item.recurrenceCount === 1 ? "" : "s"}</span>}
         </div>
       </div>
@@ -913,12 +1517,49 @@ function WorkItemDetailPanel(props: {
 
 function SystemHealthView(props: {
   data: SourceHealthResponse | undefined;
+  flow: FlowOverviewResponse | undefined;
   loading: boolean;
   error: Error | null;
 }) {
   return (
     <main className="flex-1 p-4 lg:p-6">
       <div className="mx-auto max-w-6xl">
+        <section className="mb-7">
+          <div className="mb-3 flex items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">System controls</h2>
+              <p className="text-sm text-muted-foreground">Missing safeguards and schema controls that require engineering work, not order-by-order triage.</p>
+            </div>
+            {props.flow && <Badge variant="outline">Flow snapshot: {humanize(props.flow.status)}</Badge>}
+          </div>
+          <div className="divide-y border">
+            {props.loading ? (
+              <div className="space-y-3 p-4"><Skeleton className="h-14 w-full" /><Skeleton className="h-14 w-full" /></div>
+            ) : props.data?.controlGaps.length ? (
+              props.data.controlGaps.map((gap) => (
+                <div key={gap.groupKey} className="grid gap-2 px-4 py-3 md:grid-cols-[100px_minmax(0,1fr)_120px] md:gap-4">
+                  <Badge variant="outline" className={cn("h-fit w-fit gap-1 text-[10px] uppercase", severityClass(gap.severity))}>
+                    {severityIcon(gap.severity)} {gap.severity}
+                  </Badge>
+                  <div className="min-w-0">
+                    <div className="font-medium">{gap.title}</div>
+                    <p className="mt-0.5 text-sm text-muted-foreground">{gap.summary}</p>
+                    <div className="mt-1 font-mono text-xs text-muted-foreground">{gap.code}</div>
+                  </div>
+                  <div className="text-sm tabular-nums md:text-right">
+                    <div className="font-medium">{gap.affectedRecords.toLocaleString()} record{gap.affectedRecords === 1 ? "" : "s"}</div>
+                    <div className="text-xs text-muted-foreground">Changed {formatTimestamp(gap.lastChangedAt)}</div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="flex items-center gap-2 px-4 py-5 text-sm text-emerald-800">
+                <CheckCircle2 className="h-5 w-5" /> No projected system-control gaps.
+              </div>
+            )}
+          </div>
+        </section>
+
         <div className="mb-4 flex items-end justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold">Projection Sources</h2>
@@ -926,20 +1567,21 @@ function SystemHealthView(props: {
           {props.data && <span className="text-xs text-muted-foreground">Stale after {props.data.staleAfterMinutes}m</span>}
         </div>
         <div className="overflow-x-auto border">
-          <div className="grid min-w-[820px] grid-cols-[minmax(180px,1fr)_130px_110px_120px_minmax(180px,1fr)] gap-3 border-b bg-muted/30 px-4 py-2 text-xs font-semibold uppercase text-muted-foreground">
-            <span>Source</span><span>Status</span><span>Open</span><span>Last run</span><span>Result</span>
+          <div className="grid min-w-[900px] grid-cols-[minmax(180px,1fr)_130px_110px_90px_120px_minmax(180px,1fr)] gap-3 border-b bg-muted/30 px-4 py-2 text-xs font-semibold uppercase text-muted-foreground">
+            <span>Source</span><span>Status</span><span>Open records</span><span>Controls</span><span>Last run</span><span>Result</span>
           </div>
           {props.loading ? (
             <div className="space-y-3 p-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /></div>
           ) : props.error ? (
             <div className="p-6 text-sm text-red-700">{props.error.message}</div>
           ) : (
-            <div className="min-w-[820px] divide-y">
+            <div className="min-w-[900px] divide-y">
               {props.data?.sources.map((source) => (
-                <div key={source.name} className="grid grid-cols-[minmax(180px,1fr)_130px_110px_120px_minmax(180px,1fr)] items-center gap-3 px-4 py-3 text-sm">
+                <div key={source.name} className="grid grid-cols-[minmax(180px,1fr)_130px_110px_90px_120px_minmax(180px,1fr)] items-center gap-3 px-4 py-3 text-sm">
                   <div className="min-w-0"><div className="font-medium">{humanize(source.name)}</div><div className="truncate text-xs text-muted-foreground">{source.sourceNamespace}</div></div>
                   <SourceStatusBadge status={source.status} />
                   <span className="tabular-nums">{source.openItemCount.toLocaleString()}</span>
+                  <span className="tabular-nums">{source.controlGapCount.toLocaleString()}</span>
                   <span className="text-muted-foreground">{source.ageMinutes == null ? "Never" : formatAge(source.ageMinutes)}</span>
                   <div className="min-w-0 text-xs text-muted-foreground">
                     {source.lastRun ? (
@@ -961,6 +1603,7 @@ function SystemHealthView(props: {
 
 function SourceStatusBadge({ status }: { status: SourceHealthResponse["sources"][number]["status"] }) {
   const healthy = status === "healthy";
+  const refreshing = status === "refreshing";
   const failed = status === "failed";
   return (
     <Badge
@@ -968,11 +1611,12 @@ function SourceStatusBadge({ status }: { status: SourceHealthResponse["sources"]
       className={cn(
         "w-fit capitalize",
         healthy && "border-emerald-300 bg-emerald-50 text-emerald-800",
+        refreshing && "border-blue-300 bg-blue-50 text-blue-800",
         failed && "border-red-300 bg-red-50 text-red-800",
-        !healthy && !failed && "border-amber-300 bg-amber-50 text-amber-800",
+        !healthy && !refreshing && !failed && "border-amber-300 bg-amber-50 text-amber-800",
       )}
     >
-      {healthy ? <CheckCircle2 className="mr-1 h-3 w-3" /> : failed ? <AlertTriangle className="mr-1 h-3 w-3" /> : <Clock3 className="mr-1 h-3 w-3" />}
+      {healthy ? <CheckCircle2 className="mr-1 h-3 w-3" /> : failed ? <AlertTriangle className="mr-1 h-3 w-3" /> : refreshing ? <RefreshCw className="mr-1 h-3 w-3 animate-spin" /> : <Clock3 className="mr-1 h-3 w-3" />}
       {humanize(status)}
     </Badge>
   );

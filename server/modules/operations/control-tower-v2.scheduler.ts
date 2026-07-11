@@ -1,5 +1,6 @@
-import { pool } from "../../db";
+import { db, pool } from "../../db";
 import { withAdvisoryLock } from "../../infrastructure/scheduler-lock";
+import { refreshControlTowerFlowSnapshotIfDue } from "./control-tower-flow-snapshot.service";
 import { runControlTowerProjectionJob } from "./control-tower-v2.job";
 
 const CONTROL_TOWER_PROJECTOR_LOCK_ID = 736207;
@@ -19,6 +20,7 @@ export async function runControlTowerProjectionOnce(): Promise<void> {
   const client = await pool.connect();
   try {
     const result = await runControlTowerProjectionJob({ client, execute: true });
+    const flowSnapshot = await refreshControlTowerFlowSnapshotIfDue({ client, db });
     console.log("[Operations Control Tower projector] run complete", {
       startedAt: result.startedAt,
       completedAt: result.completedAt,
@@ -29,6 +31,7 @@ export async function runControlTowerProjectionOnce(): Promise<void> {
         rowsScanned: source.rowsScanned,
         rowsFailed: source.rowsFailed,
       })),
+      flowSnapshot,
     });
   } finally {
     client.release();

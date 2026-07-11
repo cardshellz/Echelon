@@ -137,6 +137,30 @@ describe("Control Tower V2 domain", () => {
     expect(item.actualState).toContain("Drift: 2");
   });
 
+  it("classifies structural inventory safeguards as system controls", () => {
+    const item = inventoryIntegritySource.projectRow({
+      id: 903,
+      check_id: "inventory_level_constraint_gap",
+      entity_fingerprint: "c".repeat(64),
+      category: "balances",
+      severity: "blocker",
+      status: "open",
+      entity_key: { constraint_name: "chk_reserved_qty_non_negative" },
+      current_evidence: { constraint_name: "chk_reserved_qty_non_negative" },
+      current_metric: "1",
+      first_seen_at: "2026-07-10T10:00:00.000Z",
+      last_seen_at: "2026-07-10T12:00:00.000Z",
+      last_changed_at: "2026-07-10T11:00:00.000Z",
+      occurrence_count: 1,
+      recurrence_count: 0,
+      worsened_count: 0,
+      updated_at: "2026-07-10T12:00:00.000Z",
+    }, new Date("2026-07-10T12:00:00.000Z"));
+
+    expect(item.projectionVersion).toBe(3);
+    expect(item.impactTags).toEqual(["inventory_accuracy", "system_control"]);
+  });
+
   it("loads order-scoped inventory identity through indexed WMS and OMS keys", async () => {
     let queryText = "";
     const rows = await inventoryIntegritySource.loadRows({
@@ -185,7 +209,7 @@ describe("Control Tower V2 domain", () => {
     }, new Date("2026-07-10T12:00:00.000Z"));
 
     expect(item).toMatchObject({
-      projectionVersion: 2,
+      projectionVersion: 3,
       entityRef: "SHLZ-TOP-180PT-BLU-P10",
       evidenceSummary: {
         channelOrderNumber: "#59542",
