@@ -248,6 +248,7 @@ function summarizeRecommendation(item: PurchasingRecommendationItem) {
     suggestedOrderQty: item.suggestedOrderQty,
     suggestedOrderPieces: item.suggestedOrderPieces,
     orderUomLabel: item.orderUomLabel,
+    estimatedCostMills: item.estimatedCostMills,
     estimatedCostCents: item.estimatedCostCents,
     confidence: item.confidence,
     confidenceFactors: item.confidenceFactors,

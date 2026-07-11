@@ -158,6 +158,7 @@ interface ReorderItem {
     vendorProductId: number | null;
     costSource: "vendor_unit_cost_mills" | "vendor_unit_cost_cents" | "last_purchase_cost" | "missing";
     costQuality: "current" | "stale" | "unverified" | "missing";
+    estimatedCostMills: number | null;
     estimatedCostCents: number | null;
     lastCostCents: number | null;
     lastPurchasedAt?: string | null;
@@ -301,6 +302,7 @@ interface RecommendationReviewQueueItem {
   skippedReason: string | null;
   preferredVendorId: number | null;
   preferredVendorName: string | null;
+  vendorProductId: number | null;
   suggestedOrderQty: number;
   suggestedOrderPieces: number;
   orderUomUnits: number;
@@ -350,6 +352,7 @@ interface AcceptedRecommendationQueueItem {
   productVariantId: number | null;
   preferredVendorId: number | null;
   preferredVendorName: string | null;
+  vendorProductId: number | null;
   suggestedOrderQty: number;
   suggestedOrderPieces: number;
   orderUomUnits: number;

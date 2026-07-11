@@ -1,3 +1,4 @@
+import { centsToMills, millsToCents } from "@shared/utils/money";
 import {
   buildPurchasingDemandForecastBasis,
   buildPurchasingDemandForecastWindowDiagnostics,
@@ -257,11 +258,13 @@ export interface PurchasingRecommendationItem {
   lastReceivedAt: string | Date | null;
   preferredVendorId: number | null;
   preferredVendorName: string | null;
+  estimatedCostMills: number | null;
   estimatedCostCents: number | null;
   supplierBasis: {
     vendorProductId: number | null;
     costSource: PurchasingRecommendationSupplierCostSource;
     costQuality: PurchasingRecommendationSupplierCostQuality;
+    estimatedCostMills: number | null;
     estimatedCostCents: number | null;
     lastCostCents: number | null;
     lastPurchasedAt: string | Date | null;
@@ -431,6 +434,11 @@ function asPositiveInt(value: unknown, fallback: number): number {
 function asPositiveNumberOrNull(value: unknown): number | null {
   const parsed = asNumber(value, NaN);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function asPositiveSafeIntegerOrNull(value: unknown): number | null {
+  const parsed = asNumber(value, NaN);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function roundRatio(value: number): number {
@@ -1239,36 +1247,47 @@ function resolveSupplierCost(input: {
   lastPurchasedAt: string | Date | null;
   vendorProductUpdatedAt: string | Date | null;
 }): {
+  estimatedCostMills: number | null;
   estimatedCostCents: number | null;
   costSource: PurchasingRecommendationSupplierCostSource;
   costQuality: PurchasingRecommendationSupplierCostQuality;
 } {
+  let estimatedCostMills: number | null = null;
   let estimatedCostCents: number | null = null;
   let costSource: PurchasingRecommendationSupplierCostSource = "missing";
 
   if (input.estimatedCostMills !== null) {
-    estimatedCostCents = Math.round(input.estimatedCostMills / 100);
+    estimatedCostMills = input.estimatedCostMills;
+    estimatedCostCents = millsToCents(estimatedCostMills);
     costSource = "vendor_unit_cost_mills";
   } else if (input.estimatedCostCents !== null || input.unitCostCents !== null) {
     estimatedCostCents = input.estimatedCostCents ?? input.unitCostCents;
+    estimatedCostMills = centsToMills(estimatedCostCents as number);
     costSource = "vendor_unit_cost_cents";
   } else if (input.lastCostCents !== null) {
     estimatedCostCents = input.lastCostCents;
+    estimatedCostMills = centsToMills(estimatedCostCents);
     costSource = "last_purchase_cost";
   }
 
-  if (estimatedCostCents === null || costSource === "missing") {
-    return { estimatedCostCents: null, costSource: "missing", costQuality: "missing" };
+  if (estimatedCostMills === null || estimatedCostCents === null || costSource === "missing") {
+    return {
+      estimatedCostMills: null,
+      estimatedCostCents: null,
+      costSource: "missing",
+      costQuality: "missing",
+    };
   }
 
   const verificationDate = mostRecentDate(input.lastPurchasedAt, input.vendorProductUpdatedAt);
   if (!verificationDate) {
-    return { estimatedCostCents, costSource, costQuality: "unverified" };
+    return { estimatedCostMills, estimatedCostCents, costSource, costQuality: "unverified" };
   }
 
   const ageMs = Date.now() - verificationDate.getTime();
   const staleMs = 365 * 24 * 60 * 60 * 1000;
   return {
+    estimatedCostMills,
     estimatedCostCents,
     costSource,
     costQuality: ageMs > staleMs ? "stale" : "current",
@@ -1572,15 +1591,16 @@ export function generatePurchasingRecommendations(
     const preferredVendorId = row.preferred_vendor_id == null ? null : asNumber(row.preferred_vendor_id);
     const preferredVendorName = row.preferred_vendor_name ?? null;
     const vendorProductId = row.vendor_product_id == null ? null : asNumber(row.vendor_product_id);
-    const lastCostCents = asPositiveNumberOrNull(row.last_cost_cents);
+    const lastCostCents = asPositiveSafeIntegerOrNull(row.last_cost_cents);
     const supplierCost = resolveSupplierCost({
-      estimatedCostMills: asPositiveNumberOrNull(row.estimated_cost_mills),
-      estimatedCostCents: asPositiveNumberOrNull(row.estimated_cost_cents),
-      unitCostCents: asPositiveNumberOrNull(row.unit_cost_cents),
+      estimatedCostMills: asPositiveSafeIntegerOrNull(row.estimated_cost_mills),
+      estimatedCostCents: asPositiveSafeIntegerOrNull(row.estimated_cost_cents),
+      unitCostCents: asPositiveSafeIntegerOrNull(row.unit_cost_cents),
       lastCostCents,
       lastPurchasedAt: row.vendor_product_last_purchased_at ?? null,
       vendorProductUpdatedAt: row.vendor_product_updated_at ?? null,
     });
+    const estimatedCostMills = supplierCost.estimatedCostMills;
     const estimatedCostCents = supplierCost.estimatedCostCents;
     const hasVendor = Boolean(preferredVendorId);
     const demandQuality = demandForecast.demandQuality;
@@ -1725,11 +1745,13 @@ export function generatePurchasingRecommendations(
       lastReceivedAt: row.last_received_at ?? null,
       preferredVendorId,
       preferredVendorName,
+      estimatedCostMills,
       estimatedCostCents,
       supplierBasis: {
         vendorProductId,
         costSource: supplierCost.costSource,
         costQuality: supplierCost.costQuality,
+        estimatedCostMills,
         estimatedCostCents,
         lastCostCents,
         lastPurchasedAt: row.vendor_product_last_purchased_at ?? null,

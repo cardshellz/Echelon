@@ -6,10 +6,15 @@ describe("createPOFromReorder", () => {
     const po = { id: 99, vendorId: 7, status: "draft", discountCents: 0, taxCents: 0, shippingCostCents: 0 };
     const lines: any[] = [];
     const storage = {
-      getPreferredVendorProduct: vi.fn().mockResolvedValue({
+      getVendorProductById: vi.fn().mockResolvedValue({
         id: 501,
         vendorId: 7,
-        unitCostCents: 5,
+        productId: 1,
+        productVariantId: null,
+        isActive: 1,
+        isPreferred: 1,
+        unitCostCents: 1,
+        unitCostMills: 50,
         vendorSku: "VENDOR-CASE-100",
       }),
       getPurchaseOrders: vi.fn().mockResolvedValue([]),
@@ -45,6 +50,7 @@ describe("createPOFromReorder", () => {
       productId: 1,
       productVariantId: 11,
       suggestedPieces: 300,
+      vendorProductId: 501,
       vendorId: 7,
     }], "buyer-1");
 
@@ -69,15 +75,21 @@ describe("createPOFromReorder", () => {
         expectedReceiveUnitsPerVariant: 100,
         orderQty: 300,
         unitsPerUom: 100,
-        unitCostCents: 5,
-        lineTotalCents: 1500,
+        unitCostMills: 50,
+        unitCostCents: 1,
+        totalProductCostCents: 150,
+        packagingCostCents: 0,
+        lineTotalCents: 150,
       }),
     ]);
-    expect(result).toEqual([expect.objectContaining({ id: 99, subtotalCents: 1500, totalCents: 1500 })]);
+    expect(result).toEqual([expect.objectContaining({ id: 99, subtotalCents: 150, totalCents: 150 })]);
   });
 
   it("rejects non-piece-safe quantities before reading or writing storage", async () => {
-    const storage = { getPreferredVendorProduct: vi.fn() };
+    const storage = {
+      getVendorProductById: vi.fn(),
+      getPreferredVendorProduct: vi.fn(),
+    };
     const service = createPurchasingService({} as any, storage as any);
 
     await expect(service.createPOFromReorder([{
@@ -89,6 +101,65 @@ describe("createPOFromReorder", () => {
       message: "Reorder suggested pieces must be a positive safe integer",
       statusCode: 400,
     });
+    expect(storage.getVendorProductById).not.toHaveBeenCalled();
     expect(storage.getPreferredVendorProduct).not.toHaveBeenCalled();
+  });
+
+  it("rejects an exact supplier row with no positive cost before creating a PO", async () => {
+    const storage = {
+      getVendorProductById: vi.fn().mockResolvedValue({
+        id: 501,
+        vendorId: 7,
+        productId: 1,
+        productVariantId: null,
+        isActive: 1,
+        isPreferred: 1,
+        unitCostCents: 0,
+        unitCostMills: null,
+      }),
+      getPurchaseOrders: vi.fn(),
+    };
+    const service = createPurchasingService({} as any, storage as any);
+
+    await expect(service.createPOFromReorder([{
+      productId: 1,
+      productVariantId: 11,
+      suggestedPieces: 300,
+      vendorProductId: 501,
+      vendorId: 7,
+    }], "buyer-1")).rejects.toMatchObject<PurchasingError>({
+      message: "Vendor product 501 has invalid supplier cost: estimatedCostCents must be a positive safe integer",
+      statusCode: 409,
+    });
+    expect(storage.getPurchaseOrders).not.toHaveBeenCalled();
+  });
+
+  it("rejects an exact supplier row that belongs to another vendor", async () => {
+    const storage = {
+      getVendorProductById: vi.fn().mockResolvedValue({
+        id: 501,
+        vendorId: 8,
+        productId: 1,
+        productVariantId: null,
+        isActive: 1,
+        isPreferred: 1,
+        unitCostCents: 1,
+        unitCostMills: 50,
+      }),
+      getPurchaseOrders: vi.fn(),
+    };
+    const service = createPurchasingService({} as any, storage as any);
+
+    await expect(service.createPOFromReorder([{
+      productId: 1,
+      productVariantId: 11,
+      suggestedPieces: 300,
+      vendorProductId: 501,
+      vendorId: 7,
+    }], "buyer-1")).rejects.toMatchObject<PurchasingError>({
+      message: "Vendor product 501 does not belong to vendor 7",
+      statusCode: 400,
+    });
+    expect(storage.getPurchaseOrders).not.toHaveBeenCalled();
   });
 });

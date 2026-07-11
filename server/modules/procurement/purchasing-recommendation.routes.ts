@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { sql } from "drizzle-orm";
+import { centsToMills, computeLineTotalCentsFromMills } from "@shared/utils/money";
 import { db } from "../../db";
 import { requireIdempotency } from "../../middleware/idempotency";
 import { requirePermission } from "../../routes/middleware";
@@ -496,6 +497,7 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
     skippedReason: string | null;
     preferredVendorId: number | null;
     preferredVendorName: string | null;
+    vendorProductId: number | null;
     suggestedOrderQty: number;
     suggestedOrderPieces: number;
     orderUomUnits: number;
@@ -523,6 +525,7 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
       skippedReason: item.skippedReason,
       preferredVendorId: item.preferredVendorId,
       preferredVendorName: item.preferredVendorName,
+      vendorProductId: item.supplierBasis.vendorProductId,
       suggestedOrderQty: item.suggestedOrderQty,
       suggestedOrderPieces: item.suggestedOrderPieces,
       orderUomUnits: item.orderUomUnits,
@@ -687,6 +690,7 @@ function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: Retu
         productVariantId: sourceItem.productVariantId ?? decision.productVariantId,
         preferredVendorId: sourceItem.preferredVendorId ?? decision.vendorId,
         preferredVendorName: sourceItem.preferredVendorName ?? null,
+        vendorProductId: sourceItem.vendorProductId ?? sourceItem.supplierBasis?.vendorProductId ?? null,
         suggestedOrderQty: Number(sourceItem.suggestedOrderQty ?? 0) || 0,
         suggestedOrderPieces: Number(sourceItem.suggestedOrderPieces ?? 0) || 0,
         orderUomUnits: Number(sourceItem.orderUomUnits ?? 0) || 0,
@@ -790,7 +794,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       for (const item of recommendationResult.items) {
         const effectiveSupply = item.currentSupply.effectiveSupplyPieces;
         const avgDailyUsage = item.demandBasis.avgDailyUsagePieces;
-        const costCents = item.estimatedCostCents ?? 0;
+        const costMills = item.estimatedCostMills ?? centsToMills(item.estimatedCostCents ?? 0);
 
         if (effectiveSupply < item.reorderPoint) {
           criticalRestocks++;
@@ -799,7 +803,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         }
 
         if (item.daysOfSupply > 180 && item.totalOnHand > 0) {
-          idleCapitalCents += item.totalOnHand * costCents;
+          idleCapitalCents += computeLineTotalCentsFromMills(costMills, item.totalOnHand);
         }
       }
 
@@ -1044,6 +1048,10 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_vendor", item));
             continue;
           }
+          if (!Number.isSafeInteger(Number(item.vendorProductId)) || Number(item.vendorProductId) <= 0) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_vendor_product", item));
+            continue;
+          }
           eligible.push(item);
         }
 
@@ -1062,6 +1070,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
               productId: Number(item.productId),
               productVariantId: Number(item.productVariantId),
               suggestedPieces: quantity.orderQtyPieces,
+              vendorProductId: Number(item.vendorProductId),
               vendorId: Number(item.preferredVendorId),
             };
           }),
@@ -1208,6 +1217,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
             productId: item.productId,
             productVariantId: item.productVariantId ?? item.productId,
             suggestedPieces: quantity.orderQtyPieces,
+            vendorProductId: Number(item.supplierBasis.vendorProductId),
             vendorId: item.preferredVendorId ?? undefined,
           };
         });
