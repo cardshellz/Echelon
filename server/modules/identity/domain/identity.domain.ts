@@ -20,6 +20,10 @@ export const DEFAULT_ADJUSTMENT_REASONS: InsertAdjustmentReason[] = [
 
 export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "dashboard", action: "view", description: "View dashboard and analytics", category: "dashboard" },
+  { resource: "operations", action: "view", description: "View the Operations Control Tower", category: "dashboard" },
+  { resource: "operations", action: "triage", description: "Acknowledge and snooze operational work", category: "dashboard" },
+  { resource: "operations", action: "assign", description: "Assign operational work to users and teams", category: "dashboard" },
+  { resource: "operations", action: "view_technical", description: "View technical operational evidence", category: "dashboard" },
   { resource: "inventory", action: "view", description: "View inventory levels and items", category: "inventory" },
   { resource: "inventory", action: "create", description: "Create new inventory items", category: "inventory" },
   { resource: "inventory", action: "edit", description: "Edit inventory items", category: "inventory" },
@@ -83,7 +87,8 @@ export const SYSTEM_ROLES = {
     name: "Team Lead",
     description: "Manage picking operations and resolve exceptions",
     permissions: [
-      "dashboard:view", "inventory:view", "orders:view", "orders:claim", "orders:hold", "orders:priority", "orders:resolve_exception",
+      "dashboard:view", "operations:view", "operations:triage", "operations:assign", "operations:view_technical",
+      "inventory:view", "orders:view", "orders:claim", "orders:hold", "orders:priority", "orders:resolve_exception",
       "picking:view", "picking:perform", "picking:complete", "purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:cancel",
       "reports:view", "users:view", "shopify:view", "dropship:view", "locations:view",
     ],

@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 
-import { db } from "../../db";
+import { db, pool } from "../../db";
 import { hasPermission } from "../identity";
 import { requireAuth, requirePermission } from "../../routes/middleware";
 import {
@@ -9,6 +9,23 @@ import {
   getOperationsControlTowerDetail,
   parseControlTowerFilters,
 } from "./control-tower.service";
+import {
+  getControlTowerV2Assignees,
+  getControlTowerV2Detail,
+  getControlTowerV2Sources,
+  loadControlTowerV2Queue,
+  parseControlTowerV2QueueFilters,
+} from "./control-tower-v2.query";
+import {
+  ControlTowerRequestError,
+  parsePositiveWorkItemId,
+  parseWorkItemVersion,
+} from "./control-tower-v2.request";
+import {
+  acknowledgeControlTowerV2Item,
+  assignControlTowerV2Item,
+  snoozeControlTowerV2Item,
+} from "./control-tower-v2.triage";
 
 function operatorName(req: Request): string {
   return req.session.user?.username || req.session.user?.displayName || String(req.session.user?.id || "unknown");
@@ -26,6 +43,143 @@ function dependencies(req: Request) {
 }
 
 export function registerOperationsControlTowerRoutes(app: Express) {
+  app.get(
+    "/api/operations/control-tower/v2/work-items",
+    requirePermission("operations", "view"),
+    async (req: Request, res: Response) => {
+      const startedAt = Date.now();
+      try {
+        const filters = parseControlTowerV2QueueFilters(req.query as Record<string, unknown>);
+        const result = await loadControlTowerV2Queue({ client: pool, filters });
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(result);
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load Control Tower queue");
+      } finally {
+        logSlowControlTowerRequest("queue", startedAt, { view: req.query.view ?? "attention" });
+      }
+    },
+  );
+
+  app.get(
+    "/api/operations/control-tower/v2/sources",
+    requirePermission("operations", "view"),
+    async (_req: Request, res: Response) => {
+      const startedAt = Date.now();
+      try {
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(await getControlTowerV2Sources(pool));
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load Control Tower source health");
+      } finally {
+        logSlowControlTowerRequest("sources", startedAt);
+      }
+    },
+  );
+
+  app.get(
+    "/api/operations/control-tower/v2/assignees",
+    requirePermission("operations", "assign"),
+    async (_req: Request, res: Response) => {
+      try {
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(await getControlTowerV2Assignees(pool));
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load Control Tower assignees");
+      }
+    },
+  );
+
+  app.get(
+    "/api/operations/control-tower/v2/work-items/:id",
+    requirePermission("operations", "view"),
+    async (req: Request, res: Response) => {
+      const startedAt = Date.now();
+      try {
+        const id = parsePositiveWorkItemId(req.params.id);
+        const requestedTechnical = String(req.query.includeTechnical ?? "") === "1";
+        const userId = req.session.user!.id;
+        const includeTechnicalEvidence = requestedTechnical
+          && await hasPermission(userId, "operations", "view_technical");
+        if (requestedTechnical && !includeTechnicalEvidence) {
+          res.status(403).json({ error: "Permission denied: operations:view_technical" });
+          return;
+        }
+        const detail = await getControlTowerV2Detail({ client: pool, id, includeTechnicalEvidence });
+        if (!detail) {
+          res.status(404).json({ error: "Control Tower work item not found" });
+          return;
+        }
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(detail);
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load Control Tower detail");
+      } finally {
+        logSlowControlTowerRequest("detail", startedAt, { workItemId: req.params.id });
+      }
+    },
+  );
+
+  app.post(
+    "/api/operations/control-tower/v2/work-items/:id/acknowledge",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const result = await acknowledgeControlTowerV2Item({
+          pool,
+          id: parsePositiveWorkItemId(req.params.id),
+          version: parseWorkItemVersion(req.body?.version),
+          actorUserId: req.session.user!.id,
+          note: req.body?.note,
+        });
+        res.json(result);
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to acknowledge Control Tower item");
+      }
+    },
+  );
+
+  app.post(
+    "/api/operations/control-tower/v2/work-items/:id/assign",
+    requirePermission("operations", "assign"),
+    async (req: Request, res: Response) => {
+      try {
+        const result = await assignControlTowerV2Item({
+          pool,
+          id: parsePositiveWorkItemId(req.params.id),
+          version: parseWorkItemVersion(req.body?.version),
+          actorUserId: req.session.user!.id,
+          assignedUserId: req.body?.assignedUserId,
+          ownerTeam: req.body?.ownerTeam,
+          note: req.body?.note,
+        });
+        res.json(result);
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to assign Control Tower item");
+      }
+    },
+  );
+
+  app.post(
+    "/api/operations/control-tower/v2/work-items/:id/snooze",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const result = await snoozeControlTowerV2Item({
+          pool,
+          id: parsePositiveWorkItemId(req.params.id),
+          version: parseWorkItemVersion(req.body?.version),
+          actorUserId: req.session.user!.id,
+          until: req.body?.until,
+          reason: req.body?.reason,
+        });
+        res.json(result);
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to snooze Control Tower item");
+      }
+    },
+  );
+
   app.get("/api/operations/control-tower", requirePermission("inventory", "view"), async (req: Request, res: Response) => {
     try {
       const userId = req.session.user?.id;
@@ -102,5 +256,28 @@ export function registerOperationsControlTowerRoutes(app: Express) {
       const status = /not found/i.test(message) ? 404 : /permission|positive integer|required|invalid/i.test(message) ? 400 : 409;
       res.status(status).json({ error: message });
     }
+  });
+}
+
+function sendControlTowerV2Error(res: Response, error: unknown, fallback: string): void {
+  if (error instanceof ControlTowerRequestError) {
+    res.status(error.statusCode).json({ error: error.message, code: error.code });
+    return;
+  }
+  console.error(`[Operations Control Tower V2] ${fallback}`, error);
+  res.status(500).json({ error: fallback, code: "CONTROL_TOWER_INTERNAL_ERROR" });
+}
+
+function logSlowControlTowerRequest(
+  endpoint: string,
+  startedAt: number,
+  context: Record<string, unknown> = {},
+): void {
+  const durationMs = Date.now() - startedAt;
+  if (durationMs < 750) return;
+  console.warn("[Operations Control Tower V2] slow request", {
+    endpoint,
+    durationMs,
+    ...context,
   });
 }

@@ -37,7 +37,7 @@ pool.on("error", (error) => {
 });
 
 pool.on("connect", (client) => {
-  client.query('SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, orders, procurement, warehouse, oms, membership, wms, dropship').catch(console.error);
+  client.query('SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, operations, orders, procurement, warehouse, oms, membership, wms, dropship').catch(console.error);
 });
 
 export const db = drizzle(pool, { schema });
@@ -61,7 +61,7 @@ export async function runStartupMigrations(): Promise<void> {
     // unqualified names now fall through public to the real schema tables (wms.*,
     // inventory.*, …); public stays second so unqualified CREATE TABLE still lands in
     // public (matching the app) and the remaining data tables resolve as the app sees them.
-    await client.query(`SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, orders, procurement, warehouse, oms, membership, wms, dropship`);
+    await client.query(`SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, operations, orders, procurement, warehouse, oms, membership, wms, dropship`);
 
     // Refund return lifecycle (REFUND_RESTOCK_DESIGN.md): run FIRST and in its own
     // try/catch. The rest of this function is one big try/catch, and a pre-existing
