@@ -7,6 +7,14 @@ import { readFileSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import * as crypto from 'crypto';
+import {
+  acquireMigrationAdvisoryLock,
+  executeMigrationWithRetry,
+  migrationErrorMessage,
+  migrationRetryOptionsFromEnv,
+  migrationSqlState,
+  releaseMigrationAdvisoryLock,
+} from './migration-executor';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -21,6 +29,7 @@ const pool = new Pool({
   connectionString,
   ssl: { rejectUnauthorized: false }
 });
+const retryOptions = migrationRetryOptionsFromEnv(process.env);
 
 const RENAMED_FILES: Record<string, string> = {
   "0121_replen_task_method_and_autoreplen.sql": "012_replen_task_method_and_autoreplen.sql",
@@ -35,8 +44,12 @@ function hashSQL(sql: string) {
 
 async function runMigrations() {
   const client = await pool.connect();
+  let advisoryLockHeld = false;
   
   try {
+    await acquireMigrationAdvisoryLock(client);
+    advisoryLockHeld = true;
+
     // Check for duplicate prefixes
     const migrationsDir = join(__dirname);
     const files = readdirSync(migrationsDir)
@@ -49,8 +62,9 @@ async function runMigrations() {
       if (match) {
         const prefix = match[1];
         if (prefixMap.has(prefix)) {
-          console.error(`❌ Migration prefix collision: ${prefixMap.get(prefix)} and ${file}`);
-          process.exit(1);
+          throw new Error(
+            `Migration prefix collision: ${prefixMap.get(prefix)} and ${file}`,
+          );
         }
         prefixMap.set(prefix, file);
       }
@@ -99,21 +113,44 @@ async function runMigrations() {
       console.log(`🔄 Applying ${file}...`);
       
       try {
-        await client.query('BEGIN');
-        await client.query(sql);
-        await client.query('INSERT INTO _migrations (filename, content_hash) VALUES ($1, $2)', [file, fileHash]);
-        await client.query('COMMIT');
+        const result = await executeMigrationWithRetry({
+          client,
+          file,
+          sql,
+          contentHash: fileHash,
+          options: retryOptions,
+          onRetry: (notice) => {
+            console.warn(
+              `⚠️  ${notice.file} attempt ${notice.attempt}/${notice.maxAttempts} `
+              + `failed with PostgreSQL ${notice.sqlState}: ${notice.message}. `
+              + `Retrying in ${notice.delayMs}ms...`,
+            );
+          },
+        });
         console.log(`✅ ${file}`);
+        if (result.attempts > 1) {
+          console.log(`   Applied after ${result.attempts} attempts.`);
+        }
+        appliedSet.add(file);
+        appliedHashes.add(fileHash);
         count++;
-      } catch (err: any) {
-        await client.query('ROLLBACK');
-        console.error(`❌ ${file} failed: ${err.message}`);
-        process.exit(1); // Fail-fast for Heroku release phase
+      } catch (error: unknown) {
+        const sqlState = migrationSqlState(error);
+        const sqlStateContext = sqlState ? ` (PostgreSQL ${sqlState})` : "";
+        console.error(
+          `❌ ${file} failed${sqlStateContext}: ${migrationErrorMessage(error)}`,
+        );
+        throw error; // Fail the Heroku release after bounded retries are exhausted.
       }
     }
     
     console.log(`\n✅ Applied ${count} new migration(s)`);
   } finally {
+    if (advisoryLockHeld) {
+      await releaseMigrationAdvisoryLock(client).catch((error) => {
+        console.error('Failed to release migration advisory lock:', error);
+      });
+    }
     client.release();
     await pool.end();
   }
