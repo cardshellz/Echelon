@@ -31,12 +31,13 @@ import type { PoLineType, PoPhysicalStatus, PoFinancialStatus } from "@shared/sc
 import {
   PO_LINE_TYPES,
   isPoLineType,
+  poPriorityEnum,
+  poTypeEnum,
 } from "@shared/schema/procurement.schema";
 import { Decimal } from "decimal.js";
 import {
   centsToMills,
   millsToCents,
-  computeLineTotalCentsFromMills,
 } from "@shared/utils/money";
 import {
   detectQtyVariance,
@@ -162,6 +163,41 @@ export class PurchasingError extends Error {
     this.name = "PurchasingError";
   }
 }
+
+export type PurchaseOrderLineInput = {
+  lineId?: number;
+  clientId?: string;
+  lineType?: PoLineType;
+  parentClientId?: string | null;
+  description?: string | null;
+  productId?: number | null;
+  productVariantId?: number | null;
+  expectedReceiveVariantId?: number | null;
+  expectedReceiveUnitsPerVariant?: number | null;
+  orderQty: number;
+  unitCostCents?: number;
+  unitCostMills?: number;
+  totalProductCostCents?: number;
+  packagingCostCents?: number;
+  vendorProductId?: number | null;
+};
+
+export type CreatePurchaseOrderWithLinesInput = {
+  vendorId: number;
+  warehouseId?: number | null;
+  poType?: string;
+  priority?: string;
+  expectedDeliveryDate?: Date | null;
+  incoterms?: string | null;
+  vendorNotes?: string | null;
+  internalNotes?: string | null;
+  lines: PurchaseOrderLineInput[];
+};
+
+export type UpdateDraftPurchaseOrderWithLinesInput =
+  CreatePurchaseOrderWithLinesInput & {
+    expectedUpdatedAt: Date;
+  };
 
 const EDITABLE_STATUSES = new Set(["draft"]);
 // Broader set for amending existing lines (cost corrections, qty adjustments) — any non-terminal state
@@ -298,11 +334,15 @@ export function createPurchasingService(
       // OLD SHAPE: mills or cents as source (backward compat).
       const millsAuthoritative =
         typeof line.unitCostMills === "number" &&
-        Number.isInteger(line.unitCostMills) &&
-        line.unitCostMills > 0;
+        Number.isInteger(line.unitCostMills);
 
       subtotalCents = millsAuthoritative
-        ? computeLineTotalCentsFromMills(line.unitCostMills as number, qty)
+        ? Number(
+            signedRoundHalfUpDiv(
+              BigInt(line.unitCostMills as number) * BigInt(qty),
+              BigInt(100),
+            ),
+          )
         : qty * (Number(line.unitCostCents) || 0);
 
       resolvedTotalProductCostCents = subtotalCents;
@@ -3453,63 +3493,6 @@ export function createPurchasingService(
   // Rule #7 (DB Discipline): header + lines + status history + po_events are
   // inserted in one transaction so a partial row can never leak.
 
-  type CreatePurchaseOrderWithLinesInput = {
-    vendorId: number;
-    warehouseId?: number;
-    poType?: string;
-    priority?: string;
-    expectedDeliveryDate?: Date | null;
-    incoterms?: string | null;
-    vendorNotes?: string | null;
-    internalNotes?: string | null;
-    lines: Array<{
-      // Request-time identifier used to link child lines (discount/adjustment)
-      // to a parent product line before the parent has a DB id.
-      // Optional; if absent for a line that is referenced by a child, server
-      // auto-generates one.
-      clientId?: string;
-
-      // Line taxonomy (migration 0563). Defaults to 'product'.
-      // See PO_LINE_TYPES in procurement.schema for the full set.
-      lineType?: PoLineType;
-
-      // Only valid on non-product lines. References another line's
-      // clientId in the SAME request payload. Parent must resolve to a
-      // product line; no chains.
-      parentClientId?: string | null;
-
-      // Required on non-product lines; product lines cache product_name/sku
-      // from product_id and receive configuration from expected_receive_*.
-      description?: string | null;
-
-      // Required on product lines only. Must be null/absent on other types.
-      productId?: number | null;
-      productVariantId?: number | null;
-      expectedReceiveVariantId?: number | null;
-      expectedReceiveUnitsPerVariant?: number | null;
-
-      // Product lines: qty > 0. Fee: qty >= 1. All other types: qty == 1.
-      orderQty: number;
-
-      // Per-unit cost (OLD SHAPE — backward compat). Either or both may be provided:
-      //   * unitCostMills is authoritative (4-decimal precision).
-      //   * unitCostCents is accepted for legacy/back-compat callers.
-      //   * If both are provided, they MUST agree (cents == round(mills/100)).
-      // Sign constraints vary by lineType (see validateCreateWithLinesInput).
-      unitCostCents?: number;
-      unitCostMills?: number;
-
-      // Totals-based cost (NEW SHAPE — Spec F Phase 1, preferred for product lines).
-      // If totalProductCostCents is provided, it is the source of truth.
-      // unitCostMills/unitCostCents become derived. If BOTH shapes are sent,
-      // totals win and per-unit is recomputed.
-      totalProductCostCents?: number;
-      packagingCostCents?: number;
-
-      vendorProductId?: number | null;
-    }>;
-  };
-
   // Type-aware line validation (migration 0563).
   //
   // Rules per line_type:
@@ -3525,24 +3508,60 @@ export function createPurchasingService(
   // parentClientId are request-scoped and resolved to DB ids inside the
   // insert transaction; parent must resolve to a product line in the same
   // payload (no chains, no cycles).
-  function validateCreateWithLinesInput(input: CreatePurchaseOrderWithLinesInput): void {
+  function validateCreateWithLinesInput(
+    input: CreatePurchaseOrderWithLinesInput,
+    options: { allowExistingLineIds?: boolean } = {},
+  ): void {
     if (!input || typeof input !== "object") {
       throw new PurchasingError("Request body is required", 400);
     }
-    if (!Number.isInteger(input.vendorId) || input.vendorId <= 0) {
+    if (!Number.isSafeInteger(input.vendorId) || input.vendorId <= 0) {
       throw new PurchasingError("vendor_id is required", 400);
+    }
+    if (
+      input.warehouseId !== undefined &&
+      input.warehouseId !== null &&
+      (!Number.isSafeInteger(input.warehouseId) || input.warehouseId <= 0)
+    ) {
+      throw new PurchasingError("warehouse_id must be a positive integer or null", 400);
     }
     if (!Array.isArray(input.lines) || input.lines.length === 0) {
       throw new PurchasingError("At least one line is required", 400);
+    }
+    if (input.poType !== undefined && !poTypeEnum.includes(input.poType as any)) {
+      throw new PurchasingError(`po_type must be one of ${poTypeEnum.join(", ")}`, 400);
+    }
+    if (input.priority !== undefined && !poPriorityEnum.includes(input.priority as any)) {
+      throw new PurchasingError(`priority must be one of ${poPriorityEnum.join(", ")}`, 400);
+    }
+    if (
+      input.expectedDeliveryDate !== undefined &&
+      input.expectedDeliveryDate !== null &&
+      (!(input.expectedDeliveryDate instanceof Date) || Number.isNaN(input.expectedDeliveryDate.getTime()))
+    ) {
+      throw new PurchasingError("expected_delivery_date must be a valid date", 400);
     }
 
     // First pass: per-line shape + type rules. Build clientId->index map
     // for the second pass (parent resolution).
     const clientIdToIndex = new Map<string, number>();
+    const existingLineIds = new Set<number>();
     for (const [idx, line] of input.lines.entries()) {
       const label = `lines[${idx}]`;
       if (!line || typeof line !== "object") {
         throw new PurchasingError(`${label} is invalid`, 400);
+      }
+      if (line.lineId !== undefined && line.lineId !== null) {
+        if (!options.allowExistingLineIds) {
+          throw new PurchasingError(`${label}.line_id is not valid when creating a PO`, 400);
+        }
+        if (!Number.isSafeInteger(line.lineId) || line.lineId <= 0) {
+          throw new PurchasingError(`${label}.line_id must be a positive integer`, 400);
+        }
+        if (existingLineIds.has(line.lineId)) {
+          throw new PurchasingError(`${label}.line_id ${line.lineId} is duplicated`, 400);
+        }
+        existingLineIds.add(line.lineId);
       }
 
       const lineType: PoLineType = line.lineType ?? "product";
@@ -3567,16 +3586,29 @@ export function createPurchasingService(
       // Product rule.
       if (lineType === "product") {
         if (
-          !Number.isInteger(line.productId) ||
+          !Number.isSafeInteger(line.productId) ||
           (line.productId as number) <= 0
         ) {
           throw new PurchasingError(`${label}.product_id is required`, 400);
+        }
+        for (const [field, value] of [
+          ["product_variant_id", line.productVariantId],
+          ["expected_receive_variant_id", line.expectedReceiveVariantId],
+          ["vendor_product_id", line.vendorProductId],
+        ] as const) {
+          if (
+            value !== undefined &&
+            value !== null &&
+            (!Number.isSafeInteger(value) || value <= 0)
+          ) {
+            throw new PurchasingError(`${label}.${field} must be a positive integer`, 400);
+          }
         }
         if (
           line.expectedReceiveUnitsPerVariant !== undefined &&
           line.expectedReceiveUnitsPerVariant !== null &&
           (
-            !Number.isInteger(line.expectedReceiveUnitsPerVariant) ||
+            !Number.isSafeInteger(line.expectedReceiveUnitsPerVariant) ||
             line.expectedReceiveUnitsPerVariant <= 0
           )
         ) {
@@ -3625,7 +3657,7 @@ export function createPurchasingService(
       }
 
       // Qty rule.
-      if (!Number.isInteger(line.orderQty)) {
+      if (!Number.isSafeInteger(line.orderQty)) {
         throw new PurchasingError(
           `${label}.quantity_ordered must be an integer`,
           400,
@@ -3671,19 +3703,19 @@ export function createPurchasingService(
           400,
         );
       }
-      if (hasMills && !Number.isInteger(line.unitCostMills)) {
+      if (hasMills && !Number.isSafeInteger(line.unitCostMills)) {
         throw new PurchasingError(
           `${label}.unit_cost_mills must be an integer`,
           400,
         );
       }
-      if (hasCents && !Number.isInteger(line.unitCostCents)) {
+      if (hasCents && !Number.isSafeInteger(line.unitCostCents)) {
         throw new PurchasingError(
           `${label}.unit_cost_cents must be an integer`,
           400,
         );
       }
-      if (hasTotals && !Number.isInteger(line.totalProductCostCents)) {
+      if (hasTotals && !Number.isSafeInteger(line.totalProductCostCents)) {
         throw new PurchasingError(
           `${label}.total_product_cost_cents must be an integer`,
           400,
@@ -3692,7 +3724,7 @@ export function createPurchasingService(
       if (
         line.packagingCostCents !== undefined &&
         line.packagingCostCents !== null &&
-        !Number.isInteger(line.packagingCostCents)
+        !Number.isSafeInteger(line.packagingCostCents)
       ) {
         throw new PurchasingError(
           `${label}.packaging_cost_cents must be an integer`,
@@ -3800,24 +3832,18 @@ export function createPurchasingService(
     }
   }
 
-  async function createPurchaseOrderWithLines(
+  type ResolvedPurchaseOrderLine = {
+    line: CreatePurchaseOrderWithLinesInput["lines"][number];
+    lineType: PoLineType;
+    variant: any;
+    product: any;
+    costs: ReturnType<typeof calculateLineCosts>;
+  };
+
+  async function resolvePurchaseOrderLines(
     input: CreatePurchaseOrderWithLinesInput,
-    userId?: string,
-  ): Promise<any> {
-    validateCreateWithLinesInput(input);
-
-    const vendor = await storage.getVendorById(input.vendorId);
-    if (!vendor) throw new PurchasingError("Vendor not found", 404);
-
-    // Resolve product + variant info up-front for PRODUCT lines. Non-product
-    // lines don't reference a variant; they carry a user-entered description
-    // and signed cost.
-    //
-    // Per-unit cost: mills is authoritative; cents is derived (rounded
-    // half-up) for back-compat writes into unit_cost_cents. Non-product
-    // lines can have negative cost (discount/rebate/adjustment); the
-    // validator has already enforced per-type sign rules.
-    const resolvedLines = await Promise.all(
+  ): Promise<ResolvedPurchaseOrderLine[]> {
+    return Promise.all(
       input.lines.map(async (line) => {
         const lineType: PoLineType = line.lineType ?? "product";
         let variant: any = null;
@@ -3837,12 +3863,32 @@ export function createPurchasingService(
                 404,
               );
             }
+            if (
+              Number.isInteger(variant.productId) &&
+              Number(variant.productId) !== Number(product.id)
+            ) {
+              throw new PurchasingError(
+                `Expected receive variant ${expectedReceiveVariantId} does not belong to product ${product.id}`,
+                400,
+              );
+            }
+          }
+
+          if (line.vendorProductId !== undefined && line.vendorProductId !== null) {
+            const vendorProduct = await storage.getVendorProductById(line.vendorProductId);
+            if (
+              !vendorProduct ||
+              Number(vendorProduct.vendorId) !== input.vendorId ||
+              Number(vendorProduct.productId) !== Number(product.id)
+            ) {
+              throw new PurchasingError(
+                `Vendor product ${line.vendorProductId} does not match vendor ${input.vendorId} and product ${product.id}`,
+                400,
+              );
+            }
           }
         }
 
-        // Spec F Phase 1: pass through totals if provided (new shape),
-        // else fall back to mills/cents (old shape). calculateLineCosts
-        // handles both; if both are sent, totals win.
         const costs = calculateLineCosts({
           orderQty: line.orderQty,
           unitCostCents: Number(line.unitCostCents) || 0,
@@ -3852,24 +3898,187 @@ export function createPurchasingService(
           packagingCostCents:
             typeof line.packagingCostCents === "number" ? line.packagingCostCents : null,
         });
-        return {
-          line,
-          lineType,
-          variant,
-          product,
-          costs,
-          unitCostMills: costs.unitCostMills,
-          unitCostCents: costs.unitCostCents,
-        };
+        for (const [field, value] of Object.entries(costs)) {
+          if (!Number.isSafeInteger(value)) {
+            throw new PurchasingError(`Calculated ${field} exceeds the supported integer range`, 400, {
+              code: "PO_LINE_MONEY_OUT_OF_RANGE",
+              field,
+            });
+          }
+        }
+        return { line, lineType, variant, product, costs };
       }),
     );
+  }
+
+  function buildPurchaseOrderLineValues(
+    purchaseOrderId: number,
+    resolved: ResolvedPurchaseOrderLine,
+    lineNumber: number,
+  ): Record<string, unknown> {
+    const isProduct = resolved.lineType === "product";
+    return {
+      purchaseOrderId,
+      lineNumber,
+      productId: isProduct ? resolved.product.id : null,
+      productVariantId: isProduct ? (resolved.variant?.id ?? null) : null,
+      expectedReceiveVariantId: isProduct ? (resolved.variant?.id ?? null) : null,
+      vendorProductId: isProduct ? (resolved.line.vendorProductId ?? null) : null,
+      sku: isProduct ? (resolved.product.sku ?? resolved.variant?.sku ?? null) : null,
+      productName: isProduct ? resolved.product.name : null,
+      description: resolved.line.description ?? null,
+      unitOfMeasure: isProduct
+        ? (resolved.variant?.name?.split(" ")[0]?.toLowerCase() ?? "each")
+        : null,
+      unitsPerUom: isProduct ? (resolved.variant?.unitsPerVariant || 1) : 1,
+      expectedReceiveUnitsPerVariant: isProduct
+        ? (resolved.line.expectedReceiveUnitsPerVariant || resolved.variant?.unitsPerVariant || 1)
+        : 1,
+      orderQty: resolved.line.orderQty,
+      unitCostCents: resolved.costs.unitCostCents,
+      unitCostMills: resolved.costs.unitCostMills,
+      totalProductCostCents: isProduct ? resolved.costs.totalProductCostCents : 0,
+      packagingCostCents: isProduct ? resolved.costs.packagingCostCents : 0,
+      discountCents: resolved.costs.discountCents,
+      taxCents: resolved.costs.taxCents,
+      lineTotalCents: resolved.costs.lineTotalCents,
+      lineType: resolved.lineType,
+      parentLineId: null,
+      status: "open",
+    };
+  }
+
+  async function applyPurchaseOrderParentLineLinks(
+    tx: any,
+    resolvedLines: ResolvedPurchaseOrderLine[],
+    persistedLines: any[],
+    updatedAt?: Date,
+  ): Promise<void> {
+    const clientIdToLineId = new Map<string, number>();
+    resolvedLines.forEach((resolved, index) => {
+      const clientId = resolved.line.clientId;
+      const lineId = persistedLines[index]?.id;
+      if (typeof clientId === "string" && clientId.length > 0 && Number.isInteger(lineId)) {
+        clientIdToLineId.set(clientId, lineId);
+      }
+    });
+
+    for (let index = 0; index < resolvedLines.length; index++) {
+      const parentClientId = resolvedLines[index].line.parentClientId;
+      if (!parentClientId) continue;
+      const parentLineId = clientIdToLineId.get(parentClientId);
+      const childLineId = persistedLines[index]?.id;
+      if (!parentLineId || !Number.isInteger(childLineId)) {
+        throw new PurchasingError("Unable to resolve draft line parent linkage", 409, {
+          code: "PO_DRAFT_PARENT_LINK_CONFLICT",
+          parentClientId,
+        });
+      }
+      await tx
+        .update(purchaseOrderLinesTable)
+        .set({ parentLineId, ...(updatedAt ? { updatedAt } : {}) })
+        .where(eq(purchaseOrderLinesTable.id, childLineId));
+      persistedLines[index].parentLineId = parentLineId;
+    }
+  }
+
+  function safeIntegerMoney(value: bigint, field: string): number {
+    const max = BigInt(Number.MAX_SAFE_INTEGER);
+    const min = BigInt(Number.MIN_SAFE_INTEGER);
+    if (value > max || value < min) {
+      throw new PurchasingError(`${field} exceeds the supported integer range`, 400, {
+        code: "PO_MONEY_OUT_OF_RANGE",
+        field,
+      });
+    }
+    return Number(value);
+  }
+
+  function storedMoneyAsBigInt(value: unknown, field: string): bigint {
+    const numeric = value === null || value === undefined ? 0 : Number(value);
+    if (!Number.isSafeInteger(numeric)) {
+      throw new PurchasingError(`Stored ${field} is not a safe integer`, 409, {
+        code: "PO_STORED_MONEY_INVALID",
+        field,
+        value,
+      });
+    }
+    return BigInt(numeric);
+  }
+
+  function auditDate(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    const parsed = value instanceof Date ? value : new Date(String(value));
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  function snapshotDraftHeader(po: any): Record<string, unknown> {
+    return {
+      vendor_id: po.vendorId,
+      warehouse_id: po.warehouseId ?? null,
+      po_type: po.poType ?? null,
+      priority: po.priority ?? null,
+      expected_delivery_date: auditDate(po.expectedDeliveryDate),
+      incoterms: po.incoterms ?? null,
+      vendor_notes: po.vendorNotes ?? null,
+      internal_notes: po.internalNotes ?? null,
+      currency: po.currency ?? null,
+      payment_terms_days: po.paymentTermsDays ?? null,
+      payment_terms_type: po.paymentTermsType ?? null,
+      ship_from_address: po.shipFromAddress ?? null,
+      subtotal_cents: po.subtotalCents ?? 0,
+      discount_cents: po.discountCents ?? 0,
+      tax_cents: po.taxCents ?? 0,
+      shipping_cost_cents: po.shippingCostCents ?? 0,
+      total_cents: po.totalCents ?? 0,
+      line_count: po.lineCount ?? 0,
+      updated_at: auditDate(po.updatedAt),
+    };
+  }
+
+  function snapshotDraftLine(line: any): Record<string, unknown> {
+    return {
+      id: line.id,
+      line_number: line.lineNumber,
+      line_type: line.lineType ?? "product",
+      parent_line_id: line.parentLineId ?? null,
+      product_id: line.productId ?? null,
+      product_variant_id: line.productVariantId ?? null,
+      expected_receive_variant_id: line.expectedReceiveVariantId ?? null,
+      expected_receive_units_per_variant: line.expectedReceiveUnitsPerVariant ?? 1,
+      vendor_product_id: line.vendorProductId ?? null,
+      sku: line.sku ?? null,
+      product_name: line.productName ?? null,
+      description: line.description ?? null,
+      order_qty: line.orderQty,
+      unit_cost_cents: line.unitCostCents ?? 0,
+      unit_cost_mills: line.unitCostMills ?? null,
+      total_product_cost_cents: line.totalProductCostCents ?? 0,
+      packaging_cost_cents: line.packagingCostCents ?? 0,
+      discount_cents: line.discountCents ?? 0,
+      tax_cents: line.taxCents ?? 0,
+      line_total_cents: line.lineTotalCents ?? 0,
+      status: line.status ?? "open",
+    };
+  }
+
+  async function createPurchaseOrderWithLines(
+    input: CreatePurchaseOrderWithLinesInput,
+    userId?: string,
+  ): Promise<any> {
+    validateCreateWithLinesInput(input);
+
+    const vendor = await storage.getVendorById(input.vendorId);
+    if (!vendor) throw new PurchasingError("Vendor not found", 404);
+    const resolvedLines = await resolvePurchaseOrderLines(input);
 
     const poNumber = await storage.generatePoNumber();
 
-    const subtotalCents = resolvedLines.reduce(
+    const subtotalCentsBigInt = resolvedLines.reduce(
       (sum, r) => sum + BigInt(r.costs.lineTotalCents),
       BigInt(0),
     );
+    const subtotalCents = safeIntegerMoney(subtotalCentsBigInt, "subtotal_cents");
 
     // Single transaction: header + lines + status history + po_events['created']
     const created = await db.transaction(async (tx: any) => {
@@ -3890,56 +4099,17 @@ export function createPurchasingService(
           paymentTermsDays: vendor.paymentTermsDays,
           paymentTermsType: vendor.paymentTermsType,
           shipFromAddress: vendor.shipFromAddress,
-          subtotalCents: Number(subtotalCents),
-          totalCents: Number(subtotalCents), // no header discount/tax/shipping on inline create
+          subtotalCents,
+          totalCents: subtotalCents, // no header discount/tax/shipping on inline create
           lineCount: resolvedLines.length,
           createdBy: userId ?? null,
           updatedBy: userId ?? null,
         })
         .returning();
 
-      // Build line rows. Product lines cache product identity/SKU and carry
-      // expected_receive_* as the physical receiving configuration. Both record
-      // line_type (migration 0563) so downstream consumers can filter.
-      const lineRows = resolvedLines.map((r, idx) => {
-        const isProduct = r.lineType === "product";
-        return {
-          purchaseOrderId: header.id,
-          lineNumber: idx + 1,
-          productId: isProduct ? r.product.id : null,
-          // Deprecated compatibility field. PO purchasing identity is product_id
-          // + product SKU + piece quantity; expected_receive_* carries the
-          // receiving configuration.
-          productVariantId: isProduct ? (r.variant?.id ?? null) : null,
-          expectedReceiveVariantId: isProduct ? (r.variant?.id ?? null) : null,
-          vendorProductId: isProduct ? (r.line.vendorProductId ?? null) : null,
-          sku: isProduct ? (r.product.sku ?? r.variant?.sku ?? null) : null,
-          productName: isProduct ? r.product.name : null,
-          description: r.line.description ?? null,
-          unitOfMeasure: isProduct
-            ? (r.variant?.name?.split(" ")[0]?.toLowerCase() ?? "each")
-            : null,
-          unitsPerUom: isProduct ? (r.variant?.unitsPerVariant || 1) : 1,
-          expectedReceiveUnitsPerVariant: isProduct
-            ? (r.line.expectedReceiveUnitsPerVariant || r.variant?.unitsPerVariant || 1)
-            : 1,
-          orderQty: r.line.orderQty,
-          // Write BOTH mills/cents and totals on INSERT (Spec F Phase 1).
-          // Mills/cents are computed-derived for back-compat; totals are source of truth.
-          // Non-product lines always have 0 for totals fields.
-          unitCostCents: r.costs.unitCostCents,
-          unitCostMills: r.costs.unitCostMills,
-          totalProductCostCents: isProduct ? r.costs.totalProductCostCents : 0,
-          packagingCostCents: isProduct ? r.costs.packagingCostCents : 0,
-          discountCents: r.costs.discountCents,
-          taxCents: r.costs.taxCents,
-          lineTotalCents: r.costs.lineTotalCents,
-          lineType: r.lineType,
-          // parent_line_id resolved in a second pass after insert.
-          parentLineId: null as number | null,
-          status: "open" as const,
-        };
-      });
+      const lineRows = resolvedLines.map((resolved, index) =>
+        buildPurchaseOrderLineValues(header.id, resolved, index + 1),
+      );
       const insertedLines = await tx
         .insert(purchaseOrderLinesTable)
         .values(lineRows)
@@ -3948,31 +4118,7 @@ export function createPurchasingService(
           lineNumber: purchaseOrderLinesTable.lineNumber,
         });
 
-      // Second pass: resolve parentClientId -> parent_line_id. Iterate in
-      // insertion order so we can map line_number back to DB id.
-      // Validator has already checked that every parentClientId points to a
-      // valid PRODUCT line in this same request, so no extra guards here.
-      const clientIdToLineId = new Map<string, number>();
-      resolvedLines.forEach((r, idx) => {
-        const cid = r.line.clientId;
-        if (typeof cid === "string" && cid.length > 0) {
-          const dbId = insertedLines[idx]?.id;
-          if (typeof dbId === "number") clientIdToLineId.set(cid, dbId);
-        }
-      });
-      for (let i = 0; i < resolvedLines.length; i++) {
-        const r = resolvedLines[i];
-        const parentClientId = r.line.parentClientId;
-        if (!parentClientId) continue;
-        const parentDbId = clientIdToLineId.get(parentClientId);
-        if (!parentDbId) continue; // validator prevents this, defensive only
-        const childDbId = insertedLines[i]?.id;
-        if (typeof childDbId !== "number") continue;
-        await tx
-          .update(purchaseOrderLinesTable)
-          .set({ parentLineId: parentDbId })
-          .where(eq(purchaseOrderLinesTable.id, childDbId));
-      }
+      await applyPurchaseOrderParentLineLinks(tx, resolvedLines, insertedLines);
 
       // Status history: creation row (from NULL -> 'draft').
       await tx.insert(poStatusHistoryTable).values({
@@ -3987,13 +4133,288 @@ export function createPurchasingService(
       await emitPoEventTx(tx, header.id, "created", userId, {
         source: "inline_editor",
         line_count: resolvedLines.length,
-        subtotal_cents: Number(subtotalCents),
+        subtotal_cents: subtotalCents,
       });
 
       return header;
     });
 
     return created;
+  }
+
+  // ── DRAFT FULL-REPLACEMENT FLOW ─────────────────────────────────────────
+  //
+  // Locks the draft header and lines, checks an optimistic version, preserves
+  // retained line ids, cancels removed lines, inserts only new lines, and
+  // records the complete before/after state in one transaction.
+
+  async function updateDraftPurchaseOrderWithLines(
+    id: number,
+    input: UpdateDraftPurchaseOrderWithLinesInput,
+    userId?: string,
+  ): Promise<{ po: any; lines: any[] }> {
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new PurchasingError("Purchase order id must be a positive integer", 400, {
+        code: "INVALID_PURCHASE_ORDER_ID",
+      });
+    }
+    if (!input || typeof input !== "object") {
+      throw new PurchasingError("Request body is required", 400);
+    }
+    if (
+      !(input.expectedUpdatedAt instanceof Date) ||
+      Number.isNaN(input.expectedUpdatedAt.getTime())
+    ) {
+      throw new PurchasingError("expected_updated_at must be a valid date", 400, {
+        code: "PO_DRAFT_EXPECTED_VERSION_REQUIRED",
+      });
+    }
+    validateCreateWithLinesInput(input, { allowExistingLineIds: true });
+
+    const vendor = await storage.getVendorById(input.vendorId);
+    if (!vendor) throw new PurchasingError("Vendor not found", 404);
+    const resolvedLines = await resolvePurchaseOrderLines(input);
+    const subtotalCents = safeIntegerMoney(
+      resolvedLines.reduce(
+        (sum, resolved) => sum + BigInt(resolved.costs.lineTotalCents),
+        BigInt(0),
+      ),
+      "subtotal_cents",
+    );
+
+    return db.transaction(async (tx: any) => {
+      const lockedHeaders = await tx
+        .select()
+        .from(purchaseOrdersTable)
+        .where(eq(purchaseOrdersTable.id, id))
+        .limit(1)
+        .for("update");
+      const currentPo = lockedHeaders[0];
+      if (!currentPo) throw new PurchasingError("Purchase order not found", 404);
+
+      const physicalStatus = currentPo.physicalStatus ?? currentPo.status;
+      const financialStatus = currentPo.financialStatus ?? "unbilled";
+      if (
+        currentPo.status !== "draft" ||
+        physicalStatus !== "draft" ||
+        financialStatus !== "unbilled"
+      ) {
+        throw new PurchasingError(`Cannot edit PO in '${currentPo.status}' status`, 400, {
+          code: "PO_NOT_EDITABLE",
+          status: currentPo.status,
+          physicalStatus,
+          financialStatus,
+        });
+      }
+      if (
+        storedMoneyAsBigInt(currentPo.invoicedTotalCents, "invoiced_total_cents") !== BigInt(0) ||
+        storedMoneyAsBigInt(currentPo.paidTotalCents, "paid_total_cents") !== BigInt(0)
+      ) {
+        throw new PurchasingError("Cannot replace lines after financial activity exists", 409, {
+          code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY",
+        });
+      }
+
+      const currentUpdatedAt = new Date(currentPo.updatedAt);
+      if (
+        Number.isNaN(currentUpdatedAt.getTime()) ||
+        currentUpdatedAt.getTime() !== input.expectedUpdatedAt.getTime()
+      ) {
+        throw new PurchasingError("This draft changed after it was loaded", 409, {
+          code: "PO_DRAFT_EDIT_STALE",
+          expected_updated_at: input.expectedUpdatedAt.toISOString(),
+          current_updated_at: auditDate(currentPo.updatedAt),
+        });
+      }
+
+      const existingLines = await tx
+        .select()
+        .from(purchaseOrderLinesTable)
+        .where(eq(purchaseOrderLinesTable.purchaseOrderId, id))
+        .for("update");
+      const activeExistingLines = existingLines.filter((line: any) => line.status !== "cancelled");
+      const activeById = new Map<number, any>(
+        activeExistingLines.map((line: any) => [Number(line.id), line]),
+      );
+
+      const nonEditableLine = activeExistingLines.find((line: any) =>
+        (line.status ?? "open") !== "open" ||
+        Number(line.receivedQty ?? 0) !== 0 ||
+        Number(line.damagedQty ?? 0) !== 0 ||
+        Number(line.returnedQty ?? 0) !== 0 ||
+        Number(line.cancelledQty ?? 0) !== 0,
+      );
+      if (nonEditableLine) {
+        throw new PurchasingError("Cannot replace draft lines after inventory activity exists", 409, {
+          code: "PO_DRAFT_LINE_HAS_ACTIVITY",
+          line_id: nonEditableLine.id,
+          line_status: nonEditableLine.status,
+        });
+      }
+
+      for (const resolved of resolvedLines) {
+        const lineId = resolved.line.lineId;
+        if (lineId !== undefined && !activeById.has(lineId)) {
+          throw new PurchasingError(`Line ${lineId} is not an active line on this PO`, 409, {
+            code: "PO_DRAFT_LINE_OWNERSHIP",
+            line_id: lineId,
+            purchase_order_id: id,
+          });
+        }
+      }
+
+      const changedAt = now();
+      const beforeHeader = snapshotDraftHeader(currentPo);
+      const beforeLines = activeExistingLines
+        .slice()
+        .sort((a: any, b: any) => Number(a.lineNumber) - Number(b.lineNumber))
+        .map(snapshotDraftLine);
+      const retainedLineIds = new Set(
+        resolvedLines
+          .map((resolved) => resolved.line.lineId)
+          .filter((lineId): lineId is number => lineId !== undefined),
+      );
+      const cancelledLineIds: number[] = [];
+
+      for (const existingLine of activeExistingLines) {
+        if (retainedLineIds.has(existingLine.id)) continue;
+        const cancelled = await tx
+          .update(purchaseOrderLinesTable)
+          .set({
+            status: "cancelled",
+            cancelledQty: existingLine.orderQty,
+            parentLineId: null,
+            updatedAt: changedAt,
+          })
+          .where(and(
+            eq(purchaseOrderLinesTable.id, existingLine.id),
+            eq(purchaseOrderLinesTable.purchaseOrderId, id),
+            eq(purchaseOrderLinesTable.status, "open"),
+          ))
+          .returning({ id: purchaseOrderLinesTable.id });
+        if (!cancelled[0]) {
+          throw new PurchasingError("A draft line changed while the edit was being applied", 409, {
+            code: "PO_DRAFT_EDIT_CONFLICT",
+            line_id: existingLine.id,
+          });
+        }
+        cancelledLineIds.push(existingLine.id);
+      }
+
+      const persistedLines: any[] = [];
+      const addedLineIds: number[] = [];
+      for (let index = 0; index < resolvedLines.length; index++) {
+        const resolved = resolvedLines[index];
+        const values = buildPurchaseOrderLineValues(id, resolved, index + 1);
+        let persisted: any;
+        if (resolved.line.lineId !== undefined) {
+          const updatedRows = await tx
+            .update(purchaseOrderLinesTable)
+            .set({ ...values, updatedAt: changedAt })
+            .where(and(
+              eq(purchaseOrderLinesTable.id, resolved.line.lineId),
+              eq(purchaseOrderLinesTable.purchaseOrderId, id),
+              eq(purchaseOrderLinesTable.status, "open"),
+            ))
+            .returning();
+          persisted = updatedRows[0];
+          if (!persisted) {
+            throw new PurchasingError("A draft line changed while the edit was being applied", 409, {
+              code: "PO_DRAFT_EDIT_CONFLICT",
+              line_id: resolved.line.lineId,
+            });
+          }
+        } else {
+          const insertedRows = await tx
+            .insert(purchaseOrderLinesTable)
+            .values({ ...values, createdAt: changedAt, updatedAt: changedAt })
+            .returning();
+          persisted = insertedRows[0];
+          if (!persisted) {
+            throw new PurchasingError("Failed to insert a draft line", 500, {
+              code: "PO_DRAFT_LINE_INSERT_FAILED",
+              line_number: index + 1,
+            });
+          }
+          addedLineIds.push(persisted.id);
+        }
+        persistedLines.push(persisted);
+      }
+
+      await applyPurchaseOrderParentLineLinks(tx, resolvedLines, persistedLines, changedAt);
+
+      const discountCents = storedMoneyAsBigInt(currentPo.discountCents, "discount_cents");
+      const taxCents = storedMoneyAsBigInt(currentPo.taxCents, "tax_cents");
+      const shippingCostCents = storedMoneyAsBigInt(
+        currentPo.shippingCostCents,
+        "shipping_cost_cents",
+      );
+      const totalCents = safeIntegerMoney(
+        BigInt(subtotalCents) - discountCents + taxCents + shippingCostCents,
+        "total_cents",
+      );
+      const vendorChanged = Number(currentPo.vendorId) !== input.vendorId;
+      const headerPatch = {
+        vendorId: input.vendorId,
+        warehouseId: input.warehouseId === undefined ? currentPo.warehouseId : input.warehouseId,
+        poType: input.poType ?? currentPo.poType ?? "standard",
+        priority: input.priority ?? currentPo.priority ?? "normal",
+        expectedDeliveryDate: input.expectedDeliveryDate ?? null,
+        incoterms: input.incoterms ?? null,
+        vendorNotes: input.vendorNotes ?? null,
+        internalNotes: input.internalNotes ?? null,
+        currency: vendorChanged ? (vendor.currency || "USD") : currentPo.currency,
+        paymentTermsDays: vendorChanged ? vendor.paymentTermsDays : currentPo.paymentTermsDays,
+        paymentTermsType: vendorChanged ? vendor.paymentTermsType : currentPo.paymentTermsType,
+        shipFromAddress: vendorChanged ? vendor.shipFromAddress : currentPo.shipFromAddress,
+        subtotalCents,
+        totalCents,
+        lineCount: persistedLines.length,
+        receivedLineCount: 0,
+        updatedBy: userId ?? null,
+        updatedAt: changedAt,
+      };
+      const updatedHeaders = await tx
+        .update(purchaseOrdersTable)
+        .set(headerPatch)
+        .where(and(
+          eq(purchaseOrdersTable.id, id),
+          eq(purchaseOrdersTable.status, "draft"),
+          eq(purchaseOrdersTable.physicalStatus, "draft"),
+          eq(purchaseOrdersTable.financialStatus, "unbilled"),
+          eq(purchaseOrdersTable.updatedAt, currentPo.updatedAt),
+        ))
+        .returning();
+      const updatedPo = updatedHeaders[0];
+      if (!updatedPo) {
+        throw new PurchasingError("Purchase order changed while the edit was being applied", 409, {
+          code: "PO_DRAFT_EDIT_CONFLICT",
+        });
+      }
+
+      await emitPoEventTx(tx, id, "edited", userId, {
+        source: "inline_editor",
+        expected_updated_at: input.expectedUpdatedAt.toISOString(),
+        added_line_ids: addedLineIds,
+        cancelled_line_ids: cancelledLineIds,
+        before: {
+          header: beforeHeader,
+          lines: beforeLines,
+        },
+        after: {
+          header: snapshotDraftHeader(updatedPo),
+          lines: persistedLines.map(snapshotDraftLine),
+        },
+      });
+
+      return {
+        po: updatedPo,
+        lines: persistedLines.map((line, index) => ({
+          ...line,
+          clientId: resolvedLines[index].line.clientId,
+        })),
+      };
+    });
   }
 
   // ── NEW SEND FLOW (Spec A) ───────────────────────────────────────────────
@@ -4835,6 +5256,7 @@ export function createPurchasingService(
 
     // Spec A: inline create, one-click send, duplicate, preload, settings.
     createPurchaseOrderWithLines,
+    updateDraftPurchaseOrderWithLines,
     sendPurchaseOrder,
     duplicatePurchaseOrder,
     getNewPoPreload,

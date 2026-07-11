@@ -7,7 +7,11 @@ import { ordersStorage } from "../orders";
 const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
 import { requirePermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
-import { PurchasingError } from "./purchasing.service";
+import {
+  PurchasingError,
+  type CreatePurchaseOrderWithLinesInput,
+  type PurchaseOrderLineInput,
+} from "./purchasing.service";
 import * as poExceptionsService from "./po-exceptions.service";
 import { PoExceptionError } from "./po-exceptions.service";
 import * as apLedger from "./ap-ledger.service";
@@ -40,6 +44,83 @@ function parseNullableDateInput(value: unknown, fieldLabel: string): Date | null
     });
   }
   return date;
+}
+
+function mapPurchaseOrderLineInput(line: any, includeLineId: boolean): PurchaseOrderLineInput {
+  const rawCents = line?.unit_cost_cents ?? line?.unitCostCents;
+  const rawMills = line?.unit_cost_mills ?? line?.unitCostMills;
+  const lineType = line?.line_type ?? line?.lineType ?? "product";
+  const variantIdRaw = line?.product_variant_id ?? line?.productVariantId;
+  const productIdRaw = line?.product_id ?? line?.productId;
+  const expectedReceiveVariantIdRaw =
+    line?.expected_receive_variant_id ?? line?.expectedReceiveVariantId ?? variantIdRaw;
+  const expectedReceiveUnitsPerVariantRaw =
+    line?.expected_receive_units_per_variant ?? line?.expectedReceiveUnitsPerVariant;
+  const mapped: PurchaseOrderLineInput = {
+    lineType,
+    clientId: line?.client_id ?? line?.clientId ?? undefined,
+    parentClientId: line?.parent_client_id ?? line?.parentClientId ?? null,
+    description: line?.description ?? null,
+    productId: lineType === "product" ? Number(productIdRaw) : null,
+    productVariantId:
+      lineType === "product" && variantIdRaw != null ? Number(variantIdRaw) : null,
+    expectedReceiveVariantId:
+      lineType === "product" && expectedReceiveVariantIdRaw != null
+        ? Number(expectedReceiveVariantIdRaw)
+        : null,
+    expectedReceiveUnitsPerVariant:
+      lineType === "product" && expectedReceiveUnitsPerVariantRaw != null
+        ? Number(expectedReceiveUnitsPerVariantRaw)
+        : null,
+    orderQty: Number(line?.quantity_ordered ?? line?.orderQty),
+    vendorProductId: line?.vendor_product_id ?? line?.vendorProductId ?? undefined,
+  };
+
+  if (includeLineId) {
+    const rawLineId = line?.line_id ?? line?.lineId;
+    if (rawLineId !== undefined && rawLineId !== null) mapped.lineId = Number(rawLineId);
+  }
+  if (rawCents !== undefined && rawCents !== null) mapped.unitCostCents = Number(rawCents);
+  if (rawMills !== undefined && rawMills !== null) mapped.unitCostMills = Number(rawMills);
+
+  const rawTotalProduct = line?.total_product_cost_cents ?? line?.totalProductCostCents;
+  const rawPackaging = line?.packaging_cost_cents ?? line?.packagingCostCents;
+  if (rawTotalProduct !== undefined && rawTotalProduct !== null) {
+    mapped.totalProductCostCents = Number(rawTotalProduct);
+  }
+  if (rawPackaging !== undefined && rawPackaging !== null) {
+    mapped.packagingCostCents = Number(rawPackaging);
+  }
+  return mapped;
+}
+
+function mapPurchaseOrderWithLinesInput(
+  body: any,
+  includeLineIds: boolean,
+): CreatePurchaseOrderWithLinesInput {
+  const expectedDeliveryRaw = body?.expected_delivery_date ?? body?.expectedDeliveryDate;
+  const hasWarehouseId = body?.warehouse_id !== undefined || body?.warehouseId !== undefined;
+  const warehouseIdRaw = body?.warehouse_id !== undefined
+    ? body.warehouse_id
+    : body?.warehouseId;
+  return {
+    vendorId: Number(body?.vendor_id ?? body?.vendorId),
+    warehouseId: !hasWarehouseId
+      ? undefined
+      : warehouseIdRaw === null
+        ? null
+        : Number(warehouseIdRaw),
+    poType: body?.po_type ?? body?.poType,
+    priority: body?.priority,
+    expectedDeliveryDate:
+      parseNullableDateInput(expectedDeliveryRaw, "expectedDeliveryDate") ?? null,
+    incoterms: body?.incoterms ?? null,
+    vendorNotes: body?.vendor_notes ?? body?.vendorNotes ?? null,
+    internalNotes: body?.internal_notes ?? body?.internalNotes ?? null,
+    lines: Array.isArray(body?.lines)
+      ? body.lines.map((line: any) => mapPurchaseOrderLineInput(line, includeLineIds))
+      : [],
+  };
 }
 
 export function registerPurchaseOrderRoutes(app: Express) {
@@ -273,86 +354,8 @@ export function registerPurchaseOrderRoutes(app: Express) {
           return res.status(201).json(po);
         }
 
-        // Inline-lines path. Map snake_case wire format to service's
-        // camelCase. Per-unit cost supports both cents (legacy) and mills
-        // (4-decimal); the service validator rejects disagreeing pairs.
-        //
-        // Typed lines (migration 0563): forward line_type, client_id,
-        // parent_client_id, and description so the service-layer validator
-        // can apply per-type rules and resolve parentClientId -> parent_line_id
-        // inside the insert transaction. Non-product lines must NOT carry a
-        // product_variant_id (service rejects), so we omit it on the wire
-        // for any non-product line.
-        const lines = (req.body.lines as any[]).map((l) => {
-          const rawCents = l.unit_cost_cents ?? l.unitCostCents;
-          const rawMills = l.unit_cost_mills ?? l.unitCostMills;
-          const lineType = l.line_type ?? l.lineType ?? "product";
-          const variantIdRaw = l.product_variant_id ?? l.productVariantId;
-          const productIdRaw = l.product_id ?? l.productId;
-          const expectedReceiveVariantIdRaw =
-            l.expected_receive_variant_id ?? l.expectedReceiveVariantId ?? variantIdRaw;
-          const expectedReceiveUnitsPerVariantRaw =
-            l.expected_receive_units_per_variant ?? l.expectedReceiveUnitsPerVariant;
-          const out: any = {
-            // line_type is the dispatch key; default to 'product' for
-            // back-compat callers that don't send it (matches column default).
-            lineType,
-            // Request-time identifier for parent linkage. Service uses this
-            // to resolve parent_line_id after insert. Optional.
-            clientId: l.client_id ?? l.clientId ?? undefined,
-            parentClientId:
-              l.parent_client_id ?? l.parentClientId ?? null,
-            // Description is required for non-product lines (service-enforced).
-            description: l.description ?? null,
-            // Product only on product lines. Send null for non-product.
-            productId: lineType === "product" ? Number(productIdRaw) : null,
-            productVariantId:
-              lineType === "product" && variantIdRaw != null
-                ? Number(variantIdRaw)
-                : null,
-            expectedReceiveVariantId:
-              lineType === "product" && expectedReceiveVariantIdRaw != null
-                ? Number(expectedReceiveVariantIdRaw)
-                : null,
-            expectedReceiveUnitsPerVariant:
-              lineType === "product" && expectedReceiveUnitsPerVariantRaw != null
-                ? Number(expectedReceiveUnitsPerVariantRaw)
-                : null,
-            orderQty: Number(l.quantity_ordered ?? l.orderQty),
-            vendorProductId: l.vendor_product_id ?? l.vendorProductId ?? undefined,
-          };
-          if (rawCents !== undefined && rawCents !== null) {
-            out.unitCostCents = Number(rawCents);
-          }
-          if (rawMills !== undefined && rawMills !== null) {
-            out.unitCostMills = Number(rawMills);
-          }
-          // Spec F Phase 1: totals-based cost (new shape).
-          const rawTotalProduct = l.total_product_cost_cents ?? l.totalProductCostCents;
-          const rawPackaging = l.packaging_cost_cents ?? l.packagingCostCents;
-          if (rawTotalProduct !== undefined && rawTotalProduct !== null) {
-            out.totalProductCostCents = Number(rawTotalProduct);
-          }
-          if (rawPackaging !== undefined && rawPackaging !== null) {
-            out.packagingCostCents = Number(rawPackaging);
-          }
-          return out;
-        });
         const created = await purchasing.createPurchaseOrderWithLines(
-          {
-            vendorId: Number(req.body.vendor_id ?? req.body.vendorId),
-            poType: req.body.po_type ?? req.body.poType,
-            priority: req.body.priority,
-            expectedDeliveryDate: req.body.expected_delivery_date
-              ? new Date(req.body.expected_delivery_date)
-              : req.body.expectedDeliveryDate
-                ? new Date(req.body.expectedDeliveryDate)
-                : null,
-            incoterms: req.body.incoterms ?? null,
-            vendorNotes: req.body.vendor_notes ?? req.body.vendorNotes ?? null,
-            internalNotes: req.body.internal_notes ?? req.body.internalNotes ?? null,
-            lines,
-          },
+          mapPurchaseOrderWithLinesInput(req.body, false),
           userId,
         );
 
@@ -374,6 +377,71 @@ export function registerPurchaseOrderRoutes(app: Express) {
         }
         console.error("[POST /api/purchase-orders] error:", error);
         res.status(500).json({ error: error.message });
+      }
+    },
+  );
+
+  app.put(
+    "/api/purchase-orders/:id/draft",
+    requirePermission("purchasing", "edit"),
+    requireIdempotency(),
+    async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) {
+          throw new PurchasingError("Purchase order id must be a positive integer", 400, {
+            code: "INVALID_PURCHASE_ORDER_ID",
+          });
+        }
+        const expectedUpdatedAt = parseNullableDateInput(
+          req.body?.expected_updated_at ?? req.body?.expectedUpdatedAt,
+          "expectedUpdatedAt",
+        );
+        if (!expectedUpdatedAt) {
+          throw new PurchasingError("expected_updated_at is required", 400, {
+            code: "PO_DRAFT_EXPECTED_VERSION_REQUIRED",
+          });
+        }
+
+        const updated = await purchasing.updateDraftPurchaseOrderWithLines(
+          id,
+          {
+            ...mapPurchaseOrderWithLinesInput(req.body, true),
+            expectedUpdatedAt,
+          },
+          req.session.user?.id,
+        );
+
+        if (req.body?.advance_to_sent !== true) {
+          return res.json(updated);
+        }
+
+        let sendResult: Awaited<ReturnType<typeof purchasing.sendPurchaseOrder>>;
+        try {
+          sendResult = await purchasing.sendPurchaseOrder(id, req.session.user?.id);
+        } catch (sendError: any) {
+          console.error("[PUT /api/purchase-orders/:id/draft] draft updated but send failed", {
+            purchaseOrderId: id,
+            error: sendError?.message,
+          });
+          return res.json({
+            ...updated,
+            sendError: sendError?.message || "Failed to send purchase order",
+          });
+        }
+        return res.json({
+          po: sendResult.po,
+          lines: updated.lines,
+          status: sendResult.status,
+          pdf: sendResult.pdf,
+          pending_approval: sendResult.pendingApproval,
+        });
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message, details: error.details });
+        }
+        console.error("[PUT /api/purchase-orders/:id/draft] error:", error);
+        return res.status(500).json({ error: error.message });
       }
     },
   );

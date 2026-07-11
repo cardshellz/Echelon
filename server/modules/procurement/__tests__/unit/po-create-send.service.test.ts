@@ -124,6 +124,23 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     ).rejects.toThrow(/must be an integer/);
   });
 
+  it("rejects existing line ids on the create command", async () => {
+    await expect(
+      svc.createPurchaseOrderWithLines({
+        vendorId: 1,
+        lines: [
+          {
+            lineId: 10,
+            productId: 1,
+            productVariantId: 1,
+            orderQty: 1,
+            unitCostCents: 100,
+          },
+        ],
+      }),
+    ).rejects.toThrow(/line_id is not valid when creating a PO/);
+  });
+
   it("404s when vendor does not exist", async () => {
     storage.getVendorById.mockResolvedValue(null);
     await expect(
