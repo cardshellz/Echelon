@@ -13,6 +13,11 @@ import {
 
 const CHANNEL_PUSH_PENDING_THRESHOLD_MINUTES = 15;
 
+const INVENTORY_SYSTEM_CONTROL_CHECKS = new Set([
+  "inventory_level_constraint_gap",
+  "inventory_ledger_immutability_guard_missing",
+]);
+
 const INVENTORY_CHECK_DESCRIPTIONS: Record<string, string> = {
   inventory_level_constraint_gap: "Every live inventory quantity bucket needs an explicit non-negative database constraint.",
   inventory_ledger_immutability_guard_missing: "The inventory movement journal needs a database guard that rejects mutation of posted rows.",
@@ -155,7 +160,7 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
   name: "inventory_integrity",
   sourceNamespace: "inventory.integrity_findings",
   sourceType: "integrity_finding",
-  projectionVersion: 2,
+  projectionVersion: 3,
   async loadRows(client) {
     const result = await client.query(`
       SELECT
@@ -267,7 +272,7 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
       sourceNamespace: "inventory.integrity_findings",
       sourceType: "integrity_finding",
       sourceKey: String(id),
-      projectionVersion: 2,
+      projectionVersion: 3,
       domain: "inventory",
       code: checkId,
       entityType: "inventory_integrity_finding",
@@ -281,7 +286,11 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
       actualState: evidenceSentence(evidence, row.current_metric),
       severity,
       urgency: "normal",
-      impactTags: category === "costs" ? ["financial_accuracy", "inventory"] : ["inventory_accuracy"],
+      impactTags: INVENTORY_SYSTEM_CONTROL_CHECKS.has(checkId)
+        ? ["inventory_accuracy", "system_control"]
+        : category === "costs"
+          ? ["financial_accuracy", "inventory"]
+          : ["inventory_accuracy"],
       actionability: "investigate",
       sourceStatus: sourceStatus(row.status),
       ownerTeam: "Warehouse",

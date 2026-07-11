@@ -367,6 +367,9 @@
   "membership.subscription_events": [
     "modules/subscriptions"
   ],
+  "operations.control_tower_flow_snapshots": [
+    "modules/operations"
+  ],
   "operations.control_tower_observations": [
     "modules/operations"
   ],

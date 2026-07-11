@@ -31,6 +31,12 @@ interface QueueCursor {
   id: number;
 }
 
+interface GroupCursor {
+  severityRank: number;
+  sortAt: string;
+  groupKey: string;
+}
+
 function singleQueryValue(value: unknown): string | null {
   if (Array.isArray(value)) return value.length > 0 ? String(value[0]) : null;
   if (value === null || value === undefined) return null;
@@ -155,7 +161,7 @@ function commonFilterSql(params: {
   includeDomain: boolean;
   values: unknown[];
 }): string[] {
-  const conditions: string[] = [];
+  const conditions: string[] = ["NOT ('system_control' = ANY(work_item.impact_tags))"];
   if (params.includeView) conditions.push(viewPredicate(params.filters.view));
   if (params.includeDomain && params.filters.domain !== "all") {
     addFilter(conditions, params.values, (parameter) => `work_item.domain = ${parameter}`, params.filters.domain);
@@ -179,6 +185,49 @@ function commonFilterSql(params: {
   }
   return conditions;
 }
+
+function encodeGroupCursor(cursor: GroupCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeGroupCursor(value: string | null): GroupCursor | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<GroupCursor>;
+    const date = new Date(String(parsed.sortAt ?? ""));
+    const groupKey = String(parsed.groupKey ?? "").trim();
+    if (
+      !Number.isInteger(parsed.severityRank)
+      || Number(parsed.severityRank) < 0
+      || Number(parsed.severityRank) > 3
+      || Number.isNaN(date.getTime())
+      || !groupKey
+      || groupKey.length > 200
+    ) {
+      throw new Error("invalid group cursor data");
+    }
+    return {
+      severityRank: Number(parsed.severityRank),
+      sortAt: date.toISOString(),
+      groupKey,
+    };
+  } catch {
+    throw new ControlTowerRequestError("Invalid pagination cursor", 400, "INVALID_CURSOR");
+  }
+}
+
+export function parseControlTowerV2GroupKey(value: unknown): string {
+  const groupKey = String(value ?? "").trim();
+  if (!groupKey || groupKey.length > 200) {
+    throw new ControlTowerRequestError("A valid root-cause group key is required", 400, "INVALID_GROUP_KEY");
+  }
+  return groupKey;
+}
+
+const ROOT_CAUSE_GROUP_SQL = `COALESCE(
+  NULLIF(work_item.root_cause_group_key, ''),
+  CONCAT(work_item.domain, ':', work_item.code)
+)`;
 
 function integer(value: unknown): number {
   return Number(value ?? 0);
@@ -222,6 +271,7 @@ function queueItem(row: Record<string, unknown>) {
 export async function getControlTowerV2Queue(params: {
   client: QueryClient;
   filters: ControlTowerQueueFilters;
+  rootCauseGroupKey?: string;
 }) {
   const cursor = decodeCursor(params.filters.cursor);
   const values: unknown[] = [];
@@ -231,6 +281,14 @@ export async function getControlTowerV2Queue(params: {
     includeDomain: true,
     values,
   });
+  if (params.rootCauseGroupKey) {
+    addFilter(
+      conditions,
+      values,
+      (parameter) => `${ROOT_CAUSE_GROUP_SQL} = ${parameter}`,
+      params.rootCauseGroupKey,
+    );
+  }
   const sortColumn = params.filters.view === "resolved"
     ? "COALESCE(work_item.resolved_at, work_item.updated_at)"
     : "work_item.first_seen_at";
@@ -400,6 +458,307 @@ export async function loadControlTowerV2Queue(params: {
   };
 }
 
+function groupItem(row: Record<string, unknown>) {
+  return {
+    groupKey: row.group_key,
+    domain: row.domain,
+    code: row.code,
+    title: row.title,
+    summary: row.summary,
+    expectedState: row.expected_state,
+    actualState: row.actual_state,
+    recommendedAction: row.recommended_action,
+    severity: row.severity,
+    urgency: row.urgency,
+    triageStatus: row.effective_triage_status,
+    ownerTeam: row.owner_team,
+    affectedRecords: integer(row.affected_records),
+    affectedEntities: integer(row.affected_entities),
+    recurrenceCount: integer(row.recurrence_count),
+    worsenedCount: integer(row.worsened_count),
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+    lastChangedAt: row.last_changed_at,
+    responseDueAt: row.response_due_at,
+    ageMinutes: integer(row.age_minutes),
+    representativeId: integer(row.representative_id),
+    sampleEntityRefs: row.sample_entity_refs ?? [],
+    sourceNames: row.source_names ?? [],
+  };
+}
+
+async function getControlTowerV2GroupPage(params: {
+  client: QueryClient;
+  filters: ControlTowerQueueFilters;
+  rootCauseGroupKey?: string;
+}) {
+  const cursor = decodeGroupCursor(params.filters.cursor);
+  const values: unknown[] = [];
+  const conditions = commonFilterSql({
+    filters: params.filters,
+    includeView: true,
+    includeDomain: true,
+    values,
+  });
+  if (params.rootCauseGroupKey) {
+    addFilter(
+      conditions,
+      values,
+      (parameter) => `${ROOT_CAUSE_GROUP_SQL} = ${parameter}`,
+      params.rootCauseGroupKey,
+    );
+  }
+
+  const resolvedView = params.filters.view === "resolved";
+  const sourceSortColumn = resolvedView
+    ? "COALESCE(work_item.resolved_at, work_item.updated_at)"
+    : "work_item.first_seen_at";
+  const groupedSortFunction = resolvedView ? "MAX" : "MIN";
+  const sortDirection = resolvedView ? "DESC" : "ASC";
+  const groupedConditions: string[] = [];
+  if (cursor) {
+    values.push(cursor.severityRank, cursor.sortAt, cursor.groupKey);
+    const rankParameter = `$${values.length - 2}`;
+    const dateParameter = `$${values.length - 1}`;
+    const keyParameter = `$${values.length}`;
+    const dateComparator = resolvedView ? "<" : ">";
+    groupedConditions.push(`(
+      grouped.severity_rank > ${rankParameter}
+      OR (
+        grouped.severity_rank = ${rankParameter}
+        AND grouped.sort_at ${dateComparator} ${dateParameter}::TIMESTAMPTZ
+      )
+      OR (
+        grouped.severity_rank = ${rankParameter}
+        AND grouped.sort_at = ${dateParameter}::TIMESTAMPTZ
+        AND grouped.group_key > ${keyParameter}
+      )
+    )`);
+  }
+  values.push(params.filters.limit + 1);
+  const limitParameter = `$${values.length}`;
+
+  const result = await params.client.query(`
+    WITH filtered AS (
+      SELECT
+        work_item.*,
+        ${ROOT_CAUSE_GROUP_SQL} AS group_key,
+        ${SEVERITY_RANK_SQL} AS severity_rank,
+        ${sourceSortColumn} AS source_sort_at,
+        CASE
+          WHEN work_item.triage_status = 'waiting' AND work_item.next_review_at <= NOW()
+            THEN 'needs_attention'
+          ELSE work_item.triage_status
+        END AS effective_triage_status
+      FROM operations.control_tower_work_items AS work_item
+      WHERE ${conditions.length > 0 ? conditions.join(" AND ") : "TRUE"}
+    ), grouped AS (
+      SELECT
+        group_key,
+        (ARRAY_AGG(domain ORDER BY severity_rank, first_seen_at, id))[1] AS domain,
+        (ARRAY_AGG(code ORDER BY severity_rank, first_seen_at, id))[1] AS code,
+        (ARRAY_AGG(title ORDER BY severity_rank, first_seen_at, id))[1] AS title,
+        (ARRAY_AGG(summary ORDER BY severity_rank, first_seen_at, id))[1] AS summary,
+        (ARRAY_AGG(expected_state ORDER BY severity_rank, first_seen_at, id))[1] AS expected_state,
+        (ARRAY_AGG(actual_state ORDER BY severity_rank, first_seen_at, id))[1] AS actual_state,
+        (ARRAY_AGG(recommended_action ORDER BY severity_rank, first_seen_at, id))[1] AS recommended_action,
+        CASE MIN(severity_rank)
+          WHEN 0 THEN 'blocker'
+          WHEN 1 THEN 'high'
+          WHEN 2 THEN 'medium'
+          ELSE 'low'
+        END AS severity,
+        MIN(severity_rank) AS severity_rank,
+        CASE MIN(CASE urgency
+          WHEN 'overdue' THEN 0
+          WHEN 'due_soon' THEN 1
+          WHEN 'normal' THEN 2
+          ELSE 3
+        END)
+          WHEN 0 THEN 'overdue'
+          WHEN 1 THEN 'due_soon'
+          WHEN 2 THEN 'normal'
+          ELSE 'deferred'
+        END AS urgency,
+        (ARRAY_AGG(effective_triage_status ORDER BY severity_rank, first_seen_at, id))[1] AS effective_triage_status,
+        CASE
+          WHEN COUNT(DISTINCT owner_team) FILTER (WHERE owner_team IS NOT NULL) = 1
+            THEN MAX(owner_team)
+          ELSE NULL
+        END AS owner_team,
+        COUNT(*)::TEXT AS affected_records,
+        COUNT(DISTINCT CONCAT(entity_type, CHR(31), entity_id))::TEXT AS affected_entities,
+        COALESCE(SUM(recurrence_count), 0)::TEXT AS recurrence_count,
+        COALESCE(SUM(worsened_count), 0)::TEXT AS worsened_count,
+        MIN(first_seen_at) AS first_seen_at,
+        MAX(last_seen_at) AS last_seen_at,
+        MAX(last_changed_at) AS last_changed_at,
+        MIN(response_due_at) AS response_due_at,
+        ${groupedSortFunction}(source_sort_at) AS sort_at,
+        (ARRAY_AGG(id ORDER BY severity_rank, first_seen_at, id))[1] AS representative_id,
+        (ARRAY_REMOVE(ARRAY_AGG(DISTINCT entity_ref), NULL))[1:5] AS sample_entity_refs,
+        ARRAY_AGG(DISTINCT source_namespace) AS source_names
+      FROM filtered
+      GROUP BY group_key
+    )
+    SELECT
+      grouped.*,
+      FLOOR(EXTRACT(EPOCH FROM (NOW() - grouped.first_seen_at)) / 60)::INTEGER AS age_minutes
+    FROM grouped
+    WHERE ${groupedConditions.length > 0 ? groupedConditions.join(" AND ") : "TRUE"}
+    ORDER BY grouped.severity_rank ASC, grouped.sort_at ${sortDirection}, grouped.group_key ASC
+    LIMIT ${limitParameter}
+  `, values);
+
+  const hasNextPage = result.rows.length > params.filters.limit;
+  const pageRows = hasNextPage ? result.rows.slice(0, params.filters.limit) : result.rows;
+  const last = pageRows.at(-1) as Record<string, unknown> | undefined;
+  return {
+    groups: pageRows.map((row) => groupItem(row as Record<string, unknown>)),
+    nextCursor: hasNextPage && last
+      ? encodeGroupCursor({
+          severityRank: integer(last.severity_rank),
+          sortAt: new Date(String(last.sort_at)).toISOString(),
+          groupKey: String(last.group_key),
+        })
+      : null,
+  };
+}
+
+async function getControlTowerV2GroupCounts(params: {
+  client: QueryClient;
+  filters: ControlTowerQueueFilters;
+}) {
+  const viewValues: unknown[] = [];
+  const viewFilters = commonFilterSql({
+    filters: params.filters,
+    includeView: false,
+    includeDomain: true,
+    values: viewValues,
+  });
+  const viewResult = await params.client.query(`
+    SELECT
+      COUNT(DISTINCT ${ROOT_CAUSE_GROUP_SQL}) FILTER (WHERE ${viewPredicate("attention")})::TEXT AS attention,
+      COUNT(*) FILTER (WHERE ${viewPredicate("attention")})::TEXT AS attention_records,
+      COUNT(DISTINCT ${ROOT_CAUSE_GROUP_SQL}) FILTER (WHERE ${viewPredicate("in_progress")})::TEXT AS in_progress,
+      COUNT(*) FILTER (WHERE ${viewPredicate("in_progress")})::TEXT AS in_progress_records,
+      COUNT(DISTINCT ${ROOT_CAUSE_GROUP_SQL}) FILTER (WHERE ${viewPredicate("waiting")})::TEXT AS waiting,
+      COUNT(*) FILTER (WHERE ${viewPredicate("waiting")})::TEXT AS waiting_records,
+      COUNT(DISTINCT ${ROOT_CAUSE_GROUP_SQL}) FILTER (WHERE ${viewPredicate("resolved")})::TEXT AS resolved,
+      COUNT(*) FILTER (WHERE ${viewPredicate("resolved")})::TEXT AS resolved_records
+    FROM operations.control_tower_work_items AS work_item
+    WHERE ${viewFilters.length > 0 ? viewFilters.join(" AND ") : "TRUE"}
+  `, viewValues);
+
+  const domainValues: unknown[] = [];
+  const domainFilters = commonFilterSql({
+    filters: params.filters,
+    includeView: true,
+    includeDomain: false,
+    values: domainValues,
+  });
+  const domainResult = await params.client.query(`
+    SELECT
+      work_item.domain,
+      COUNT(DISTINCT ${ROOT_CAUSE_GROUP_SQL})::TEXT AS group_count,
+      COUNT(*)::TEXT AS affected_records
+    FROM operations.control_tower_work_items AS work_item
+    WHERE ${domainFilters.length > 0 ? domainFilters.join(" AND ") : "TRUE"}
+    GROUP BY work_item.domain
+  `, domainValues);
+
+  const totalValues: unknown[] = [];
+  const totalFilters = commonFilterSql({
+    filters: params.filters,
+    includeView: true,
+    includeDomain: true,
+    values: totalValues,
+  });
+  const totalResult = await params.client.query(`
+    SELECT
+      COUNT(DISTINCT ${ROOT_CAUSE_GROUP_SQL})::TEXT AS group_count,
+      COUNT(*)::TEXT AS affected_records
+    FROM operations.control_tower_work_items AS work_item
+    WHERE ${totalFilters.length > 0 ? totalFilters.join(" AND ") : "TRUE"}
+  `, totalValues);
+
+  const viewRow = viewResult.rows[0] as Record<string, unknown> | undefined;
+  const totalRow = totalResult.rows[0] as Record<string, unknown> | undefined;
+  const domainRows = domainResult.rows as Record<string, unknown>[];
+  return {
+    totalGroups: integer(totalRow?.group_count),
+    totalAffectedRecords: integer(totalRow?.affected_records),
+    viewCounts: {
+      attention: integer(viewRow?.attention),
+      inProgress: integer(viewRow?.in_progress),
+      waiting: integer(viewRow?.waiting),
+      resolved: integer(viewRow?.resolved),
+    },
+    viewAffectedRecords: {
+      attention: integer(viewRow?.attention_records),
+      inProgress: integer(viewRow?.in_progress_records),
+      waiting: integer(viewRow?.waiting_records),
+      resolved: integer(viewRow?.resolved_records),
+    },
+    domainCounts: Object.fromEntries(
+      CONTROL_TOWER_DOMAINS.map((domain) => [
+        domain,
+        integer(domainRows.find((row) => row.domain === domain)?.group_count),
+      ]),
+    ),
+    domainAffectedRecords: Object.fromEntries(
+      CONTROL_TOWER_DOMAINS.map((domain) => [
+        domain,
+        integer(domainRows.find((row) => row.domain === domain)?.affected_records),
+      ]),
+    ),
+  };
+}
+
+export async function loadControlTowerV2Groups(params: {
+  client: QueryClient;
+  filters: ControlTowerQueueFilters;
+}) {
+  const [page, counts] = await Promise.all([
+    getControlTowerV2GroupPage(params),
+    getControlTowerV2GroupCounts(params),
+  ]);
+  return {
+    generatedAt: new Date().toISOString(),
+    filters: params.filters,
+    ...counts,
+    ...page,
+  };
+}
+
+export async function getControlTowerV2GroupDetail(params: {
+  client: QueryClient;
+  filters: ControlTowerQueueFilters;
+  groupKey: string;
+}) {
+  const aggregateFilters = { ...params.filters, cursor: null, limit: 1 };
+  const [groupPage, instancePage] = await Promise.all([
+    getControlTowerV2GroupPage({
+      client: params.client,
+      filters: aggregateFilters,
+      rootCauseGroupKey: params.groupKey,
+    }),
+    getControlTowerV2Queue({
+      client: params.client,
+      filters: params.filters,
+      rootCauseGroupKey: params.groupKey,
+    }),
+  ]);
+  const group = groupPage.groups[0] ?? null;
+  if (!group) return null;
+  return {
+    generatedAt: new Date().toISOString(),
+    group,
+    instances: instancePage.items,
+    nextCursor: instancePage.nextCursor,
+  };
+}
+
 export async function getControlTowerV2Detail(params: {
   client: QueryClient;
   id: number;
@@ -536,8 +895,9 @@ function sourceStaleMinutes(): number {
 }
 
 export async function getControlTowerV2Sources(client: QueryClient) {
-  const [runsResult, countsResult] = await Promise.all([
-    client.query(`
+  // Keep source-health reads sequential so a diagnostic refresh does not fan
+  // out avoidable database work alongside transactional application traffic.
+  const runsResult = await client.query(`
       SELECT DISTINCT ON (source_name)
         id,
         source_name,
@@ -557,57 +917,106 @@ export async function getControlTowerV2Sources(client: QueryClient) {
         error_message
       FROM operations.control_tower_source_runs
       ORDER BY source_name, started_at DESC
-    `),
-    client.query(`
-      SELECT source_namespace, COUNT(*)::TEXT AS count
+    `);
+  const countsResult = await client.query(`
+      SELECT
+        source_namespace,
+        COUNT(*) FILTER (WHERE NOT ('system_control' = ANY(impact_tags)))::TEXT AS operator_open_count,
+        COUNT(*) FILTER (WHERE 'system_control' = ANY(impact_tags))::TEXT AS control_gap_count
       FROM operations.control_tower_work_items
       WHERE triage_status <> 'resolved'
+        AND source_status NOT IN ('resolved', 'ignored')
       GROUP BY source_namespace
-    `),
-  ]);
+    `);
+  const controlsResult = await client.query(`
+      SELECT
+        ${ROOT_CAUSE_GROUP_SQL} AS group_key,
+        work_item.domain,
+        work_item.code,
+        MIN(work_item.title) AS title,
+        MIN(work_item.summary) AS summary,
+        CASE MIN(${SEVERITY_RANK_SQL})
+          WHEN 0 THEN 'blocker'
+          WHEN 1 THEN 'high'
+          WHEN 2 THEN 'medium'
+          ELSE 'low'
+        END AS severity,
+        COUNT(*)::TEXT AS affected_records,
+        MIN(work_item.first_seen_at) AS first_seen_at,
+        MAX(work_item.last_seen_at) AS last_seen_at,
+        MAX(work_item.last_changed_at) AS last_changed_at
+      FROM operations.control_tower_work_items AS work_item
+      WHERE 'system_control' = ANY(work_item.impact_tags)
+        AND work_item.triage_status <> 'resolved'
+        AND work_item.source_status NOT IN ('resolved', 'ignored')
+      GROUP BY ${ROOT_CAUSE_GROUP_SQL}, work_item.domain, work_item.code
+      ORDER BY MIN(${SEVERITY_RANK_SQL}), MIN(work_item.first_seen_at), ${ROOT_CAUSE_GROUP_SQL}
+    `);
   const staleMinutes = sourceStaleMinutes();
   const now = Date.now();
   const latestRuns = new Map(
     (runsResult.rows as Record<string, unknown>[]).map((row) => [String(row.source_name), row]),
   );
   const openCounts = new Map(
-    (countsResult.rows as Record<string, unknown>[]).map((row) => [String(row.source_namespace), integer(row.count)]),
+    (countsResult.rows as Record<string, unknown>[]).map((row) => [String(row.source_namespace), {
+      operatorOpen: integer(row.operator_open_count),
+      controlGaps: integer(row.control_gap_count),
+    }]),
   );
 
   return {
     generatedAt: new Date(now).toISOString(),
     staleAfterMinutes: staleMinutes,
+    controlGaps: (controlsResult.rows as Record<string, unknown>[]).map((row) => ({
+      groupKey: row.group_key,
+      domain: row.domain,
+      code: row.code,
+      title: row.title,
+      summary: row.summary,
+      severity: row.severity,
+      affectedRecords: integer(row.affected_records),
+      firstSeenAt: row.first_seen_at,
+      lastSeenAt: row.last_seen_at,
+      lastChangedAt: row.last_changed_at,
+    })),
     sources: CONTROL_TOWER_SOURCE_ADAPTERS.map((adapter) => {
       const run = latestRuns.get(adapter.name);
+      const sourceCounts = openCounts.get(adapter.sourceNamespace) ?? { operatorOpen: 0, controlGaps: 0 };
       if (!run) {
         return {
           name: adapter.name,
           sourceNamespace: adapter.sourceNamespace,
           status: "never_run",
           projectionVersion: adapter.projectionVersion,
-          openItemCount: openCounts.get(adapter.sourceNamespace) ?? 0,
+          openItemCount: sourceCounts.operatorOpen,
+          controlGapCount: sourceCounts.controlGaps,
           lastRun: null,
         };
       }
+      const startedAt = run.started_at ? new Date(String(run.started_at)) : null;
       const completedAt = run.completed_at ? new Date(String(run.completed_at)) : null;
-      const ageMinutes = completedAt ? Math.max(0, Math.floor((now - completedAt.getTime()) / 60_000)) : null;
+      const ageReference = completedAt ?? startedAt;
+      const ageMinutes = ageReference ? Math.max(0, Math.floor((now - ageReference.getTime()) / 60_000)) : null;
       const status = run.status === "failed"
         ? "failed"
         : run.status === "partial"
           ? "degraded"
-          : run.status === "running" || run.status === "skipped"
-            ? "degraded"
-          : ageMinutes !== null && ageMinutes > staleMinutes
-            ? "stale"
-            : run.projector_version !== adapter.projectionVersion
-              ? "version_mismatch"
-              : "healthy";
+          : run.status === "running"
+            ? ageMinutes !== null && ageMinutes > staleMinutes ? "stale" : "refreshing"
+            : run.status === "skipped"
+              ? "degraded"
+              : run.projector_version !== adapter.projectionVersion
+                ? "version_mismatch"
+                : ageMinutes !== null && ageMinutes > staleMinutes
+                  ? "stale"
+                  : "healthy";
       return {
         name: adapter.name,
         sourceNamespace: adapter.sourceNamespace,
         status,
         projectionVersion: adapter.projectionVersion,
-        openItemCount: openCounts.get(adapter.sourceNamespace) ?? 0,
+        openItemCount: sourceCounts.operatorOpen,
+        controlGapCount: sourceCounts.controlGaps,
         ageMinutes,
         lastRun: run,
       };

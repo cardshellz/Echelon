@@ -9,11 +9,15 @@ import {
   getOperationsControlTowerDetail,
   parseControlTowerFilters,
 } from "./control-tower.service";
+import { getControlTowerFlowOverview } from "./control-tower-flow-snapshot.service";
 import {
   getControlTowerV2Assignees,
   getControlTowerV2Detail,
+  getControlTowerV2GroupDetail,
   getControlTowerV2Sources,
+  loadControlTowerV2Groups,
   loadControlTowerV2Queue,
+  parseControlTowerV2GroupKey,
   parseControlTowerV2QueueFilters,
 } from "./control-tower-v2.query";
 import {
@@ -43,6 +47,63 @@ function dependencies(req: Request) {
 }
 
 export function registerOperationsControlTowerRoutes(app: Express) {
+  app.get(
+    "/api/operations/control-tower/v2/flow-overview",
+    requirePermission("operations", "view"),
+    async (_req: Request, res: Response) => {
+      const startedAt = Date.now();
+      try {
+        res.setHeader("Cache-Control", "private, max-age=30, stale-while-revalidate=60");
+        res.json(await getControlTowerFlowOverview(pool));
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load Control Tower flow overview");
+      } finally {
+        logSlowControlTowerRequest("flow-overview", startedAt);
+      }
+    },
+  );
+
+  app.get(
+    "/api/operations/control-tower/v2/groups",
+    requirePermission("operations", "view"),
+    async (req: Request, res: Response) => {
+      const startedAt = Date.now();
+      try {
+        const filters = parseControlTowerV2QueueFilters(req.query as Record<string, unknown>);
+        const result = await loadControlTowerV2Groups({ client: pool, filters });
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(result);
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load Control Tower issue groups");
+      } finally {
+        logSlowControlTowerRequest("groups", startedAt, { view: req.query.view ?? "attention" });
+      }
+    },
+  );
+
+  app.get(
+    "/api/operations/control-tower/v2/groups/:groupKey",
+    requirePermission("operations", "view"),
+    async (req: Request, res: Response) => {
+      const startedAt = Date.now();
+      try {
+        const filters = parseControlTowerV2QueueFilters(req.query as Record<string, unknown>);
+        const groupKey = parseControlTowerV2GroupKey(req.params.groupKey);
+        const detail = await getControlTowerV2GroupDetail({ client: pool, filters, groupKey });
+        if (!detail) {
+          res.status(404).json({ error: "Control Tower issue group not found" });
+          return;
+        }
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(detail);
+      } catch (error) {
+        sendControlTowerV2Error(res, error, "Failed to load Control Tower issue group");
+      } finally {
+        logSlowControlTowerRequest("group-detail", startedAt, { groupKey: req.params.groupKey });
+      }
+    },
+  );
+
   app.get(
     "/api/operations/control-tower/v2/work-items",
     requirePermission("operations", "view"),
