@@ -23,11 +23,13 @@ import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-status";
 import { maybeGetPackInstruction } from "../shipping-engine/application/pack-plan.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
+import { parseProviderAmountCents } from "../shipping/types";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
 const SHIPSTATION_SPLIT_SOURCE = "shipstation_split";
 const SHIPSTATION_COMBINED_CHILD_SOURCE = "shipstation_combined_child";
+const SHIPSTATION_CARRIER_COST_SOURCE = "shipstation_ship_notify";
 const SENSITIVE_URL_QUERY_PARAMS = new Set(["secret", "token", "signature", "key"]);
 
 class ShipStationWebhookProcessingError extends Error {
@@ -1094,12 +1096,29 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       shipDate !== null &&
       !Number.isNaN(shipDate.getTime())
     ) {
+      const parsedCarrierCostCents = parseProviderAmountCents(shipment.shipmentCost);
+      const carrierCostCents = parsedCarrierCostCents !== null && parsedCarrierCostCents > 0
+        ? parsedCarrierCostCents
+        : undefined;
+      if (shipment.shipmentCost != null && parsedCarrierCostCents === null) {
+        console.error(JSON.stringify({
+          code: "SHIPSTATION_SHIPMENT_COST_INVALID",
+          message: "ShipStation shipment cost could not be converted to integer cents.",
+          context: {
+            shipstationShipmentId: shipment.shipmentId,
+            shipmentCost: shipment.shipmentCost,
+          },
+        }));
+      }
       return {
         kind: "shipped",
         trackingNumber,
         carrier,
         shipDate,
         trackingUrl: buildTrackingUrl(carrier, trackingNumber),
+        serviceCode: typeof shipment.serviceCode === "string" ? shipment.serviceCode.trim() || null : null,
+        carrierCostCents,
+        carrierCostSource: carrierCostCents === undefined ? undefined : SHIPSTATION_CARRIER_COST_SOURCE,
       };
     }
 

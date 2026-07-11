@@ -1,7 +1,7 @@
 # Card Shellz .ops Dropship Platform - V2 Consolidated Design
 
-Status: Authoritative build design draft  
-Date: 2026-04-28  
+Status: Authoritative build design draft
+Date: 2026-04-28
 Implementation notes last refreshed: 2026-07-05
 Purpose: Merge the prior dropship and .ops portal design docs into one forward design.
 
@@ -530,6 +530,13 @@ Insurance pool:
 - Insurance pool is funded by a configurable fee baked into shipping, for example 2%.
 - Lost, misdelivered, or no-inspection carrier cases can be credited from the insurance pool according to configured policy.
 - Carrier claims can be tracked, but vendor credit does not necessarily wait for claim payout.
+- The pool is an internal accounting mechanism, not a vendor-promised insurance benefit. A separately communicated vendor benefit would require its own approved terms and disclosure.
+- Carrier-protection policies are immutable, versioned configurations. Assignment rules may scope a policy by channel, warehouse, carrier/service, destination, and shipment-value range, with deterministic precedence and a default fallback.
+- Reimbursement uses affected wholesale merchandise cost plus the affected shipment's allocated portion of the shipping amount actually charged to the vendor. Vendor retail margin, marketplace fees, taxes, and raw carrier label cost are not reimbursement bases.
+- For one physical shipment, assign the full order shipping charge. For free-shipping orders, assign zero. For split shipments with a positive charge, allocate by each physical shipment's captured label-cost share using largest-remainder rounding and shipment-ID tie breaking so the result reconciles exactly to the order charge.
+- Label cost is only the split-allocation weight. Missing positive label cost on any split fails claim intake closed; it must never be replaced with an estimate.
+- Claim intake begins only after the WMS order is fully shipped, includes every shipped physical fulfillment in the immutable allocation set, and freezes policy, assignment, source evidence, affected wholesale cost, allocated shipping charge, currency, and calculated credit.
+- Carrier-protection policy money is USD-only until policy deductibles, caps, and value ranges become currency-scoped.
 
 Return statuses should include:
 
@@ -767,6 +774,9 @@ Returns:
 - `dropship_rma_items`
 - `dropship_rma_inspections`
 - `dropship_carrier_claims`
+- `dropship_carrier_protection_policies`
+- `dropship_carrier_protection_assignments`
+- `dropship_shipment_shipping_allocations`
 
 Notifications:
 
@@ -859,6 +869,7 @@ Minimum required coverage:
 - Payment hold timeout/cancellation.
 - Return fault category financial behavior.
 - Insurance pool credit behavior.
+- Exact split-shipment shipping allocation, immutable claim snapshots, and fail-closed missing label-cost behavior.
 - Critical notification muting prevention.
 
 External APIs must be mocked in tests:

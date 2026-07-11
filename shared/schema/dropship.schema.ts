@@ -19,7 +19,7 @@ import { channels } from "./channels.schema";
 import { productLines, products, productVariants } from "./catalog.schema";
 import { members, memberSubscriptions, plans } from "./membership.schema";
 import { omsOrders } from "./oms.schema";
-import { outboundShipments } from "./orders.schema";
+import { orders as wmsOrders, outboundShipments } from "./orders.schema";
 import { warehouses } from "./warehouse.schema";
 
 export const dropshipSchema = pgSchema("dropship");
@@ -1202,35 +1202,110 @@ export const dropshipCarrierProtectionAssignments = dropshipSchema.table("dropsh
   index("dropship_carrier_protection_assignment_match_idx").on(table.isActive, table.priority),
 ]);
 
+export const dropshipShipmentShippingAllocations = dropshipSchema.table("dropship_shipment_shipping_allocations", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  intakeId: integer("intake_id").notNull().references(() => dropshipOrderIntake.id, { onDelete: "restrict" }),
+  economicsSnapshotId: integer("economics_snapshot_id").notNull().references(() => dropshipOrderEconomicsSnapshots.id, { onDelete: "restrict" }),
+  omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "restrict" }),
+  wmsOrderId: integer("wms_order_id").notNull().references(() => wmsOrders.id, { onDelete: "restrict" }),
+  wmsShipmentId: integer("wms_shipment_id").notNull().references(() => outboundShipments.id, { onDelete: "restrict" }),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  allocationMethod: varchar("allocation_method", { length: 80 }).notNull(),
+  orderShippingChargeCents: bigint("order_shipping_charge_cents", { mode: "number" }).notNull(),
+  shipmentCarrierCostCents: bigint("shipment_carrier_cost_cents", { mode: "number" }),
+  totalCarrierCostCents: bigint("total_carrier_cost_cents", { mode: "number" }),
+  allocatedShippingChargeCents: bigint("allocated_shipping_charge_cents", { mode: "number" }).notNull(),
+  allocationGroupHash: varchar("allocation_group_hash", { length: 64 }).notNull(),
+  sourceSnapshot: jsonb("source_snapshot").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("dropship_shipment_shipping_allocation_intake_shipment_uq").on(table.intakeId, table.wmsShipmentId),
+  index("dropship_shipment_shipping_allocation_economics_idx").on(table.economicsSnapshotId, table.wmsShipmentId),
+  check("dropship_shipment_shipping_allocation_currency_chk", sql`${table.currency} ~ '^[A-Z]{3}$'`),
+  check("dropship_shipment_shipping_allocation_money_chk", sql`
+    ${table.orderShippingChargeCents} >= 0
+    AND (${table.shipmentCarrierCostCents} IS NULL OR ${table.shipmentCarrierCostCents} > 0)
+    AND (${table.totalCarrierCostCents} IS NULL OR ${table.totalCarrierCostCents} > 0)
+    AND ${table.allocatedShippingChargeCents} >= 0
+    AND ${table.allocatedShippingChargeCents} <= ${table.orderShippingChargeCents}
+  `),
+]);
+
 export const dropshipCarrierClaims = dropshipSchema.table("dropship_carrier_claims", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   rmaId: integer("rma_id").references(() => dropshipRmas.id, { onDelete: "set null" }),
   intakeId: integer("intake_id").references(() => dropshipOrderIntake.id, { onDelete: "set null" }),
+  wmsShipmentId: integer("wms_shipment_id").references(() => outboundShipments.id, { onDelete: "restrict" }),
   carrier: varchar("carrier", { length: 80 }),
   trackingNumber: varchar("tracking_number", { length: 120 }),
+  currency: varchar("currency", { length: 3 }),
   status: varchar("status", { length: 40 }).notNull().default("pending"),
   eventType: varchar("event_type", { length: 30 }),
   policyId: integer("policy_id").references(() => dropshipCarrierProtectionPolicies.id, { onDelete: "restrict" }),
+  carrierProtectionAssignmentId: integer("carrier_protection_assignment_id").references(() => dropshipCarrierProtectionAssignments.id, { onDelete: "restrict" }),
+  shippingAllocationId: bigint("shipping_allocation_id", { mode: "number" }).references(() => dropshipShipmentShippingAllocations.id, { onDelete: "restrict" }),
   policySnapshot: jsonb("policy_snapshot"),
+  sourceSnapshot: jsonb("source_snapshot"),
   wholesaleCostSnapshotCents: bigint("wholesale_cost_snapshot_cents", { mode: "number" }),
   shippingChargeSnapshotCents: bigint("shipping_charge_snapshot_cents", { mode: "number" }),
   calculatedCreditCents: bigint("calculated_credit_cents", { mode: "number" }),
   approvedCreditCents: bigint("approved_credit_cents", { mode: "number" }),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }),
+  eligibleAt: timestamp("eligible_at", { withTimezone: true }),
   externalClaimId: varchar("external_claim_id", { length: 255 }),
   claimAmountCents: bigint("claim_amount_cents", { mode: "number" }),
   insurancePoolCreditCents: bigint("insurance_pool_credit_cents", { mode: "number" }),
   filedAt: timestamp("filed_at", { withTimezone: true }),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }),
+  requestHash: varchar("request_hash", { length: 64 }),
+  actorType: varchar("actor_type", { length: 40 }),
+  actorId: varchar("actor_id", { length: 255 }),
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("dropship_carrier_claim_status_idx").on(table.status),
+  index("dropship_carrier_claim_intake_created_idx").on(table.intakeId, table.createdAt),
+  uniqueIndex("dropship_carrier_claim_idempotency_idx").on(table.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
+  uniqueIndex("dropship_carrier_claim_shipment_event_idx").on(table.wmsShipmentId, table.eventType).where(sql`wms_shipment_id IS NOT NULL AND event_type IS NOT NULL`),
   check("dropship_carrier_claim_money_chk", sql`
     (${table.claimAmountCents} IS NULL OR ${table.claimAmountCents} >= 0)
     AND (${table.insurancePoolCreditCents} IS NULL OR ${table.insurancePoolCreditCents} >= 0)
+    AND (${table.wholesaleCostSnapshotCents} IS NULL OR ${table.wholesaleCostSnapshotCents} >= 0)
+    AND (${table.shippingChargeSnapshotCents} IS NULL OR ${table.shippingChargeSnapshotCents} >= 0)
+    AND (${table.calculatedCreditCents} IS NULL OR ${table.calculatedCreditCents} >= 0)
+    AND (${table.approvedCreditCents} IS NULL OR ${table.approvedCreditCents} >= 0)
   `),
   check("dropship_carrier_claim_event_chk", sql`${table.eventType} IS NULL OR ${table.eventType} IN ('loss','misdelivery','damage')`),
+  check("dropship_carrier_claim_currency_chk", sql`${table.currency} IS NULL OR ${table.currency} ~ '^[A-Z]{3}$'`),
+  check("dropship_carrier_claim_intake_snapshot_chk", sql`
+    ${table.wmsShipmentId} IS NULL OR (
+      ${table.intakeId} IS NOT NULL
+      AND ${table.currency} IS NOT NULL
+      AND ${table.carrier} IS NOT NULL
+      AND btrim(${table.carrier}) <> ''
+      AND ${table.trackingNumber} IS NOT NULL
+      AND btrim(${table.trackingNumber}) <> ''
+      AND ${table.eventType} IS NOT NULL
+      AND ${table.policyId} IS NOT NULL
+      AND ${table.carrierProtectionAssignmentId} IS NOT NULL
+      AND ${table.shippingAllocationId} IS NOT NULL
+      AND ${table.policySnapshot} IS NOT NULL
+      AND ${table.sourceSnapshot} IS NOT NULL
+      AND ${table.wholesaleCostSnapshotCents} IS NOT NULL
+      AND ${table.shippingChargeSnapshotCents} IS NOT NULL
+      AND ${table.calculatedCreditCents} IS NOT NULL
+      AND ${table.occurredAt} IS NOT NULL
+      AND ${table.eligibleAt} IS NOT NULL
+      AND ${table.idempotencyKey} IS NOT NULL
+      AND btrim(${table.idempotencyKey}) <> ''
+      AND ${table.requestHash} IS NOT NULL
+      AND ${table.requestHash} ~ '^[0-9a-f]{64}$'
+      AND ${table.actorType} IN ('admin','system')
+      AND (${table.actorType} <> 'admin' OR (${table.actorId} IS NOT NULL AND btrim(${table.actorId}) <> ''))
+    )
+  `),
 ]);
 
 export const dropshipNotificationEvents = dropshipSchema.table("dropship_notification_events", {

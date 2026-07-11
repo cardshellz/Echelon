@@ -60,7 +60,9 @@ export type CanonicalShipmentEvent =
       carrierRaw: string;
       shipDate: Date;
       trackingUrl?: string | null;
-      shipmentCost?: number;
+      serviceCode?: string | null;
+      carrierCostCents?: number;
+      carrierCostSource?: string;
       items?: CanonicalShipmentItem[];
     }
   | {
@@ -88,6 +90,23 @@ export interface CanonicalShipmentItem {
   sku: string;
   quantity: number;
   name?: string;
+}
+
+/**
+ * Convert a provider decimal-money value to integer cents without using
+ * floating-point arithmetic. Provider payloads with fractional cents,
+ * exponents, negatives, or unsafe totals are rejected.
+ */
+export function parseProviderAmountCents(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const raw = String(value).trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) return null;
+
+  const [wholeRaw, fractionalRaw = ""] = raw.split(".");
+  const total = BigInt(wholeRaw) * BigInt(100)
+    + BigInt((fractionalRaw + "00").slice(0, 2));
+  if (total > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(total);
 }
 
 // ─── Outbound push result ───────────────────────────────────────────

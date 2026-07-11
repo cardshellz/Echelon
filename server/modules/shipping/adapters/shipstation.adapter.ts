@@ -26,9 +26,10 @@ import type {
   ShipmentPushPayload,
   CanonicalShipmentEvent,
 } from "../types";
-import { normalizeCarrier } from "../types";
+import { normalizeCarrier, parseProviderAmountCents } from "../types";
 
 const ENGINE_NAME = "shipstation";
+const SHIPSTATION_SHIPMENTS_API_COST_SOURCE = "shipstation_shipments_api";
 
 export function toEngineRef(
   shipstationOrderId: number,
@@ -186,6 +187,10 @@ export function createShipStationEngine(
             reason: "voided in ShipStation",
           };
         }
+        const parsedCarrierCostCents = parseProviderAmountCents(s.shipmentCost);
+        const carrierCostCents = parsedCarrierCostCents !== null && parsedCarrierCostCents > 0
+          ? parsedCarrierCostCents
+          : undefined;
         return {
           kind: "shipped" as const,
           shipmentId: s.shipmentId,
@@ -194,7 +199,9 @@ export function createShipStationEngine(
           carrier: normalizeCarrier(s.carrierCode ?? "other"),
           carrierRaw: s.carrierCode ?? "other",
           shipDate: new Date(s.shipDate),
-          shipmentCost: s.shipmentCost,
+          serviceCode: typeof s.serviceCode === "string" ? s.serviceCode.trim() || null : null,
+          carrierCostCents,
+          carrierCostSource: carrierCostCents === undefined ? undefined : SHIPSTATION_SHIPMENTS_API_COST_SOURCE,
           items: s.shipmentItems?.map((item: any) => ({
             sku: item.sku ?? "",
             quantity: item.quantity ?? 0,

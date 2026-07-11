@@ -128,6 +128,9 @@
   "dropship.dropship_box_catalog": [
     "modules/dropship"
   ],
+  "dropship.dropship_carrier_claims": [
+    "modules/dropship"
+  ],
   "dropship.dropship_carrier_protection_assignments": [
     "modules/dropship"
   ],
@@ -198,6 +201,9 @@
     "modules/dropship"
   ],
   "dropship.dropship_sensitive_action_challenges": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_shipment_shipping_allocations": [
     "modules/dropship"
   ],
   "dropship.dropship_shipping_markup_config": [

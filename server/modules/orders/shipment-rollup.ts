@@ -94,6 +94,9 @@ export type ShipmentEvent =
       carrier: string;
       shipDate: Date;
       trackingUrl?: string | null;
+      serviceCode?: string | null;
+      carrierCostCents?: number;
+      carrierCostSource?: string;
     }
   | { kind: "cancelled"; reason?: string }
   | { kind: "voided"; reason?: string; trackingNumber?: string | null };
@@ -106,7 +109,11 @@ interface CurrentShipmentRow {
   status: string;
   tracking_number: string | null;
   carrier: string | null;
+  service_code: string | null;
   tracking_url: string | null;
+  carrier_cost_cents: string | number | null;
+  carrier_cost_source: string | null;
+  carrier_cost_recorded_at: Date | string | null;
   shopify_fulfillment_id: string | null;
   shipped_at: Date | string | null;
   shipping_engine: string | null;
@@ -126,7 +133,8 @@ async function loadShipment(
   shipmentId: number,
 ): Promise<CurrentShipmentRow> {
   const result: any = await db.execute(sql`
-    SELECT id, order_id, status, tracking_number, carrier, tracking_url,
+    SELECT id, order_id, status, tracking_number, carrier, service_code, tracking_url,
+           carrier_cost_cents, carrier_cost_source, carrier_cost_recorded_at,
            shopify_fulfillment_id, shipped_at,
            shipping_engine, engine_order_ref, engine_shipment_ref,
            shipstation_order_id, shipstation_order_key
@@ -204,6 +212,9 @@ export async function markShipmentShipped(
     carrier: string;
     shipDate: Date;
     trackingUrl?: string | null;
+    serviceCode?: string | null;
+    carrierCostCents?: number;
+    carrierCostSource?: string;
   },
   opts: {
     now?: Date;
@@ -236,14 +247,44 @@ export async function markShipmentShipped(
     throw err;
   }
 
+  const serviceCode = typeof meta.serviceCode === "string" && meta.serviceCode.trim()
+    ? meta.serviceCode.trim().slice(0, 100)
+    : null;
+  const hasCarrierCost = meta.carrierCostCents !== undefined;
+  if (hasCarrierCost && (!Number.isSafeInteger(meta.carrierCostCents) || meta.carrierCostCents! <= 0)) {
+    const err: any = new Error("carrierCostCents must be a positive integer when provided");
+    err.code = "INVALID_ARGUMENT";
+    err.field = "carrierCostCents";
+    throw err;
+  }
+  const carrierCostSource = typeof meta.carrierCostSource === "string"
+    ? meta.carrierCostSource.trim().slice(0, 40)
+    : "";
+  if (hasCarrierCost && !carrierCostSource) {
+    const err: any = new Error("carrierCostSource is required when carrierCostCents is provided");
+    err.code = "INVALID_ARGUMENT";
+    err.field = "carrierCostSource";
+    throw err;
+  }
+
   const current = await loadShipment(db, shipmentId);
   const now = opts.now ?? new Date();
+
+  const currentCarrierCostCents = Number(current.carrier_cost_cents ?? 0);
+  const serviceMatches = serviceCode === null || current.service_code === serviceCode;
+  const carrierCostMatches = !hasCarrierCost || (
+    currentCarrierCostCents === meta.carrierCostCents
+    && current.carrier_cost_source === carrierCostSource
+    && current.carrier_cost_recorded_at != null
+  );
 
   // Idempotency: already shipped with identical tracking/carrier → no-op.
   if (
     current.status === "shipped" &&
     current.tracking_number === meta.trackingNumber &&
-    (current.carrier ?? "") === meta.carrier
+    (current.carrier ?? "") === meta.carrier &&
+    serviceMatches &&
+    carrierCostMatches
   ) {
     return { wmsOrderId: current.order_id, changed: false };
   }
@@ -279,9 +320,22 @@ export async function markShipmentShipped(
     UPDATE wms.outbound_shipments SET
       status = 'shipped',
       carrier = ${meta.carrier},
+      service_code = COALESCE(${serviceCode}, service_code),
       tracking_number = ${meta.trackingNumber},
       tracking_url = ${trackingUrl},
       shipped_at = ${meta.shipDate},
+      carrier_cost_cents = CASE
+        WHEN ${hasCarrierCost} THEN ${meta.carrierCostCents ?? null}
+        ELSE carrier_cost_cents
+      END,
+      carrier_cost_source = CASE
+        WHEN ${hasCarrierCost} THEN ${carrierCostSource || null}
+        ELSE carrier_cost_source
+      END,
+      carrier_cost_recorded_at = CASE
+        WHEN ${hasCarrierCost} THEN ${now}
+        ELSE carrier_cost_recorded_at
+      END,
       updated_at = ${now}
     WHERE id = ${shipmentId}
   `);
@@ -945,6 +999,9 @@ export async function dispatchShipmentEvent(
           carrier: event.carrier,
           shipDate: event.shipDate,
           trackingUrl: event.trackingUrl ?? null,
+          serviceCode: event.serviceCode ?? null,
+          carrierCostCents: event.carrierCostCents,
+          carrierCostSource: event.carrierCostSource,
         },
         { now: opts.now, fulfillmentPush: opts.fulfillmentPush },
       );

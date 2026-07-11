@@ -177,6 +177,7 @@ export type NormalizedCreateCarrierProtectionPolicy = Omit<z.infer<typeof create
   effectiveTo: Date | null;
 };
 export type NormalizedCreateCarrierProtectionAssignment = Omit<z.infer<typeof createAssignmentSchema>, "idempotencyKey" | "actor">;
+export type ResolveCarrierProtectionPolicyInput = z.infer<typeof resolvePolicySchema> & { occurredAt: Date };
 
 export interface CarrierProtectionRepository {
   getOverview(generatedAt: Date): Promise<CarrierProtectionOverview>;
@@ -185,7 +186,7 @@ export interface CarrierProtectionRepository {
   retirePolicy(input: { policyId: number } & CarrierProtectionCommandContext): Promise<CarrierProtectionMutationResult<CarrierProtectionPolicyRecord>>;
   createAssignment(input: NormalizedCreateCarrierProtectionAssignment & CarrierProtectionCommandContext): Promise<CarrierProtectionMutationResult<CarrierProtectionAssignmentRecord>>;
   deactivateAssignment(input: { assignmentId: number } & CarrierProtectionCommandContext): Promise<CarrierProtectionMutationResult<CarrierProtectionAssignmentRecord>>;
-  resolvePolicy(input: z.infer<typeof resolvePolicySchema> & { occurredAt: Date }): Promise<CarrierProtectionMatch | null>;
+  resolvePolicy(input: ResolveCarrierProtectionPolicyInput): Promise<CarrierProtectionMatch | null>;
 }
 
 export class DropshipCarrierProtectionService {
@@ -281,10 +282,30 @@ export function calculateCarrierProtectionCredit(input: {
 }): number {
   assertMoney(input.wholesaleCostCents);
   assertMoney(input.shippingChargeCents);
-  const merchandise = Number((BigInt(input.wholesaleCostCents) * BigInt(input.policy.merchandiseReimbursementBps)) / BigInt(10000));
-  const shipping = Number((BigInt(input.shippingChargeCents) * BigInt(input.policy.shippingReimbursementBps)) / BigInt(10000));
-  const afterDeductible = Math.max(0, merchandise + shipping - input.policy.deductibleCents);
-  return input.policy.maxCreditCents == null ? afterDeductible : Math.min(afterDeductible, input.policy.maxCreditCents);
+  assertBasisPoints(input.policy.merchandiseReimbursementBps);
+  assertBasisPoints(input.policy.shippingReimbursementBps);
+  assertMoney(input.policy.deductibleCents);
+  if (input.policy.maxCreditCents !== null) assertMoney(input.policy.maxCreditCents);
+
+  const denominator = BigInt(10_000);
+  const merchandise = (BigInt(input.wholesaleCostCents)
+    * BigInt(input.policy.merchandiseReimbursementBps)) / denominator;
+  const shipping = (BigInt(input.shippingChargeCents)
+    * BigInt(input.policy.shippingReimbursementBps)) / denominator;
+  const gross = merchandise + shipping;
+  const deductible = BigInt(input.policy.deductibleCents);
+  let credit = gross > deductible ? gross - deductible : BigInt(0);
+  if (input.policy.maxCreditCents !== null) {
+    const maximum = BigInt(input.policy.maxCreditCents);
+    if (credit > maximum) credit = maximum;
+  }
+  if (credit > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new DropshipError(
+      "DROPSHIP_CARRIER_PROTECTION_INVALID_MONEY",
+      "Carrier-protection credit exceeds the supported range.",
+    );
+  }
+  return Number(credit);
 }
 
 function withContext<T extends object>(command: string, normalized: T, parsed: { idempotencyKey: string; actor: CarrierProtectionCommandContext["actor"] }, now: Date): T & CarrierProtectionCommandContext {
@@ -301,6 +322,15 @@ function normalizePolicyKey(value: string): string {
 
 function assertMoney(value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new DropshipError("DROPSHIP_CARRIER_PROTECTION_INVALID_MONEY", "Carrier-protection calculations require non-negative integer cents.");
+}
+
+function assertBasisPoints(value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > 10_000) {
+    throw new DropshipError(
+      "DROPSHIP_CARRIER_PROTECTION_INVALID_MONEY",
+      "Carrier-protection reimbursement rates must be integer basis points from 0 through 10000.",
+    );
+  }
 }
 
 export function carrierProtectionValidationError(error: unknown): DropshipError | null {

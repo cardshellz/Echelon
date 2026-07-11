@@ -10,7 +10,15 @@
 import type { EngineOrderState, CanonicalShipmentEvent } from "./types";
 
 export type ReconcileEvent =
-  | { kind: "shipped"; trackingNumber: string; carrier: string; shipDate: Date }
+  | {
+      kind: "shipped";
+      trackingNumber: string;
+      carrier: string;
+      shipDate: Date;
+      serviceCode?: string | null;
+      carrierCostCents?: number;
+      carrierCostSource?: string;
+    }
   | { kind: "cancelled"; reason: string }
   | { kind: "voided"; reason: string }
   // Engine reports cancelled but the ORDER is still live → a discrepancy to flag
@@ -47,6 +55,13 @@ export function deriveReconcileEvent(
       carrier:
         latest.carrierRaw?.trim() || input.currentCarrier || "other",
       shipDate: latest.shipDate instanceof Date ? latest.shipDate : new Date(latest.shipDate),
+      ...(latest.serviceCode ? { serviceCode: latest.serviceCode } : {}),
+      ...(latest.carrierCostCents !== undefined && latest.carrierCostSource
+        ? {
+            carrierCostCents: latest.carrierCostCents,
+            carrierCostSource: latest.carrierCostSource,
+          }
+        : {}),
     };
   }
 

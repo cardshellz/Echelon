@@ -69,6 +69,32 @@ describe("DropshipCarrierProtectionService", () => {
     })).toBe(4500);
   });
 
+  it("applies the cap before converting a large exact calculation back to number", () => {
+    expect(calculateCarrierProtectionCredit({
+      wholesaleCostCents: Number.MAX_SAFE_INTEGER,
+      shippingChargeCents: Number.MAX_SAFE_INTEGER,
+      policy: {
+        merchandiseReimbursementBps: 10000,
+        shippingReimbursementBps: 10000,
+        deductibleCents: 0,
+        maxCreditCents: Number.MAX_SAFE_INTEGER,
+      },
+    })).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it("rejects an uncapped calculated credit outside the safe integer range", () => {
+    expect(() => calculateCarrierProtectionCredit({
+      wholesaleCostCents: Number.MAX_SAFE_INTEGER,
+      shippingChargeCents: Number.MAX_SAFE_INTEGER,
+      policy: {
+        merchandiseReimbursementBps: 10000,
+        shippingReimbursementBps: 10000,
+        deductibleCents: 0,
+        maxCreditCents: null,
+      },
+    })).toThrowError(expect.objectContaining({ code: "DROPSHIP_CARRIER_PROTECTION_INVALID_MONEY" }));
+  });
+
   it("rejects scoped conditions on the default assignment", async () => {
     const service = makeService(new FakeRepository());
     await expect(service.createAssignment({
