@@ -22,6 +22,7 @@ import {
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-status";
 import { maybeGetPackInstruction } from "../shipping-engine/application/pack-plan.service";
+import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -3270,16 +3271,57 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
   // ─── processShipNotify entry point ─────────────────────────────
 
+  async function resolveRecoveredNoMatchException(
+    shipment: ShipStationShipment,
+  ): Promise<void> {
+    if (!Number.isInteger(shipment.shipmentId) || Number(shipment.shipmentId) <= 0) {
+      return;
+    }
+
+    try {
+      const recovery = await resolveRecoveredShipNotifyNoMatchExceptions(db, {
+        externalShipmentRef: shipment.shipmentId,
+        limit: 10,
+        resolvedBy: "system:shipstation_webhook",
+      });
+      if (recovery.resolvedCount > 0) {
+        console.log(JSON.stringify({
+          level: "info",
+          action: "ship_notify_no_match_resolved",
+          outcome: "recovered",
+          ss_shipment_id: shipment.shipmentId,
+          ss_order_id: shipment.orderId ?? null,
+          resolved_count: recovery.resolvedCount,
+          exception_ids: recovery.recovered.map((row) => row.exceptionId),
+        }));
+      }
+    } catch (error: any) {
+      // The fulfillment event already committed. Exception housekeeping must
+      // remain retryable without turning a successful provider callback into a
+      // failed webhook delivery.
+      console.error(JSON.stringify({
+        level: "error",
+        action: "ship_notify_no_match_resolve_failed",
+        outcome: "error",
+        ss_shipment_id: shipment.shipmentId,
+        ss_order_id: shipment.orderId ?? null,
+        error: error?.message ?? String(error),
+      }));
+    }
+  }
+
   async function processShipmentNotification(
     shipment: ShipStationShipment,
   ): Promise<{ processed: boolean }> {
     const v2Result = await processShipNotifyV2(shipment);
     if (v2Result.processed) {
+      await resolveRecoveredNoMatchException(shipment);
       return { processed: true };
     }
     if (v2Result.fallback) {
       const legacyResult = await processShipNotifyLegacy(shipment);
       if (legacyResult.processed) {
+        await resolveRecoveredNoMatchException(shipment);
         return legacyResult;
       }
     }
