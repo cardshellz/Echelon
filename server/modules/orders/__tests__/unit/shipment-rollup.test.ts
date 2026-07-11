@@ -91,7 +91,11 @@ function shipmentRow(
     status: string;
     tracking_number: string | null;
     carrier: string | null;
+    service_code: string | null;
     tracking_url: string | null;
+    carrier_cost_cents: number | null;
+    carrier_cost_source: string | null;
+    carrier_cost_recorded_at: string | null;
     shopify_fulfillment_id: string | null;
     shipstation_order_id: number | null;
     shipped_at: string | null;
@@ -103,7 +107,11 @@ function shipmentRow(
     status: "planned",
     tracking_number: null,
     carrier: null,
+    service_code: null,
     tracking_url: null,
+    carrier_cost_cents: 0,
+    carrier_cost_source: null,
+    carrier_cost_recorded_at: null,
     shopify_fulfillment_id: null,
     shipstation_order_id: null,
     shipped_at: null,
@@ -134,6 +142,63 @@ describe("markShipmentShipped", () => {
 
     expect(result).toEqual({ wmsOrderId: 42, changed: true });
     expect(mock.getCallCount()).toBe(2);
+  });
+
+  it("persists service and captured integer carrier cost on the shipment", async () => {
+    const mock = makeDb([
+      { rows: [shipmentRow()] },
+      { rows: [] },
+    ]);
+
+    await markShipmentShipped(
+      mock.db,
+      501,
+      {
+        trackingNumber: "1Z999",
+        carrier: "UPS",
+        shipDate: NOW,
+        serviceCode: "ups_ground",
+        carrierCostCents: 599,
+        carrierCostSource: "shipstation_ship_notify",
+      },
+      { now: NOW },
+    );
+
+    const updateSql = mock.calls[1]?.sqlText ?? "";
+    expect(updateSql).toContain("service_code = COALESCE");
+    expect(updateSql).toContain("carrier_cost_cents = CASE");
+    expect(updateSql).toContain("carrier_cost_recorded_at = CASE");
+  });
+
+  it("keeps an identical captured cost idempotent", async () => {
+    const mock = makeDb([{
+      rows: [shipmentRow({
+        status: "shipped",
+        tracking_number: "1Z999",
+        carrier: "UPS",
+        service_code: "ups_ground",
+        carrier_cost_cents: 599,
+        carrier_cost_source: "shipstation_ship_notify",
+        carrier_cost_recorded_at: NOW.toISOString(),
+      })],
+    }]);
+
+    const result = await markShipmentShipped(
+      mock.db,
+      501,
+      {
+        trackingNumber: "1Z999",
+        carrier: "UPS",
+        shipDate: NOW,
+        serviceCode: "ups_ground",
+        carrierCostCents: 599,
+        carrierCostSource: "shipstation_ship_notify",
+      },
+      { now: NOW },
+    );
+
+    expect(result.changed).toBe(false);
+    expect(mock.getCallCount()).toBe(1);
   });
 
   it("is idempotent when shipment is already shipped with SAME tracking + carrier", async () => {

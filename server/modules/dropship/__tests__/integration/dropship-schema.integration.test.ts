@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config } from "dotenv";
 import pg from "pg";
+import { PgDropshipCarrierClaimRepository } from "../../infrastructure/dropship-carrier-claim.repository";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 
@@ -10,6 +11,18 @@ const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const describeWithDb = TEST_DB_URL ? describe : describe.skip;
 const migrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0086_dropship_v2_foundation.sql"),
+  "utf8",
+);
+const adminCommandMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0101_dropship_shipping_admin_config.sql"),
+  "utf8",
+);
+const carrierProtectionMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0585_dropship_carrier_protection_policies.sql"),
+  "utf8",
+);
+const carrierClaimMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0586_dropship_carrier_claim_intake.sql"),
   "utf8",
 );
 
@@ -44,6 +57,7 @@ async function createMinimalDependencies(client: pg.PoolClient) {
     CREATE SCHEMA IF NOT EXISTS catalog;
     CREATE SCHEMA IF NOT EXISTS channels;
     CREATE SCHEMA IF NOT EXISTS warehouse;
+    CREATE SCHEMA IF NOT EXISTS wms;
     CREATE SCHEMA IF NOT EXISTS oms;
 
     CREATE TABLE IF NOT EXISTS membership.members (
@@ -105,6 +119,29 @@ async function createMinimalDependencies(client: pg.PoolClient) {
       id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
       code varchar(20) UNIQUE NOT NULL,
       name varchar(200) NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS wms.orders (
+      id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+      oms_fulfillment_order_id varchar(128),
+      warehouse_status varchar(40) NOT NULL DEFAULT 'ready'
+    );
+
+    CREATE TABLE IF NOT EXISTS wms.outbound_shipments (
+      id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+      order_id integer NOT NULL REFERENCES wms.orders(id),
+      status varchar(40) NOT NULL DEFAULT 'planned',
+      carrier varchar(100),
+      tracking_number varchar(200),
+      shipped_at timestamptz,
+      carrier_cost_cents integer NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS wms.outbound_shipment_items (
+      id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+      shipment_id integer NOT NULL REFERENCES wms.outbound_shipments(id),
+      product_variant_id integer,
+      qty integer NOT NULL DEFAULT 1
     );
 
     CREATE TABLE IF NOT EXISTS oms.oms_orders (
@@ -194,6 +231,9 @@ describeWithDb("Dropship V2 database foundation", () => {
     await client.query("BEGIN");
     await createMinimalDependencies(client);
     await client.query(migrationSql);
+    await client.query(adminCommandMigrationSql);
+    await client.query(carrierProtectionMigrationSql);
+    await client.query(carrierClaimMigrationSql);
 
     const channel = await client.query<{ id: number }>(
       `INSERT INTO channels.channels (name, type, provider, status, sync_enabled, sync_mode)
@@ -392,4 +432,243 @@ describeWithDb("Dropship V2 database foundation", () => {
       "23505",
     );
   });
+
+  it("keeps carrier-claim migrations repeatable and enforces captured-cost provenance", async () => {
+    await client!.query(carrierProtectionMigrationSql);
+    await client!.query(carrierClaimMigrationSql);
+
+    const order = await client!.query<{ id: number }>(
+      "INSERT INTO wms.orders (warehouse_status) VALUES ('shipped') RETURNING id",
+    );
+    const shipment = await client!.query<{ id: number }>(
+      `INSERT INTO wms.outbound_shipments (order_id, status, carrier_cost_cents)
+       VALUES ($1, 'shipped', 0)
+       RETURNING id`,
+      [order.rows[0].id],
+    );
+
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `UPDATE wms.outbound_shipments
+         SET carrier_cost_source = 'shipstation_ship_notify', carrier_cost_recorded_at = now()
+         WHERE id = $1`,
+        [shipment.rows[0].id],
+      ),
+      "23514",
+    );
+
+    await client!.query(
+      `UPDATE wms.outbound_shipments
+       SET carrier_cost_cents = 499,
+           carrier_cost_source = 'shipstation_ship_notify',
+           carrier_cost_recorded_at = now()
+       WHERE id = $1`,
+      [shipment.rows[0].id],
+    );
+  });
+
+  it("persists exact split-shipment allocation and replays claim intake idempotently", async () => {
+    const now = new Date("2026-07-11T14:00:00.000Z");
+    const shippedAt = new Date("2026-07-10T14:00:00.000Z");
+    const occurredAt = new Date("2026-07-11T13:00:00.000Z");
+    const omsOrder = await client!.query<{ id: number }>(
+      `INSERT INTO oms.oms_orders (channel_id, external_order_id, status)
+       VALUES ($1, 'CLAIM-ORDER-1', 'shipped')
+       RETURNING id`,
+      [channelId],
+    );
+    const quote = await client!.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_shipping_quote_snapshots
+        (vendor_id, store_connection_id, warehouse_id, package_count, base_rate_cents,
+         total_shipping_cents, quote_payload)
+       VALUES ($1, $2, $3, 2, 1000, 1000, $4::jsonb)
+       RETURNING id`,
+      [vendorAId, storeAId, warehouseId, JSON.stringify({ destination: { country: "US", region: "PA" } })],
+    );
+    const intake = await client!.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_order_intake
+        (channel_id, vendor_id, store_connection_id, platform, external_order_id,
+         status, oms_order_id, accepted_at)
+       VALUES ($1, $2, $3, 'ebay', 'CLAIM-ORDER-1', 'accepted', $4, $5)
+       RETURNING id`,
+      [channelId, vendorAId, storeAId, omsOrder.rows[0].id, shippedAt],
+    );
+    await client!.query(
+      `INSERT INTO dropship.dropship_order_economics_snapshots
+        (intake_id, oms_order_id, vendor_id, store_connection_id, member_id,
+         shipping_quote_snapshot_id, warehouse_id, currency, retail_subtotal_cents,
+         wholesale_subtotal_cents, shipping_cents, total_debit_cents, pricing_snapshot)
+       VALUES ($1, $2, $3, $4, 'member-dropship-a', $5, $6, 'USD', 2000, 1000, 1000, 2000, $7::jsonb)`,
+      [
+        intake.rows[0].id,
+        omsOrder.rows[0].id,
+        vendorAId,
+        storeAId,
+        quote.rows[0].id,
+        warehouseId,
+        JSON.stringify({
+          wholesale: {
+            lines: [{ productVariantId: variantId, quantity: 2, wholesaleUnitCostCents: 500 }],
+          },
+        }),
+      ],
+    );
+    const wmsOrder = await client!.query<{ id: number }>(
+      `INSERT INTO wms.orders (oms_fulfillment_order_id, warehouse_status)
+       VALUES ($1, 'shipped')
+       RETURNING id`,
+      [String(omsOrder.rows[0].id)],
+    );
+    const firstShipment = await client!.query<{ id: number }>(
+      `INSERT INTO wms.outbound_shipments
+        (order_id, status, carrier, service_code, tracking_number, shipped_at,
+         carrier_cost_cents, carrier_cost_source, carrier_cost_recorded_at)
+       VALUES ($1, 'shipped', 'USPS', 'priority_mail', 'TRACK-CLAIM-1', $2,
+         300, 'shipstation_ship_notify', $2)
+       RETURNING id`,
+      [wmsOrder.rows[0].id, shippedAt],
+    );
+    const secondShipment = await client!.query<{ id: number }>(
+      `INSERT INTO wms.outbound_shipments
+        (order_id, status, carrier, service_code, tracking_number, shipped_at,
+         carrier_cost_cents, carrier_cost_source, carrier_cost_recorded_at)
+       VALUES ($1, 'shipped', 'USPS', 'priority_mail', 'TRACK-CLAIM-2', $2,
+         700, 'shipstation_ship_notify', $2)
+       RETURNING id`,
+      [wmsOrder.rows[0].id, shippedAt],
+    );
+    await client!.query(
+      `INSERT INTO wms.outbound_shipment_items (shipment_id, product_variant_id, qty)
+       VALUES ($1, $2, 2)`,
+      [firstShipment.rows[0].id, variantId],
+    );
+
+    const policy = await client!.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_carrier_protection_policies
+        (policy_key, version, name, status, loss_wait_days, misdelivery_wait_days,
+         carrier_claim_required, effective_from, created_by)
+       VALUES ('integration-default', 1, 'Integration default', 'active', 0, 0,
+         false, $1, 'integration-test')
+       RETURNING id`,
+      [new Date("2026-07-01T00:00:00.000Z")],
+    );
+    await client!.query(
+      `INSERT INTO dropship.dropship_carrier_protection_assignments
+        (policy_id, name, is_default, created_by)
+       VALUES ($1, 'Integration default assignment', true, 'integration-test')`,
+      [policy.rows[0].id],
+    );
+
+    const repository = new PgDropshipCarrierClaimRepository(createSavepointPool(client!));
+    const command = {
+      wmsShipmentId: firstShipment.rows[0].id,
+      eventType: "loss" as const,
+      occurredAt,
+      rmaId: null,
+      externalClaimId: null,
+      notes: "Database integration proof",
+      idempotencyKey: "claim-integration-idempotency-1",
+      requestHash: "a".repeat(64),
+      actor: { actorType: "admin" as const, actorId: "integration-test" },
+      now,
+    };
+
+    const created = await repository.createClaim(command);
+    const replayed = await repository.createClaim(command);
+
+    expect(created.idempotentReplay).toBe(false);
+    expect(replayed.idempotentReplay).toBe(true);
+    expect(replayed.record.claimId).toBe(created.record.claimId);
+    expect(created.record.shippingChargeSnapshotCents).toBe(300);
+    expect(created.record.wholesaleCostSnapshotCents).toBe(1000);
+    expect(created.record.calculatedCreditCents).toBe(1300);
+    expect(created.record.status).toBe("pending_approval");
+
+    const allocations = await client!.query<{
+      wms_shipment_id: number;
+      shipment_carrier_cost_cents: string;
+      allocated_shipping_charge_cents: string;
+    }>(
+      `SELECT wms_shipment_id, shipment_carrier_cost_cents, allocated_shipping_charge_cents
+       FROM dropship.dropship_shipment_shipping_allocations
+       WHERE intake_id = $1
+       ORDER BY wms_shipment_id`,
+      [intake.rows[0].id],
+    );
+    expect(allocations.rows).toEqual([
+      {
+        wms_shipment_id: firstShipment.rows[0].id,
+        shipment_carrier_cost_cents: "300",
+        allocated_shipping_charge_cents: "300",
+      },
+      {
+        wms_shipment_id: secondShipment.rows[0].id,
+        shipment_carrier_cost_cents: "700",
+        allocated_shipping_charge_cents: "700",
+      },
+    ]);
+
+    const counts = await client!.query<{
+      claim_count: string;
+      allocation_count: string;
+      audit_count: string;
+    }>(
+      `SELECT
+         (SELECT COUNT(*) FROM dropship.dropship_carrier_claims WHERE intake_id = $1)::text AS claim_count,
+         (SELECT COUNT(*) FROM dropship.dropship_shipment_shipping_allocations WHERE intake_id = $1)::text AS allocation_count,
+         (SELECT COUNT(*) FROM dropship.dropship_audit_events
+           WHERE entity_type = 'dropship_carrier_claim' AND entity_id = $2)::text AS audit_count`,
+      [intake.rows[0].id, String(created.record.claimId)],
+    );
+    expect(counts.rows[0]).toEqual({ claim_count: "1", allocation_count: "2", audit_count: "1" });
+
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `UPDATE dropship.dropship_shipment_shipping_allocations
+         SET allocated_shipping_charge_cents = 301
+         WHERE intake_id = $1 AND wms_shipment_id = $2`,
+        [intake.rows[0].id, firstShipment.rows[0].id],
+      ),
+      "23514",
+    );
+  });
 });
+
+function createSavepointPool(client: pg.PoolClient): pg.Pool {
+  let sequence = 0;
+  return {
+    connect: async () => {
+      const savepoint = `dropship_claim_repository_${++sequence}`;
+      let transactionOpen = false;
+      return {
+        query: async (query: unknown, values?: unknown[]) => {
+          if (typeof query === "string") {
+            const normalized = query.trim().replace(/\s+/g, " ").toUpperCase();
+            if (normalized.startsWith("BEGIN")) {
+              await client.query(`SAVEPOINT ${savepoint}`);
+              transactionOpen = true;
+              return { rows: [], rowCount: null };
+            }
+            if (normalized === "COMMIT") {
+              await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+              transactionOpen = false;
+              return { rows: [], rowCount: null };
+            }
+            if (normalized === "ROLLBACK") {
+              if (transactionOpen) {
+                await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+                await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+                transactionOpen = false;
+              }
+              return { rows: [], rowCount: null };
+            }
+          }
+          return client.query(query as never, values as never);
+        },
+        release: () => undefined,
+      } as unknown as pg.PoolClient;
+    },
+  } as unknown as pg.Pool;
+}

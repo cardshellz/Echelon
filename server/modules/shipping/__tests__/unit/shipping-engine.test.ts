@@ -4,7 +4,7 @@ import {
   toEngineRef,
   fromEngineRef,
 } from "../../adapters/shipstation.adapter";
-import { normalizeCarrier } from "../../types";
+import { normalizeCarrier, parseProviderAmountCents } from "../../types";
 import type { ShippingEngine } from "../../engine";
 import type { ShipStationServiceHandle } from "../../adapters/shipstation.adapter";
 import type { EngineRef } from "../../types";
@@ -26,6 +26,20 @@ function mockSsService(overrides: Partial<ShipStationServiceHandle> = {}): ShipS
     ...overrides,
   };
 }
+
+describe("parseProviderAmountCents", () => {
+  it("parses exact cents without floating-point multiplication", () => {
+    expect(parseProviderAmountCents(5.99)).toBe(599);
+    expect(parseProviderAmountCents("0.10")).toBe(10);
+  });
+
+  it("rejects fractional cents, negatives, exponents, and unsafe totals", () => {
+    expect(parseProviderAmountCents("1.001")).toBeNull();
+    expect(parseProviderAmountCents("-1.00")).toBeNull();
+    expect(parseProviderAmountCents("1e3")).toBeNull();
+    expect(parseProviderAmountCents("999999999999999.99")).toBeNull();
+  });
+});
 
 const ref: EngineRef = { engine: "shipstation", engineOrderRef: "999" };
 
@@ -141,6 +155,7 @@ describe("ShipStation Engine Adapter", () => {
             orderKey: "echelon-wms-shp-1",
             trackingNumber: "1Z999",
             carrierCode: "stamps_com",
+            serviceCode: "usps_ground_advantage",
             shipDate: "2026-05-01",
             voidDate: null,
             shipmentCost: 5.99,
@@ -166,6 +181,9 @@ describe("ShipStation Engine Adapter", () => {
         expect(events[0].carrier).toBe("USPS");
         expect(events[0].carrierRaw).toBe("stamps_com");
         expect(events[0].trackingNumber).toBe("1Z999");
+        expect(events[0].serviceCode).toBe("usps_ground_advantage");
+        expect(events[0].carrierCostCents).toBe(599);
+        expect(events[0].carrierCostSource).toBe("shipstation_shipments_api");
       }
       expect(events[1].kind).toBe("voided");
     });

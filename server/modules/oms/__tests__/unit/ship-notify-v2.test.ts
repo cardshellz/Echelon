@@ -163,7 +163,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
   });
 
   it("dispatches 'shipped' → rollup → OMS derived update + event", async () => {
-    const shipmentPayload = makeShipmentPayload();
+    const shipmentPayload = makeShipmentPayload({ shipmentCost: 5.99 });
 
     // Execute queue in the exact order the V2 path reads:
     //   1. SS fetch (uses fetch mock, NOT execute)
@@ -244,6 +244,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       .filter((c) => c.tag === "execute")
       .map((c) => c.sqlText);
     expect(executeSqls[0]).toMatch(/shipstation_order_id/);
+    expect(executeSqls.some((text) => text.includes("carrier_cost_cents = CASE"))).toBe(true);
+    expect(executeSqls.some((text) => text.includes("service_code = COALESCE"))).toBe(true);
 
     // Verify OMS was updated via the fluent builder and line fulfillment
     // was derived from WMS shipment rows via raw SQL.
@@ -423,6 +425,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
             status: "shipped",
             tracking_number: "1Z12345",
             carrier: "UPS",
+            service_code: "ups_ground",
             tracking_url: null,
           },
         ],

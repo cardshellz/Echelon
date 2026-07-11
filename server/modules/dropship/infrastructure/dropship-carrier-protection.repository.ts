@@ -11,6 +11,7 @@ import type {
   CarrierProtectionRepository,
   NormalizedCreateCarrierProtectionAssignment,
   NormalizedCreateCarrierProtectionPolicy,
+  ResolveCarrierProtectionPolicyInput,
 } from "../application/dropship-carrier-protection-service";
 
 interface PolicyRow {
@@ -202,43 +203,10 @@ export class PgDropshipCarrierProtectionRepository implements CarrierProtectionR
     } catch (error) { await rollback(client); throw mapError(error); } finally { client.release(); }
   }
 
-  async resolvePolicy(input: {
-    eventType: "loss" | "misdelivery" | "damage";
-    channelId: number;
-    warehouseId: number;
-    carrier: string;
-    service: string;
-    destinationCountry: string;
-    destinationRegion?: string | null;
-    shipmentValueCents: number;
-    occurredAt: Date;
-  }): Promise<CarrierProtectionMatch | null> {
+  async resolvePolicy(input: ResolveCarrierProtectionPolicyInput): Promise<CarrierProtectionMatch | null> {
     const client = await this.dbPool.connect();
     try {
-      const coverageColumn = input.eventType === "loss" ? "covered_loss" : input.eventType === "misdelivery" ? "covered_misdelivery" : "covered_damage";
-      const result = await client.query<AssignmentRow>(
-        `${assignmentSelect}
-         WHERE a.is_active = true AND p.status = 'active' AND p.${coverageColumn} = true
-           AND p.effective_from <= $1 AND (p.effective_to IS NULL OR p.effective_to > $1)
-           AND (a.channel_id IS NULL OR a.channel_id = $2)
-           AND (a.warehouse_id IS NULL OR a.warehouse_id = $3)
-           AND (a.carrier IS NULL OR UPPER(a.carrier) = UPPER($4))
-           AND (a.service IS NULL OR LOWER(a.service) = LOWER($5))
-           AND (a.destination_country IS NULL OR a.destination_country = $6)
-           AND (a.destination_region IS NULL OR a.destination_region = $7)
-           AND (a.min_shipment_value_cents IS NULL OR a.min_shipment_value_cents <= $8)
-           AND (a.max_shipment_value_cents IS NULL OR a.max_shipment_value_cents >= $8)
-         ORDER BY a.is_default ASC, a.priority DESC,
-           ((a.channel_id IS NOT NULL)::int + (a.warehouse_id IS NOT NULL)::int + (a.carrier IS NOT NULL)::int
-            + (a.service IS NOT NULL)::int + (a.destination_country IS NOT NULL)::int + (a.destination_region IS NOT NULL)::int
-            + (a.min_shipment_value_cents IS NOT NULL)::int + (a.max_shipment_value_cents IS NOT NULL)::int) DESC,
-           a.id ASC LIMIT 1`,
-        [input.occurredAt, input.channelId, input.warehouseId, input.carrier, input.service,
-          input.destinationCountry, input.destinationRegion ?? null, input.shipmentValueCents],
-      );
-      const row = result.rows[0];
-      if (!row) return null;
-      return { assignment: mapAssignment(row), policy: await loadPolicy(client, row.policy_id) };
+      return resolveCarrierProtectionPolicyWithClient(client, input);
     } finally { client.release(); }
   }
 }
@@ -253,6 +221,40 @@ const assignmentSelect = `SELECT a.*, p.name AS policy_name, p.version AS policy
   JOIN dropship.dropship_carrier_protection_policies p ON p.id = a.policy_id
   LEFT JOIN channels.channels c ON c.id = a.channel_id
   LEFT JOIN warehouse.warehouses w ON w.id = a.warehouse_id`;
+
+export async function resolveCarrierProtectionPolicyWithClient(
+  client: PoolClient,
+  input: ResolveCarrierProtectionPolicyInput,
+): Promise<CarrierProtectionMatch | null> {
+  const coverageColumn = input.eventType === "loss"
+    ? "covered_loss"
+    : input.eventType === "misdelivery"
+      ? "covered_misdelivery"
+      : "covered_damage";
+  const result = await client.query<AssignmentRow>(
+    `${assignmentSelect}
+     WHERE a.is_active = true AND p.status = 'active' AND p.${coverageColumn} = true
+       AND p.effective_from <= $1 AND (p.effective_to IS NULL OR p.effective_to > $1)
+       AND (a.channel_id IS NULL OR a.channel_id = $2)
+       AND (a.warehouse_id IS NULL OR a.warehouse_id = $3)
+       AND (a.carrier IS NULL OR UPPER(a.carrier) = UPPER($4))
+       AND (a.service IS NULL OR LOWER(a.service) = LOWER($5))
+       AND (a.destination_country IS NULL OR a.destination_country = $6)
+       AND (a.destination_region IS NULL OR a.destination_region = $7)
+       AND (a.min_shipment_value_cents IS NULL OR a.min_shipment_value_cents <= $8)
+       AND (a.max_shipment_value_cents IS NULL OR a.max_shipment_value_cents >= $8)
+     ORDER BY a.is_default ASC, a.priority DESC,
+       ((a.channel_id IS NOT NULL)::int + (a.warehouse_id IS NOT NULL)::int + (a.carrier IS NOT NULL)::int
+        + (a.service IS NOT NULL)::int + (a.destination_country IS NOT NULL)::int + (a.destination_region IS NOT NULL)::int
+        + (a.min_shipment_value_cents IS NOT NULL)::int + (a.max_shipment_value_cents IS NOT NULL)::int) DESC,
+       a.id ASC LIMIT 1`,
+    [input.occurredAt, input.channelId, input.warehouseId, input.carrier, input.service,
+      input.destinationCountry, input.destinationRegion ?? null, input.shipmentValueCents],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return { assignment: mapAssignment(row), policy: await loadPolicy(client, row.policy_id) };
+}
 
 async function listAssignments(client: PoolClient): Promise<CarrierProtectionAssignmentRecord[]> {
   const result = await client.query<AssignmentRow>(`${assignmentSelect} ORDER BY a.is_active DESC, a.priority DESC, a.id ASC`);

@@ -449,6 +449,7 @@ export const outboundShipments = wmsSchema.table("outbound_shipments", {
   // DB-level enum: wms.shipment_status. See header comment above for values.
   status: varchar("status", { length: 20 }).notNull().default("planned"),
   carrier: varchar("carrier", { length: 100 }),
+  serviceCode: varchar("service_code", { length: 100 }),
   trackingNumber: varchar("tracking_number", { length: 200 }),
   trackingUrl: text("tracking_url"),
   shippedAt: timestamp("shipped_at"),
@@ -456,6 +457,8 @@ export const outboundShipments = wmsSchema.table("outbound_shipments", {
 
   // Shipping costs (for dropship invoicing & profitability)
   carrierCostCents: bigint("carrier_cost_cents", { mode: "number" }).default(0), // Actual carrier charge
+  carrierCostSource: varchar("carrier_cost_source", { length: 40 }),
+  carrierCostRecordedAt: timestamp("carrier_cost_recorded_at", { withTimezone: true }),
   dunnageCostCents: bigint("dunnage_cost_cents", { mode: "number" }).default(0), // Packaging materials
   // totalShippingCostCents computed column added via migration
 
