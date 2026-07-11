@@ -66,6 +66,10 @@ import {
   validateDeliverySchedulePatch,
   type DeliverySchedulePatch,
 } from "./purchase-order-delivery-schedule";
+import {
+  buildPurchaseOrderDraftHeaderChange,
+  purchaseOrderDraftHeaderPatchSchema,
+} from "./purchase-order-draft-header";
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -217,7 +221,12 @@ function signedCentsToMills(cents: number): number {
 
 export type PurchasingService = ReturnType<typeof createPurchasingService>;
 
-export function createPurchasingService(db: any, storage: Storage) {
+export function createPurchasingService(
+  db: any,
+  storage: Storage,
+  options: { now?: () => Date } = {},
+) {
+  const now = options.now ?? (() => new Date());
 
   // ── Helpers ─────────────────────────────────────────────────────
 
@@ -981,33 +990,74 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
   }
 
-  async function updatePO(id: number, updates: Record<string, any>, userId?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-
-    if (!EDITABLE_STATUSES.has(po.status)) {
-      throw new PurchasingError(`Cannot edit PO in '${po.status}' status`, 400);
+  async function updatePO(
+    id: number,
+    requested: unknown,
+    userId?: string,
+  ) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new PurchasingError("Purchase order id must be a positive integer", 400, {
+        code: "INVALID_PURCHASE_ORDER_ID",
+      });
+    }
+    const parsed = purchaseOrderDraftHeaderPatchSchema.safeParse(requested);
+    if (!parsed.success) {
+      throw new PurchasingError("Invalid draft purchase order header update", 400, {
+        code: "INVALID_PO_DRAFT_HEADER_PATCH",
+        issues: parsed.error.issues,
+      });
     }
 
-    const deliveryPatch: DeliverySchedulePatch = {};
-    if (Object.prototype.hasOwnProperty.call(updates, "expectedDeliveryDate")) {
-      deliveryPatch.expectedDeliveryDate = updates.expectedDeliveryDate;
-    }
-    if (Object.prototype.hasOwnProperty.call(updates, "confirmedDeliveryDate")) {
-      deliveryPatch.confirmedDeliveryDate = updates.confirmedDeliveryDate;
-    }
-    const deliveryIssues = validateDeliverySchedulePatch(po, deliveryPatch);
-    if (deliveryIssues.length > 0) {
-      const issue = deliveryIssues[0];
-      throw new PurchasingError(issue.message, 400, issue);
-    }
+    return db.transaction(async (tx: any) => {
+      const locked = await tx
+        .select()
+        .from(purchaseOrdersTable)
+        .where(eq(purchaseOrdersTable.id, id))
+        .limit(1)
+        .for("update");
+      const po = locked[0];
+      if (!po) throw new PurchasingError("Purchase order not found", 404);
 
-    // updatePO is a generic edit (notes, priority, etc.). No status change,
-    // so we use the plain update helper. Previously used
-    // updatePurchaseOrderStatusWithHistory which required historyData we
-    // weren't supplying, causing to_status NOT NULL violations on any
-    // non-status field edit.
-    return await storage.updatePurchaseOrder(id, { ...updates, updatedBy: userId });
+      const physicalStatus = po.physicalStatus ?? po.status;
+      if (!EDITABLE_STATUSES.has(po.status) || physicalStatus !== "draft") {
+        throw new PurchasingError(`Cannot edit PO in '${po.status}' status`, 400, {
+          code: "PO_NOT_EDITABLE",
+          status: po.status,
+          physicalStatus,
+        });
+      }
+
+      const change = buildPurchaseOrderDraftHeaderChange(po, parsed.data);
+      if (change.changedFields.length === 0) return po;
+
+      const updatedAt = now();
+      const result = await tx
+        .update(purchaseOrdersTable)
+        .set({
+          ...change.patch,
+          ...(userId ? { updatedBy: userId } : {}),
+          updatedAt,
+        })
+        .where(and(
+          eq(purchaseOrdersTable.id, id),
+          eq(purchaseOrdersTable.status, "draft"),
+          eq(purchaseOrdersTable.physicalStatus, "draft"),
+        ))
+        .returning();
+      const updated = result[0];
+      if (!updated) {
+        throw new PurchasingError("Purchase order changed while the edit was being applied", 409, {
+          code: "PO_DRAFT_EDIT_CONFLICT",
+        });
+      }
+
+      await emitPoEventTx(tx, id, "edited", userId, {
+        changed_fields: change.changedFields,
+        before: change.before,
+        after: change.after,
+      });
+      return updated;
+    });
   }
 
   async function updateDeliverySchedule(

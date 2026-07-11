@@ -21,6 +21,7 @@ import {
   buildPoLifecycleSummary,
   type PoLifecycleCommand,
 } from "./purchase-order-lifecycle.service";
+import { purchaseOrderDraftHeaderPatchSchema } from "./purchase-order-draft-header";
 
 function parseNullableDateInput(value: unknown, fieldLabel: string): Date | null | undefined {
   if (value === undefined) return undefined;
@@ -520,14 +521,27 @@ export function registerPurchaseOrderRoutes(app: Express) {
 
   app.patch("/api/purchase-orders/:id", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const updates = { ...req.body };
-      if (updates.expectedDeliveryDate) updates.expectedDeliveryDate = new Date(updates.expectedDeliveryDate);
-      if (updates.confirmedDeliveryDate) updates.confirmedDeliveryDate = new Date(updates.confirmedDeliveryDate);
-      if (updates.cancelDate) updates.cancelDate = new Date(updates.cancelDate);
-      const po = await purchasing.updatePO(Number(req.params.id), updates, req.session.user?.id);
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new PurchasingError("Purchase order id must be a positive integer", 400, {
+          code: "INVALID_PURCHASE_ORDER_ID",
+        });
+      }
+
+      const parsed = purchaseOrderDraftHeaderPatchSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new PurchasingError("Invalid draft purchase order header update", 400, {
+          code: "INVALID_PO_DRAFT_HEADER_PATCH",
+          issues: parsed.error.issues,
+        });
+      }
+
+      const po = await purchasing.updatePO(id, parsed.data, req.session.user?.id);
       res.json(po);
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) {
+        return res.status(error.statusCode).json({ error: error.message, details: error.details });
+      }
       res.status(500).json({ error: error.message });
     }
   });
