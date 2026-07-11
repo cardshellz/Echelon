@@ -430,14 +430,19 @@ flowchart LR
     COL --> ITEMS[(operations.control_tower_work_items)]
     COL --> OBS[(operations.control_tower_observations)]
     COL --> RUNS[(operations.control_tower_source_runs)]
+    COL --> SNAP[(operations.control_tower_flow_snapshots)]
 
-    ITEMS --> API[Paginated Control Tower API]
+    ITEMS --> API[Grouped root-cause API]
+    ITEMS --> ATOMIC[Paginated atomic evidence API]
     OBS --> DETAIL[Detail and timeline API]
     RUNS --> HEALTH[System Health API]
+    SNAP --> FLOW[Cached order-flow API]
 
     API --> UI[Operator UI]
+    ATOMIC --> UI
     DETAIL --> UI
     HEALTH --> UI
+    FLOW --> UI
 
     UI --> CMD[Action command API]
     CMD --> ATTEMPTS[(operations.control_tower_action_attempts)]
@@ -464,6 +469,8 @@ flowchart LR
 - One-minute incremental projection for open operational exceptions.
 - Five-minute reconciliation scan for missed events.
 - Daily historical and trend aggregation outside the interactive API.
+- Five-minute persisted order-flow snapshot; interactive requests never execute
+  the multi-stage waterfall query.
 
 Cadence is configurable per source. The UI displays source freshness and marks
 a domain stale when its collector exceeds its freshness SLO.
@@ -569,11 +576,22 @@ Durable action command and result ledger:
 Unique idempotency keys prevent duplicate operator clicks and worker retries from
 repeating a domain mutation.
 
+### `operations.control_tower_flow_snapshots`
+
+Stores the last good 30-day order-flow waterfall plus refresh status, duration,
+and sanitized failure evidence. Refresh runs under the Control Tower scheduler's
+cross-dyno advisory lock. A failed refresh preserves the prior payload, so the UI
+can remain available while clearly marking it degraded or stale.
+
 ## API Requirements
 
-### Queue
+### Root-Cause Queue
 
-`GET /api/operations/control-tower/v2/work-items`
+`GET /api/operations/control-tower/v2/groups`
+
+The operator queue groups current atomic findings by `root_cause_group_key` and
+returns both issue-group counts and affected-record counts. Structural checks
+tagged `system_control` are excluded from this queue and shown in System Health.
 
 Supported filters:
 
@@ -595,8 +613,46 @@ Requirements:
 - Default 50 rows, maximum 100.
 - Compact list DTO only.
 - Server-side filtering and sorting.
-- Response includes total counts for current view and filter facets.
+- Response includes issue-group and affected-record counts for the current view
+  and filter facets.
 - ETag or `updated_since` support for efficient refresh.
+
+### Group Drill-Down
+
+`GET /api/operations/control-tower/v2/groups/:groupKey`
+
+Returns one root-cause summary and a cursor-paginated page of the atomic work
+items that support it. Atomic records remain immutable/auditable and are not
+collapsed or deleted by grouping.
+
+### Flow Overview
+
+`GET /api/operations/control-tower/v2/flow-overview`
+
+Returns the latest persisted order-flow snapshot and freshness status. It does
+not execute live OMS/WMS/fulfillment aggregation in the request path. The
+snapshot carries the existing flow-monitor issue registry, so the UI groups
+exception types into the five operator-facing stages without turning aggregate
+metrics into queue work items:
+
+- channel accepted: `intake`;
+- reached WMS: `oms_to_wms`;
+- shipment created: `wms_fulfill` and `engine_push`;
+- shipped: `shipped`;
+- channel updated: `writeback`.
+
+Selecting a stage shows its root-cause exception types and monitor-match counts.
+These counts may overlap when one record violates more than one detector and are
+not presented as unique affected entities. Selecting one exception loads its
+current, limit-capped evidence through
+the existing read-only `GET /api/oms/ops/flow-bucket/:code` contract. The live
+evidence query runs only on explicit drill-down; it is never part of page load.
+
+### Atomic Queue
+
+`GET /api/operations/control-tower/v2/work-items`
+
+Retained for exact evidence pagination, group drill-down, and compatible clients.
 
 ### Detail
 
@@ -765,7 +821,8 @@ Exit: source counts reconcile exactly and no source lifecycle is lost.
 - Convert current computed health checks to stable entity findings.
 - Add event-driven projection where exception rows are created.
 - Add scheduled reconciliation collectors.
-- Move aggregate waterfall metrics to System Health.
+- Persist aggregate waterfall metrics and display them as an order-flow context
+  band above the grouped queue; keep structural controls in System Health.
 
 Exit: every current queue-worthy detector produces atomic work items; aggregate
 diagnostics no longer appear as fake work.

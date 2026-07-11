@@ -15,6 +15,23 @@ import {
 
 export const operationsSchema = pgSchema("operations");
 
+export const controlTowerFlowSnapshots = operationsSchema.table("control_tower_flow_snapshots", {
+  snapshotKey: varchar("snapshot_key", { length: 80 }).primaryKey(),
+  windowDays: integer("window_days").notNull(),
+  status: varchar("status", { length: 20 }).notNull(),
+  payload: jsonb("payload"),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  generatedAt: timestamp("generated_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  durationMs: integer("duration_ms"),
+  errorCode: varchar("error_code", { length: 100 }),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  index("idx_control_tower_flow_snapshots_generated").on(table.generatedAt.desc()),
+]);
+
 export const controlTowerSourceRuns = operationsSchema.table("control_tower_source_runs", {
   id: varchar("id", { length: 36 }).primaryKey(),
   sourceName: varchar("source_name", { length: 120 }).notNull(),
@@ -155,6 +172,7 @@ export const controlTowerActionAttempts = operationsSchema.table("control_tower_
 ]);
 
 export type ControlTowerSourceRun = typeof controlTowerSourceRuns.$inferSelect;
+export type ControlTowerFlowSnapshot = typeof controlTowerFlowSnapshots.$inferSelect;
 export type ControlTowerWorkItem = typeof controlTowerWorkItems.$inferSelect;
 export type ControlTowerObservation = typeof controlTowerObservations.$inferSelect;
 export type ControlTowerActionAttempt = typeof controlTowerActionAttempts.$inferSelect;
