@@ -21,6 +21,10 @@ import {
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import { runStaleAutoDraftPoEscalationCheck } from "../modules/procurement/auto-draft-po-escalation.service";
 import {
+  calculateRecommendationLineTotalCents,
+  resolveRecommendationPoQuantity,
+} from "../modules/procurement/recommendation-po-quantity";
+import {
   purchaseOrders,
   reorderExclusionRules,
   products,
@@ -32,6 +36,42 @@ import {
 interface AutoDraftOptions {
   triggeredBy: "scheduler" | "manual";
   triggeredByUser?: string;
+}
+
+type EligibleAutoDraftItem = {
+  productId: number;
+  productVariantId: number;
+  sku: string;
+  productName: string;
+  suggestedOrderQty: number;
+  suggestedOrderPieces: number;
+  orderUomUnits: number;
+  onOrderPieces: number;
+  openPoCount: number;
+  status: string;
+  preferredVendorId: number | null;
+  estimatedCostCents: number | null;
+};
+
+function buildAutoDraftPoLine(item: EligibleAutoDraftItem, purchaseOrderId: number, lineNumber: number) {
+  const quantity = resolveRecommendationPoQuantity(item);
+  const unitCostCents = item.estimatedCostCents ?? 0;
+  return {
+    purchaseOrderId,
+    lineNumber,
+    productId: item.productId,
+    productVariantId: item.productVariantId,
+    expectedReceiveVariantId: item.productVariantId,
+    expectedReceiveUnitsPerVariant: quantity.orderUomUnits,
+    sku: item.sku,
+    productName: item.productName,
+    orderQty: quantity.orderQtyPieces,
+    unitOfMeasure: "each",
+    unitsPerUom: quantity.orderUomUnits,
+    unitCostCents,
+    lineTotalCents: calculateRecommendationLineTotalCents(unitCostCents, quantity.orderQtyPieces),
+    status: "open",
+  };
 }
 
 function shouldCreateDraftPos(settings: AutoDraftRecommendationSettings): boolean {
@@ -94,20 +134,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
     skippedNoVendor = recommendationResult.summary.skippedNoVendor;
     skippedOnOrder = recommendationResult.summary.skippedOnOrder;
 
-    const eligibleItems: Array<{
-      productId: number;
-      productVariantId: number;
-      sku: string;
-      productName: string;
-      suggestedOrderQty: number;
-      suggestedOrderPieces: number;
-      orderUomUnits: number;
-      onOrderPieces: number;
-      openPoCount: number;
-      status: string;
-      preferredVendorId: number | null;
-      estimatedCostCents: number | null;
-    }> = recommendationResult.items
+    const eligibleItems: EligibleAutoDraftItem[] = recommendationResult.items
       .filter((item) => passesAutoDraftApprovalPolicy(item, settings))
       .map((item) => ({
         productId: item.productId,
@@ -163,22 +190,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
 
         const newLines = items
           .filter((item) => !existingProductIds.has(item.productVariantId))
-          .map((item, idx) => {
-            return {
-              purchaseOrderId: poId,
-              lineNumber: existingLines.length + idx + 1,
-              productId: item.productId,
-              productVariantId: item.productVariantId,
-              sku: item.sku,
-              productName: item.productName,
-              orderQty: item.suggestedOrderQty,
-              unitOfMeasure: item.orderUomUnits > 1 ? "case" : "each",
-              unitsPerUom: item.orderUomUnits,
-              unitCostCents: item.estimatedCostCents ?? 0,
-              lineTotalCents: (item.estimatedCostCents ?? 0) * item.suggestedOrderQty,
-              status: "open",
-            };
-          });
+          .map((item, idx) => buildAutoDraftPoLine(item, poId, existingLines.length + idx + 1));
 
         if (newLines.length > 0) {
           await storage.bulkCreatePurchaseOrderLines(newLines as any);
@@ -209,20 +221,7 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
         posCreated++;
 
         // Create lines
-        const lineData = items.map((item, idx) => ({
-          purchaseOrderId: poId,
-          lineNumber: idx + 1,
-          productId: item.productId,
-          productVariantId: item.productVariantId,
-          sku: item.sku,
-          productName: item.productName,
-          orderQty: item.suggestedOrderQty,
-          unitOfMeasure: item.orderUomUnits > 1 ? "case" : "each",
-          unitsPerUom: item.orderUomUnits,
-          unitCostCents: item.estimatedCostCents ?? 0,
-          lineTotalCents: (item.estimatedCostCents ?? 0) * item.suggestedOrderQty,
-          status: "open",
-        }));
+        const lineData = items.map((item, idx) => buildAutoDraftPoLine(item, poId, idx + 1));
 
         if (lineData.length > 0) {
           await storage.bulkCreatePurchaseOrderLines(lineData as any);
