@@ -128,6 +128,12 @@
   "dropship.dropship_box_catalog": [
     "modules/dropship"
   ],
+  "dropship.dropship_carrier_protection_assignments": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_carrier_protection_policies": [
+    "modules/dropship"
+  ],
   "dropship.dropship_catalog_rule_set_revisions": [
     "modules/dropship"
   ],
