@@ -489,6 +489,9 @@
   "procurement.purchasing_recommendation_decisions": [
     "modules/procurement"
   ],
+  "procurement.purchasing_recommendation_po_handoffs": [
+    "modules/procurement"
+  ],
   "procurement.receiving_lines": [
     "modules/catalog",
     "modules/procurement"

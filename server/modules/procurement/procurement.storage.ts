@@ -20,6 +20,7 @@ import {
   type InsertPoRevision,
   type PoReceipt,
   type InsertPoReceipt,
+  type PurchasingRecommendationPoHandoff,
   type InventoryLot,
   type InsertInventoryLot,
   type OrderItemCost,
@@ -58,6 +59,7 @@ import {
   reorderExclusionRules,
   autoDraftRuns,
   purchasingRecommendationDecisions,
+  purchasingRecommendationPoHandoffs,
   products,
   eq, and, or, inArray, notInArray, sql, desc, asc, lte, like, ilike,
 } from "../../storage/base";
@@ -238,6 +240,8 @@ export interface IProcurementStorage {
   getLatestRecommendationDecisions(recommendationIds: string[], kinds?: string[]): Promise<any[]>;
   getLatestRecommendationDecisionsByDecision(decision: string, limit?: number): Promise<any[]>;
   createRecommendationDecision(data: any): Promise<any>;
+  getRecommendationPoHandoffForPo(purchaseOrderId: number): Promise<PurchasingRecommendationPoHandoff | undefined>;
+  getRecommendationPoHandoffForLine(purchaseOrderLineId: number): Promise<PurchasingRecommendationPoHandoff | undefined>;
   getDashboardData(lookbackDays: number): Promise<any>;
   getAutoDraftSettings(warehouseId?: number): Promise<any>;
   updateAutoDraftSettings(warehouseId: number | undefined, settings: any): Promise<void>;
@@ -2019,6 +2023,22 @@ export const procurementMethods: IProcurementStorage = {
   async createRecommendationDecision(data: any): Promise<any> {
     const [decision] = await db.insert(purchasingRecommendationDecisions).values(data).returning();
     return decision;
+  },
+
+  async getRecommendationPoHandoffForPo(purchaseOrderId: number): Promise<PurchasingRecommendationPoHandoff | undefined> {
+    const [handoff] = await db.select()
+      .from(purchasingRecommendationPoHandoffs)
+      .where(eq(purchasingRecommendationPoHandoffs.purchaseOrderId, purchaseOrderId))
+      .limit(1);
+    return handoff;
+  },
+
+  async getRecommendationPoHandoffForLine(purchaseOrderLineId: number): Promise<PurchasingRecommendationPoHandoff | undefined> {
+    const [handoff] = await db.select()
+      .from(purchasingRecommendationPoHandoffs)
+      .where(eq(purchasingRecommendationPoHandoffs.purchaseOrderLineId, purchaseOrderLineId))
+      .limit(1);
+    return handoff;
   },
 
   async getAutoDraftSettings(warehouseId?: number): Promise<any> {

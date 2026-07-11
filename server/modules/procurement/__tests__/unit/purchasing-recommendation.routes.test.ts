@@ -5,8 +5,6 @@ import http from "http";
 import { AddressInfo } from "net";
 
 const mocks = vi.hoisted(() => ({
-  idempotencyMiddleware: vi.fn((_req: Request, _res: Response, next: NextFunction) => next()),
-  requireIdempotency: vi.fn(),
   procurement: {
     getReorderAnalysisData: vi.fn(),
     getOpenPoSummaryReport: vi.fn(),
@@ -40,9 +38,11 @@ const mocks = vi.hoisted(() => ({
   purchasingService: {
     createPOFromReorder: vi.fn(),
   },
+  recommendationPoHandoffService: {
+    recordDecision: vi.fn(),
+    createAcceptedHandoff: vi.fn(),
+  },
 }));
-
-mocks.requireIdempotency.mockReturnValue(mocks.idempotencyMiddleware);
 
 vi.mock("../../../../routes/middleware", () => {
   const pass = (req: Request, _res: Response, next: NextFunction) => {
@@ -55,9 +55,6 @@ vi.mock("../../../../routes/middleware", () => {
   };
 });
 
-vi.mock("../../../../middleware/idempotency", () => ({
-  requireIdempotency: mocks.requireIdempotency,
-}));
 
 vi.mock("../..", () => ({ procurementStorage: mocks.procurement }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.inventory }));
@@ -78,7 +75,10 @@ import {
 function buildApp(): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = { purchasing: mocks.purchasingService };
+  app.locals.services = {
+    purchasing: mocks.purchasingService,
+    recommendationPoHandoff: mocks.recommendationPoHandoffService,
+  };
   registerPurchasingRecommendationRoutes(app);
   registerPurchasingRecommendationAdminRoutes(app);
   return app;
@@ -136,6 +136,17 @@ describe("purchasing recommendation routes", () => {
       createdAt: "2026-05-22T12:00:00.000Z",
     }));
     mocks.purchasingService.createPOFromReorder.mockResolvedValue([]);
+    mocks.recommendationPoHandoffService.recordDecision.mockImplementation(async (data) => ({
+      id: 5001,
+      ...data,
+      decidedAt: "2026-05-22T12:00:00.000Z",
+      createdAt: "2026-05-22T12:00:00.000Z",
+    }));
+    mocks.recommendationPoHandoffService.createAcceptedHandoff.mockResolvedValue({
+      pos: [],
+      decisions: [],
+      handedOff: [],
+    });
   });
 
   afterEach(async () => {
@@ -1019,6 +1030,7 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         order_uom_level: 2,
+        vendor_product_id: 7702,
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
@@ -1035,7 +1047,7 @@ describe("purchasing recommendation routes", () => {
     });
 
     expect(status).toBe(201);
-    expect(mocks.procurement.createRecommendationDecision).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.recommendationPoHandoffService.recordDecision).toHaveBeenCalledWith(expect.objectContaining({
       recommendationId: "202:2002:30",
       kind: "held_by_policy",
       decision: "accepted_for_po",
@@ -1054,6 +1066,11 @@ describe("purchasing recommendation routes", () => {
         item: expect.objectContaining({
           sku: "QUEUE-HELD",
           kind: "held_by_policy",
+          suggestedOrderPieces: 10,
+          orderUomUnits: 10,
+          vendorProductId: 7702,
+          estimatedCostMills: 100000,
+          estimatedCostCents: 1000,
         }),
       }),
     }));
@@ -1197,11 +1214,19 @@ describe("purchasing recommendation routes", () => {
         recommendationSnapshot: {
           lookbackDays: 30,
           item: {
+            productId: 202,
+            productVariantId: 2002,
             sku: "QUEUE-HELD",
             productName: "Queue Held",
+            preferredVendorId: 77,
+            vendorProductId: 7702,
             suggestedOrderQty: 1,
+            suggestedOrderPieces: 10,
+            orderUomUnits: 10,
             orderUomLabel: "Case",
             preferredVendorName: "Vendor",
+            estimatedCostMills: 100000,
+            estimatedCostCents: 1000,
           },
         },
       },
@@ -1301,7 +1326,7 @@ describe("purchasing recommendation routes", () => {
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
     ]);
-    mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue([
+    const acceptedHandoffDecisionRows = [
       {
         id: 91,
         recommendationId: "202:2002:30",
@@ -1315,17 +1340,66 @@ describe("purchasing recommendation routes", () => {
         recommendationSnapshot: {
           lookbackDays: 30,
           item: {
+            productId: 202,
+            productVariantId: 2002,
             sku: "QUEUE-HELD",
             productName: "Queue Held",
+            preferredVendorId: 77,
+            vendorProductId: 7702,
             suggestedOrderQty: 1,
+            suggestedOrderPieces: 10,
+            orderUomUnits: 10,
             orderUomLabel: "Case",
             preferredVendorName: "Vendor",
+            estimatedCostMills: 100000,
+            estimatedCostCents: 1000,
           },
         },
       },
-    ]);
-    mocks.purchasingService.createPOFromReorder.mockResolvedValue([{ id: 12, vendorId: 77, status: "draft" }]);
+    ];
+    mocks.procurement.getLatestRecommendationDecisions.mockResolvedValue(acceptedHandoffDecisionRows);
+    mocks.recommendationPoHandoffService.createAcceptedHandoff.mockResolvedValue({
+      pos: [{ id: 12, poNumber: "PO-20260522-001", vendorId: 77, status: "draft" }],
+      decisions: [{
+        id: 5002,
+        recommendationId: "202:2002:30",
+        kind: "held_by_policy",
+        decision: "po_handoff_created",
+        status: "active",
+      }],
+      handedOff: [{
+        acceptedDecisionId: 91,
+        handoffDecisionId: 5002,
+        recommendationId: "202:2002:30",
+        kind: "held_by_policy",
+        sku: "QUEUE-HELD",
+        poId: 12,
+        poLineId: 1201,
+        poIds: [12],
+      }],
+    });
     server = await startServer(buildApp());
+
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderQty = 2;
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderPieces = 20;
+    const drifted = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      { items: [{ recommendationId: "202:2002:30", kind: "held_by_policy" }] },
+    );
+    expect(drifted).toMatchObject({
+      status: 409,
+      body: {
+        skipped: [{
+          reason: "accepted_economics_changed",
+          context: { changedFields: expect.arrayContaining(["suggestedOrderQty", "suggestedOrderPieces"]) },
+        }],
+      },
+    });
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).not.toHaveBeenCalled();
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderQty = 1;
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderPieces = 10;
 
     const { status, body } = await requestJson(
       server.url,
@@ -1336,38 +1410,31 @@ describe("purchasing recommendation routes", () => {
       },
     );
 
-    expect(status).toBe(201);
+    expect(status, JSON.stringify(body)).toBe(201);
     expect(mocks.procurement.getLatestRecommendationDecisions).toHaveBeenCalledWith(
       ["202:2002:30"],
       ["held_by_policy"],
     );
-    expect(mocks.purchasingService.createPOFromReorder).toHaveBeenCalledWith(
-      [
-        {
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).toHaveBeenCalledWith({
+      actorId: "admin-user",
+      items: [
+        expect.objectContaining({
+          acceptedDecisionId: 91,
+          recommendationId: "202:2002:30",
+          kind: "held_by_policy",
           productId: 202,
           productVariantId: 2002,
           suggestedPieces: 10,
+          orderUomUnits: 10,
           vendorProductId: 7702,
           vendorId: 77,
-        },
+          sku: "QUEUE-HELD",
+          recommendationSnapshot: expect.objectContaining({
+            approvalPolicy: "high_confidence_and_strong_candidate",
+          }),
+        }),
       ],
-      "admin-user",
-    );
-    expect(mocks.procurement.createRecommendationDecision).toHaveBeenCalledWith(expect.objectContaining({
-      recommendationId: "202:2002:30",
-      kind: "held_by_policy",
-      decision: "po_handoff_created",
-      decisionReason: "accepted_recommendation_po_handoff",
-      productId: 202,
-      productVariantId: 2002,
-      vendorId: 77,
-      sku: "QUEUE-HELD",
-      decidedBy: "admin-user",
-      recommendationSnapshot: expect.objectContaining({
-        approvalPolicy: "high_confidence_and_strong_candidate",
-        poHandoff: { poIds: [12] },
-      }),
-    }));
+    });
     expect(body).toMatchObject({
       success: true,
       count: 1,
@@ -1377,6 +1444,8 @@ describe("purchasing recommendation routes", () => {
           recommendationId: "202:2002:30",
           kind: "held_by_policy",
           sku: "QUEUE-HELD",
+          poId: 12,
+          poLineId: 1201,
           poIds: [12],
         },
       ],
@@ -1433,8 +1502,7 @@ describe("purchasing recommendation routes", () => {
       ["999:product:30"],
       ["quality_review_required"],
     );
-    expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
-    expect(mocks.procurement.createRecommendationDecision).not.toHaveBeenCalled();
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).not.toHaveBeenCalled();
     expect(body).toMatchObject({
       error: "No current accepted recommendations are eligible for PO handoff",
       skipped: [

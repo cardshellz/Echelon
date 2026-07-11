@@ -85,6 +85,7 @@ interface Storage {
   updatePurchaseOrder(id: number, updates: any, historyData?: any): Promise<any>;
   updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData?: any): Promise<any>;
   deletePurchaseOrder(id: number): Promise<boolean>;
+  getRecommendationPoHandoffForPo(purchaseOrderId: number): Promise<any | undefined>;
   generatePoNumber(): Promise<string>;
 
   // PO Lines
@@ -94,6 +95,7 @@ interface Storage {
   bulkCreatePurchaseOrderLines(lines: any[]): Promise<any[]>;
   updatePurchaseOrderLine(id: number, updates: any): Promise<any>;
   deletePurchaseOrderLine(id: number): Promise<boolean>;
+  getRecommendationPoHandoffForLine(purchaseOrderLineId: number): Promise<any | undefined>;
   getOpenPoLinesForVariant(productVariantId: number): Promise<any[]>;
 
   // PO Status History
@@ -1185,6 +1187,14 @@ export function createPurchasingService(
     if (po.status !== "draft") {
       throw new PurchasingError("Can only delete POs in draft status", 400);
     }
+    const recommendationHandoff = await storage.getRecommendationPoHandoffForPo(id);
+    if (recommendationHandoff) {
+      throw new PurchasingError(
+        "Cannot delete a recommendation-created PO; cancel it to preserve the handoff audit trail",
+        409,
+        { code: "RECOMMENDATION_PO_DELETE_BLOCKED", handoffId: recommendationHandoff.id },
+      );
+    }
     return await storage.deletePurchaseOrder(id);
   }
 
@@ -1420,6 +1430,15 @@ export function createPurchasingService(
       throw new PurchasingError(`Cannot edit lines on PO in '${po.status}' status`, 400);
     }
 
+    const recommendationHandoff = await storage.getRecommendationPoHandoffForLine(lineId);
+    if (recommendationHandoff) {
+      throw new PurchasingError(
+        "Cannot amend a recommendation-created PO line; cancel the PO and accept a new recommendation",
+        409,
+        { code: "RECOMMENDATION_PO_LINE_AMEND_BLOCKED", handoffId: recommendationHandoff.id },
+      );
+    }
+
     const normalizedUpdates = { ...updates };
     const receiveVariantId =
       normalizedUpdates.expectedReceiveVariantId ??
@@ -1515,6 +1534,15 @@ export function createPurchasingService(
 
     if (!EDITABLE_STATUSES.has(po.status)) {
       throw new PurchasingError(`Cannot delete lines on PO in '${po.status}' status`, 400);
+    }
+
+    const recommendationHandoff = await storage.getRecommendationPoHandoffForLine(lineId);
+    if (recommendationHandoff) {
+      throw new PurchasingError(
+        "Cannot delete a recommendation-created PO line; cancel the PO and accept a new recommendation",
+        409,
+        { code: "RECOMMENDATION_PO_LINE_DELETE_BLOCKED", handoffId: recommendationHandoff.id },
+      );
     }
 
     await storage.deletePurchaseOrderLine(lineId);
