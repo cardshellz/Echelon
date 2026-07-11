@@ -123,9 +123,10 @@ type ProductLite = {
 };
 
 type LineDraft = {
-  // Client-local id for React key. Sent to server so parent_line_id can be
-  // resolved — backend route must be updated to pass it through (see note in
-  // saveMutation below).
+  // Stable database identity for a line loaded from an existing draft.
+  // New client-only lines remain null until the draft update returns their ids.
+  serverLineId: number | null;
+  // Client-local id for React keys and request-time parent-line resolution.
   clientId: string;
   // Line taxonomy (migration 0563). One of PO_LINE_TYPES. Default: "product".
   lineType: PoLineType;
@@ -511,6 +512,7 @@ function newClientId(): string {
 
 function emptyLine(lineType: PoLineType = "product"): LineDraft {
   return {
+    serverLineId: null,
     clientId: newClientId(),
     lineType,
     description: "",
@@ -526,6 +528,21 @@ function emptyLine(lineType: PoLineType = "product"): LineDraft {
     totalProductCostCents: 0,
     packagingCostCents: 0,
   };
+}
+
+type EditorSnapshotInput = {
+  vendorId: number | null;
+  lines: LineDraft[];
+  poType: string;
+  priority: string;
+  expectedDeliveryDate: string;
+  incoterms: string;
+  vendorNotes: string;
+  internalNotes: string;
+};
+
+function buildEditorSnapshot(input: EditorSnapshotInput): string {
+  return JSON.stringify(input);
 }
 
 // Idempotency-Key header value. Fresh per mutation attempt.
@@ -590,9 +607,10 @@ export default function PurchaseOrderEdit() {
 
   // Remember the initial snapshot so we only flip dirty on real changes.
   const snapshotRef = useRef<string>("");
+  const loadedVersionRef = useRef<string | null>(null);
   useEffect(() => {
     // Capture baseline after the first render completes.
-    snapshotRef.current = JSON.stringify({
+    snapshotRef.current = buildEditorSnapshot({
       vendorId: selectedVendor?.id ?? null,
       lines,
       poType,
@@ -606,7 +624,7 @@ export default function PurchaseOrderEdit() {
   }, []);
 
   useEffect(() => {
-    const current = JSON.stringify({
+    const current = buildEditorSnapshot({
       vendorId: selectedVendor?.id ?? null,
       lines,
       poType,
@@ -741,6 +759,7 @@ export default function PurchaseOrderEdit() {
     if (preload.lines?.length > 0 && lines.length === 0) {
       setLines(
         preload.lines.map((l) => ({
+          serverLineId: null,
           clientId: newClientId(),
           // Preloaded lines are always product lines (the preload endpoint
           // returns catalog suggestions, not typed non-product lines).
@@ -792,63 +811,100 @@ export default function PurchaseOrderEdit() {
       navigate(`/purchase-orders/${existingPo.id}`);
       return;
     }
-    if (existingPo.vendor) setSelectedVendor(existingPo.vendor);
-    if (existingPo.poType) setPoType(existingPo.poType);
-    if (existingPo.priority) setPriority(existingPo.priority);
-    if (existingPo.expectedDeliveryDate)
-      setExpectedDeliveryDate(String(existingPo.expectedDeliveryDate).slice(0, 10));
-    if (existingPo.incoterms) setIncoterms(existingPo.incoterms);
-    if (existingPo.vendorNotes) setVendorNotes(existingPo.vendorNotes);
-    if (existingPo.internalNotes) setInternalNotes(existingPo.internalNotes);
-    if (Array.isArray(existingPo.lines)) {
-      setLines(
-        existingPo.lines.map((l: any) => {
-          const lineType: PoLineType =
-            typeof l.lineType === "string" && PO_LINE_TYPES.includes(l.lineType as PoLineType)
-              ? (l.lineType as PoLineType)
-              : "product";
-          const serverMills =
-            typeof l.unitCostMills === "number" ? l.unitCostMills : null;
-          // For non-product lines (discount/rebate/adjustment), cost may be
-          // negative. We preserve the sign from the server value.
-          let unitCostMills: number;
-          if (serverMills !== null) {
-            unitCostMills = serverMills;
-          } else {
-            // Fall back to cents→mills. Non-negative only (legacy rows).
-            unitCostMills = centsToMills(Number(l.unitCostCents) || 0);
-          }
-          // Spec F Phase 1: populate totals from server data.
-          // For old lines (totalProductCostCents = 0), back-compute from mills.
-          const qty = Number(l.orderQty) || 0;
-          const serverTotalProduct = Number(l.totalProductCostCents) || 0;
-          const serverPackaging = Number(l.packagingCostCents) || 0;
-          const totalProductCostCents =
-            serverTotalProduct > 0
-              ? serverTotalProduct
-              : unitCostMills > 0 && qty > 0
-                ? Math.round((unitCostMills * qty) / 100)
-                : 0;
-          return {
-            clientId: newClientId(),
-            lineType,
-            description: typeof l.description === "string" ? l.description : "",
-            parentClientId: null,
-            productVariantId: l.productVariantId ?? null,
-            expectedReceiveVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
-            expectedReceiveUnitsPerVariant:
-              l.expectedReceiveUnitsPerVariant ?? l.unitsPerUom ?? 1,
-            productId: l.productId ?? null,
-            productName: l.productName ?? "",
-            sku: l.sku ?? null,
-            orderQty: l.orderQty,
-            unitCostMills,
-            totalProductCostCents,
-            packagingCostCents: serverPackaging,
-          };
-        }),
-      );
+    const nextVendor = existingPo.vendor ?? null;
+    const nextPoType = existingPo.poType ?? "standard";
+    const nextPriority = existingPo.priority ?? "normal";
+    const nextExpectedDeliveryDate = existingPo.expectedDeliveryDate
+      ? String(existingPo.expectedDeliveryDate).slice(0, 10)
+      : "";
+    const nextIncoterms = existingPo.incoterms ?? "";
+    const nextVendorNotes = existingPo.vendorNotes ?? "";
+    const nextInternalNotes = existingPo.internalNotes ?? "";
+    const activeServerLines = Array.isArray(existingPo.lines)
+      ? existingPo.lines.filter((line: any) => line.status !== "cancelled")
+      : [];
+    const clientIdByServerLineId = new Map<number, string>();
+    for (const line of activeServerLines) {
+      const lineId = Number(line.id);
+      if (Number.isSafeInteger(lineId) && lineId > 0) {
+        clientIdByServerLineId.set(lineId, `existing-${lineId}`);
+      }
     }
+    const nextLines: LineDraft[] = activeServerLines.map((l: any) => {
+      const lineType: PoLineType =
+        typeof l.lineType === "string" && PO_LINE_TYPES.includes(l.lineType as PoLineType)
+          ? (l.lineType as PoLineType)
+          : "product";
+      const serverMills =
+        typeof l.unitCostMills === "number" ? l.unitCostMills : null;
+      // For non-product lines (discount/rebate/adjustment), cost may be
+      // negative. We preserve the sign from the server value.
+      let unitCostMills: number;
+      if (serverMills !== null) {
+        unitCostMills = serverMills;
+      } else {
+        // Fall back to cents→mills. Non-negative only (legacy rows).
+        unitCostMills = centsToMills(Number(l.unitCostCents) || 0);
+      }
+      // Spec F Phase 1: populate totals from server data.
+      // For old lines (totalProductCostCents = 0), back-compute from mills.
+      const qty = Number(l.orderQty) || 0;
+      const serverTotalProduct = Number(l.totalProductCostCents) || 0;
+      const serverPackaging = Number(l.packagingCostCents) || 0;
+      const totalProductCostCents =
+        serverTotalProduct > 0
+          ? serverTotalProduct
+          : unitCostMills > 0 && qty > 0
+            ? Math.round((unitCostMills * qty) / 100)
+            : 0;
+      const serverLineId = Number(l.id);
+      return {
+        serverLineId:
+          Number.isSafeInteger(serverLineId) && serverLineId > 0 ? serverLineId : null,
+        clientId: clientIdByServerLineId.get(serverLineId) ?? newClientId(),
+        lineType,
+        description: typeof l.description === "string" ? l.description : "",
+        parentClientId:
+          l.parentLineId == null
+            ? null
+            : clientIdByServerLineId.get(Number(l.parentLineId)) ?? null,
+        productVariantId: l.productVariantId ?? null,
+        expectedReceiveVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
+        expectedReceiveUnitsPerVariant:
+          l.expectedReceiveUnitsPerVariant ?? l.unitsPerUom ?? 1,
+        productId: l.productId ?? null,
+        productName: l.productName ?? "",
+        sku: l.sku ?? null,
+        orderQty: l.orderQty,
+        unitCostMills,
+        totalProductCostCents,
+        packagingCostCents: serverPackaging,
+        vendorProductId: l.vendorProductId ?? null,
+        catalogOriginallyAbsent: null,
+      };
+    });
+
+    const loadedVersion = existingPo.updatedAt ? String(existingPo.updatedAt) : null;
+    loadedVersionRef.current = loadedVersion;
+    snapshotRef.current = buildEditorSnapshot({
+      vendorId: nextVendor?.id ?? null,
+      lines: nextLines,
+      poType: nextPoType,
+      priority: nextPriority,
+      expectedDeliveryDate: nextExpectedDeliveryDate,
+      incoterms: nextIncoterms,
+      vendorNotes: nextVendorNotes,
+      internalNotes: nextInternalNotes,
+    });
+    setSelectedVendor(nextVendor);
+    setPoType(nextPoType);
+    setPriority(nextPriority);
+    setExpectedDeliveryDate(nextExpectedDeliveryDate);
+    setIncoterms(nextIncoterms);
+    setVendorNotes(nextVendorNotes);
+    setInternalNotes(nextInternalNotes);
+    setLines(nextLines);
+    setDirty(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [existingPo]);
 
@@ -995,6 +1051,7 @@ export default function PurchaseOrderEdit() {
   const hasNoLines = lines.length === 0;
   const noVendor = !selectedVendor;
   const canSave = !saving && !hasLineErrors && !hasNoLines && !noVendor;
+  const canSaveDraft = canSave && (!isEditMode || dirty);
 
   // ── Dirty nav prompt ──────────────────────────────────────────────────
   useEffect(() => {
@@ -1202,6 +1259,9 @@ export default function PurchaseOrderEdit() {
   const saveMutation = useMutation({
     mutationFn: async (advanceToSent: boolean) => {
       if (!selectedVendor) throw new Error("Vendor required");
+      if (isEditMode && (!editId || !loadedVersionRef.current)) {
+        throw new Error("The draft version is unavailable. Reload the PO before saving.");
+      }
       const body = {
         vendor_id: selectedVendor.id,
         po_type: poType,
@@ -1211,11 +1271,7 @@ export default function PurchaseOrderEdit() {
         vendor_notes: vendorNotes || null,
         internal_notes: internalNotes || null,
         lines: lines.map((l) => ({
-          // NOTE: the procurement route handler (procurement.routes.ts) does
-          // not yet pass line_type, client_id, or parent_client_id through to
-          // the service layer. These fields are included here so the request
-          // is correct once that route gap is closed. Until then, all lines
-          // are treated as "product" by the backend. See completion report.
+          line_id: l.serverLineId ?? undefined,
           line_type: l.lineType,
           client_id: l.clientId,
           parent_client_id: l.parentClientId ?? null,
@@ -1250,15 +1306,19 @@ export default function PurchaseOrderEdit() {
           vendor_product_id: l.vendorProductId ?? null,
         })),
         advance_to_sent: advanceToSent,
+        ...(isEditMode ? { expected_updated_at: loadedVersionRef.current } : {}),
       };
-      const res = await fetch("/api/purchase-orders", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": genIdempotencyKey(),
+      const res = await fetch(
+        isEditMode ? `/api/purchase-orders/${editId}/draft` : "/api/purchase-orders",
+        {
+          method: isEditMode ? "PUT" : "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": genIdempotencyKey(),
+          },
+          body: JSON.stringify(body),
         },
-        body: JSON.stringify(body),
-      });
+      );
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to save PO");
       return data;
@@ -1266,6 +1326,7 @@ export default function PurchaseOrderEdit() {
   });
 
   async function handleSaveDraft() {
+    if (isEditMode && !dirty) return;
     const err = validateForSubmit();
     if (err) {
       toast({ title: "Cannot save", description: err, variant: "destructive" });
@@ -1281,10 +1342,33 @@ export default function PurchaseOrderEdit() {
       }
       const result = await saveMutation.mutateAsync(false);
       const po = result?.po ?? result;
-      toast({ title: "PO saved as draft", description: po?.poNumber ?? "" });
-      snapshotRef.current = JSON.stringify({
+      let savedLines = lines;
+      if (isEditMode) {
+        const serverLineIdByClientId = new Map<string, number>();
+        for (const savedLine of Array.isArray(result?.lines) ? result.lines : []) {
+          const lineId = Number(savedLine?.id);
+          if (
+            typeof savedLine?.clientId === "string" &&
+            Number.isSafeInteger(lineId) &&
+            lineId > 0
+          ) {
+            serverLineIdByClientId.set(savedLine.clientId, lineId);
+          }
+        }
+        savedLines = lines.map((line) => ({
+          ...line,
+          serverLineId: serverLineIdByClientId.get(line.clientId) ?? line.serverLineId,
+        }));
+        loadedVersionRef.current = po?.updatedAt ? String(po.updatedAt) : null;
+        setLines(savedLines);
+      }
+      toast({
+        title: isEditMode ? "PO updated" : "PO saved as draft",
+        description: po?.poNumber ?? "",
+      });
+      snapshotRef.current = buildEditorSnapshot({
         vendorId: selectedVendor?.id ?? null,
-        lines,
+        lines: savedLines,
         poType,
         priority,
         expectedDeliveryDate,
@@ -1293,7 +1377,7 @@ export default function PurchaseOrderEdit() {
         internalNotes,
       });
       setDirty(false);
-      if (po?.id) navigate(`/purchase-orders/${po.id}/edit`);
+      if (!isEditMode && po?.id) navigate(`/purchase-orders/${po.id}/edit`);
     } catch (e: any) {
       toast({ title: "Save failed", description: e.message, variant: "destructive" });
     } finally {
@@ -1317,7 +1401,9 @@ export default function PurchaseOrderEdit() {
       const po = result?.po ?? result;
       if (result?.sendError) {
         toast({
-          title: "PO created, but send to vendor failed",
+          title: isEditMode
+            ? "PO updated, but send to vendor failed"
+            : "PO created, but send to vendor failed",
           description: result.sendError,
           variant: "destructive",
         });
@@ -1328,7 +1414,7 @@ export default function PurchaseOrderEdit() {
         });
       } else {
         toast({
-          title: "PO created and sent to vendor",
+          title: isEditMode ? "PO updated and sent to vendor" : "PO created and sent to vendor",
           description: po?.poNumber ?? "",
         });
       }
@@ -1404,7 +1490,7 @@ export default function PurchaseOrderEdit() {
           <Button
             variant="secondary"
             onClick={handleSaveDraft}
-            disabled={!canSave}
+            disabled={!canSaveDraft}
             title={
               hasLineErrors
                 ? "Fix line errors before saving"
@@ -1412,6 +1498,8 @@ export default function PurchaseOrderEdit() {
                 ? "Pick a vendor before saving"
                 : hasNoLines
                 ? "Add at least one line before saving"
+                : isEditMode && !dirty
+                ? "No unsaved changes"
                 : undefined
             }
           >
@@ -1469,6 +1557,15 @@ export default function PurchaseOrderEdit() {
                         key={v.id}
                         value={String(v.id)}
                         onSelect={() => {
+                          if (selectedVendor?.id !== v.id) {
+                            setLines((current) =>
+                              current.map((line) => ({
+                                ...line,
+                                vendorProductId: null,
+                                catalogOriginallyAbsent: null,
+                              })),
+                            );
+                          }
                           setSelectedVendor(v);
                           setVendorOpen(false);
                           setVendorSearch("");
@@ -1884,7 +1981,7 @@ export default function PurchaseOrderEdit() {
         <Button
           variant="secondary"
           onClick={handleSaveDraft}
-          disabled={!canSave}
+          disabled={!canSaveDraft}
           className="flex-1"
           title={
             hasLineErrors
@@ -1893,6 +1990,8 @@ export default function PurchaseOrderEdit() {
               ? "Pick a vendor before saving"
               : hasNoLines
               ? "Add at least one line before saving"
+              : isEditMode && !dirty
+              ? "No unsaved changes"
               : undefined
           }
         >

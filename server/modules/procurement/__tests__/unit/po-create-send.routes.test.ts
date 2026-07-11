@@ -54,6 +54,7 @@ function buildPurchasingMock(overrides: Record<string, any> = {}) {
     getPurchaseOrderById: vi.fn(),
     getPurchaseOrderLines: vi.fn(),
     createPurchaseOrderWithLines: vi.fn(),
+    updateDraftPurchaseOrderWithLines: vi.fn(),
     sendPurchaseOrder: vi.fn(),
     duplicatePurchaseOrder: vi.fn(),
     getNewPoPreload: vi.fn(),
@@ -218,6 +219,175 @@ describe("POST /api/purchase-orders (dual-mode)", () => {
     expect(purchasing.sendPurchaseOrder).toHaveBeenCalledWith(7, "test-user");
     expect(body.pdf.pdf_placeholder).toBe(true);
     expect(body.status).toBe("sent");
+  });
+});
+
+describe("PUT /api/purchase-orders/:id/draft", () => {
+  let server: { url: string; close: () => Promise<void> };
+  let purchasing: ReturnType<typeof buildPurchasingMock>;
+
+  beforeEach(async () => {
+    purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it("maps the full editor payload and preserves existing line ids", async () => {
+    purchasing.updateDraftPurchaseOrderWithLines.mockResolvedValue({
+      po: { id: 42, updatedAt: "2026-07-11T01:00:00.000Z" },
+      lines: [{ id: 10, clientId: "line-10" }],
+    });
+    const { status, body } = await jsonRequest(
+      server.url,
+      "PUT",
+      "/api/purchase-orders/42/draft",
+      {
+        vendor_id: 3,
+        warehouse_id: null,
+        po_type: "standard",
+        priority: "high",
+        expected_delivery_date: "2026-08-01T00:00:00.000Z",
+        expected_updated_at: "2026-07-11T00:30:00.000Z",
+        lines: [
+          {
+            line_id: 10,
+            client_id: "line-10",
+            line_type: "product",
+            product_id: 7,
+            expected_receive_variant_id: 70,
+            expected_receive_units_per_variant: 100,
+            quantity_ordered: 500,
+            total_product_cost_cents: 1_250,
+            packaging_cost_cents: 50,
+          },
+        ],
+      },
+    );
+
+    expect(status).toBe(200);
+    expect(body.po.id).toBe(42);
+    expect(purchasing.updateDraftPurchaseOrderWithLines).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        vendorId: 3,
+        warehouseId: null,
+        poType: "standard",
+        priority: "high",
+        expectedDeliveryDate: new Date("2026-08-01T00:00:00.000Z"),
+        expectedUpdatedAt: new Date("2026-07-11T00:30:00.000Z"),
+        lines: [
+          expect.objectContaining({
+            lineId: 10,
+            clientId: "line-10",
+            productId: 7,
+            expectedReceiveVariantId: 70,
+            orderQty: 500,
+            totalProductCostCents: 1_250,
+            packagingCostCents: 50,
+          }),
+        ],
+      }),
+      "test-user",
+    );
+    expect(purchasing.createPurchaseOrderWithLines).not.toHaveBeenCalled();
+  });
+
+  it("sends the same PO after an atomic draft update", async () => {
+    purchasing.updateDraftPurchaseOrderWithLines.mockResolvedValue({
+      po: { id: 42, status: "draft" },
+      lines: [{ id: 10, clientId: "line-10" }],
+    });
+    purchasing.sendPurchaseOrder.mockResolvedValue({
+      po: { id: 42, status: "sent" },
+      status: "sent",
+      pdf: { pdf_placeholder: true, reason: "not implemented" },
+      pendingApproval: false,
+    });
+
+    const { status, body } = await jsonRequest(
+      server.url,
+      "PUT",
+      "/api/purchase-orders/42/draft",
+      {
+        vendor_id: 3,
+        expected_updated_at: "2026-07-11T00:30:00.000Z",
+        advance_to_sent: true,
+        lines: [
+          {
+            line_id: 10,
+            client_id: "line-10",
+            line_type: "product",
+            product_id: 7,
+            quantity_ordered: 1,
+            total_product_cost_cents: 100,
+          },
+        ],
+      },
+    );
+
+    expect(status).toBe(200);
+    expect(purchasing.sendPurchaseOrder).toHaveBeenCalledWith(42, "test-user");
+    expect(body.status).toBe("sent");
+    expect(body.lines).toEqual([{ id: 10, clientId: "line-10" }]);
+  });
+
+  it("reports a partial outcome when the draft update commits but sending fails", async () => {
+    purchasing.updateDraftPurchaseOrderWithLines.mockResolvedValue({
+      po: { id: 42, status: "draft", updatedAt: "2026-07-11T01:00:00.000Z" },
+      lines: [{ id: 10, clientId: "line-10" }],
+    });
+    purchasing.sendPurchaseOrder.mockRejectedValue(new Error("email provider unavailable"));
+
+    const { status, body } = await jsonRequest(
+      server.url,
+      "PUT",
+      "/api/purchase-orders/42/draft",
+      {
+        vendor_id: 3,
+        expected_updated_at: "2026-07-11T00:30:00.000Z",
+        advance_to_sent: true,
+        lines: [
+          {
+            line_id: 10,
+            line_type: "product",
+            product_id: 7,
+            quantity_ordered: 1,
+            total_product_cost_cents: 100,
+          },
+        ],
+      },
+    );
+
+    expect(status).toBe(200);
+    expect(body.po).toMatchObject({ id: 42, status: "draft" });
+    expect(body.sendError).toBe("email provider unavailable");
+  });
+
+  it("requires an optimistic concurrency version", async () => {
+    const { status, body } = await jsonRequest(
+      server.url,
+      "PUT",
+      "/api/purchase-orders/42/draft",
+      {
+        vendor_id: 3,
+        lines: [
+          {
+            line_id: 10,
+            line_type: "product",
+            product_id: 7,
+            quantity_ordered: 1,
+            total_product_cost_cents: 100,
+          },
+        ],
+      },
+    );
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("PO_DRAFT_EXPECTED_VERSION_REQUIRED");
+    expect(purchasing.updateDraftPurchaseOrderWithLines).not.toHaveBeenCalled();
   });
 });
 
