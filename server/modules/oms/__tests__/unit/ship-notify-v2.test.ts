@@ -250,6 +250,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     const updateCalls = mock.calls.filter((c) => c.tag === "update");
     expect(updateCalls.length).toBeGreaterThanOrEqual(1);
     expect(executeSqls.some((text) => text.includes("shipped_by_line"))).toBe(true);
+    expect(
+      executeSqls.some((text) => text.includes("UPDATE wms.reconciliation_exceptions")),
+    ).toBe(true);
 
     // Verify the audit event and Shopify fulfillment retry were inserted.
     const insertCalls = mock.calls.filter((c) => c.tag === "insert");
@@ -1339,6 +1342,9 @@ describe("processShipNotify V2 :: error resilience", () => {
         })
         .join("");
       calls.push({ sqlText: text, tag: "execute" });
+      if (text.includes("UPDATE wms.reconciliation_exceptions")) {
+        return { rows: [] };
+      }
       if (goodQ.length > 0) return goodQ.shift()!;
       if (brokenQ.length > 0) return brokenQ.shift()!;
       if (brokenQ.length === 0 && !thrownForBroken) {

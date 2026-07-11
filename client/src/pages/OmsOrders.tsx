@@ -219,10 +219,16 @@ export default function OmsOrders() {
   const canOverrideReview = hasPermission("orders", "hold");
 
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(() =>
+    new URLSearchParams(window.location.search).get("search")?.trim() ?? ""
+  );
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [channelFilter, setChannelFilter] = useState<string>("all");
-  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(() => {
+    const value = new URLSearchParams(window.location.search).get("orderId");
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  });
   const [shipDialog, setShipDialog] = useState<{ orderId: number } | null>(null);
   const [trackingNumber, setTrackingNumber] = useState("");
   const [carrier, setCarrier] = useState("USPS");

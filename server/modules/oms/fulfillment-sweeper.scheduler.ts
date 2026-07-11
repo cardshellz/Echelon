@@ -7,6 +7,7 @@ import { ShopifyFulfillmentReconciler } from "./reconcilers/shopify.reconciler";
 import type { FulfillmentReconciler } from "./reconcilers/reconciler.interface";
 import { applyChannelFulfillment } from "./channel-fulfillment.service";
 import { findChannelWritebackCandidates } from "./channel-writeback.service";
+import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
 
 const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 200;
@@ -25,6 +26,25 @@ function getReconciler(provider: string, dbArg: any): FulfillmentReconciler | nu
 export async function runFulfillmentSweep(dbArg: any = db) {
   try {
     console.log(`${LOG_PREFIX} Starting hourly outbound channel writeback sweep...`);
+
+    try {
+      const recovery = await resolveRecoveredShipNotifyNoMatchExceptions(dbArg, {
+        limit: 1_000,
+        resolvedBy: "system:fulfillment_sweeper",
+      });
+      if (recovery.resolvedCount > 0) {
+        console.log(
+          `${LOG_PREFIX} Auto-resolved ${recovery.resolvedCount} recovered SHIP_NOTIFY no-match exception(s).`,
+        );
+      }
+    } catch (error: any) {
+      // Channel writeback repair remains independent from exception cleanup.
+      // A cleanup failure is observable and retried on the next sweep without
+      // blocking customer tracking repairs.
+      console.error(
+        `${LOG_PREFIX} SHIP_NOTIFY exception recovery failed: ${error?.message ?? String(error)}`,
+      );
+    }
 
     // Shipment scope is required here: an order can be partially shipped, and
     // one successful sibling must never hide another missing writeback.

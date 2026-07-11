@@ -63,6 +63,22 @@ function stringOrNull(value: unknown): string | null {
   return text || null;
 }
 
+function providerDisplayName(value: unknown): string {
+  const provider = stringOrNull(value)?.toLowerCase();
+  if (provider === "shipstation") return "ShipStation";
+  if (provider === "shopify") return "Shopify";
+  if (provider === "ebay") return "eBay";
+  return provider ? humanizeControlTowerCode(provider) : "Provider";
+}
+
+function channelOrderNumber(...values: unknown[]): string | null {
+  for (const value of values) {
+    const normalized = stringOrNull(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 function sourceStatus(value: unknown): "open" | "acknowledged" {
   return String(value).toLowerCase() === "acknowledged" ? "acknowledged" : "open";
 }
@@ -90,6 +106,7 @@ function withFingerprint(item: ProjectedWithoutFingerprint): ProjectedControlTow
 function evidenceSentence(evidence: Record<string, unknown>, metric: unknown): string {
   const preferredKeys = [
     "sku",
+    "external_order_number",
     "order_number",
     "location_code",
     "warehouse_location_id",
@@ -104,6 +121,7 @@ function evidenceSentence(evidence: Record<string, unknown>, metric: unknown): s
   ];
   const parts: string[] = [];
   for (const key of preferredKeys) {
+    if (key === "order_number" && stringOrNull(evidence.external_order_number)) continue;
     const value = evidence[key];
     if (value === null || value === undefined || value === "") continue;
     parts.push(`${humanizeControlTowerCode(key)}: ${String(value)}`);
@@ -118,7 +136,7 @@ function evidenceSentence(evidence: Record<string, unknown>, metric: unknown): s
 function inventoryEntityRef(entityKey: Record<string, unknown>, evidence: Record<string, unknown>): string {
   const sku = stringOrNull(firstPresent(evidence, ["sku", "variant_sku"]));
   const location = stringOrNull(firstPresent(evidence, ["location_code", "bin_code"]));
-  const orderNumber = stringOrNull(firstPresent(evidence, ["order_number", "external_order_number"]));
+  const orderNumber = stringOrNull(firstPresent(evidence, ["external_order_number", "order_number"]));
   if (sku && location) return `${sku} at ${location}`;
   if (sku) return sku;
   if (orderNumber) return `Order ${orderNumber}`;
@@ -137,29 +155,80 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
   name: "inventory_integrity",
   sourceNamespace: "inventory.integrity_findings",
   sourceType: "integrity_finding",
-  projectionVersion: 1,
+  projectionVersion: 2,
   async loadRows(client) {
     const result = await client.query(`
       SELECT
-        id,
-        check_id,
-        entity_fingerprint,
-        category,
-        severity,
-        status,
-        entity_key,
-        current_evidence,
-        current_metric,
-        first_seen_at,
-        last_seen_at,
-        last_changed_at,
-        occurrence_count,
-        recurrence_count,
-        worsened_count,
-        updated_at
-      FROM inventory.integrity_findings
-      WHERE status IN ('open', 'acknowledged')
-      ORDER BY id
+        finding.id,
+        finding.check_id,
+        finding.entity_fingerprint,
+        finding.category,
+        finding.severity,
+        finding.status,
+        finding.entity_key,
+        finding.current_evidence,
+        finding.current_metric,
+        finding.first_seen_at,
+        finding.last_seen_at,
+        finding.last_changed_at,
+        finding.occurrence_count,
+        finding.recurrence_count,
+        finding.worsened_count,
+        finding.updated_at,
+        wms_order.id AS resolved_wms_order_id,
+        wms_order.order_number AS wms_order_number,
+        oms_order.id AS oms_order_id,
+        oms_order.external_order_number AS channel_order_number,
+        channel.provider AS channel_provider
+      FROM inventory.integrity_findings AS finding
+      LEFT JOIN LATERAL (
+        SELECT candidate.order_id
+        FROM wms.order_items AS candidate
+        WHERE candidate.id = CASE
+          WHEN COALESCE(
+            finding.current_evidence->>'order_item_id',
+            finding.entity_key->>'order_item_id'
+          ) ~ '^[1-9][0-9]*$'
+          THEN COALESCE(
+            finding.current_evidence->>'order_item_id',
+            finding.entity_key->>'order_item_id'
+          )::integer
+          ELSE NULL
+        END
+        LIMIT 1
+      ) AS order_item ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT candidate.*
+        FROM wms.orders AS candidate
+        WHERE candidate.id = COALESCE(
+          CASE
+            WHEN COALESCE(
+              finding.current_evidence->>'order_id',
+              finding.entity_key->>'order_id'
+            ) ~ '^[1-9][0-9]*$'
+            THEN COALESCE(
+              finding.current_evidence->>'order_id',
+              finding.entity_key->>'order_id'
+            )::integer
+            ELSE NULL
+          END,
+          order_item.order_id
+        )
+        LIMIT 1
+      ) AS wms_order ON TRUE
+      LEFT JOIN oms.oms_orders AS oms_order
+        ON oms_order.id = CASE
+          WHEN wms_order.source IN ('oms', 'ebay')
+           AND wms_order.oms_fulfillment_order_id ~ '^[1-9][0-9]{0,17}$'
+          THEN wms_order.oms_fulfillment_order_id::bigint
+          WHEN wms_order.source_table_id ~ '^[1-9][0-9]{0,17}$'
+          THEN wms_order.source_table_id::bigint
+          ELSE NULL
+        END
+      LEFT JOIN channels.channels AS channel
+        ON channel.id = oms_order.channel_id
+      WHERE finding.status IN ('open', 'acknowledged')
+      ORDER BY finding.id
     `);
     return result.rows;
   },
@@ -169,7 +238,22 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
     if (!checkId) throw new Error("inventory finding check_id is required");
     const category = String(row.category ?? "inventory").trim();
     const entityKey = asRecord(row.entity_key);
-    const evidence = asRecord(row.current_evidence);
+    const sourceEvidence = asRecord(row.current_evidence);
+    const orderNumber = channelOrderNumber(
+      row.channel_order_number,
+      sourceEvidence.external_order_number,
+      row.wms_order_number,
+      sourceEvidence.order_number,
+    );
+    const evidence = orderNumber
+      ? { ...sourceEvidence, external_order_number: orderNumber }
+      : sourceEvidence;
+    const wmsOrderId = row.resolved_wms_order_id == null
+      ? null
+      : positiveInteger(row.resolved_wms_order_id, "inventory finding wms_order_id");
+    const omsOrderId = row.oms_order_id == null
+      ? null
+      : positiveInteger(row.oms_order_id, "inventory finding oms_order_id");
     const description = INVENTORY_CHECK_DESCRIPTIONS[checkId]
       ?? `The ${humanizeControlTowerCode(checkId).toLowerCase()} inventory invariant must hold.`;
     const severity: ControlTowerSeverity = row.severity === "blocker" ? "blocker" : "medium";
@@ -183,7 +267,7 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
       sourceNamespace: "inventory.integrity_findings",
       sourceType: "integrity_finding",
       sourceKey: String(id),
-      projectionVersion: 1,
+      projectionVersion: 2,
       domain: "inventory",
       code: checkId,
       entityType: "inventory_integrity_finding",
@@ -214,15 +298,29 @@ export const inventoryIntegritySource: ControlTowerSourceAdapter<Record<string, 
         checkId,
         category,
         metric: String(row.current_metric ?? "0"),
+        channelProvider: row.channel_provider,
+        channelOrderNumber: orderNumber,
+        omsOrderId,
+        wmsOrderId,
         entityKey: compactEvidence(entityKey),
         evidence: compactEvidence(evidence),
       },
       detailLocator: {
         sourceTable: "inventory.integrity_findings",
         sourceId: id,
-        links: [{ label: "Open inventory workflow", href: inventoryHref(category) }],
+        omsOrderId,
+        wmsOrderId,
+        links: [{
+          label: orderNumber ? `Open ${orderNumber}` : "Open inventory workflow",
+          href: wmsOrderId ? `/orders?orderId=${wmsOrderId}` : inventoryHref(category),
+        }],
       },
-      availableActions: [{ code: "open_source", kind: "navigate", label: "Open inventory workflow", href: inventoryHref(category) }],
+      availableActions: [{
+        code: "open_source",
+        kind: "navigate",
+        label: orderNumber ? `Open ${orderNumber}` : "Open inventory workflow",
+        href: wmsOrderId ? `/orders?orderId=${wmsOrderId}` : inventoryHref(category),
+      }],
       sourceUpdatedAt,
       observedMetric: String(row.current_metric ?? "0"),
     });
@@ -239,7 +337,7 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
   name: "wms_reconciliation",
   sourceNamespace: "wms.reconciliation_exceptions",
   sourceType: "reconciliation_exception",
-  projectionVersion: 1,
+  projectionVersion: 2,
   async loadRows(client) {
     const result = await client.query(`
       SELECT
@@ -262,15 +360,59 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
         exception.last_seen_at,
         exception.occurrence_count,
         exception.updated_at,
-        wms_order.order_number,
+        COALESCE(exception.wms_order_id, shipment.order_id) AS resolved_wms_order_id,
+        shipment.id AS resolved_wms_shipment_id,
+        wms_order.order_number AS wms_order_number,
+        oms_order.id AS oms_order_id,
+        oms_order.external_order_number AS channel_order_number,
+        channel.provider AS channel_provider,
         shipment.tracking_number,
         shipment.shipping_engine,
         shipment.engine_order_ref
       FROM wms.reconciliation_exceptions AS exception
+      LEFT JOIN LATERAL (
+        SELECT candidate.*
+        FROM wms.outbound_shipments AS candidate
+        WHERE candidate.id = exception.wms_shipment_id
+           OR candidate.id = NULLIF(
+             substring(exception.external_order_key FROM '^echelon-wms-shp-([0-9]+)$'),
+             ''
+           )::integer
+           OR candidate.external_fulfillment_id =
+             'shipstation_shipment:' || exception.external_shipment_ref
+           OR candidate.shipstation_order_id::text = exception.external_order_ref
+           OR (
+             candidate.shipping_engine = exception.external_system
+             AND candidate.engine_order_ref = exception.external_order_ref
+           )
+        ORDER BY
+          CASE
+            WHEN candidate.id = exception.wms_shipment_id THEN 1
+            WHEN candidate.id = NULLIF(
+              substring(exception.external_order_key FROM '^echelon-wms-shp-([0-9]+)$'),
+              ''
+            )::integer THEN 2
+            WHEN candidate.external_fulfillment_id =
+              'shipstation_shipment:' || exception.external_shipment_ref THEN 3
+            WHEN candidate.shipstation_order_id::text = exception.external_order_ref THEN 4
+            ELSE 5
+          END,
+          candidate.id DESC
+        LIMIT 1
+      ) AS shipment ON TRUE
       LEFT JOIN wms.orders AS wms_order
-        ON wms_order.id = exception.wms_order_id
-      LEFT JOIN wms.outbound_shipments AS shipment
-        ON shipment.id = exception.wms_shipment_id
+        ON wms_order.id = COALESCE(exception.wms_order_id, shipment.order_id)
+      LEFT JOIN oms.oms_orders AS oms_order
+        ON oms_order.id = CASE
+          WHEN wms_order.source IN ('oms', 'ebay')
+           AND wms_order.oms_fulfillment_order_id ~ '^[1-9][0-9]{0,17}$'
+          THEN wms_order.oms_fulfillment_order_id::bigint
+          WHEN wms_order.source_table_id ~ '^[1-9][0-9]{0,17}$'
+          THEN wms_order.source_table_id::bigint
+          ELSE NULL
+        END
+      LEFT JOIN channels.channels AS channel
+        ON channel.id = oms_order.channel_id
       WHERE exception.status IN ('open', 'acknowledged')
         AND exception.classification <> 'historical_ignore'
       ORDER BY exception.id
@@ -283,13 +425,47 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
     if (!rule) throw new Error("WMS reconciliation rule is required");
     const classification = String(row.classification ?? "manual_review");
     const details = asRecord(row.details);
-    const orderNumber = stringOrNull(row.order_number ?? row.external_order_ref);
-    const wmsOrderId = row.wms_order_id == null ? null : positiveInteger(row.wms_order_id, "wms_order_id");
-    const shipmentId = row.wms_shipment_id == null ? null : positiveInteger(row.wms_shipment_id, "wms_shipment_id");
+    const orderNumber = channelOrderNumber(
+      row.channel_order_number,
+      row.wms_order_number,
+    );
+    const wmsOrderIdValue = row.resolved_wms_order_id ?? row.wms_order_id;
+    const shipmentIdValue = row.resolved_wms_shipment_id ?? row.wms_shipment_id;
+    const wmsOrderId = wmsOrderIdValue == null
+      ? null
+      : positiveInteger(wmsOrderIdValue, "wms_order_id");
+    const shipmentId = shipmentIdValue == null
+      ? null
+      : positiveInteger(shipmentIdValue, "wms_shipment_id");
+    const omsOrderId = row.oms_order_id == null
+      ? null
+      : positiveInteger(row.oms_order_id, "oms_order_id");
+    const provider = providerDisplayName(row.external_system);
+    const providerOrderRef = stringOrNull(row.external_order_ref);
+    const providerShipmentRef = stringOrNull(row.external_shipment_ref);
+    const trackingNumber = stringOrNull(row.tracking_number ?? details.trackingNumber);
     const entityType = shipmentId ? "wms_shipment" : wmsOrderId ? "wms_order" : "external_order";
     const entityId = String(shipmentId ?? wmsOrderId ?? row.external_order_ref ?? id);
-    const entityRef = orderNumber ? `Order ${orderNumber}` : shipmentId ? `Shipment ${shipmentId}` : `Exception ${id}`;
-    const summary = String(row.summary ?? humanizeControlTowerCode(rule)).trim();
+    const entityRef = orderNumber
+      ? `Order ${orderNumber}`
+      : providerOrderRef
+        ? `${provider} order ${providerOrderRef}`
+        : shipmentId
+          ? `WMS shipment ${shipmentId}`
+          : `Exception ${id}`;
+    const summary = rule === "ship_notify_no_match"
+      ? `${provider} shipment ${providerShipmentRef ?? "unknown"} did not match a WMS shipment${orderNumber ? ` for order ${orderNumber}` : ""}.`
+      : String(row.summary ?? humanizeControlTowerCode(rule)).trim();
+    const actualState = rule === "ship_notify_no_match"
+      ? [
+          `${provider} reported a shipment that could not be linked to WMS when the callback was processed.`,
+          providerOrderRef ? `Provider order: ${providerOrderRef}.` : null,
+          providerShipmentRef ? `Provider shipment: ${providerShipmentRef}.` : null,
+          trackingNumber ? `Tracking: ${trackingNumber}.` : null,
+        ].filter(Boolean).join(" ")
+      : `${humanizeControlTowerCode(classification)}: ${summary}`;
+    const orderHref = wmsOrderId ? `/orders?orderId=${wmsOrderId}` : "/orders";
+    const openOrderLabel = orderNumber ? `Open ${orderNumber}` : "Open WMS orders";
     const firstSeenAt = isoTimestamp(row.first_seen_at, "WMS first_seen_at");
     const lastSeenAt = isoTimestamp(row.last_seen_at, "WMS last_seen_at");
     const sourceUpdatedAt = isoTimestamp(row.updated_at ?? row.last_seen_at, "WMS updated_at");
@@ -298,7 +474,7 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       sourceNamespace: "wms.reconciliation_exceptions",
       sourceType: "reconciliation_exception",
       sourceKey: String(id),
-      projectionVersion: 1,
+      projectionVersion: 2,
       domain: "wms",
       code: rule,
       entityType,
@@ -309,14 +485,16 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       title: humanizeControlTowerCode(rule),
       summary,
       expectedState: "OMS, WMS, shipment, and provider evidence must agree before fulfillment state changes.",
-      actualState: `${humanizeControlTowerCode(classification)}: ${summary}`,
+      actualState,
       severity: wmsSeverity(row.severity, classification),
       urgency: classification === "hard_block" ? "overdue" : "normal",
       impactTags: ["order_flow", "warehouse_execution"],
       actionability: "investigate",
       sourceStatus: sourceStatus(row.status),
       ownerTeam: "Warehouse",
-      recommendedAction: "Review the reconciliation evidence and resolve the underlying source workflow. Do not overwrite fulfillment state manually.",
+      recommendedAction: rule === "ship_notify_no_match"
+        ? `Open ${orderNumber ? `order ${orderNumber}` : "the WMS order list"}, verify whether this exact provider shipment is now linked, and replay the provider callback only if fulfillment is still missing.`
+        : "Review the reconciliation evidence and resolve the underlying source workflow. Do not overwrite fulfillment state manually.",
       responseDueAt: null,
       firstSeenAt,
       lastSeenAt,
@@ -328,12 +506,15 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
         exceptionId: id,
         source: row.source,
         classification,
+        channelProvider: row.channel_provider,
+        channelOrderNumber: orderNumber,
+        omsOrderId,
         wmsOrderId,
         wmsShipmentId: shipmentId,
         externalSystem: row.external_system,
         externalOrderRef: row.external_order_ref,
         externalShipmentRef: row.external_shipment_ref,
-        trackingNumber: row.tracking_number,
+        trackingNumber,
         shippingEngine: row.shipping_engine,
         engineOrderRef: row.engine_order_ref,
         details: compactEvidence(details),
@@ -341,11 +522,12 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       detailLocator: {
         sourceTable: "wms.reconciliation_exceptions",
         sourceId: id,
+        omsOrderId,
         wmsOrderId,
         wmsShipmentId: shipmentId,
-        links: [{ label: "Open WMS orders", href: "/orders" }],
+        links: [{ label: openOrderLabel, href: orderHref }],
       },
-      availableActions: [{ code: "open_source", kind: "navigate", label: "Open WMS orders", href: "/orders" }],
+      availableActions: [{ code: "open_source", kind: "navigate", label: openOrderLabel, href: orderHref }],
       sourceUpdatedAt,
       observedMetric: String(Math.max(1, nonNegativeInteger(row.occurrence_count, "WMS occurrence_count", 1))),
     });
@@ -460,7 +642,7 @@ export const channelFulfillmentSource: ControlTowerSourceAdapter<Record<string, 
   name: "channel_fulfillment",
   sourceNamespace: "oms.channel_fulfillment_pushes",
   sourceType: "channel_fulfillment_push",
-  projectionVersion: 1,
+  projectionVersion: 2,
   async loadRows(client) {
     const result = await client.query(`
       SELECT
@@ -512,7 +694,8 @@ export const channelFulfillmentSource: ControlTowerSourceAdapter<Record<string, 
       throw new Error(`unsupported channel fulfillment push status ${status}`);
     }
     const provider = String(row.channel_provider ?? "channel");
-    const orderNumber = stringOrNull(row.external_order_number ?? row.wms_order_number) ?? String(omsOrderId);
+    const orderNumber = channelOrderNumber(row.external_order_number, row.wms_order_number);
+    const orderReference = orderNumber ? `Order ${orderNumber}` : `OMS order ${omsOrderId}`;
     const trackingNumber = stringOrNull(row.tracking_number);
     const lastError = stringOrNull(row.last_error);
     const metadata = asRecord(row.metadata);
@@ -526,16 +709,16 @@ export const channelFulfillmentSource: ControlTowerSourceAdapter<Record<string, 
       sourceNamespace: "oms.channel_fulfillment_pushes",
       sourceType: "channel_fulfillment_push",
       sourceKey: String(id),
-      projectionVersion: 1,
+      projectionVersion: 2,
       domain: "shipping",
       code: `channel_fulfillment_${status}`,
       entityType: "physical_shipment",
       entityId: String(physicalShipmentId),
-      entityRef: trackingNumber ? `Order ${orderNumber} / ${trackingNumber}` : `Order ${orderNumber}`,
+      entityRef: trackingNumber ? `${orderReference} / ${trackingNumber}` : orderReference,
       correlationId: stringOrNull(row.provider_physical_shipment_id),
       rootCauseGroupKey: `shipping:channel_fulfillment:${provider}:${status}`,
       title: channelPushTitle(status),
-      summary: `Order ${orderNumber} has a physical shipment that is not confirmed by ${provider}.`,
+      summary: `${orderReference} has a physical shipment that is not confirmed by ${provider}.`,
       expectedState: "Each physical shipment must be confirmed exactly once by the originating sales channel.",
       actualState: actual,
       severity: status === "pending" ? "medium" : "high",
@@ -557,7 +740,8 @@ export const channelFulfillmentSource: ControlTowerSourceAdapter<Record<string, 
         omsOrderId,
         wmsOrderId: row.wms_order_id,
         physicalShipmentId,
-        orderNumber,
+        channelOrderNumber: orderNumber,
+        externalOrderId: row.external_order_id,
         channelProvider: provider,
         channelFulfillmentId: row.channel_fulfillment_id,
         pushStatus: status,
@@ -575,9 +759,17 @@ export const channelFulfillmentSource: ControlTowerSourceAdapter<Record<string, 
         omsOrderId,
         wmsOrderId: row.wms_order_id,
         physicalShipmentId,
-        links: [{ label: "Open OMS orders", href: "/oms/orders" }],
+        links: [{
+          label: orderNumber ? `Open ${orderNumber}` : "Open OMS order",
+          href: `/oms/orders?orderId=${omsOrderId}`,
+        }],
       },
-      availableActions: [{ code: "open_source", kind: "navigate", label: "Open OMS orders", href: "/oms/orders" }],
+      availableActions: [{
+        code: "open_source",
+        kind: "navigate",
+        label: orderNumber ? `Open ${orderNumber}` : "Open OMS order",
+        href: `/oms/orders?orderId=${omsOrderId}`,
+      }],
       sourceUpdatedAt: updatedAt,
       observedMetric: String(Math.max(1, nonNegativeInteger(row.attempt_count, "channel push attempt_count") + 1)),
     });
