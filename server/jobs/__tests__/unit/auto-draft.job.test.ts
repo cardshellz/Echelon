@@ -170,9 +170,14 @@ describe("auto-draft job", () => {
         purchaseOrderId: 700,
         productId: 1,
         productVariantId: 11,
+        expectedReceiveVariantId: 11,
+        expectedReceiveUnitsPerVariant: 10,
         sku: "HIGH-1",
-        orderQty: 1,
+        orderQty: 10,
+        unitOfMeasure: "each",
+        unitsPerUom: 10,
         unitCostCents: 125,
+        lineTotalCents: 1250,
       }),
     ]);
     expect(mocks.storage.bulkCreatePurchaseOrderLines.mock.calls[0][0]).toHaveLength(1);

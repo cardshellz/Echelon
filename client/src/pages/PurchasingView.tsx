@@ -225,6 +225,8 @@ interface ApprovalPolicyImpact {
     sku: string;
     productName: string;
     suggestedOrderQty: number;
+    suggestedOrderPieces: number;
+    orderUomUnits: number;
     orderUomLabel: string;
     preferredVendorName: string | null;
     explanation: string;
@@ -300,6 +302,8 @@ interface RecommendationReviewQueueItem {
   preferredVendorId: number | null;
   preferredVendorName: string | null;
   suggestedOrderQty: number;
+  suggestedOrderPieces: number;
+  orderUomUnits: number;
   orderUomLabel: string;
   candidateScore?: ReorderItem["recommendationCandidateScore"];
   qualityGate?: ReorderItem["qualityGate"];
@@ -347,6 +351,8 @@ interface AcceptedRecommendationQueueItem {
   preferredVendorId: number | null;
   preferredVendorName: string | null;
   suggestedOrderQty: number;
+  suggestedOrderPieces: number;
+  orderUomUnits: number;
   orderUomLabel: string;
   candidateScore?: ReorderItem["recommendationCandidateScore"] | null;
   statusReason: string;
@@ -491,6 +497,17 @@ function formatApprovalPolicy(policy?: AutoDraftApprovalPolicy | null): string {
   return policy === "high_confidence_and_strong_candidate"
     ? "High confidence + strong candidate"
     : "High confidence only";
+}
+
+function formatRecommendationPurchaseQuantity(item: {
+  suggestedOrderQty: number;
+  suggestedOrderPieces: number;
+  orderUomUnits: number;
+  orderUomLabel: string;
+}): string {
+  const orderUom = `${item.suggestedOrderQty.toLocaleString()} ${item.orderUomLabel}`;
+  if (item.orderUomUnits <= 1) return `${item.suggestedOrderPieces.toLocaleString()} pieces`;
+  return `${orderUom} (${item.suggestedOrderPieces.toLocaleString()} pieces)`;
 }
 
 function createPurchasingCommandIdempotencyKey(prefix: string): string {
@@ -1050,7 +1067,7 @@ export default function PurchasingView() {
                           </div>
                           <div className="mt-1 truncate font-medium">{item.productName}</div>
                           <div className="mt-1 text-zinc-500">
-                            {item.suggestedOrderQty} {item.orderUomLabel}
+                            {formatRecommendationPurchaseQuantity(item)}
                             {item.preferredVendorName ? ` - ${item.preferredVendorName}` : ""}
                           </div>
                         </div>
@@ -1153,7 +1170,7 @@ export default function PurchasingView() {
                           <div className="mt-1 text-sm font-medium truncate">{item.productName}</div>
                           <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.reason.detail}</p>
                           <div className="mt-2 text-[11px] text-zinc-500">
-                            {item.suggestedOrderQty} {item.orderUomLabel}
+                            {formatRecommendationPurchaseQuantity(item)}
                             {item.preferredVendorName ? ` - ${item.preferredVendorName}` : ""}
                             {item.latestDecision?.decidedAt ? (
                               <span className="ml-2">
@@ -1248,7 +1265,7 @@ export default function PurchasingView() {
                         <div className="mt-1 text-sm font-medium truncate">{item.productName}</div>
                         <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.statusReason}</p>
                         <div className="mt-2 text-[11px] text-zinc-500">
-                          {item.suggestedOrderQty} {item.orderUomLabel}
+                          {formatRecommendationPurchaseQuantity(item)}
                           {item.preferredVendorName ? ` - ${item.preferredVendorName}` : ""}
                           {item.decision.decidedAt ? (
                             <span className="ml-2">
