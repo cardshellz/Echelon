@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const sql = readFileSync(resolve(process.cwd(), "migrations/128_dropship_carrier_protection_policies.sql"), "utf8");
+const sql = readFileSync(resolve(process.cwd(), "migrations/0585_dropship_carrier_protection_policies.sql"), "utf8");
 
 describe("carrier-protection policy migration", () => {
   it("creates versioned policy and deterministic assignment tables", () => {
