@@ -21,6 +21,26 @@ import {
   buildPoLifecycleSummary,
   type PoLifecycleCommand,
 } from "./purchase-order-lifecycle.service";
+import { purchaseOrderDraftHeaderPatchSchema } from "./purchase-order-draft-header";
+
+function parseNullableDateInput(value: unknown, fieldLabel: string): Date | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  if (typeof value !== "string" && !(value instanceof Date)) {
+    throw new PurchasingError(`${fieldLabel} must be a valid date`, 400, {
+      code: "INVALID_DATE_INPUT",
+      field: fieldLabel,
+    });
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new PurchasingError(`${fieldLabel} must be a valid date`, 400, {
+      code: "INVALID_DATE_INPUT",
+      field: fieldLabel,
+    });
+  }
+  return date;
+}
 
 export function registerPurchaseOrderRoutes(app: Express) {
   const { purchasing, shipmentTracking } = app.locals.services;
@@ -35,8 +55,12 @@ export function registerPurchaseOrderRoutes(app: Express) {
     if (req.body?.notes !== undefined) input.notes = req.body.notes;
     if (req.body?.reason !== undefined) input.reason = req.body.reason;
     if (req.body?.vendorRefNumber !== undefined) input.vendorRefNumber = req.body.vendorRefNumber;
-    if (req.body?.confirmedDeliveryDate) {
-      input.confirmedDeliveryDate = new Date(req.body.confirmedDeliveryDate);
+    if (req.body?.confirmedDeliveryDate !== undefined) {
+      const confirmedDeliveryDate = parseNullableDateInput(
+        req.body.confirmedDeliveryDate,
+        "confirmedDeliveryDate",
+      );
+      if (confirmedDeliveryDate) input.confirmedDeliveryDate = confirmedDeliveryDate;
     }
     return input;
   };
@@ -461,16 +485,63 @@ export function registerPurchaseOrderRoutes(app: Express) {
     },
   );
 
-  app.patch("/api/purchase-orders/:id", requirePermission("purchasing", "edit"), async (req, res) => {
+  app.patch("/api/purchase-orders/:id/delivery-schedule", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const updates = { ...req.body };
-      if (updates.expectedDeliveryDate) updates.expectedDeliveryDate = new Date(updates.expectedDeliveryDate);
-      if (updates.confirmedDeliveryDate) updates.confirmedDeliveryDate = new Date(updates.confirmedDeliveryDate);
-      if (updates.cancelDate) updates.cancelDate = new Date(updates.cancelDate);
-      const po = await purchasing.updatePO(Number(req.params.id), updates, req.session.user?.id);
+      const hasExpectedCamel = Object.prototype.hasOwnProperty.call(req.body ?? {}, "expectedDeliveryDate");
+      const hasExpectedSnake = Object.prototype.hasOwnProperty.call(req.body ?? {}, "expected_delivery_date");
+      const hasConfirmedCamel = Object.prototype.hasOwnProperty.call(req.body ?? {}, "confirmedDeliveryDate");
+      const hasConfirmedSnake = Object.prototype.hasOwnProperty.call(req.body ?? {}, "confirmed_delivery_date");
+      const expectedRaw = hasExpectedCamel
+        ? req.body.expectedDeliveryDate
+        : hasExpectedSnake
+          ? req.body.expected_delivery_date
+          : undefined;
+      const confirmedRaw = hasConfirmedCamel
+        ? req.body.confirmedDeliveryDate
+        : hasConfirmedSnake
+          ? req.body.confirmed_delivery_date
+          : undefined;
+      const po = await purchasing.updateDeliverySchedule(
+        Number(req.params.id),
+        {
+          expectedDeliveryDate: parseNullableDateInput(expectedRaw, "expectedDeliveryDate"),
+          confirmedDeliveryDate: parseNullableDateInput(confirmedRaw, "confirmedDeliveryDate"),
+          notes: typeof req.body?.notes === "string" ? req.body.notes : undefined,
+        },
+        req.session.user?.id,
+      );
       res.json(po);
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) {
+        return res.status(error.statusCode).json({ error: error.message, details: error.details });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/purchase-orders/:id", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new PurchasingError("Purchase order id must be a positive integer", 400, {
+          code: "INVALID_PURCHASE_ORDER_ID",
+        });
+      }
+
+      const parsed = purchaseOrderDraftHeaderPatchSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new PurchasingError("Invalid draft purchase order header update", 400, {
+          code: "INVALID_PO_DRAFT_HEADER_PATCH",
+          issues: parsed.error.issues,
+        });
+      }
+
+      const po = await purchasing.updatePO(id, parsed.data, req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) {
+        return res.status(error.statusCode).json({ error: error.message, details: error.details });
+      }
       res.status(500).json({ error: error.message });
     }
   });

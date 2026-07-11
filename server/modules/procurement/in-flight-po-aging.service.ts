@@ -1,6 +1,10 @@
 import type { AutoDraftPoAgingSeverity, AutoDraftPoAgingThresholds } from "./auto-draft-po-aging.service";
 import { DEFAULT_STALE_AUTO_DRAFT_PO_THRESHOLDS } from "./auto-draft-po-aging.service";
 import { resolveCurrentPhysicalStatus } from "./purchase-order-lifecycle.service";
+import {
+  isConfirmedDeliveryDateInvalid,
+  resolveEffectiveDeliveryDate,
+} from "./purchase-order-delivery-schedule";
 
 export type InFlightPoAgingStage = "supplier_followup_pending" | "receiving_pending";
 
@@ -60,6 +64,7 @@ export type InFlightPoAgingItem = {
   activeReceivingOrderId: number | null;
   activeReceiptNumber: string | null;
   activeReceiptStatus: string | null;
+  hasInvalidConfirmedDeliveryDate: boolean;
 };
 
 export type InFlightPoAgingDiagnostics = {
@@ -76,6 +81,7 @@ export type InFlightPoAgingDiagnostics = {
     missingEta: number;
     overdueEta: number;
     arrivedNotReceiving: number;
+    invalidConfirmedDeliveryDate: number;
   };
   items: InFlightPoAgingItem[];
 };
@@ -142,10 +148,10 @@ function stageStartedAt(row: InFlightPoAgingRow, stage: InFlightPoAgingStage, no
       row.firstArrivedAt,
     );
     if (latestReceivingProgress) return latestReceivingProgress;
-    return firstDate(row.confirmedDeliveryDate, row.expectedDeliveryDate, row.sentToVendorAt, row.orderDate, row.createdAt);
+    return firstDate(resolveEffectiveDeliveryDate(row), row.sentToVendorAt, row.orderDate, row.createdAt);
   }
 
-  const eta = firstDate(row.confirmedDeliveryDate, row.expectedDeliveryDate);
+  const eta = resolveEffectiveDeliveryDate(row);
   if (eta && eta.getTime() <= now.getTime()) return eta;
   return firstDate(row.sentToVendorAt, row.orderDate, row.createdAt);
 }
@@ -163,11 +169,11 @@ function severityForAge(
 }
 
 function hasMissingEta(row: InFlightPoAgingRow): boolean {
-  return !row.confirmedDeliveryDate && !row.expectedDeliveryDate;
+  return resolveEffectiveDeliveryDate(row) === null;
 }
 
 function hasOverdueEta(row: InFlightPoAgingRow, now: Date): boolean {
-  const eta = firstDate(row.confirmedDeliveryDate, row.expectedDeliveryDate);
+  const eta = resolveEffectiveDeliveryDate(row);
   return Boolean(eta && eta.getTime() < now.getTime());
 }
 
@@ -188,6 +194,10 @@ function buildDetail(row: InFlightPoAgingRow, stage: InFlightPoAgingStage, ageDa
       return `PO has been marked arrived for ${ageDays} day${ageDays === 1 ? "" : "s"}; create or finish the receipt.`;
     }
     return `PO has been waiting on receiving for ${ageDays} day${ageDays === 1 ? "" : "s"} after the current receive-by baseline.`;
+  }
+
+  if (isConfirmedDeliveryDateInvalid(row)) {
+    return "Vendor confirmed delivery date predates the PO submission date; correct the delivery schedule before relying on the ETA.";
   }
 
   if (hasMissingEta(row)) {
@@ -228,8 +238,11 @@ export function buildInFlightPoAgingDiagnostics(
     const poId = Number(row.id);
     if (!Number.isFinite(poId)) continue;
     const physicalStatus = resolveCurrentPhysicalStatus(row);
+    const hasInvalidConfirmedDeliveryDate = isConfirmedDeliveryDateInvalid(row);
     const activeReceivingOrderId = nullableNumber(row.activeReceivingOrderId);
-    const action = stage === "receiving_pending"
+    const action = stage === "supplier_followup_pending" && hasInvalidConfirmedDeliveryDate
+      ? { action: "correct_delivery_schedule", label: "Correct schedule", href: `/purchase-orders/${poId}` }
+      : stage === "receiving_pending"
       ? activeReceivingOrderId !== null
         ? { action: "continue_receipt", label: "Continue receipt", href: `/receiving?open=${activeReceivingOrderId}` }
         : { action: "create_receipt", label: "Create receipt", href: `/purchase-orders/${poId}` }
@@ -254,12 +267,13 @@ export function buildInFlightPoAgingDiagnostics(
       action,
       lineCount: nullableNumber(row.lineCount),
       totalCents: nullableNumber(row.totalCents),
-      expectedDeliveryDate: isoOrNull(row.confirmedDeliveryDate) ?? isoOrNull(row.expectedDeliveryDate),
+      expectedDeliveryDate: isoOrNull(resolveEffectiveDeliveryDate(row)),
       openExceptionCount: Math.max(0, Number(row.openExceptionCount ?? 0) || 0),
       latestReceivingActivityAt: isoOrNull(row.latestReceivingActivityAt),
       activeReceivingOrderId,
       activeReceiptNumber: row.activeReceiptNumber ?? null,
       activeReceiptStatus: row.activeReceiptStatus ?? null,
+      hasInvalidConfirmedDeliveryDate,
     });
   }
 
@@ -279,6 +293,7 @@ export function buildInFlightPoAgingDiagnostics(
     missingEta: 0,
     overdueEta: 0,
     arrivedNotReceiving: 0,
+    invalidConfirmedDeliveryDate: 0,
   };
 
   for (const item of items) {
@@ -291,6 +306,7 @@ export function buildInFlightPoAgingDiagnostics(
     if (hasMissingEta(row)) counts.missingEta += 1;
     if (hasOverdueEta(row, now)) counts.overdueEta += 1;
     if (isArrivedNotReceiving(row)) counts.arrivedNotReceiving += 1;
+    if (isConfirmedDeliveryDateInvalid(row)) counts.invalidConfirmedDeliveryDate += 1;
   }
 
   return {

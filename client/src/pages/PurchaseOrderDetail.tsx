@@ -811,6 +811,19 @@ function parsePositiveInt(value: string | null): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+function dateInputValue(value: unknown): string {
+  if (!value) return "";
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+}
+
+function displayScheduleDate(value: unknown): string {
+  const input = dateInputValue(value);
+  if (!input) return "Not set";
+  const [year, month, day] = input.split("-").map(Number);
+  return format(new Date(year, month - 1, day), "MMM d, yyyy");
+}
+
 export default function PurchaseOrderDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -823,6 +836,7 @@ export default function PurchaseOrderDetail() {
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
   const [showCancelDialog, setShowCancelDialog] = useState(false);
   const [showAckDialog, setShowAckDialog] = useState(false);
+  const [showScheduleDialog, setShowScheduleDialog] = useState(false);
   const [showDocDialog, setShowDocDialog] = useState(false);
   const [showEmailDialog, setShowEmailDialog] = useState(false);
   const [showCreateInvoiceDialog, setShowCreateInvoiceDialog] = useState(false);
@@ -833,6 +847,11 @@ export default function PurchaseOrderDetail() {
   const [emailSending, setEmailSending] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
+  const [scheduleData, setScheduleData] = useState({
+    expectedDeliveryDate: "",
+    confirmedDeliveryDate: "",
+    notes: "",
+  });
   const [showCreateShipmentDialog, setShowCreateShipmentDialog] = useState(false);
   const [showReceivePicker, setShowReceivePicker] = useState(false);
   const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
@@ -1079,6 +1098,23 @@ export default function PurchaseOrderDetail() {
     po ? !["closed", "cancelled"].includes(po.status) : false,
   );
   const canClosePo = canLifecycleAction("close", po?.status === "received");
+  const scheduleStatus = po?.physicalStatus ?? po?.status;
+  const canEditSchedule = Boolean(
+    po && !["received", "closed", "cancelled", "short_closed"].includes(scheduleStatus),
+  );
+  const canSetConfirmedDelivery = Boolean(
+    po && !["draft", "pending_approval", "approved"].includes(scheduleStatus),
+  );
+  const scheduleMinimumDate = dateInputValue(po?.sentToVendorAt ?? po?.orderDate ?? po?.createdAt);
+
+  const openScheduleEditor = () => {
+    setScheduleData({
+      expectedDeliveryDate: dateInputValue(po?.expectedDeliveryDate),
+      confirmedDeliveryDate: dateInputValue(po?.confirmedDeliveryDate),
+      notes: "",
+    });
+    setShowScheduleDialog(true);
+  };
 
   // Incoterms-driven charge applicability: if no terms set, all are editable
   const poIncoterms = po?.incoterms as string | null | undefined;
@@ -1556,6 +1592,32 @@ export default function PurchaseOrderDetail() {
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const updateScheduleMutation = useMutation({
+    mutationFn: async (data: typeof scheduleData) => {
+      const res = await fetch(`/api/purchase-orders/${poId}/delivery-schedule`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedDeliveryDate: data.expectedDeliveryDate || null,
+          confirmedDeliveryDate: data.confirmedDeliveryDate || null,
+          notes: data.notes.trim() || undefined,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || "Failed to update delivery schedule");
+      return body;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/procurement/health"] });
+      setShowScheduleDialog(false);
+      toast({ title: "Schedule updated", description: "Delivery dates and audit history were updated." });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Schedule update failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -2165,6 +2227,29 @@ export default function PurchaseOrderDetail() {
                   <XCircle className="h-3 w-3" />
                 </Button>
               </span>
+            )}
+            <span>•</span>
+            <span>Requested: {displayScheduleDate(po.expectedDeliveryDate)}</span>
+            <span>•</span>
+            <span>Vendor confirmed: {displayScheduleDate(po.confirmedDeliveryDate)}</span>
+            {canEditSchedule && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={openScheduleEditor}
+                      aria-label="Edit delivery schedule"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Edit delivery schedule</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             )}
           </div>
         </div>
@@ -3991,6 +4076,61 @@ export default function PurchaseOrderDetail() {
         </DialogContent>
       </Dialog>
 
+      {/* ── Delivery Schedule Dialog ── */}
+      <Dialog open={showScheduleDialog} onOpenChange={setShowScheduleDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delivery Schedule</DialogTitle>
+            <DialogDescription>Update requested and vendor-confirmed delivery dates.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Requested Delivery Date</Label>
+              <Input
+                type="date"
+                min={scheduleMinimumDate || undefined}
+                value={scheduleData.expectedDeliveryDate}
+                onChange={event => setScheduleData(previous => ({
+                  ...previous,
+                  expectedDeliveryDate: event.target.value,
+                }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Vendor Confirmed Delivery Date</Label>
+              <Input
+                type="date"
+                min={scheduleMinimumDate || undefined}
+                value={scheduleData.confirmedDeliveryDate}
+                disabled={!canSetConfirmedDelivery}
+                onChange={event => setScheduleData(previous => ({
+                  ...previous,
+                  confirmedDeliveryDate: event.target.value,
+                }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Change Note</Label>
+              <Textarea
+                value={scheduleData.notes}
+                onChange={event => setScheduleData(previous => ({ ...previous, notes: event.target.value }))}
+                placeholder="Reason for the schedule correction"
+                rows={3}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowScheduleDialog(false)}>Cancel</Button>
+              <Button
+                onClick={() => updateScheduleMutation.mutate(scheduleData)}
+                disabled={updateScheduleMutation.isPending}
+              >
+                {updateScheduleMutation.isPending ? "Saving..." : "Save Schedule"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* ── Acknowledge Dialog ── */}
       <Dialog open={showAckDialog} onOpenChange={setShowAckDialog}>
         <DialogContent className="max-w-md">
@@ -4012,6 +4152,7 @@ export default function PurchaseOrderDetail() {
               <Label>Confirmed Delivery Date</Label>
               <Input
                 type="date"
+                min={scheduleMinimumDate || undefined}
                 value={ackData.confirmedDeliveryDate}
                 onChange={e => setAckData(prev => ({ ...prev, confirmedDeliveryDate: e.target.value }))}
                 className="h-10"

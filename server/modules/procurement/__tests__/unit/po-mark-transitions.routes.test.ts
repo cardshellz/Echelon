@@ -63,6 +63,8 @@ function buildPurchasingMock(overrides: Record<string, any> = {}): any {
     getNewPoPreload: vi.fn(),
     getProcurementSettings: vi.fn(),
     updateProcurementSetting: vi.fn(),
+    updatePO: vi.fn(),
+    updateDeliverySchedule: vi.fn(),
     acknowledge: vi.fn(),
     cancel: vi.fn(),
     voidPO: vi.fn(),
@@ -113,6 +115,16 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 async function post(baseUrl: string, path: string, body: any = {}): Promise<{ status: number; body: any }> {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+async function patch(baseUrl: string, path: string, body: any = {}): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -226,5 +238,129 @@ describe("POST /api/purchase-orders/:id/mark-arrived", () => {
       { notes: "Arrived at warehouse" },
       "test-user",
     );
+  });
+});
+
+describe("PATCH /api/purchase-orders/:id/delivery-schedule", () => {
+  let server: { url: string; close: () => Promise<void> };
+  let purchasing: ReturnType<typeof buildPurchasingMock>;
+
+  beforeEach(async () => {
+    purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+  });
+
+  afterEach(async () => { await server.close(); });
+
+  it("parses nullable schedule dates and forwards the audited update", async () => {
+    purchasing.updateDeliverySchedule.mockResolvedValue({ id: 15, status: "acknowledged" });
+
+    const { status } = await patch(server.url, "/api/purchase-orders/15/delivery-schedule", {
+      expectedDeliveryDate: "2026-08-20",
+      confirmedDeliveryDate: null,
+      notes: "Correct vendor schedule",
+    });
+
+    expect(status).toBe(200);
+    expect(purchasing.updateDeliverySchedule).toHaveBeenCalledWith(
+      15,
+      {
+        expectedDeliveryDate: new Date("2026-08-20"),
+        confirmedDeliveryDate: null,
+        notes: "Correct vendor schedule",
+      },
+      "test-user",
+    );
+  });
+
+  it("rejects malformed dates before calling the service", async () => {
+    const { status, body } = await patch(server.url, "/api/purchase-orders/15/delivery-schedule", {
+      confirmedDeliveryDate: "not-a-date",
+    });
+
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/valid date/i);
+    expect(purchasing.updateDeliverySchedule).not.toHaveBeenCalled();
+  });
+});
+
+describe("PATCH /api/purchase-orders/:id", () => {
+  let server: { url: string; close: () => Promise<void> };
+  let purchasing: ReturnType<typeof buildPurchasingMock>;
+
+  beforeEach(async () => {
+    purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+  });
+
+  afterEach(async () => { await server.close(); });
+
+  it("forwards only validated draft metadata", async () => {
+    purchasing.updatePO.mockResolvedValue({ id: 16, status: "draft", priority: "high" });
+
+    const { status } = await patch(server.url, "/api/purchase-orders/16", {
+      priority: "high",
+      internalNotes: "Expedite after vendor confirmation",
+      cancelDate: "2026-09-30",
+    });
+
+    expect(status).toBe(200);
+    expect(purchasing.updatePO).toHaveBeenCalledWith(
+      16,
+      {
+        priority: "high",
+        internalNotes: "Expedite after vendor confirmation",
+        cancelDate: new Date("2026-09-30"),
+      },
+      "test-user",
+    );
+  });
+
+  it("rejects protected lifecycle and financial fields as one atomic request", async () => {
+    const { status, body } = await patch(server.url, "/api/purchase-orders/16", {
+      priority: "high",
+      status: "sent",
+      physicalStatus: "received",
+      totalCents: 1,
+      approvedBy: "attacker",
+      expectedDeliveryDate: "2026-09-30",
+      incoterms: "DDP",
+      overReceiptTolerancePct: 100,
+    });
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("INVALID_PO_DRAFT_HEADER_PATCH");
+    expect(JSON.stringify(body.details.issues)).toContain("status");
+    expect(JSON.stringify(body.details.issues)).toContain("physicalStatus");
+    expect(JSON.stringify(body.details.issues)).toContain("totalCents");
+    expect(JSON.stringify(body.details.issues)).toContain("approvedBy");
+    expect(JSON.stringify(body.details.issues)).toContain("expectedDeliveryDate");
+    expect(JSON.stringify(body.details.issues)).toContain("incoterms");
+    expect(JSON.stringify(body.details.issues)).toContain("overReceiptTolerancePct");
+    expect(purchasing.updatePO).not.toHaveBeenCalled();
+  });
+
+  it("rejects locale-dependent date strings", async () => {
+    const { status, body } = await patch(server.url, "/api/purchase-orders/16", {
+      cancelDate: "09/30/2026",
+    });
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("INVALID_PO_DRAFT_HEADER_PATCH");
+    expect(JSON.stringify(body.details.issues)).toContain("ISO date");
+    expect(purchasing.updatePO).not.toHaveBeenCalled();
+  });
+
+  it("rejects empty edits and invalid ids before calling the service", async () => {
+    const empty = await patch(server.url, "/api/purchase-orders/16", {});
+    const invalidId = await patch(server.url, "/api/purchase-orders/not-an-id", {
+      priority: "high",
+    });
+
+    expect(empty.status).toBe(400);
+    expect(empty.body.details.code).toBe("INVALID_PO_DRAFT_HEADER_PATCH");
+    expect(invalidId.status).toBe(400);
+    expect(invalidId.body.details.code).toBe("INVALID_PURCHASE_ORDER_ID");
+    expect(purchasing.updatePO).not.toHaveBeenCalled();
   });
 });
