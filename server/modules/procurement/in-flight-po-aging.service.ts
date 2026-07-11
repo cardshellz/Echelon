@@ -151,9 +151,14 @@ function stageStartedAt(row: InFlightPoAgingRow, stage: InFlightPoAgingStage, no
     return firstDate(resolveEffectiveDeliveryDate(row), row.sentToVendorAt, row.orderDate, row.createdAt);
   }
 
+  const physicalStatus = resolveCurrentPhysicalStatus(row);
+  const submissionDate = firstDate(row.sentToVendorAt, row.orderDate, row.createdAt);
   const eta = resolveEffectiveDeliveryDate(row);
-  if (eta && eta.getTime() <= now.getTime()) return eta;
-  return firstDate(row.sentToVendorAt, row.orderDate, row.createdAt);
+  if (physicalStatus === "sent") return submissionDate;
+  if (isConfirmedDeliveryDateInvalid(row)) {
+    return eta && eta.getTime() <= now.getTime() ? eta : submissionDate;
+  }
+  return eta ?? submissionDate;
 }
 
 function severityForAge(
@@ -200,10 +205,17 @@ function buildDetail(row: InFlightPoAgingRow, stage: InFlightPoAgingStage, ageDa
     return "Vendor confirmed delivery date predates the PO submission date; correct the delivery schedule before relying on the ETA.";
   }
 
+  const physicalStatus = resolveCurrentPhysicalStatus(row);
+  if (physicalStatus === "sent") {
+    const missingEtaDetail = hasMissingEta(row) ? " or an expected delivery date" : "";
+    return `PO has been sent for ${ageDays} day${ageDays === 1 ? "" : "s"} without vendor acknowledgement${missingEtaDetail}.`;
+  }
+
   if (hasMissingEta(row)) {
     return `PO has been with the supplier for ${ageDays} day${ageDays === 1 ? "" : "s"} without an expected or confirmed delivery date.`;
   }
-  return `PO is ${ageDays} day${ageDays === 1 ? "" : "s"} past its supplier follow-up or ETA baseline.`;
+  const scheduleLabel = row.confirmedDeliveryDate ? "vendor-confirmed delivery date" : "expected delivery date";
+  return `PO is ${ageDays} day${ageDays === 1 ? "" : "s"} past its ${scheduleLabel}.`;
 }
 
 export function buildInFlightPoAgingDiagnostics(
