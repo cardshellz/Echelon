@@ -1144,6 +1144,64 @@ export const dropshipRmaInspections = dropshipSchema.table("dropship_rma_inspect
   check("dropship_rma_inspection_money_chk", sql`${table.creditCents} >= 0 AND ${table.feeCents} >= 0`),
 ]);
 
+export const dropshipCarrierProtectionPolicies = dropshipSchema.table("dropship_carrier_protection_policies", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  policyKey: varchar("policy_key", { length: 80 }).notNull(),
+  version: integer("version").notNull(),
+  supersedesPolicyId: integer("supersedes_policy_id"),
+  name: varchar("name", { length: 160 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  coveredLoss: boolean("covered_loss").notNull().default(true),
+  coveredMisdelivery: boolean("covered_misdelivery").notNull().default(true),
+  coveredDamage: boolean("covered_damage").notNull().default(true),
+  merchandiseReimbursementBps: integer("merchandise_reimbursement_bps").notNull().default(10000),
+  shippingReimbursementBps: integer("shipping_reimbursement_bps").notNull().default(10000),
+  deductibleCents: bigint("deductible_cents", { mode: "number" }).notNull().default(0),
+  maxCreditCents: bigint("max_credit_cents", { mode: "number" }),
+  lossWaitDays: integer("loss_wait_days").notNull().default(7),
+  misdeliveryWaitDays: integer("misdelivery_wait_days").notNull().default(2),
+  damageInspectionRequired: boolean("damage_inspection_required").notNull().default(true),
+  payoutTrigger: varchar("payout_trigger", { length: 40 }).notNull().default("internal_approval"),
+  carrierClaimRequired: boolean("carrier_claim_required").notNull().default(true),
+  approvalMode: varchar("approval_mode", { length: 20 }).notNull().default("manual"),
+  automaticApprovalLimitCents: bigint("automatic_approval_limit_cents", { mode: "number" }),
+  effectiveFrom: timestamp("effective_from", { withTimezone: true }).defaultNow().notNull(),
+  effectiveTo: timestamp("effective_to", { withTimezone: true }),
+  createdBy: varchar("created_by", { length: 255 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+}, (table) => [
+  uniqueIndex("dropship_carrier_protection_policy_key_version_uq").on(table.policyKey, table.version),
+  index("dropship_carrier_protection_policy_status_idx").on(table.status, table.effectiveFrom),
+  check("dropship_carrier_protection_policy_status_chk", sql`${table.status} IN ('draft','active','retired')`),
+  check("dropship_carrier_protection_policy_coverage_chk", sql`${table.coveredLoss} OR ${table.coveredMisdelivery} OR ${table.coveredDamage}`),
+  check("dropship_carrier_protection_policy_bps_chk", sql`${table.merchandiseReimbursementBps} BETWEEN 0 AND 10000 AND ${table.shippingReimbursementBps} BETWEEN 0 AND 10000`),
+  check("dropship_carrier_protection_policy_effective_chk", sql`${table.effectiveTo} IS NULL OR ${table.effectiveTo} > ${table.effectiveFrom}`),
+]);
+
+export const dropshipCarrierProtectionAssignments = dropshipSchema.table("dropship_carrier_protection_assignments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  policyId: integer("policy_id").notNull().references(() => dropshipCarrierProtectionPolicies.id, { onDelete: "restrict" }),
+  name: varchar("name", { length: 160 }).notNull(),
+  priority: integer("priority").notNull().default(0),
+  channelId: integer("channel_id").references(() => channels.id, { onDelete: "restrict" }),
+  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "restrict" }),
+  carrier: varchar("carrier", { length: 80 }),
+  service: varchar("service", { length: 120 }),
+  destinationCountry: varchar("destination_country", { length: 2 }),
+  destinationRegion: varchar("destination_region", { length: 100 }),
+  minShipmentValueCents: bigint("min_shipment_value_cents", { mode: "number" }),
+  maxShipmentValueCents: bigint("max_shipment_value_cents", { mode: "number" }),
+  isDefault: boolean("is_default").notNull().default(false),
+  isActive: boolean("is_active").notNull().default(true),
+  createdBy: varchar("created_by", { length: 255 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
+}, (table) => [
+  index("dropship_carrier_protection_default_idx").on(table.isDefault, table.isActive),
+  index("dropship_carrier_protection_assignment_match_idx").on(table.isActive, table.priority),
+]);
+
 export const dropshipCarrierClaims = dropshipSchema.table("dropship_carrier_claims", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   rmaId: integer("rma_id").references(() => dropshipRmas.id, { onDelete: "set null" }),
@@ -1151,6 +1209,13 @@ export const dropshipCarrierClaims = dropshipSchema.table("dropship_carrier_clai
   carrier: varchar("carrier", { length: 80 }),
   trackingNumber: varchar("tracking_number", { length: 120 }),
   status: varchar("status", { length: 40 }).notNull().default("pending"),
+  eventType: varchar("event_type", { length: 30 }),
+  policyId: integer("policy_id").references(() => dropshipCarrierProtectionPolicies.id, { onDelete: "restrict" }),
+  policySnapshot: jsonb("policy_snapshot"),
+  wholesaleCostSnapshotCents: bigint("wholesale_cost_snapshot_cents", { mode: "number" }),
+  shippingChargeSnapshotCents: bigint("shipping_charge_snapshot_cents", { mode: "number" }),
+  calculatedCreditCents: bigint("calculated_credit_cents", { mode: "number" }),
+  approvedCreditCents: bigint("approved_credit_cents", { mode: "number" }),
   externalClaimId: varchar("external_claim_id", { length: 255 }),
   claimAmountCents: bigint("claim_amount_cents", { mode: "number" }),
   insurancePoolCreditCents: bigint("insurance_pool_credit_cents", { mode: "number" }),
@@ -1165,6 +1230,7 @@ export const dropshipCarrierClaims = dropshipSchema.table("dropship_carrier_clai
     (${table.claimAmountCents} IS NULL OR ${table.claimAmountCents} >= 0)
     AND (${table.insurancePoolCreditCents} IS NULL OR ${table.insurancePoolCreditCents} >= 0)
   `),
+  check("dropship_carrier_claim_event_chk", sql`${table.eventType} IS NULL OR ${table.eventType} IN ('loss','misdelivery','damage')`),
 ]);
 
 export const dropshipNotificationEvents = dropshipSchema.table("dropship_notification_events", {

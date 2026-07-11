@@ -749,6 +749,64 @@ export interface DropshipAdminShippingConfigResponse {
   config: DropshipShippingConfigOverview;
 }
 
+export interface CarrierProtectionPolicyConfig {
+  policyId: number;
+  policyKey: string;
+  version: number;
+  supersedesPolicyId: number | null;
+  name: string;
+  status: "draft" | "active" | "retired";
+  coveredLoss: boolean;
+  coveredMisdelivery: boolean;
+  coveredDamage: boolean;
+  merchandiseReimbursementBps: number;
+  shippingReimbursementBps: number;
+  deductibleCents: number;
+  maxCreditCents: number | null;
+  lossWaitDays: number;
+  misdeliveryWaitDays: number;
+  damageInspectionRequired: boolean;
+  payoutTrigger: "internal_approval" | "carrier_claim_approved" | "carrier_payment_received";
+  carrierClaimRequired: boolean;
+  approvalMode: "manual" | "automatic";
+  automaticApprovalLimitCents: number | null;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  createdAt: string;
+  retiredAt: string | null;
+}
+
+export interface CarrierProtectionAssignmentConfig {
+  assignmentId: number;
+  policyId: number;
+  policyName: string;
+  policyVersion: number;
+  name: string;
+  priority: number;
+  channelId: number | null;
+  channelName: string | null;
+  warehouseId: number | null;
+  warehouseName: string | null;
+  carrier: string | null;
+  service: string | null;
+  destinationCountry: string | null;
+  destinationRegion: string | null;
+  minShipmentValueCents: number | null;
+  maxShipmentValueCents: number | null;
+  isDefault: boolean;
+  isActive: boolean;
+  createdAt: string;
+  deactivatedAt: string | null;
+}
+
+export interface CarrierProtectionConfigResponse {
+  config: {
+    policies: CarrierProtectionPolicyConfig[];
+    assignments: CarrierProtectionAssignmentConfig[];
+    generatedAt: string;
+  };
+}
+
 export interface DropshipShippingBoxInput {
   boxId?: number;
   code: string;
