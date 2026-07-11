@@ -31,6 +31,7 @@ import {
   type ForecastInputGapActionCode,
 } from "./forecast-input-gap-diagnostics.service";
 import { loadPurchasingRecommendationContext } from "./purchasing-recommendation-context.service";
+import { resolveRecommendationPoQuantity } from "./recommendation-po-quantity";
 import { buildSupplierSetupGaps } from "./supplier-setup-gaps.service";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
@@ -312,6 +313,8 @@ function buildApprovalPolicyImpact(result: ReturnType<typeof generatePurchasingR
       sku: item.sku,
       productName: item.productName,
       suggestedOrderQty: item.suggestedOrderQty,
+      suggestedOrderPieces: item.suggestedOrderPieces,
+      orderUomUnits: item.orderUomUnits,
       orderUomLabel: item.orderUomLabel,
       preferredVendorName: item.preferredVendorName,
       recommendationCandidateScore: item.recommendationCandidateScore,
@@ -494,6 +497,8 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
     preferredVendorId: number | null;
     preferredVendorName: string | null;
     suggestedOrderQty: number;
+    suggestedOrderPieces: number;
+    orderUomUnits: number;
     orderUomLabel: string;
     candidateScore: PurchasingRecommendationItem["recommendationCandidateScore"];
     qualityGate: PurchasingRecommendationItem["qualityGate"];
@@ -519,6 +524,8 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
       preferredVendorId: item.preferredVendorId,
       preferredVendorName: item.preferredVendorName,
       suggestedOrderQty: item.suggestedOrderQty,
+      suggestedOrderPieces: item.suggestedOrderPieces,
+      orderUomUnits: item.orderUomUnits,
       orderUomLabel: item.orderUomLabel,
       candidateScore: item.recommendationCandidateScore,
       qualityGate: item.qualityGate,
@@ -681,6 +688,8 @@ function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: Retu
         preferredVendorId: sourceItem.preferredVendorId ?? decision.vendorId,
         preferredVendorName: sourceItem.preferredVendorName ?? null,
         suggestedOrderQty: Number(sourceItem.suggestedOrderQty ?? 0) || 0,
+        suggestedOrderPieces: Number(sourceItem.suggestedOrderPieces ?? 0) || 0,
+        orderUomUnits: Number(sourceItem.orderUomUnits ?? 0) || 0,
         orderUomLabel: sourceItem.orderUomLabel ?? "units",
         candidateScore,
         qualityGate: currentItem?.qualityGate ?? snapshotItem.qualityGate ?? null,
@@ -1025,6 +1034,12 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "invalid_qty", item));
             continue;
           }
+          try {
+            resolveRecommendationPoQuantity(item);
+          } catch {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "invalid_piece_qty", item));
+            continue;
+          }
           if (!Number.isFinite(Number(item.preferredVendorId)) || Number(item.preferredVendorId) <= 0) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_vendor", item));
             continue;
@@ -1041,12 +1056,15 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
 
         const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
         const pos = await purchasing.createPOFromReorder(
-          eligible.map((item) => ({
-            productId: Number(item.productId),
-            productVariantId: Number(item.productVariantId),
-            suggestedQty: Number(item.suggestedOrderQty),
-            vendorId: Number(item.preferredVendorId),
-          })),
+          eligible.map((item) => {
+            const quantity = resolveRecommendationPoQuantity(item);
+            return {
+              productId: Number(item.productId),
+              productVariantId: Number(item.productVariantId),
+              suggestedPieces: quantity.orderQtyPieces,
+              vendorId: Number(item.preferredVendorId),
+            };
+          }),
           userId,
         );
         const poIds = Array.from(new Set((pos ?? []).map((po: any) => Number(po?.id)).filter((id: number) => Number.isFinite(id))));
@@ -1184,12 +1202,15 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
 
       const itemsToOrder = recommendationResult.items
         .filter((item) => passesAutoDraftApprovalPolicy(item, settings))
-        .map((item) => ({
-          productId: item.productId,
-          productVariantId: item.productVariantId ?? item.productId,
-          suggestedQty: item.suggestedOrderQty,
-          vendorId: item.preferredVendorId ?? undefined,
-        }));
+        .map((item) => {
+          const quantity = resolveRecommendationPoQuantity(item);
+          return {
+            productId: item.productId,
+            productVariantId: item.productVariantId ?? item.productId,
+            suggestedPieces: quantity.orderQtyPieces,
+            vendorId: item.preferredVendorId ?? undefined,
+          };
+        });
 
       let result: any[] = [];
       const poMutations: PurchasingRecommendationRunPoMutation[] = [];

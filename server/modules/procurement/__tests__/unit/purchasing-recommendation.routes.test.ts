@@ -1344,7 +1344,7 @@ describe("purchasing recommendation routes", () => {
         {
           productId: 202,
           productVariantId: 2002,
-          suggestedQty: 1,
+          suggestedPieces: 10,
           vendorId: 77,
         },
       ],
@@ -1790,7 +1790,7 @@ describe("purchasing recommendation routes", () => {
         {
           productId: 42,
           productVariantId: 420,
-          suggestedQty: 1,
+          suggestedPieces: 5,
           vendorId: 7,
         },
       ],

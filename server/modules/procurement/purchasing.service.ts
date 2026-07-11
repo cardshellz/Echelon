@@ -983,6 +983,7 @@ export function createPurchasingService(
     freightTerms?: string;
     vendorNotes?: string;
     internalNotes?: string;
+    source?: "manual" | "auto_draft" | "reorder";
     createdBy?: string;
   }) {
     // Validate vendor
@@ -1006,6 +1007,7 @@ export function createPurchasingService(
         freightTerms: data.freightTerms,
         vendorNotes: data.vendorNotes,
         internalNotes: data.internalNotes,
+        source: data.source ?? "manual",
         currency: vendor.currency || "USD",
         paymentTermsDays: vendor.paymentTermsDays,
         paymentTermsType: vendor.paymentTermsType,
@@ -3252,9 +3254,24 @@ export function createPurchasingService(
   async function createPOFromReorder(items: Array<{
     productId: number;
     productVariantId: number;
-    suggestedQty: number;
+    suggestedPieces: number;
     vendorId?: number;
   }>, userId?: string) {
+    for (const item of items) {
+      if (!Number.isSafeInteger(item.productId) || item.productId <= 0) {
+        throw new PurchasingError("Reorder product id must be a positive safe integer", 400);
+      }
+      if (!Number.isSafeInteger(item.productVariantId) || item.productVariantId <= 0) {
+        throw new PurchasingError("Reorder product variant id must be a positive safe integer", 400);
+      }
+      if (!Number.isSafeInteger(item.suggestedPieces) || item.suggestedPieces <= 0) {
+        throw new PurchasingError("Reorder suggested pieces must be a positive safe integer", 400);
+      }
+      if (item.vendorId !== undefined && (!Number.isSafeInteger(item.vendorId) || item.vendorId <= 0)) {
+        throw new PurchasingError("Reorder vendor id must be a positive safe integer", 400);
+      }
+    }
+
     // Group items by vendor (preferred vendor or specified)
     const vendorGroups = new Map<number, typeof items>();
 
@@ -3292,7 +3309,7 @@ export function createPurchasingService(
       if (existingDrafts && existingDrafts.length > 0) {
         po = existingDrafts[0];
       } else {
-        po = await createPO({ vendorId, createdBy: userId });
+        po = await createPO({ vendorId, source: "reorder", createdBy: userId });
         isNew = true;
       }
 
@@ -3304,9 +3321,9 @@ export function createPurchasingService(
         const existingLine = existingLines.find((l: any) => l.productId === item.productId && l.productVariantId === item.productVariantId);
         
         if (existingLine) {
-          // If the suggested qty is higher than the existing drafted qty, update the line
-          if (item.suggestedQty > existingLine.orderQty) {
-            await updateLine(existingLine.id, { orderQty: item.suggestedQty }, userId);
+          // PO quantities are always base pieces; receive configuration stays on the variant fields.
+          if (item.suggestedPieces > existingLine.orderQty) {
+            await updateLine(existingLine.id, { orderQty: item.suggestedPieces }, userId);
             linesUpdated = true;
           }
         } else {
@@ -3315,7 +3332,7 @@ export function createPurchasingService(
             productId: item.productId,
             productVariantId: item.productVariantId,
             vendorProductId: vp?.id,
-            orderQty: item.suggestedQty,
+            orderQty: item.suggestedPieces,
             unitCostCents: vp?.unitCostCents || 0,
             vendorSku: vp?.vendorSku,
           });
