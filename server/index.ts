@@ -23,6 +23,7 @@ import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.sched
 import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
 import { startOmsFlowReconciliationScheduler, setOmsFlowReconciliationServices } from "./modules/oms/oms-flow-reconciliation.service";
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
+import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
 import {
   startWebhookRetryWorker,
   enqueueShipStationRetry,
@@ -821,6 +822,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startOmsOpsAlertScheduler(db);
       } else {
         logSchedulerDisabled("scheduler", "OMS ops alert scheduler", "OMS_OPS_ALERT_SCHEDULER_DISABLED");
+      }
+
+      if (!schedulersDisabled("CONTROL_TOWER_PROJECTOR_DISABLED")) {
+        startControlTowerProjectionScheduler();
+      } else {
+        logSchedulerDisabled("scheduler", "Operations Control Tower projector", "CONTROL_TOWER_PROJECTOR_DISABLED");
       }
 
       if (!schedulersDisabled()) {
