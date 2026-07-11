@@ -61,6 +61,7 @@ import {
   reconcilePurchaseOrderReceipt,
   type ReceivingReconciliationLine,
 } from "./purchase-order-receipt-reconciliation.service";
+import { resolveRecommendationPoCost } from "./recommendation-po-cost";
 import {
   deliveryDateIso,
   sameDeliveryDate,
@@ -1258,6 +1259,9 @@ export function createPurchasingService(
     vendorProductId?: number;
     orderQty: number;
     unitCostCents: number;
+    unitCostMills?: number | null;
+    totalProductCostCents?: number | null;
+    packagingCostCents?: number | null;
     unitOfMeasure?: string;
     unitsPerUom?: number;
     discountPercent?: number;
@@ -1290,6 +1294,9 @@ export function createPurchasingService(
     const costs = calculateLineCosts({
       orderQty: data.orderQty,
       unitCostCents: data.unitCostCents,
+      unitCostMills: data.unitCostMills,
+      totalProductCostCents: data.totalProductCostCents,
+      packagingCostCents: data.packagingCostCents,
       discountPercent: data.discountPercent,
       taxRatePercent: data.taxRatePercent,
     });
@@ -1310,7 +1317,10 @@ export function createPurchasingService(
       expectedReceiveUnitsPerVariant:
         data.expectedReceiveUnitsPerVariant || data.unitsPerUom || variant?.unitsPerVariant || 1,
       orderQty: data.orderQty,
-      unitCostCents: data.unitCostCents,
+      unitCostCents: costs.unitCostCents,
+      unitCostMills: costs.unitCostMills,
+      totalProductCostCents: costs.totalProductCostCents,
+      packagingCostCents: costs.packagingCostCents,
       discountPercent: String(data.discountPercent || 0),
       taxRatePercent: String(data.taxRatePercent || 0),
       discountCents: costs.discountCents,
@@ -1333,6 +1343,9 @@ export function createPurchasingService(
     vendorProductId?: number;
     orderQty: number;
     unitCostCents: number;
+    unitCostMills?: number | null;
+    totalProductCostCents?: number | null;
+    packagingCostCents?: number | null;
     unitOfMeasure?: string;
     vendorSku?: string;
     description?: string;
@@ -1359,6 +1372,9 @@ export function createPurchasingService(
       const costs = calculateLineCosts({
         orderQty: line.orderQty,
         unitCostCents: line.unitCostCents,
+        unitCostMills: line.unitCostMills,
+        totalProductCostCents: line.totalProductCostCents,
+        packagingCostCents: line.packagingCostCents,
       });
 
       lineData.push({
@@ -1377,7 +1393,10 @@ export function createPurchasingService(
         expectedReceiveUnitsPerVariant:
           line.expectedReceiveUnitsPerVariant || variant?.unitsPerVariant || 1,
         orderQty: line.orderQty,
-        unitCostCents: line.unitCostCents,
+        unitCostCents: costs.unitCostCents,
+        unitCostMills: costs.unitCostMills,
+        totalProductCostCents: costs.totalProductCostCents,
+        packagingCostCents: costs.packagingCostCents,
         lineTotalCents: costs.lineTotalCents,
         discountCents: costs.discountCents,
         taxCents: costs.taxCents,
@@ -3255,6 +3274,7 @@ export function createPurchasingService(
     productId: number;
     productVariantId: number;
     suggestedPieces: number;
+    vendorProductId?: number;
     vendorId?: number;
   }>, userId?: string) {
     for (const item of items) {
@@ -3267,36 +3287,93 @@ export function createPurchasingService(
       if (!Number.isSafeInteger(item.suggestedPieces) || item.suggestedPieces <= 0) {
         throw new PurchasingError("Reorder suggested pieces must be a positive safe integer", 400);
       }
+      if (
+        item.vendorProductId !== undefined &&
+        (!Number.isSafeInteger(item.vendorProductId) || item.vendorProductId <= 0)
+      ) {
+        throw new PurchasingError("Reorder vendor product id must be a positive safe integer", 400);
+      }
       if (item.vendorId !== undefined && (!Number.isSafeInteger(item.vendorId) || item.vendorId <= 0)) {
         throw new PurchasingError("Reorder vendor id must be a positive safe integer", 400);
       }
     }
 
-    // Group items by vendor (preferred vendor or specified)
-    const vendorGroups = new Map<number, typeof items>();
+    type ReorderVendorProduct = NonNullable<Awaited<ReturnType<typeof storage.getVendorProductById>>>;
+    type ResolvedReorderItem = (typeof items)[number] & {
+      vendorId: number;
+      vendorProduct: ReorderVendorProduct;
+      supplierCost: ReturnType<typeof resolveRecommendationPoCost>;
+    };
+    const vendorGroups = new Map<number, ResolvedReorderItem[]>();
 
     for (const item of items) {
-      let vendorId = item.vendorId;
+      const vendorProduct = item.vendorProductId
+        ? await storage.getVendorProductById(item.vendorProductId)
+        : await storage.getPreferredVendorProduct(item.productId, item.productVariantId);
 
-      if (!vendorId) {
-        // Look up preferred vendor
-        const vp = await storage.getPreferredVendorProduct(item.productId, item.productVariantId);
-        if (vp) {
-          vendorId = vp.vendorId;
-        }
+      if (item.vendorProductId && !vendorProduct) {
+        throw new PurchasingError(`Vendor product ${item.vendorProductId} not found`, 404);
+      }
+      if (!vendorProduct) {
+        throw new PurchasingError(
+          `No active preferred vendor product found for product variant ${item.productVariantId}`,
+          409,
+        );
+      }
+      if (Number(vendorProduct.productId) !== item.productId) {
+        throw new PurchasingError(
+          `Vendor product ${vendorProduct.id} does not belong to product ${item.productId}`,
+          400,
+        );
+      }
+      if (
+        vendorProduct.productVariantId !== null &&
+        vendorProduct.productVariantId !== undefined &&
+        Number(vendorProduct.productVariantId) !== item.productVariantId
+      ) {
+        throw new PurchasingError(
+          `Vendor product ${vendorProduct.id} does not match product variant ${item.productVariantId}`,
+          400,
+        );
+      }
+      if (Number(vendorProduct.isActive) !== 1 || Number(vendorProduct.isPreferred) !== 1) {
+        throw new PurchasingError(
+          `Vendor product ${vendorProduct.id} is no longer an active preferred supplier row`,
+          409,
+        );
       }
 
+      const vendorId = item.vendorId ?? vendorProduct.vendorId;
       if (!vendorId) {
         throw new PurchasingError(
           `No vendor found for product variant ${item.productVariantId}. Set a preferred vendor first.`,
           400,
         );
       }
+      if (Number(vendorProduct.vendorId) !== vendorId) {
+        throw new PurchasingError(
+          `Vendor product ${vendorProduct.id} does not belong to vendor ${vendorId}`,
+          400,
+        );
+      }
+      let supplierCost: ReturnType<typeof resolveRecommendationPoCost>;
+      try {
+        supplierCost = resolveRecommendationPoCost({
+          estimatedCostMills: vendorProduct.unitCostMills,
+          estimatedCostCents: vendorProduct.unitCostCents,
+          orderQtyPieces: item.suggestedPieces,
+        });
+      } catch (error) {
+        throw new PurchasingError(
+          `Vendor product ${vendorProduct.id} has invalid supplier cost: ${(error as Error).message}`,
+          409,
+        );
+      }
 
       if (!vendorGroups.has(vendorId)) {
         vendorGroups.set(vendorId, []);
       }
-      vendorGroups.get(vendorId)!.push(item);
+      vendorGroups.get(vendorId)!.push({ ...item, vendorId, vendorProduct, supplierCost });
     }
 
     const createdPOs: any[] = [];
@@ -3327,14 +3404,15 @@ export function createPurchasingService(
             linesUpdated = true;
           }
         } else {
-          const vp = await storage.getPreferredVendorProduct(item.productId, item.productVariantId);
+          const vp = item.vendorProduct;
           lineDataToCreate.push({
             productId: item.productId,
             productVariantId: item.productVariantId,
-            vendorProductId: vp?.id,
+            vendorProductId: vp.id,
             orderQty: item.suggestedPieces,
-            unitCostCents: vp?.unitCostCents || 0,
-            vendorSku: vp?.vendorSku,
+            unitCostCents: item.supplierCost.unitCostCents,
+            unitCostMills: item.supplierCost.unitCostMills,
+            vendorSku: vp.vendorSku,
           });
         }
       }

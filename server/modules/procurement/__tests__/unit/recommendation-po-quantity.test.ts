@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  calculateRecommendationLineTotalCents,
-  resolveRecommendationPoQuantity,
-} from "../../recommendation-po-quantity";
+import { resolveRecommendationPoQuantity } from "../../recommendation-po-quantity";
 
 describe("resolveRecommendationPoQuantity", () => {
   it("keeps PO order quantity in base pieces while preserving the receive configuration", () => {
@@ -32,17 +29,5 @@ describe("resolveRecommendationPoQuantity", () => {
     { suggestedOrderQty: 1.5, suggestedOrderPieces: 15, orderUomUnits: 10 },
   ])("rejects invalid quantity input %#", (input) => {
     expect(() => resolveRecommendationPoQuantity(input)).toThrow(RangeError);
-  });
-});
-
-describe("calculateRecommendationLineTotalCents", () => {
-  it("calculates the cent total from per-piece cost and base-piece quantity", () => {
-    expect(calculateRecommendationLineTotalCents(125, 300)).toBe(37_500);
-  });
-
-  it("rejects unsafe totals instead of losing integer precision", () => {
-    expect(() => calculateRecommendationLineTotalCents(Number.MAX_SAFE_INTEGER, 2)).toThrow(
-      "recommendation line total exceeds the safe integer range",
-    );
   });
 });

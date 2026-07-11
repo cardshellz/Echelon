@@ -41,20 +41,3 @@ export function resolveRecommendationPoQuantity(
     orderUomUnits,
   };
 }
-
-export function calculateRecommendationLineTotalCents(
-  unitCostCents: unknown,
-  orderQtyPieces: unknown,
-): number {
-  const normalizedUnitCostCents = Number(unitCostCents ?? 0);
-  const normalizedOrderQtyPieces = positiveSafeInteger(orderQtyPieces, "orderQtyPieces");
-  if (!Number.isSafeInteger(normalizedUnitCostCents) || normalizedUnitCostCents < 0) {
-    throw new RangeError("unitCostCents must be a nonnegative safe integer");
-  }
-
-  const total = BigInt(normalizedUnitCostCents) * BigInt(normalizedOrderQtyPieces);
-  if (total > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new RangeError("recommendation line total exceeds the safe integer range");
-  }
-  return Number(total);
-}

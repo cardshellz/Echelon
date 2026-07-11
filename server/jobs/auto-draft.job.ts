@@ -20,10 +20,8 @@ import {
 } from "../modules/procurement/purchasing-recommendation.run-detail";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import { runStaleAutoDraftPoEscalationCheck } from "../modules/procurement/auto-draft-po-escalation.service";
-import {
-  calculateRecommendationLineTotalCents,
-  resolveRecommendationPoQuantity,
-} from "../modules/procurement/recommendation-po-quantity";
+import { resolveRecommendationPoCost } from "../modules/procurement/recommendation-po-cost";
+import { resolveRecommendationPoQuantity } from "../modules/procurement/recommendation-po-quantity";
 import {
   purchaseOrders,
   reorderExclusionRules,
@@ -50,12 +48,21 @@ type EligibleAutoDraftItem = {
   openPoCount: number;
   status: string;
   preferredVendorId: number | null;
+  vendorProductId: number;
+  estimatedCostMills: number | null;
   estimatedCostCents: number | null;
 };
 
 function buildAutoDraftPoLine(item: EligibleAutoDraftItem, purchaseOrderId: number, lineNumber: number) {
+  if (!Number.isSafeInteger(item.vendorProductId) || item.vendorProductId <= 0) {
+    throw new RangeError("vendorProductId must be a positive safe integer");
+  }
   const quantity = resolveRecommendationPoQuantity(item);
-  const unitCostCents = item.estimatedCostCents ?? 0;
+  const cost = resolveRecommendationPoCost({
+    estimatedCostMills: item.estimatedCostMills,
+    estimatedCostCents: item.estimatedCostCents,
+    orderQtyPieces: quantity.orderQtyPieces,
+  });
   return {
     purchaseOrderId,
     lineNumber,
@@ -63,13 +70,17 @@ function buildAutoDraftPoLine(item: EligibleAutoDraftItem, purchaseOrderId: numb
     productVariantId: item.productVariantId,
     expectedReceiveVariantId: item.productVariantId,
     expectedReceiveUnitsPerVariant: quantity.orderUomUnits,
+    vendorProductId: item.vendorProductId,
     sku: item.sku,
     productName: item.productName,
     orderQty: quantity.orderQtyPieces,
     unitOfMeasure: "each",
     unitsPerUom: quantity.orderUomUnits,
-    unitCostCents,
-    lineTotalCents: calculateRecommendationLineTotalCents(unitCostCents, quantity.orderQtyPieces),
+    unitCostMills: cost.unitCostMills,
+    unitCostCents: cost.unitCostCents,
+    totalProductCostCents: cost.totalProductCostCents,
+    packagingCostCents: 0,
+    lineTotalCents: cost.lineTotalCents,
     status: "open",
   };
 }
@@ -148,6 +159,8 @@ export async function runAutoDraftJob(options: AutoDraftOptions) {
         openPoCount: item.openPoCount,
         status: item.status,
         preferredVendorId: item.preferredVendorId,
+        vendorProductId: Number(item.supplierBasis.vendorProductId),
+        estimatedCostMills: item.estimatedCostMills,
         estimatedCostCents: item.estimatedCostCents,
       }));
 

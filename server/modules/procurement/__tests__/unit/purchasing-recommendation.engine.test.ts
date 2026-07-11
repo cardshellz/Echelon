@@ -81,6 +81,7 @@ describe("purchasing recommendation engine", () => {
       suggestedOrderPieces: 10,
       orderUomLabel: "Case",
       preferredVendorId: 77,
+      estimatedCostMills: 12500,
       estimatedCostCents: 125,
       confidence: "high",
       confidenceFactors: expect.arrayContaining([
@@ -96,6 +97,7 @@ describe("purchasing recommendation engine", () => {
         vendorProductId: 770,
         costSource: "vendor_unit_cost_mills",
         costQuality: "current",
+        estimatedCostMills: 12500,
         estimatedCostCents: 125,
         lastCostCents: 120,
       },
@@ -995,6 +997,7 @@ describe("purchasing recommendation engine", () => {
 
     expect(result.items[0]).toMatchObject({
       confidence: "medium",
+      estimatedCostMills: 22500,
       estimatedCostCents: 225,
       qualityGate: {
         autoDraftEligible: false,
@@ -1004,6 +1007,7 @@ describe("purchasing recommendation engine", () => {
         vendorProductId: 7010,
         costSource: "last_purchase_cost",
         costQuality: "stale",
+        estimatedCostMills: 22500,
         estimatedCostCents: 225,
         lastCostCents: 225,
       },
