@@ -35,10 +35,11 @@ const upsertBoxInputSchema = z.object({
 
 const upsertPackageProfileInputSchema = z.object({
   productVariantId: positiveIdSchema,
-  weightGrams: positiveIdSchema,
-  lengthMm: positiveIdSchema,
-  widthMm: positiveIdSchema,
-  heightMm: positiveIdSchema,
+  // Accepted temporarily for backward-compatible clients; catalog variant data is authoritative.
+  weightGrams: positiveIdSchema.optional(),
+  lengthMm: positiveIdSchema.optional(),
+  widthMm: positiveIdSchema.optional(),
+  heightMm: positiveIdSchema.optional(),
   shipAlone: z.boolean().default(false),
   defaultCarrier: optionalTrimmedStringSchema(50),
   defaultService: optionalTrimmedStringSchema(80),
@@ -161,14 +162,16 @@ export interface DropshipBoxConfigRecord {
 export interface DropshipPackageProfileConfigRecord {
   packageProfileId: number;
   productVariantId: number;
+  productId: number;
   productSku: string | null;
   productName: string | null;
   variantSku: string | null;
   variantName: string | null;
-  weightGrams: number;
-  lengthMm: number;
-  widthMm: number;
-  heightMm: number;
+  weightGrams: number | null;
+  lengthMm: number | null;
+  widthMm: number | null;
+  heightMm: number | null;
+  packageDataComplete: boolean;
   shipAlone: boolean;
   defaultCarrier: string | null;
   defaultService: string | null;
@@ -297,7 +300,10 @@ export interface DropshipShippingConfigCommandContext {
 }
 
 export type NormalizedUpsertDropshipBoxInput = Omit<UpsertDropshipBoxInput, "idempotencyKey" | "actor">;
-export type NormalizedUpsertDropshipPackageProfileInput = Omit<UpsertDropshipPackageProfileInput, "idempotencyKey" | "actor">;
+export type NormalizedUpsertDropshipPackageProfileInput = Omit<
+  UpsertDropshipPackageProfileInput,
+  "idempotencyKey" | "actor" | "weightGrams" | "lengthMm" | "widthMm" | "heightMm"
+>;
 export type NormalizedUpsertDropshipZoneRuleInput = Omit<UpsertDropshipZoneRuleInput, "idempotencyKey" | "actor">;
 export type NormalizedCreateDropshipRateTableInput = Omit<CreateDropshipRateTableInput, "idempotencyKey" | "actor">;
 export type NormalizedCreateDropshipMarkupPolicyInput = Omit<CreateDropshipMarkupPolicyInput, "idempotencyKey" | "actor">;
@@ -339,8 +345,17 @@ export class DropshipShippingConfigService {
     input: unknown,
   ): Promise<DropshipShippingConfigMutationResult<DropshipPackageProfileConfigRecord>> {
     const parsed = upsertPackageProfileInputSchema.parse(input);
+    const {
+      actor: _actor,
+      heightMm: _legacyHeightMm,
+      idempotencyKey: _idempotencyKey,
+      lengthMm: _legacyLengthMm,
+      weightGrams: _legacyWeightGrams,
+      widthMm: _legacyWidthMm,
+      ...overrideInput
+    } = parsed;
     const normalized: NormalizedUpsertDropshipPackageProfileInput = {
-      ...parsed,
+      ...overrideInput,
       defaultCarrier: parsed.defaultCarrier?.trim() || null,
       defaultService: parsed.defaultService?.trim() || null,
       defaultBoxId: parsed.defaultBoxId ?? null,

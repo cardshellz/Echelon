@@ -815,6 +815,7 @@ export const dropshipBoxCatalog = dropshipSchema.table("dropship_box_catalog", {
 export const dropshipPackageProfiles = dropshipSchema.table("dropship_package_profiles", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
+  // Deprecated compatibility snapshots. Runtime package data is read from catalog.product_variants.
   weightGrams: integer("weight_grams").notNull(),
   lengthMm: integer("length_mm").notNull(),
   widthMm: integer("width_mm").notNull(),

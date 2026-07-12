@@ -239,6 +239,7 @@ function statusForDropshipShippingConfigError(code: string): number {
       return 400;
     case "DROPSHIP_SHIPPING_CONFIG_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_SHIPPING_POLICY_WINDOW_CONFLICT":
+    case "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED":
       return 409;
     case "DROPSHIP_PRODUCT_VARIANT_NOT_FOUND":
     case "DROPSHIP_SHIPPING_BOX_NOT_FOUND":

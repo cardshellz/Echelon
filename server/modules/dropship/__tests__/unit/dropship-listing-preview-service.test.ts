@@ -81,6 +81,7 @@ describe("DropshipListingPreviewService", () => {
       productVariantId: 101,
       priceCents: 1299,
       quantity: 4,
+      weightGrams: 100,
     });
   });
 
@@ -116,6 +117,24 @@ describe("DropshipListingPreviewService", () => {
     expect(result.rows[0]?.previewStatus).toBe("blocked");
     expect(result.rows[0]?.blockers).toContain("listing_config_required");
     expect(result.rows[0]?.blockers).not.toContain("platform_not_supported");
+  });
+
+  it("blocks listing push when canonical catalog package data is incomplete", async () => {
+    repository.packageReadiness.set(101, {
+      hasCatalogPackageData: false,
+      hasActiveBox: true,
+      hasActiveRateTable: true,
+    });
+
+    const result = await service.previewForMember("member-1", {
+      storeConnectionId: 22,
+      productVariantIds: [101],
+      requestedRetailPriceCents: 1299,
+    });
+
+    expect(result.rows[0]?.previewStatus).toBe("blocked");
+    expect(result.rows[0]?.blockers).toContain("catalog_package_data_required");
+    expect(result.rows[0]?.blockers).not.toContain("package_profile_required");
   });
 
   it("blocks listing preview when vendor entitlement is not active", async () => {
@@ -251,6 +270,11 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
     isActive: true,
   };
   jobs: DropshipListingPushJobRecord[] = [];
+  packageReadiness = new Map<number, DropshipListingPackageReadiness>([[101, {
+    hasCatalogPackageData: true,
+    hasActiveBox: true,
+    hasActiveRateTable: true,
+  }]]);
   lastCreatedInput: CreateDropshipListingPushJobRepositoryInput | null = null;
 
   async loadStoreContext(): Promise<DropshipListingStoreContext | null> {
@@ -293,11 +317,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   }
 
   async getPackageReadiness(): Promise<Map<number, DropshipListingPackageReadiness>> {
-    return new Map([[101, {
-      hasPackageProfile: true,
-      hasActiveBox: true,
-      hasActiveRateTable: true,
-    }]]);
+    return this.packageReadiness;
   }
 
   async createListingPushJob(
@@ -359,6 +379,7 @@ function makeCandidate(): DropshipListingCatalogCandidate {
     condition: "new",
     itemSpecifics: { size: "35pt" },
     imageUrls: ["https://cdn.example.test/toploader.jpg"],
+    weightGrams: 100,
   };
 }
 

@@ -72,6 +72,7 @@ export class ConfigDrivenDropshipMarketplaceListingProvider implements DropshipM
         condition: input.content.condition,
         itemSpecifics: input.content.itemSpecifics,
         imageUrls: input.content.imageUrls,
+        weightGrams: input.content.weightGrams,
         priceCents: input.priceCents,
         quantity: input.quantity,
         marketplaceConfig: input.config.marketplaceConfig,

@@ -92,6 +92,7 @@ function statusForDropshipShippingError(code: string): number {
   }
   if (
     code === "DROPSHIP_PACKAGE_PROFILE_REQUIRED"
+    || code === "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED"
     || code === "DROPSHIP_BOX_CATALOG_REQUIRED"
     || code === "DROPSHIP_PACKAGE_PROFILE_BOX_REQUIRED"
     || code === "DROPSHIP_CARTONIZATION_BLOCKED"

@@ -17,6 +17,7 @@ import {
   FileSearch,
   History,
   MinusCircle,
+  Pencil,
   PlayCircle,
   PlusCircle,
   RefreshCw,
@@ -245,6 +246,10 @@ interface DropshipProductVariantOption {
   productId: number;
   active?: number | null;
   isActive?: boolean;
+  weightGrams: number | null;
+  lengthMm: number | null;
+  widthMm: number | null;
+  heightMm: number | null;
 }
 
 interface DropshipProductOption {
@@ -380,10 +385,6 @@ interface ShippingBoxFormState {
 
 interface ShippingPackageProfileFormState {
   productVariantId: string;
-  weightLb: string;
-  lengthIn: string;
-  widthIn: string;
-  heightIn: string;
   shipAlone: boolean;
   defaultCarrier: string;
   defaultService: string;
@@ -489,7 +490,7 @@ type ShippingConfigSectionKey =
 const shippingConfigSections: Array<{ key: ShippingConfigSectionKey; label: string }> = [
   { key: "overview", label: "Overview" },
   { key: "boxes", label: "Boxes" },
-  { key: "profiles", label: "Product profiles" },
+  { key: "profiles", label: "Variant overrides" },
   { key: "zones", label: "Zones" },
   { key: "rates", label: "Rate tables" },
   { key: "markup", label: "Markup" },
@@ -557,10 +558,6 @@ function makeEmptyReturnCreateForm(): ReturnCreateFormState {
 
 const emptyShippingPackageProfileForm: ShippingPackageProfileFormState = {
   productVariantId: "",
-  weightLb: "",
-  lengthIn: "",
-  widthIn: "",
-  heightIn: "",
   shipAlone: false,
   defaultCarrier: "",
   defaultService: "",
@@ -3726,10 +3723,6 @@ function ShippingConfigTab() {
     await runShippingAction("profile", async () => {
       await putJson("/api/dropship/admin/shipping/package-profiles", buildShippingPackageProfileInput({
         productVariantId: profileForm.productVariantId,
-        weightGrams: poundsToGramsString(profileForm.weightLb, "weight"),
-        lengthMm: inchesToMillimetersString(profileForm.lengthIn, "length"),
-        widthMm: inchesToMillimetersString(profileForm.widthIn, "width"),
-        heightMm: inchesToMillimetersString(profileForm.heightIn, "height"),
         shipAlone: profileForm.shipAlone,
         defaultCarrier: profileForm.defaultCarrier,
         defaultService: profileForm.defaultService,
@@ -3739,7 +3732,7 @@ function ShippingConfigTab() {
         idempotencyKey: createDropshipIdempotencyKey("shipping-package-profile"),
       }));
       setProfileForm(emptyShippingPackageProfileForm);
-      setMessage("Product shipping profile saved.");
+      setMessage("Variant shipping overrides saved.");
     });
   }
 
@@ -3908,7 +3901,7 @@ function ShippingConfigTab() {
         <TabsContent value="overview" className="m-0 space-y-5">
           <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <CatalogMetric icon={<Boxes className="h-4 w-4" />} label="Active boxes" value={String(activeCount(config?.boxes))} />
-            <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Product profiles" value={String(config?.packageProfiles.length ?? 0)} />
+            <CatalogMetric icon={<Truck className="h-4 w-4" />} label="Variant overrides" value={String(config?.packageProfiles.length ?? 0)} />
             <CatalogMetric icon={<FileSearch className="h-4 w-4" />} label="Zone rules" value={String(activeCount(config?.zoneRules))} />
             <CatalogMetric icon={<Wallet className="h-4 w-4" />} label="Active rate tables" value={String(activeRateTableCount(config))} />
           </section>
@@ -3935,6 +3928,7 @@ function ShippingConfigTab() {
               isSaving={pendingAction === "profile"}
               onChange={setProfileForm}
               onSave={savePackageProfile}
+              profiles={config?.packageProfiles ?? []}
               variants={productVariantOptions}
               variantsLoading={variantsQuery.isLoading}
             />
@@ -4084,6 +4078,7 @@ function ShippingPackageProfilePanel({
   isSaving,
   onChange,
   onSave,
+  profiles,
   variants,
   variantsLoading,
 }: {
@@ -4092,23 +4087,67 @@ function ShippingPackageProfilePanel({
   isSaving: boolean;
   onChange: Dispatch<SetStateAction<ShippingPackageProfileFormState>>;
   onSave: () => void;
+  profiles: DropshipShippingConfigOverview["packageProfiles"];
   variants: DropshipProductVariantOption[];
   variantsLoading: boolean;
 }) {
+  const selectedVariant = variants.find((variant) => String(variant.id) === form.productVariantId) ?? null;
+  const selectedProfile = profiles.find((profile) => String(profile.productVariantId) === form.productVariantId) ?? null;
+  const packageDataComplete = hasCompleteVariantPackageData(selectedVariant);
+
   return (
     <section className="rounded-md border bg-card p-4">
-      <PanelHeader title="Product shipping profiles" detail="SKU-level shipping dimensions, weight, and package rules." />
+      <PanelHeader
+        title="Variant shipping overrides"
+        detail="Catalog Variants owns package weight and dimensions. Configure only dropship-specific packing and service behavior here."
+      />
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <ProductVariantSkuPicker
           isLoading={variantsLoading}
-          onChange={(value) => onChange((current) => ({ ...current, productVariantId: value }))}
+          onChange={(value) => {
+            const profile = profiles.find((candidate) => String(candidate.productVariantId) === value);
+            onChange(profile
+              ? {
+                  productVariantId: value,
+                  shipAlone: profile.shipAlone,
+                  defaultCarrier: profile.defaultCarrier ?? "",
+                  defaultService: profile.defaultService ?? "",
+                  defaultBoxId: profile.defaultBoxId === null ? "" : String(profile.defaultBoxId),
+                  maxUnitsPerPackage: profile.maxUnitsPerPackage === null ? "" : String(profile.maxUnitsPerPackage),
+                  isActive: profile.isActive,
+                }
+              : { ...emptyShippingPackageProfileForm, productVariantId: value });
+          }}
           value={form.productVariantId}
           variants={variants}
         />
-        <ShippingInput label="Weight lb" value={form.weightLb} onChange={(value) => onChange((current) => ({ ...current, weightLb: value }))} />
-        <ShippingInput label="Length in" value={form.lengthIn} onChange={(value) => onChange((current) => ({ ...current, lengthIn: value }))} />
-        <ShippingInput label="Width in" value={form.widthIn} onChange={(value) => onChange((current) => ({ ...current, widthIn: value }))} />
-        <ShippingInput label="Height in" value={form.heightIn} onChange={(value) => onChange((current) => ({ ...current, heightIn: value }))} />
+        <div className="border-y py-3 md:col-span-2">
+          {selectedVariant ? (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">Catalog package data</span>
+                  <Badge variant={packageDataComplete ? "outline" : "destructive"}>
+                    {packageDataComplete ? "Complete" : "Missing"}
+                  </Badge>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {packageDataComplete
+                    ? formatVariantPackageData(selectedVariant)
+                    : "Add a positive weight, length, width, and height to this catalog variant before saving overrides."}
+                </p>
+              </div>
+              <Button asChild size="sm" variant="outline">
+                <a href={`/products/${selectedVariant.productId}?tab=variants&variantId=${selectedVariant.id}`}>
+                  <Pencil className="mr-2 h-4 w-4" />
+                  Edit in Catalog
+                </a>
+              </Button>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">Select a variant to verify its catalog package data.</p>
+          )}
+        </div>
         <ShippingInput label="Max units/package" value={form.maxUnitsPerPackage} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxUnitsPerPackage: value }))} />
         <ShippingInput label="Default carrier" value={form.defaultCarrier} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultCarrier: value }))} />
         <ShippingInput label="Default service" value={form.defaultService} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultService: value }))} />
@@ -4142,9 +4181,13 @@ function ShippingPackageProfilePanel({
           </Select>
         </div>
       </div>
-      <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
+      <Button
+        className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+        disabled={isSaving || !selectedVariant || !packageDataComplete}
+        onClick={onSave}
+      >
         <Save className="h-4 w-4" />
-        Save product profile
+        {selectedProfile ? "Update overrides" : "Save overrides"}
       </Button>
     </section>
   );
@@ -4523,10 +4566,10 @@ function ShippingConfigOverviewDashboard({
       detail: "Physical boxes and mailers available for package selection.",
     },
     {
-      section: "Product shipping profiles",
-      configured: `${activeCount(config.packageProfiles)} active / ${config.packageProfiles.length} loaded`,
-      ready: activeCount(config.packageProfiles) > 0,
-      detail: "SKU-level dimensions and package behavior used before quoting.",
+      section: "Variant shipping overrides",
+      configured: `${activeCount(config.packageProfiles)} active / ${config.packageProfiles.length} configured`,
+      ready: true,
+      detail: "Optional SKU-level packing and service behavior; package dimensions come from Catalog Variants.",
     },
     {
       section: "Zones",
@@ -4632,16 +4675,15 @@ function ShippingProductProfilesTable({
   isLoading: boolean;
 }) {
   if (isLoading) return <ShippingTableSkeleton />;
-  if (!config) return <EmptyState title="No product profiles" description="Dropship product shipping profiles are not loaded." />;
+  if (!config) return <EmptyState title="No variant overrides" description="Dropship variant shipping overrides are not loaded." />;
   return (
     <ShippingSimpleTable
-      title="Product shipping profiles"
-      emptyTitle="No product shipping profiles"
-      headers={["SKU", "Size", "Weight", "Defaults", "Status"]}
+      title="Variant shipping overrides"
+      emptyTitle="No variant shipping overrides"
+      headers={["SKU", "Catalog package", "Overrides", "Status"]}
       rows={config.packageProfiles.map((profile) => [
         profile.variantSku || String(profile.productVariantId),
-        `${formatMmAsInches(profile.lengthMm)} x ${formatMmAsInches(profile.widthMm)} x ${formatMmAsInches(profile.heightMm)} in`,
-        `${formatGramsAsPounds(profile.weightGrams)} lb`,
+        profile.packageDataComplete ? formatPackageProfileData(profile) : "Missing catalog package data",
         [
           profile.defaultCarrier,
           profile.defaultService,
@@ -5985,7 +6027,7 @@ function DogfoodReadinessTable({
                 </TableCell>
                 <TableCell>
                   <div className="text-sm">
-                    Profiles: <span className="font-mono">{item.metrics.selectedPackageProfileCount}</span>
+                    Package data: <span className="font-mono">{item.metrics.selectedPackageProfileCount}</span>
                     {" / "}
                     <span className={item.metrics.selectedVariantMissingPackageProfileCount > 0 ? "font-mono text-rose-700" : "font-mono"}>
                       {item.metrics.selectedVariantMissingPackageProfileCount}
@@ -9067,6 +9109,38 @@ function parseNonNegativeDecimal(value: string, field: string): number {
 
 function formatMmAsInches(value: number): string {
   return formatMeasurement(value / 25.4);
+}
+
+function hasCompleteVariantPackageData(variant: DropshipProductVariantOption | null): variant is DropshipProductVariantOption & {
+  weightGrams: number;
+  lengthMm: number;
+  widthMm: number;
+  heightMm: number;
+} {
+  if (!variant) return false;
+  return [variant.weightGrams, variant.lengthMm, variant.widthMm, variant.heightMm]
+    .every((value) => Number.isInteger(value) && Number(value) > 0);
+}
+
+function formatVariantPackageData(variant: DropshipProductVariantOption & {
+  weightGrams: number;
+  lengthMm: number;
+  widthMm: number;
+  heightMm: number;
+}): string {
+  return `${formatGramsAsPounds(variant.weightGrams)} lb / ${formatMmAsInches(variant.lengthMm)} x ${formatMmAsInches(variant.widthMm)} x ${formatMmAsInches(variant.heightMm)} in`;
+}
+
+function formatPackageProfileData(profile: DropshipShippingConfigOverview["packageProfiles"][number]): string {
+  if (
+    profile.weightGrams === null
+    || profile.lengthMm === null
+    || profile.widthMm === null
+    || profile.heightMm === null
+  ) {
+    return "Missing catalog package data";
+  }
+  return `${formatGramsAsPounds(profile.weightGrams)} lb / ${formatMmAsInches(profile.lengthMm)} x ${formatMmAsInches(profile.widthMm)} x ${formatMmAsInches(profile.heightMm)} in`;
 }
 
 function formatGramsAsPounds(value: number): string {

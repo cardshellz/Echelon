@@ -653,14 +653,16 @@ export interface DropshipShippingBoxConfig {
 export interface DropshipShippingPackageProfileConfig {
   packageProfileId: number;
   productVariantId: number;
+  productId: number;
   productSku: string | null;
   productName: string | null;
   variantSku: string | null;
   variantName: string | null;
-  weightGrams: number;
-  lengthMm: number;
-  widthMm: number;
-  heightMm: number;
+  weightGrams: number | null;
+  lengthMm: number | null;
+  widthMm: number | null;
+  heightMm: number | null;
+  packageDataComplete: boolean;
   shipAlone: boolean;
   defaultCarrier: string | null;
   defaultService: string | null;
@@ -822,10 +824,6 @@ export interface DropshipShippingBoxInput {
 
 export interface DropshipShippingPackageProfileInput {
   productVariantId: number;
-  weightGrams: number;
-  lengthMm: number;
-  widthMm: number;
-  heightMm: number;
   shipAlone: boolean;
   defaultCarrier: string | null;
   defaultService: string | null;
@@ -3058,10 +3056,6 @@ export function buildShippingBoxInput(input: {
 
 export function buildShippingPackageProfileInput(input: {
   productVariantId: string;
-  weightGrams: string;
-  lengthMm: string;
-  widthMm: string;
-  heightMm: string;
   shipAlone: boolean;
   defaultCarrier: string;
   defaultService: string;
@@ -3072,10 +3066,6 @@ export function buildShippingPackageProfileInput(input: {
 }): DropshipShippingPackageProfileInput {
   return {
     productVariantId: parsePositiveInteger(input.productVariantId, "productVariantId"),
-    weightGrams: parsePositiveInteger(input.weightGrams, "weightGrams"),
-    lengthMm: parsePositiveInteger(input.lengthMm, "lengthMm"),
-    widthMm: parsePositiveInteger(input.widthMm, "widthMm"),
-    heightMm: parsePositiveInteger(input.heightMm, "heightMm"),
     shipAlone: input.shipAlone,
     defaultCarrier: input.defaultCarrier.trim() || null,
     defaultService: input.defaultService.trim() || null,

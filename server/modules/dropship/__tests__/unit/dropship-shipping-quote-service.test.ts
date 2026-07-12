@@ -58,12 +58,18 @@ describe("dropship shipping quote domain", () => {
     expect(calculateBasisPointsFeeCents(999, { bps: 200 })).toBe(19);
   });
 
-  it("blocks cartonization when a package profile is missing", () => {
-    expect(() => cartonizeDropshipItems({
-      items: [{ productVariantId: 999, quantity: 1 }],
-      packageProfiles: [],
-      boxes: [makeBox()],
-    })).toThrow(DropshipError);
+  it("blocks cartonization when canonical catalog package data is missing", () => {
+    let thrown: unknown;
+    try {
+      cartonizeDropshipItems({
+        items: [{ productVariantId: 999, quantity: 1 }],
+        packageProfiles: [],
+        boxes: [makeBox()],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ code: "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED" });
   });
 });
 

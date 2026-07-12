@@ -52,6 +52,7 @@ Implementation status (2026-07-11):
 | 0.2 | Implemented: active holds are reconsidered only after a vendor wallet mutation and retain their original expiration across worker claims. Production verification remains. |
 | 0.3 | Implemented with strict error-shape matching, a deduplicated audit event, and cursor advancement after the remaining orders complete. Production verification remains. |
 | 0.4 | Code default implemented: new eBay configs use `live`; Shopify remains `draft_first`. The existing `marzcards` production config still requires an explicit post-deploy flip. |
+| 0.5 | Implemented: quote cartonization, listing/eBay push, and dogfood readiness use canonical Catalog Variant package data; dropship profiles are override-only. Production quote verification remains. |
 
 **0.1 eBay HTTP 400 must not tear down the store connection.** `isPermanentAuthFailureStatus` treats 400 as a permanent auth failure in BOTH `dropship-ebay-listing-push.provider.ts:428-430` and `dropship-ebay-tracking.provider.ts` (~:298); any eBay validation 400 then nulls token refs and deletes vault rows via `recordAuthFailure` (`dropship-marketplace-credentials.ts:237-262`), forcing full OAuth reconnect and blocking remaining job items. Fix: 401/403 only in both API-call paths (400 stays fatal only on the token-refresh endpoint = `invalid_grant`). Acceptance: unit test — eBay 400 on push/tracking fails the item without touching connection status/tokens. (Deep review §3.2.)
 
