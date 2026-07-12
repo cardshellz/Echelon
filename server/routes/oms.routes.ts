@@ -1,4 +1,4 @@
-import { requireAuth } from "./middleware";
+import { requireAuth, requirePermission } from "./middleware";
 /**
  * OMS API Routes
  *
@@ -106,51 +106,59 @@ export function registerOmsRoutes(app: Express) {
     }
   });
 
-  app.post("/api/oms/ops/webhook-inbox/:id/replay", requireAuth, async (req: Request, res: Response) => {
-    try {
-      const id = Number(req.params.id);
-      const operator =
-        req.session.user?.username ||
-        req.session.user?.displayName ||
-        String(req.session.user?.id || "unknown");
-      const result = await enqueueWebhookInboxReplay(db, id, operator);
-      res.json(result);
-    } catch (err: any) {
-      console.error("[OMS Routes] Webhook inbox replay error:", err);
-      const message = err?.message || "Failed to queue webhook replay";
-      const status = /positive integer/i.test(message)
-        ? 400
-        : /not found/i.test(message)
-          ? 404
-          : /already succeeded|not a replayable/i.test(message)
-            ? 409
-            : 500;
-      res.status(status).json({ error: message });
-    }
-  });
+  app.post(
+    "/api/oms/ops/webhook-inbox/:id/replay",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const id = Number(req.params.id);
+        const operator =
+          req.session.user?.username ||
+          req.session.user?.displayName ||
+          String(req.session.user?.id || "unknown");
+        const result = await enqueueWebhookInboxReplay(db, id, operator);
+        res.json(result);
+      } catch (err: any) {
+        console.error("[OMS Routes] Webhook inbox replay error:", err);
+        const message = err?.message || "Failed to queue webhook replay";
+        const status = /positive integer/i.test(message)
+          ? 400
+          : /not found/i.test(message)
+            ? 404
+            : /already succeeded|not a replayable/i.test(message)
+              ? 409
+              : 500;
+        res.status(status).json({ error: message });
+      }
+    },
+  );
 
-  app.post("/api/oms/ops/webhook-retry/:id/requeue", requireAuth, async (req: Request, res: Response) => {
-    try {
-      const id = Number(req.params.id);
-      const operator =
-        req.session.user?.username ||
-        req.session.user?.displayName ||
-        String(req.session.user?.id || "unknown");
-      const result = await requeueDeadWebhookRetry(db, id, operator);
-      res.json(result);
-    } catch (err: any) {
-      console.error("[OMS Routes] Webhook retry requeue error:", err);
-      const message = err?.message || "Failed to requeue webhook retry";
-      const status = /positive integer/i.test(message)
-        ? 400
-        : /not found/i.test(message)
-          ? 404
-          : /not dead-lettered/i.test(message)
-            ? 409
-            : 500;
-      res.status(status).json({ error: message });
-    }
-  });
+  app.post(
+    "/api/oms/ops/webhook-retry/:id/requeue",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const id = Number(req.params.id);
+        const operator =
+          req.session.user?.username ||
+          req.session.user?.displayName ||
+          String(req.session.user?.id || "unknown");
+        const result = await requeueDeadWebhookRetry(db, id, operator);
+        res.json(result);
+      } catch (err: any) {
+        console.error("[OMS Routes] Webhook retry requeue error:", err);
+        const message = err?.message || "Failed to requeue webhook retry";
+        const status = /positive integer/i.test(message)
+          ? 400
+          : /not found/i.test(message)
+            ? 404
+            : /not dead-lettered/i.test(message)
+              ? 409
+              : 500;
+        res.status(status).json({ error: message });
+      }
+    },
+  );
 
   app.post("/api/oms/ops/reconciliation/remediate", requireAuth, async (req: Request, res: Response) => {
     try {

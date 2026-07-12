@@ -12,14 +12,14 @@ import {
   Globe,
   X,
   CheckCircle2,
-  AlertCircle,
   Timer,
   Filter,
   Ship,
   ExternalLink,
+  RadioTower,
   RotateCcw,
 } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -120,40 +120,6 @@ interface OmsStats {
   todayCount: number;
 }
 
-interface OmsOpsIssue {
-  code: string;
-  severity: "critical" | "warning" | "info";
-  count: number;
-  message: string;
-  sample: any[];
-}
-
-interface OmsOpsHealth {
-  generatedAt: string;
-  status: "healthy" | "degraded" | "critical";
-  workers?: {
-    webhookRetry?: OmsWorkerHeartbeat & {
-      lastSkippedAt: string | null;
-      inFlight: boolean;
-    };
-    omsFlowReconciliation?: OmsWorkerHeartbeat;
-    omsOpsAlert?: OmsWorkerHeartbeat;
-  };
-  counts: {
-    critical: number;
-    warning: number;
-    info: number;
-  };
-  issues: OmsOpsIssue[];
-}
-
-interface OmsWorkerHeartbeat {
-  startedAt: string | null;
-  lastRunAt: string | null;
-  lastSuccessAt: string | null;
-  lastError: string | null;
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -241,16 +207,6 @@ export default function OmsOrders() {
     queryFn: async () => {
       const res = await fetch("/api/oms/orders/stats");
       if (!res.ok) throw new Error("Failed to fetch stats");
-      return res.json();
-    },
-    refetchInterval: 30_000,
-  });
-
-  const { data: opsHealth } = useQuery<OmsOpsHealth>({
-    queryKey: ["/api/oms/ops/health"],
-    queryFn: async () => {
-      const res = await fetch("/api/oms/ops/health");
-      if (!res.ok) throw new Error("Failed to fetch OMS health");
       return res.json();
     },
     refetchInterval: 30_000,
@@ -344,95 +300,23 @@ export default function OmsOrders() {
     },
   });
 
-  const replayWebhookMutation = useMutation({
-    mutationFn: async (inboxId: number) => {
-      const res = await fetch(`/api/oms/ops/webhook-inbox/${inboxId}/replay`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Failed to queue replay" }));
-        throw new Error(err.error || "Failed to queue replay");
-      }
-      return res.json();
-    },
-    onSuccess: (result) => {
-      toast({
-        title: "Webhook replay queued",
-        description: `${result.topic} retry #${result.retryQueueId}`,
-      });
-      queryClient.invalidateQueries({ queryKey: ["/api/oms/ops/health"] });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Replay failed", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const requeueRetryMutation = useMutation({
-    mutationFn: async (retryQueueId: number) => {
-      const res = await fetch(`/api/oms/ops/webhook-retry/${retryQueueId}/requeue`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Failed to requeue retry" }));
-        throw new Error(err.error || "Failed to requeue retry");
-      }
-      return res.json();
-    },
-    onSuccess: (result) => {
-      toast({
-        title: "Retry requeued",
-        description: `${result.provider}/${result.topic} #${result.retryQueueId}`,
-      });
-      queryClient.invalidateQueries({ queryKey: ["/api/oms/ops/health"] });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Requeue failed", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const remediateFlowMutation = useMutation({
-    mutationFn: async ({ code, row }: { code: string; row: any }) => {
-      const res = await fetch("/api/oms/ops/reconciliation/remediate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code,
-          omsOrderId: row.oms_order_id ?? row.id,
-          wmsOrderId: row.wms_order_id ?? (code === "WMS_READY_WITHOUT_SHIPMENT" ? row.id : undefined),
-          shipmentId: row.shipment_id,
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Failed to remediate issue" }));
-        throw new Error(err.error || "Failed to remediate issue");
-      }
-      return res.json();
-    },
-    onSuccess: (result) => {
-      toast({
-        title: result.changed ? "Remediation applied" : "No change needed",
-        description: result.action,
-      });
-      queryClient.invalidateQueries({ queryKey: ["/api/oms/ops/health"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Remediation failed", description: err.message, variant: "destructive" });
-    },
-  });
-
   const orders = ordersData?.orders || [];
   const total = ordersData?.total || 0;
   const totalPages = Math.ceil(total / limit);
 
   return (
     <div className="p-4 md:p-6 space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Orders (OMS)</h1>
           <p className="text-muted-foreground text-sm">Unified order view across all channels</p>
         </div>
+        <Button variant="outline" size="sm" asChild>
+          <a href="/oms/flow-monitor">
+            <RadioTower className="mr-2 h-4 w-4" />
+            Operations Control Tower
+          </a>
+        </Button>
       </div>
 
       {/* Stats Cards */}
@@ -474,229 +358,6 @@ export default function OmsOrders() {
           </CardContent>
         </Card>
       </div>
-
-      {opsHealth && (
-        <Card className={opsHealth.status === "critical" ? "border-red-300" : opsHealth.status === "degraded" ? "border-amber-300" : "border-emerald-300"}>
-          <CardHeader className="pb-3">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <AlertCircle className={opsHealth.status === "healthy" ? "h-4 w-4 text-emerald-600" : opsHealth.status === "degraded" ? "h-4 w-4 text-amber-600" : "h-4 w-4 text-red-600"} />
-                OMS/WMS Flow Health
-              </CardTitle>
-              <div className="flex gap-2">
-                <Badge variant={opsHealth.status === "healthy" ? "outline" : "destructive"}>
-                  {opsHealth.status}
-                </Badge>
-                <Badge variant="outline">
-                  {opsHealth.counts.critical} critical
-                </Badge>
-                <Badge variant="outline">
-                  {opsHealth.counts.warning} warnings
-                </Badge>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="pt-0">
-            {opsHealth.workers?.webhookRetry && (
-              <div className="mb-2 rounded-md bg-muted p-2 text-xs text-muted-foreground">
-                Retry worker | {opsHealth.workers.webhookRetry.inFlight ? "running" : "idle"} | started {opsHealth.workers.webhookRetry.startedAt || "-"} | last run {opsHealth.workers.webhookRetry.lastRunAt || "-"} | last success {opsHealth.workers.webhookRetry.lastSuccessAt || "-"} | last skipped {opsHealth.workers.webhookRetry.lastSkippedAt || "-"}
-              </div>
-            )}
-            {opsHealth.workers?.omsFlowReconciliation && (
-              <div className="mb-2 rounded-md bg-muted p-2 text-xs text-muted-foreground">
-                Reconciliation scheduler | started {opsHealth.workers.omsFlowReconciliation.startedAt || "-"} | last run {opsHealth.workers.omsFlowReconciliation.lastRunAt || "-"} | last success {opsHealth.workers.omsFlowReconciliation.lastSuccessAt || "-"}
-              </div>
-            )}
-            {opsHealth.workers?.omsOpsAlert && (
-              <div className="mb-3 rounded-md bg-muted p-2 text-xs text-muted-foreground">
-                Alert scheduler | started {opsHealth.workers.omsOpsAlert.startedAt || "-"} | last run {opsHealth.workers.omsOpsAlert.lastRunAt || "-"} | last success {opsHealth.workers.omsOpsAlert.lastSuccessAt || "-"}
-              </div>
-            )}
-            {opsHealth.issues.length === 0 ? (
-              <div className="text-sm text-muted-foreground">No stuck webhook, WMS, or shipping handoff issues detected.</div>
-            ) : (
-              <div className="grid gap-3 lg:grid-cols-2">
-                {opsHealth.issues.map((issue) => (
-                  <div key={issue.code} className="rounded-md border p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-medium">{issue.message}</div>
-                        <div className="mt-1 text-xs text-muted-foreground">{issue.code}</div>
-                      </div>
-                      <Badge variant={issue.severity === "critical" ? "destructive" : "outline"}>
-                        {issue.count}
-                      </Badge>
-                    </div>
-                    {issue.sample.length > 0 && issue.code.startsWith("WEBHOOK_INBOX_") ? (
-                      <div className="mt-3 space-y-2">
-                        {issue.sample.slice(0, 3).map((row: any) => (
-                          <div key={row.id} className="flex items-center justify-between gap-3 rounded bg-muted p-2 text-xs">
-                            <div className="min-w-0">
-                              <div className="truncate font-medium">
-                                #{row.id} {row.provider}/{row.topic}
-                              </div>
-                              <div className="truncate text-muted-foreground">
-                                {row.status || "processing"} | attempts {row.attempts ?? 0} | {row.source_domain || "unknown shop"}
-                              </div>
-                            </div>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 shrink-0 gap-1 px-2"
-                              disabled={replayWebhookMutation.isPending}
-                              onClick={() => replayWebhookMutation.mutate(Number(row.id))}
-                            >
-                              <RotateCcw className="h-3.5 w-3.5" />
-                              Replay
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : issue.sample.length > 0 && (
-                      issue.code === "OMS_PAID_WITHOUT_WMS" ||
-                      issue.code === "WMS_READY_WITHOUT_SHIPMENT" ||
-                      issue.code === "OMS_FINAL_WMS_ACTIVE" ||
-                      issue.code === "WMS_FINAL_OMS_OPEN" ||
-                      issue.code === "SHIPMENT_SHIPPED_OMS_OPEN" ||
-                      issue.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED" ||
-                      issue.code === "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED"
-                    ) ? (
-                      <div className="mt-3 space-y-2">
-                        {issue.sample.slice(0, 3).map((row: any) => (
-                          <div
-                            key={`${issue.code}-${row.oms_order_id || row.wms_order_id || row.shipment_id}`}
-                            className="flex items-center justify-between gap-3 rounded bg-muted p-2 text-xs"
-                          >
-                            <div className="min-w-0">
-                              <div className="truncate font-medium">
-                                {row.external_order_number || row.order_number || `OMS #${row.oms_order_id}`}
-                              </div>
-                              <div className="truncate text-muted-foreground">
-                                OMS {row.oms_order_id || "-"} | WMS {row.wms_order_id || row.order_id || "-"} | Ship {row.shipment_id || "-"}
-                              </div>
-                            </div>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 shrink-0 gap-1 px-2"
-                              disabled={remediateFlowMutation.isPending}
-                              onClick={() => remediateFlowMutation.mutate({ code: issue.code, row })}
-                            >
-                              <RotateCcw className="h-3.5 w-3.5" />
-                              Fix
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : issue.sample.length > 0 && issue.code === "WEBHOOK_RETRY_DEAD" ? (
-                      <div className="mt-3 space-y-2">
-                        {issue.sample.slice(0, 3).map((row: any) => (
-                          <div key={row.id} className="flex items-center justify-between gap-3 rounded bg-muted p-2 text-xs">
-                            <div className="min-w-0">
-                              <div className="truncate font-medium">
-                                #{row.id} {row.provider}/{row.topic}
-                              </div>
-                              <div className="truncate text-muted-foreground">
-                                attempts {row.attempts ?? 0} | {row.last_error || "dead-lettered"}
-                              </div>
-                            </div>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 shrink-0 gap-1 px-2"
-                              disabled={requeueRetryMutation.isPending}
-                              onClick={() => requeueRetryMutation.mutate(Number(row.id))}
-                            >
-                              <RotateCcw className="h-3.5 w-3.5" />
-                              Requeue
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : issue.sample.length > 0 && (
-                      issue.code === "WEBHOOK_RETRY_STALE_DUE" ||
-                      issue.code === "WEBHOOK_RETRY_DUE"
-                    ) ? (
-                      <div className="mt-3 space-y-2">
-                        {issue.sample.slice(0, 3).map((row: any) => (
-                          <div key={`${issue.code}-${row.id}`} className="rounded bg-muted p-2 text-xs">
-                            <div className="truncate font-medium">
-                              #{row.id} {row.provider}/{row.topic}
-                            </div>
-                            <div className="mt-1 truncate text-muted-foreground">
-                              due {row.next_retry_at || "-"} | attempts {row.attempts ?? 0} | {row.last_error || "pending"}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : issue.sample.length > 0 && (
-                      issue.code === "WEBHOOK_RETRY_WORKER_NOT_STARTED" ||
-                      issue.code === "WEBHOOK_RETRY_WORKER_STALE" ||
-                      issue.code === "OMS_FLOW_RECONCILIATION_SCHEDULER_NOT_STARTED" ||
-                      issue.code === "OMS_FLOW_RECONCILIATION_SCHEDULER_STALE" ||
-                      issue.code === "OMS_OPS_ALERT_SCHEDULER_NOT_STARTED" ||
-                      issue.code === "OMS_OPS_ALERT_SCHEDULER_STALE"
-                    ) ? (
-                      <div className="mt-3 rounded bg-muted p-2 text-xs text-muted-foreground">
-                        started {issue.sample[0]?.startedAt || "-"} | last run {issue.sample[0]?.lastRunAt || "-"} | last error {issue.sample[0]?.lastError || "-"}
-                      </div>
-                    ) : issue.sample.length > 0 && (
-                      issue.code === "SHIPMENT_REQUIRES_REVIEW" ||
-                      issue.code === "SHIPMENT_ON_HOLD"
-                    ) ? (
-                      <div className="mt-3 space-y-2">
-                        {issue.sample.slice(0, 3).map((row: any) => (
-                          <div
-                            key={`${issue.code}-${row.shipment_id}`}
-                            className="rounded bg-muted p-2 text-xs"
-                          >
-                            <div className="truncate font-medium">
-                              Ship {row.shipment_id} | WMS {row.order_id || "-"} | {row.status || "-"}
-                            </div>
-                            <div className="mt-1 truncate text-muted-foreground">
-                              {row.review_reason || row.on_hold_reason || "warehouse review required"}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : issue.sample.length > 0 && (
-                      issue.code === "LINE_HELD_AGING" ||
-                      issue.code === "ORDER_ALL_LINES_HELD"
-                    ) ? (
-                      <div className="mt-3 space-y-2">
-                        {issue.sample.slice(0, 3).map((row: any) => (
-                          <div
-                            key={`${issue.code}-${row.wms_order_id}-${row.shipment_id ?? "order"}`}
-                            className="rounded bg-muted p-2 text-xs"
-                          >
-                            <div className="truncate font-medium">
-                              {row.order_number || `WMS #${row.wms_order_id}`}
-                              {row.sku ? ` | ${row.sku}` : ""}
-                              {row.held_lines != null ? ` | ${row.held_lines} line(s) held` : ""}
-                            </div>
-                            <div className="mt-1 truncate text-muted-foreground">
-                              {row.days_held != null
-                                ? `held ${row.days_held}d`
-                                : row.held_since
-                                ? `held since ${String(row.held_since).slice(0, 10)}`
-                                : "held"}
-                              {row.hold_reason ? ` | ${row.hold_reason}` : ""}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : issue.sample.length > 0 && (
-                      <pre className="mt-3 max-h-28 overflow-auto rounded bg-muted p-2 text-xs">
-                        {JSON.stringify(issue.sample.slice(0, 3), null, 2)}
-                      </pre>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3">

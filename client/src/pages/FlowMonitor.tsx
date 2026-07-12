@@ -50,7 +50,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
+import {
+  resolveFlowReplayAction,
+  type FlowReplayAction,
+} from "@/lib/control-tower-flow-actions";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 
@@ -180,6 +185,12 @@ interface FlowIssueSnapshot {
 interface FlowBucketResponse {
   code: string;
   rows: Array<Record<string, unknown>>;
+}
+
+interface FlowReplayResponse {
+  retryQueueId: number;
+  provider: string;
+  topic: string;
 }
 
 interface FlowOverviewResponse {
@@ -780,7 +791,12 @@ export default function FlowMonitor() {
         />
       ) : (
         <>
-          <FlowOverview data={flowQuery.data} loading={flowQuery.isLoading} error={flowQuery.error} />
+          <FlowOverview
+            data={flowQuery.data}
+            loading={flowQuery.isLoading}
+            error={flowQuery.error}
+            canReplay={hasPermission("operations", "triage")}
+          />
           <div className="border-b px-4 lg:px-6">
             <div className="grid grid-cols-2 gap-1 py-2 sm:grid-cols-4">
               {VIEW_CONFIG.map((tab) => (
@@ -995,7 +1011,9 @@ function FlowOverview(props: {
   data: FlowOverviewResponse | undefined;
   loading: boolean;
   error: Error | null;
+  canReplay: boolean;
 }) {
+  const { toast } = useToast();
   const snapshot = props.data?.snapshot ?? null;
   const [selectedStageKey, setSelectedStageKey] = useState<string | null>(null);
   const [selectedIssueCode, setSelectedIssueCode] = useState<string | null>(null);
@@ -1034,6 +1052,28 @@ function FlowOverview(props: {
     ),
     enabled: selectedIssueCode !== null && selectedStage !== null && snapshot !== null,
     staleTime: 60_000,
+  });
+
+  const replayMutation = useMutation({
+    mutationFn: async (action: FlowReplayAction) => {
+      const response = await apiRequest("POST", action.endpoint);
+      const result = await response.json() as FlowReplayResponse;
+      return { action, result };
+    },
+    onSuccess: async ({ action, result }) => {
+      toast({
+        title: action.successTitle,
+        description: `${result.provider}/${result.topic} retry #${result.retryQueueId}`,
+      });
+      await bucketQuery.refetch();
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Replay failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
   });
 
   const openStage = (stage: (typeof stages)[number]) => {
@@ -1198,6 +1238,12 @@ function FlowOverview(props: {
                       <div className="divide-y border-y">
                         {bucketQuery.data.rows.map((row, index) => {
                           const orderReference = flowOrderReference(row);
+                          const replayAction = props.canReplay
+                            ? resolveFlowReplayAction(selectedIssue, row)
+                            : null;
+                          const replayingThisRow = replayMutation.isPending
+                            && replayMutation.variables?.kind === replayAction?.kind
+                            && replayMutation.variables?.sourceId === replayAction?.sourceId;
                           const fields = Object.entries(row).filter(([key, value]) => (
                             value !== null
                             && value !== undefined
@@ -1205,13 +1251,28 @@ function FlowOverview(props: {
                           ));
                           return (
                             <div key={`${selectedIssue.code}-${index}`} className="py-3">
-                              <div className="flex items-center justify-between gap-3">
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                 <div className="min-w-0 truncate text-sm font-medium">{flowRecordTitle(row, index)}</div>
-                                {orderReference && (
-                                  <Button variant="ghost" size="sm" asChild>
-                                    <a href={`/oms/orders?search=${encodeURIComponent(orderReference)}`}>Open order<ExternalLink className="ml-2 h-3.5 w-3.5" /></a>
-                                  </Button>
-                                )}
+                                <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
+                                  {replayAction && (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      disabled={replayMutation.isPending}
+                                      onClick={() => replayMutation.mutate(replayAction)}
+                                    >
+                                      {replayingThisRow
+                                        ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                                        : <RefreshCw className="mr-2 h-3.5 w-3.5" />}
+                                      {replayingThisRow ? replayAction.pendingLabel : replayAction.label}
+                                    </Button>
+                                  )}
+                                  {orderReference && (
+                                    <Button variant="ghost" size="sm" asChild>
+                                      <a href={`/oms/orders?search=${encodeURIComponent(orderReference)}`}>Open order<ExternalLink className="ml-2 h-3.5 w-3.5" /></a>
+                                    </Button>
+                                  )}
+                                </div>
                               </div>
                               <dl className="mt-2 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
                                 {fields.map(([key, value]) => (

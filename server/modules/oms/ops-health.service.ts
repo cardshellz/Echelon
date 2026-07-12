@@ -9,13 +9,19 @@ import {
 } from "./channel-writeback.service";
 import { getOmsOpsAlertSchedulerHeartbeat } from "./oms-ops-alert-heartbeat";
 import { getWebhookRetryWorkerHeartbeat } from "./webhook-retry.worker";
+import {
+  HELD_LINE_AGING_DAYS,
+  allLinesHeldCountQuery,
+  allLinesHeldSampleQuery,
+  heldLineAgingCountQuery,
+  heldLineAgingSampleQuery,
+} from "./line-item-hold-monitoring";
 
 // P5 (LINE-ITEM-HOLD-DESIGN.md §6.8/§7): a held pre-order line older than this
 // is surfaced as an aging exception — by then the PO was most likely cancelled or
 // the stock never arrived ("held forever"), so a human should chase the PO or
 // cancel the line. Deliberately conservative: pre-orders can legitimately run
 // weeks out, and this threshold also drives an ops alert, so keep it low-noise.
-const HELD_LINE_AGING_DAYS = 30;
 
 export interface OmsOpsIssue {
   code: string;
@@ -811,31 +817,8 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     // still-held line this old likely means the PO was cancelled or never landed.
     countAndSample(
       db,
-      sql`
-        SELECT COUNT(*)::int AS count
-        FROM wms.outbound_shipments os
-        WHERE os.held = true
-          AND os.source = 'line_item_hold'
-          AND os.status NOT IN ('shipped', 'cancelled', 'voided')
-          AND os.held_at IS NOT NULL
-          AND os.held_at < NOW() - (${HELD_LINE_AGING_DAYS} * INTERVAL '1 day')
-      `,
-      sql`
-        SELECT os.id AS shipment_id, os.order_id AS wms_order_id, wo.order_number,
-               oi.sku, oi.quantity, os.on_hold_reason AS hold_reason,
-               os.held_at, (NOW()::date - os.held_at::date) AS days_held
-        FROM wms.outbound_shipments os
-        JOIN wms.orders wo ON wo.id = os.order_id
-        LEFT JOIN wms.outbound_shipment_items osi ON osi.shipment_id = os.id
-        LEFT JOIN wms.order_items oi ON oi.id = osi.order_item_id
-        WHERE os.held = true
-          AND os.source = 'line_item_hold'
-          AND os.status NOT IN ('shipped', 'cancelled', 'voided')
-          AND os.held_at IS NOT NULL
-          AND os.held_at < NOW() - (${HELD_LINE_AGING_DAYS} * INTERVAL '1 day')
-        ORDER BY os.held_at ASC
-        LIMIT 10
-      `,
+      heldLineAgingCountQuery(),
+      heldLineAgingSampleQuery(10),
     ),
     // P5: whole-order pre-order exception — every shippable line is held and
     // nothing has shipped yet, so there is no ship-now shipment and the order
@@ -843,44 +826,8 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     // surfaced so ops can confirm it is intended rather than a mis-hold.
     countAndSample(
       db,
-      sql`
-        SELECT COUNT(*)::int AS count FROM (
-          SELECT wo.id
-          FROM wms.orders wo
-          JOIN wms.order_items oi ON oi.order_id = wo.id
-          WHERE wo.warehouse_status NOT IN ('cancelled', 'shipped')
-          GROUP BY wo.id
-          HAVING BOOL_OR(COALESCE(oi.on_hold, false)) = true
-             AND SUM(COALESCE(oi.fulfilled_quantity, 0)) = 0
-             AND COUNT(*) FILTER (
-                   WHERE COALESCE(oi.requires_shipping, 1) <> 0
-                     AND oi.status NOT IN ('cancelled', 'completed')
-                     AND COALESCE(oi.on_hold, false) = false
-                 ) = 0
-        ) t
-      `,
-      sql`
-        SELECT wo.id AS wms_order_id, wo.order_number, wo.warehouse_status,
-               COUNT(*) FILTER (WHERE COALESCE(oi.on_hold, false) = true)::int AS held_lines,
-               (SELECT MIN(os.held_at)
-                  FROM wms.outbound_shipments os
-                  WHERE os.order_id = wo.id
-                    AND os.source = 'line_item_hold'
-                    AND os.held = true) AS held_since
-        FROM wms.orders wo
-        JOIN wms.order_items oi ON oi.order_id = wo.id
-        WHERE wo.warehouse_status NOT IN ('cancelled', 'shipped')
-        GROUP BY wo.id, wo.order_number, wo.warehouse_status
-        HAVING BOOL_OR(COALESCE(oi.on_hold, false)) = true
-           AND SUM(COALESCE(oi.fulfilled_quantity, 0)) = 0
-           AND COUNT(*) FILTER (
-                 WHERE COALESCE(oi.requires_shipping, 1) <> 0
-                   AND oi.status NOT IN ('cancelled', 'completed')
-                   AND COALESCE(oi.on_hold, false) = false
-               ) = 0
-        ORDER BY held_since ASC NULLS LAST
-        LIMIT 10
-      `,
+      allLinesHeldCountQuery(),
+      allLinesHeldSampleQuery(10),
     ),
   ]);
   const channelWriteback = await getChannelWritebackHealth(db, {

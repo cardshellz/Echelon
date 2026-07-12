@@ -9,8 +9,8 @@ const SHIPSTATION_SRC = readFileSync(resolve(__dirname, "../../../oms/shipstatio
 const PICKING_SRC = readFileSync(resolve(__dirname, "../../picking.use-cases.ts"), "utf8");
 const FLOW_WATERFALL_SRC = readFileSync(resolve(__dirname, "../../../oms/flow-waterfall.service.ts"), "utf8");
 const OPS_HEALTH_SRC = readFileSync(resolve(__dirname, "../../../oms/ops-health.service.ts"), "utf8");
+const HOLD_MONITORING_SRC = readFileSync(resolve(__dirname, "../../../oms/line-item-hold-monitoring.ts"), "utf8");
 const RECON_SRC = readFileSync(resolve(__dirname, "../../../oms/oms-flow-reconciliation.service.ts"), "utf8");
-const OMS_ORDERS_SRC = readFileSync(resolve(__dirname, "../../../../../client/src/pages/OmsOrders.tsx"), "utf8");
 
 // Line-item hold, Phase 1 (LINE-ITEM-HOLD-DESIGN.md): a lead/admin can hold a
 // single pre-order line so the rest of the order ships. P1 records the hold +
@@ -122,27 +122,33 @@ describe("line-item hold (P5 — ops aging + all-held exception)", () => {
     // both the count and sample queries must exclude source='line_item_hold'
     const exclusions = OPS_HEALTH_SRC.match(/COALESCE\(source, ''\)\s*<>\s*'line_item_hold'/g) ?? [];
     expect(exclusions.length).toBeGreaterThanOrEqual(2);
+    const waterfallExclusions = FLOW_WATERFALL_SRC.match(
+      /COALESCE\((?:os\.)?source, ''\)\s*<>\s*'line_item_hold'/g,
+    ) ?? [];
+    expect(waterfallExclusions.length).toBeGreaterThanOrEqual(2);
   });
 
   it("exposes a LINE_HELD_AGING detector keyed on line-item holds past a day threshold", () => {
-    expect(OPS_HEALTH_SRC).toMatch(/const HELD_LINE_AGING_DAYS = \d+/);
+    expect(HOLD_MONITORING_SRC).toMatch(/export const HELD_LINE_AGING_DAYS = \d+/);
     expect(OPS_HEALTH_SRC).toMatch(/code: "LINE_HELD_AGING"/);
-    expect(OPS_HEALTH_SRC).toMatch(/os\.source = 'line_item_hold'/);
-    expect(OPS_HEALTH_SRC).toMatch(
+    expect(HOLD_MONITORING_SRC).toMatch(/os\.source = 'line_item_hold'/);
+    expect(HOLD_MONITORING_SRC).toMatch(
       /held_at < NOW\(\) - \(\$\{HELD_LINE_AGING_DAYS\} \* INTERVAL '1 day'\)/,
     );
   });
 
   it("exposes an ORDER_ALL_LINES_HELD exception (every shippable line held, nothing shipped)", () => {
     expect(OPS_HEALTH_SRC).toMatch(/code: "ORDER_ALL_LINES_HELD"/);
-    expect(OPS_HEALTH_SRC).toMatch(/BOOL_OR\(COALESCE\(oi\.on_hold, false\)\) = true/);
-    expect(OPS_HEALTH_SRC).toMatch(/SUM\(COALESCE\(oi\.fulfilled_quantity, 0\)\) = 0/);
+    expect(HOLD_MONITORING_SRC).toMatch(/BOOL_OR\(COALESCE\(oi\.on_hold, false\)\) = true/);
+    expect(HOLD_MONITORING_SRC).toMatch(/SUM\(COALESCE\(oi\.fulfilled_quantity, 0\)\) = 0/);
     // and no remaining open shippable non-held line
-    expect(OPS_HEALTH_SRC).toMatch(/COALESCE\(oi\.on_hold, false\) = false\s*\)\s*= 0/);
+    expect(HOLD_MONITORING_SRC).toMatch(/COALESCE\(oi\.on_hold, false\) = false\s*\)\s*= 0/);
   });
 
-  it("the ops UI renders dedicated cards for the two new held exceptions", () => {
-    expect(OMS_ORDERS_SRC).toMatch(/issue\.code === "LINE_HELD_AGING"/);
-    expect(OMS_ORDERS_SRC).toMatch(/issue\.code === "ORDER_ALL_LINES_HELD"/);
+  it("registers both held exceptions in the Control Tower waterfall", () => {
+    expect(FLOW_WATERFALL_SRC).toMatch(/code: "LINE_HELD_AGING"/);
+    expect(FLOW_WATERFALL_SRC).toMatch(/code: "ORDER_ALL_LINES_HELD"/);
+    expect(FLOW_WATERFALL_SRC).toMatch(/sample: \(\) => heldLineAgingSampleQuery\(50\)/);
+    expect(FLOW_WATERFALL_SRC).toMatch(/sample: \(\) => allLinesHeldSampleQuery\(50\)/);
   });
 });
