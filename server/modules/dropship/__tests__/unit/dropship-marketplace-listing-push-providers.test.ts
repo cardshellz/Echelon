@@ -84,6 +84,9 @@ describe("dropship marketplace listing push providers", () => {
       availability: {
         shipToLocationAvailability: { quantity: 4 },
       },
+      packageWeightAndSize: {
+        weight: { value: 100, unit: "GRAM" },
+      },
     });
     const offerBody = JSON.parse(String(fetcher.calls[2]?.init.body));
     expect(offerBody).toMatchObject({
@@ -133,6 +136,22 @@ describe("dropship marketplace listing push providers", () => {
     }))).rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR" });
 
     expect(credentials.authFailures).toHaveLength(0);
+  });
+
+  it("fails before calling eBay when the persisted listing intent lacks catalog weight", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([]);
+    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      marketplaceConfig: ebayMarketplaceConfig(),
+      weightGrams: null,
+    }))).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_PACKAGE_WEIGHT_REQUIRED",
+      context: { productVariantId: 101, retryable: false },
+    });
+    expect(fetcher.calls).toHaveLength(0);
   });
 
   it("still marks the store for reauthorization on an eBay listing API 401", async () => {
@@ -205,6 +224,7 @@ function makeRequest(input: {
   platform: "shopify" | "ebay";
   listingMode?: "draft_first" | "live";
   marketplaceConfig?: Record<string, unknown>;
+  weightGrams?: number | null;
 }): DropshipMarketplaceListingPushRequest {
   return {
     vendorId: 10,
@@ -233,6 +253,7 @@ function makeRequest(input: {
       condition: "new",
       itemSpecifics: { Size: ["35pt"] },
       imageUrls: ["https://cdn.example.test/toploader.jpg"],
+      weightGrams: input.weightGrams === undefined ? 100 : input.weightGrams,
       priceCents: 1299,
       quantity: 4,
       marketplaceConfig: input.marketplaceConfig ?? {},

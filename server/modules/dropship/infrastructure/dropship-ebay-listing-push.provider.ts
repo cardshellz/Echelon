@@ -439,6 +439,13 @@ function assertEbayReady(input: DropshipMarketplaceListingPushRequest, config: E
       retryable: false,
     });
   }
+  if (!Number.isInteger(intent.weightGrams) || (intent.weightGrams ?? 0) <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_EBAY_PACKAGE_WEIGHT_REQUIRED",
+      "eBay listing push requires a positive catalog variant weight.",
+      { productVariantId: input.productVariantId, retryable: false },
+    );
+  }
   if (!config.categoryId || !config.merchantLocationKey) {
     throw new DropshipError("DROPSHIP_EBAY_LISTING_CONFIG_REQUIRED", "eBay listing configuration is incomplete.", {
       retryable: false,
@@ -473,7 +480,7 @@ function buildDropshipEbayListingDraft(
         barcode: null,
         gtin: intent.gtin,
         mpn: intent.mpn,
-        weightGrams: null,
+        weightGrams: intent.weightGrams,
         priceCents: intent.priceCents,
         compareAtPriceCents: null,
         isListed: true,
@@ -507,6 +514,7 @@ function buildDropshipEbayListingDraft(
     conditionOverride: mapEbayCondition(intent.condition),
     descriptionHtmlOverride: intent.description ?? intent.title,
     includeOfferTax: false,
+    requirePackageWeight: true,
   });
 }
 

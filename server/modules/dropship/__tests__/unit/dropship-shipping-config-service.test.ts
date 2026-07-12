@@ -88,12 +88,47 @@ describe("DropshipShippingConfigService", () => {
     })).rejects.toThrow();
     expect(repository.lastInsuranceInput).toBeNull();
   });
+
+  it("normalizes package profiles as shipping overrides without accepting a second package-data source", async () => {
+    const repository = new FakeShippingConfigRepository();
+    const service = new DropshipShippingConfigService({
+      repository,
+      clock: { now: () => now },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+
+    await service.upsertPackageProfile({
+      productVariantId: 10,
+      weightGrams: 999,
+      lengthMm: 999,
+      widthMm: 999,
+      heightMm: 999,
+      shipAlone: true,
+      defaultCarrier: " USPS ",
+      defaultService: null,
+      defaultBoxId: null,
+      maxUnitsPerPackage: 1,
+      isActive: true,
+      idempotencyKey: "package-profile-001",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(repository.lastPackageProfileInput).toMatchObject({
+      productVariantId: 10,
+      shipAlone: true,
+      defaultCarrier: "USPS",
+      maxUnitsPerPackage: 1,
+    });
+    expect(repository.lastPackageProfileInput).not.toHaveProperty("weightGrams");
+    expect(repository.lastPackageProfileInput).not.toHaveProperty("lengthMm");
+  });
 });
 
 class FakeShippingConfigRepository implements DropshipShippingConfigRepository {
   lastBoxInput: Parameters<DropshipShippingConfigRepository["upsertBox"]>[0] | null = null;
   lastRateTableInput: Parameters<DropshipShippingConfigRepository["createRateTable"]>[0] | null = null;
   lastInsuranceInput: Parameters<DropshipShippingConfigRepository["createInsurancePolicy"]>[0] | null = null;
+  lastPackageProfileInput: Parameters<DropshipShippingConfigRepository["upsertPackageProfile"]>[0] | null = null;
 
   async getOverview(input: Parameters<DropshipShippingConfigRepository["getOverview"]>[0]): Promise<DropshipShippingConfigOverview> {
     return {
@@ -130,18 +165,21 @@ class FakeShippingConfigRepository implements DropshipShippingConfigRepository {
   }
 
   async upsertPackageProfile(input: Parameters<DropshipShippingConfigRepository["upsertPackageProfile"]>[0]): Promise<DropshipShippingConfigMutationResult<DropshipPackageProfileConfigRecord>> {
+    this.lastPackageProfileInput = input;
     return {
       record: {
         packageProfileId: 1,
         productVariantId: input.productVariantId,
+        productId: 100,
         productSku: "P",
         productName: "Product",
         variantSku: "V",
         variantName: "Variant",
-        weightGrams: input.weightGrams,
-        lengthMm: input.lengthMm,
-        widthMm: input.widthMm,
-        heightMm: input.heightMm,
+        weightGrams: 100,
+        lengthMm: 200,
+        widthMm: 120,
+        heightMm: 20,
+        packageDataComplete: true,
         shipAlone: input.shipAlone,
         defaultCarrier: input.defaultCarrier,
         defaultService: input.defaultService,

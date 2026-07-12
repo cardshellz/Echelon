@@ -32,6 +32,7 @@ export interface DropshipCanonicalListingContent {
   condition: string | null;
   itemSpecifics: Record<string, unknown> | null;
   imageUrls: string[];
+  weightGrams: number | null;
 }
 
 export interface DropshipMarketplaceListingIntent {
@@ -50,6 +51,7 @@ export interface DropshipMarketplaceListingIntent {
   condition: string | null;
   itemSpecifics: Record<string, unknown> | null;
   imageUrls: string[];
+  weightGrams: number | null;
   priceCents: number;
   quantity: number;
   marketplaceConfig: Record<string, unknown>;

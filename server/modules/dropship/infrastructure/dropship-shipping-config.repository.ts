@@ -41,14 +41,15 @@ interface BoxRow {
 interface PackageProfileRow {
   id: number;
   product_variant_id: number;
+  product_id: number;
   product_sku: string | null;
   product_name: string | null;
   variant_sku: string | null;
   variant_name: string | null;
-  weight_grams: number;
-  length_mm: number;
-  width_mm: number;
-  height_mm: number;
+  weight_grams: number | null;
+  length_mm: number | null;
+  width_mm: number | null;
+  height_mm: number | null;
   ship_alone: boolean;
   default_carrier: string | null;
   default_service: string | null;
@@ -57,6 +58,14 @@ interface PackageProfileRow {
   is_active: boolean;
   created_at: Date;
   updated_at: Date;
+}
+
+interface CatalogPackageDataRow {
+  id: number;
+  weight_grams: number | null;
+  length_mm: number | null;
+  width_mm: number | null;
+  height_mm: number | null;
 }
 
 interface ZoneRuleRow {
@@ -258,12 +267,12 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
         return { record: profile, idempotentReplay: true };
       }
 
-      await assertProductVariantExists(client, input.productVariantId);
+      const packageData = await loadCompleteCatalogPackageDataForUpdate(client, input.productVariantId);
       if (input.defaultBoxId !== null && input.defaultBoxId !== undefined) {
         await assertBoxExists(client, input.defaultBoxId);
       }
 
-      const result = await client.query<PackageProfileRow>(
+      const result = await client.query<{ id: number }>(
         `INSERT INTO dropship.dropship_package_profiles
           (product_variant_id, weight_grams, length_mm, width_mm, height_mm,
            ship_alone, default_carrier, default_service, default_box_id,
@@ -281,17 +290,13 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
                max_units_per_package = EXCLUDED.max_units_per_package,
                is_active = EXCLUDED.is_active,
                updated_at = EXCLUDED.updated_at
-         RETURNING id, product_variant_id, NULL::text AS product_sku,
-                   NULL::text AS product_name, NULL::text AS variant_sku,
-                   NULL::text AS variant_name, weight_grams, length_mm, width_mm,
-                   height_mm, ship_alone, default_carrier, default_service,
-                   default_box_id, max_units_per_package, is_active, created_at, updated_at`,
+         RETURNING id`,
         [
           input.productVariantId,
-          input.weightGrams,
-          input.lengthMm,
-          input.widthMm,
-          input.heightMm,
+          packageData.weight_grams,
+          packageData.length_mm,
+          packageData.width_mm,
+          packageData.height_mm,
           input.shipAlone,
           input.defaultCarrier,
           input.defaultService,
@@ -765,9 +770,9 @@ async function listPackageProfilesWithClient(
   }
   params.push(input.packageProfileLimit);
   const result = await client.query<PackageProfileRow>(
-    `SELECT pp.id, pp.product_variant_id, p.sku AS product_sku,
+    `SELECT pp.id, pp.product_variant_id, p.id AS product_id, p.sku AS product_sku,
             p.name AS product_name, pv.sku AS variant_sku, pv.name AS variant_name,
-            pp.weight_grams, pp.length_mm, pp.width_mm, pp.height_mm,
+            pv.weight_grams, pv.length_mm, pv.width_mm, pv.height_mm,
             pp.ship_alone, pp.default_carrier, pp.default_service,
             pp.default_box_id, pp.max_units_per_package, pp.is_active,
             pp.created_at, pp.updated_at
@@ -848,9 +853,9 @@ async function loadPackageProfileByIdWithClient(
   packageProfileId: number,
 ): Promise<DropshipPackageProfileConfigRecord> {
   const result = await client.query<PackageProfileRow>(
-    `SELECT pp.id, pp.product_variant_id, p.sku AS product_sku,
+    `SELECT pp.id, pp.product_variant_id, p.id AS product_id, p.sku AS product_sku,
             p.name AS product_name, pv.sku AS variant_sku, pv.name AS variant_name,
-            pp.weight_grams, pp.length_mm, pp.width_mm, pp.height_mm,
+            pv.weight_grams, pv.length_mm, pv.width_mm, pv.height_mm,
             pp.ship_alone, pp.default_carrier, pp.default_service,
             pp.default_box_id, pp.max_units_per_package, pp.is_active,
             pp.created_at, pp.updated_at
@@ -988,16 +993,37 @@ async function listInsurancePoliciesWithClient(
   return result.rows.map(mapInsurancePolicyRow);
 }
 
-async function assertProductVariantExists(client: PoolClient, productVariantId: number): Promise<void> {
-  const result = await client.query<{ id: number }>(
-    "SELECT id FROM catalog.product_variants WHERE id = $1 LIMIT 1",
+async function loadCompleteCatalogPackageDataForUpdate(
+  client: PoolClient,
+  productVariantId: number,
+): Promise<CatalogPackageDataRow> {
+  const result = await client.query<CatalogPackageDataRow>(
+    `SELECT id, weight_grams, length_mm, width_mm, height_mm
+     FROM catalog.product_variants
+     WHERE id = $1
+     FOR UPDATE`,
     [productVariantId],
   );
-  if (!result.rows[0]) {
+  const packageData = result.rows[0];
+  if (!packageData) {
     throw new DropshipError("DROPSHIP_PRODUCT_VARIANT_NOT_FOUND", "Product variant was not found.", {
       productVariantId,
     });
   }
+  const missingFields = [
+    ["weightGrams", packageData.weight_grams],
+    ["lengthMm", packageData.length_mm],
+    ["widthMm", packageData.width_mm],
+    ["heightMm", packageData.height_mm],
+  ].filter(([, value]) => !Number.isInteger(value) || Number(value) <= 0).map(([field]) => field);
+  if (missingFields.length > 0) {
+    throw new DropshipError(
+      "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED",
+      "Complete catalog variant weight and dimensions are required before saving shipping overrides.",
+      { productVariantId, missingFields },
+    );
+  }
+  return packageData;
 }
 
 async function assertBoxExists(client: PoolClient, boxId: number): Promise<void> {
@@ -1090,6 +1116,7 @@ function mapPackageProfileRow(row: PackageProfileRow): DropshipPackageProfileCon
   return {
     packageProfileId: row.id,
     productVariantId: row.product_variant_id,
+    productId: row.product_id,
     productSku: row.product_sku,
     productName: row.product_name,
     variantSku: row.variant_sku,
@@ -1098,6 +1125,7 @@ function mapPackageProfileRow(row: PackageProfileRow): DropshipPackageProfileCon
     lengthMm: row.length_mm,
     widthMm: row.width_mm,
     heightMm: row.height_mm,
+    packageDataComplete: hasCompleteCatalogPackageData(row),
     shipAlone: row.ship_alone,
     defaultCarrier: row.default_carrier,
     defaultService: row.default_service,
@@ -1107,6 +1135,11 @@ function mapPackageProfileRow(row: PackageProfileRow): DropshipPackageProfileCon
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function hasCompleteCatalogPackageData(row: PackageProfileRow): boolean {
+  return [row.weight_grams, row.length_mm, row.width_mm, row.height_mm]
+    .every((value) => Number.isInteger(value) && Number(value) > 0);
 }
 
 function mapZoneRuleRow(row: ZoneRuleRow): DropshipZoneRuleConfigRecord {

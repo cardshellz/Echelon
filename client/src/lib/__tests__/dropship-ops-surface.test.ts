@@ -765,10 +765,6 @@ describe("dropship ops surface client helpers", () => {
 
     expect(buildShippingPackageProfileInput({
       productVariantId: "10",
-      weightGrams: "100",
-      lengthMm: "200",
-      widthMm: "120",
-      heightMm: "20",
       shipAlone: false,
       defaultCarrier: "USPS",
       defaultService: "",

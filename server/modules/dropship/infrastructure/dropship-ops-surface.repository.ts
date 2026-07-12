@@ -650,17 +650,15 @@ function dogfoodReadinessSql(): string {
     LEFT JOIN LATERAL (
       SELECT
         COUNT(*) AS selected_variant_count,
-        COUNT(*) FILTER (WHERE selected_variants.has_active_package_profile) AS selected_package_profile_count,
-        COUNT(*) FILTER (WHERE NOT selected_variants.has_active_package_profile) AS selected_variant_missing_package_profile_count
+        COUNT(*) FILTER (WHERE selected_variants.has_catalog_package_data) AS selected_package_profile_count,
+        COUNT(*) FILTER (WHERE NOT selected_variants.has_catalog_package_data) AS selected_variant_missing_package_profile_count
       FROM (
         SELECT
           pv.id AS product_variant_id,
-          EXISTS (
-            SELECT 1
-            FROM dropship.dropship_package_profiles pp
-            WHERE pp.product_variant_id = pv.id
-              AND pp.is_active = true
-          ) AS has_active_package_profile
+          COALESCE(pv.weight_grams, 0) > 0
+            AND COALESCE(pv.length_mm, 0) > 0
+            AND COALESCE(pv.width_mm, 0) > 0
+            AND COALESCE(pv.height_mm, 0) > 0 AS has_catalog_package_data
         FROM catalog.product_variants pv
         INNER JOIN catalog.products p ON p.id = pv.product_id
         WHERE pv.is_active = true
@@ -1596,14 +1594,14 @@ function buildDogfoodChecks(input: {
           : `No active shipping rate rows are available for warehouse ${input.defaultWarehouseId}.`,
     },
     {
-      key: "package_profiles",
-      label: "Package profiles",
+      key: "catalog_package_data",
+      label: "Catalog package data",
       status: input.selectedVariantCount > 0 && input.selectedVariantMissingPackageProfileCount === 0 ? "ready" : "blocked",
       message: input.selectedVariantCount === 0
-        ? "No active selected variants are exposed for package-profile evaluation."
+        ? "No active selected variants are exposed for package-data evaluation."
         : input.selectedVariantMissingPackageProfileCount === 0
-          ? `${input.selectedPackageProfileCount} selected variant package profile(s) ready.`
-          : `${input.selectedVariantMissingPackageProfileCount} of ${input.selectedVariantCount} selected variant(s) are missing active package profiles.`,
+          ? `${input.selectedPackageProfileCount} selected variant(s) have complete catalog package data.`
+          : `${input.selectedVariantMissingPackageProfileCount} of ${input.selectedVariantCount} selected variant(s) are missing catalog weight or dimensions.`,
     },
     {
       key: "shipping_markup_policy",

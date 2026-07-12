@@ -183,7 +183,8 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       limit: 50,
     });
 
-    expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_package_profiles");
+    expect(String(query.mock.calls[0]?.[0])).toContain("COALESCE(pv.weight_grams, 0) > 0");
+    expect(String(query.mock.calls[0]?.[0])).not.toContain("dropship.dropship_package_profiles");
     expect(String(query.mock.calls[0]?.[0])).toContain("dropship.dropship_rate_table_rows");
     expect(String(query.mock.calls[0]?.[0])).toContain("zr_rate.zone = rr.destination_zone");
     expect(String(query.mock.calls[0]?.[0])).toContain("FROM channels.channels c");
@@ -217,9 +218,9 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       status: "ready",
       message: "Internal dropship channel 7 is initialized.",
     });
-    expect(result.items[0]?.checks.find((check) => check.key === "package_profiles")).toMatchObject({
+    expect(result.items[0]?.checks.find((check) => check.key === "catalog_package_data")).toMatchObject({
       status: "blocked",
-      message: "1 of 3 selected variant(s) are missing active package profiles.",
+      message: "1 of 3 selected variant(s) are missing catalog weight or dimensions.",
     });
     expect(result.items[0]?.checks.find((check) => check.key === "shipping_rates")).toMatchObject({
       status: "ready",

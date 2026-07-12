@@ -687,7 +687,7 @@ Admin must be able to manage:
 - Store connection health.
 - Setup blockers.
 - Listing push failures.
-- Product/package profiles.
+- Optional per-variant dropship packing and service overrides; package weight and dimensions remain owned by Catalog Variants.
 - Box catalog.
 - Rate tables and effective dates.
 - Zone definitions.

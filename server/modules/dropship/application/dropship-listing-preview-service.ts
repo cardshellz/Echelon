@@ -56,7 +56,7 @@ export interface DropshipListingCatalogCandidate extends DropshipCatalogVariantC
 }
 
 export interface DropshipListingPackageReadiness {
-  hasPackageProfile: boolean;
+  hasCatalogPackageData: boolean;
   hasActiveBox: boolean;
   hasActiveRateTable: boolean;
 }
@@ -534,8 +534,8 @@ function buildListingPreviewRow(input: {
     blockers.push("listing_config_platform_mismatch");
   }
   const packageReadiness = input.packageReadiness;
-  if (!packageReadiness?.hasPackageProfile) {
-    blockers.push("package_profile_required");
+  if (!packageReadiness?.hasCatalogPackageData) {
+    blockers.push("catalog_package_data_required");
   }
   if (!packageReadiness?.hasActiveBox) {
     blockers.push("active_box_required");

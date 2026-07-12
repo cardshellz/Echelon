@@ -133,8 +133,8 @@ export function cartonizeDropshipItems(input: {
     const profile = profilesByVariantId.get(item.productVariantId);
     if (!profile) {
       throw new DropshipError(
-        "DROPSHIP_PACKAGE_PROFILE_REQUIRED",
-        "Dropship package profile is required before quoting shipping.",
+        "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED",
+        "Complete catalog variant weight and dimensions are required before quoting shipping.",
         { productVariantId: item.productVariantId },
       );
     }
