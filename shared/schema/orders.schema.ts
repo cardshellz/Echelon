@@ -624,9 +624,10 @@ export type InsertShipmentTrackingHistory = typeof shipmentTrackingHistory.$infe
 // Until Group D lands, this table is inert (no writer, no reader).
 export const returns = wmsSchema.table("returns", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  shipmentId: integer("shipment_id").notNull().references(() => outboundShipments.id, { onDelete: "cascade" }),
+  shipmentId: integer("shipment_id").references(() => outboundShipments.id, { onDelete: "set null" }),
   orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
   source: varchar("source", { length: 30 }).notNull().default("shopify_webhook"),
+  sourceEventKey: varchar("source_event_key", { length: 250 }),
   reason: varchar("reason", { length: 200 }),
   refundExternalId: varchar("refund_external_id", { length: 100 }),
   restocked: boolean("restocked").notNull().default(false),

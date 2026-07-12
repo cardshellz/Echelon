@@ -18,7 +18,7 @@ const WEBHOOKS_SRC = readFileSync(
 describe("cancelOrderCascade no-shipment fallback guard", () => {
   function extractCancelOrderCascade(): string {
     const start = WEBHOOKS_SRC.indexOf("export async function cancelOrderCascade(");
-    const nextExport = WEBHOOKS_SRC.indexOf("/**\n * Apply a Shopify `refunds/create`");
+    const nextExport = WEBHOOKS_SRC.indexOf("export function deriveOmsUpdateFinality", start);
     return WEBHOOKS_SRC.substring(start, nextExport);
   }
 

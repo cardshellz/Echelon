@@ -28,6 +28,12 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
+import {
+  applyShopifyRefundCascade,
+  extractRefundLineAdjustments,
+  RefundsCreateBadPayloadError,
+  __test__ as refundCascadeTest,
+} from "./shopify-refund-cascade.service";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
@@ -97,6 +103,14 @@ interface WmsServices {
   reservation: {
     reserveOrder: (orderId: number) => Promise<any>;
     releaseOrderReservation: (orderId: number, reason: string) => Promise<any>;
+    releaseOrderItemReservation: (args: {
+      orderId: number;
+      orderItemId: number;
+      quantity: number;
+      sourceEventId: string;
+      reason: string;
+      userId?: string;
+    }) => Promise<{ releasedQuantity: number }>;
   };
   fulfillmentRouter: {
     routeOrder: (ctx: any) => Promise<any>;
@@ -466,585 +480,6 @@ export async function cancelOrderCascade(
 }
 
 /**
- * Apply a Shopify `refunds/create` payload as a return-record + optional
- * restock against the WMS side. C29 (Group F).
- *
- * Behavior:
- *  1. Validate payload has `id` (refund external id) and `order_id`.
- *     Malformed → throws `BadPayloadError` (caller maps to 400).
- *  2. Resolve OMS order. If not in OMS → outcome `order_not_tracked` (no DB writes).
- *  3. Resolve WMS order via `wms.orders.oms_fulfillment_order_id` /
- *     legacy `source_table_id`. If no WMS order → `wms_order_not_found`.
- *  4. Resolve most recent shipment for the WMS order. Per migration 062
- *     `wms.returns.shipment_id` is NOT NULL — if no shipment exists the
- *     return cannot be persisted; we return `no_shipment_to_associate`
- *     instead. (Capturing pre-shipment refunds is deferred to a later C
- *     once the schema accepts NULL shipment_id.)
- *  5. Idempotency: SELECT-then-INSERT keyed on `refund_external_id` for
- *     the same order. Duplicate → outcome `idempotent_skip`.
- *  6. Insert `wms.returns` row with `restocked` reflecting whether any
- *     refund line item carried `restock=true` or `restock_type='return'`.
- *  7. If `helpers.restock` is provided AND any line was flagged for
- *     restock, invoke it once with the refund context. Failures are
- *     logged but don't roll back the return record (C30 will add a
- *     formal retry queue for the restock leg).
- *
- * Pure of HTTP concerns: HMAC verification + 200 response + error → 500
- * mapping all live in the route handler. This helper just talks to db.
- *
- * Plan ref: shipstation-flow-refactor-plan.md §6 Commit 29.
- */
-export class RefundsCreateBadPayloadError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RefundsCreateBadPayloadError";
-  }
-}
-
-export type ApplyShopifyRefundCascadeOutcome =
-  | "return_recorded"
-  | "idempotent_skip"
-  | "order_not_tracked"
-  | "wms_order_not_found"
-  | "no_shipment_to_associate";
-
-export interface ApplyShopifyRefundCascadeResult {
-  outcome: ApplyShopifyRefundCascadeOutcome;
-  refundExternalId: string;
-  omsOrderId?: number;
-  wmsOrderId?: number;
-  shipmentId?: number | null;
-  restocked: boolean;
-  restockInvoked: boolean;
-  restockError?: string;
-  adjustedLines?: number;
-  cancelledShipments?: number;
-  repushedShipments?: number;
-  flaggedShipments?: number;
-}
-
-type ShopifyRefundLineAdjustment = {
-  externalLineItemId: string;
-  quantity: number;
-  restockPolicy: "no_restock" | "return" | "restock" | "cancel" | "unknown";
-  raw: any;
-};
-
-function normalizeRefundRestockPolicy(line: any): ShopifyRefundLineAdjustment["restockPolicy"] {
-  const restockType = typeof line?.restock_type === "string" ? line.restock_type : null;
-  if (restockType === "return") return "return";
-  if (restockType === "restock") return "restock";
-  if (restockType === "cancel") return "cancel";
-  if (restockType === "no_restock") return "no_restock";
-  if (line?.restock === true) return "restock";
-  if (line?.restock === false) return "no_restock";
-  return "unknown";
-}
-
-function extractRefundLineAdjustments(refundLineItems: Array<any>): ShopifyRefundLineAdjustment[] {
-  const adjustments: ShopifyRefundLineAdjustment[] = [];
-  for (const line of refundLineItems) {
-    const rawExternalId = line?.line_item_id ?? line?.line_item?.id;
-    const quantity = Number(line?.quantity ?? 0);
-    if (rawExternalId === undefined || rawExternalId === null) continue;
-    if (!Number.isInteger(quantity) || quantity <= 0) continue;
-    adjustments.push({
-      externalLineItemId: String(rawExternalId),
-      quantity,
-      restockPolicy: normalizeRefundRestockPolicy(line),
-      raw: line,
-    });
-  }
-  return adjustments;
-}
-
-async function persistRefundLineAdjustments(
-  db: any,
-  args: {
-    omsOrderId: number;
-    refundExternalId: string;
-    reason: string | null;
-    adjustments: ShopifyRefundLineAdjustment[];
-  },
-): Promise<number> {
-  let inserted = 0;
-  for (const adjustment of args.adjustments) {
-    const result: any = await db.execute(sql`
-      INSERT INTO oms.order_line_adjustments (
-        order_id, order_line_id, external_line_item_id, source,
-        source_event_id, adjustment_type, restock_policy, quantity,
-        reason, raw_payload
-      )
-      SELECT
-        ${args.omsOrderId},
-        (
-          SELECT id FROM oms.oms_order_lines
-          WHERE order_id = ${args.omsOrderId}
-            AND external_line_item_id = ${adjustment.externalLineItemId}
-          LIMIT 1
-        ),
-        ${adjustment.externalLineItemId},
-        'shopify_webhook',
-        ${args.refundExternalId},
-        'refund',
-        ${adjustment.restockPolicy},
-        ${adjustment.quantity},
-        ${args.reason},
-        ${JSON.stringify(adjustment.raw)}::jsonb
-      ON CONFLICT (source, source_event_id, external_line_item_id, adjustment_type)
-      DO NOTHING
-      RETURNING id
-    `);
-    inserted += result?.rows?.length ?? 0;
-  }
-  return inserted;
-}
-
-async function applyRefundLineAdjustmentsToWms(
-  db: any,
-  args: {
-    wmsOrderId: number;
-    adjustments: ShopifyRefundLineAdjustment[];
-    now: Date;
-    shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
-    shippingEngine?: { cancel: (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => Promise<unknown> };
-    // Re-push a shipment to the engine after its contents changed (reduced by a
-    // partial refund). Wired from the route; if absent, the shipment is flagged.
-    pushShipment?: (shipmentId: number) => Promise<unknown>;
-  },
-): Promise<{ adjustedLines: number; cancelledShipments: number; repushedShipments: number; flaggedShipments: number }> {
-  let adjustedLines = 0;
-  const affectedExternalIds = args.adjustments.map((a) => a.externalLineItemId);
-  if (affectedExternalIds.length === 0) {
-    return { adjustedLines, cancelledShipments: 0, repushedShipments: 0, flaggedShipments: 0 };
-  }
-
-  const quantityResult: any = await db.execute(sql`
-    WITH matched_items AS (
-      SELECT
-        wi.id AS order_item_id,
-        wi.quantity AS order_item_quantity,
-        COALESCE(SUM(adj.quantity), 0)::int AS adjusted_quantity
-      FROM wms.order_items wi
-      JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
-      LEFT JOIN oms.order_line_adjustments adj
-        ON adj.order_line_id = ol.id
-       AND adj.adjustment_type IN ('refund', 'cancel')
-      WHERE wi.order_id = ${args.wmsOrderId}
-        AND ol.external_line_item_id = ANY(ARRAY[${sql.join(affectedExternalIds, sql`, `)}]::text[])
-      GROUP BY wi.id, wi.quantity
-    ),
-    updated_shipment_items AS (
-      UPDATE wms.outbound_shipment_items si
-      SET qty = GREATEST(0, mi.order_item_quantity - mi.adjusted_quantity)
-      FROM matched_items mi
-      WHERE si.order_item_id = mi.order_item_id
-        AND si.shipment_id IN (
-          SELECT os.id FROM wms.outbound_shipments os
-          WHERE os.order_id = ${args.wmsOrderId}
-            -- Reduce contents for all PRE-SHIP shipments (was 'planned' only) so
-            -- the re-push / operator review reflects the true remaining items.
-            AND os.status IN ('planned', 'queued', 'labeled')
-        )
-      RETURNING si.id
-    )
-    UPDATE wms.order_items wi
-    SET status = CASE
-          WHEN COALESCE(wi.picked_quantity, 0) = 0
-           AND COALESCE(wi.fulfilled_quantity, 0) = 0
-           AND mi.adjusted_quantity >= wi.quantity
-          THEN 'cancelled'
-          ELSE wi.status
-        END
-    FROM matched_items mi
-    WHERE wi.id = mi.order_item_id
-    RETURNING wi.id
-  `);
-  adjustedLines = quantityResult?.rows?.length ?? 0;
-
-  // A refund is a PAYMENT state, not a fulfillment action. The line-item
-  // quantities were just reduced above. Now reconcile each affected PRE-SHIP
-  // shipment to physical reality — a refund NEVER "holds" a shipment:
-  //   - empty (all its items refunded) -> cancel the shipment (+ cancel the SS order)
-  //   - queued, items remain           -> re-push the SS order with the reduced contents
-  //   - labeled, items remain          -> flag for review; an associate must physically
-  //                                       find the printed-but-unshipped package and fix it
-  //   - planned, items remain          -> nothing (qty already reduced; never pushed)
-  // Shipped/terminal shipments are excluded (a refund after ship is payment-only; #659).
-  const affectedResult: any = await db.execute(sql`
-    SELECT os.id, os.status,
-           os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
-           os.shipstation_order_id, os.shipstation_order_key,
-           (SELECT COALESCE(SUM(x.qty), 0)::int
-              FROM wms.outbound_shipment_items x
-             WHERE x.shipment_id = os.id) AS remaining_qty
-    FROM wms.outbound_shipments os
-    WHERE os.order_id = ${args.wmsOrderId}
-      AND os.status IN ('planned', 'queued', 'labeled')
-      AND EXISTS (
-        SELECT 1 FROM wms.outbound_shipment_items si
-        JOIN wms.order_items wi ON wi.id = si.order_item_id
-        JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
-        WHERE si.shipment_id = os.id
-          AND ol.external_line_item_id = ANY(ARRAY[${sql.join(affectedExternalIds, sql`, `)}]::text[])
-      )
-    ORDER BY os.id
-  `);
-  const affectedRows: Array<{
-    id: number;
-    status: string;
-    shipping_engine: string | null;
-    engine_order_ref: string | null;
-    engine_shipment_ref: string | null;
-    shipstation_order_id: number | null;
-    shipstation_order_key: string | null;
-    remaining_qty: number;
-  }> = affectedResult?.rows ?? [];
-
-  let cancelledShipments = 0;
-  let repushedShipments = 0;
-  let flaggedShipments = 0;
-
-  const flagForReview = async (shipmentId: number, reason: string) => {
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true, review_reason = ${reason}, updated_at = ${args.now}
-      WHERE id = ${shipmentId}
-    `);
-  };
-
-  const { markShipmentCancelled, recomputeOrderStatusFromShipments } =
-    await import("../orders/shipment-rollup");
-
-  for (const row of affectedRows) {
-    try {
-      if (row.remaining_qty <= 0) {
-        // Nothing left to ship -> cancel the shipment. markShipmentCancelled
-        // engine-cancels the SS order for queued/labeled/on_hold rows.
-        await markShipmentCancelled(db, row.id, "refund_fully_cancelled", {
-          now: args.now,
-          engineCancel: args.shippingEngine
-            ? async (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => {
-                await args.shippingEngine!.cancel(ref);
-              }
-            : undefined,
-          shipstation: args.shipstation
-            ? { removeFromList: async (ssId: number) => { await args.shipstation!.cancelOrder(ssId); } }
-            : undefined,
-        });
-        cancelledShipments++;
-      } else if (row.status === "queued") {
-        // Pre-ship, no label: re-sync the SS order to the reduced contents.
-        if (args.pushShipment) {
-          await args.pushShipment(row.id);
-          repushedShipments++;
-        } else {
-          await flagForReview(row.id, "refund_repush_unavailable");
-          flaggedShipments++;
-        }
-      } else if (row.status === "labeled") {
-        // A label was printed but the package has not shipped (no ship-notify):
-        // an associate must physically find it and pull the item / re-label.
-        await flagForReview(row.id, "refund_after_label");
-        flaggedShipments++;
-      }
-      // planned + items remain: qty already reduced; nothing else to do.
-    } catch (err: any) {
-      console.error(
-        `[applyRefundLineAdjustmentsToWms] reconcile failed for shipment ${row.id} ` +
-          `(status=${row.status}, remaining=${row.remaining_qty}): ${err?.message ?? err}`,
-      );
-      try {
-        await flagForReview(row.id, "refund_reconcile_failed");
-        flaggedShipments++;
-      } catch (flagErr: any) {
-        console.error(
-          `[applyRefundLineAdjustmentsToWms] could not even flag shipment ${row.id} for review: ${flagErr?.message ?? flagErr}`,
-        );
-      }
-    }
-  }
-
-  // Cancels changed shipment statuses -> roll the order status up from them.
-  if (cancelledShipments > 0) {
-    try {
-      await recomputeOrderStatusFromShipments(db, args.wmsOrderId, { now: args.now });
-    } catch (err: any) {
-      console.error(
-        `[applyRefundLineAdjustmentsToWms] order recompute failed for ${args.wmsOrderId}: ${err?.message ?? err}`,
-      );
-    }
-  }
-
-  return { adjustedLines, cancelledShipments, repushedShipments, flaggedShipments };
-}
-
-export async function applyShopifyRefundCascade(
-  db: any,
-  refundPayload: any,
-  helpers: {
-    /**
-     * Resolve OMS order id by shopify order id (numeric or GID) +
-     * channel id. Returning `null` means the order is not tracked in
-     * OMS — the cascade short-circuits with `order_not_tracked`.
-     */
-    resolveOmsOrder: (
-      db: any,
-      args: { shopifyOrderId: string | number; channelId: number },
-    ) => Promise<{ id: number } | null>;
-    /**
-     * Optional restock hook. Called once per refund if any line item is
-     * flagged for restock. Implementation owns the per-line fan-out.
-     * Failures are caught + logged; they do not abort the return-record
-     * insert.
-     */
-    restock?: (
-      db: any,
-      ctx: {
-        wmsOrderId: number;
-        omsOrderId: number;
-        refundLineItems: Array<any>;
-        refundPayload: any;
-      },
-    ) => Promise<void>;
-    shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
-    shippingEngine?: { cancel: (ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string }) => Promise<unknown> };
-    pushShipment?: (shipmentId: number) => Promise<unknown>;
-  },
-  opts: {
-    channelId: number;
-    now?: Date;
-    logPrefix?: string;
-  },
-): Promise<ApplyShopifyRefundCascadeResult> {
-  const logPrefix = opts.logPrefix ?? "[applyShopifyRefundCascade]";
-  const now = opts.now ?? new Date();
-
-  // ── 1. Validate payload ────────────────────────────────────────────
-  if (!refundPayload || typeof refundPayload !== "object") {
-    throw new RefundsCreateBadPayloadError("refund payload missing or not an object");
-  }
-  const refundExternalIdRaw = refundPayload.id;
-  const shopifyOrderIdRaw = refundPayload.order_id;
-  if (refundExternalIdRaw === undefined || refundExternalIdRaw === null) {
-    throw new RefundsCreateBadPayloadError("refund payload missing `id`");
-  }
-  if (shopifyOrderIdRaw === undefined || shopifyOrderIdRaw === null) {
-    throw new RefundsCreateBadPayloadError("refund payload missing `order_id`");
-  }
-  const refundExternalId = String(refundExternalIdRaw);
-
-  const refundLineItems: Array<any> = Array.isArray(refundPayload.refund_line_items)
-    ? refundPayload.refund_line_items
-    : [];
-  const restockLines = refundLineItems.filter(
-    (li: any) =>
-      li &&
-      (li.restock === true || li.restock_type === "return" || li.restock_type === "restock"),
-  );
-  const anyRestock = restockLines.length > 0;
-  const lineAdjustments = extractRefundLineAdjustments(refundLineItems);
-
-  // ── 2. Resolve OMS order ───────────────────────────────────────────
-  const oms = await helpers.resolveOmsOrder(db, {
-    shopifyOrderId: shopifyOrderIdRaw,
-    channelId: opts.channelId,
-  });
-  if (!oms) {
-    return {
-      outcome: "order_not_tracked",
-      refundExternalId,
-      restocked: false,
-      restockInvoked: false,
-    };
-  }
-  const omsOrderId = oms.id;
-
-  // ── 3. Resolve WMS order ───────────────────────────────────────────
-  const wmsOrderRes: any = await db.execute(sql`
-    SELECT id FROM wms.orders
-    WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrderId)})
-       OR (source = 'shopify' AND source_table_id = ${String(omsOrderId)})
-    LIMIT 1
-  `);
-  const wmsRows: Array<{ id: number }> = wmsOrderRes?.rows ?? [];
-  if (wmsRows.length === 0) {
-    return {
-      outcome: "wms_order_not_found",
-      refundExternalId,
-      omsOrderId,
-      restocked: false,
-      restockInvoked: false,
-    };
-  }
-  const wmsOrderId = wmsRows[0].id;
-
-  const persistedAdjustments = await persistRefundLineAdjustments(db, {
-    omsOrderId,
-    refundExternalId,
-    reason: (refundPayload.note as string | undefined) ?? "shopify_refund",
-    adjustments: lineAdjustments,
-  });
-  const wmsAdjustmentResult = await applyRefundLineAdjustmentsToWms(db, {
-    wmsOrderId,
-    adjustments: lineAdjustments,
-    now,
-    shipstation: helpers.shipstation,
-    shippingEngine: helpers.shippingEngine,
-    pushShipment: helpers.pushShipment,
-  });
-
-  // ── 5. Idempotency check (do this before shipment resolution to
-  //    short-circuit cleanly on retries even if the order has since
-  //    been shipped) ─────────────────────────────────────────────────
-  const existingRes: any = await db.execute(sql`
-    SELECT id FROM wms.returns
-    WHERE refund_external_id = ${refundExternalId}
-      AND order_id = ${wmsOrderId}
-    LIMIT 1
-  `);
-  if ((existingRes?.rows?.length ?? 0) > 0) {
-    return {
-      outcome: "idempotent_skip",
-      refundExternalId,
-      omsOrderId,
-      wmsOrderId,
-      restocked: false,
-      restockInvoked: false,
-      adjustedLines: persistedAdjustments + wmsAdjustmentResult.adjustedLines,
-      cancelledShipments: wmsAdjustmentResult.cancelledShipments,
-      repushedShipments: wmsAdjustmentResult.repushedShipments,
-      flaggedShipments: wmsAdjustmentResult.flaggedShipments,
-    };
-  }
-
-  // ── 4. Resolve most-recent shipment ────────────────────────────────
-  const shipmentRes: any = await db.execute(sql`
-    SELECT id FROM wms.outbound_shipments
-    WHERE order_id = ${wmsOrderId}
-    ORDER BY id DESC
-    LIMIT 1
-  `);
-  const shipmentRows: Array<{ id: number }> = shipmentRes?.rows ?? [];
-  if (shipmentRows.length === 0) {
-    // Schema requires a NOT NULL shipment_id, so we cannot persist a
-    // return row without one. Surface as a distinct outcome so the
-    // route handler can log + leave Shopify happy.
-    console.warn(
-      `${logPrefix} no shipment found for wmsOrder=${wmsOrderId}; cannot persist return ` +
-        `row (refund_external_id=${refundExternalId}). schema requires shipment_id NOT NULL.`,
-    );
-    return {
-      outcome: "no_shipment_to_associate",
-      refundExternalId,
-      omsOrderId,
-      wmsOrderId,
-      shipmentId: null,
-      restocked: false,
-      restockInvoked: false,
-    };
-  }
-  const shipmentId = shipmentRows[0].id;
-
-  // ── 6. Insert wms.returns row ──────────────────────────────────────
-  const reason = (refundPayload.note as string | undefined) ?? "shopify_refund";
-  const notes = (refundPayload.note as string | undefined) ?? null;
-  const refundedAt = refundPayload.processed_at
-    ? new Date(refundPayload.processed_at)
-    : now;
-  const source = "shopify_webhook";
-
-  const returnInsertRes: any = await db.execute(sql`
-    INSERT INTO wms.returns (
-      shipment_id, order_id, source, reason,
-      refund_external_id, restocked, status,
-      received_at, refunded_at, notes
-    ) VALUES (
-      ${shipmentId}, ${wmsOrderId}, ${source}, ${reason},
-      ${refundExternalId}, ${anyRestock}, ${anyRestock ? "expected" : "closed"},
-      NULL, ${refundedAt}, ${notes}
-    )
-    RETURNING id
-  `);
-  const returnId: number | undefined = returnInsertRes?.rows?.[0]?.id;
-
-  // Open per-line "expected" return rows for lines the channel flagged for restock
-  // (restock_type=return/restock). These await physical receipt; the return-to-stock
-  // path (ReturnsService.processReturn) reconciles received_qty and restocks on-hand.
-  // cancel/no_restock lines get no return_items (no physical return expected).
-  const returnAdjustments = lineAdjustments.filter(
-    (a) => a.restockPolicy === "return" || a.restockPolicy === "restock",
-  );
-  if (returnId != null && returnAdjustments.length > 0) {
-    const returnItemRows = returnAdjustments.map((a) => ({
-      ext_id: a.externalLineItemId,
-      qty: a.quantity,
-      policy: a.restockPolicy,
-      loc: a.raw?.location_id != null ? String(a.raw.location_id) : null,
-    }));
-    await db.execute(sql`
-      INSERT INTO wms.return_items
-        (return_id, order_item_id, oms_order_line_id, external_line_item_id, sku, expected_qty, restock_policy, location_id, status)
-      SELECT ${returnId}, wi.id, wi.oms_order_line_id, x.ext_id, wi.sku, x.qty, x.policy, x.loc, 'expected'
-      FROM jsonb_to_recordset(${JSON.stringify(returnItemRows)}::jsonb) AS x(ext_id text, qty int, policy text, loc text)
-      LEFT JOIN oms.oms_order_lines ol ON ol.external_line_item_id = x.ext_id AND ol.order_id = ${omsOrderId}
-      LEFT JOIN wms.order_items wi ON wi.oms_order_line_id = ol.id AND wi.order_id = ${wmsOrderId}
-    `);
-  }
-
-  // ── 7. Conditional restock ────────────────────────────────────────
-  let restockInvoked = false;
-  let restockError: string | undefined;
-  if (anyRestock && helpers.restock) {
-    restockInvoked = true;
-    try {
-      await helpers.restock(db, {
-        wmsOrderId,
-        omsOrderId,
-        refundLineItems: restockLines,
-        refundPayload,
-      });
-    } catch (e: any) {
-      restockError = e?.message || String(e);
-      console.error(
-        `${logPrefix} restock helper failed for wmsOrder=${wmsOrderId} ` +
-          `(refund_external_id=${refundExternalId}): ${restockError}`,
-      );
-      // D-REFUNDREL: Persist dead-letter so ops can find unreleased inventory.
-      try {
-        await db.insert(omsOrderEvents).values({
-          orderId: omsOrderId,
-          eventType: "refund_restock_failed",
-          details: {
-            wmsOrderId,
-            refundExternalId,
-            error: restockError,
-            requiresReview: true,
-          },
-        });
-      } catch (_dlErr) {
-        // Structured log above is our trace
-      }
-    }
-  }
-
-  return {
-    outcome: "return_recorded",
-    refundExternalId,
-    omsOrderId,
-    wmsOrderId,
-    shipmentId,
-    restocked: anyRestock,
-    restockInvoked,
-    restockError,
-    adjustedLines: persistedAdjustments + wmsAdjustmentResult.adjustedLines,
-    cancelledShipments: wmsAdjustmentResult.cancelledShipments,
-    repushedShipments: wmsAdjustmentResult.repushedShipments,
-    flaggedShipments: wmsAdjustmentResult.flaggedShipments,
-  };
-}
-
-/**
  * Decide, on a Shopify orders/updated webhook, whether the order is being
  * cancelled by the channel vs merely already-terminal on our side.
  *
@@ -1078,9 +513,9 @@ export const __test__ = {
   extractShopifyRisk,
   cascadeShopifyCancelToShipments,
   applyShopifyRefundCascade,
-  applyRefundLineAdjustmentsToWms,
   extractRefundLineAdjustments,
   RefundsCreateBadPayloadError,
+  ...refundCascadeTest,
   mapShopifyLineFulfillmentStatus,
   deriveOmsUpdateFinality,
 };
@@ -2551,31 +1986,18 @@ export function registerOmsWebhooks(
         );
       }
 
-      // C29 — record the refund as a wms.returns row (audit trail) and
-      // optionally restock. The WMS-side cascade is owned by
-      // `applyShopifyRefundCascade`; the existing reservation-release is
-      // wired in as the restock hook so behaviour parity with prior
-      // commits is preserved. A cascade failure propagates to the outer
-      // catch, which queues a retry; that retry skips the financial update
-      // (guarded by the 'refunded' event marker above) and re-attempts only
-      // this cascade, which is idempotent (returns keyed by
-      // refund_external_id, adjustments ON CONFLICT DO NOTHING).
+      // The line cascade owns commercial authority, WMS work reduction,
+      // expected-return creation, and event-keyed reservation release. A
+      // failure propagates so the same inbox record retries; every leg is
+      // idempotent by the Shopify refund id.
       const cascade = await applyShopifyRefundCascade(
         db,
         refundPayload,
         {
           // OMS already resolved above — short-circuit the helper.
           resolveOmsOrder: async () => ({ id: existing.id }),
-          restock: wmsServices
-            ? async (_db, ctx) => {
-                await wmsServices.reservation.releaseOrderReservation(
-                  ctx.wmsOrderId,
-                  `Refund restock (${ctx.refundLineItems.length} items, refund=${ctx.refundPayload.id})`,
-                );
-                console.log(
-                  `${LOG_PREFIX} Released reservations for restocked items in order ${existing.externalOrderNumber}`,
-                );
-              }
+          releaseOrderItemReservation: wmsServices
+            ? async (args) => wmsServices.reservation.releaseOrderItemReservation(args)
             : undefined,
           shipstation: shipStationService
             ? {
@@ -2600,14 +2022,20 @@ export function registerOmsWebhooks(
                 }
               : undefined,
         },
-        { channelId, now, logPrefix: LOG_PREFIX },
+        {
+          channelId,
+          sourceInboxId: inbox.receipt.id,
+          now,
+          logPrefix: LOG_PREFIX,
+        },
       );
       console.log(
         `${LOG_PREFIX} refunds/create cascade for order ${existing.externalOrderNumber}: ` +
-          `outcome=${cascade.outcome} restocked=${cascade.restocked} ` +
-          `restockInvoked=${cascade.restockInvoked} shipmentId=${cascade.shipmentId ?? "null"} ` +
-          `adjustedLines=${cascade.adjustedLines ?? 0} cancelled=${cascade.cancelledShipments ?? 0} ` +
-            `repushed=${cascade.repushedShipments ?? 0} flagged=${cascade.flaggedShipments ?? 0}`,
+          `outcome=${cascade.outcome} returnExpected=${cascade.returnExpected} ` +
+          `returnId=${cascade.returnId ?? "null"} adjustedLines=${cascade.adjustedLines} ` +
+          `releasedReservations=${cascade.releasedReservationQuantity} ` +
+          `cancelled=${cascade.cancelledShipments} repushed=${cascade.repushedShipments} ` +
+          `flagged=${cascade.flaggedShipments} warnings=${cascade.warnings.length}`,
       );
 
       console.log(

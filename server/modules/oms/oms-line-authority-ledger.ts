@@ -25,6 +25,8 @@ export interface BuildOmsLineAuthorityEventInput {
   authority: OmsLineAuthorityState;
   sourceEventId?: string | null;
   previous?: OmsLineAuthorityPreviousState | null;
+  cancelledQuantity?: number;
+  refundedQuantity?: number;
 }
 
 export interface RecordOmsLineAuthorityEventInput extends BuildOmsLineAuthorityEventInput {
@@ -61,6 +63,14 @@ export function buildOmsLineAuthorityEvent(
     input.previous?.authorityFulfillableQuantity,
     "previous.authorityFulfillableQuantity",
   );
+  const cancelledQuantity = requireNonNegativeInteger(
+    input.cancelledQuantity ?? 0,
+    "cancelledQuantity",
+  ) ?? 0;
+  const refundedQuantity = requireNonNegativeInteger(
+    input.refundedQuantity ?? 0,
+    "refundedQuantity",
+  ) ?? 0;
 
   const eventKey = [
     "oms-line-authority",
@@ -71,6 +81,8 @@ export function buildOmsLineAuthorityEvent(
     `observed:${input.authority.channelObservedQuantity}`,
     `paid:${input.authority.paidQuantity}`,
     `fulfillable:${input.authority.authorityFulfillableQuantity}`,
+    `cancelled:${cancelledQuantity}`,
+    `refunded:${refundedQuantity}`,
     `status:${compactEventPart(input.authority.authorizationStatus)}`,
   ].join("|");
 
@@ -89,8 +101,8 @@ export function buildOmsLineAuthorityEvent(
     channelObservedQuantity: input.authority.channelObservedQuantity,
     paidQuantity: input.authority.paidQuantity,
     authorityFulfillableQuantity: input.authority.authorityFulfillableQuantity,
-    cancelledQuantity: 0,
-    refundedQuantity: 0,
+    cancelledQuantity,
+    refundedQuantity,
     authorizationStatus: input.authority.authorizationStatus,
     authorizedAt: input.authority.authorizedAt,
     authorizedByEventId: input.authority.authorizedByEventId,

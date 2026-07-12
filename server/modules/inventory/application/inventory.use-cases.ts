@@ -637,10 +637,12 @@ export class InventoryUseCases {
     orderItemId: number;
     reason: string;
     userId?: string;
-  }): Promise<void> {
+    referenceType?: string;
+    referenceId?: string;
+  }, txOverride?: any): Promise<void> {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
-    await this.db.transaction(async (tx) => {
+    const doWork = async (tx: any) => {
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -673,14 +675,25 @@ export class InventoryUseCases {
         targetState: "on_hand",
         orderId: params.orderId,
         orderItemId: params.orderItemId,
-        referenceType: "order",
-        referenceId: String(params.orderId),
+        referenceType: params.referenceType ?? "order",
+        referenceId: params.referenceId ?? String(params.orderId),
         notes: params.reason,
         userId: params.userId ?? null,
       }, tx);
-    });
+    };
 
-    this.triggerNotifyChange(params.productVariantId, "unreserve");
+    if (txOverride) {
+      await doWork(txOverride);
+    } else {
+      await this.db.transaction(doWork);
+    }
+
+    // A caller-owned transaction has not committed yet. Its application
+    // service must emit the post-commit channel sync after that transaction
+    // succeeds; firing here could publish stale ATP.
+    if (!txOverride) {
+      this.triggerNotifyChange(params.productVariantId, "unreserve");
+    }
   }
 
   /**

@@ -71,6 +71,46 @@ export async function runStartupMigrations(): Promise<void> {
     // (wms.*) here so search_path shadowing can't touch it.
     try {
       await client.query(`ALTER TABLE wms.returns ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'closed'`);
+      await client.query(`ALTER TABLE wms.returns ALTER COLUMN shipment_id DROP NOT NULL`);
+      await client.query(`ALTER TABLE wms.returns ADD COLUMN IF NOT EXISTS source_event_key VARCHAR(250)`);
+      await client.query(`
+        DO $$
+        DECLARE
+          existing_constraint_name TEXT;
+        BEGIN
+          SELECT constraint_row.conname
+          INTO existing_constraint_name
+          FROM pg_constraint constraint_row
+          JOIN pg_attribute column_row
+            ON column_row.attrelid = constraint_row.conrelid
+           AND column_row.attnum = ANY(constraint_row.conkey)
+          WHERE constraint_row.contype = 'f'
+            AND constraint_row.conrelid = 'wms.returns'::regclass
+            AND column_row.attname = 'shipment_id'
+          LIMIT 1;
+
+          IF existing_constraint_name IS NOT NULL
+             AND existing_constraint_name <> 'wms_returns_shipment_id_fkey' THEN
+            EXECUTE format(
+              'ALTER TABLE wms.returns DROP CONSTRAINT %I',
+              existing_constraint_name
+            );
+          END IF;
+
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'wms_returns_shipment_id_fkey'
+              AND conrelid = 'wms.returns'::regclass
+          ) THEN
+            ALTER TABLE wms.returns
+              ADD CONSTRAINT wms_returns_shipment_id_fkey
+              FOREIGN KEY (shipment_id)
+              REFERENCES wms.outbound_shipments(id)
+              ON DELETE SET NULL;
+          END IF;
+        END $$;
+      `);
       await client.query(`
         CREATE TABLE IF NOT EXISTS wms.return_items (
           id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -92,6 +132,7 @@ export async function runStartupMigrations(): Promise<void> {
       await client.query(`CREATE INDEX IF NOT EXISTS idx_return_items_return ON wms.return_items(return_id)`);
       await client.query(`CREATE INDEX IF NOT EXISTS idx_return_items_order_item ON wms.return_items(order_item_id)`);
       await client.query(`CREATE INDEX IF NOT EXISTS idx_returns_status_open ON wms.returns(status) WHERE status <> 'closed'`);
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_returns_source_event_key ON wms.returns(source_event_key) WHERE NULLIF(BTRIM(source_event_key), '') IS NOT NULL`);
       console.log("Checked refund return lifecycle (wms.returns.status, wms.return_items)");
     } catch (e: any) {
       console.error("[startup-migration] refund return lifecycle DDL failed:", e?.message ?? e);

@@ -120,6 +120,10 @@ const DEAD_LETTER_REASON_CODE = sql`CASE
   WHEN rq.last_error LIKE '%cents must be >= 0%' THEN 'PUSH_NEGATIVE_TOTAL'
   WHEN rq.last_error LIKE '%total_cents%does not match%' THEN 'PUSH_TOTAL_MISMATCH'
   WHEN rq.last_error LIKE '%timeout exceeded%' THEN 'DB_CONNECT_TIMEOUT'
+  WHEN rq.provider = 'shopify'
+    AND rq.topic = 'refunds/create'
+    AND rq.last_error LIKE '%Local API returned 500%'
+    THEN 'SHOPIFY_REFUND_CASCADE_FAILED'
   WHEN rq.last_error LIKE '%Local API returned 500%' THEN 'INTERNAL_API_500'
   WHEN rq.last_error LIKE '%processed%failed%' THEN 'SHIPNOTIFY_UNSPECIFIED'
   WHEN rq.last_error IS NULL THEN 'NO_MESSAGE'
@@ -136,6 +140,7 @@ const DEAD_LETTER_LABELS: Record<string, string> = {
   PUSH_NEGATIVE_TOTAL: "Push — order total came out negative",
   PUSH_TOTAL_MISMATCH: "Push — order total didn't match",
   DB_CONNECT_TIMEOUT: "Temporary database timeout",
+  SHOPIFY_REFUND_CASCADE_FAILED: "Refund line update failed to finish",
   INTERNAL_API_500: "Internal error (500)",
   SHIPNOTIFY_UNSPECIFIED: "Ship update failed (reason not recorded)",
   NO_MESSAGE: "(no error message)",
@@ -150,8 +155,8 @@ const BASE_ISSUES: FlowIssueDef[] = [
   // ---- intake ----
   {
     code: "WEBHOOK_INBOX_FAILED", kind: "stuck", stage: "intake", severity: "critical",
-    message: "Incoming orders failed to import",
-    why: "An order came in from a channel but didn't finish importing, so it isn't in the system yet. Re-run the import; if it keeps failing, the order data is malformed and needs a closer look.",
+    message: "Channel events failed to finish",
+    why: "A channel event such as an order, cancellation, fulfillment, or refund did not finish processing. Re-run it; a successful retry automatically clears the originating inbox failure.",
     remediation: "REQUEUE", replaySafe: true,
     count: () => sql`SELECT COUNT(*)::int AS count FROM oms.webhook_inbox WHERE status IN ('failed','dead')`,
     sample: () => sql`SELECT COALESCE(oo.external_order_number, wi.payload->>'name', wi.payload->>'order_number') AS order_number, wi.provider, wi.topic, wi.status, wi.attempts, wi.last_error, COALESCE(wi.processed_at, wi.last_attempt_at, wi.first_received_at) AS at, wi.id AS inbox_id FROM oms.webhook_inbox wi LEFT JOIN oms.oms_orders oo ON oo.external_order_id = COALESCE(wi.payload->>'order_id', wi.payload->>'id') WHERE wi.status IN ('failed','dead') ORDER BY COALESCE(wi.processed_at, wi.last_attempt_at, wi.first_received_at) DESC NULLS LAST LIMIT 50`,
@@ -550,6 +555,10 @@ const DEAD_LETTER_REASONS: DeadLetterReasonDef[] = [
   { code: "DB_CONNECT_TIMEOUT", stage: "shipped", severity: "warning",
     message: "Temporary database timeout",
     why: "A transient database timeout — not a real problem with the order. Safe to re-run.",
+    remediation: "REQUEUE", replaySafe: true },
+  { code: "SHOPIFY_REFUND_CASCADE_FAILED", stage: "wms_fulfill", severity: "critical",
+    message: "Refund line update did not finish",
+    why: "Shopify recorded the refund, but the OMS/WMS line disposition did not finish. Re-run the event; the refund id makes authority, reservation, shipment, and expected-return updates idempotent.",
     remediation: "REQUEUE", replaySafe: true },
   { code: "INTERNAL_API_500", stage: "shipped", severity: "warning",
     message: "Internal error (500)",

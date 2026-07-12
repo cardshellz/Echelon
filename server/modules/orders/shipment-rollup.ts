@@ -415,6 +415,11 @@ export async function markShipmentCancelled(
   opts: {
     now?: Date;
     engineCancel?: (ref: EngineRef) => Promise<void>;
+    /**
+     * Only for a locally stale aggregate row whose provider order is proven
+     * to have already shipped through a terminal sibling row.
+     */
+    skipEngineCancel?: boolean;
     shipstation?: {
       removeFromList?: (shipstationOrderId: number) => Promise<void>;
     };
@@ -457,6 +462,7 @@ export async function markShipmentCancelled(
   // is already cancelled. Failure is non-blocking — reconcile catches drift.
   const ref = engineRefFromRow(current as any);
   if (
+    !opts.skipEngineCancel &&
     (current.status === "queued" ||
       current.status === "labeled") &&
     ref
