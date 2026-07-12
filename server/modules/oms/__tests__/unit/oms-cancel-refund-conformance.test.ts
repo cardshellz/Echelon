@@ -22,6 +22,7 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
 }
 
 const OMS_WEBHOOKS_SRC = readSource("../../oms-webhooks.ts");
+const SHOPIFY_REFUND_SRC = readSource("../../shopify-refund-cascade.service.ts");
 const SHIPMENT_ROLLUP_SRC = readSource("../../../orders/shipment-rollup.ts");
 const C8_CANCEL_REFUND_GUARDS_TEST_SRC = readSource("c8-cancel-refund-guards.test.ts");
 const ORDERS_CANCELLED_CASCADE_TEST_SRC = readSource("orders-cancelled-cascade.test.ts");
@@ -91,64 +92,77 @@ describe("OMS/WMS authority conformance :: Shopify cancel and refund finality", 
       "export async function markShipmentVoided",
     );
     const refundAdjustmentBlock = sourceBlock(
-      OMS_WEBHOOKS_SRC,
-      "async function applyRefundLineAdjustmentsToWms",
-      "export async function applyShopifyRefundCascade",
+      SHOPIFY_REFUND_SRC,
+      "async function reconcileActiveShipmentItems",
+      "async function createExpectedReturn",
     );
 
     expect(SHIPMENT_ROLLUP_TEST_SRC).toContain(
       "does NOT regress status when shipment is 'shipped'",
     );
     expect(REFUNDS_CREATE_CASCADE_TEST_SRC).toContain(
-      "wms.returns row inserted with restocked=false",
+      "repairs #60037 as a no-restock line disposition without inventing a return",
     );
     expect(customerCancelBlock).toContain('case "shipped":');
     expect(customerCancelBlock).toContain('case "returned":');
     expect(customerCancelBlock).toContain('case "lost":');
     expect(customerCancelBlock).toContain('reason: "already_shipped"');
-    expect(refundAdjustmentBlock).toContain("Shipped/terminal shipments are excluded");
     expect(refundAdjustmentBlock).toContain("os.status IN ('planned', 'queued', 'labeled')");
     expect(refundAdjustmentBlock).not.toMatch(/os\.status IN \([^)]*'shipped'/);
   });
 
-  it("reconciles pre-shipment refunds by reducing work, cancelling empty shipments, or repushing queued work", () => {
+  it("reconciles pre-shipment refunds without violating positive shipment-item quantities", () => {
     const refundAdjustmentBlock = sourceBlock(
-      OMS_WEBHOOKS_SRC,
-      "async function applyRefundLineAdjustmentsToWms",
-      "export async function applyShopifyRefundCascade",
+      SHOPIFY_REFUND_SRC,
+      "async function reconcileActiveShipmentItems",
+      "async function createExpectedReturn",
     );
 
     expect(REFUND_RECONCILE_SHIPMENTS_TEST_SRC).toContain(
-      "queued shipment with items remaining -> re-pushes, never holds",
+      "allocates partial remaining demand once across split shipments",
     );
     expect(REFUND_RECONCILE_SHIPMENTS_TEST_SRC).toContain(
-      "emptied shipment (all items refunded) -> cancels (+engine) and recomputes the order",
+      "deletes all active shipment demand after a full refund",
     );
-    expect(REFUND_RECONCILE_SHIPMENTS_TEST_SRC).toContain(
-      "planned shipment with items remaining -> qty reduced only, no further action",
-    );
-    expect(REFUND_RECONCILE_SHIPMENTS_TEST_SRC).toContain("expectNoHoldWrites");
-    expect(refundAdjustmentBlock).toContain("SET qty = GREATEST(0");
-    expect(refundAdjustmentBlock).toContain('row.status === "queued"');
-    expect(refundAdjustmentBlock).toContain("args.pushShipment");
-    expect(refundAdjustmentBlock).toContain('"refund_fully_cancelled"');
-    expect(refundAdjustmentBlock).toContain("markShipmentCancelled");
+    expect(refundAdjustmentBlock).toContain("DELETE FROM wms.outbound_shipment_items");
+    expect(refundAdjustmentBlock).toContain("SET qty = ${allocation.nextQuantity}");
+    expect(refundAdjustmentBlock).not.toContain("SET qty = GREATEST(0");
+    expect(SHOPIFY_REFUND_SRC).toContain('plan.status === "queued"');
+    expect(SHOPIFY_REFUND_SRC).toContain("helpers.pushShipment(plan.shipmentId)");
+    expect(SHOPIFY_REFUND_SRC).toContain('"refund_fully_cancelled"');
+    expect(SHOPIFY_REFUND_SRC).toContain("markShipmentCancelled");
     expect(refundAdjustmentBlock).not.toMatch(/status\s*=\s*'on_hold'/);
   });
 
   it("keeps refund-after-label as manual review instead of automatic mutation", () => {
     const refundAdjustmentBlock = sourceBlock(
-      OMS_WEBHOOKS_SRC,
-      "async function applyRefundLineAdjustmentsToWms",
-      "export async function applyShopifyRefundCascade",
+      SHOPIFY_REFUND_SRC,
+      "async function reconcileActiveShipmentItems",
+      "async function createExpectedReturn",
     );
 
     expect(REFUND_RECONCILE_SHIPMENTS_TEST_SRC).toContain(
-      "labeled shipment with items remaining -> flags 'refund_after_label', no re-push",
+      "partial remaining demand once across split shipments",
     );
-    expect(refundAdjustmentBlock).toContain('row.status === "labeled"');
+    expect(refundAdjustmentBlock).toContain('String(shipment.status) === "labeled"');
     expect(refundAdjustmentBlock).toContain('"refund_after_label"');
     expect(refundAdjustmentBlock).toContain("requires_review = true");
-    expect(refundAdjustmentBlock).not.toMatch(/row\.status === "labeled"[\s\S]{0,200}args\.pushShipment/);
+    expect(refundAdjustmentBlock).not.toContain("pushShipment");
+  });
+
+  it("separates refund disposition from physical return receipt", () => {
+    const returnBlock = sourceBlock(
+      SHOPIFY_REFUND_SRC,
+      "async function createExpectedReturn",
+      "async function applyInternalRefundState",
+    );
+
+    expect(REFUNDS_CREATE_CASCADE_TEST_SRC).toContain(
+      "opens an expected return only for fulfilled units carrying a return policy",
+    );
+    expect(returnBlock).toContain('const returnPolicies = new Set(["return", "restock"])');
+    expect(returnBlock).toContain("source_event_key");
+    expect(returnBlock).toContain("availableReturnEntitlement");
+    expect(returnBlock).not.toContain("receiveInventory");
   });
 });

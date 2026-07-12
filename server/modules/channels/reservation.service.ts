@@ -50,6 +50,17 @@ export interface ReserveForOrderResult {
   shortfall: number;
 }
 
+export interface ReleaseOrderItemReservationResult {
+  orderId: number;
+  orderItemId: number;
+  productVariantId: number;
+  requestedQuantity: number;
+  previouslyReleasedQuantity: number;
+  releasedQuantity: number;
+  openReservationAfter: number;
+  idempotentReplay: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -526,6 +537,207 @@ class ReservationService {
     }
 
     return result;
+  }
+
+  /**
+   * Release at most `quantity` units attributed to one WMS order item.
+   *
+   * `sourceEventId` is mandatory and becomes the inventory-ledger reference.
+   * The per-product advisory lock serializes reserve/release writers; a retry
+   * re-reads how much this exact event already released and only applies the
+   * remainder. This makes a refund retry safe even when the prior attempt
+   * committed the inventory release but failed later in its workflow.
+   */
+  async releaseOrderItemReservation(params: {
+    orderId: number;
+    orderItemId: number;
+    quantity: number;
+    sourceEventId: string;
+    reason: string;
+    userId?: string;
+  }): Promise<ReleaseOrderItemReservationResult> {
+    if (!Number.isInteger(params.orderId) || params.orderId <= 0) {
+      throw new Error("orderId must be a positive integer");
+    }
+    if (!Number.isInteger(params.orderItemId) || params.orderItemId <= 0) {
+      throw new Error("orderItemId must be a positive integer");
+    }
+    if (!Number.isInteger(params.quantity) || params.quantity <= 0) {
+      throw new Error("quantity must be a positive integer");
+    }
+    const sourceEventId = String(params.sourceEventId ?? "").trim();
+    if (!sourceEventId) throw new Error("sourceEventId is required");
+
+    const outcome = await this.db.transaction(async (tx: any) => {
+      const itemResult: any = await tx.execute(sql`
+        SELECT
+          oi.id AS order_item_id,
+          oi.sku,
+          pv.id AS product_variant_id,
+          pv.product_id
+        FROM wms.order_items oi
+        JOIN catalog.product_variants pv ON pv.sku = oi.sku
+        WHERE oi.id = ${params.orderItemId}
+          AND oi.order_id = ${params.orderId}
+        FOR UPDATE OF oi
+      `);
+      const itemRows = itemResult?.rows ?? [];
+      if (itemRows.length !== 1) {
+        throw new Error(
+          itemRows.length === 0
+            ? `WMS order item ${params.orderItemId} does not belong to order ${params.orderId} or has no catalog variant`
+            : `WMS order item ${params.orderItemId} SKU resolves to multiple catalog variants`,
+        );
+      }
+
+      const item = itemRows[0];
+      const productVariantId = Number(item.product_variant_id);
+      const productId = Number(item.product_id);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${RESERVATION_LOCK_NS}, ${productId})`);
+
+      const priorEventResult: any = await tx.execute(sql`
+        SELECT COALESCE(SUM(-reserved_qty_delta), 0)::int AS released_quantity
+        FROM inventory.inventory_transactions
+        WHERE order_id = ${params.orderId}
+          AND order_item_id = ${params.orderItemId}
+          AND transaction_type = 'unreserve'
+          AND reference_type = 'shopify_refund'
+          AND reference_id = ${sourceEventId}
+          AND COALESCE(reserved_qty_delta, 0) < 0
+          AND voided_at IS NULL
+      `);
+      const previouslyReleasedQuantity = Math.max(
+        0,
+        Number(priorEventResult?.rows?.[0]?.released_quantity ?? 0),
+      );
+      const remainingRequest = Math.max(params.quantity - previouslyReleasedQuantity, 0);
+
+      const ledgerResult: any = await tx.execute(sql`
+        SELECT
+          COALESCE(SUM(reserved_qty_delta), 0)::int AS delta_sum,
+          COUNT(*) FILTER (
+            WHERE transaction_type = 'reserve' AND reserved_qty_delta IS NULL
+          )::int AS legacy_reserves,
+          COALESCE(SUM(CASE WHEN transaction_type = 'pick'
+                            THEN -variant_qty_delta ELSE 0 END), 0)::int AS picked_units,
+          COALESCE(SUM(CASE WHEN transaction_type = 'unreserve'
+                                 AND reserved_qty_delta IS NOT NULL
+                            THEN -reserved_qty_delta ELSE 0 END), 0)::int AS unreserved_units
+        FROM inventory.inventory_transactions
+        WHERE order_id = ${params.orderId}
+          AND order_item_id = ${params.orderItemId}
+          AND transaction_type IN ('reserve', 'unreserve', 'pick')
+          AND voided_at IS NULL
+      `);
+      const ledger = ledgerResult?.rows?.[0] ?? {};
+      let openQuantity = Math.max(0, Number(ledger.delta_sum ?? 0));
+
+      if (Number(ledger.legacy_reserves ?? 0) > 0) {
+        const quantityResult: any = await tx.execute(sql`
+          SELECT quantity
+          FROM wms.order_items
+          WHERE id = ${params.orderItemId}
+            AND order_id = ${params.orderId}
+        `);
+        const orderedQuantity = Number(quantityResult?.rows?.[0]?.quantity ?? 0);
+        const legacyEstimate = Math.max(
+          0,
+          orderedQuantity - Number(ledger.picked_units ?? 0) - Number(ledger.unreserved_units ?? 0),
+        );
+        openQuantity = Math.max(openQuantity, legacyEstimate);
+      }
+
+      const requiredReleaseQuantity = Math.min(remainingRequest, openQuantity);
+      let remainingToRelease = requiredReleaseQuantity;
+      let releasedQuantity = 0;
+
+      if (remainingToRelease > 0) {
+        const levelsResult: any = await tx.execute(sql`
+          WITH location_authority AS (
+            SELECT
+              COALESCE(to_location_id, from_location_id) AS warehouse_location_id,
+              GREATEST(COALESCE(SUM(reserved_qty_delta), 0), 0)::int AS attributed_open_quantity,
+              BOOL_OR(
+                transaction_type = 'reserve' AND reserved_qty_delta IS NULL
+              ) AS has_legacy_reserve
+            FROM inventory.inventory_transactions
+            WHERE order_id = ${params.orderId}
+              AND order_item_id = ${params.orderItemId}
+              AND transaction_type IN ('reserve', 'unreserve', 'pick')
+              AND voided_at IS NULL
+              AND COALESCE(to_location_id, from_location_id) IS NOT NULL
+            GROUP BY COALESCE(to_location_id, from_location_id)
+          )
+          SELECT
+            level.id,
+            level.warehouse_location_id,
+            level.reserved_qty,
+            authority.attributed_open_quantity,
+            authority.has_legacy_reserve
+          FROM location_authority authority
+          JOIN inventory.inventory_levels level
+            ON level.warehouse_location_id = authority.warehouse_location_id
+           AND level.product_variant_id = ${productVariantId}
+          WHERE level.reserved_qty > 0
+            AND (
+              authority.attributed_open_quantity > 0
+              OR authority.has_legacy_reserve
+            )
+          ORDER BY authority.attributed_open_quantity DESC, level.reserved_qty DESC, level.id ASC
+          FOR UPDATE OF level
+        `);
+
+        for (const level of levelsResult?.rows ?? []) {
+          if (remainingToRelease <= 0) break;
+          const locationOpenQuantity = Boolean(level.has_legacy_reserve)
+            ? remainingToRelease
+            : Math.max(0, Number(level.attributed_open_quantity ?? 0));
+          const releaseQuantity = Math.min(
+            remainingToRelease,
+            locationOpenQuantity,
+            Math.max(0, Number(level.reserved_qty ?? 0)),
+          );
+          if (releaseQuantity <= 0) continue;
+
+          await this.inventoryCore.releaseReservation({
+            productVariantId,
+            warehouseLocationId: Number(level.warehouse_location_id),
+            qty: releaseQuantity,
+            orderId: params.orderId,
+            orderItemId: params.orderItemId,
+            reason: params.reason,
+            userId: params.userId,
+            referenceType: "shopify_refund",
+            referenceId: sourceEventId,
+          }, tx);
+          releasedQuantity += releaseQuantity;
+          remainingToRelease -= releaseQuantity;
+        }
+      }
+
+      if (releasedQuantity !== requiredReleaseQuantity) {
+        throw new Error(
+          `Could not release ${requiredReleaseQuantity} reserved unit(s) for WMS order item ` +
+            `${params.orderItemId}; only ${releasedQuantity} unit(s) were attributable to locked inventory levels`,
+        );
+      }
+
+      return {
+        orderId: params.orderId,
+        orderItemId: params.orderItemId,
+        productVariantId,
+        requestedQuantity: params.quantity,
+        previouslyReleasedQuantity,
+        releasedQuantity,
+        openReservationAfter: Math.max(openQuantity - releasedQuantity, 0),
+        idempotentReplay: remainingRequest === 0,
+      } satisfies ReleaseOrderItemReservationResult;
+    });
+
+    if (outcome.releasedQuantity > 0) {
+      await this.channelSync.queueSyncAfterInventoryChange(outcome.productVariantId);
+    }
+    return outcome;
   }
 
   // ---------------------------------------------------------------------------

@@ -166,3 +166,152 @@ describe("releaseOrderReservation — order-scoped + idempotent (P0.1b)", () => 
     expect(releaseCalls[1].qty).toBe(1);
   });
 });
+
+function queryText(query: any): string {
+  return (query?.queryChunks ?? [])
+    .flatMap((chunk: any) => {
+      if (chunk == null) return [];
+      if (typeof chunk === "string") return [chunk];
+      if (Array.isArray(chunk.value)) return chunk.value;
+      if (chunk.value !== undefined) return [String(chunk.value)];
+      return [];
+    })
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function makeLineReleaseDb(args: {
+  previouslyReleased?: number;
+  openQuantity?: number;
+  reservedQuantity?: number;
+}) {
+  const tx: any = {
+    execute: vi.fn(async (query: any) => {
+      const text = queryText(query);
+      if (text.includes("FROM wms.order_items oi")) {
+        return { rows: [{ order_item_id: 700, sku: "SKU-A", product_variant_id: 9, product_id: 3 }] };
+      }
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("reference_type = 'shopify_refund'")) {
+        return { rows: [{ released_quantity: args.previouslyReleased ?? 0 }] };
+      }
+      if (text.includes("WITH location_authority")) {
+        return {
+          rows: [{
+            id: 1,
+            warehouse_location_id: 10,
+            reserved_qty: args.reservedQuantity ?? 5,
+            attributed_open_quantity: args.openQuantity ?? 5,
+            has_legacy_reserve: false,
+          }],
+        };
+      }
+      if (text.includes("transaction_type IN ('reserve', 'unreserve', 'pick')")) {
+        return {
+          rows: [{
+            delta_sum: args.openQuantity ?? 5,
+            legacy_reserves: 0,
+            picked_units: 0,
+            unreserved_units: 0,
+          }],
+        };
+      }
+      throw new Error(`Unexpected line release query: ${text}`);
+    }),
+  };
+  return {
+    transaction: vi.fn(async (callback: (transaction: any) => Promise<unknown>) => callback(tx)),
+  } as any;
+}
+
+describe("releaseOrderItemReservation - refund-event scoped", () => {
+  it("releases only the requested line quantity and records the refund event identity", async () => {
+    const { mockInventoryCore, mockChannelSync, mockAtpService, releaseCalls } = makeHarness();
+    const db = makeLineReleaseDb({ openQuantity: 5, reservedQuantity: 5 });
+    const svc = createReservationService(db, mockInventoryCore, mockChannelSync, mockAtpService);
+
+    const result = await svc.releaseOrderItemReservation({
+      orderId: 42,
+      orderItemId: 700,
+      quantity: 2,
+      sourceEventId: "refund-123",
+      reason: "Shopify line refund refund-123",
+      userId: "system:shopify_refund",
+    });
+
+    expect(result).toMatchObject({
+      requestedQuantity: 2,
+      previouslyReleasedQuantity: 0,
+      releasedQuantity: 2,
+      openReservationAfter: 3,
+      idempotentReplay: false,
+    });
+    expect(releaseCalls).toHaveLength(1);
+    expect(releaseCalls[0]).toMatchObject({
+      qty: 2,
+      orderId: 42,
+      orderItemId: 700,
+      referenceType: "shopify_refund",
+      referenceId: "refund-123",
+    });
+    expect(mockChannelSync.queueSyncAfterInventoryChange).toHaveBeenCalledWith(9);
+  });
+
+  it("does not release inventory twice when the refund event is replayed", async () => {
+    const { mockInventoryCore, mockChannelSync, mockAtpService, releaseCalls } = makeHarness();
+    const db = makeLineReleaseDb({ previouslyReleased: 2, openQuantity: 3 });
+    const svc = createReservationService(db, mockInventoryCore, mockChannelSync, mockAtpService);
+
+    const result = await svc.releaseOrderItemReservation({
+      orderId: 42,
+      orderItemId: 700,
+      quantity: 2,
+      sourceEventId: "refund-123",
+      reason: "Shopify line refund refund-123",
+    });
+
+    expect(result).toMatchObject({
+      previouslyReleasedQuantity: 2,
+      releasedQuantity: 0,
+      idempotentReplay: true,
+    });
+    expect(releaseCalls).toHaveLength(0);
+    expect(mockChannelSync.queueSyncAfterInventoryChange).not.toHaveBeenCalled();
+  });
+
+  it("caps the line release at the reservation still open in the ledger", async () => {
+    const { mockInventoryCore, mockChannelSync, mockAtpService, releaseCalls } = makeHarness();
+    const db = makeLineReleaseDb({ openQuantity: 1, reservedQuantity: 5 });
+    const svc = createReservationService(db, mockInventoryCore, mockChannelSync, mockAtpService);
+
+    const result = await svc.releaseOrderItemReservation({
+      orderId: 42,
+      orderItemId: 700,
+      quantity: 2,
+      sourceEventId: "refund-456",
+      reason: "Shopify line refund refund-456",
+    });
+
+    expect(result.releasedQuantity).toBe(1);
+    expect(result.openReservationAfter).toBe(0);
+    expect(releaseCalls[0].qty).toBe(1);
+  });
+
+  it("fails instead of releasing another order's reservation when attribution is missing", async () => {
+    const { mockInventoryCore, mockChannelSync, mockAtpService, releaseCalls } = makeHarness();
+    const db = makeLineReleaseDb({ openQuantity: 2, reservedQuantity: 0 });
+    const svc = createReservationService(db, mockInventoryCore, mockChannelSync, mockAtpService);
+
+    await expect(svc.releaseOrderItemReservation({
+      orderId: 42,
+      orderItemId: 700,
+      quantity: 2,
+      sourceEventId: "refund-789",
+      reason: "Shopify line refund refund-789",
+    })).rejects.toThrow("only 0 unit(s) were attributable");
+
+    expect(releaseCalls).toHaveLength(0);
+    expect(mockChannelSync.queueSyncAfterInventoryChange).not.toHaveBeenCalled();
+  });
+});

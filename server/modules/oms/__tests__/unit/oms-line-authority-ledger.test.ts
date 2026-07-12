@@ -95,6 +95,31 @@ describe("OMS line authority ledger", () => {
     });
   });
 
+  it("includes line disposition counters in both the event and idempotency key", () => {
+    const authority = deriveOmsLineAuthority({
+      sourceTopic: "refunds/create",
+      sourceEventId: "refund:1036275548319",
+      financialStatus: "paid",
+      quantity: 25,
+      fulfillableQuantity: 0,
+      now: new Date("2026-07-10T16:00:00.000Z"),
+    });
+
+    const event = buildOmsLineAuthorityEvent({
+      orderId: 242960,
+      orderLineId: 110466,
+      eventType: "line_updated",
+      authority,
+      cancelledQuantity: 0,
+      refundedQuantity: 25,
+    });
+
+    expect(event.cancelledQuantity).toBe(0);
+    expect(event.refundedQuantity).toBe(25);
+    expect(event.eventKey).toContain("cancelled:0");
+    expect(event.eventKey).toContain("refunded:25");
+  });
+
   it("keeps authority state writes paired with ledger writes in service and webhook paths", () => {
     expect(OMS_SERVICE_SRC).toMatch(/recordOmsLineAuthorityEvent/);
     expect(OMS_SERVICE_SRC).toMatch(/eventType: "line_inserted"/);

@@ -25,6 +25,13 @@ const OMS_WEBHOOKS_SRC = readFileSync(
   "utf8",
 );
 
+const REFUND_CASCADE_SRC = readFileSync(
+  fileURLToPath(
+    new URL("../../shopify-refund-cascade.service.ts", import.meta.url),
+  ),
+  "utf8",
+);
+
 // ─── D-SYNCANCEL structural checks ────────────────────────────────
 
 function extractSyncCancelFn(): string {
@@ -77,7 +84,7 @@ describe("D-SYNCANCEL: OMS sync cancel releases inventory", () => {
 
 function extractCancelOrderCascade(): string {
   const start = OMS_WEBHOOKS_SRC.indexOf("export async function cancelOrderCascade(");
-  const nextExport = OMS_WEBHOOKS_SRC.indexOf("Apply a Shopify `refunds/create`", start);
+  const nextExport = OMS_WEBHOOKS_SRC.indexOf("export function deriveOmsUpdateFinality", start);
   return OMS_WEBHOOKS_SRC.substring(start, nextExport);
 }
 
@@ -196,23 +203,17 @@ describe("P0.5: cancelled-order retries re-run an incomplete cascade", () => {
 
 // ─── D-REFUNDREL structural checks ────────────────────────────────
 
-describe("D-REFUNDREL: Refund restock failure dead-letter", () => {
-  it("persists refund_restock_failed event when restock helper throws", () => {
-    const refundBlock = OMS_WEBHOOKS_SRC.substring(
-      OMS_WEBHOOKS_SRC.indexOf("D-REFUNDREL"),
-      OMS_WEBHOOKS_SRC.indexOf("return {", OMS_WEBHOOKS_SRC.indexOf("D-REFUNDREL")),
-    );
-    expect(refundBlock).toContain("refund_restock_failed");
-    expect(refundBlock).toContain("requiresReview: true");
+describe("D-REFUNDREL: line-level refund reservation and return boundaries", () => {
+  it("requires line-scoped reservation release and lets failure reach the webhook retry boundary", () => {
+    expect(REFUND_CASCADE_SRC).toContain("Line-level reservation release is not configured");
+    expect(REFUND_CASCADE_SRC).toContain("await helpers.releaseOrderItemReservation!");
+    expect(REFUND_CASCADE_SRC).toContain("sourceEventId: refundExternalId");
   });
 
-  it("includes refundExternalId in the dead-letter details", () => {
-    const refundBlock = OMS_WEBHOOKS_SRC.substring(
-      OMS_WEBHOOKS_SRC.indexOf("D-REFUNDREL"),
-      OMS_WEBHOOKS_SRC.indexOf("return {", OMS_WEBHOOKS_SRC.indexOf("D-REFUNDREL")),
-    );
-    expect(refundBlock).toContain("refundExternalId");
-    expect(refundBlock).toContain("wmsOrderId");
-    expect(refundBlock).toContain("error:");
+  it("does not convert Shopify return intent into an inventory receipt", () => {
+    expect(REFUND_CASCADE_SRC).toContain('const returnPolicies = new Set(["return", "restock"])');
+    expect(REFUND_CASCADE_SRC).toContain("status, received_at, refunded_at");
+    expect(REFUND_CASCADE_SRC).toContain("false, 'expected', NULL");
+    expect(REFUND_CASCADE_SRC).not.toContain("receiveInventory");
   });
 });

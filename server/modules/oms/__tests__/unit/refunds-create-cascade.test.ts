@@ -1,478 +1,418 @@
-/**
- * Unit tests for `applyShopifyRefundCascade` (§6 Group F, Commit 29).
- *
- * The cascade is the WMS portion of the Shopify `refunds/create`
- * webhook handler. It:
- *   - Validates the refund payload shape
- *   - Resolves the OMS order (caller-injected helper)
- *   - Resolves the WMS order via `wms.orders` lookup
- *   - Resolves the most-recent shipment (id DESC LIMIT 1)
- *   - Idempotency-checks via `refund_external_id` + `order_id`
- *   - Inserts a `wms.returns` row with `restocked` reflecting whether
- *     any refund line was flagged for restock
- *   - Optionally invokes a restock helper if any line was flagged
- *
- * The route handler itself (HMAC, OMS update, event log) is exercised
- * via integration; this file scopes to the cascade logic only.
- *
- * Standards: coding-standards Rule #6 (idempotent retry-safety),
- * Rule #9 (happy + edge cases), Rule #15 (5-section completion report).
- */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+const mocks = vi.hoisted(() => ({
+  recordAuthorityEvent: vi.fn(async () => undefined),
+  markShipmentCancelled: vi.fn(async () => ({ wmsOrderId: 204464, changed: true })),
+  recomputeOrderStatusFromShipments: vi.fn(async () => undefined),
+}));
+const {
+  recordAuthorityEvent,
+  markShipmentCancelled,
+  recomputeOrderStatusFromShipments,
+} = mocks;
 
-// `oms-webhooks.ts` transitively imports `server/db`; stub it so import
-// time doesn't try to construct a real Postgres client. Same pattern as
-// orders-cancelled-cascade / fulfillments-create-webhook.
-vi.mock("../../../../db", () => ({
-  db: {
-    insert: () => ({ values: async () => undefined }),
-    update: () => ({ set: () => ({ where: async () => undefined }) }),
-    select: () => ({
-      from: () => ({
-        where: () => ({ limit: async () => [] }),
-      }),
-    }),
-    execute: async () => ({ rows: [] }),
-  },
+vi.mock("../../oms-line-authority-ledger", () => ({
+  recordOmsLineAuthorityEvent: mocks.recordAuthorityEvent,
 }));
 
-// Pull in helpers after the db mock is registered.
-import { __test__ } from "../../oms-webhooks";
+vi.mock("../../../orders/shipment-rollup", () => ({
+  markShipmentCancelled: mocks.markShipmentCancelled,
+  recomputeOrderStatusFromShipments: mocks.recomputeOrderStatusFromShipments,
+}));
 
-const { applyShopifyRefundCascade, RefundsCreateBadPayloadError } = __test__;
+import {
+  applyShopifyRefundCascade,
+  RefundsCreateBadPayloadError,
+} from "../../shopify-refund-cascade.service";
 
-// ─── Scripted db.execute mock ────────────────────────────────────────
+const NOW = new Date("2026-07-10T16:00:00.000Z");
 
-type ScriptedResponse = { rows: any[] };
+function qtext(query: any): string {
+  return (query?.queryChunks ?? [])
+    .flatMap((chunk: any) => {
+      if (chunk == null) return [];
+      if (typeof chunk === "string") return [chunk];
+      if (Array.isArray(chunk.value)) return chunk.value;
+      if (chunk.value !== undefined) return [String(chunk.value)];
+      return [];
+    })
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-function makeDb(scripted: ScriptedResponse[]) {
-  const calls: any[] = [];
-  const remaining = [...scripted];
-  const execute = vi.fn(async (query: any) => {
-    calls.push(query);
-    if (remaining.length === 0) return { rows: [] };
-    return remaining.shift()!;
-  });
+function makeDb(handler: (text: string) => { rows: any[] } | Promise<{ rows: any[] }>) {
+  const calls: string[] = [];
+  const db: any = {
+    execute: vi.fn(async (query: any) => {
+      const text = qtext(query);
+      calls.push(text);
+      return handler(text);
+    }),
+    transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(db)),
+  };
+  return { db, calls };
+}
+
+function omsLine(overrides: Record<string, unknown> = {}) {
   return {
-    db: { execute } as any,
-    execute,
-    calls,
-    remaining,
+    id: 110466,
+    external_line_item_id: "441680952",
+    channel_observed_quantity: 25,
+    paid_quantity: 25,
+    authority_fulfillable_quantity: 25,
+    cancelled_quantity: 0,
+    refunded_quantity: 0,
+    authorization_status: "authorized",
+    authorized_at: NOW,
+    authorized_by_event_id: "paid-event",
+    requires_shipping: true,
+    refund_cancel_quantity: 0,
+    refund_other_quantity: 0,
+    ...overrides,
   };
 }
 
-const NOW = new Date("2026-04-26T12:00:00Z");
+function refundPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 1036275548319,
+    order_id: 12153457410207,
+    note: "Out of stock",
+    processed_at: "2026-07-10T15:30:00.000Z",
+    refund_line_items: [
+      {
+        line_item_id: 441680952,
+        quantity: 25,
+        restock_type: "no_restock",
+      },
+    ],
+    ...overrides,
+  };
+}
 
-const baseRefund = (overrides: Record<string, any> = {}) => ({
-  id: 9988776655,
-  order_id: 1234567890,
-  note: "customer changed mind",
-  processed_at: "2026-04-26T11:55:00Z",
-  refund_line_items: [],
-  ...overrides,
-});
+function helpers(overrides: Record<string, unknown> = {}) {
+  return {
+    resolveOmsOrder: vi.fn(async () => ({ id: 242960 })),
+    releaseOrderItemReservation: vi.fn(async () => ({ releasedQuantity: 25 })),
+    pushShipment: vi.fn(async () => undefined),
+    shippingEngine: { cancel: vi.fn(async () => undefined) },
+    ...overrides,
+  } as any;
+}
 
-const buildResolveOmsOrder = (id: number | null) =>
-  vi.fn(async (_db: any, _args: any) => (id === null ? null : { id }));
-
-describe("applyShopifyRefundCascade (C29)", () => {
+describe("applyShopifyRefundCascade", () => {
   beforeEach(() => {
-    vi.restoreAllMocks();
+    vi.clearAllMocks();
+    markShipmentCancelled.mockResolvedValue({ wmsOrderId: 204464, changed: true });
   });
 
-  it("happy path: refund with no restocks → wms.returns row inserted with restocked=false", async () => {
-    const mock = makeDb([
-      // 1) WMS order lookup
-      { rows: [{ id: 42 }] },
-      { rows: [{ id: 9001 }] }, // line adjustment insert
-      { rows: [{ id: 9002 }] }, // line adjustment insert
-      { rows: [{ id: 501 }] }, // WMS line adjustment
-      { rows: [] }, // held shipment lookup
-      // 2) Idempotency check (no existing row)
-      { rows: [] },
-      // 3) Most-recent shipment
-      { rows: [{ id: 7001 }] },
-      // 4) INSERT wms.returns
-      { rows: [] },
-    ]);
+  it("repairs #60037 as a no-restock line disposition without inventing a return", async () => {
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) {
+        return { rows: [{ id: 204464 }] };
+      }
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) {
+        return { rows: [omsLine()] };
+      }
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) return { rows: [{ id: 1026 }] };
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) {
+        return { rows: [omsLine({ refund_other_quantity: 25 })] };
+      }
+      if (text.includes("UPDATE oms.oms_order_lines")) return { rows: [] };
+      if (text.includes("FROM wms.order_items wi") && text.includes("FOR UPDATE OF wi")) {
+        return {
+          rows: [{
+            id: 312850,
+            oms_order_line_id: 110466,
+            external_line_item_id: "441680952",
+            quantity: 25,
+            picked_quantity: 0,
+            fulfilled_quantity: 0,
+            status: "short",
+            requires_shipping: true,
+          }],
+        };
+      }
+      if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) {
+        return {
+          rows: [
+            { shipment_item_id: 11070, shipment_id: 8008, order_item_id: 312850, current_quantity: 25, remaining_demand: 0 },
+            { shipment_item_id: 11071, shipment_id: 8008, order_item_id: 312851, current_quantity: 1, remaining_demand: 0 },
+          ],
+        };
+      }
+      if (text.includes("DELETE FROM wms.outbound_shipment_items")) return { rows: [] };
+      if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) {
+        return {
+          rows: [{
+            id: 8008,
+            status: "queued",
+            remaining_quantity: 0,
+            terminal_provider_sibling: true,
+          }],
+        };
+      }
+      throw new Error(`Unexpected SQL in #60037 test: ${text}`);
+    });
+    const serviceHelpers = helpers();
 
-    const restock = vi.fn();
     const result = await applyShopifyRefundCascade(
       mock.db,
-      baseRefund({
-        refund_line_items: [
-          { line_item_id: 1, quantity: 1, restock: false },
-          { line_item_id: 2, quantity: 2, restock: false },
-        ],
+      refundPayload(),
+      serviceHelpers,
+      { channelId: 36, sourceInboxId: 75058, now: NOW },
+    );
+
+    expect(result).toMatchObject({
+      outcome: "line_dispositions_applied",
+      omsOrderId: 242960,
+      wmsOrderId: 204464,
+      returnExpected: false,
+      restocked: false,
+      adjustedLines: 1,
+      releasedReservationQuantity: 25,
+      cancelledShipments: 1,
+    });
+    expect(serviceHelpers.releaseOrderItemReservation).toHaveBeenCalledWith({
+      orderId: 204464,
+      orderItemId: 312850,
+      quantity: 25,
+      sourceEventId: "1036275548319",
+      reason: "Shopify line refund 1036275548319",
+      userId: "system:shopify_refund",
+    });
+    expect(markShipmentCancelled).toHaveBeenCalledWith(
+      mock.db,
+      8008,
+      "refund_retired_provider_covered_shipment",
+      expect.objectContaining({ skipEngineCancel: true }),
+    );
+    expect(mock.calls.filter((text) => text.includes("DELETE FROM wms.outbound_shipment_items"))).toHaveLength(2);
+    expect(mock.calls.some((text) => text.includes("SET qty = 0"))).toBe(false);
+    expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns"))).toBe(false);
+    expect(recordAuthorityEvent).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 242960,
+      orderLineId: 110466,
+      cancelledQuantity: 0,
+      refundedQuantity: 25,
+      authority: expect.objectContaining({
+        authorityFulfillableQuantity: 0,
+        authorizationStatus: "refunded",
       }),
-      { resolveOmsOrder: buildResolveOmsOrder(99), restock },
-      { channelId: 5, now: NOW },
-    );
-
-    expect(result.outcome).toBe("return_recorded");
-    expect(result.refundExternalId).toBe("9988776655");
-    expect(result.omsOrderId).toBe(99);
-    expect(result.wmsOrderId).toBe(42);
-    expect(result.shipmentId).toBe(7001);
-    expect(result.restocked).toBe(false);
-    expect(result.restockInvoked).toBe(false);
-    expect(restock).not.toHaveBeenCalled();
-    expect(mock.execute).toHaveBeenCalled();
+    }));
   });
 
-  it("refund with restock_type='return' line → restocked=true, restock helper invoked", async () => {
-    const mock = makeDb([
-      { rows: [{ id: 42 }] }, // WMS order
-      { rows: [{ id: 9001 }] }, // line adjustment insert
-      { rows: [{ id: 9002 }] }, // line adjustment insert
-      { rows: [{ id: 501 }] }, // WMS line adjustment
-      { rows: [] }, // held shipment lookup
-      { rows: [] }, // idempotency
-      { rows: [{ id: 7002 }] }, // most-recent shipment
-      { rows: [{ id: 800 }] }, // INSERT wms.returns RETURNING id
-      { rows: [{ id: 1 }] }, // INSERT wms.return_items (the restock line)
-    ]);
+  it("opens an expected return only for fulfilled units carrying a return policy", async () => {
+    const originalLine = omsLine({
+      id: 12,
+      external_line_item_id: "12",
+      channel_observed_quantity: 1,
+      paid_quantity: 1,
+      authority_fulfillable_quantity: 1,
+    });
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) return { rows: [{ id: 42 }] };
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) return { rows: [originalLine] };
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) return { rows: [{ id: 1 }] };
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) return { rows: [omsLine({ ...originalLine, refund_other_quantity: 1 })] };
+      if (text.includes("UPDATE oms.oms_order_lines")) return { rows: [] };
+      if (text.includes("FROM wms.order_items wi") && text.includes("FOR UPDATE OF wi")) {
+        return { rows: [{
+          id: 501,
+          oms_order_line_id: 12,
+          external_line_item_id: "12",
+          quantity: 1,
+          picked_quantity: 1,
+          fulfilled_quantity: 1,
+          status: "completed",
+          requires_shipping: true,
+        }] };
+      }
+      if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) return { rows: [] };
+      if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) return { rows: [] };
+      if (text.includes("SELECT COALESCE(SUM(ri.expected_qty)")) return { rows: [{ expected_quantity: 0 }] };
+      if (text.includes("JOIN wms.outbound_shipment_items si") && text.includes("ORDER BY COALESCE(os.shipped_at")) return { rows: [{ id: 700 }] };
+      if (text.includes("INSERT INTO wms.returns")) return { rows: [{ id: 800 }] };
+      if (text.includes("INSERT INTO wms.return_items")) return { rows: [{ id: 900 }] };
+      throw new Error(`Unexpected SQL in return test: ${text}`);
+    });
+    const serviceHelpers = helpers({
+      releaseOrderItemReservation: vi.fn(async () => ({ releasedQuantity: 0 })),
+    });
 
-    const restock = vi.fn(async () => undefined);
     const result = await applyShopifyRefundCascade(
       mock.db,
-      baseRefund({
-        refund_line_items: [
-          { line_item_id: 1, quantity: 1, restock_type: "return" },
-          { line_item_id: 2, quantity: 1, restock: false },
-        ],
+      refundPayload({
+        refund_line_items: [{ line_item_id: 12, quantity: 1, restock_type: "return" }],
       }),
-      { resolveOmsOrder: buildResolveOmsOrder(99), restock },
-      { channelId: 5, now: NOW },
+      serviceHelpers,
+      { channelId: 36, now: NOW },
     );
 
-    expect(result.outcome).toBe("return_recorded");
-    expect(result.restocked).toBe(true);
-    expect(result.restockInvoked).toBe(true);
-    expect(result.restockError).toBeUndefined();
-    expect(restock).toHaveBeenCalledOnce();
-    const ctx = restock.mock.calls[0][1];
-    expect(ctx.wmsOrderId).toBe(42);
-    expect(ctx.omsOrderId).toBe(99);
-    expect(ctx.refundLineItems).toHaveLength(1);
-    expect(ctx.refundLineItems[0].restock_type).toBe("return");
-    // Phase 3: an "expected" return_items row is opened for the restock line.
-    const returnItemsCall = mock.calls.find((q) => JSON.stringify(q).includes("return_items"));
-    expect(returnItemsCall).toBeDefined();
+    expect(result).toMatchObject({
+      outcome: "return_expected",
+      returnId: 800,
+      returnExpected: true,
+      restocked: false,
+    });
+    expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns") && text.includes("source_event_key"))).toBe(true);
+    expect(mock.calls.some((text) => text.includes("INSERT INTO wms.return_items") && text.includes("expected_qty"))).toBe(true);
   });
 
-  it("refund with restock=true line → restocked=true (treats boolean restock as restock signal)", async () => {
-    const mock = makeDb([
-      { rows: [{ id: 42 }] },
-      { rows: [{ id: 9001 }] },
-      { rows: [{ id: 501 }] },
-      { rows: [] },
-      { rows: [] },
-      { rows: [{ id: 7003 }] }, // most-recent shipment
-      { rows: [{ id: 801 }] }, // INSERT wms.returns RETURNING id
-      { rows: [{ id: 1 }] }, // INSERT wms.return_items
-    ]);
-
-    const restock = vi.fn(async () => undefined);
-    const result = await applyShopifyRefundCascade(
-      mock.db,
-      baseRefund({
-        refund_line_items: [{ line_item_id: 1, quantity: 1, restock: true }],
-      }),
-      { resolveOmsOrder: buildResolveOmsOrder(99), restock },
-      { channelId: 5, now: NOW },
-    );
-
-    expect(result.restocked).toBe(true);
-    expect(restock).toHaveBeenCalledOnce();
-  });
-
-  it("no associated shipment → no_shipment_to_associate, no INSERT, no restock", async () => {
-    const mock = makeDb([
-      { rows: [{ id: 42 }] }, // WMS order
-      { rows: [{ id: 9001 }] }, // line adjustment insert
-      { rows: [{ id: 501 }] }, // WMS line adjustment
-      { rows: [] }, // held shipment lookup
-      { rows: [] }, // idempotency
-      { rows: [] }, // most-recent shipment: empty
-    ]);
-
-    const restock = vi.fn();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("is idempotent when the same no-restock refund is replayed", async () => {
+    const finalLine = omsLine({
+      authority_fulfillable_quantity: 0,
+      refunded_quantity: 25,
+      authorization_status: "refunded",
+      refund_other_quantity: 25,
+    });
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) return { rows: [{ id: 204464 }] };
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) return { rows: [finalLine] };
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) return { rows: [] };
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) return { rows: [finalLine] };
+      if (text.includes("FROM wms.order_items wi") && text.includes("FOR UPDATE OF wi")) {
+        return { rows: [{
+          id: 312850,
+          oms_order_line_id: 110466,
+          external_line_item_id: "441680952",
+          quantity: 25,
+          picked_quantity: 0,
+          fulfilled_quantity: 0,
+          status: "short",
+          requires_shipping: true,
+        }] };
+      }
+      if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) return { rows: [] };
+      if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) return { rows: [] };
+      throw new Error(`Unexpected SQL in replay test: ${text}`);
+    });
+    const serviceHelpers = helpers({
+      releaseOrderItemReservation: vi.fn(async () => ({ releasedQuantity: 0 })),
+    });
 
     const result = await applyShopifyRefundCascade(
       mock.db,
-      baseRefund({
-        refund_line_items: [{ line_item_id: 1, quantity: 1, restock: true }],
-      }),
-      { resolveOmsOrder: buildResolveOmsOrder(99), restock },
-      { channelId: 5, now: NOW },
-    );
-
-    expect(result.outcome).toBe("no_shipment_to_associate");
-    expect(result.shipmentId).toBeNull();
-    expect(result.restocked).toBe(false);
-    expect(result.restockInvoked).toBe(false);
-    expect(restock).not.toHaveBeenCalled();
-    expect(mock.execute).toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
-  });
-
-  it("order not tracked in OMS → order_not_tracked, no DB writes", async () => {
-    const mock = makeDb([]);
-    const restock = vi.fn();
-
-    const result = await applyShopifyRefundCascade(
-      mock.db,
-      baseRefund(),
-      { resolveOmsOrder: buildResolveOmsOrder(null), restock },
-      { channelId: 5, now: NOW },
-    );
-
-    expect(result.outcome).toBe("order_not_tracked");
-    expect(result.omsOrderId).toBeUndefined();
-    expect(result.wmsOrderId).toBeUndefined();
-    expect(result.restocked).toBe(false);
-    expect(mock.execute).not.toHaveBeenCalled();
-    expect(restock).not.toHaveBeenCalled();
-  });
-
-  it("WMS order not found → wms_order_not_found, no INSERT", async () => {
-    const mock = makeDb([
-      { rows: [] }, // WMS order: empty
-    ]);
-    const restock = vi.fn();
-
-    const result = await applyShopifyRefundCascade(
-      mock.db,
-      baseRefund(),
-      { resolveOmsOrder: buildResolveOmsOrder(99), restock },
-      { channelId: 5, now: NOW },
-    );
-
-    expect(result.outcome).toBe("wms_order_not_found");
-    expect(result.omsOrderId).toBe(99);
-    expect(mock.execute).toHaveBeenCalledTimes(1);
-    expect(restock).not.toHaveBeenCalled();
-  });
-
-  it("idempotent: same refund.id arrives twice → second call no-ops with idempotent_skip", async () => {
-    const mock = makeDb([
-      { rows: [{ id: 42 }] }, // WMS order
-      { rows: [{ id: 555 }] }, // idempotency: existing row found
-    ]);
-    const restock = vi.fn();
-
-    const result = await applyShopifyRefundCascade(
-      mock.db,
-      baseRefund({
-        refund_line_items: [{ line_item_id: 1, restock: true }],
-      }),
-      { resolveOmsOrder: buildResolveOmsOrder(99), restock },
-      { channelId: 5, now: NOW },
+      refundPayload(),
+      serviceHelpers,
+      { channelId: 36, sourceInboxId: 75058, now: NOW },
     );
 
     expect(result.outcome).toBe("idempotent_skip");
-    expect(result.wmsOrderId).toBe(42);
-    expect(result.restocked).toBe(false);
-    expect(result.restockInvoked).toBe(false);
-    // Only WMS lookup + idempotency check — no shipment lookup, no INSERT
-    expect(mock.execute).toHaveBeenCalledTimes(2);
-    expect(restock).not.toHaveBeenCalled();
+    expect(result.releasedReservationQuantity).toBe(0);
+    expect(markShipmentCancelled).not.toHaveBeenCalled();
   });
 
-  it("bad payload: missing id → throws RefundsCreateBadPayloadError", async () => {
-    const mock = makeDb([]);
-    await expect(
-      applyShopifyRefundCascade(
-        mock.db,
-        { order_id: 12345 },
-        { resolveOmsOrder: buildResolveOmsOrder(99) },
-        { channelId: 5, now: NOW },
-      ),
-    ).rejects.toBeInstanceOf(RefundsCreateBadPayloadError);
-    expect(mock.execute).not.toHaveBeenCalled();
-  });
-
-  it("bad payload: missing order_id → throws RefundsCreateBadPayloadError", async () => {
-    const mock = makeDb([]);
-    await expect(
-      applyShopifyRefundCascade(
-        mock.db,
-        { id: 99887766 },
-        { resolveOmsOrder: buildResolveOmsOrder(99) },
-        { channelId: 5, now: NOW },
-      ),
-    ).rejects.toBeInstanceOf(RefundsCreateBadPayloadError);
-  });
-
-  it("bad payload: null payload → throws RefundsCreateBadPayloadError", async () => {
-    const mock = makeDb([]);
-    await expect(
-      applyShopifyRefundCascade(
-        mock.db,
-        null,
-        { resolveOmsOrder: buildResolveOmsOrder(99) },
-        { channelId: 5, now: NOW },
-      ),
-    ).rejects.toBeInstanceOf(RefundsCreateBadPayloadError);
-  });
-
-  it("DB failure on INSERT → propagates (caller maps to 500)", async () => {
-    const mock = {
-      db: {
-        execute: vi
-          .fn()
-          // WMS lookup ok
-          .mockResolvedValueOnce({ rows: [{ id: 42 }] })
-          // idempotency ok
-          .mockResolvedValueOnce({ rows: [] })
-          // shipment ok
-          .mockResolvedValueOnce({ rows: [{ id: 7004 }] })
-          // INSERT throws
-          .mockRejectedValueOnce(new Error("connection terminated")),
-      } as any,
-    };
-
-    await expect(
-      applyShopifyRefundCascade(
-        mock.db,
-        baseRefund(),
-        { resolveOmsOrder: buildResolveOmsOrder(99) },
-        { channelId: 5, now: NOW },
-      ),
-    ).rejects.toThrow("connection terminated");
-  });
-
-  it("restock helper throws → return record still considered recorded, error captured", async () => {
-    const mock = makeDb([
-      { rows: [{ id: 42 }] }, // WMS
-      { rows: [] }, // idempotency
-      { rows: [{ id: 7005 }] }, // shipment
-      { rows: [] }, // INSERT
-    ]);
-
-    const restock = vi.fn(async () => {
-      throw new Error("reservation service down");
+  it("does not touch warehouse state for a money-only refund", async () => {
+    const mock = makeDb(() => {
+      throw new Error("money-only refund must not query WMS state");
     });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const serviceHelpers = helpers();
 
     const result = await applyShopifyRefundCascade(
       mock.db,
-      baseRefund({
-        refund_line_items: [{ line_item_id: 1, restock: true }],
-      }),
-      { resolveOmsOrder: buildResolveOmsOrder(99), restock },
-      { channelId: 5, now: NOW },
+      refundPayload({ refund_line_items: [] }),
+      serviceHelpers,
+      { channelId: 36, now: NOW },
     );
 
-    expect(result.outcome).toBe("return_recorded");
-    expect(result.restocked).toBe(true);
-    expect(result.restockInvoked).toBe(true);
-    expect(result.restockError).toContain("reservation service down");
-    expect(errSpy).toHaveBeenCalled();
-    errSpy.mockRestore();
+    expect(result.outcome).toBe("financial_only");
+    expect(mock.db.execute).not.toHaveBeenCalled();
   });
 
-  it("picks the most-recent shipment (id DESC LIMIT 1) consistently", async () => {
-    // Verifies the cascade does not collapse to e.g. lowest id; it asks
-    // db.execute for the shipment and uses whatever id is returned. The
-    // SQL itself is `ORDER BY id DESC LIMIT 1` (asserted by inspecting
-    // the issued query string).
-    const mock = makeDb([
-      { rows: [{ id: 42 }] },
-      { rows: [] },
-      { rows: [{ id: 9999 }] },
-      { rows: [] },
-    ]);
+  it("updates OMS line authority even when no WMS order exists", async () => {
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) return { rows: [] };
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) return { rows: [omsLine()] };
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) return { rows: [{ id: 1 }] };
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) return { rows: [omsLine({ refund_other_quantity: 25 })] };
+      if (text.includes("UPDATE oms.oms_order_lines")) return { rows: [] };
+      throw new Error(`Unexpected SQL in missing WMS test: ${text}`);
+    });
 
     const result = await applyShopifyRefundCascade(
       mock.db,
-      baseRefund(),
-      { resolveOmsOrder: buildResolveOmsOrder(99) },
-      { channelId: 5, now: NOW },
+      refundPayload(),
+      helpers(),
+      { channelId: 36, now: NOW },
     );
 
-    expect(result.shipmentId).toBe(9999);
-    // The shipment lookup query (3rd execute call) must include
-    // ORDER BY id DESC LIMIT 1 fragment.
-    const shipmentQuery = mock.calls[2];
-    const queryStr = JSON.stringify(shipmentQuery);
-    expect(queryStr).toContain("ORDER BY id DESC");
-    expect(queryStr).toContain("LIMIT 1");
+    expect(result.outcome).toBe("wms_order_not_found");
+    expect(recordAuthorityEvent).toHaveBeenCalledOnce();
   });
 
-  it("uses processed_at as refundedAt when present, falls back to now", async () => {
-    // Smoke-check: cascade accepts both shapes. We don't assert the
-    // bound parameter here (sql template tag opaque); we just assert
-    // the cascade reaches the INSERT step in both cases.
-    const mock1 = makeDb([
-      { rows: [{ id: 42 }] },
-      { rows: [] },
-      { rows: [{ id: 7006 }] },
-      { rows: [] },
-    ]);
-    const r1 = await applyShopifyRefundCascade(
-      mock1.db,
-      baseRefund({ processed_at: "2026-04-25T10:00:00Z" }),
-      { resolveOmsOrder: buildResolveOmsOrder(99) },
-      { channelId: 5, now: NOW },
-    );
-    expect(r1.outcome).toBe("return_recorded");
+  it("fails closed when a shippable refunded OMS line has no WMS item mapping", async () => {
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) return { rows: [{ id: 42 }] };
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) return { rows: [omsLine()] };
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) return { rows: [{ id: 1 }] };
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) return { rows: [omsLine({ refund_other_quantity: 25 })] };
+      if (text.includes("UPDATE oms.oms_order_lines")) return { rows: [] };
+      if (text.includes("FROM wms.order_items wi") && text.includes("FOR UPDATE OF wi")) return { rows: [] };
+      throw new Error(`Unexpected SQL in missing WMS line test: ${text}`);
+    });
 
-    const mock2 = makeDb([
-      { rows: [{ id: 42 }] },
-      { rows: [] },
-      { rows: [{ id: 7007 }] },
-      { rows: [] },
-    ]);
-    const r2 = await applyShopifyRefundCascade(
-      mock2.db,
-      baseRefund({ processed_at: undefined }),
-      { resolveOmsOrder: buildResolveOmsOrder(99) },
-      { channelId: 5, now: NOW },
+    await expect(applyShopifyRefundCascade(
+      mock.db,
+      refundPayload(),
+      helpers(),
+      { channelId: 36, now: NOW },
+    )).rejects.toThrow("missing shippable refund line(s): 441680952");
+  });
+
+  it("returns order_not_tracked without local writes", async () => {
+    const mock = makeDb(() => {
+      throw new Error("untracked refund must not query local state");
+    });
+    const result = await applyShopifyRefundCascade(
+      mock.db,
+      refundPayload(),
+      helpers({ resolveOmsOrder: vi.fn(async () => null) }),
+      { channelId: 36, now: NOW },
     );
-    expect(r2.outcome).toBe("return_recorded");
+    expect(result.outcome).toBe("order_not_tracked");
+    expect(mock.db.execute).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [null, "missing or not an object"],
+    [{ order_id: 1 }, "missing `id`"],
+    [{ id: 1 }, "missing `order_id`"],
+    [{ id: 1, order_id: 2, refund_line_items: [{ line_item_id: 3, quantity: 0 }] }, "positive integer"],
+  ])("rejects malformed payload %#", async (payload, expectedMessage) => {
+    const mock = makeDb(() => ({ rows: [] }));
+    await expect(applyShopifyRefundCascade(
+      mock.db,
+      payload,
+      helpers(),
+      { channelId: 36, now: NOW },
+    )).rejects.toMatchObject<RefundsCreateBadPayloadError>({
+      name: "RefundsCreateBadPayloadError",
+      message: expect.stringContaining(expectedMessage),
+    });
   });
 });
 
-// ─── Source regression: per-refund financial idempotency guard ────────
-// The refunds/create handler's OMS update is INCREMENTAL
-// (refund_amount_cents = prior + this), so a replayed or retried webhook
-// must not re-add the same refund. The guard checks for the 'refunded'
-// event marker (keyed by Shopify refund id) and the marker is written in
-// the SAME transaction as the financial update.
+const OMS_WEBHOOKS_SRC = readFileSync(resolve(__dirname, "../../oms-webhooks.ts"), "utf8");
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
-const OMS_WEBHOOKS_SRC = readFileSync(
-  resolve(__dirname, "../../oms-webhooks.ts"),
-  "utf-8",
-);
-
-describe("refunds/create :: per-refund financial idempotency", () => {
-  it("guards the financial update on the 'refunded' event marker keyed by refundId", () => {
+describe("refunds/create financial idempotency", () => {
+  it("guards the financial increment with a refund-id event marker", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(
       /event_type = 'refunded'[\s\S]{0,120}details->>'refundId' = \$\{String\(refundPayload\.id\)\}/,
     );
-    expect(OMS_WEBHOOKS_SRC).toMatch(/refundAlreadyApplied/);
+    expect(OMS_WEBHOOKS_SRC).toContain("refundAlreadyApplied");
   });
 
-  it("writes the financial update and the marker event in one locked transaction (P0.5)", () => {
-    // The atomic SQL increment + the 'refunded' marker event commit together
-    // inside a per-order advisory-locked transaction — replays and concurrent
-    // refunds can neither double-count nor lose an amount.
-    const m = OMS_WEBHOOKS_SRC.match(
+  it("commits the financial increment and marker under one order lock", () => {
+    expect(OMS_WEBHOOKS_SRC).toMatch(
       /await db\.transaction\(async \(tx: any\) => \{[\s\S]*?pg_advisory_xact_lock\(918411[\s\S]*?refund_amount_cents = COALESCE\(refund_amount_cents, 0\) \+ \$\{thisRefundCents\}[\s\S]*?eventType: "refunded"[\s\S]*?\}\);/,
     );
-    expect(m).not.toBeNull();
-  });
-
-  it("does not write a second 'refunded' event after the cascade", () => {
-    const markers = OMS_WEBHOOKS_SRC.match(/eventType: "refunded"/g) ?? [];
-    expect(markers.length).toBe(1);
   });
 });
