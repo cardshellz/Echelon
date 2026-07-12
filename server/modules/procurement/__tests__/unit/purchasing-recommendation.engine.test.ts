@@ -213,6 +213,86 @@ describe("purchasing recommendation engine", () => {
     expect(result.items[0].explanation).toContain("Recommend 1 Case");
   });
 
+  it("blocks otherwise high-confidence recommendations without receivable supplier bindings", () => {
+    const baseRow = {
+      base_sku: "SKU-BLOCKED",
+      product_name: "Blocked Product",
+      total_pieces: 12,
+      total_reserved_pieces: 2,
+      total_outbound_pieces: 60,
+      previous_outbound_pieces: 50,
+      demand_order_count: 12,
+      demand_active_days: 10,
+      latest_demand_at: "2026-05-18T12:00:00.000Z",
+      on_order_pieces: 0,
+      open_po_count: 0,
+      vendor_lead_time_days: 5,
+      safety_stock_days: 2,
+      order_uom_units: 10,
+      order_uom_level: 3,
+      preferred_vendor_id: 77,
+      estimated_cost_mills: 12500,
+      vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+    };
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [
+        {
+          ...baseRow,
+          product_id: 13,
+          vendor_product_id: 771,
+        },
+        {
+          ...baseRow,
+          product_id: 14,
+          variant_id: 114,
+          vendor_product_id: null,
+        },
+      ],
+    });
+
+    expect(result.items).toHaveLength(2);
+    expect(result.items[0]).toMatchObject({
+      confidence: "high",
+      actionable: true,
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "quality_control_block",
+        detail: expect.stringContaining("Missing receive configuration"),
+      },
+      qualityControls: expect.arrayContaining([
+        expect.objectContaining({
+          area: "receive_configuration",
+          severity: "block",
+          code: "missing_receive_configuration",
+        }),
+      ]),
+    });
+    expect(result.items[1]).toMatchObject({
+      confidence: "high",
+      actionable: true,
+      qualityGate: {
+        autoDraftEligible: false,
+        reason: "quality_control_block",
+        detail: expect.stringContaining("Missing supplier catalog binding"),
+      },
+      qualityControls: expect.arrayContaining([
+        expect.objectContaining({
+          area: "supplier_catalog",
+          severity: "block",
+          code: "missing_supplier_catalog_binding",
+        }),
+      ]),
+    });
+    expect(result.items.map((item) => passesAutoDraftApprovalPolicy(item))).toEqual([false, false]);
+    expect(result.summary).toMatchObject({
+      actionableCount: 2,
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 2,
+    });
+  });
+
   it("uses configurable candidate score thresholds for read-only banding", () => {
     const result = generatePurchasingRecommendations({
       // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
@@ -500,6 +580,7 @@ describe("purchasing recommendation engine", () => {
       rows: [
         {
           product_id: 50,
+          variant_id: 501,
           base_sku: "THIN",
           product_name: "Thin History Product",
           total_pieces: 0,
@@ -507,6 +588,7 @@ describe("purchasing recommendation engine", () => {
           total_outbound_pieces: 2,
           on_order_pieces: 0,
           order_uom_units: null,
+          vendor_product_id: 5010,
           preferred_vendor_id: 10,
         },
       ],
@@ -587,6 +669,7 @@ describe("purchasing recommendation engine", () => {
           vendor_lead_time_days: 2,
           safety_stock_days: 1,
           order_uom_units: 10,
+          vendor_product_id: 6010,
           preferred_vendor_id: 10,
         },
       ],

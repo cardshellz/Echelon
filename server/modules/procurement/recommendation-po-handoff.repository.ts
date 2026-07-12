@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
 import {
+  autoDraftRuns,
   poEvents,
   poStatusHistory,
   productVariants,
@@ -20,6 +21,7 @@ import type {
   NewRecommendationPurchaseOrder,
   NewRecommendationPurchaseOrderLine,
   RecommendationDecisionRecord,
+  RecommendationAutoDraftRunRecord,
   RecommendationKind,
   RecommendationPoHandoffRecord,
   RecommendationPoHandoffRepository,
@@ -38,6 +40,10 @@ const RECOMMENDATION_LOCK_PREFIX = "procurement:purchasing-recommendation:";
 
 function uniquePositiveIds(ids: readonly number[]): number[] {
   return [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+}
+
+function uniqueNonEmptyStrings(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
 function poNumberPrefix(numberDate: Date): string {
@@ -68,6 +74,32 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
       }
     },
 
+    async getTransactionTimestamp() {
+      const result = await tx.execute(sql`SELECT clock_timestamp() AS now`);
+      const value = (result.rows[0] as { now?: Date | string } | undefined)?.now;
+      const timestamp = value instanceof Date ? value : new Date(String(value ?? ""));
+      if (Number.isNaN(timestamp.getTime())) {
+        throw new Error("Database transaction timestamp is unavailable");
+      }
+      return timestamp;
+    },
+
+    async getAutoDraftRunForUpdate(id) {
+      const [run] = await tx
+        .select({
+          id: autoDraftRuns.id,
+          runAt: autoDraftRuns.runAt,
+          status: autoDraftRuns.status,
+          triggeredBy: autoDraftRuns.triggeredBy,
+          triggeredByUser: autoDraftRuns.triggeredByUser,
+        })
+        .from(autoDraftRuns)
+        .where(eq(autoDraftRuns.id, id))
+        .for("update")
+        .limit(1);
+      return (run ?? null) as RecommendationAutoDraftRunRecord | null;
+    },
+
     async getDecisionsForUpdate(ids) {
       const safeIds = uniquePositiveIds(ids);
       if (safeIds.length === 0) return [];
@@ -92,6 +124,22 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
         .where(and(
           eq(purchasingRecommendationDecisions.status, "active"),
           matchingKeys,
+        ))
+        .orderBy(
+          desc(purchasingRecommendationDecisions.decidedAt),
+          desc(purchasingRecommendationDecisions.id),
+        ) as RecommendationDecisionRecord[];
+    },
+
+    async getLatestActiveDecisionsByRecommendationIds(recommendationIds) {
+      const safeIds = uniqueNonEmptyStrings(recommendationIds);
+      if (safeIds.length === 0) return [];
+      return await tx
+        .select()
+        .from(purchasingRecommendationDecisions)
+        .where(and(
+          eq(purchasingRecommendationDecisions.status, "active"),
+          inArray(purchasingRecommendationDecisions.recommendationId, safeIds),
         ))
         .orderBy(
           desc(purchasingRecommendationDecisions.decidedAt),

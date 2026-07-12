@@ -3,9 +3,11 @@ import {
   createRecommendationPoHandoffService,
   RecommendationPoHandoffError,
   type AcceptedRecommendationPoHandoffCommand,
+  type AutomaticRecommendationPoHandoffCommand,
   type CreatedRecommendationPurchaseOrder,
   type CreatedRecommendationPurchaseOrderLine,
   type RecommendationDecisionRecord,
+  type RecommendationAutoDraftRunRecord,
   type RecommendationPoHandoffRecord,
   type RecommendationPoHandoffRepository,
   type RecommendationPoHandoffUnitOfWork,
@@ -18,6 +20,7 @@ import {
 const NOW = new Date("2026-07-11T18:00:00.000Z");
 
 interface FakeState {
+  autoDraftRuns: RecommendationAutoDraftRunRecord[];
   decisions: RecommendationDecisionRecord[];
   handoffs: RecommendationPoHandoffRecord[];
   vendorProducts: RecommendationVendorProductRecord[];
@@ -32,6 +35,7 @@ interface FakeState {
 
 function cloneState(state: FakeState): FakeState {
   return {
+    autoDraftRuns: state.autoDraftRuns.map((row) => ({ ...row })),
     decisions: state.decisions.map((row) => ({ ...row })),
     handoffs: state.handoffs.map((row) => ({ ...row })),
     vendorProducts: state.vendorProducts.map((row) => ({ ...row })),
@@ -91,6 +95,13 @@ function acceptedDecision(
 
 function baseState(): FakeState {
   return {
+    autoDraftRuns: [{
+      id: 500,
+      runAt: new Date("2026-07-11T17:55:00.000Z"),
+      status: "running",
+      triggeredBy: "scheduler",
+      triggeredByUser: null,
+    }],
     decisions: [acceptedDecision()],
     handoffs: [],
     vendorProducts: [{
@@ -158,6 +169,31 @@ function baseCommand(): AcceptedRecommendationPoHandoffCommand {
   };
 }
 
+function automaticCommand(): AutomaticRecommendationPoHandoffCommand {
+  return {
+    actorId: "system:auto-draft",
+    autoDraftRunId: 500,
+    items: [{
+      recommendationId: "101:1001:30",
+      productId: 101,
+      productVariantId: 1001,
+      suggestedOrderQty: 3,
+      suggestedOrderPieces: 300,
+      orderUomUnits: 100,
+      orderUomLabel: "Case",
+      vendorId: 7,
+      vendorProductId: 701,
+      sku: "SKU-101",
+      productName: "Product 101",
+      estimatedCostMills: 50,
+      estimatedCostCents: 1,
+      candidateScore: 88,
+      candidateBand: "strong_candidate",
+      recommendationSnapshot: { item: { explanation: "Order three cases." } },
+    }],
+  };
+}
+
 function buildHarness(initialState = baseState()) {
   let committed = cloneState(initialState);
   let failOnCreateHandoff = false;
@@ -170,6 +206,12 @@ function buildHarness(initialState = baseState()) {
         async lockRecommendationKeys(keys) {
           lockCalls.push([...keys]);
         },
+        async getTransactionTimestamp() {
+          return NOW;
+        },
+        async getAutoDraftRunForUpdate(id) {
+          return staged.autoDraftRuns.find((row) => row.id === id) ?? null;
+        },
         async getDecisionsForUpdate(ids) {
           return staged.decisions.filter((row) => ids.includes(row.id));
         },
@@ -177,6 +219,15 @@ function buildHarness(initialState = baseState()) {
           const requested = new Set(keys.map((key) => JSON.stringify([key.recommendationId, key.kind])));
           return staged.decisions
             .filter((row) => row.status === "active" && requested.has(JSON.stringify([row.recommendationId, row.kind])))
+            .sort((left, right) => {
+              const timeDelta = right.decidedAt.getTime() - left.decidedAt.getTime();
+              return timeDelta || right.id - left.id;
+            });
+        },
+        async getLatestActiveDecisionsByRecommendationIds(recommendationIds) {
+          const requested = new Set(recommendationIds);
+          return staged.decisions
+            .filter((row) => row.status === "active" && requested.has(row.recommendationId))
             .sort((left, right) => {
               const timeDelta = right.decidedAt.getTime() - left.decidedAt.getTime();
               return timeDelta || right.id - left.id;
@@ -260,7 +311,7 @@ function buildHarness(initialState = baseState()) {
 describe("recommendation PO handoff service", () => {
   it("creates the PO, exact receive line, audit decision, and mapping in mills", async () => {
     const harness = buildHarness();
-    const service = createRecommendationPoHandoffService(harness.repository, () => NOW);
+    const service = createRecommendationPoHandoffService(harness.repository);
 
     const result = await service.createAcceptedHandoff(baseCommand());
 
@@ -319,7 +370,10 @@ describe("recommendation PO handoff service", () => {
         poNumber: "PO-20260711-001",
       },
     });
-    expect(harness.lockCalls).toEqual([[JSON.stringify(["101:1001:30", "held_by_policy"])]]);
+    expect(harness.lockCalls).toEqual([[
+      JSON.stringify(["101:1001:30", "held_by_policy"]),
+      JSON.stringify(["101:1001:30", "po_mutation"]),
+    ]]);
   });
 
   it("creates one independent draft PO per vendor with exact line mappings", async () => {
@@ -388,7 +442,7 @@ describe("recommendation PO handoff service", () => {
       recommendationSnapshot: { item: { sku: "SKU-202" } },
     });
     const harness = buildHarness(state);
-    const service = createRecommendationPoHandoffService(harness.repository, () => NOW);
+    const service = createRecommendationPoHandoffService(harness.repository);
 
     const result = await service.createAcceptedHandoff(command);
 
@@ -403,10 +457,7 @@ describe("recommendation PO handoff service", () => {
 
   it("requires a new acceptance when the requested quantity drifts from the accepted basis", async () => {
     const harness = buildHarness();
-    const service = createRecommendationPoHandoffService(harness.repository, () => {
-      expect(harness.lockCalls).toHaveLength(1);
-      return NOW;
-    });
+    const service = createRecommendationPoHandoffService(harness.repository);
     const command = baseCommand();
     command.items[0].suggestedPieces = 400;
 
@@ -423,7 +474,7 @@ describe("recommendation PO handoff service", () => {
     state.vendorProducts[0].unitCostMills = 75;
     state.vendorProducts[0].unitCostCents = 1;
     const harness = buildHarness(state);
-    const service = createRecommendationPoHandoffService(harness.repository, () => NOW);
+    const service = createRecommendationPoHandoffService(harness.repository);
 
     await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
       statusCode: 409,
@@ -447,7 +498,7 @@ describe("recommendation PO handoff service", () => {
       createdAt: NOW,
     });
     const harness = buildHarness(state);
-    const service = createRecommendationPoHandoffService(harness.repository, () => NOW);
+    const service = createRecommendationPoHandoffService(harness.repository);
 
     await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
       statusCode: 409,
@@ -465,7 +516,7 @@ describe("recommendation PO handoff service", () => {
       decidedAt: new Date("2026-07-11T17:30:00.000Z"),
     });
     const harness = buildHarness(state);
-    const service = createRecommendationPoHandoffService(harness.repository, () => NOW);
+    const service = createRecommendationPoHandoffService(harness.repository);
 
     await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
       statusCode: 409,
@@ -474,10 +525,35 @@ describe("recommendation PO handoff service", () => {
     expect(harness.state.pos).toHaveLength(0);
   });
 
+  it("rejects an operator handoff when another recommendation path created newer supply", async () => {
+    const state = baseState();
+    state.decisions.push({
+      ...acceptedDecision(11, "101:1001:30", "auto_draft_eligible"),
+      decision: "po_handoff_created",
+      source: "auto_draft",
+      autoDraftRunId: 500,
+      decidedAt: new Date("2026-07-11T17:30:00.000Z"),
+      createdAt: new Date("2026-07-11T17:30:00.000Z"),
+    });
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
+      statusCode: 409,
+      code: "ACCEPTED_RECOMMENDATION_CROSS_KIND_STALE",
+      context: {
+        acceptedDecisionId: 10,
+        latestDecisionId: 11,
+        latestKind: "auto_draft_eligible",
+      },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
   it("rolls back the PO, line, audit event, and handoff decision when mapping fails", async () => {
     const harness = buildHarness();
     harness.failHandoffInsert();
-    const service = createRecommendationPoHandoffService(harness.repository, () => NOW);
+    const service = createRecommendationPoHandoffService(harness.repository);
 
     await expect(service.createAcceptedHandoff(baseCommand())).rejects.toThrow("forced handoff insert failure");
 
@@ -489,12 +565,106 @@ describe("recommendation PO handoff service", () => {
     expect(harness.state.decisions).toHaveLength(1);
   });
 
+  it("creates automatic acceptance, PO, handoff decision, and run provenance atomically", async () => {
+    const harness = buildHarness();
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    const result = await service.createAutomaticHandoff(automaticCommand());
+
+    expect(result.skipped).toEqual([]);
+    expect(result.pos).toEqual([
+      expect.objectContaining({
+        vendorId: 7,
+        source: "auto_draft",
+        autoDraftDate: "2026-07-11",
+        subtotalCents: 150,
+        totalCents: 150,
+        metadata: expect.objectContaining({
+          source: "automatic_recommendation_handoff",
+          autoDraftRunId: 500,
+        }),
+      }),
+    ]);
+    expect(harness.state.decisions.slice(-2)).toEqual([
+      expect.objectContaining({
+        id: 11,
+        kind: "auto_draft_eligible",
+        decision: "accepted_for_po",
+        source: "auto_draft",
+        autoDraftRunId: 500,
+        decisionReason: "auto_draft_policy_approved",
+      }),
+      expect.objectContaining({
+        id: 12,
+        kind: "auto_draft_eligible",
+        decision: "po_handoff_created",
+        source: "auto_draft",
+        autoDraftRunId: 500,
+        decisionReason: "automatic_recommendation_po_handoff",
+      }),
+    ]);
+    expect(harness.state.handoffs).toEqual([
+      expect.objectContaining({
+        acceptedDecisionId: 11,
+        handoffDecisionId: 12,
+        recommendationId: "101:1001:30",
+        kind: "auto_draft_eligible",
+      }),
+    ]);
+    expect(harness.lockCalls).toEqual([[
+      JSON.stringify(["101:1001:30", "auto_draft_eligible"]),
+      JSON.stringify(["101:1001:30", "po_mutation"]),
+    ]]);
+  });
+
+  it("skips an automatic snapshot when another review path commits after its run started", async () => {
+    const state = baseState();
+    state.decisions.push({
+      ...acceptedDecision(11, "101:1001:30", "held_by_policy"),
+      decision: "po_handoff_created",
+      source: "auto_draft",
+      autoDraftRunId: 499,
+      decidedAt: new Date("2026-07-11T17:56:00.000Z"),
+      createdAt: new Date("2026-07-11T17:56:00.000Z"),
+    });
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    const result = await service.createAutomaticHandoff(automaticCommand());
+
+    expect(result).toMatchObject({
+      pos: [],
+      decisions: [],
+      handedOff: [],
+      skipped: [{
+        recommendationId: "101:1001:30",
+        kind: "auto_draft_eligible",
+        reason: "changed_after_run_started",
+        latestDecisionId: 11,
+      }],
+    });
+    expect(harness.state.decisions).toHaveLength(2);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("rolls back the automatic acceptance when its immutable mapping fails", async () => {
+    const harness = buildHarness();
+    harness.failHandoffInsert();
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAutomaticHandoff(automaticCommand())).rejects.toThrow(
+      "forced handoff insert failure",
+    );
+
+    expect(harness.state.decisions).toHaveLength(1);
+    expect(harness.state.pos).toHaveLength(0);
+    expect(harness.state.lines).toHaveLength(0);
+    expect(harness.state.handoffs).toHaveLength(0);
+  });
+
   it("records operator decisions through the same recommendation lock and transaction", async () => {
     const harness = buildHarness();
-    const service = createRecommendationPoHandoffService(harness.repository, () => {
-      expect(harness.lockCalls).toHaveLength(1);
-      return NOW;
-    });
+    const service = createRecommendationPoHandoffService(harness.repository);
 
     const created = await service.recordDecision({
       recommendationId: "101:1001:30",
@@ -517,12 +687,15 @@ describe("recommendation PO handoff service", () => {
 
     expect(created).toMatchObject({ id: 11, decision: "deferred", decidedAt: NOW, createdAt: NOW });
     expect(harness.state.decisions).toHaveLength(2);
-    expect(harness.lockCalls).toEqual([[JSON.stringify(["101:1001:30", "held_by_policy"])]]);
+    expect(harness.lockCalls).toEqual([[
+      JSON.stringify(["101:1001:30", "held_by_policy"]),
+      JSON.stringify(["101:1001:30", "po_mutation"]),
+    ]]);
   });
 
   it("rejects acceptance before writing when its economic basis is incomplete", async () => {
     const harness = buildHarness();
-    const service = createRecommendationPoHandoffService(harness.repository, () => NOW);
+    const service = createRecommendationPoHandoffService(harness.repository);
 
     await expect(service.recordDecision({
       recommendationId: "101:1001:30",
@@ -551,7 +724,7 @@ describe("recommendation PO handoff service", () => {
 
   it("records system audit identity without writing a nonexistent user foreign key", async () => {
     const harness = buildHarness();
-    const service = createRecommendationPoHandoffService(harness.repository, () => NOW);
+    const service = createRecommendationPoHandoffService(harness.repository);
     const command = baseCommand();
     command.actorId = "SYSTEM";
 

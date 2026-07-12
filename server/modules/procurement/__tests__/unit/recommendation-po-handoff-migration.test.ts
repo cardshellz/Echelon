@@ -6,6 +6,10 @@ const migration = readFileSync(
   join(process.cwd(), "migrations", "130_atomic_recommendation_po_handoffs.sql"),
   "utf8",
 );
+const automaticMigration = readFileSync(
+  join(process.cwd(), "migrations", "132_automatic_recommendation_handoff_provenance.sql"),
+  "utf8",
+);
 
 describe("recommendation PO handoff migration", () => {
   it("enforces one handoff per acceptance and exact PO-line ownership", () => {
@@ -21,5 +25,13 @@ describe("recommendation PO handoff migration", () => {
     expect(migration).toContain("decision.decision = 'po_handoff_created'");
     expect(migration).toContain("BEFORE UPDATE OR DELETE");
     expect(migration).toContain("purchasing recommendation PO handoffs are immutable");
+  });
+
+  it("binds automatic decision pairs to one auto-draft run", () => {
+    expect(automaticMigration).toContain("purch_rec_decisions_auto_draft_run_chk");
+    expect(automaticMigration).toContain("purch_rec_decisions_auto_draft_run_rec_kind_decision_uidx");
+    expect(automaticMigration).toContain("accepted_source IS DISTINCT FROM handoff_source");
+    expect(automaticMigration).toContain("accepted_run_id IS DISTINCT FROM handoff_run_id");
+    expect(automaticMigration).toContain("automatic recommendation handoffs require an auto-draft run");
   });
 });
