@@ -65,6 +65,27 @@ describe("runDropshipOrderProcessingSweep", () => {
 });
 
 describe("PgDropshipOrderProcessingQueueRepository", () => {
+  it("revisits an active payment hold only after its vendor wallet changes", async () => {
+    const query = vi.fn(async () => ({ rows: [{ id: 91 }] }));
+    const repository = new PgDropshipOrderProcessingQueueRepository({ query } as unknown as Pool);
+
+    const result = await repository.listProcessableIntakeIds({
+      limit: 10,
+      now,
+    });
+
+    expect(result).toEqual([91]);
+    const [sql, params] = query.mock.calls[0] ?? [];
+    expect(String(sql)).toContain("oi.status IN ('received', 'retrying')");
+    expect(String(sql)).toContain("oi.status = 'payment_hold'");
+    expect(String(sql)).toContain("oi.payment_hold_expires_at > $2");
+    expect(String(sql)).toContain("FROM dropship.dropship_wallet_accounts wa");
+    expect(String(sql)).toContain("wa.vendor_id = oi.vendor_id");
+    expect(String(sql)).toContain("wa.updated_at >= oi.updated_at");
+    expect(String(sql)).not.toContain("payment_hold_expires_at IS NULL");
+    expect(params).toEqual([10, now]);
+  });
+
   it("requeues stale processing intakes and writes audit events in one transaction", async () => {
     const client = makeClient([{
       id: 91,
