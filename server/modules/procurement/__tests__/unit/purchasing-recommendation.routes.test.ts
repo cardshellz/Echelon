@@ -113,7 +113,16 @@ describe("purchasing recommendation routes", () => {
     vi.clearAllMocks();
     mocks.db.execute.mockResolvedValue({ rows: [] });
     mocks.db.select.mockReturnValue({ from: vi.fn().mockResolvedValue([]) });
-    mocks.runAutoDraftJob.mockResolvedValue(undefined);
+    mocks.runAutoDraftJob.mockResolvedValue({
+      success: true,
+      pos: [],
+      count: 0,
+      itemsDrafted: 0,
+      itemsSkippedAfterAnalysis: 0,
+      reviewOnly: false,
+      recommendationSummary: {},
+      recommendationRun: { id: 1001, detail: {} },
+    });
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
       autoDraftMode: "draft_po",
       approvalPolicy: "high_confidence_only",
@@ -305,6 +314,7 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         order_uom_level: 2,
+        vendor_product_id: 7706,
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
@@ -680,6 +690,7 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         order_uom_level: 2,
+        vendor_product_id: 7702,
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
@@ -703,6 +714,7 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         order_uom_level: 2,
+        vendor_product_id: 8803,
         preferred_vendor_id: 88,
         preferred_vendor_name: "Vendor B",
       },
@@ -956,6 +968,7 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         order_uom_level: 2,
+        vendor_product_id: 7702,
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
@@ -1194,6 +1207,7 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         order_uom_level: 2,
+        vendor_product_id: 7702,
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
@@ -1809,7 +1823,7 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
-  it("uses the shared recommendation engine for direct auto-draft items", async () => {
+  it("delegates the direct endpoint to the canonical auto-draft job", async () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getReorderAnalysisData.mockResolvedValue([
       {
@@ -1851,67 +1865,39 @@ describe("purchasing recommendation routes", () => {
         order_uom_level: 2,
       },
     ]);
-    mocks.purchasingService.createPOFromReorder.mockResolvedValue([{ id: 9 }]);
+    mocks.runAutoDraftJob.mockResolvedValue({
+      success: true,
+      pos: [{ id: 9, vendorId: 7 }],
+      count: 1,
+      itemsDrafted: 1,
+      itemsSkippedAfterAnalysis: 0,
+      reviewOnly: false,
+      recommendationSummary: {
+        actionableCount: 1,
+        highConfidenceCount: 1,
+        autoDraftEligibleCount: 1,
+        autoDraftReviewRequiredCount: 0,
+        skippedNoVendor: 1,
+      },
+      recommendationRun: {
+        id: 1001,
+        detail: {
+          recommendationSummary: { actionableCount: 1, autoDraftEligibleCount: 1 },
+        },
+      },
+    });
     server = await startServer(buildApp());
 
     const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft-run");
 
     expect(status).toBe(200);
-    expect(mocks.purchasingService.createPOFromReorder).toHaveBeenCalledWith(
-      [
-        {
-          productId: 42,
-          productVariantId: 420,
-          suggestedPieces: 5,
-          vendorProductId: 7042,
-          vendorId: 7,
-        },
-      ],
-      "admin-user",
-    );
-    expect(mocks.procurement.createAutoDraftRun).toHaveBeenCalledWith({
+    expect(mocks.runAutoDraftJob).toHaveBeenCalledWith({
       triggeredBy: "manual",
       triggeredByUser: "admin-user",
-      status: "running",
     });
-    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
-      1001,
-      expect.objectContaining({
-        status: "success",
-        itemsAnalyzed: 2,
-        linesAdded: 1,
-        skippedNoVendor: 1,
-        summaryJson: expect.objectContaining({
-          recommendationSummary: expect.objectContaining({
-            actionableCount: 1,
-            highConfidenceCount: 1,
-            autoDraftEligibleCount: 1,
-            autoDraftReviewRequiredCount: 0,
-            skippedNoVendor: 1,
-          }),
-          settings: expect.objectContaining({
-            autoDraftMode: "draft_po",
-          }),
-          actionableRecommendations: [
-            expect.objectContaining({
-              sku: "AUTO-1",
-              suggestedOrderQty: 1,
-              explanation: expect.any(String),
-              qualityGate: expect.objectContaining({
-                autoDraftEligible: true,
-                reason: "high_confidence",
-              }),
-            }),
-          ],
-          skippedRecommendations: [
-            expect.objectContaining({
-              sku: "NO-VENDOR",
-              skippedReason: "no_vendor",
-            }),
-          ],
-        }),
-      }),
-    );
+    expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
+    expect(mocks.procurement.createAutoDraftRun).not.toHaveBeenCalled();
+    expect(mocks.procurement.updateAutoDraftRun).not.toHaveBeenCalled();
     expect(body).toMatchObject({
       success: true,
       count: 1,
@@ -1955,42 +1941,41 @@ describe("purchasing recommendation routes", () => {
         preferred_vendor_id: 7,
       },
     ]);
+    mocks.runAutoDraftJob.mockResolvedValue({
+      success: true,
+      pos: [],
+      count: 0,
+      itemsDrafted: 0,
+      itemsSkippedAfterAnalysis: 0,
+      reviewOnly: false,
+      recommendationSummary: {
+        actionableCount: 1,
+        mediumConfidenceCount: 1,
+        autoDraftEligibleCount: 0,
+        autoDraftReviewRequiredCount: 1,
+      },
+      recommendationRun: {
+        id: 1001,
+        detail: {
+          recommendationSummary: {
+            actionableCount: 1,
+            autoDraftEligibleCount: 0,
+            autoDraftReviewRequiredCount: 1,
+          },
+        },
+      },
+    });
     server = await startServer(buildApp());
 
     const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft-run");
 
     expect(status).toBe(200);
     expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
-    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
-      1001,
-      expect.objectContaining({
-        status: "success",
-        itemsAnalyzed: 1,
-        linesAdded: 0,
-        summaryJson: expect.objectContaining({
-          recommendationSummary: expect.objectContaining({
-            actionableCount: 1,
-            mediumConfidenceCount: 1,
-            autoDraftEligibleCount: 0,
-            autoDraftReviewRequiredCount: 1,
-          }),
-          settings: expect.objectContaining({
-            autoDraftMode: "draft_po",
-          }),
-          actionableRecommendations: [
-            expect.objectContaining({
-              sku: "REVIEW-1",
-              suggestedOrderQty: 1,
-              qualityGate: expect.objectContaining({
-                autoDraftEligible: false,
-                reason: "medium_confidence_review",
-              }),
-            }),
-          ],
-          poMutations: [],
-        }),
-      }),
-    );
+    expect(mocks.runAutoDraftJob).toHaveBeenCalledWith({
+      triggeredBy: "manual",
+      triggeredByUser: "admin-user",
+    });
+    expect(mocks.procurement.updateAutoDraftRun).not.toHaveBeenCalled();
     expect(body).toMatchObject({
       success: true,
       pos: [],
@@ -2017,6 +2002,26 @@ describe("purchasing recommendation routes", () => {
   });
 
   it("records direct auto-draft recommendations without PO mutations in review-only mode", async () => {
+    mocks.runAutoDraftJob.mockResolvedValue({
+      success: true,
+      pos: [],
+      count: 0,
+      itemsDrafted: 0,
+      itemsSkippedAfterAnalysis: 0,
+      reviewOnly: true,
+      recommendationSummary: {
+        actionableCount: 1,
+        autoDraftEligibleCount: 0,
+        autoDraftReviewRequiredCount: 1,
+      },
+      recommendationRun: {
+        id: 1001,
+        detail: {
+          settings: { autoDraftMode: "review_only" },
+          poMutations: [],
+        },
+      },
+    });
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
       autoDraftMode: "review_only",
@@ -2051,38 +2056,11 @@ describe("purchasing recommendation routes", () => {
 
     expect(status).toBe(200);
     expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
-    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
-      1001,
-      expect.objectContaining({
-        status: "success",
-        itemsAnalyzed: 1,
-        posCreated: 0,
-        posUpdated: 0,
-        linesAdded: 0,
-        skippedNoVendor: 0,
-        summaryJson: expect.objectContaining({
-          recommendationSummary: expect.objectContaining({
-            actionableCount: 1,
-            autoDraftEligibleCount: 0,
-            autoDraftReviewRequiredCount: 1,
-          }),
-          settings: expect.objectContaining({
-            autoDraftMode: "review_only",
-          }),
-          actionableRecommendations: [
-            expect.objectContaining({
-              sku: "AUTO-1",
-              suggestedOrderQty: 1,
-              qualityGate: expect.objectContaining({
-                autoDraftEligible: false,
-                reason: "medium_confidence_review",
-              }),
-            }),
-          ],
-          poMutations: [],
-        }),
-      }),
-    );
+    expect(mocks.runAutoDraftJob).toHaveBeenCalledWith({
+      triggeredBy: "manual",
+      triggeredByUser: "admin-user",
+    });
+    expect(mocks.procurement.updateAutoDraftRun).not.toHaveBeenCalled();
     expect(body).toMatchObject({
       success: true,
       pos: [],

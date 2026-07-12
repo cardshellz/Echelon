@@ -61,7 +61,6 @@ import {
   reconcilePurchaseOrderReceipt,
   type ReceivingReconciliationLine,
 } from "./purchase-order-receipt-reconciliation.service";
-import { resolveRecommendationPoCost } from "./recommendation-po-cost";
 import {
   deliveryDateIso,
   sameDeliveryDate,
@@ -3296,168 +3295,6 @@ export function createPurchasingService(
     return result;
   }
 
-  // ── REORDER → PO ───────────────────────────────────────────────
-
-  async function createPOFromReorder(items: Array<{
-    productId: number;
-    productVariantId: number;
-    suggestedPieces: number;
-    vendorProductId?: number;
-    vendorId?: number;
-  }>, userId?: string) {
-    for (const item of items) {
-      if (!Number.isSafeInteger(item.productId) || item.productId <= 0) {
-        throw new PurchasingError("Reorder product id must be a positive safe integer", 400);
-      }
-      if (!Number.isSafeInteger(item.productVariantId) || item.productVariantId <= 0) {
-        throw new PurchasingError("Reorder product variant id must be a positive safe integer", 400);
-      }
-      if (!Number.isSafeInteger(item.suggestedPieces) || item.suggestedPieces <= 0) {
-        throw new PurchasingError("Reorder suggested pieces must be a positive safe integer", 400);
-      }
-      if (
-        item.vendorProductId !== undefined &&
-        (!Number.isSafeInteger(item.vendorProductId) || item.vendorProductId <= 0)
-      ) {
-        throw new PurchasingError("Reorder vendor product id must be a positive safe integer", 400);
-      }
-      if (item.vendorId !== undefined && (!Number.isSafeInteger(item.vendorId) || item.vendorId <= 0)) {
-        throw new PurchasingError("Reorder vendor id must be a positive safe integer", 400);
-      }
-    }
-
-    type ReorderVendorProduct = NonNullable<Awaited<ReturnType<typeof storage.getVendorProductById>>>;
-    type ResolvedReorderItem = (typeof items)[number] & {
-      vendorId: number;
-      vendorProduct: ReorderVendorProduct;
-      supplierCost: ReturnType<typeof resolveRecommendationPoCost>;
-    };
-    const vendorGroups = new Map<number, ResolvedReorderItem[]>();
-
-    for (const item of items) {
-      const vendorProduct = item.vendorProductId
-        ? await storage.getVendorProductById(item.vendorProductId)
-        : await storage.getPreferredVendorProduct(item.productId, item.productVariantId);
-
-      if (item.vendorProductId && !vendorProduct) {
-        throw new PurchasingError(`Vendor product ${item.vendorProductId} not found`, 404);
-      }
-      if (!vendorProduct) {
-        throw new PurchasingError(
-          `No active preferred vendor product found for product variant ${item.productVariantId}`,
-          409,
-        );
-      }
-      if (Number(vendorProduct.productId) !== item.productId) {
-        throw new PurchasingError(
-          `Vendor product ${vendorProduct.id} does not belong to product ${item.productId}`,
-          400,
-        );
-      }
-      if (
-        vendorProduct.productVariantId !== null &&
-        vendorProduct.productVariantId !== undefined &&
-        Number(vendorProduct.productVariantId) !== item.productVariantId
-      ) {
-        throw new PurchasingError(
-          `Vendor product ${vendorProduct.id} does not match product variant ${item.productVariantId}`,
-          400,
-        );
-      }
-      if (Number(vendorProduct.isActive) !== 1 || Number(vendorProduct.isPreferred) !== 1) {
-        throw new PurchasingError(
-          `Vendor product ${vendorProduct.id} is no longer an active preferred supplier row`,
-          409,
-        );
-      }
-
-      const vendorId = item.vendorId ?? vendorProduct.vendorId;
-      if (!vendorId) {
-        throw new PurchasingError(
-          `No vendor found for product variant ${item.productVariantId}. Set a preferred vendor first.`,
-          400,
-        );
-      }
-      if (Number(vendorProduct.vendorId) !== vendorId) {
-        throw new PurchasingError(
-          `Vendor product ${vendorProduct.id} does not belong to vendor ${vendorId}`,
-          400,
-        );
-      }
-      let supplierCost: ReturnType<typeof resolveRecommendationPoCost>;
-      try {
-        supplierCost = resolveRecommendationPoCost({
-          estimatedCostMills: vendorProduct.unitCostMills,
-          estimatedCostCents: vendorProduct.unitCostCents,
-          orderQtyPieces: item.suggestedPieces,
-        });
-      } catch (error) {
-        throw new PurchasingError(
-          `Vendor product ${vendorProduct.id} has invalid supplier cost: ${(error as Error).message}`,
-          409,
-        );
-      }
-
-      if (!vendorGroups.has(vendorId)) {
-        vendorGroups.set(vendorId, []);
-      }
-      vendorGroups.get(vendorId)!.push({ ...item, vendorId, vendorProduct, supplierCost });
-    }
-
-    const createdPOs: any[] = [];
-
-    for (const [vendorId, groupItems] of vendorGroups) {
-      // Find existing draft PO for this vendor to append to
-      const existingDrafts = await storage.getPurchaseOrders({ vendorId, status: "draft", limit: 1 });
-      let po;
-      let isNew = false;
-      if (existingDrafts && existingDrafts.length > 0) {
-        po = existingDrafts[0];
-      } else {
-        po = await createPO({ vendorId, source: "reorder", createdBy: userId });
-        isNew = true;
-      }
-
-      const existingLines = isNew ? [] : await storage.getPurchaseOrderLines(po.id);
-      const lineDataToCreate: any[] = [];
-      let linesUpdated = false;
-
-      for (const item of groupItems) {
-        const existingLine = existingLines.find((l: any) => l.productId === item.productId && l.productVariantId === item.productVariantId);
-        
-        if (existingLine) {
-          // PO quantities are always base pieces; receive configuration stays on the variant fields.
-          if (item.suggestedPieces > existingLine.orderQty) {
-            await updateLine(existingLine.id, { orderQty: item.suggestedPieces }, userId);
-            linesUpdated = true;
-          }
-        } else {
-          const vp = item.vendorProduct;
-          lineDataToCreate.push({
-            productId: item.productId,
-            productVariantId: item.productVariantId,
-            vendorProductId: vp.id,
-            orderQty: item.suggestedPieces,
-            unitCostCents: item.supplierCost.unitCostCents,
-            unitCostMills: item.supplierCost.unitCostMills,
-            vendorSku: vp.vendorSku,
-          });
-        }
-      }
-
-      if (lineDataToCreate.length > 0) {
-        await addBulkLines(po.id, lineDataToCreate, userId);
-      } else if (linesUpdated) {
-        await recalculateTotals(po.id, userId);
-      }
-
-      const finalPo = await storage.getPurchaseOrderById(po.id);
-      createdPOs.push(finalPo);
-    }
-
-    return createdPOs;
-  }
-
   // ── PROCUREMENT SETTINGS (Spec A) ───────────────────────────────────────
   //
   // These live on inventory.warehouse_settings (DEFAULT row) per spec §12.
@@ -5349,9 +5186,6 @@ export function createPurchasingService(
     transitionFinancial,
     recomputeFinancialAggregates,
     findOpenPoLineByProduct,
-
-    // Reorder → PO
-    createPOFromReorder,
 
     // On-order query
     getOnOrderQty,

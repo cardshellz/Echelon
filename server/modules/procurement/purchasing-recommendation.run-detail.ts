@@ -16,11 +16,19 @@ export interface PurchasingRecommendationRunPoMutation {
   linesAdded: number;
 }
 
+export interface PurchasingRecommendationRunPoMutationSkip {
+  recommendationId: string;
+  kind: string;
+  reason: string;
+  latestDecisionId: number;
+}
+
 export interface PurchasingRecommendationRunDetailOptions {
   lookbackDays: number;
   settings?: AutoDraftRecommendationSettings;
   generatedAt?: Date;
   poMutations?: PurchasingRecommendationRunPoMutation[];
+  poMutationSkips?: PurchasingRecommendationRunPoMutationSkip[];
 }
 
 export interface PurchasingRecommendationRunDetail {
@@ -37,6 +45,7 @@ export interface PurchasingRecommendationRunDetail {
   approvalPolicyBlockedRecommendations: Array<ReturnType<typeof summarizeRecommendation>>;
   skippedRecommendations: Array<ReturnType<typeof summarizeRecommendation>>;
   poMutations: PurchasingRecommendationRunPoMutation[];
+  poMutationSkips: PurchasingRecommendationRunPoMutationSkip[];
 }
 
 function increment(map: Record<string, number>, key: string | null | undefined) {
@@ -302,5 +311,6 @@ export function buildPurchasingRecommendationRunDetail(
       .slice(0, 25)
       .map(summarizeRecommendation),
     poMutations: options.poMutations ?? [],
+    poMutationSkips: options.poMutationSkips ?? [],
   };
 }

@@ -1,157 +1,107 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => {
-  const purchaseOrdersTable = {
-    __table: "purchaseOrders",
-    vendorId: "vendor_id",
-    status: "status",
-    source: "source",
-    autoDraftDate: "auto_draft_date",
-  };
-  const reorderExclusionRulesTable = { __table: "reorderExclusionRules" };
-  const productsTable = { __table: "products" };
+const mocks = vi.hoisted(() => ({
+  db: {},
+  procurement: {
+    createAutoDraftRun: vi.fn(),
+    getAutoDraftSettings: vi.fn(),
+    getReorderAnalysisData: vi.fn(),
+    updateAutoDraftRun: vi.fn(),
+  },
+  inventory: {
+    getVelocityLookbackDays: vi.fn(),
+  },
+  context: {
+    load: vi.fn(),
+  },
+  handoff: {
+    createAutomaticHandoff: vi.fn(),
+  },
+  stalePoEscalation: {
+    run: vi.fn(),
+  },
+}));
 
+vi.mock("../../../db", () => ({ db: mocks.db }));
+vi.mock("../../../modules/procurement/procurement.storage", () => ({
+  procurementMethods: mocks.procurement,
+}));
+vi.mock("../../../modules/inventory", () => ({
+  inventoryStorage: mocks.inventory,
+}));
+vi.mock("../../../modules/procurement/purchasing-recommendation-context.service", () => ({
+  loadPurchasingRecommendationContext: mocks.context.load,
+}));
+vi.mock("../../../modules/procurement/recommendation-po-handoff.repository", () => ({
+  createDrizzleRecommendationPoHandoffRepository: () => ({}),
+}));
+vi.mock("../../../modules/procurement/recommendation-po-handoff.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../modules/procurement/recommendation-po-handoff.service")>();
   return {
-    purchaseOrdersTable,
-    reorderExclusionRulesTable,
-    productsTable,
-    db: {
-      execute: vi.fn(),
-      select: vi.fn(),
-    },
-    storage: {
-      createAutoDraftRun: vi.fn(),
-      getAutoDraftSettings: vi.fn(),
-      getReorderAnalysisData: vi.fn(),
-      updatePurchaseOrder: vi.fn(),
-      bulkCreatePurchaseOrderLines: vi.fn(),
-      getPurchaseOrderLines: vi.fn(),
-      updateAutoDraftRun: vi.fn(),
-    },
-    purchasing: {
-      createPO: vi.fn(),
-      recalculateTotals: vi.fn(),
-    },
-    stalePoEscalation: {
-      run: vi.fn(),
-    },
+    ...actual,
+    createRecommendationPoHandoffService: () => mocks.handoff,
   };
 });
-
-vi.mock("../../../db", () => ({
-  db: mocks.db,
-}));
-
-vi.mock("../../../modules/procurement/procurement.storage", () => ({
-  procurementMethods: mocks.storage,
-}));
-
-vi.mock("../../../modules/procurement/purchasing.service", () => ({
-  createPurchasingService: () => mocks.purchasing,
-}));
-
 vi.mock("../../../modules/procurement/auto-draft-po-escalation.service", () => ({
   runStaleAutoDraftPoEscalationCheck: mocks.stalePoEscalation.run,
 }));
 
-vi.mock("../../../storage/base", () => {
-  const sqlTag = Object.assign(
-    (strings: TemplateStringsArray, ...values: unknown[]) => ({ strings, values }),
-    { raw: (value: string) => value },
-  );
-
-  return {
-    purchaseOrders: mocks.purchaseOrdersTable,
-    reorderExclusionRules: mocks.reorderExclusionRulesTable,
-    products: mocks.productsTable,
-    sql: sqlTag,
-    eq: vi.fn((left, right) => ({ op: "eq", left, right })),
-    and: vi.fn((...conditions) => ({ op: "and", conditions })),
-  };
-});
-
 import { runAutoDraftJob } from "../../auto-draft.job";
 
-function mockDbSelect({ existingDraftPos = [] }: { existingDraftPos?: any[] } = {}) {
-  mocks.db.select.mockImplementation(() => ({
-    from: (table: any) => {
-      if (table === mocks.purchaseOrdersTable) {
-        return {
-          where: () => ({
-            limit: vi.fn().mockResolvedValue(existingDraftPos),
-          }),
-        };
-      }
-      return Promise.resolve([]);
-    },
-  }));
+function recommendationRows() {
+  return [{
+    product_id: 1,
+    variant_id: 11,
+    base_sku: "HIGH-1",
+    product_name: "High Confidence Product",
+    total_pieces: 0,
+    total_reserved_pieces: 0,
+    total_outbound_pieces: 60,
+    previous_outbound_pieces: 55,
+    demand_order_count: 12,
+    demand_active_days: 10,
+    on_order_pieces: 0,
+    open_po_count: 0,
+    lead_time_days: 4,
+    vendor_lead_time_days: 4,
+    safety_stock_days: 1,
+    order_uom_units: 10,
+    order_uom_level: 2,
+    vendor_product_id: 701,
+    preferred_vendor_id: 7,
+    estimated_cost_mills: 50,
+    vendor_product_updated_at: new Date().toISOString(),
+  }];
 }
 
 describe("auto-draft job", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockDbSelect();
-    mocks.db.execute.mockResolvedValue({
-      rows: [
-        { id: 1, sku: "HIGH-1", category: null, brand: null, product_type: null, tags: [], reorder_excluded: false },
-        { id: 2, sku: "REVIEW-1", category: null, brand: null, product_type: null, tags: [], reorder_excluded: false },
-      ],
+    mocks.procurement.createAutoDraftRun.mockResolvedValue({
+      id: 500,
+      runAt: new Date("2026-07-11T18:00:00.000Z"),
+      status: "running",
     });
-    mocks.storage.createAutoDraftRun.mockResolvedValue({ id: 500 });
-    mocks.storage.getAutoDraftSettings.mockResolvedValue({
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
       autoDraftMode: "draft_po",
       approvalPolicy: "high_confidence_only",
       includeOrderSoon: false,
       skipOnOpenPo: true,
       skipNoVendor: true,
     });
-    mocks.storage.getReorderAnalysisData.mockResolvedValue([
-      {
-        product_id: 1,
-        variant_id: 11,
-        base_sku: "HIGH-1",
-        product_name: "High Confidence Product",
-        total_pieces: 0,
-        total_reserved_pieces: 0,
-        total_outbound_pieces: 60,
-        previous_outbound_pieces: 55,
-        demand_order_count: 12,
-        demand_active_days: 10,
-        on_order_pieces: 0,
-        open_po_count: 0,
-        lead_time_days: 4,
-        vendor_lead_time_days: 4,
-        safety_stock_days: 1,
-        order_uom_units: 10,
-        order_uom_level: 2,
-        vendor_product_id: 701,
-        preferred_vendor_id: 7,
-        estimated_cost_mills: 50,
-        vendor_product_updated_at: new Date().toISOString(),
-      },
-      {
-        product_id: 2,
-        variant_id: 22,
-        base_sku: "REVIEW-1",
-        product_name: "Review Product",
-        total_pieces: 0,
-        total_reserved_pieces: 0,
-        total_outbound_pieces: 60,
-        previous_outbound_pieces: 55,
-        demand_order_count: 12,
-        demand_active_days: 10,
-        on_order_pieces: 0,
-        open_po_count: 0,
-        lead_time_days: 4,
-        safety_stock_days: 1,
-        order_uom_units: 10,
-        order_uom_level: 2,
-        preferred_vendor_id: 7,
-      },
-    ]);
-    mocks.purchasing.createPO.mockResolvedValue({ id: 700 });
-    mocks.storage.bulkCreatePurchaseOrderLines.mockResolvedValue([]);
-    mocks.storage.getPurchaseOrderLines.mockResolvedValue([]);
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(90);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue(recommendationRows());
+    mocks.context.load.mockResolvedValue({
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+      rules: [],
+      productMetaById: new Map(),
+    });
+    mocks.handoff.createAutomaticHandoff.mockResolvedValue({
+      pos: [{ id: 700, vendorId: 7, poNumber: "PO-20260711-001" }],
+      decisions: [],
+      handedOff: [{ poId: 700, recommendationId: "1:11:90" }],
+      skipped: [],
+    });
     mocks.stalePoEscalation.run.mockResolvedValue({
       sent: false,
       suppressed: false,
@@ -162,112 +112,137 @@ describe("auto-draft job", () => {
     });
   });
 
-  it("creates PO lines only for recommendations that pass the quality gate", async () => {
-    await runAutoDraftJob({ triggeredBy: "scheduler" });
+  it("delegates every eligible mutation to the atomic handoff service", async () => {
+    const result = await runAutoDraftJob({ triggeredBy: "scheduler" });
 
-    expect(mocks.purchasing.createPO).toHaveBeenCalledTimes(1);
-    expect(mocks.storage.bulkCreatePurchaseOrderLines).toHaveBeenCalledWith([
-      expect.objectContaining({
-        purchaseOrderId: 700,
+    expect(mocks.inventory.getVelocityLookbackDays).toHaveBeenCalledTimes(1);
+    expect(mocks.procurement.getReorderAnalysisData).toHaveBeenCalledWith(90);
+    expect(mocks.handoff.createAutomaticHandoff).toHaveBeenCalledWith({
+      actorId: "system:auto-draft",
+      autoDraftRunId: 500,
+      items: [expect.objectContaining({
+        recommendationId: "1:11:90",
         productId: 1,
         productVariantId: 11,
-        expectedReceiveVariantId: 11,
-        expectedReceiveUnitsPerVariant: 10,
+        suggestedOrderPieces: 10,
+        orderUomUnits: 10,
+        vendorId: 7,
         vendorProductId: 701,
-        sku: "HIGH-1",
-        orderQty: 10,
-        unitOfMeasure: "each",
-        unitsPerUom: 10,
-        unitCostMills: 50,
-        unitCostCents: 1,
-        totalProductCostCents: 5,
-        packagingCostCents: 0,
-        lineTotalCents: 5,
-      }),
-    ]);
-    expect(mocks.storage.bulkCreatePurchaseOrderLines.mock.calls[0][0]).toHaveLength(1);
-    expect(mocks.storage.updateAutoDraftRun).toHaveBeenCalledWith(
+        estimatedCostMills: 50,
+        candidateBand: "strong_candidate",
+        recommendationSnapshot: expect.objectContaining({
+          analysis: { lookbackDays: 90 },
+        }),
+      })],
+    });
+    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
       500,
       expect.objectContaining({
         status: "success",
-        itemsAnalyzed: 2,
+        itemsAnalyzed: 1,
         posCreated: 1,
         posUpdated: 0,
         linesAdded: 1,
         summaryJson: expect.objectContaining({
-          settings: expect.objectContaining({
-            autoDraftMode: "draft_po",
-            approvalPolicy: "high_confidence_only",
-          }),
-          recommendationSummary: expect.objectContaining({
-            actionableCount: 2,
-            autoDraftEligibleCount: 1,
-            autoDraftReviewRequiredCount: 1,
-          }),
-          actionableRecommendations: expect.arrayContaining([
-            expect.objectContaining({
-              sku: "HIGH-1",
-              qualityGate: expect.objectContaining({
-                autoDraftEligible: true,
-                reason: "high_confidence",
-              }),
-            }),
-            expect.objectContaining({
-              sku: "REVIEW-1",
-              qualityGate: expect.objectContaining({
-                autoDraftEligible: false,
-                reason: "medium_confidence_review",
-              }),
-            }),
-          ]),
+          poMutations: [{ vendorId: 7, poId: 700, action: "created", linesAdded: 1 }],
+          poMutationSkips: [],
         }),
       }),
     );
-    expect(mocks.stalePoEscalation.run).toHaveBeenCalledWith({
-      thresholds: undefined,
+    expect(result).toMatchObject({
+      success: true,
+      count: 1,
+      itemsDrafted: 1,
+      itemsSkippedAfterAnalysis: 0,
+      reviewOnly: false,
+      recommendationRun: { id: 500 },
     });
   });
 
-  it("honors the stricter candidate-score approval policy before mutating draft POs", async () => {
-    mocks.storage.getAutoDraftSettings.mockResolvedValue({
-      autoDraftMode: "draft_po",
-      approvalPolicy: "high_confidence_and_strong_candidate",
+  it("records review-only analysis without invoking a PO writer", async () => {
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "review_only",
+      approvalPolicy: "high_confidence_only",
       includeOrderSoon: false,
       skipOnOpenPo: true,
       skipNoVendor: true,
-      candidateScoreStrongThreshold: 95,
-      candidateScoreReviewThreshold: 80,
     });
 
-    await runAutoDraftJob({ triggeredBy: "scheduler" });
+    const result = await runAutoDraftJob({ triggeredBy: "manual", triggeredByUser: "buyer-1" });
 
-    expect(mocks.purchasing.createPO).not.toHaveBeenCalled();
-    expect(mocks.storage.bulkCreatePurchaseOrderLines).not.toHaveBeenCalled();
-    expect(mocks.storage.updateAutoDraftRun).toHaveBeenCalledWith(
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
       500,
       expect.objectContaining({
         status: "success",
-        itemsAnalyzed: 2,
         posCreated: 0,
         posUpdated: 0,
         linesAdded: 0,
+      }),
+    );
+    expect(result).toMatchObject({ count: 0, itemsDrafted: 0, reviewOnly: true });
+  });
+
+  it("keeps incomplete receive configuration out of automatic PO mutation", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        ...recommendationRows()[0],
+        variant_id: null,
+      },
+    ]);
+
+    const result = await runAutoDraftJob({ triggeredBy: "scheduler" });
+
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
+      500,
+      expect.objectContaining({
+        status: "success",
+        posCreated: 0,
+        linesAdded: 0,
         summaryJson: expect.objectContaining({
-          settings: expect.objectContaining({
-            approvalPolicy: "high_confidence_and_strong_candidate",
-            candidateScoreStrongThreshold: 95,
-            candidateScoreReviewThreshold: 80,
+          recommendationSummary: expect.objectContaining({
+            actionableCount: 1,
+            autoDraftEligibleCount: 0,
+            autoDraftReviewRequiredCount: 1,
           }),
-          actionableRecommendations: expect.arrayContaining([
-            expect.objectContaining({
-              sku: "HIGH-1",
-              qualityGate: expect.objectContaining({
-                autoDraftEligible: true,
-              }),
-              recommendationCandidateScore: expect.objectContaining({
-                band: "review_candidate",
-              }),
-            }),
-          ]),
+        }),
+      }),
+    );
+    expect(result).toMatchObject({
+      count: 0,
+      itemsDrafted: 0,
+      recommendationSummary: {
+        actionableCount: 1,
+        autoDraftEligibleCount: 0,
+        autoDraftReviewRequiredCount: 1,
+      },
+    });
+  });
+
+  it("reports snapshots skipped because another handoff committed after analysis began", async () => {
+    mocks.handoff.createAutomaticHandoff.mockResolvedValue({
+      pos: [],
+      decisions: [],
+      handedOff: [],
+      skipped: [{
+        recommendationId: "1:11:90",
+        kind: "auto_draft_eligible",
+        reason: "changed_after_run_started",
+        latestDecisionId: 900,
+      }],
+    });
+
+    const result = await runAutoDraftJob({ triggeredBy: "scheduler" });
+
+    expect(result).toMatchObject({ count: 0, itemsDrafted: 0, itemsSkippedAfterAnalysis: 1 });
+    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
+      500,
+      expect.objectContaining({
+        status: "success",
+        linesAdded: 0,
+        summaryJson: expect.objectContaining({
+          poMutationSkips: [expect.objectContaining({ latestDecisionId: 900 })],
         }),
       }),
     );

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { resolveRecommendationPoCost } from "./recommendation-po-cost";
 
-const recommendationKinds = ["skipped", "held_by_policy", "quality_review_required"] as const;
+const recommendationKinds = ["skipped", "held_by_policy", "quality_review_required", "auto_draft_eligible"] as const;
 const operatorDecisionValues = ["reviewed", "accepted_for_po", "deferred", "dismissed"] as const;
 
 const positiveSafeInteger = z.number().int().positive().refine(Number.isSafeInteger, {
@@ -34,6 +34,39 @@ const handoffItemSchema = z.object({
 const handoffCommandSchema = z.object({
   actorId: z.string().trim().min(1).max(100),
   items: z.array(handoffItemSchema).min(1).max(25),
+}).strict();
+
+const automaticHandoffItemSchema = z.object({
+  recommendationId: z.string().trim().min(1).max(160),
+  productId: positiveSafeInteger,
+  productVariantId: positiveSafeInteger,
+  suggestedOrderQty: positiveSafeInteger,
+  suggestedOrderPieces: positiveSafeInteger,
+  orderUomUnits: positiveSafeInteger,
+  orderUomLabel: z.string().trim().min(1).max(100),
+  vendorId: positiveSafeInteger,
+  vendorProductId: positiveSafeInteger,
+  sku: nullableBoundedString(100),
+  productName: nullableBoundedString(2_000),
+  estimatedCostMills: positiveSafeInteger.nullable(),
+  estimatedCostCents: nonnegativeSafeInteger.nullable(),
+  candidateScore: z.number().int().min(0).max(100).nullable(),
+  candidateBand: nullableBoundedString(40),
+  recommendationSnapshot: z.record(z.unknown()),
+}).strict().superRefine((value, context) => {
+  if (value.estimatedCostMills === null && value.estimatedCostCents === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "automatic recommendation supplier cost is required",
+      path: ["estimatedCostMills"],
+    });
+  }
+});
+
+const automaticHandoffCommandSchema = z.object({
+  actorId: z.string().trim().min(1).max(100),
+  autoDraftRunId: positiveSafeInteger,
+  items: z.array(automaticHandoffItemSchema).max(2_000),
 }).strict();
 
 const acceptedRecommendationEconomicBasisSchema = z.object({
@@ -80,6 +113,8 @@ export type RecommendationKind = typeof recommendationKinds[number];
 export type OperatorRecommendationDecision = typeof operatorDecisionValues[number];
 export type AcceptedRecommendationPoHandoffItem = z.infer<typeof handoffItemSchema>;
 export type AcceptedRecommendationPoHandoffCommand = z.infer<typeof handoffCommandSchema>;
+export type AutomaticRecommendationPoHandoffItem = z.infer<typeof automaticHandoffItemSchema>;
+export type AutomaticRecommendationPoHandoffCommand = z.infer<typeof automaticHandoffCommandSchema>;
 export type RecordRecommendationDecisionInput = z.infer<typeof recordDecisionSchema>;
 type AcceptedRecommendationEconomicBasis = z.infer<typeof acceptedRecommendationEconomicBasisSchema>;
 
@@ -116,6 +151,14 @@ export interface RecommendationPoHandoffRecord {
   kind: string;
   createdBy: string | null;
   createdAt: Date;
+}
+
+export interface RecommendationAutoDraftRunRecord {
+  id: number;
+  runAt: Date | string;
+  status: string;
+  triggeredBy: string;
+  triggeredByUser: string | null;
 }
 
 export interface RecommendationVendorProductRecord {
@@ -172,7 +215,8 @@ export interface NewRecommendationPurchaseOrder {
   subtotalCents: number;
   totalCents: number;
   lineCount: number;
-  source: "reorder";
+  source: "reorder" | "auto_draft";
+  autoDraftDate: string | null;
   createdBy: string | null;
   updatedBy: string | null;
   metadata: Record<string, unknown>;
@@ -222,9 +266,14 @@ export interface NewRecommendationPoHandoffRecord extends Omit<RecommendationPoH
 
 export interface RecommendationPoHandoffUnitOfWork {
   lockRecommendationKeys(keys: readonly string[]): Promise<void>;
+  getTransactionTimestamp(): Promise<Date>;
+  getAutoDraftRunForUpdate(id: number): Promise<RecommendationAutoDraftRunRecord | null>;
   getDecisionsForUpdate(ids: readonly number[]): Promise<RecommendationDecisionRecord[]>;
   getLatestActiveDecisions(
     keys: ReadonlyArray<{ recommendationId: string; kind: RecommendationKind }>,
+  ): Promise<RecommendationDecisionRecord[]>;
+  getLatestActiveDecisionsByRecommendationIds(
+    recommendationIds: readonly string[],
   ): Promise<RecommendationDecisionRecord[]>;
   getHandoffsByAcceptedDecisionIds(ids: readonly number[]): Promise<RecommendationPoHandoffRecord[]>;
   getVendorProducts(ids: readonly number[]): Promise<RecommendationVendorProductRecord[]>;
@@ -277,6 +326,15 @@ export interface AcceptedRecommendationPoHandoffResult {
   }>;
 }
 
+export interface AutomaticRecommendationPoHandoffResult extends AcceptedRecommendationPoHandoffResult {
+  skipped: Array<{
+    recommendationId: string;
+    kind: "auto_draft_eligible";
+    reason: "changed_after_run_started";
+    latestDecisionId: number;
+  }>;
+}
+
 export class RecommendationPoHandoffError extends Error {
   constructor(
     message: string,
@@ -309,6 +367,10 @@ type AcceptedDecisionBinding = {
 
 function recommendationKey(recommendationId: string, kind: string): string {
   return JSON.stringify([recommendationId, kind]);
+}
+
+function recommendationMutationLockKey(recommendationId: string): string {
+  return JSON.stringify([recommendationId, "po_mutation"]);
 }
 
 function parseInput<T>(schema: z.ZodType<T>, input: unknown, code: string): T {
@@ -360,6 +422,24 @@ function latestDecisionMap(rows: readonly RecommendationDecisionRecord[]): Map<s
   return latest;
 }
 
+function latestDecisionByRecommendationId(
+  rows: readonly RecommendationDecisionRecord[],
+): Map<string, RecommendationDecisionRecord> {
+  const latest = new Map<string, RecommendationDecisionRecord>();
+  for (const row of rows) {
+    const current = latest.get(row.recommendationId);
+    if (!current) {
+      latest.set(row.recommendationId, row);
+      continue;
+    }
+    const timeDelta = row.decidedAt.getTime() - current.decidedAt.getTime();
+    if (timeDelta > 0 || (timeDelta === 0 && row.id > current.id)) {
+      latest.set(row.recommendationId, row);
+    }
+  }
+  return latest;
+}
+
 function safeMoneySum(values: readonly number[], field: string): number {
   const total = values.reduce((sum, value) => sum + BigInt(value), BigInt(0));
   if (total > BigInt(Number.MAX_SAFE_INTEGER)) {
@@ -397,7 +477,10 @@ function isHandoffUniqueViolation(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const candidate = error as { code?: unknown; constraint?: unknown };
   if (candidate.code !== "23505") return false;
-  return typeof candidate.constraint === "string" && candidate.constraint.startsWith("purch_rec_po_handoff_");
+  return typeof candidate.constraint === "string" && (
+    candidate.constraint.startsWith("purch_rec_po_handoff_") ||
+    candidate.constraint.startsWith("purch_rec_decisions_auto_draft_")
+  );
 }
 
 function assertAcceptedDecisions(
@@ -509,6 +592,32 @@ function assertAcceptedDecisions(
   }
 
   return bindingById;
+}
+
+function assertNoNewerDecisionAcrossKinds(
+  items: readonly AcceptedRecommendationPoHandoffItem[],
+  acceptedById: ReadonlyMap<number, AcceptedDecisionBinding>,
+  decisions: readonly RecommendationDecisionRecord[],
+): void {
+  const latestByRecommendation = latestDecisionByRecommendationId(decisions);
+  for (const item of items) {
+    const accepted = acceptedById.get(item.acceptedDecisionId)!.decision;
+    const latest = latestByRecommendation.get(item.recommendationId);
+    if (!latest || latest.id === accepted.id) continue;
+    const timeDelta = latest.decidedAt.getTime() - accepted.decidedAt.getTime();
+    if (timeDelta < 0 || (timeDelta === 0 && latest.id < accepted.id)) continue;
+    throw new RecommendationPoHandoffError(
+      "The recommendation has a newer decision in another review path",
+      409,
+      "ACCEPTED_RECOMMENDATION_CROSS_KIND_STALE",
+      {
+        acceptedDecisionId: accepted.id,
+        latestDecisionId: latest.id,
+        latestKind: latest.kind,
+        latestDecision: latest.decision,
+      },
+    );
+  }
 }
 
 function resolveCatalogRows(
@@ -642,9 +751,204 @@ function resolveCatalogRows(
   });
 }
 
+async function loadResolvedHandoffItems(
+  unitOfWork: RecommendationPoHandoffUnitOfWork,
+  items: readonly AcceptedRecommendationPoHandoffItem[],
+  acceptedById: ReadonlyMap<number, AcceptedDecisionBinding>,
+): Promise<ResolvedHandoffItem[]> {
+  const vendorProductIds = [...new Set(items.map((item) => item.vendorProductId))];
+  const vendorIds = [...new Set(items.map((item) => item.vendorId))];
+  const productIds = [...new Set(items.map((item) => item.productId))];
+  const variantIds = [...new Set(items.map((item) => item.productVariantId))];
+  const vendorProducts = await unitOfWork.getVendorProducts(vendorProductIds);
+  const vendors = await unitOfWork.getVendors(vendorIds);
+  const products = await unitOfWork.getProducts(productIds);
+  const variants = await unitOfWork.getProductVariants(variantIds);
+  assertCompleteLookup(vendorProductIds, vendorProducts, "vendor product");
+  assertCompleteLookup(vendorIds, vendors, "vendor");
+  assertCompleteLookup(productIds, products, "product");
+  assertCompleteLookup(variantIds, variants, "product variant");
+
+  return resolveCatalogRows(items, acceptedById, vendorProducts, vendors, products, variants);
+}
+
+type HandoffPersistenceOptions = {
+  actorId: string;
+  now: Date;
+  decisionSource: "operator" | "auto_draft";
+  autoDraftRunId: number | null;
+  poSource: "reorder" | "auto_draft";
+  autoDraftDate: string | null;
+  metadataSource: "accepted_recommendation_handoff" | "automatic_recommendation_handoff";
+  statusHistoryNotes: string;
+  handoffDecisionReason: string;
+};
+
+async function persistResolvedHandoffs(
+  unitOfWork: RecommendationPoHandoffUnitOfWork,
+  resolvedItems: readonly ResolvedHandoffItem[],
+  options: HandoffPersistenceOptions,
+): Promise<AcceptedRecommendationPoHandoffResult> {
+  const auditActor = resolveAuditActor(options.actorId);
+  const byVendor = new Map<number, ResolvedHandoffItem[]>();
+  for (const item of resolvedItems) {
+    const group = byVendor.get(item.vendorId) ?? [];
+    group.push(item);
+    byVendor.set(item.vendorId, group);
+  }
+
+  const pos: CreatedRecommendationPurchaseOrder[] = [];
+  const decisions: RecommendationDecisionRecord[] = [];
+  const handedOff: AcceptedRecommendationPoHandoffResult["handedOff"] = [];
+
+  for (const vendorId of [...byVendor.keys()].sort((left, right) => left - right)) {
+    const group = byVendor.get(vendorId)!;
+    const vendor = group[0].vendor;
+    const subtotalCents = safeMoneySum(
+      group.map((item) => item.lineTotalCents),
+      "purchase order subtotal",
+    );
+    const po = await unitOfWork.createPurchaseOrder({
+      vendorId,
+      status: "draft",
+      physicalStatus: "draft",
+      financialStatus: "unbilled",
+      poType: "standard",
+      priority: "normal",
+      currency: vendor.currency || "USD",
+      paymentTermsDays: vendor.paymentTermsDays,
+      paymentTermsType: vendor.paymentTermsType,
+      shipFromAddress: vendor.shipFromAddress,
+      incoterms: vendor.defaultIncoterms,
+      subtotalCents,
+      totalCents: subtotalCents,
+      lineCount: group.length,
+      source: options.poSource,
+      autoDraftDate: options.autoDraftDate,
+      createdBy: auditActor.databaseUserId,
+      updatedBy: auditActor.databaseUserId,
+      metadata: {
+        source: options.metadataSource,
+        acceptedDecisionIds: group.map((item) => item.acceptedDecisionId),
+        autoDraftRunId: options.autoDraftRunId,
+        createdAt: options.now.toISOString(),
+      },
+      createdAt: options.now,
+      updatedAt: options.now,
+    }, options.now);
+    pos.push(po);
+
+    await unitOfWork.createStatusHistory({
+      purchaseOrderId: po.id,
+      fromStatus: null,
+      toStatus: "draft",
+      changedBy: auditActor.databaseUserId,
+      notes: options.statusHistoryNotes,
+      changedAt: options.now,
+    });
+    await unitOfWork.createPoEvent({
+      poId: po.id,
+      eventType: "created",
+      actorType: auditActor.eventActorType,
+      actorId: auditActor.eventActorId,
+      payloadJson: {
+        source: options.metadataSource,
+        line_count: group.length,
+        subtotal_cents: subtotalCents,
+        accepted_decision_ids: group.map((item) => item.acceptedDecisionId),
+        recommendation_ids: group.map((item) => item.recommendationId),
+        auto_draft_run_id: options.autoDraftRunId,
+      },
+      createdAt: options.now,
+    });
+
+    for (let index = 0; index < group.length; index += 1) {
+      const item = group[index];
+      const line = await unitOfWork.createPurchaseOrderLine({
+        purchaseOrderId: po.id,
+        lineNumber: index + 1,
+        productId: item.product.id,
+        productVariantId: item.variant.id,
+        expectedReceiveVariantId: item.variant.id,
+        vendorProductId: item.vendorProduct.id,
+        sku: item.product.sku || item.variant.sku || item.sku,
+        productName: item.product.name,
+        vendorSku: item.vendorProduct.vendorSku,
+        unitOfMeasure: normalizeUnitOfMeasure(item.orderUomLabel),
+        unitsPerUom: item.variant.unitsPerVariant,
+        expectedReceiveUnitsPerVariant: item.variant.unitsPerVariant,
+        orderQty: item.suggestedPieces,
+        unitCostCents: item.unitCostCents,
+        unitCostMills: item.unitCostMills,
+        totalProductCostCents: item.totalProductCostCents,
+        packagingCostCents: 0,
+        discountCents: 0,
+        taxCents: 0,
+        lineTotalCents: item.lineTotalCents,
+        lineType: "product",
+        status: "open",
+        createdAt: options.now,
+        updatedAt: options.now,
+      });
+      const decision = await unitOfWork.createDecision({
+        recommendationId: item.recommendationId,
+        kind: item.kind,
+        decision: "po_handoff_created",
+        status: "active",
+        decisionReason: options.handoffDecisionReason,
+        note: null,
+        source: options.decisionSource,
+        autoDraftRunId: options.autoDraftRunId,
+        productId: item.product.id,
+        productVariantId: item.variant.id,
+        vendorId: item.vendor.id,
+        sku: item.sku,
+        productName: item.productName,
+        candidateScore: item.candidateScore,
+        candidateBand: item.candidateBand,
+        recommendationSnapshot: {
+          ...item.recommendationSnapshot,
+          poHandoff: {
+            acceptedDecisionId: item.acceptedDecisionId,
+            poId: po.id,
+            poLineId: line.id,
+            poNumber: po.poNumber,
+          },
+        },
+        decidedBy: options.actorId,
+        decidedAt: options.now,
+        createdAt: options.now,
+      });
+      await unitOfWork.createHandoff({
+        acceptedDecisionId: item.acceptedDecisionId,
+        handoffDecisionId: decision.id,
+        purchaseOrderId: po.id,
+        purchaseOrderLineId: line.id,
+        recommendationId: item.recommendationId,
+        kind: item.kind,
+        createdBy: auditActor.databaseUserId,
+        createdAt: options.now,
+      });
+
+      decisions.push(decision);
+      handedOff.push({
+        acceptedDecisionId: item.acceptedDecisionId,
+        handoffDecisionId: decision.id,
+        recommendationId: item.recommendationId,
+        kind: item.kind,
+        sku: item.sku,
+        poId: po.id,
+        poLineId: line.id,
+        poIds: [po.id],
+      });
+    }
+  }
+
+  return { pos, decisions, handedOff };
+}
+
 export function createRecommendationPoHandoffService(
   repository: RecommendationPoHandoffRepository,
-  clock: () => Date = () => new Date(),
 ) {
   async function recordDecision(input: unknown): Promise<RecommendationDecisionRecord> {
     const parsed = parseInput(recordDecisionSchema, input, "INVALID_RECOMMENDATION_DECISION");
@@ -661,10 +965,11 @@ export function createRecommendationPoHandoffService(
       }
     }
     const lockKey = recommendationKey(parsed.recommendationId, parsed.kind);
+    const mutationLockKey = recommendationMutationLockKey(parsed.recommendationId);
 
     return repository.transaction(async (unitOfWork) => {
-      await unitOfWork.lockRecommendationKeys([lockKey]);
-      const now = clock();
+      await unitOfWork.lockRecommendationKeys([lockKey, mutationLockKey].sort());
+      const now = await unitOfWork.getTransactionTimestamp();
       return unitOfWork.createDecision({
         ...parsed,
         autoDraftRunId: parsed.autoDraftRunId ?? null,
@@ -679,6 +984,7 @@ export function createRecommendationPoHandoffService(
     const acceptedDecisionIds = parsed.items.map((item) => item.acceptedDecisionId);
     const uniqueAcceptedIds = new Set(acceptedDecisionIds);
     const keys = parsed.items.map((item) => recommendationKey(item.recommendationId, item.kind));
+    const mutationKeys = parsed.items.map((item) => recommendationMutationLockKey(item.recommendationId));
     const uniqueKeys = new Set(keys);
     if (uniqueAcceptedIds.size !== parsed.items.length || uniqueKeys.size !== parsed.items.length) {
       throw new RecommendationPoHandoffError(
@@ -688,15 +994,17 @@ export function createRecommendationPoHandoffService(
       );
     }
 
-    const auditActor = resolveAuditActor(parsed.actorId);
     try {
       return await repository.transaction(async (unitOfWork) => {
-        await unitOfWork.lockRecommendationKeys([...uniqueKeys].sort());
-        const now = clock();
+        await unitOfWork.lockRecommendationKeys([...new Set([...uniqueKeys, ...mutationKeys])].sort());
+        const now = await unitOfWork.getTransactionTimestamp();
 
         const acceptedDecisions = await unitOfWork.getDecisionsForUpdate(acceptedDecisionIds);
         const latestDecisions = await unitOfWork.getLatestActiveDecisions(
           parsed.items.map((item) => ({ recommendationId: item.recommendationId, kind: item.kind })),
+        );
+        const latestAcrossKinds = await unitOfWork.getLatestActiveDecisionsByRecommendationIds(
+          parsed.items.map((item) => item.recommendationId),
         );
         const existingHandoffs = await unitOfWork.getHandoffsByAcceptedDecisionIds(acceptedDecisionIds);
         const acceptedById = assertAcceptedDecisions(
@@ -705,180 +1013,20 @@ export function createRecommendationPoHandoffService(
           latestDecisions,
           existingHandoffs,
         );
+        assertNoNewerDecisionAcrossKinds(parsed.items, acceptedById, latestAcrossKinds);
 
-        const vendorProductIds = [...new Set(parsed.items.map((item) => item.vendorProductId))];
-        const vendorIds = [...new Set(parsed.items.map((item) => item.vendorId))];
-        const productIds = [...new Set(parsed.items.map((item) => item.productId))];
-        const variantIds = [...new Set(parsed.items.map((item) => item.productVariantId))];
-        const vendorProducts = await unitOfWork.getVendorProducts(vendorProductIds);
-        const vendors = await unitOfWork.getVendors(vendorIds);
-        const products = await unitOfWork.getProducts(productIds);
-        const variants = await unitOfWork.getProductVariants(variantIds);
-        assertCompleteLookup(vendorProductIds, vendorProducts, "vendor product");
-        assertCompleteLookup(vendorIds, vendors, "vendor");
-        assertCompleteLookup(productIds, products, "product");
-        assertCompleteLookup(variantIds, variants, "product variant");
-
-        const resolvedItems = resolveCatalogRows(
-          parsed.items,
-          acceptedById,
-          vendorProducts,
-          vendors,
-          products,
-          variants,
-        );
-        const byVendor = new Map<number, ResolvedHandoffItem[]>();
-        for (const item of resolvedItems) {
-          const group = byVendor.get(item.vendorId) ?? [];
-          group.push(item);
-          byVendor.set(item.vendorId, group);
-        }
-
-        const pos: CreatedRecommendationPurchaseOrder[] = [];
-        const decisions: RecommendationDecisionRecord[] = [];
-        const handedOff: AcceptedRecommendationPoHandoffResult["handedOff"] = [];
-
-        for (const vendorId of [...byVendor.keys()].sort((left, right) => left - right)) {
-          const group = byVendor.get(vendorId)!;
-          const vendor = group[0].vendor;
-          const subtotalCents = safeMoneySum(
-            group.map((item) => item.lineTotalCents),
-            "purchase order subtotal",
-          );
-          const po = await unitOfWork.createPurchaseOrder({
-            vendorId,
-            status: "draft",
-            physicalStatus: "draft",
-            financialStatus: "unbilled",
-            poType: "standard",
-            priority: "normal",
-            currency: vendor.currency || "USD",
-            paymentTermsDays: vendor.paymentTermsDays,
-            paymentTermsType: vendor.paymentTermsType,
-            shipFromAddress: vendor.shipFromAddress,
-            incoterms: vendor.defaultIncoterms,
-            subtotalCents,
-            totalCents: subtotalCents,
-            lineCount: group.length,
-            source: "reorder",
-            createdBy: auditActor.databaseUserId,
-            updatedBy: auditActor.databaseUserId,
-            metadata: {
-              source: "accepted_recommendation_handoff",
-              acceptedDecisionIds: group.map((item) => item.acceptedDecisionId),
-              createdAt: now.toISOString(),
-            },
-            createdAt: now,
-            updatedAt: now,
-          }, now);
-          pos.push(po);
-
-          await unitOfWork.createStatusHistory({
-            purchaseOrderId: po.id,
-            fromStatus: null,
-            toStatus: "draft",
-            changedBy: auditActor.databaseUserId,
-            notes: "PO created from accepted purchasing recommendations",
-            changedAt: now,
-          });
-          await unitOfWork.createPoEvent({
-            poId: po.id,
-            eventType: "created",
-            actorType: auditActor.eventActorType,
-            actorId: auditActor.eventActorId,
-            payloadJson: {
-              source: "accepted_recommendation_handoff",
-              line_count: group.length,
-              subtotal_cents: subtotalCents,
-              accepted_decision_ids: group.map((item) => item.acceptedDecisionId),
-              recommendation_ids: group.map((item) => item.recommendationId),
-            },
-            createdAt: now,
-          });
-
-          for (let index = 0; index < group.length; index += 1) {
-            const item = group[index];
-            const line = await unitOfWork.createPurchaseOrderLine({
-              purchaseOrderId: po.id,
-              lineNumber: index + 1,
-              productId: item.product.id,
-              productVariantId: item.variant.id,
-              expectedReceiveVariantId: item.variant.id,
-              vendorProductId: item.vendorProduct.id,
-              sku: item.product.sku || item.variant.sku || item.sku,
-              productName: item.product.name,
-              vendorSku: item.vendorProduct.vendorSku,
-              unitOfMeasure: normalizeUnitOfMeasure(item.orderUomLabel),
-              unitsPerUom: item.variant.unitsPerVariant,
-              expectedReceiveUnitsPerVariant: item.variant.unitsPerVariant,
-              orderQty: item.suggestedPieces,
-              unitCostCents: item.unitCostCents,
-              unitCostMills: item.unitCostMills,
-              totalProductCostCents: item.totalProductCostCents,
-              packagingCostCents: 0,
-              discountCents: 0,
-              taxCents: 0,
-              lineTotalCents: item.lineTotalCents,
-              lineType: "product",
-              status: "open",
-              createdAt: now,
-              updatedAt: now,
-            });
-            const decision = await unitOfWork.createDecision({
-              recommendationId: item.recommendationId,
-              kind: item.kind,
-              decision: "po_handoff_created",
-              status: "active",
-              decisionReason: "accepted_recommendation_po_handoff",
-              note: null,
-              source: "operator",
-              autoDraftRunId: null,
-              productId: item.product.id,
-              productVariantId: item.variant.id,
-              vendorId: item.vendor.id,
-              sku: item.sku,
-              productName: item.productName,
-              candidateScore: item.candidateScore,
-              candidateBand: item.candidateBand,
-              recommendationSnapshot: {
-                ...item.recommendationSnapshot,
-                poHandoff: {
-                  acceptedDecisionId: item.acceptedDecisionId,
-                  poId: po.id,
-                  poLineId: line.id,
-                  poNumber: po.poNumber,
-                },
-              },
-              decidedBy: parsed.actorId,
-              decidedAt: now,
-              createdAt: now,
-            });
-            await unitOfWork.createHandoff({
-              acceptedDecisionId: item.acceptedDecisionId,
-              handoffDecisionId: decision.id,
-              purchaseOrderId: po.id,
-              purchaseOrderLineId: line.id,
-              recommendationId: item.recommendationId,
-              kind: item.kind,
-              createdBy: auditActor.databaseUserId,
-              createdAt: now,
-            });
-
-            decisions.push(decision);
-            handedOff.push({
-              acceptedDecisionId: item.acceptedDecisionId,
-              handoffDecisionId: decision.id,
-              recommendationId: item.recommendationId,
-              kind: item.kind,
-              sku: item.sku,
-              poId: po.id,
-              poLineId: line.id,
-              poIds: [po.id],
-            });
-          }
-        }
-
-        return { pos, decisions, handedOff };
+        const resolvedItems = await loadResolvedHandoffItems(unitOfWork, parsed.items, acceptedById);
+        return persistResolvedHandoffs(unitOfWork, resolvedItems, {
+          actorId: parsed.actorId,
+          now,
+          decisionSource: "operator",
+          autoDraftRunId: null,
+          poSource: "reorder",
+          autoDraftDate: null,
+          metadataSource: "accepted_recommendation_handoff",
+          statusHistoryNotes: "PO created from accepted purchasing recommendations",
+          handoffDecisionReason: "accepted_recommendation_po_handoff",
+        });
       });
     } catch (error) {
       if (isHandoffUniqueViolation(error)) {
@@ -892,9 +1040,187 @@ export function createRecommendationPoHandoffService(
     }
   }
 
+  async function createAutomaticHandoff(input: unknown): Promise<AutomaticRecommendationPoHandoffResult> {
+    const parsed = parseInput(
+      automaticHandoffCommandSchema,
+      input,
+      "INVALID_AUTOMATIC_RECOMMENDATION_HANDOFF",
+    );
+    const keys = parsed.items.map((item) => recommendationKey(item.recommendationId, "auto_draft_eligible"));
+    const mutationKeys = parsed.items.map((item) => recommendationMutationLockKey(item.recommendationId));
+    if (new Set(keys).size !== parsed.items.length) {
+      throw new RecommendationPoHandoffError(
+        "Each automatic recommendation may appear only once per run handoff",
+        400,
+        "DUPLICATE_AUTOMATIC_RECOMMENDATION",
+      );
+    }
+
+    try {
+      return await repository.transaction(async (unitOfWork) => {
+        const run = await unitOfWork.getAutoDraftRunForUpdate(parsed.autoDraftRunId);
+        if (!run) {
+          throw new RecommendationPoHandoffError(
+            "The auto-draft run no longer exists",
+            409,
+            "AUTO_DRAFT_RUN_MISSING",
+            { autoDraftRunId: parsed.autoDraftRunId },
+          );
+        }
+        if (run.status !== "running") {
+          throw new RecommendationPoHandoffError(
+            "The auto-draft run is not open for PO mutation",
+            409,
+            "AUTO_DRAFT_RUN_NOT_RUNNING",
+            { autoDraftRunId: run.id, status: run.status },
+          );
+        }
+
+        await unitOfWork.lockRecommendationKeys([...new Set([...keys, ...mutationKeys])].sort());
+        const now = await unitOfWork.getTransactionTimestamp();
+        const runStartedAt = run.runAt instanceof Date ? run.runAt : new Date(run.runAt);
+        if (Number.isNaN(runStartedAt.getTime())) {
+          throw new RecommendationPoHandoffError(
+            "The auto-draft run start time is invalid",
+            409,
+            "AUTO_DRAFT_RUN_TIMESTAMP_INVALID",
+            { autoDraftRunId: run.id },
+          );
+        }
+
+        const latestDecisions = await unitOfWork.getLatestActiveDecisionsByRecommendationIds(
+          parsed.items.map((item) => item.recommendationId),
+        );
+        const latestById = latestDecisionByRecommendationId(latestDecisions);
+        const skipped: AutomaticRecommendationPoHandoffResult["skipped"] = [];
+        const currentItems = parsed.items.filter((item) => {
+          const latest = latestById.get(item.recommendationId);
+          if (!latest || latest.decidedAt.getTime() < runStartedAt.getTime()) return true;
+          skipped.push({
+            recommendationId: item.recommendationId,
+            kind: "auto_draft_eligible",
+            reason: "changed_after_run_started",
+            latestDecisionId: latest.id,
+          });
+          return false;
+        });
+
+        const handoffItems: AcceptedRecommendationPoHandoffItem[] = [];
+        const acceptedById = new Map<number, AcceptedDecisionBinding>();
+        for (const item of currentItems) {
+          const priorSnapshotItem = item.recommendationSnapshot.item;
+          const snapshotItem = {
+            ...(priorSnapshotItem && typeof priorSnapshotItem === "object" && !Array.isArray(priorSnapshotItem)
+              ? priorSnapshotItem as Record<string, unknown>
+              : {}),
+            productId: item.productId,
+            productVariantId: item.productVariantId,
+            preferredVendorId: item.vendorId,
+            vendorProductId: item.vendorProductId,
+            suggestedOrderQty: item.suggestedOrderQty,
+            suggestedOrderPieces: item.suggestedOrderPieces,
+            orderUomUnits: item.orderUomUnits,
+            estimatedCostMills: item.estimatedCostMills,
+            estimatedCostCents: item.estimatedCostCents,
+          };
+          const parsedBasis = acceptedRecommendationEconomicBasisSchema.safeParse(snapshotItem);
+          if (!parsedBasis.success) {
+            throw new RecommendationPoHandoffError(
+              "The automatic recommendation does not contain a complete economic basis",
+              409,
+              "AUTOMATIC_RECOMMENDATION_ECONOMIC_BASIS_MISSING",
+              { recommendationId: item.recommendationId, issues: parsedBasis.error.issues },
+            );
+          }
+          const recommendationSnapshot = {
+            ...item.recommendationSnapshot,
+            item: snapshotItem,
+            autoDraft: {
+              runId: run.id,
+              runAt: runStartedAt.toISOString(),
+              triggeredBy: run.triggeredBy,
+            },
+          };
+          const acceptedDecision = await unitOfWork.createDecision({
+            recommendationId: item.recommendationId,
+            kind: "auto_draft_eligible",
+            decision: "accepted_for_po",
+            status: "active",
+            decisionReason: "auto_draft_policy_approved",
+            note: null,
+            source: "auto_draft",
+            autoDraftRunId: run.id,
+            productId: item.productId,
+            productVariantId: item.productVariantId,
+            vendorId: item.vendorId,
+            sku: item.sku,
+            productName: item.productName,
+            candidateScore: item.candidateScore,
+            candidateBand: item.candidateBand,
+            recommendationSnapshot,
+            decidedBy: parsed.actorId,
+            decidedAt: now,
+            createdAt: now,
+          });
+          const handoffItem: AcceptedRecommendationPoHandoffItem = {
+            acceptedDecisionId: acceptedDecision.id,
+            recommendationId: item.recommendationId,
+            kind: "auto_draft_eligible",
+            productId: item.productId,
+            productVariantId: item.productVariantId,
+            suggestedPieces: item.suggestedOrderPieces,
+            orderUomUnits: item.orderUomUnits,
+            orderUomLabel: item.orderUomLabel,
+            vendorId: item.vendorId,
+            vendorProductId: item.vendorProductId,
+            sku: item.sku,
+            productName: item.productName,
+            candidateScore: item.candidateScore,
+            candidateBand: item.candidateBand,
+            recommendationSnapshot,
+          };
+          handoffItems.push(handoffItem);
+          acceptedById.set(acceptedDecision.id, {
+            decision: acceptedDecision,
+            basis: parsedBasis.data,
+          });
+        }
+
+        if (handoffItems.length === 0) {
+          return { pos: [], decisions: [], handedOff: [], skipped };
+        }
+
+        const resolvedItems = await loadResolvedHandoffItems(unitOfWork, handoffItems, acceptedById);
+        const persisted = await persistResolvedHandoffs(unitOfWork, resolvedItems, {
+          actorId: parsed.actorId,
+          now,
+          decisionSource: "auto_draft",
+          autoDraftRunId: run.id,
+          poSource: "auto_draft",
+          autoDraftDate: runStartedAt.toISOString().slice(0, 10),
+          metadataSource: "automatic_recommendation_handoff",
+          statusHistoryNotes: "PO created by the purchasing auto-draft policy",
+          handoffDecisionReason: "automatic_recommendation_po_handoff",
+        });
+        return { ...persisted, skipped };
+      });
+    } catch (error) {
+      if (isHandoffUniqueViolation(error)) {
+        throw new RecommendationPoHandoffError(
+          "This automatic recommendation was already handled for the auto-draft run",
+          409,
+          "AUTOMATIC_RECOMMENDATION_ALREADY_HANDED_OFF",
+          { autoDraftRunId: parsed.autoDraftRunId },
+        );
+      }
+      throw error;
+    }
+  }
+
   return {
     recordDecision,
     createAcceptedHandoff,
+    createAutomaticHandoff,
   };
 }
 
