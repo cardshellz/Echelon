@@ -83,12 +83,15 @@ export type PurchasingRecommendationQualityGateReason =
   | "medium_confidence_review"
   | "low_confidence_review"
   | "not_actionable"
+  | "quality_control_block"
   | "forecast_trust_review";
 export type PurchasingRecommendationQualityControlArea =
   | "demand"
   | "lead_time"
   | "supplier_cost"
-  | "vendor";
+  | "vendor"
+  | "receive_configuration"
+  | "supplier_catalog";
 export type PurchasingRecommendationQualityControlSeverity = "review" | "block";
 
 export interface PurchasingRecommendationQualityControl {
@@ -644,6 +647,9 @@ function buildQualityControls(input: {
   costQuality: PurchasingRecommendationSupplierCostQuality;
   costSource: PurchasingRecommendationSupplierCostSource;
   hasVendor: boolean;
+  actionable: boolean;
+  hasReceiveConfiguration: boolean;
+  hasSupplierCatalogBinding: boolean;
 }): PurchasingRecommendationQualityControl[] {
   const controls: PurchasingRecommendationQualityControl[] = [];
   const demandSample =
@@ -765,6 +771,26 @@ function buildQualityControls(input: {
         detail: "Preferred vendor cost exists, but its verification date is unknown.",
       });
     }
+  }
+
+  if (input.actionable && !input.hasReceiveConfiguration) {
+    controls.push({
+      area: "receive_configuration",
+      severity: "block",
+      code: "missing_receive_configuration",
+      label: "Missing receive configuration",
+      detail: "Assign an active product variant before automated purchasing can create a receivable PO line.",
+    });
+  }
+
+  if (input.actionable && !input.hasSupplierCatalogBinding) {
+    controls.push({
+      area: "supplier_catalog",
+      severity: "block",
+      code: "missing_supplier_catalog_binding",
+      label: "Missing supplier catalog binding",
+      detail: "Link an active preferred vendor-product row before automated purchasing can create a PO line.",
+    });
   }
 
   return controls;
@@ -1369,19 +1395,32 @@ function buildQualityGate(input: {
   autopilotBlockers: PurchasingRecommendationQualityControl[];
   forecastTrust: PurchasingRecommendationForecastTrustDiagnostics;
 }): PurchasingRecommendationItem["qualityGate"] {
-  const primaryBlocker = input.autopilotBlockers[0];
+  const primaryControl = input.autopilotBlockers[0];
+  const hardBlocker = input.autopilotBlockers.find((control) => control.severity === "block");
   if (!input.actionable) {
-    const detail = primaryBlocker
-      ? `${primaryBlocker.label}: ${primaryBlocker.detail}`
-      : input.skippedReason
-        ? "This recommendation is blocked by an operator review condition."
-        : "This recommendation is not currently in an auto-draftable reorder state.";
+    let detail = "This recommendation is not currently in an auto-draftable reorder state.";
+    if (hardBlocker) {
+      detail = `${hardBlocker.label}: ${hardBlocker.detail}`;
+    } else if (primaryControl) {
+      detail = `${primaryControl.label}: ${primaryControl.detail}`;
+    } else if (input.skippedReason) {
+      detail = "This recommendation is blocked by an operator review condition.";
+    }
 
     return {
       autoDraftEligible: false,
       reason: "not_actionable",
       label: "Not auto-draftable",
       detail,
+    };
+  }
+
+  if (hardBlocker) {
+    return {
+      autoDraftEligible: false,
+      reason: "quality_control_block",
+      label: "Blocked from auto-draft",
+      detail: `${hardBlocker.label}: ${hardBlocker.detail}`,
     };
   }
 
@@ -1407,8 +1446,8 @@ function buildQualityGate(input: {
     autoDraftEligible: false,
     reason: input.confidence === "medium" ? "medium_confidence_review" : "low_confidence_review",
     label: "Review before auto-draft",
-    detail: primaryBlocker
-      ? `${primaryBlocker.label}: ${primaryBlocker.detail}`
+    detail: primaryControl
+      ? `${primaryControl.label}: ${primaryControl.detail}`
       : "This recommendation is actionable, but confidence is not high enough for automated PO drafting.",
   };
 }
@@ -1692,6 +1731,9 @@ export function generatePurchasingRecommendations(
       costQuality: supplierCost.costQuality,
       costSource: supplierCost.costSource,
       hasVendor,
+      actionable,
+      hasReceiveConfiguration: productVariantId !== undefined && productVariantId > 0,
+      hasSupplierCatalogBinding: vendorProductId !== null && vendorProductId > 0,
     });
     const autopilotBlockers = qualityControls;
     const qualityGate = buildQualityGate({

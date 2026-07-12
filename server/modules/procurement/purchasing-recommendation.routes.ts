@@ -15,8 +15,6 @@ import {
 } from "./purchasing-recommendation.engine";
 import {
   buildApprovalPolicyDiagnostics,
-  buildPurchasingRecommendationRunDetail,
-  type PurchasingRecommendationRunPoMutation,
 } from "./purchasing-recommendation.run-detail";
 import {
   buildStaleAutoDraftPoDiagnostics,
@@ -34,10 +32,6 @@ import { loadPurchasingRecommendationContext } from "./purchasing-recommendation
 import { resolveRecommendationPoQuantity } from "./recommendation-po-quantity";
 import { buildSupplierSetupGaps } from "./supplier-setup-gaps.service";
 const storage = { ...procurementStorage, ...inventoryStorage };
-
-function shouldCreateDraftPos(settings: AutoDraftRecommendationSettings): boolean {
-  return settings.autoDraftMode !== "review_only";
-}
 
 function parseRunHistoryLimit(value: unknown): number {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -1243,97 +1237,21 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
   });
 
   app.post("/api/purchasing/auto-draft-run", requirePermission("inventory", "adjust"), async (req, res) => {
-    let runRecord: any | null = null;
     try {
-      const { purchasing } = app.locals.services;
       const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
-      runRecord = await storage.createAutoDraftRun({
-        triggeredBy: "manual",
-        triggeredByUser: userId,
-        status: "running",
-      });
-      const configuredLookback = await storage.getVelocityLookbackDays();
-      const rawRows = await storage.getReorderAnalysisData(configuredLookback);
-      const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
-      const context = await loadPurchasingRecommendationContext();
-      const recommendationResult = generatePurchasingRecommendations({
-        rows: rawRows as PurchasingRecommendationRawRow[],
-        lookbackDays: configuredLookback,
-        autoDraftSettings: settings,
-        requireVendor: Boolean(settings.skipNoVendor),
-        ...context,
-      });
-
-      const itemsToOrder = recommendationResult.items
-        .filter((item) => passesAutoDraftApprovalPolicy(item, settings))
-        .map((item) => {
-          const quantity = resolveRecommendationPoQuantity(item);
-          return {
-            productId: item.productId,
-            productVariantId: item.productVariantId ?? item.productId,
-            suggestedPieces: quantity.orderQtyPieces,
-            vendorProductId: Number(item.supplierBasis.vendorProductId),
-            vendorId: item.preferredVendorId ?? undefined,
-          };
-        });
-
-      let result: any[] = [];
-      const poMutations: PurchasingRecommendationRunPoMutation[] = [];
-      const createDraftPos = shouldCreateDraftPos(settings);
-      if (createDraftPos && itemsToOrder.length > 0) {
-        result = await purchasing.createPOFromReorder(itemsToOrder, userId);
-        for (const po of result) {
-          if (po?.vendorId && po?.id) {
-            poMutations.push({
-              vendorId: Number(po.vendorId),
-              poId: Number(po.id),
-              action: "upserted",
-              linesAdded: 0,
-            });
-          }
-        }
-      }
-
-      const runDetail = buildPurchasingRecommendationRunDetail(recommendationResult, {
-        lookbackDays: configuredLookback,
-        settings,
-        poMutations,
-      });
-
-      await storage.updateAutoDraftRun(runRecord.id, {
-        status: "success",
-        itemsAnalyzed: rawRows.length,
-        posCreated: result.length,
-        posUpdated: 0,
-        linesAdded: createDraftPos ? itemsToOrder.length : 0,
-        skippedNoVendor: recommendationResult.summary.skippedNoVendor,
-        skippedOnOrder: recommendationResult.summary.skippedOnOrder,
-        skippedExcluded: recommendationResult.summary.excludedCount,
-        summaryJson: runDetail,
-        finishedAt: new Date(),
-      });
-
-      res.json({
-        success: true,
-        pos: result,
-        count: result.length,
-        itemsDrafted: createDraftPos ? itemsToOrder.length : 0,
-        reviewOnly: !createDraftPos,
-        recommendationSummary: recommendationResult.summary,
-        recommendationRun: {
-          id: runRecord.id,
-          detail: runDetail,
-        },
-      });
+      const { runAutoDraftJob } = await import("../../jobs/auto-draft.job");
+      const result = await runAutoDraftJob({ triggeredBy: "manual", triggeredByUser: userId });
+      res.json(result);
     } catch (error: any) {
-      if (runRecord?.id) {
-        await storage.updateAutoDraftRun(runRecord.id, {
-          status: "error",
-          errorMessage: error?.message || "Unknown error",
-          finishedAt: new Date(),
+      console.error("Error running auto-draft:", error);
+      const statusCode = Number(error?.statusCode);
+      if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
+        return res.status(statusCode).json({
+          error: error.message,
+          code: error.code ?? "AUTO_DRAFT_REJECTED",
+          context: error.context ?? {},
         });
       }
-      console.error("Error running auto-draft:", error);
       res.status(500).json({ error: "Failed to run auto-draft" });
     }
   });

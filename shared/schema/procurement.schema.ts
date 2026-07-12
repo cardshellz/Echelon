@@ -1153,10 +1153,17 @@ export const purchasingRecommendationDecisions = procurementSchema.table("purcha
   decidedAt: timestamp("decided_at").defaultNow().notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
+  check(
+    "purch_rec_decisions_auto_draft_run_chk",
+    sql`${table.source} <> 'auto_draft' OR ${table.autoDraftRunId} IS NOT NULL`,
+  ),
   index("purch_rec_decisions_rec_kind_decided_idx").on(table.recommendationId, table.kind, table.decidedAt),
   index("purch_rec_decisions_decision_decided_idx").on(table.decision, table.decidedAt),
   index("purch_rec_decisions_sku_idx").on(table.sku),
   uniqueIndex("purch_rec_decisions_id_rec_kind_uidx").on(table.id, table.recommendationId, table.kind),
+  uniqueIndex("purch_rec_decisions_auto_draft_run_rec_kind_decision_uidx")
+    .on(table.autoDraftRunId, table.recommendationId, table.kind, table.decision)
+    .where(sql`${table.source} = 'auto_draft' AND ${table.status} = 'active' AND ${table.autoDraftRunId} IS NOT NULL`),
 ]);
 
 export const insertPurchasingRecommendationDecisionSchema = createInsertSchema(purchasingRecommendationDecisions).omit({
