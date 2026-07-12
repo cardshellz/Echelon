@@ -18,6 +18,12 @@ import {
   type PurchasingRecommendationRawRow,
 } from "../modules/procurement/purchasing-recommendation.engine";
 import { loadPurchasingRecommendationContext } from "../modules/procurement/purchasing-recommendation-context.service";
+import { createDrizzleAutoDraftRunLifecycleRepository } from "../modules/procurement/auto-draft-run-lifecycle.repository";
+import {
+  createAutoDraftRunLifecycleService,
+  type AutoDraftRunLifecycleService,
+  type AutoDraftRunRecord,
+} from "../modules/procurement/auto-draft-run-lifecycle.service";
 import {
   buildPurchasingRecommendationRunDetail,
   type PurchasingRecommendationRunPoMutation,
@@ -29,7 +35,7 @@ import {
   type CreatedRecommendationPurchaseOrder,
 } from "../modules/procurement/recommendation-po-handoff.service";
 
-interface AutoDraftOptions {
+export interface AutoDraftOptions {
   triggeredBy: "scheduler" | "manual";
   triggeredByUser?: string;
 }
@@ -50,6 +56,12 @@ export interface AutoDraftJobResult {
     id: number;
     detail: ReturnType<typeof buildPurchasingRecommendationRunDetail>;
   };
+}
+
+export interface StartedAutoDraftJob {
+  runId: number;
+  interruptedRunIds: number[];
+  completion: Promise<AutoDraftJobResult>;
 }
 
 function toAutomaticHandoffItem(
@@ -101,20 +113,18 @@ function shouldCreateDraftPos(settings: AutoDraftRecommendationSettings): boolea
   return settings.autoDraftMode !== "review_only";
 }
 
-export async function runAutoDraftJob(options: AutoDraftOptions): Promise<AutoDraftJobResult> {
+async function executeAutoDraftJob(
+  options: AutoDraftOptions,
+  runRecord: AutoDraftRunRecord,
+  lifecycle: AutoDraftRunLifecycleService,
+): Promise<AutoDraftJobResult> {
   const storage = { ...procurementMethods, ...inventoryStorage };
   const handoffService = createRecommendationPoHandoffService(
     createDrizzleRecommendationPoHandoffRepository(db),
   );
-  const runRecord = await storage.createAutoDraftRun({
-    triggeredBy: options.triggeredBy,
-    triggeredByUser: options.triggeredByUser,
-    status: "running",
-  });
 
   let itemsAnalyzed = 0;
   let posCreated = 0;
-  const posUpdated = 0;
   let linesAdded = 0;
   let skippedNoVendor = 0;
   let skippedOnOrder = 0;
@@ -145,11 +155,27 @@ export async function runAutoDraftJob(options: AutoDraftOptions): Promise<AutoDr
       .filter((item) => passesAutoDraftApprovalPolicy(item, settings))
       .map((item) => toAutomaticHandoffItem(item, lookbackDays, settings));
     const createDraftPos = shouldCreateDraftPos(settings);
+    recommendationRunDetail = buildPurchasingRecommendationRunDetail(recommendationResult, {
+      lookbackDays,
+      settings,
+      generatedAt: runRecord.runAt,
+      poMutations: [],
+      poMutationSkips: [],
+    });
+
+    await lifecycle.heartbeatRun({ runId: runRecord.id });
     const handoffResult = createDraftPos && eligibleItems.length > 0
       ? await handoffService.createAutomaticHandoff({
           actorId: options.triggeredByUser ?? "system:auto-draft",
           autoDraftRunId: runRecord.id,
           items: eligibleItems,
+          completion: {
+            itemsAnalyzed,
+            skippedNoVendor,
+            skippedOnOrder,
+            skippedExcluded,
+            summaryJson: recommendationRunDetail,
+          },
         })
       : { pos: [], decisions: [], handedOff: [], skipped: [] };
 
@@ -162,25 +188,24 @@ export async function runAutoDraftJob(options: AutoDraftOptions): Promise<AutoDr
       linesAdded: handoffResult.handedOff.filter((item) => item.poId === po.id).length,
     }));
 
-    recommendationRunDetail = buildPurchasingRecommendationRunDetail(recommendationResult, {
-      lookbackDays,
-      settings,
+    recommendationRunDetail = {
+      ...recommendationRunDetail,
       poMutations,
       poMutationSkips: handoffResult.skipped,
-    });
+    };
 
-    await storage.updateAutoDraftRun(runRecord.id, {
-      status: "success",
-      itemsAnalyzed,
-      posCreated,
-      posUpdated,
-      linesAdded,
-      skippedNoVendor,
-      skippedOnOrder,
-      skippedExcluded,
-      summaryJson: recommendationRunDetail,
-      finishedAt: new Date(),
-    });
+    if (!createDraftPos || eligibleItems.length === 0) {
+      await lifecycle.completeRun({
+        runId: runRecord.id,
+        completion: {
+          itemsAnalyzed,
+          skippedNoVendor,
+          skippedOnOrder,
+          skippedExcluded,
+          summaryJson: recommendationRunDetail,
+        },
+      });
+    }
 
     console.log(
       `[Auto-draft] Complete: ${itemsAnalyzed} analyzed, ${posCreated} created, ${linesAdded} lines added, ` +
@@ -214,19 +239,52 @@ export async function runAutoDraftJob(options: AutoDraftOptions): Promise<AutoDr
     };
   } catch (error: any) {
     console.error("[Auto-draft] Failed:", error);
-    await storage.updateAutoDraftRun(runRecord.id, {
-      status: "error",
-      errorMessage: error?.message || "Unknown error",
-      itemsAnalyzed,
-      posCreated,
-      posUpdated,
-      linesAdded,
-      skippedNoVendor,
-      skippedOnOrder,
-      skippedExcluded,
-      summaryJson: recommendationRunDetail,
-      finishedAt: new Date(),
-    });
+    try {
+      const failure = await lifecycle.failRun({
+        runId: runRecord.id,
+        errorMessage: error?.message || "Unknown error",
+        progress: {
+          itemsAnalyzed,
+          skippedNoVendor,
+          skippedOnOrder,
+          skippedExcluded,
+          summaryJson: recommendationRunDetail,
+        },
+      });
+      if (!failure.transitioned) {
+        console.error(
+          `[Auto-draft] Run ${runRecord.id} failure did not replace terminal status ${failure.run?.status ?? "missing"}`,
+        );
+      }
+    } catch (statusError) {
+      console.error(`[Auto-draft] Failed to persist run ${runRecord.id} error status:`, statusError);
+      throw new AggregateError(
+        [error, statusError],
+        `Auto-draft failed and its run status could not be persisted: ${error?.message || "Unknown error"}`,
+      );
+    }
     throw error;
   }
+}
+
+export async function startAutoDraftJob(options: AutoDraftOptions): Promise<StartedAutoDraftJob> {
+  const lifecycle = createAutoDraftRunLifecycleService(
+    createDrizzleAutoDraftRunLifecycleRepository(db),
+  );
+  const started = await lifecycle.startRun({
+    triggeredBy: options.triggeredBy,
+    triggeredByUser: options.triggeredByUser ?? null,
+  });
+  const completion = executeAutoDraftJob(options, started.run, lifecycle);
+  void completion.catch(() => undefined);
+  return {
+    runId: started.run.id,
+    interruptedRunIds: started.interruptedRunIds,
+    completion,
+  };
+}
+
+export async function runAutoDraftJob(options: AutoDraftOptions): Promise<AutoDraftJobResult> {
+  const started = await startAutoDraftJob(options);
+  return started.completion;
 }

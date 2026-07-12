@@ -15,7 +15,8 @@ describe("automatic recommendation writer topology", () => {
     expect(job).not.toContain("bulkCreatePurchaseOrderLines");
     expect(job).not.toContain("purchasing.createPO");
     expect(job).not.toContain("storage.updatePurchaseOrder");
-    expect(routes.match(/runAutoDraftJob\(/g)).toHaveLength(2);
+    expect(routes.match(/runAutoDraftJob\(/g)).toHaveLength(1);
+    expect(routes.match(/startAutoDraftJob\(/g)).toHaveLength(1);
     expect(routes).not.toContain("createPOFromReorder");
   });
 

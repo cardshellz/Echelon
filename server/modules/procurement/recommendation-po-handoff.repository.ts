@@ -100,6 +100,15 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
       return (run ?? null) as RecommendationAutoDraftRunRecord | null;
     },
 
+    async completeAutoDraftRun(id, values) {
+      const [updated] = await tx
+        .update(autoDraftRuns)
+        .set(values)
+        .where(and(eq(autoDraftRuns.id, id), eq(autoDraftRuns.status, "running")))
+        .returning({ id: autoDraftRuns.id });
+      return Boolean(updated);
+    },
+
     async getDecisionsForUpdate(ids) {
       const safeIds = uniquePositiveIds(ids);
       if (safeIds.length === 0) return [];

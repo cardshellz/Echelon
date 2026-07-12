@@ -159,6 +159,7 @@ interface RecommendationCandidateScore {
 }
 
 type AutoDraftApprovalPolicy = "high_confidence_only" | "high_confidence_and_strong_candidate";
+type AutoDraftRunStatus = "running" | "success" | "error" | "interrupted";
 
 interface AutoDraftRunRecommendationSample {
   sku: string;
@@ -203,7 +204,10 @@ interface DashboardData {
   spend: { totalReceivedCents: number; openPoValueCents: number; avgPoCents: number; topSupplierName: string | null; topSupplierCents: number; activeSupplierCount: number };
   lastAutoDraftRun: {
     runAt: string;
-    status: string;
+    status: AutoDraftRunStatus;
+    heartbeatAt: string | null;
+    leaseExpiresAt: string | null;
+    finishedAt: string | null;
     itemsAnalyzed: number;
     posCreated: number;
     posUpdated: number;
@@ -211,6 +215,7 @@ interface DashboardData {
     skippedNoVendor: number;
     skippedExcluded: number;
     skippedOnOrder: number;
+    errorMessage: string | null;
     summaryJson?: {
       settings?: {
         autoDraftMode?: "draft_po" | "review_only";
@@ -235,7 +240,10 @@ interface AutoDraftRunHistoryItem {
   id: number;
   runAt: string;
   triggeredBy: string | null;
-  status: string;
+  status: AutoDraftRunStatus;
+  heartbeatAt: string | null;
+  leaseExpiresAt: string | null;
+  finishedAt: string | null;
   mode: "draft_po" | "review_only";
   approvalPolicy: AutoDraftApprovalPolicy;
   itemsAnalyzed: number;
@@ -633,6 +641,30 @@ function autoDraftRunSearchText(run: AutoDraftRunHistoryItem): string {
   ].filter(Boolean).join(" ").toLowerCase();
 }
 
+function autoDraftRunStatusLabel(status: AutoDraftRunStatus): string {
+  switch (status) {
+    case "success": return "Success";
+    case "running": return "Running";
+    case "interrupted": return "Interrupted";
+    case "error": return "Error";
+  }
+}
+
+function autoDraftRunStatusDotClass(status: AutoDraftRunStatus): string {
+  switch (status) {
+    case "success": return "bg-green-500";
+    case "running": return "bg-blue-500";
+    case "interrupted": return "bg-amber-500";
+    case "error": return "bg-red-500";
+  }
+}
+
+function autoDraftRunHasActiveLease(run: DashboardData["lastAutoDraftRun"]): boolean {
+  if (!run || run.status !== "running" || !run.leaseExpiresAt) return false;
+  const leaseExpiresAt = Date.parse(run.leaseExpiresAt);
+  return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > Date.now();
+}
+
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
   sent: { label: "Sent", className: "bg-blue-50 text-blue-700 border-blue-200" },
   acknowledged: { label: "Acknowledged", className: "bg-purple-50 text-purple-700 border-purple-200" },
@@ -701,13 +733,16 @@ export default function PurchasingDashboard() {
   const useNewPoEditor = procurementSettings?.useNewPoEditor === true;
 
   const runAutoDraftMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (): Promise<{ runId: number; interruptedRunIds: number[] }> => {
       const res = await fetch("/api/purchasing/auto-draft/run", { method: "POST" });
-      if (!res.ok) throw new Error("Failed to trigger auto-draft");
-      return res.json();
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(payload?.error ?? "Failed to trigger auto-draft");
+      return payload;
     },
-    onSuccess: () => {
-      toast({ title: "Auto-draft started", description: "Refresh in a minute to see results." });
+    onSuccess: (started) => {
+      toast({ title: "Auto-draft started", description: `Run ${started.runId} has an active processing lease.` });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/runs?limit=5"] });
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
         queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/runs?limit=5"] });
@@ -790,6 +825,8 @@ export default function PurchasingDashboard() {
       ]
     : [];
   const recentAutoDraftRuns = autoDraftRunHistory?.runs ?? [];
+  // This only controls button availability. The API claim transaction remains authoritative.
+  const autoDraftRunActive = autoDraftRunHasActiveLease(data.lastAutoDraftRun);
   const normalizedRunHistorySearch = runHistorySearch.trim().toLowerCase();
   const visibleAutoDraftRuns = normalizedRunHistorySearch
     ? recentAutoDraftRuns.filter((run) => autoDraftRunSearchText(run).includes(normalizedRunHistorySearch))
@@ -1549,11 +1586,16 @@ export default function PurchasingDashboard() {
               {data.lastAutoDraftRun ? (
                 <>
                   <div className="flex items-center gap-2 mb-3">
-                    <div className={`w-2 h-2 rounded-full ${data.lastAutoDraftRun.status === "success" ? "bg-green-500 shadow-[0_0_0_3px_rgba(34,197,94,0.2)]" : "bg-red-500"}`} />
+                    <div className={`w-2 h-2 rounded-full ${autoDraftRunStatusDotClass(data.lastAutoDraftRun.status)}`} />
                     <span className="text-xs">
-                      Last run: {formatRelativeTime(data.lastAutoDraftRun.runAt)} · {data.lastAutoDraftRun.status === "success" ? "Success" : "Error"}
+                      Last run: {formatRelativeTime(data.lastAutoDraftRun.runAt)} - {autoDraftRunStatusLabel(data.lastAutoDraftRun.status)}
                     </span>
                   </div>
+                  {data.lastAutoDraftRun.errorMessage && data.lastAutoDraftRun.status !== "success" ? (
+                    <div className={`mb-3 text-xs ${data.lastAutoDraftRun.status === "interrupted" ? "text-amber-700" : "text-red-600"}`}>
+                      {data.lastAutoDraftRun.errorMessage}
+                    </div>
+                  ) : null}
                   <div className="space-y-1.5">
                     {[
                       { label: "Items analyzed", value: data.lastAutoDraftRun.itemsAnalyzed },
@@ -1686,8 +1728,9 @@ export default function PurchasingDashboard() {
                           <div key={run.id} className="rounded border bg-muted/20 p-2 text-xs">
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-2 min-w-0">
-                                <span className={`h-2 w-2 rounded-full flex-shrink-0 ${run.status === "success" ? "bg-green-500" : run.status === "running" ? "bg-blue-500" : "bg-red-500"}`} />
+                                <span className={`h-2 w-2 rounded-full flex-shrink-0 ${autoDraftRunStatusDotClass(run.status)}`} />
                                 <span className="font-medium truncate">{formatRelativeTime(run.runAt)}</span>
+                                <span className="text-[11px] text-muted-foreground">{autoDraftRunStatusLabel(run.status)}</span>
                               </div>
                               <span className="text-[11px] text-muted-foreground whitespace-nowrap">
                                 {run.mode === "review_only" ? "Recommendation only" : "Draft POs"} - {formatApprovalPolicy(run.approvalPolicy)}
@@ -1757,8 +1800,10 @@ export default function PurchasingDashboard() {
                                 ))}
                               </div>
                             ) : null}
-                            {run.status === "error" && run.errorMessage ? (
-                              <div className="mt-1 truncate text-[11px] text-red-600">{run.errorMessage}</div>
+                            {(run.status === "error" || run.status === "interrupted") && run.errorMessage ? (
+                              <div className={`mt-1 truncate text-[11px] ${run.status === "interrupted" ? "text-amber-700" : "text-red-600"}`}>
+                                {run.errorMessage}
+                              </div>
                             ) : null}
                           </div>
                         ))}
@@ -1779,10 +1824,10 @@ export default function PurchasingDashboard() {
                 size="sm"
                 className="w-full mt-3 text-xs justify-center"
                 onClick={() => runAutoDraftMutation.mutate()}
-                disabled={runAutoDraftMutation.isPending}
+                disabled={runAutoDraftMutation.isPending || autoDraftRunActive}
               >
                 <Zap className="h-3 w-3 mr-1.5" />
-                {runAutoDraftMutation.isPending ? "Running..." : "Run Auto-Draft Now"}
+                {runAutoDraftMutation.isPending || autoDraftRunActive ? "Auto-Draft Running" : "Run Auto-Draft Now"}
               </Button>
               <Button
                 variant="ghost"

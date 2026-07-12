@@ -249,6 +249,8 @@ function normalizeAutoDraftRun(row: any) {
     triggeredBy: row?.triggeredBy ?? row?.triggered_by ?? null,
     triggeredByUser: row?.triggeredByUser ?? row?.triggered_by_user ?? null,
     status: row?.status,
+    heartbeatAt: row?.heartbeatAt ?? row?.heartbeat_at ?? null,
+    leaseExpiresAt: row?.leaseExpiresAt ?? row?.lease_expires_at ?? null,
     itemsAnalyzed: numberField(row, "itemsAnalyzed", "items_analyzed"),
     posCreated: numberField(row, "posCreated", "pos_created"),
     posUpdated: numberField(row, "posUpdated", "pos_updated"),
@@ -1454,7 +1456,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
   app.get("/api/purchasing/auto-draft/status", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const run = await storage.getLatestAutoDraftRun();
-      res.json(run || null);
+      res.json(run ? normalizeAutoDraftRun(run) : null);
     } catch (error) {
       console.error("Error fetching auto-draft status:", error);
       res.status(500).json({ error: "Failed to fetch auto-draft status" });
@@ -1502,14 +1504,26 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         return res.status(403).json({ error: "Admin role required" });
       }
 
-      // Import and run the job asynchronously
-      const { runAutoDraftJob } = await import("../../jobs/auto-draft.job");
-      runAutoDraftJob({ triggeredBy: "manual", triggeredByUser: user?.id })
+      const { startAutoDraftJob } = await import("../../jobs/auto-draft.job");
+      const started = await startAutoDraftJob({ triggeredBy: "manual", triggeredByUser: user?.id });
+      void started.completion
         .catch((err: any) => console.error("[Auto-draft] manual run failed:", err));
 
-      res.status(202).json({ message: "Auto-draft job started" });
-    } catch (error) {
+      res.status(202).json({
+        message: "Auto-draft job started",
+        runId: started.runId,
+        interruptedRunIds: started.interruptedRunIds,
+      });
+    } catch (error: any) {
       console.error("Error triggering auto-draft:", error);
+      const statusCode = Number(error?.statusCode);
+      if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
+        return res.status(statusCode).json({
+          error: error.message,
+          code: error.code ?? "AUTO_DRAFT_RUN_REJECTED",
+          context: error.context ?? {},
+        });
+      }
       res.status(500).json({ error: "Failed to trigger auto-draft" });
     }
   });

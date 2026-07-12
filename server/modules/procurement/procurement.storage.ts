@@ -234,8 +234,6 @@ export interface IProcurementStorage {
   setProductReorderExcluded(productId: number, excluded: boolean): Promise<void>;
   getLatestAutoDraftRun(): Promise<any | undefined>;
   getRecentAutoDraftRuns(limit?: number): Promise<any[]>;
-  createAutoDraftRun(data: any): Promise<any>;
-  updateAutoDraftRun(id: number, updates: any): Promise<void>;
   getRecentRecommendationDecisions(limit?: number): Promise<any[]>;
   getLatestRecommendationDecisions(recommendationIds: string[], kinds?: string[]): Promise<any[]>;
   getLatestRecommendationDecisionsByDecision(decision: string, limit?: number): Promise<any[]>;
@@ -1945,15 +1943,6 @@ export const procurementMethods: IProcurementStorage = {
       .limit(safeLimit);
   },
 
-  async createAutoDraftRun(data: any): Promise<any> {
-    const [run] = await db.insert(autoDraftRuns).values(data).returning();
-    return run;
-  },
-
-  async updateAutoDraftRun(id: number, updates: any): Promise<void> {
-    await db.update(autoDraftRuns).set(updates).where(eq(autoDraftRuns.id, id));
-  },
-
   async getRecentRecommendationDecisions(limit: number = 25): Promise<any[]> {
     const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
     return await db.select()
@@ -2330,6 +2319,9 @@ export const procurementMethods: IProcurementStorage = {
       lastAutoDraftRun: lastAutoDraftRun ? {
         runAt: lastAutoDraftRun.runAt || lastAutoDraftRun.run_at,
         status: lastAutoDraftRun.status,
+        heartbeatAt: lastAutoDraftRun.heartbeatAt || lastAutoDraftRun.heartbeat_at || null,
+        leaseExpiresAt: lastAutoDraftRun.leaseExpiresAt || lastAutoDraftRun.lease_expires_at || null,
+        finishedAt: lastAutoDraftRun.finishedAt || lastAutoDraftRun.finished_at || null,
         itemsAnalyzed: lastAutoDraftRun.itemsAnalyzed || lastAutoDraftRun.items_analyzed || 0,
         posCreated: lastAutoDraftRun.posCreated || lastAutoDraftRun.pos_created || 0,
         posUpdated: lastAutoDraftRun.posUpdated || lastAutoDraftRun.pos_updated || 0,
@@ -2337,6 +2329,7 @@ export const procurementMethods: IProcurementStorage = {
         skippedNoVendor: lastAutoDraftRun.skippedNoVendor || lastAutoDraftRun.skipped_no_vendor || 0,
         skippedExcluded: lastAutoDraftRun.skippedExcluded || lastAutoDraftRun.skipped_excluded || 0,
         skippedOnOrder: lastAutoDraftRun.skippedOnOrder || lastAutoDraftRun.skipped_on_order || 0,
+        errorMessage: lastAutoDraftRun.errorMessage || lastAutoDraftRun.error_message || null,
         summaryJson: lastAutoDraftRun.summaryJson || lastAutoDraftRun.summary_json || null,
       } : null,
     };

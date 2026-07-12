@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { resolveRecommendationPoCost } from "./recommendation-po-cost";
+import { autoDraftRunCompletionSchema } from "./auto-draft-run-lifecycle.service";
 
 const recommendationKinds = ["skipped", "held_by_policy", "quality_review_required", "auto_draft_eligible"] as const;
 const operatorDecisionValues = ["reviewed", "accepted_for_po", "deferred", "dismissed"] as const;
@@ -67,6 +68,7 @@ const automaticHandoffCommandSchema = z.object({
   actorId: z.string().trim().min(1).max(100),
   autoDraftRunId: positiveSafeInteger,
   items: z.array(automaticHandoffItemSchema).max(2_000),
+  completion: autoDraftRunCompletionSchema,
 }).strict();
 
 const acceptedRecommendationEconomicBasisSchema = z.object({
@@ -268,6 +270,21 @@ export interface RecommendationPoHandoffUnitOfWork {
   lockRecommendationKeys(keys: readonly string[]): Promise<void>;
   getTransactionTimestamp(): Promise<Date>;
   getAutoDraftRunForUpdate(id: number): Promise<RecommendationAutoDraftRunRecord | null>;
+  completeAutoDraftRun(id: number, values: {
+    status: "success";
+    heartbeatAt: Date;
+    leaseExpiresAt: null;
+    itemsAnalyzed: number;
+    posCreated: number;
+    posUpdated: 0;
+    linesAdded: number;
+    skippedNoVendor: number;
+    skippedOnOrder: number;
+    skippedExcluded: number;
+    errorMessage: null;
+    summaryJson: Record<string, unknown>;
+    finishedAt: Date;
+  }): Promise<boolean>;
   getDecisionsForUpdate(ids: readonly number[]): Promise<RecommendationDecisionRecord[]>;
   getLatestActiveDecisions(
     keys: ReadonlyArray<{ recommendationId: string; kind: RecommendationKind }>,
@@ -947,6 +964,55 @@ async function persistResolvedHandoffs(
   return { pos, decisions, handedOff };
 }
 
+function buildAutomaticRunSummary(
+  baseSummary: Record<string, unknown>,
+  persisted: AcceptedRecommendationPoHandoffResult,
+  skipped: AutomaticRecommendationPoHandoffResult["skipped"],
+): Record<string, unknown> {
+  return {
+    ...baseSummary,
+    poMutations: persisted.pos.map((po) => ({
+      vendorId: po.vendorId,
+      poId: po.id,
+      action: "created",
+      linesAdded: persisted.handedOff.filter((item) => item.poId === po.id).length,
+    })),
+    poMutationSkips: skipped,
+  };
+}
+
+async function completeAutomaticRun(
+  unitOfWork: RecommendationPoHandoffUnitOfWork,
+  input: AutomaticRecommendationPoHandoffCommand,
+  persisted: AcceptedRecommendationPoHandoffResult,
+  skipped: AutomaticRecommendationPoHandoffResult["skipped"],
+  now: Date,
+): Promise<void> {
+  const completed = await unitOfWork.completeAutoDraftRun(input.autoDraftRunId, {
+    status: "success",
+    heartbeatAt: now,
+    leaseExpiresAt: null,
+    itemsAnalyzed: input.completion.itemsAnalyzed,
+    posCreated: persisted.pos.length,
+    posUpdated: 0,
+    linesAdded: persisted.handedOff.length,
+    skippedNoVendor: input.completion.skippedNoVendor,
+    skippedOnOrder: input.completion.skippedOnOrder,
+    skippedExcluded: input.completion.skippedExcluded,
+    errorMessage: null,
+    summaryJson: buildAutomaticRunSummary(input.completion.summaryJson, persisted, skipped),
+    finishedAt: now,
+  });
+  if (!completed) {
+    throw new RecommendationPoHandoffError(
+      "The auto-draft run changed before its PO transaction could complete",
+      409,
+      "AUTO_DRAFT_RUN_COMPLETION_CONFLICT",
+      { autoDraftRunId: input.autoDraftRunId },
+    );
+  }
+}
+
 export function createRecommendationPoHandoffService(
   repository: RecommendationPoHandoffRepository,
 ) {
@@ -1186,22 +1252,26 @@ export function createRecommendationPoHandoffService(
           });
         }
 
-        if (handoffItems.length === 0) {
-          return { pos: [], decisions: [], handedOff: [], skipped };
+        let persisted: AcceptedRecommendationPoHandoffResult = {
+          pos: [],
+          decisions: [],
+          handedOff: [],
+        };
+        if (handoffItems.length > 0) {
+          const resolvedItems = await loadResolvedHandoffItems(unitOfWork, handoffItems, acceptedById);
+          persisted = await persistResolvedHandoffs(unitOfWork, resolvedItems, {
+            actorId: parsed.actorId,
+            now,
+            decisionSource: "auto_draft",
+            autoDraftRunId: run.id,
+            poSource: "auto_draft",
+            autoDraftDate: runStartedAt.toISOString().slice(0, 10),
+            metadataSource: "automatic_recommendation_handoff",
+            statusHistoryNotes: "PO created by the purchasing auto-draft policy",
+            handoffDecisionReason: "automatic_recommendation_po_handoff",
+          });
         }
-
-        const resolvedItems = await loadResolvedHandoffItems(unitOfWork, handoffItems, acceptedById);
-        const persisted = await persistResolvedHandoffs(unitOfWork, resolvedItems, {
-          actorId: parsed.actorId,
-          now,
-          decisionSource: "auto_draft",
-          autoDraftRunId: run.id,
-          poSource: "auto_draft",
-          autoDraftDate: runStartedAt.toISOString().slice(0, 10),
-          metadataSource: "automatic_recommendation_handoff",
-          statusHistoryNotes: "PO created by the purchasing auto-draft policy",
-          handoffDecisionReason: "automatic_recommendation_po_handoff",
-        });
+        await completeAutomaticRun(unitOfWork, parsed, persisted, skipped, now);
         return { ...persisted, skipped };
       });
     } catch (error) {
