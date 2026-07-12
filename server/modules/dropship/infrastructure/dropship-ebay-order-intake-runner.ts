@@ -45,6 +45,7 @@ export function startDropshipEbayOrderIntakeWorker(): void {
           || result.ordersCreated > 0
           || result.ordersUpdated > 0
           || result.ordersRejected > 0
+          || result.ordersConflicted > 0
         ) {
           console.info(JSON.stringify({
             code: "DROPSHIP_EBAY_ORDER_INTAKE_SWEEP_COMPLETED",

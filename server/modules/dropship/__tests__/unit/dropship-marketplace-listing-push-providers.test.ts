@@ -6,6 +6,8 @@ import { ShopifyDropshipListingPushProvider } from "../../infrastructure/dropshi
 import { EbayDropshipListingPushProvider } from "../../infrastructure/dropship-ebay-listing-push.provider";
 import type {
   DropshipMarketplaceCredentialRepository,
+  DropshipMarketplaceStoreAuthFailureInput,
+  DropshipMarketplaceStoreAuthFailureRecord,
   DropshipMarketplaceStoreCredentials,
 } from "../../infrastructure/dropship-marketplace-credentials";
 
@@ -116,9 +118,43 @@ describe("dropship marketplace listing push providers", () => {
     });
     expect(fetcher.calls[3]?.url).toContain("/sell/inventory/v1/offer/offer-101/publish");
   });
+
+  it("does not invalidate store credentials for an ordinary eBay listing API 400", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([
+      jsonResponse({ errors: [{ message: "Invalid package details" }] }, 400),
+    ]);
+    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      listingMode: "live",
+      marketplaceConfig: ebayMarketplaceConfig(),
+    }))).rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR" });
+
+    expect(credentials.authFailures).toHaveLength(0);
+  });
+
+  it("still marks the store for reauthorization on an eBay listing API 401", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([jsonResponse({ errors: [{ message: "Invalid token" }] }, 401)]);
+    const provider = new EbayDropshipListingPushProvider(credentials, fetcher.fetch);
+
+    await expect(provider.pushListing(makeRequest({
+      platform: "ebay",
+      listingMode: "live",
+      marketplaceConfig: ebayMarketplaceConfig(),
+    }))).rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR" });
+
+    expect(credentials.authFailures).toEqual([
+      expect.objectContaining({ status: "needs_reauth", statusCode: 401 }),
+    ]);
+  });
 });
 
 class FakeCredentialRepository implements DropshipMarketplaceCredentialRepository {
+  authFailures: DropshipMarketplaceStoreAuthFailureInput[] = [];
+
   constructor(private credential: DropshipMarketplaceStoreCredentials) {}
 
   async loadForStoreConnection(): Promise<DropshipMarketplaceStoreCredentials> {
@@ -133,6 +169,20 @@ class FakeCredentialRepository implements DropshipMarketplaceCredentialRepositor
       accessTokenExpiresAt: input.accessTokenExpiresAt,
     };
     return this.credential;
+  }
+
+  async recordAuthFailure(
+    input: DropshipMarketplaceStoreAuthFailureInput,
+  ): Promise<DropshipMarketplaceStoreAuthFailureRecord> {
+    this.authFailures.push(input);
+    return {
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      platform: input.platform,
+      previousStatus: "connected",
+      status: input.status,
+      transitioned: true,
+    };
   }
 }
 

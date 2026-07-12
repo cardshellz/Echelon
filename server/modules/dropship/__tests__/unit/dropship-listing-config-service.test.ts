@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
+  buildDefaultDropshipStoreListingConfig,
+  DROPSHIP_DEFAULT_EBAY_LISTING_MODE,
   DROPSHIP_DEFAULT_LISTING_INVENTORY_MODE,
   DROPSHIP_DEFAULT_LISTING_MODE,
   DROPSHIP_DEFAULT_LISTING_PRICE_MODE,
@@ -61,6 +63,15 @@ describe("DropshipListingConfigService", () => {
       platform: "shopify",
       actor: { actorType: "vendor", actorId: "member-1" },
     });
+  });
+
+  it("defaults new eBay configs to live while Shopify remains draft-first", () => {
+    expect(buildDefaultDropshipStoreListingConfig("ebay").listingMode).toBe(
+      DROPSHIP_DEFAULT_EBAY_LISTING_MODE,
+    );
+    expect(buildDefaultDropshipStoreListingConfig("shopify").listingMode).toBe(
+      DROPSHIP_DEFAULT_LISTING_MODE,
+    );
   });
 
   it("lets admins ensure a listing config without provisioning a member identity", async () => {
