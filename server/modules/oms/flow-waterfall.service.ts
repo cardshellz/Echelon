@@ -23,6 +23,13 @@
 
 import { sql } from "drizzle-orm";
 import { getChannelWritebackHealth, type ChannelWritebackHealth } from "./channel-writeback.service";
+import {
+  HELD_LINE_AGING_DAYS,
+  allLinesHeldCountQuery,
+  allLinesHeldSampleQuery,
+  heldLineAgingCountQuery,
+  heldLineAgingSampleQuery,
+} from "./line-item-hold-monitoring";
 
 const DEFAULT_WINDOW_DAYS = 30;
 const MAX_WINDOW_DAYS = 365;
@@ -212,8 +219,24 @@ const BASE_ISSUES: FlowIssueDef[] = [
     message: "Shipments on hold",
     why: "These shipments are paused — often an address problem or a last-minute customer change. Sort out the issue and release them, or cancel if they shouldn't ship.",
     remediation: "MANUAL_REVIEW", replaySafe: false,
-    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE held = true`,
-    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.on_hold_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.held = true ORDER BY os.created_at DESC LIMIT 50`,
+    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE held = true AND COALESCE(source, '') <> 'line_item_hold'`,
+    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.on_hold_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.held = true AND COALESCE(os.source, '') <> 'line_item_hold' ORDER BY os.created_at DESC LIMIT 50`,
+  },
+  {
+    code: "LINE_HELD_AGING", kind: "stuck", stage: "wms_fulfill", severity: "warning",
+    message: `Pre-order line holds have aged past ${HELD_LINE_AGING_DAYS} days`,
+    why: "These held lines have remained outside the ship-now shipment past the review threshold. Confirm the purchase order is still expected, then release or cancel each line deliberately.",
+    remediation: "MANUAL_REVIEW", replaySafe: false,
+    count: () => heldLineAgingCountQuery(),
+    sample: () => heldLineAgingSampleQuery(50),
+  },
+  {
+    code: "ORDER_ALL_LINES_HELD", kind: "stuck", stage: "wms_fulfill", severity: "info",
+    message: "Orders have every shippable line held",
+    why: "Nothing can enter the ship-now shipment because every remaining shippable line is held. Confirm that the whole-order hold state is intentional.",
+    remediation: "MANUAL_REVIEW", replaySafe: false,
+    count: () => allLinesHeldCountQuery(),
+    sample: () => allLinesHeldSampleQuery(50),
   },
   {
     // WHERE mirrors the canonical SLA monitor (sla-monitor.service.ts): overdue = non-terminal past due.
