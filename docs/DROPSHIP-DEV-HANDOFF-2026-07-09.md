@@ -49,6 +49,7 @@ Implementation status (2026-07-11):
 | Item | Status |
 | --- | --- |
 | 0.1 | Implemented and covered across listing, tracking, intake, and cancellation resource APIs. Production verification remains. |
+| 0.2 | Implemented: active holds are reconsidered only after a vendor wallet mutation and retain their original expiration across worker claims. Production verification remains. |
 | 0.3 | Implemented with strict error-shape matching, a deduplicated audit event, and cursor advancement after the remaining orders complete. Production verification remains. |
 | 0.4 | Code default implemented: new eBay configs use `live`; Shopify remains `draft_first`. The existing `marzcards` production config still requires an explicit post-deploy flip. |
 

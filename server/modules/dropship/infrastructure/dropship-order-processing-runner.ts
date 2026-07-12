@@ -116,15 +116,23 @@ export class PgDropshipOrderProcessingQueueRepository implements DropshipOrderPr
     limit: number;
     now: Date;
   }): Promise<number[]> {
+    // Revisit a hold only after its vendor wallet changes; reprocessing moves the
+    // intake timestamp forward so the same wallet mutation cannot trigger it again.
     const result = await this.dbPool.query<IntakeIdRow>(
-      `SELECT id
-       FROM dropship.dropship_order_intake
-       WHERE status IN ('received', 'retrying')
+      `SELECT oi.id
+       FROM dropship.dropship_order_intake oi
+       WHERE oi.status IN ('received', 'retrying')
           OR (
-            status = 'payment_hold'
-            AND (payment_hold_expires_at IS NULL OR payment_hold_expires_at > $2)
+            oi.status = 'payment_hold'
+            AND oi.payment_hold_expires_at > $2
+            AND EXISTS (
+              SELECT 1
+              FROM dropship.dropship_wallet_accounts wa
+              WHERE wa.vendor_id = oi.vendor_id
+                AND wa.updated_at >= oi.updated_at
+            )
           )
-       ORDER BY received_at ASC, id ASC
+       ORDER BY oi.received_at ASC, oi.id ASC
        LIMIT $1`,
       [input.limit, input.now],
     );
