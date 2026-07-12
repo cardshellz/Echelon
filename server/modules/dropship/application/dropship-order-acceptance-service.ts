@@ -704,15 +704,15 @@ function normalizeActivePaymentHoldExpiresAt(
   intake: DropshipAcceptanceIntakeRecord,
   acceptedAt: Date,
 ): Date | null {
-  if (intake.status !== "payment_hold") {
-    return null;
-  }
   if (!intake.paymentHoldExpiresAt) {
-    throw new DropshipError(
-      "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRY_REQUIRED",
-      "Dropship payment hold intake is missing its expiration timestamp.",
-      { intakeId: intake.intakeId },
-    );
+    if (intake.status === "payment_hold") {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRY_REQUIRED",
+        "Dropship payment hold intake is missing its expiration timestamp.",
+        { intakeId: intake.intakeId },
+      );
+    }
+    return null;
   }
   if (intake.paymentHoldExpiresAt <= acceptedAt) {
     throw new DropshipError(

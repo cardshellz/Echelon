@@ -161,12 +161,12 @@ describe("buildDropshipOrderAcceptancePlan", () => {
     expect(plan.totalDebitCents).toBe(2722);
   });
 
-  it("preserves an active payment hold expiration instead of extending the hold", () => {
+  it("preserves an active payment hold expiration across repeated worker claims", () => {
     const existingExpiresAt = new Date("2026-05-01T20:00:00.000Z");
-    const plan = buildDropshipOrderAcceptancePlan(makePlanningInput({
+    const firstSweep = buildDropshipOrderAcceptancePlan(makePlanningInput({
       intake: {
         ...makePlanningInput().intake,
-        status: "payment_hold",
+        status: "processing",
         paymentHoldExpiresAt: existingExpiresAt,
       },
       wallet: {
@@ -176,19 +176,45 @@ describe("buildDropshipOrderAcceptancePlan", () => {
         currency: "USD",
       },
     }));
+    const secondSweep = buildDropshipOrderAcceptancePlan(makePlanningInput({
+      intake: {
+        ...makePlanningInput().intake,
+        status: "processing",
+        paymentHoldExpiresAt: firstSweep.paymentHoldExpiresAt,
+      },
+      wallet: {
+        walletAccountId: 1,
+        availableBalanceCents: 100,
+        pendingBalanceCents: 10_000,
+        currency: "USD",
+      },
+      acceptedAt: new Date("2026-05-01T18:10:00.000Z"),
+    }));
 
-    expect(plan.outcome).toBe("payment_hold");
-    expect(plan.paymentHoldExpiresAt).toEqual(existingExpiresAt);
+    expect(firstSweep.outcome).toBe("payment_hold");
+    expect(firstSweep.paymentHoldExpiresAt).toEqual(existingExpiresAt);
+    expect(secondSweep.outcome).toBe("payment_hold");
+    expect(secondSweep.paymentHoldExpiresAt).toEqual(existingExpiresAt);
   });
 
-  it("blocks acceptance after a payment hold has expired", () => {
+  it("blocks a worker-claimed payment hold after its original deadline", () => {
+    expectDropshipError(() => buildDropshipOrderAcceptancePlan(makePlanningInput({
+      intake: {
+        ...makePlanningInput().intake,
+        status: "processing",
+        paymentHoldExpiresAt: new Date("2026-05-01T17:59:59.000Z"),
+      },
+    })), "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED");
+  });
+
+  it("rejects a payment hold that has no expiration", () => {
     expectDropshipError(() => buildDropshipOrderAcceptancePlan(makePlanningInput({
       intake: {
         ...makePlanningInput().intake,
         status: "payment_hold",
-        paymentHoldExpiresAt: new Date("2026-05-01T17:59:59.000Z"),
+        paymentHoldExpiresAt: null,
       },
-    })), "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED");
+    })), "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRY_REQUIRED");
   });
 
   it("blocks quote item mismatch before wallet or OMS effects", () => {
