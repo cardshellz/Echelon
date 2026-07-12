@@ -44,6 +44,14 @@ House pricing philosophy behind M1-M3: *show our numbers authoritatively; never 
 
 ## 2. Batch 0 — before resuming dogfood (small PRs, each independently shippable)
 
+Implementation status (2026-07-11):
+
+| Item | Status |
+| --- | --- |
+| 0.1 | Implemented and covered across listing, tracking, intake, and cancellation resource APIs. Production verification remains. |
+| 0.3 | Implemented with strict error-shape matching, a deduplicated audit event, and cursor advancement after the remaining orders complete. Production verification remains. |
+| 0.4 | Code default implemented: new eBay configs use `live`; Shopify remains `draft_first`. The existing `marzcards` production config still requires an explicit post-deploy flip. |
+
 **0.1 eBay HTTP 400 must not tear down the store connection.** `isPermanentAuthFailureStatus` treats 400 as a permanent auth failure in BOTH `dropship-ebay-listing-push.provider.ts:428-430` and `dropship-ebay-tracking.provider.ts` (~:298); any eBay validation 400 then nulls token refs and deletes vault rows via `recordAuthFailure` (`dropship-marketplace-credentials.ts:237-262`), forcing full OAuth reconnect and blocking remaining job items. Fix: 401/403 only in both API-call paths (400 stays fatal only on the token-refresh endpoint = `invalid_grant`). Acceptance: unit test — eBay 400 on push/tracking fails the item without touching connection status/tokens. (Deep review §3.2.)
 
 **0.2 Payment-hold expiry must survive the worker sweep.** The 10s sweep re-claims every unexpired hold (`dropship-order-processing-runner.ts:115-132` selects unexpired `payment_hold` rows), the claim flips status to `processing` (`dropship-order-processing.repository.ts:75-88`), so `normalizeActivePaymentHoldExpiresAt` (`dropship-order-acceptance-service.ts:703-709`) no longer sees `payment_hold` and re-arms the expiry to now+48h every cycle. Holds never expire; ≥10 holds starve newer intakes (`ORDER BY received_at ASC LIMIT 10`); 2 audit rows per held intake per sweep. Fix: carry the pre-claim status/expiry into the plan (preserve expiry through the claim), and/or exclude unexpired holds from the sweep unless funding state changed. Acceptance: worker-path test — claim an underfunded intake twice; `payment_hold_expires_at` unchanged; `expirePaymentHolds` fires at the original deadline. (§3.4.)

@@ -6,6 +6,8 @@ import { EbayDropshipOrderCancellationProvider } from "../../infrastructure/drop
 import { ShopifyDropshipOrderCancellationProvider } from "../../infrastructure/dropship-shopify-order-cancellation.provider";
 import type {
   DropshipMarketplaceCredentialRepository,
+  DropshipMarketplaceStoreAuthFailureInput,
+  DropshipMarketplaceStoreAuthFailureRecord,
   DropshipMarketplaceStoreCredentials,
 } from "../../infrastructure/dropship-marketplace-credentials";
 
@@ -92,9 +94,28 @@ describe("dropship marketplace order cancellation providers", () => {
     }))).rejects.toMatchObject({ code: "DROPSHIP_EBAY_ORDER_CANCELLATION_CONFIG_REQUIRED" });
     expect(fetcher.calls).toHaveLength(0);
   });
+
+  it("does not invalidate store credentials for an ordinary eBay cancellation API 400", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential({
+      config: {
+        cancellation: { cancelReason: "BuyerCancelOrder", buyerPaid: false },
+      },
+    }));
+    const fetcher = new FakeFetch([jsonResponse({ errors: [{ message: "Invalid cancellation" }] }, 400)]);
+    const provider = new EbayDropshipOrderCancellationProvider(credentials, fetcher.fetch);
+
+    await expect(provider.cancelOrder(makeRequest({
+      platform: "ebay",
+      externalOrderId: "EBAY-ORDER-1",
+    }))).rejects.toMatchObject({ code: "DROPSHIP_EBAY_ORDER_CANCELLATION_HTTP_ERROR" });
+
+    expect(credentials.authFailures).toHaveLength(0);
+  });
 });
 
 class FakeCredentialRepository implements DropshipMarketplaceCredentialRepository {
+  authFailures: DropshipMarketplaceStoreAuthFailureInput[] = [];
+
   constructor(private credential: DropshipMarketplaceStoreCredentials) {}
 
   async loadForStoreConnection(): Promise<DropshipMarketplaceStoreCredentials> {
@@ -111,6 +132,20 @@ class FakeCredentialRepository implements DropshipMarketplaceCredentialRepositor
       accessTokenExpiresAt: input.accessTokenExpiresAt,
     };
     return this.credential;
+  }
+
+  async recordAuthFailure(
+    input: DropshipMarketplaceStoreAuthFailureInput,
+  ): Promise<DropshipMarketplaceStoreAuthFailureRecord> {
+    this.authFailures.push(input);
+    return {
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      platform: input.platform,
+      previousStatus: "connected",
+      status: input.status,
+      transitioned: true,
+    };
   }
 }
 

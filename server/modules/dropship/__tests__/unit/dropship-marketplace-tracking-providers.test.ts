@@ -3,7 +3,8 @@ import { DropshipError } from "../../domain/errors";
 import { EbayDropshipMarketplaceTrackingProvider } from "../../infrastructure/dropship-ebay-tracking.provider";
 import { ShopifyDropshipMarketplaceTrackingProvider } from "../../infrastructure/dropship-shopify-tracking.provider";
 import type {
-  DropshipMarketplaceCredentialRepository,
+  DropshipMarketplaceStoreAuthFailureInput,
+  DropshipMarketplaceStoreAuthFailureRecord,
   DropshipMarketplaceStoreCredentials,
 } from "../../infrastructure/dropship-marketplace-credentials";
 
@@ -157,6 +158,32 @@ describe("EbayDropshipMarketplaceTrackingProvider", () => {
 
     expect(result.externalFulfillmentId).toBe("FT-3");
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not invalidate store credentials for an ordinary eBay tracking API 400", async () => {
+    const repo = makeCredentialRepo(makeCredential());
+    const fetchImpl = vi.fn(async () => new Response("invalid tracking payload", { status: 400 }));
+    const provider = new EbayDropshipMarketplaceTrackingProvider(repo, fetchImpl as any);
+
+    await expect(provider.pushTracking({
+      intakeId: 10,
+      omsOrderId: 20,
+      wmsShipmentId: null,
+      vendorId: 30,
+      storeConnectionId: 40,
+      platform: "ebay",
+      externalOrderId: "ORDER-1",
+      externalOrderNumber: null,
+      sourceOrderId: null,
+      carrier: "USPS",
+      trackingNumber: "94001111",
+      shippedAt: new Date("2026-05-02T10:00:00.000Z"),
+      lineItems: [{ externalLineItemId: "LINE-1", quantity: 1 }],
+      idempotencyKey: "tracking-key",
+    })).rejects.toMatchObject({ code: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR" });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(repo.recordAuthFailure).not.toHaveBeenCalled();
   });
 });
 
@@ -430,10 +457,20 @@ function makeShopifyCredential(): DropshipMarketplaceStoreCredentials {
 
 function makeCredentialRepo(
   credential: DropshipMarketplaceStoreCredentials,
-): DropshipMarketplaceCredentialRepository {
+) {
   return {
     loadForStoreConnection: vi.fn(async () => credential),
     replaceTokens: vi.fn(async () => credential),
+    recordAuthFailure: vi.fn(async (
+      input: DropshipMarketplaceStoreAuthFailureInput,
+    ): Promise<DropshipMarketplaceStoreAuthFailureRecord> => ({
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      platform: input.platform,
+      previousStatus: "connected",
+      status: input.status,
+      transitioned: true,
+    })),
   };
 }
 
