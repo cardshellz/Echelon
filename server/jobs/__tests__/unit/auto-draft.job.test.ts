@@ -17,6 +17,12 @@ const mocks = vi.hoisted(() => ({
   handoff: {
     createAutomaticHandoff: vi.fn(),
   },
+  lifecycle: {
+    startRun: vi.fn(),
+    heartbeatRun: vi.fn(),
+    completeRun: vi.fn(),
+    failRun: vi.fn(),
+  },
   stalePoEscalation: {
     run: vi.fn(),
   },
@@ -35,6 +41,16 @@ vi.mock("../../../modules/procurement/purchasing-recommendation-context.service"
 vi.mock("../../../modules/procurement/recommendation-po-handoff.repository", () => ({
   createDrizzleRecommendationPoHandoffRepository: () => ({}),
 }));
+vi.mock("../../../modules/procurement/auto-draft-run-lifecycle.repository", () => ({
+  createDrizzleAutoDraftRunLifecycleRepository: () => ({}),
+}));
+vi.mock("../../../modules/procurement/auto-draft-run-lifecycle.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../modules/procurement/auto-draft-run-lifecycle.service")>();
+  return {
+    ...actual,
+    createAutoDraftRunLifecycleService: () => mocks.lifecycle,
+  };
+});
 vi.mock("../../../modules/procurement/recommendation-po-handoff.service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../modules/procurement/recommendation-po-handoff.service")>();
   return {
@@ -77,11 +93,17 @@ function recommendationRows() {
 describe("auto-draft job", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.procurement.createAutoDraftRun.mockResolvedValue({
-      id: 500,
-      runAt: new Date("2026-07-11T18:00:00.000Z"),
-      status: "running",
+    mocks.lifecycle.startRun.mockResolvedValue({
+      run: {
+        id: 500,
+        runAt: new Date("2026-07-11T18:00:00.000Z"),
+        status: "running",
+      },
+      interruptedRunIds: [],
     });
+    mocks.lifecycle.heartbeatRun.mockResolvedValue({ id: 500, status: "running" });
+    mocks.lifecycle.completeRun.mockResolvedValue({ id: 500, status: "success" });
+    mocks.lifecycle.failRun.mockResolvedValue({ run: { id: 500, status: "error" }, transitioned: true });
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
       autoDraftMode: "draft_po",
       approvalPolicy: "high_confidence_only",
@@ -117,6 +139,11 @@ describe("auto-draft job", () => {
 
     expect(mocks.inventory.getVelocityLookbackDays).toHaveBeenCalledTimes(1);
     expect(mocks.procurement.getReorderAnalysisData).toHaveBeenCalledWith(90);
+    expect(mocks.lifecycle.startRun).toHaveBeenCalledWith({
+      triggeredBy: "scheduler",
+      triggeredByUser: null,
+    });
+    expect(mocks.lifecycle.heartbeatRun).toHaveBeenCalledWith({ runId: 500 });
     expect(mocks.handoff.createAutomaticHandoff).toHaveBeenCalledWith({
       actorId: "system:auto-draft",
       autoDraftRunId: 500,
@@ -134,21 +161,19 @@ describe("auto-draft job", () => {
           analysis: { lookbackDays: 90 },
         }),
       })],
-    });
-    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
-      500,
-      expect.objectContaining({
-        status: "success",
+      completion: {
         itemsAnalyzed: 1,
-        posCreated: 1,
-        posUpdated: 0,
-        linesAdded: 1,
+        skippedNoVendor: 0,
+        skippedOnOrder: 0,
+        skippedExcluded: 0,
         summaryJson: expect.objectContaining({
-          poMutations: [{ vendorId: 7, poId: 700, action: "created", linesAdded: 1 }],
+          poMutations: [],
           poMutationSkips: [],
         }),
-      }),
-    );
+      },
+    });
+    expect(mocks.lifecycle.completeRun).not.toHaveBeenCalled();
+    expect(mocks.procurement.updateAutoDraftRun).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       success: true,
       count: 1,
@@ -171,15 +196,14 @@ describe("auto-draft job", () => {
     const result = await runAutoDraftJob({ triggeredBy: "manual", triggeredByUser: "buyer-1" });
 
     expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
-    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
-      500,
-      expect.objectContaining({
-        status: "success",
-        posCreated: 0,
-        posUpdated: 0,
-        linesAdded: 0,
+    expect(mocks.lifecycle.completeRun).toHaveBeenCalledWith({
+      runId: 500,
+      completion: expect.objectContaining({
+        itemsAnalyzed: 1,
+        summaryJson: expect.objectContaining({ poMutations: [], poMutationSkips: [] }),
       }),
-    );
+    });
+    expect(mocks.procurement.updateAutoDraftRun).not.toHaveBeenCalled();
     expect(result).toMatchObject({ count: 0, itemsDrafted: 0, reviewOnly: true });
   });
 
@@ -194,12 +218,9 @@ describe("auto-draft job", () => {
     const result = await runAutoDraftJob({ triggeredBy: "scheduler" });
 
     expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
-    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
-      500,
-      expect.objectContaining({
-        status: "success",
-        posCreated: 0,
-        linesAdded: 0,
+    expect(mocks.lifecycle.completeRun).toHaveBeenCalledWith({
+      runId: 500,
+      completion: expect.objectContaining({
         summaryJson: expect.objectContaining({
           recommendationSummary: expect.objectContaining({
             actionableCount: 1,
@@ -208,7 +229,7 @@ describe("auto-draft job", () => {
           }),
         }),
       }),
-    );
+    });
     expect(result).toMatchObject({
       count: 0,
       itemsDrafted: 0,
@@ -236,15 +257,35 @@ describe("auto-draft job", () => {
     const result = await runAutoDraftJob({ triggeredBy: "scheduler" });
 
     expect(result).toMatchObject({ count: 0, itemsDrafted: 0, itemsSkippedAfterAnalysis: 1 });
-    expect(mocks.procurement.updateAutoDraftRun).toHaveBeenCalledWith(
-      500,
-      expect.objectContaining({
-        status: "success",
-        linesAdded: 0,
-        summaryJson: expect.objectContaining({
-          poMutationSkips: [expect.objectContaining({ latestDecisionId: 900 })],
-        }),
+    expect(mocks.handoff.createAutomaticHandoff).toHaveBeenCalledWith(expect.objectContaining({
+      completion: expect.objectContaining({
+        summaryJson: expect.objectContaining({ poMutationSkips: [] }),
       }),
-    );
+    }));
+    expect(mocks.lifecycle.completeRun).not.toHaveBeenCalled();
+    expect(result.recommendationRun.detail).toMatchObject({
+      poMutationSkips: [expect.objectContaining({ latestDecisionId: 900 })],
+    });
+  });
+
+  it("records analysis failure through compare-and-set lifecycle state", async () => {
+    mocks.procurement.getAutoDraftSettings.mockRejectedValue(new Error("settings unavailable"));
+
+    await expect(runAutoDraftJob({ triggeredBy: "scheduler" })).rejects.toThrow("settings unavailable");
+
+    expect(mocks.lifecycle.heartbeatRun).not.toHaveBeenCalled();
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+    expect(mocks.lifecycle.failRun).toHaveBeenCalledWith({
+      runId: 500,
+      errorMessage: "settings unavailable",
+      progress: {
+        itemsAnalyzed: 0,
+        skippedNoVendor: 0,
+        skippedOnOrder: 0,
+        skippedExcluded: 0,
+        summaryJson: null,
+      },
+    });
+    expect(mocks.procurement.updateAutoDraftRun).not.toHaveBeenCalled();
   });
 });

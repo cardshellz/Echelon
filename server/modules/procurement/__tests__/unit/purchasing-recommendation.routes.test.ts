@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
     select: vi.fn(),
   },
   runAutoDraftJob: vi.fn(),
+  startAutoDraftJob: vi.fn(),
   purchasingService: {
     createPOFromReorder: vi.fn(),
   },
@@ -65,6 +66,7 @@ vi.mock("../../../../storage/base", () => ({
 }));
 vi.mock("../../../../jobs/auto-draft.job", () => ({
   runAutoDraftJob: mocks.runAutoDraftJob,
+  startAutoDraftJob: mocks.startAutoDraftJob,
 }));
 
 import {
@@ -122,6 +124,20 @@ describe("purchasing recommendation routes", () => {
       reviewOnly: false,
       recommendationSummary: {},
       recommendationRun: { id: 1001, detail: {} },
+    });
+    mocks.startAutoDraftJob.mockResolvedValue({
+      runId: 1001,
+      interruptedRunIds: [],
+      completion: Promise.resolve({
+        success: true,
+        pos: [],
+        count: 0,
+        itemsDrafted: 0,
+        itemsSkippedAfterAnalysis: 0,
+        reviewOnly: false,
+        recommendationSummary: {},
+        recommendationRun: { id: 1001, detail: {} },
+      }),
     });
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
       autoDraftMode: "draft_po",
@@ -1536,11 +1552,65 @@ describe("purchasing recommendation routes", () => {
     const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft/run");
 
     expect(status).toBe(202);
-    expect(mocks.runAutoDraftJob).toHaveBeenCalledWith({
+    expect(mocks.startAutoDraftJob).toHaveBeenCalledWith({
       triggeredBy: "manual",
       triggeredByUser: "admin-user",
     });
-    expect(body).toEqual({ message: "Auto-draft job started" });
+    expect(body).toEqual({
+      message: "Auto-draft job started",
+      runId: 1001,
+      interruptedRunIds: [],
+    });
+  });
+
+  it("rejects a second manual run while an auto-draft lease is active", async () => {
+    mocks.startAutoDraftJob.mockRejectedValue(Object.assign(
+      new Error("An auto-draft run is already active"),
+      {
+        statusCode: 409,
+        code: "AUTO_DRAFT_RUN_ALREADY_RUNNING",
+        context: { runId: 1001, leaseExpiresAt: "2026-07-12T02:30:00.000Z" },
+      },
+    ));
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft/run");
+
+    expect(status).toBe(409);
+    expect(body).toEqual({
+      error: "An auto-draft run is already active",
+      code: "AUTO_DRAFT_RUN_ALREADY_RUNNING",
+      context: { runId: 1001, leaseExpiresAt: "2026-07-12T02:30:00.000Z" },
+    });
+  });
+
+  it("normalizes interrupted lease state on the auto-draft status endpoint", async () => {
+    mocks.procurement.getLatestAutoDraftRun.mockResolvedValue({
+      id: 1000,
+      run_at: "2026-07-12T01:00:00.000Z",
+      triggered_by: "scheduler",
+      triggered_by_user: null,
+      status: "interrupted",
+      heartbeat_at: "2026-07-12T01:10:00.000Z",
+      lease_expires_at: null,
+      finished_at: "2026-07-12T01:40:00.000Z",
+      items_analyzed: 25,
+      error_message: "Auto-draft run lease expired before completion.",
+    });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/auto-draft/status");
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      id: 1000,
+      status: "interrupted",
+      heartbeatAt: "2026-07-12T01:10:00.000Z",
+      leaseExpiresAt: null,
+      finishedAt: "2026-07-12T01:40:00.000Z",
+      itemsAnalyzed: 25,
+      errorMessage: "Auto-draft run lease expired before completion.",
+    });
   });
 
   it("returns normalized recent auto-draft recommendation runs", async () => {

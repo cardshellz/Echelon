@@ -1105,7 +1105,9 @@ export const autoDraftRuns = pgTable("auto_draft_runs", {
   runAt: timestamp("run_at").defaultNow().notNull(),
   triggeredBy: varchar("triggered_by", { length: 50 }).notNull().default("scheduler"), // 'scheduler' | 'manual'
   triggeredByUser: varchar("triggered_by_user", { length: 255 }),
-  status: varchar("status", { length: 20 }).notNull().default("running"), // 'running' | 'success' | 'error'
+  status: varchar("status", { length: 20 }).notNull().default("running"), // 'running' | 'success' | 'error' | 'interrupted'
+  heartbeatAt: timestamp("heartbeat_at").defaultNow().notNull(),
+  leaseExpiresAt: timestamp("lease_expires_at"),
   itemsAnalyzed: integer("items_analyzed").notNull().default(0),
   posCreated: integer("pos_created").notNull().default(0),
   posUpdated: integer("pos_updated").notNull().default(0),
@@ -1116,7 +1118,27 @@ export const autoDraftRuns = pgTable("auto_draft_runs", {
   errorMessage: text("error_message"),
   summaryJson: jsonb("summary_json"),
   finishedAt: timestamp("finished_at"),
-});
+}, (table) => [
+  check(
+    "auto_draft_runs_status_chk",
+    sql`${table.status} IN ('running', 'success', 'error', 'interrupted')`,
+  ),
+  check(
+    "auto_draft_runs_lifecycle_chk",
+    sql`(
+      ${table.status} = 'running'
+      AND ${table.finishedAt} IS NULL
+      AND ${table.leaseExpiresAt} IS NOT NULL
+    ) OR (
+      ${table.status} <> 'running'
+      AND ${table.finishedAt} IS NOT NULL
+      AND ${table.leaseExpiresAt} IS NULL
+    )`,
+  ),
+  uniqueIndex("auto_draft_runs_single_running_uidx")
+    .on(table.status)
+    .where(sql`${table.status} = 'running'`),
+]);
 
 export const insertAutoDraftRunSchema = createInsertSchema(autoDraftRuns).omit({
   id: true,

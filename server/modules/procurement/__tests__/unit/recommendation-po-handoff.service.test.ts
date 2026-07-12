@@ -21,6 +21,7 @@ const NOW = new Date("2026-07-11T18:00:00.000Z");
 
 interface FakeState {
   autoDraftRuns: RecommendationAutoDraftRunRecord[];
+  runCompletions: Array<{ runId: number; values: Record<string, unknown> }>;
   decisions: RecommendationDecisionRecord[];
   handoffs: RecommendationPoHandoffRecord[];
   vendorProducts: RecommendationVendorProductRecord[];
@@ -36,6 +37,7 @@ interface FakeState {
 function cloneState(state: FakeState): FakeState {
   return {
     autoDraftRuns: state.autoDraftRuns.map((row) => ({ ...row })),
+    runCompletions: state.runCompletions.map((row) => ({ runId: row.runId, values: { ...row.values } })),
     decisions: state.decisions.map((row) => ({ ...row })),
     handoffs: state.handoffs.map((row) => ({ ...row })),
     vendorProducts: state.vendorProducts.map((row) => ({ ...row })),
@@ -102,6 +104,7 @@ function baseState(): FakeState {
       triggeredBy: "scheduler",
       triggeredByUser: null,
     }],
+    runCompletions: [],
     decisions: [acceptedDecision()],
     handoffs: [],
     vendorProducts: [{
@@ -191,12 +194,24 @@ function automaticCommand(): AutomaticRecommendationPoHandoffCommand {
       candidateBand: "strong_candidate",
       recommendationSnapshot: { item: { explanation: "Order three cases." } },
     }],
+    completion: {
+      itemsAnalyzed: 12,
+      skippedNoVendor: 2,
+      skippedOnOrder: 1,
+      skippedExcluded: 3,
+      summaryJson: {
+        version: 1,
+        poMutations: [],
+        poMutationSkips: [],
+      },
+    },
   };
 }
 
 function buildHarness(initialState = baseState()) {
   let committed = cloneState(initialState);
   let failOnCreateHandoff = false;
+  let failOnCompleteRun = false;
   const lockCalls: string[][] = [];
 
   const repository: RecommendationPoHandoffRepository = {
@@ -211,6 +226,14 @@ function buildHarness(initialState = baseState()) {
         },
         async getAutoDraftRunForUpdate(id) {
           return staged.autoDraftRuns.find((row) => row.id === id) ?? null;
+        },
+        async completeAutoDraftRun(id, values) {
+          if (failOnCompleteRun) return false;
+          const run = staged.autoDraftRuns.find((row) => row.id === id && row.status === "running");
+          if (!run) return false;
+          run.status = "success";
+          staged.runCompletions.push({ runId: id, values: { ...values } });
+          return true;
         },
         async getDecisionsForUpdate(ids) {
           return staged.decisions.filter((row) => ids.includes(row.id));
@@ -304,6 +327,9 @@ function buildHarness(initialState = baseState()) {
     },
     failHandoffInsert() {
       failOnCreateHandoff = true;
+    },
+    failRunCompletion() {
+      failOnCompleteRun = true;
     },
   };
 }
@@ -615,6 +641,27 @@ describe("recommendation PO handoff service", () => {
       JSON.stringify(["101:1001:30", "auto_draft_eligible"]),
       JSON.stringify(["101:1001:30", "po_mutation"]),
     ]]);
+    expect(harness.state.runCompletions).toEqual([
+      {
+        runId: 500,
+        values: expect.objectContaining({
+          status: "success",
+          itemsAnalyzed: 12,
+          posCreated: 1,
+          posUpdated: 0,
+          linesAdded: 1,
+          skippedNoVendor: 2,
+          skippedOnOrder: 1,
+          skippedExcluded: 3,
+          summaryJson: expect.objectContaining({
+            poMutations: [{ vendorId: 7, poId: 100, action: "created", linesAdded: 1 }],
+            poMutationSkips: [],
+          }),
+          finishedAt: NOW,
+          leaseExpiresAt: null,
+        }),
+      },
+    ]);
   });
 
   it("skips an automatic snapshot when another review path commits after its run started", async () => {
@@ -645,6 +692,19 @@ describe("recommendation PO handoff service", () => {
     });
     expect(harness.state.decisions).toHaveLength(2);
     expect(harness.state.pos).toHaveLength(0);
+    expect(harness.state.runCompletions).toEqual([
+      expect.objectContaining({
+        runId: 500,
+        values: expect.objectContaining({
+          status: "success",
+          posCreated: 0,
+          linesAdded: 0,
+          summaryJson: expect.objectContaining({
+            poMutationSkips: [expect.objectContaining({ latestDecisionId: 11 })],
+          }),
+        }),
+      }),
+    ]);
   });
 
   it("rolls back the automatic acceptance when its immutable mapping fails", async () => {
@@ -660,6 +720,25 @@ describe("recommendation PO handoff service", () => {
     expect(harness.state.pos).toHaveLength(0);
     expect(harness.state.lines).toHaveLength(0);
     expect(harness.state.handoffs).toHaveLength(0);
+    expect(harness.state.runCompletions).toHaveLength(0);
+  });
+
+  it("rolls back automatic PO writes when the run cannot transition to success", async () => {
+    const harness = buildHarness();
+    harness.failRunCompletion();
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAutomaticHandoff(automaticCommand())).rejects.toMatchObject({
+      statusCode: 409,
+      code: "AUTO_DRAFT_RUN_COMPLETION_CONFLICT",
+      context: { autoDraftRunId: 500 },
+    } satisfies Partial<RecommendationPoHandoffError>);
+
+    expect(harness.state.pos).toHaveLength(0);
+    expect(harness.state.lines).toHaveLength(0);
+    expect(harness.state.handoffs).toHaveLength(0);
+    expect(harness.state.decisions).toHaveLength(1);
+    expect(harness.state.runCompletions).toHaveLength(0);
   });
 
   it("records operator decisions through the same recommendation lock and transaction", async () => {
