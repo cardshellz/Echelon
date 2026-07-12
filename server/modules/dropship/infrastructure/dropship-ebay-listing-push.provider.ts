@@ -21,6 +21,10 @@ import type {
   EbayOffer,
 } from "../../channels/adapters/ebay/ebay-types";
 import type { ChannelListingPayload } from "../../channels/channel-adapter.interface";
+import {
+  isEbayResourceAuthFailureStatus,
+  isEbayTokenRefreshAuthFailureStatus,
+} from "./dropship-ebay-auth-failure";
 
 type FetchLike = typeof fetch;
 interface Clock {
@@ -286,7 +290,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     });
     const text = await response.text();
     if (!response.ok) {
-      if (isPermanentAuthFailureStatus(response.status)) {
+      if (isEbayTokenRefreshAuthFailureStatus(response.status)) {
         await this.recordNeedsReauth(credential, {
           failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
           message: `eBay token refresh failed with HTTP ${response.status}.`,
@@ -350,7 +354,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       if (response.ok) return undefined as T;
     }
     if (!response.ok) {
-      if (isPermanentAuthFailureStatus(response.status)) {
+      if (isEbayResourceAuthFailureStatus(response.status)) {
         await this.credentials.recordAuthFailure?.({
           vendorId: input.credential.vendorId,
           storeConnectionId: input.credential.storeConnectionId,
@@ -423,10 +427,6 @@ function parseEbayListingConfig(
     environment: config.environment === "sandbox" ? "sandbox" as const : "production" as const,
   };
   return parsed;
-}
-
-function isPermanentAuthFailureStatus(status: number): boolean {
-  return status === 400 || status === 401 || status === 403;
 }
 
 function assertEbayReady(input: DropshipMarketplaceListingPushRequest, config: EbayListingConfig): void {

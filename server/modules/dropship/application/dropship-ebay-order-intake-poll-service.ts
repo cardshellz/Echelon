@@ -4,6 +4,9 @@ import type {
   DropshipOrderIntakeService,
 } from "./dropship-order-intake-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import { DropshipError } from "../domain/errors";
+
+export const IMMUTABLE_ORDER_INTAKE_CONFLICT_CODE = "DROPSHIP_ORDER_INTAKE_IMMUTABLE_PAYLOAD_CHANGE";
 
 export interface DropshipEbayOrderIntakeStoreConnection {
   vendorId: number;
@@ -19,6 +22,16 @@ export interface DropshipEbayOrderIntakeOrder {
 export interface DropshipEbayOrderIntakeFetchResult {
   orders: DropshipEbayOrderIntakeOrder[];
   ignored: number;
+}
+
+export interface DropshipEbayOrderIntakeImmutableConflictInput {
+  vendorId: number;
+  storeConnectionId: number;
+  intakeId: number;
+  externalOrderId: string;
+  failureCode: typeof IMMUTABLE_ORDER_INTAKE_CONFLICT_CODE;
+  message: string;
+  now: Date;
 }
 
 export interface DropshipEbayOrderIntakeProvider {
@@ -39,6 +52,10 @@ export interface DropshipEbayOrderIntakeRepository {
     syncedThrough: Date;
     now: Date;
   }): Promise<void>;
+
+  recordImmutableOrderConflict(
+    input: DropshipEbayOrderIntakeImmutableConflictInput,
+  ): Promise<{ created: boolean }>;
 }
 
 export interface DropshipEbayOrderIntakeSweepResult {
@@ -50,6 +67,7 @@ export interface DropshipEbayOrderIntakeSweepResult {
   ordersReplayed: number;
   ordersRejected: number;
   ordersIgnored: number;
+  ordersConflicted: number;
 }
 
 export interface DropshipEbayOrderIntakePollServiceDependencies {
@@ -89,8 +107,36 @@ export class DropshipEbayOrderIntakePollService {
         });
         result.ordersIgnored += fetched.ignored;
         for (const order of fetched.orders) {
-          const intake = await this.deps.orderIntakeService.recordMarketplaceOrder(order.input);
-          applyIntakeResult(result, intake);
+          try {
+            const intake = await this.deps.orderIntakeService.recordMarketplaceOrder(order.input);
+            applyIntakeResult(result, intake);
+          } catch (error) {
+            const conflict = parseImmutableOrderConflict({ error, order, connection });
+            if (!conflict) throw error;
+
+            const audit = await this.deps.repository.recordImmutableOrderConflict({
+              vendorId: connection.vendorId,
+              storeConnectionId: connection.storeConnectionId,
+              intakeId: conflict.intakeId,
+              externalOrderId: order.externalOrderId,
+              failureCode: IMMUTABLE_ORDER_INTAKE_CONFLICT_CODE,
+              message: conflict.message,
+              now: this.deps.clock.now(),
+            });
+            result.ordersConflicted += 1;
+            if (audit.created) {
+              this.deps.logger.warn({
+                code: "DROPSHIP_EBAY_ORDER_INTAKE_IMMUTABLE_CONFLICT",
+                message: "Dropship eBay order intake skipped an immutable payload conflict.",
+                context: {
+                  vendorId: connection.vendorId,
+                  storeConnectionId: connection.storeConnectionId,
+                  intakeId: conflict.intakeId,
+                  externalOrderId: order.externalOrderId,
+                },
+              });
+            }
+          }
         }
         await this.deps.repository.markStorePollSucceeded({
           storeConnectionId: connection.storeConnectionId,
@@ -149,7 +195,32 @@ function emptySweepResult(storesScanned: number): DropshipEbayOrderIntakeSweepRe
     ordersReplayed: 0,
     ordersRejected: 0,
     ordersIgnored: 0,
+    ordersConflicted: 0,
   };
+}
+
+function parseImmutableOrderConflict(input: {
+  error: unknown;
+  order: DropshipEbayOrderIntakeOrder;
+  connection: DropshipEbayOrderIntakeStoreConnection;
+}): { intakeId: number; message: string } | null {
+  if (!(input.error instanceof DropshipError) || input.error.code !== IMMUTABLE_ORDER_INTAKE_CONFLICT_CODE) {
+    return null;
+  }
+
+  const intakeId = input.error.context?.intakeId;
+  const externalOrderId = input.error.context?.externalOrderId;
+  const storeConnectionId = input.error.context?.storeConnectionId;
+  if (
+    !Number.isInteger(intakeId)
+    || (intakeId as number) <= 0
+    || externalOrderId !== input.order.externalOrderId
+    || storeConnectionId !== input.connection.storeConnectionId
+  ) {
+    return null;
+  }
+
+  return { intakeId: intakeId as number, message: input.error.message };
 }
 
 function applyIntakeResult(

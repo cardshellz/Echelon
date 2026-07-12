@@ -39,6 +39,7 @@ function createDropshipWorkerSweepRunners(): Record<DropshipWorkerSweepName, Dro
           ordersReplayed: result.ordersReplayed,
           ordersRejected: result.ordersRejected,
           ordersIgnored: result.ordersIgnored,
+          ordersConflicted: result.ordersConflicted,
         };
       },
     },

@@ -10,6 +10,10 @@ import type {
 } from "./dropship-marketplace-credentials";
 import { buildEbayShippingFulfillmentPath, extractEbayFulfillmentIdFromLocation, normalizeEbayTrackingNumber } from "../../channels/adapters/ebay/ebay-fulfillment.util";
 import { mapCarrierToEbay } from "../../channels/adapters/ebay/ebay-category-map";
+import {
+  isEbayResourceAuthFailureStatus,
+  isEbayTokenRefreshAuthFailureStatus,
+} from "./dropship-ebay-auth-failure";
 
 type FetchLike = typeof fetch;
 type EbayEnvironment = "sandbox" | "production";
@@ -148,7 +152,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
     });
     const text = await response.text();
     if (!response.ok) {
-      if (isPermanentAuthFailureStatus(response.status)) {
+      if (isEbayTokenRefreshAuthFailureStatus(response.status)) {
         await this.recordNeedsReauth(credential, {
           failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
           message: `eBay token refresh failed with HTTP ${response.status}.`,
@@ -231,7 +235,7 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
         };
       }
       const retryable = response.status === 429 || response.status >= 500;
-      if (isPermanentAuthFailureStatus(response.status)) {
+      if (isEbayResourceAuthFailureStatus(response.status)) {
         await this.credentials.recordAuthFailure?.({
           vendorId: input.credential.vendorId,
           storeConnectionId: input.credential.storeConnectionId,
@@ -293,10 +297,6 @@ function resolveMarketplaceId(config: Record<string, unknown>): string {
   return typeof config.marketplaceId === "string" && config.marketplaceId.trim()
     ? config.marketplaceId.trim()
     : "EBAY_US";
-}
-
-function isPermanentAuthFailureStatus(status: number): boolean {
-  return status === 400 || status === 401 || status === 403;
 }
 
 function parseEbayJson<T>(input: { text: string; code: string; message: string }): T {

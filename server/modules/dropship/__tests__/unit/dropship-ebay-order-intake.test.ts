@@ -2,14 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 
-import { recordDropshipOrderIntakeInputSchema } from "../../application/dropship-order-intake-service";
+import {
+  recordDropshipOrderIntakeInputSchema,
+  type DropshipOrderIntakeRepositoryResult,
+} from "../../application/dropship-order-intake-service";
 import {
   DropshipEbayOrderIntakePollService,
   type DropshipEbayOrderIntakeProvider,
   type DropshipEbayOrderIntakeRepository,
   type DropshipEbayOrderIntakeStoreConnection,
 } from "../../application/dropship-ebay-order-intake-poll-service";
-import type { DropshipMarketplaceCredentialRepository, DropshipMarketplaceStoreCredentials } from "../../infrastructure/dropship-marketplace-credentials";
+import type {
+  DropshipMarketplaceCredentialRepository,
+  DropshipMarketplaceStoreAuthFailureInput,
+  DropshipMarketplaceStoreAuthFailureRecord,
+  DropshipMarketplaceStoreCredentials,
+} from "../../infrastructure/dropship-marketplace-credentials";
 import {
   buildEbayDropshipOrderIntakeInput,
   parseEbayMoneyCents,
@@ -170,6 +178,23 @@ describe("EbayDropshipOrderIntakeProvider", () => {
     expect(result.orders).toHaveLength(1);
     expect(result.orders[0].input.externalOrderId).toBe("11-11111-11111");
   });
+
+  it("does not invalidate store credentials for an ordinary eBay order API 400", async () => {
+    const credentials = new FakeCredentialRepository();
+    const fetchImpl = vi.fn(async () => new Response("invalid filter", { status: 400 }));
+    const provider = new EbayDropshipOrderIntakeProvider(credentials, fetchImpl as any, {
+      now: () => new Date("2026-05-03T15:30:00.000Z"),
+    });
+
+    await expect(provider.fetchOrders({
+      connection: { vendorId: 10, storeConnectionId: 22, lastOrderSyncAt: null },
+      since: new Date("2026-05-03T15:15:00.000Z"),
+      until: new Date("2026-05-03T15:30:00.000Z"),
+    })).rejects.toMatchObject({ code: "DROPSHIP_EBAY_ORDER_INTAKE_HTTP_ERROR" });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(credentials.authFailures).toHaveLength(0);
+  });
 });
 
 describe("DropshipEbayOrderIntakePollService", () => {
@@ -283,6 +308,91 @@ describe("DropshipEbayOrderIntakePollService", () => {
     });
     expect(repository.lastSuccess).toBeNull();
   });
+
+  it("isolates an immutable order conflict, records the other orders, and advances the cursor", async () => {
+    const repository = new FakePollRepository();
+    const orders = ["ORDER-1", "ORDER-2", "ORDER-3"].map(makePollOrder);
+    const recordMarketplaceOrder = vi.fn(async (input) => {
+      if (input.externalOrderId === "ORDER-2") {
+        throw new DropshipError(
+          "DROPSHIP_ORDER_INTAKE_IMMUTABLE_PAYLOAD_CHANGE",
+          "Immutable intake payload changed.",
+          {
+            intakeId: 202,
+            externalOrderId: "ORDER-2",
+            storeConnectionId: 22,
+          },
+        );
+      }
+      return makeRecordedIntakeResult(input.externalOrderId, input.externalOrderId === "ORDER-1" ? 201 : 203);
+    });
+    const logger = nullLogger();
+    const service = new DropshipEbayOrderIntakePollService({
+      repository,
+      provider: {
+        fetchOrders: vi.fn(async () => ({ ignored: 0, orders })),
+      },
+      orderIntakeService: { recordMarketplaceOrder },
+      clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
+      logger,
+    });
+
+    const result = await service.pollConnectedStores({
+      limit: 10,
+      initialLookbackMinutes: 240,
+      overlapMinutes: 15,
+    });
+
+    expect(result).toMatchObject({
+      storesSucceeded: 1,
+      storesFailed: 0,
+      ordersCreated: 2,
+      ordersConflicted: 1,
+    });
+    expect(recordMarketplaceOrder).toHaveBeenCalledTimes(3);
+    expect(repository.immutableConflicts).toEqual([
+      expect.objectContaining({
+        vendorId: 10,
+        storeConnectionId: 22,
+        intakeId: 202,
+        externalOrderId: "ORDER-2",
+        failureCode: "DROPSHIP_ORDER_INTAKE_IMMUTABLE_PAYLOAD_CHANGE",
+      }),
+    ]);
+    expect(repository.lastSuccess).not.toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not isolate malformed immutable-conflict errors", async () => {
+    const repository = new FakePollRepository();
+    const service = new DropshipEbayOrderIntakePollService({
+      repository,
+      provider: {
+        fetchOrders: vi.fn(async () => ({ ignored: 0, orders: [makePollOrder("ORDER-1")] })),
+      },
+      orderIntakeService: {
+        recordMarketplaceOrder: vi.fn(async () => {
+          throw new DropshipError(
+            "DROPSHIP_ORDER_INTAKE_IMMUTABLE_PAYLOAD_CHANGE",
+            "Malformed immutable conflict.",
+            { intakeId: 201, externalOrderId: "DIFFERENT-ORDER", storeConnectionId: 22 },
+          );
+        }),
+      },
+      clock: { now: () => new Date("2026-05-03T15:00:00.000Z") },
+      logger: nullLogger(),
+    });
+
+    const result = await service.pollConnectedStores({
+      limit: 10,
+      initialLookbackMinutes: 240,
+      overlapMinutes: 15,
+    });
+
+    expect(result).toMatchObject({ storesSucceeded: 0, storesFailed: 1, ordersConflicted: 0 });
+    expect(repository.immutableConflicts).toHaveLength(0);
+    expect(repository.lastSuccess).toBeNull();
+  });
 });
 
 describe("PgDropshipEbayOrderIntakeRepository", () => {
@@ -302,9 +412,46 @@ describe("PgDropshipEbayOrderIntakeRepository", () => {
     expect(sql).toContain("refresh_token_ref IS NOT NULL");
     expect(params).toEqual([25]);
   });
+
+  it("records an immutable conflict once under a transaction-scoped advisory lock", async () => {
+    const client = {
+      query: vi.fn(async (sql: string) => ({
+        rows: [],
+        rowCount: sql.includes("INSERT INTO dropship.dropship_audit_events") ? 1 : null,
+      })),
+      release: vi.fn(),
+    };
+    const dbPool = {
+      connect: vi.fn(async () => client),
+    };
+    const repository = new PgDropshipEbayOrderIntakeRepository(dbPool as any);
+
+    const result = await repository.recordImmutableOrderConflict({
+      vendorId: 10,
+      storeConnectionId: 22,
+      intakeId: 202,
+      externalOrderId: "ORDER-2",
+      failureCode: "DROPSHIP_ORDER_INTAKE_IMMUTABLE_PAYLOAD_CHANGE",
+      message: "Immutable intake payload changed.",
+      now: new Date("2026-05-03T15:00:00.000Z"),
+    });
+
+    expect(result).toEqual({ created: true });
+    expect(client.query.mock.calls.map((call) => call[0])).toEqual([
+      "BEGIN",
+      expect.stringContaining("pg_advisory_xact_lock"),
+      expect.stringContaining("INSERT INTO dropship.dropship_audit_events"),
+      "COMMIT",
+    ]);
+    const insertSql = String(client.query.mock.calls[2]?.[0]);
+    expect(insertSql).toContain("WHERE NOT EXISTS");
+    expect(insertSql).toContain("event_type = $4");
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
 });
 
 class FakeCredentialRepository implements DropshipMarketplaceCredentialRepository {
+  authFailures: DropshipMarketplaceStoreAuthFailureInput[] = [];
   credential: DropshipMarketplaceStoreCredentials = {
     vendorId: 10,
     storeConnectionId: 22,
@@ -329,10 +476,25 @@ class FakeCredentialRepository implements DropshipMarketplaceCredentialRepositor
   async replaceTokens(): Promise<DropshipMarketplaceStoreCredentials> {
     throw new Error("replaceTokens should not be called with a fresh token");
   }
+
+  async recordAuthFailure(
+    input: DropshipMarketplaceStoreAuthFailureInput,
+  ): Promise<DropshipMarketplaceStoreAuthFailureRecord> {
+    this.authFailures.push(input);
+    return {
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      platform: input.platform,
+      previousStatus: "connected",
+      status: input.status,
+      transitioned: true,
+    };
+  }
 }
 
 class FakePollRepository implements DropshipEbayOrderIntakeRepository {
   lastSuccess: Parameters<DropshipEbayOrderIntakeRepository["markStorePollSucceeded"]>[0] | null = null;
+  immutableConflicts: Array<Parameters<DropshipEbayOrderIntakeRepository["recordImmutableOrderConflict"]>[0]> = [];
 
   async listPollableStoreConnections(): Promise<DropshipEbayOrderIntakeStoreConnection[]> {
     return [{ vendorId: 10, storeConnectionId: 22, lastOrderSyncAt: null }];
@@ -343,6 +505,13 @@ class FakePollRepository implements DropshipEbayOrderIntakeRepository {
   ): Promise<void> {
     this.lastSuccess = input;
   }
+
+  async recordImmutableOrderConflict(
+    input: Parameters<DropshipEbayOrderIntakeRepository["recordImmutableOrderConflict"]>[0],
+  ): Promise<{ created: boolean }> {
+    this.immutableConflicts.push(input);
+    return { created: true };
+  }
 }
 
 function nullLogger() {
@@ -350,6 +519,52 @@ function nullLogger() {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
+  };
+}
+
+function makePollOrder(externalOrderId: string) {
+  const order = {
+    ...makeEbayOrder(),
+    orderId: externalOrderId,
+    legacyOrderId: `legacy-${externalOrderId}`,
+  };
+  return {
+    externalOrderId,
+    input: buildEbayDropshipOrderIntakeInput({
+      store: { vendorId: 10, storeConnectionId: 22 },
+      order,
+    }),
+  };
+}
+
+function makeRecordedIntakeResult(
+  externalOrderId: string,
+  intakeId: number,
+): DropshipOrderIntakeRepositoryResult {
+  const recordedAt = new Date("2026-05-03T15:00:00.000Z");
+  return {
+    action: "created",
+    intake: {
+      intakeId,
+      channelId: 50,
+      vendorId: 10,
+      storeConnectionId: 22,
+      platform: "ebay",
+      externalOrderId,
+      externalOrderNumber: null,
+      sourceOrderId: `legacy-${externalOrderId}`,
+      status: "received",
+      paymentHoldExpiresAt: null,
+      rejectionReason: null,
+      cancellationStatus: null,
+      rawPayload: {},
+      normalizedPayload: { lines: [{ quantity: 1 }] },
+      payloadHash: `hash-${externalOrderId}`,
+      omsOrderId: null,
+      receivedAt: recordedAt,
+      acceptedAt: null,
+      updatedAt: recordedAt,
+    },
   };
 }
 
