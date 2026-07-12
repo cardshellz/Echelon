@@ -2,7 +2,6 @@ import type { Express } from "express";
 import { sql } from "drizzle-orm";
 import { centsToMills, computeLineTotalCentsFromMills } from "@shared/utils/money";
 import { db } from "../../db";
-import { requireIdempotency } from "../../middleware/idempotency";
 import { requirePermission } from "../../routes/middleware";
 import { procurementStorage } from "../procurement";
 import { inventoryStorage } from "../inventory";
@@ -376,7 +375,7 @@ function parseRecommendationDecision(value: unknown): RecommendationDecision | n
 }
 
 function recommendationDecisionKey(recommendationId: string, kind: string): string {
-  return `${recommendationId}:${kind}`;
+  return JSON.stringify([recommendationId, kind]);
 }
 
 function normalizeRecommendationDecision(row: any) {
@@ -502,6 +501,9 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
     suggestedOrderPieces: number;
     orderUomUnits: number;
     orderUomLabel: string;
+    estimatedCostMills: number | null;
+    estimatedCostCents: number | null;
+    supplierBasis: PurchasingRecommendationItem["supplierBasis"];
     candidateScore: PurchasingRecommendationItem["recommendationCandidateScore"];
     qualityGate: PurchasingRecommendationItem["qualityGate"];
     qualityControls: PurchasingRecommendationQualityControl[];
@@ -530,6 +532,9 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
       suggestedOrderPieces: item.suggestedOrderPieces,
       orderUomUnits: item.orderUomUnits,
       orderUomLabel: item.orderUomLabel,
+      estimatedCostMills: item.estimatedCostMills,
+      estimatedCostCents: item.estimatedCostCents,
+      supplierBasis: item.supplierBasis,
       candidateScore: item.recommendationCandidateScore,
       qualityGate: item.qualityGate,
       qualityControls: item.autopilotBlockers?.length ? item.autopilotBlockers : item.qualityControls ?? [],
@@ -682,6 +687,7 @@ function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: Retu
         recommendationId: decision.recommendationId,
         kind: decision.kind,
         decision,
+        acceptedItem: snapshotItem,
         source: currentItem ? "current_recommendation" : "decision_snapshot",
         current: Boolean(currentItem),
         sku: sourceItem.sku ?? decision.sku,
@@ -695,6 +701,9 @@ function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: Retu
         suggestedOrderPieces: Number(sourceItem.suggestedOrderPieces ?? 0) || 0,
         orderUomUnits: Number(sourceItem.orderUomUnits ?? 0) || 0,
         orderUomLabel: sourceItem.orderUomLabel ?? "units",
+        estimatedCostMills: sourceItem.estimatedCostMills ?? sourceItem.supplierBasis?.estimatedCostMills ?? null,
+        estimatedCostCents: sourceItem.estimatedCostCents ?? sourceItem.supplierBasis?.estimatedCostCents ?? null,
+        supplierBasis: sourceItem.supplierBasis ?? null,
         candidateScore,
         qualityGate: currentItem?.qualityGate ?? snapshotItem.qualityGate ?? null,
         reason: currentItem?.reason ?? snapshotItem.reason ?? null,
@@ -726,6 +735,28 @@ function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: Retu
     },
     items,
   };
+}
+
+function recommendationEconomicBasis(item: any) {
+  return {
+    productId: Number(item?.productId),
+    productVariantId: Number(item?.productVariantId),
+    preferredVendorId: Number(item?.preferredVendorId),
+    vendorProductId: Number(item?.vendorProductId ?? item?.supplierBasis?.vendorProductId),
+    suggestedOrderQty: Number(item?.suggestedOrderQty),
+    suggestedOrderPieces: Number(item?.suggestedOrderPieces),
+    orderUomUnits: Number(item?.orderUomUnits),
+    estimatedCostMills: item?.estimatedCostMills ?? item?.supplierBasis?.estimatedCostMills ?? null,
+    estimatedCostCents: item?.estimatedCostCents ?? item?.supplierBasis?.estimatedCostCents ?? null,
+  };
+}
+
+function changedRecommendationEconomicFields(currentItem: any, acceptedItem: any): string[] {
+  const current = recommendationEconomicBasis(currentItem);
+  const accepted = recommendationEconomicBasis(acceptedItem);
+  return Object.keys(current).filter((key) => (
+    current[key as keyof typeof current] !== accepted[key as keyof typeof accepted]
+  ));
 }
 
 function parseAcceptedRecommendationHandoffSelections(body: any):
@@ -765,12 +796,18 @@ function parseAcceptedRecommendationHandoffSelections(body: any):
   return { selections };
 }
 
-function buildAcceptedRecommendationHandoffSkipped(selection: { recommendationId: string; kind: RecommendationReviewQueueKind }, reason: string, item?: any) {
+function buildAcceptedRecommendationHandoffSkipped(
+  selection: { recommendationId: string; kind: RecommendationReviewQueueKind },
+  reason: string,
+  item?: any,
+  context?: Record<string, unknown>,
+) {
   return {
     recommendationId: selection.recommendationId,
     kind: selection.kind,
     sku: item?.sku ?? null,
     reason,
+    ...(context ? { context } : {}),
   };
 }
 
@@ -989,7 +1026,6 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
   app.post(
     "/api/purchasing/recommendation-accepted-queue/create-po",
     requirePermission("inventory", "adjust"),
-    requireIdempotency(),
     async (req, res) => {
       try {
         const parsed = parseAcceptedRecommendationHandoffSelections(req.body);
@@ -997,9 +1033,9 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           return res.status(400).json({ error: parsed.error });
         }
 
-        const purchasing = app.locals.services?.purchasing;
-        if (!purchasing?.createPOFromReorder) {
-          return res.status(500).json({ error: "Purchasing service is not available" });
+        const recommendationPoHandoff = app.locals.services?.recommendationPoHandoff;
+        if (!recommendationPoHandoff?.createAcceptedHandoff) {
+          return res.status(500).json({ error: "Recommendation PO handoff service is not available" });
         }
 
         const [{ configuredLookback, settings, queue }, decisionRows] = await Promise.all([
@@ -1026,33 +1062,53 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "stale_accepted_snapshot", item));
             continue;
           }
-          if (!Number.isFinite(Number(item.productId)) || Number(item.productId) <= 0) {
+          const handoffItem = item.acceptedItem;
+          if (!handoffItem || typeof handoffItem !== "object") {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "accepted_snapshot_incomplete", item));
+            continue;
+          }
+          const changedEconomicFields = changedRecommendationEconomicFields(item, handoffItem);
+          if (changedEconomicFields.length > 0) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(
+              selection,
+              "accepted_economics_changed",
+              item,
+              { changedFields: changedEconomicFields },
+            ));
+            continue;
+          }
+          if (!Number.isFinite(Number(handoffItem.productId)) || Number(handoffItem.productId) <= 0) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_product", item));
             continue;
           }
-          if (!Number.isFinite(Number(item.productVariantId)) || Number(item.productVariantId) <= 0) {
+          if (!Number.isFinite(Number(handoffItem.productVariantId)) || Number(handoffItem.productVariantId) <= 0) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_variant", item));
             continue;
           }
-          if (!Number.isFinite(Number(item.suggestedOrderQty)) || Number(item.suggestedOrderQty) <= 0) {
+          if (!Number.isFinite(Number(handoffItem.suggestedOrderQty)) || Number(handoffItem.suggestedOrderQty) <= 0) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "invalid_qty", item));
             continue;
           }
           try {
-            resolveRecommendationPoQuantity(item);
+            resolveRecommendationPoQuantity(handoffItem);
           } catch {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "invalid_piece_qty", item));
             continue;
           }
-          if (!Number.isFinite(Number(item.preferredVendorId)) || Number(item.preferredVendorId) <= 0) {
+          if (!Number.isFinite(Number(handoffItem.preferredVendorId)) || Number(handoffItem.preferredVendorId) <= 0) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_vendor", item));
             continue;
           }
-          if (!Number.isSafeInteger(Number(item.vendorProductId)) || Number(item.vendorProductId) <= 0) {
+          const acceptedVendorProductId = handoffItem.vendorProductId ?? handoffItem.supplierBasis?.vendorProductId;
+          if (!Number.isSafeInteger(Number(acceptedVendorProductId)) || Number(acceptedVendorProductId) <= 0) {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_vendor_product", item));
             continue;
           }
-          eligible.push(item);
+          if (!Number.isSafeInteger(Number(item.decision?.id)) || Number(item.decision.id) <= 0) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "missing_accepted_decision", item));
+            continue;
+          }
+          eligible.push({ ...item, handoffItem });
         }
 
         if (eligible.length === 0) {
@@ -1063,67 +1119,54 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         }
 
         const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
-        const pos = await purchasing.createPOFromReorder(
-          eligible.map((item) => {
-            const quantity = resolveRecommendationPoQuantity(item);
+        const result = await recommendationPoHandoff.createAcceptedHandoff({
+          actorId: userId,
+          items: eligible.map((item) => {
+            const acceptedItem = item.handoffItem;
+            const quantity = resolveRecommendationPoQuantity(acceptedItem);
             return {
-              productId: Number(item.productId),
-              productVariantId: Number(item.productVariantId),
+              acceptedDecisionId: Number(item.decision.id),
+              recommendationId: item.recommendationId,
+              kind: item.kind,
+              productId: Number(acceptedItem.productId),
+              productVariantId: Number(acceptedItem.productVariantId),
               suggestedPieces: quantity.orderQtyPieces,
-              vendorProductId: Number(item.vendorProductId),
-              vendorId: Number(item.preferredVendorId),
+              orderUomUnits: quantity.orderUomUnits,
+              orderUomLabel: acceptedItem.orderUomLabel,
+              vendorProductId: Number(acceptedItem.vendorProductId ?? acceptedItem.supplierBasis?.vendorProductId),
+              vendorId: Number(acceptedItem.preferredVendorId),
+              sku: acceptedItem.sku ?? null,
+              productName: acceptedItem.productName ?? null,
+              candidateScore: acceptedItem.candidateScore?.score ?? null,
+              candidateBand: acceptedItem.candidateScore?.band ?? null,
+              recommendationSnapshot: {
+                lookbackDays: configuredLookback,
+                autoDraftMode: settings.autoDraftMode ?? "draft_po",
+                approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
+                item: acceptedItem,
+              },
             };
           }),
-          userId,
-        );
-        const poIds = Array.from(new Set((pos ?? []).map((po: any) => Number(po?.id)).filter((id: number) => Number.isFinite(id))));
-
-        const decisions = await Promise.all(eligible.map((item) => storage.createRecommendationDecision({
-          recommendationId: item.recommendationId,
-          kind: item.kind,
-          decision: "po_handoff_created",
-          status: "active",
-          decisionReason: "accepted_recommendation_po_handoff",
-          note: null,
-          source: "operator",
-          productId: Number(item.productId),
-          productVariantId: Number(item.productVariantId),
-          vendorId: Number(item.preferredVendorId),
-          sku: item.sku,
-          productName: item.productName,
-          candidateScore: item.candidateScore?.score ?? null,
-          candidateBand: item.candidateScore?.band ?? null,
-          recommendationSnapshot: {
-            lookbackDays: configuredLookback,
-            autoDraftMode: settings.autoDraftMode ?? "draft_po",
-            approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
-            item,
-            poHandoff: {
-              poIds,
-            },
-          },
-          decidedBy: userId,
-        })));
+        });
 
         res.status(201).json({
           success: true,
-          count: (pos ?? []).length,
+          count: result.pos.length,
           itemsDrafted: eligible.length,
-          pos,
-          handedOff: eligible.map((item) => ({
-            recommendationId: item.recommendationId,
-            kind: item.kind,
-            sku: item.sku,
-            poIds,
-          })),
+          pos: result.pos,
+          handedOff: result.handedOff,
           skipped,
-          decisions: decisions.map(normalizeRecommendationDecision),
+          decisions: result.decisions.map(normalizeRecommendationDecision),
         });
       } catch (error) {
         console.error("Error creating PO from accepted recommendation queue:", error);
         const statusCode = Number((error as any)?.statusCode);
         if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
-          return res.status(statusCode).json({ error: (error as Error).message });
+          return res.status(statusCode).json({
+            error: (error as Error).message,
+            code: (error as any)?.code ?? "RECOMMENDATION_PO_HANDOFF_REJECTED",
+            context: (error as any)?.context ?? {},
+          });
         }
         res.status(500).json({ error: "Failed to create PO from accepted recommendation queue" });
       }
@@ -1154,7 +1197,11 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       }
 
       const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
-      const created = await storage.createRecommendationDecision({
+      const recommendationPoHandoff = app.locals.services?.recommendationPoHandoff;
+      if (!recommendationPoHandoff?.recordDecision) {
+        return res.status(500).json({ error: "Recommendation PO handoff service is not available" });
+      }
+      const created = await recommendationPoHandoff.recordDecision({
         recommendationId: item.recommendationId,
         kind: item.kind,
         decision,
@@ -1183,6 +1230,14 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
     } catch (error) {
       console.error("Error recording recommendation decision:", error);
+      const statusCode = Number((error as any)?.statusCode);
+      if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
+        return res.status(statusCode).json({
+          error: (error as Error).message,
+          code: (error as any)?.code ?? "RECOMMENDATION_DECISION_REJECTED",
+          context: (error as any)?.context ?? {},
+        });
+      }
       res.status(500).json({ error: "Failed to record recommendation decision" });
     }
   });

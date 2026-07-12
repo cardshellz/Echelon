@@ -1,4 +1,4 @@
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, index, date } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, index, date, check, foreignKey } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -509,7 +509,9 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("purchase_order_lines_po_id_line_id_uidx").on(table.purchaseOrderId, table.id),
+]);
 
 // ---------------------------------------------------------------------------
 // PO line taxonomy (migration 0563)
@@ -1154,6 +1156,7 @@ export const purchasingRecommendationDecisions = procurementSchema.table("purcha
   index("purch_rec_decisions_rec_kind_decided_idx").on(table.recommendationId, table.kind, table.decidedAt),
   index("purch_rec_decisions_decision_decided_idx").on(table.decision, table.decidedAt),
   index("purch_rec_decisions_sku_idx").on(table.sku),
+  uniqueIndex("purch_rec_decisions_id_rec_kind_uidx").on(table.id, table.recommendationId, table.kind),
 ]);
 
 export const insertPurchasingRecommendationDecisionSchema = createInsertSchema(purchasingRecommendationDecisions).omit({
@@ -1166,7 +1169,68 @@ export type InsertPurchasingRecommendationDecision = z.infer<typeof insertPurcha
 export type PurchasingRecommendationDecision = typeof purchasingRecommendationDecisions.$inferSelect;
 
 // ============================================================================
-// 25. PO EVENTS - append-only lifecycle audit stream (Spec A)
+// 25. PURCHASING RECOMMENDATION PO HANDOFFS
+// ============================================================================
+
+export const purchasingRecommendationPoHandoffs = procurementSchema.table("purchasing_recommendation_po_handoffs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  acceptedDecisionId: integer("accepted_decision_id").notNull(),
+  handoffDecisionId: integer("handoff_decision_id").notNull(),
+  purchaseOrderId: integer("purchase_order_id").notNull(),
+  purchaseOrderLineId: integer("purchase_order_line_id").notNull(),
+  recommendationId: varchar("recommendation_id", { length: 160 }).notNull(),
+  kind: varchar("kind", { length: 40 }).notNull(),
+  createdBy: varchar("created_by", { length: 255 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  check(
+    "purchasing_recommendation_po_handoffs_distinct_decisions_chk",
+    sql`${table.acceptedDecisionId} <> ${table.handoffDecisionId}`,
+  ),
+  foreignKey({
+    name: "purch_rec_po_handoff_accepted_decision_fk",
+    columns: [table.acceptedDecisionId, table.recommendationId, table.kind],
+    foreignColumns: [
+      purchasingRecommendationDecisions.id,
+      purchasingRecommendationDecisions.recommendationId,
+      purchasingRecommendationDecisions.kind,
+    ],
+  }).onDelete("restrict"),
+  foreignKey({
+    name: "purch_rec_po_handoff_decision_fk",
+    columns: [table.handoffDecisionId, table.recommendationId, table.kind],
+    foreignColumns: [
+      purchasingRecommendationDecisions.id,
+      purchasingRecommendationDecisions.recommendationId,
+      purchasingRecommendationDecisions.kind,
+    ],
+  }).onDelete("restrict"),
+  foreignKey({
+    name: "purch_rec_po_handoff_po_line_fk",
+    columns: [table.purchaseOrderId, table.purchaseOrderLineId],
+    foreignColumns: [purchaseOrderLines.purchaseOrderId, purchaseOrderLines.id],
+  }).onDelete("restrict"),
+  uniqueIndex("purch_rec_po_handoff_accepted_decision_uidx").on(table.acceptedDecisionId),
+  uniqueIndex("purch_rec_po_handoff_decision_uidx").on(table.handoffDecisionId),
+  uniqueIndex("purch_rec_po_handoff_po_line_uidx").on(table.purchaseOrderLineId),
+  index("purch_rec_po_handoff_po_idx").on(table.purchaseOrderId),
+  index("purch_rec_po_handoff_rec_kind_idx").on(table.recommendationId, table.kind),
+]);
+
+export const insertPurchasingRecommendationPoHandoffSchema = createInsertSchema(
+  purchasingRecommendationPoHandoffs,
+).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertPurchasingRecommendationPoHandoff = z.infer<
+  typeof insertPurchasingRecommendationPoHandoffSchema
+>;
+export type PurchasingRecommendationPoHandoff = typeof purchasingRecommendationPoHandoffs.$inferSelect;
+
+// ============================================================================
+// 26. PO EVENTS - append-only lifecycle audit stream (Spec A)
 // ============================================================================
 //
 // Separate from po_status_history so non-status events (edits, sends,

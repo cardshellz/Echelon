@@ -51,6 +51,8 @@ import { createChannelProductPushService } from "../modules/channels/product-pus
 import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
+import { createRecommendationPoHandoffService } from "../modules/procurement/recommendation-po-handoff.service";
+import { createDrizzleRecommendationPoHandoffRepository } from "../modules/procurement/recommendation-po-handoff.repository";
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
 import { recordReceivingReconciliationFailure } from "../modules/procurement/po-exceptions.service";
 import { createOmsService } from "../modules/oms/oms.service";
@@ -126,6 +128,9 @@ export function createServices(db: any) {
     ...catalogStorage,
     ...warehouseStorage,
   });
+  const recommendationPoHandoff = createRecommendationPoHandoffService(
+    createDrizzleRecommendationPoHandoffRepository(db),
+  );
 
   // Shipment tracking (depends on procurement + catalog storage)
   const shipmentTracking = createShipmentTrackingService(db, {
@@ -283,6 +288,7 @@ export function createServices(db: any) {
     channelProductPush,
     binAssignment,
     purchasing,
+    recommendationPoHandoff,
     shipmentTracking,
     syncSettings,
     echelonOrchestrator,
@@ -333,6 +339,8 @@ export { createBinAssignmentService } from "../modules/warehouse/bin-assignment.
 export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "../modules/warehouse/bin-assignment.service";
 export { createPurchasingService } from "../modules/procurement/purchasing.service";
 export type { PurchasingService, PurchasingError } from "../modules/procurement/purchasing.service";
+export { createRecommendationPoHandoffService } from "../modules/procurement/recommendation-po-handoff.service";
+export type { RecommendationPoHandoffService, RecommendationPoHandoffError } from "../modules/procurement/recommendation-po-handoff.service";
 export { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
 export type { ShipmentTrackingService, ShipmentTrackingError } from "../modules/procurement/shipment-tracking.service";
 export { createInventoryLotService } from "../modules/inventory/lots.service";
