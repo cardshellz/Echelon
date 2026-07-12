@@ -85,6 +85,7 @@ interface CandidateRow {
   condition: string | null;
   item_specifics: Record<string, unknown> | null;
   image_urls: string[] | null;
+  weight_grams: number | null;
   product_is_active: boolean;
   variant_is_active: boolean;
   units_per_variant: number;
@@ -271,6 +272,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            p.condition AS condition,
            p.item_specifics,
            assets.image_urls,
+           pv.weight_grams,
            p.is_active AS product_is_active,
            pv.is_active AS variant_is_active,
            pv.units_per_variant,
@@ -374,7 +376,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
   async getPackageReadiness(productVariantIds: readonly number[]): Promise<Map<number, DropshipListingPackageReadiness>> {
     const readiness = new Map<number, DropshipListingPackageReadiness>();
     productVariantIds.forEach((productVariantId) => readiness.set(productVariantId, {
-      hasPackageProfile: false,
+      hasCatalogPackageData: false,
       hasActiveBox: false,
       hasActiveRateTable: false,
     }));
@@ -382,11 +384,14 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
 
     const client = await this.dbPool.connect();
     try {
-      const profileResult = await client.query<PackageReadinessRow>(
-        `SELECT product_variant_id
-         FROM dropship.dropship_package_profiles
-         WHERE product_variant_id = ANY($1::int[])
-           AND is_active = true`,
+      const packageDataResult = await client.query<PackageReadinessRow>(
+        `SELECT id AS product_variant_id
+         FROM catalog.product_variants
+         WHERE id = ANY($1::int[])
+           AND weight_grams > 0
+           AND length_mm > 0
+           AND width_mm > 0
+           AND height_mm > 0`,
         [productVariantIds],
       );
       const boxResult = await client.query<CountRow>(
@@ -403,9 +408,9 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
       );
       const hasActiveBox = Number(boxResult.rows[0]?.count ?? 0) > 0;
       const hasActiveRateTable = Number(rateResult.rows[0]?.count ?? 0) > 0;
-      const profileVariantIds = new Set(profileResult.rows.map((row) => row.product_variant_id));
+      const packageDataVariantIds = new Set(packageDataResult.rows.map((row) => row.product_variant_id));
       productVariantIds.forEach((productVariantId) => readiness.set(productVariantId, {
-        hasPackageProfile: profileVariantIds.has(productVariantId),
+        hasCatalogPackageData: packageDataVariantIds.has(productVariantId),
         hasActiveBox,
         hasActiveRateTable,
       }));
@@ -709,6 +714,7 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     condition: row.condition,
     itemSpecifics: row.item_specifics,
     imageUrls: row.image_urls ?? [],
+    weightGrams: row.weight_grams,
   };
 }
 

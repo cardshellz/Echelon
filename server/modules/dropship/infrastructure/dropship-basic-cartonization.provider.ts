@@ -12,8 +12,8 @@ import {
 } from "../domain/shipping-quote";
 
 const BASIC_DROPSHIP_CARTONIZATION_ENGINE = {
-  name: "basic_db_package_profile_cartonization",
-  version: "1",
+  name: "basic_catalog_package_cartonization",
+  version: "2",
 } as const;
 
 interface PackageProfileRow {
@@ -70,12 +70,25 @@ export class BasicDropshipCartonizationProvider implements DropshipCartonization
     const client = await this.dbPool.connect();
     try {
       const result = await client.query<PackageProfileRow>(
-        `SELECT product_variant_id, weight_grams, length_mm, width_mm, height_mm,
-                ship_alone, default_carrier, default_service, default_box_id,
-                max_units_per_package
-         FROM dropship.dropship_package_profiles
-         WHERE product_variant_id = ANY($1::int[])
-           AND is_active = true`,
+        `SELECT pv.id AS product_variant_id,
+                pv.weight_grams,
+                pv.length_mm,
+                pv.width_mm,
+                pv.height_mm,
+                COALESCE(pp.ship_alone, false) AS ship_alone,
+                pp.default_carrier,
+                pp.default_service,
+                pp.default_box_id,
+                pp.max_units_per_package
+         FROM catalog.product_variants pv
+         LEFT JOIN dropship.dropship_package_profiles pp
+           ON pp.product_variant_id = pv.id
+          AND pp.is_active = true
+         WHERE pv.id = ANY($1::int[])
+           AND pv.weight_grams > 0
+           AND pv.length_mm > 0
+           AND pv.width_mm > 0
+           AND pv.height_mm > 0`,
         [productVariantIds],
       );
       return result.rows.map(mapPackageProfileRow);
