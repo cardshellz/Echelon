@@ -29,6 +29,10 @@ const WEBHOOKS_SRC = readFileSync(
   resolve(__dirname, "../../oms-webhooks.ts"),
   "utf8",
 );
+const OMS_SERVICE_SRC = readFileSync(
+  resolve(__dirname, "../../oms.service.ts"),
+  "utf8",
+);
 
 describe("oms-line-authority — non-authorizing events must not downgrade a fresh authorization", () => {
   it("orders/updated with FRESH previous (authorized) preserves authorization — the fix's premise", () => {
@@ -105,6 +109,24 @@ describe("oms-line-authority — non-authorizing events must not downgrade a fre
     );
     expect(authorizingBlock).toContain('"orders/paid"');
     expect(authorizingBlock).not.toContain('"orders/updated"');
+  });
+});
+
+describe("oms.service duplicate ingest", () => {
+  it("derives authority from a row-locked fresh read before updating an existing line", () => {
+    // Production regression: paid Shopify orders #60237/#60238/#60279/#60286
+    // were authorized by orders/paid, then concurrent orders/updated duplicate
+    // ingest wrote stale previous_paid_quantity=0 back over the line authority.
+    const marker = "const previousAuthority = lockedLine ?? existingLine";
+    const idx = OMS_SERVICE_SRC.indexOf(marker);
+    expect(idx).toBeGreaterThan(-1);
+    const block = OMS_SERVICE_SRC.slice(idx - 350, idx + 3600);
+
+    expect(block).toContain(".for(\"update\")");
+    expect(block).toContain(marker);
+    expect(block).toContain("buildLineAuthorityState(data, item, previousAuthority)");
+    expect(block).toContain("previous: previousAuthority");
+    expect(block).not.toContain("buildLineAuthorityState(data, item, existingLine)");
   });
 });
 
