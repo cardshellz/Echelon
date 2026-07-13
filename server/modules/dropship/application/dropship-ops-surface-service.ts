@@ -57,6 +57,7 @@ const dogfoodLaunchStatusInputSchema = z.object({
 export type SearchDropshipAuditEventsInput = z.infer<typeof searchAuditEventsInputSchema>;
 export type GetDropshipAdminOpsOverviewInput = z.infer<typeof adminOpsOverviewInputSchema>;
 export type DropshipDogfoodReadinessStatus = z.infer<typeof dogfoodReadinessStatusSchema>;
+export type DropshipSystemReadinessStatus = DropshipDogfoodReadinessStatus | "not_applicable";
 export type ListDropshipDogfoodReadinessInput = z.infer<typeof dogfoodReadinessInputSchema>;
 export type ListDropshipDogfoodSmokeInput = z.infer<typeof dogfoodSmokeInputSchema>;
 export type GetDropshipDogfoodLaunchStatusInput = z.infer<typeof dogfoodLaunchStatusInputSchema>;
@@ -174,7 +175,7 @@ export interface DropshipDogfoodReadinessCheck {
 export interface DropshipSystemReadinessCheck {
   key: string;
   label: string;
-  status: "ready" | "warning" | "blocked";
+  status: DropshipSystemReadinessStatus;
   message: string;
   requiredEnv: string[];
 }
@@ -1313,9 +1314,9 @@ function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadines
 function buildUsdcBaseFundingCheck(): DropshipSystemReadinessCheck {
   return {
     key: "usdc_base_funding",
-    label: "USDC Base funding",
-    status: "ready",
-    message: "USDC Base confirmed-transfer funding method registration, ledger capture, and admin confirmed-credit flow are available.",
+    label: "USDC on Base (optional)",
+    status: "not_applicable",
+    message: "USDC is a planned optional funding rail and does not affect launch readiness. Wallet registration and audited ledger foundations remain available; provider-backed chain verification is not configured.",
     requiredEnv: [],
   };
 }
@@ -1426,18 +1427,13 @@ export function buildDropshipSettingsSections(input: {
     input.wallet.availableBalanceCents > 0 || input.wallet.activeStripeFundingMethodCount > 0
       ? null
       : "stripe_funding_method_required",
-    input.wallet.activeUsdcBaseFundingMethodCount > 0
-      ? null
-      : "usdc_base_funding_method_required",
   ].filter((value): value is string => value !== null);
   const walletReady = walletBlockers.length === 0;
   const walletAttentionSummary = !input.wallet.autoReloadEnabled
     ? "Auto-reload needs setup."
     : !input.wallet.autoReloadFundingMethodReady
       ? "Auto-reload needs usable Stripe funding."
-      : input.wallet.activeUsdcBaseFundingMethodCount <= 0
-        ? "USDC Base funding needs setup."
-        : "Wallet funding needs setup.";
+      : "Wallet funding needs setup.";
 
   return [
     {
@@ -1462,7 +1458,7 @@ export function buildDropshipSettingsSections(input: {
       status: walletReady ? "ready" : "attention_required",
       comingSoon: false,
       summary: walletReady
-        ? "Wallet funding, USDC Base, and auto-reload ready."
+        ? "Wallet funding and auto-reload ready."
         : walletAttentionSummary,
       blockers: walletBlockers,
     },

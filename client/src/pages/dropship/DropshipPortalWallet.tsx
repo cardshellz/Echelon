@@ -733,8 +733,11 @@ function UsdcFundingMethodPanel({
     <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">USDC on Base</h2>
-          <p className="mt-1 text-sm text-zinc-500">Register the wallet address used for confirmed-transfer funding.</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">USDC on Base</h2>
+            <Badge variant="outline">Optional</Badge>
+          </div>
+          <p className="mt-1 text-sm text-zinc-500">Register a wallet address for optional confirmed-transfer funding. USDC is not used for auto-reload and is not required for launch.</p>
         </div>
         <Button
           type="button"

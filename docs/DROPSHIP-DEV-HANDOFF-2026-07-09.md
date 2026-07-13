@@ -28,7 +28,7 @@ Strategic (deep review §5):
 | D3 | **P3.2 synchronous reservation before first external vendor** | Batch 3 item 3.2 |
 | D4 | **eBay lists LIVE at push** | Batch 0 item 0.4 (code default + data flip) |
 | D5 | **Dropship reads package weight/dims from `catalog.product_variants`** | Batch 0 item 0.5 (before quote testing) |
-| D6 | **USDC descoped from launch** | Batch 0 item 0.6 (activation gate) + honest readiness check (Batch 3) |
+| D6 | **USDC is a planned optional rail, not a launch or activation requirement** | Batch 0 item 0.6 removes the gate and makes readiness honest; provider-backed verification remains a separate wallet milestone |
 | D7 | **Lapse/disconnect listing cleanup built during dogfood** + lapse-simulation test phase | Batch 1 |
 
 Margin-first catalog (design doc §5):
@@ -44,7 +44,7 @@ House pricing philosophy behind M1-M3: *show our numbers authoritatively; never 
 
 ## 2. Batch 0 — before resuming dogfood (small PRs, each independently shippable)
 
-Implementation status (2026-07-11):
+Implementation status (2026-07-13):
 
 | Item | Status |
 | --- | --- |
@@ -53,6 +53,7 @@ Implementation status (2026-07-11):
 | 0.3 | Implemented with strict error-shape matching, a deduplicated audit event, and cursor advancement after the remaining orders complete. Production verification remains. |
 | 0.4 | Code default implemented: new eBay configs use `live`; Shopify remains `draft_first`. The existing `marzcards` production config still requires an explicit post-deploy flip. |
 | 0.5 | Implemented: quote cartonization, listing/eBay push, and dogfood readiness use canonical Catalog Variant package data; dropship profiles are override-only. Production quote verification remains. |
+| 0.6 | Implemented: USDC is no longer an activation, settings, or dogfood-readiness requirement. The optional funding-method/ledger foundation remains, and provider-backed USDC is reported as not applicable to launch until configured. Production portal verification remains. |
 
 **0.1 eBay HTTP 400 must not tear down the store connection.** `isPermanentAuthFailureStatus` treats 400 as a permanent auth failure in BOTH `dropship-ebay-listing-push.provider.ts:428-430` and `dropship-ebay-tracking.provider.ts` (~:298); any eBay validation 400 then nulls token refs and deletes vault rows via `recordAuthFailure` (`dropship-marketplace-credentials.ts:237-262`), forcing full OAuth reconnect and blocking remaining job items. Fix: 401/403 only in both API-call paths (400 stays fatal only on the token-refresh endpoint = `invalid_grant`). Acceptance: unit test — eBay 400 on push/tracking fails the item without touching connection status/tokens. (Deep review §3.2.)
 
@@ -64,7 +65,7 @@ Implementation status (2026-07-11):
 
 **0.5 Dropship package data reads `catalog.product_variants` (D5).** Today the quote/cartonization path reads only `dropship.dropship_package_profiles` (`dropship-basic-cartonization.provider.ts:72-79`) while the PR #796 Catalog > Variants editor writes `catalog.product_variants` weight/dims (`catalog.routes.ts:1362-1398`) — no sync, so the dogfood handoff's step 3 currently does nothing. Fix: cartonization provider sources weight_grams/length_mm/width_mm/height_mm from `catalog.product_variants`; `dropship_package_profiles` keeps only dropship-specific fields (ship_alone, default_box_id, max_units_per_package) — treat profile dims as deprecated (read-through preference: catalog first). Listing-preview's `package_profile_required` blocker must gate on catalog dims presence instead. Needs its own test pass (this touches quote correctness right before the first quote validation): unit tests + one manual SHIPCFG-04/08 quote check. (§3.1.)
 
-**0.6 Remove the USDC activation gate (D6).** `walletReady` hard-requires a USDC funding method (`dropship-vendor-provisioning-service.ts:303-305`) and onboarding copy demands it (`DropshipPortalOnboarding.tsx:731,913-915`) — every vendor would need a crypto wallet to activate. Fix: drop `hasUsdcBaseFundingMethod` from the gate (keep spendable-or-stripe + auto-reload), update the two copy strings, keep the USDC panel as optional. Acceptance: provisioning unit test — walletReady true with Stripe+auto-reload and no USDC.
+**0.6 Remove the USDC activation gate (D6).** `walletReady` hard-requires a USDC funding method (`dropship-vendor-provisioning-service.ts:303-305`) and onboarding copy demands it (`DropshipPortalOnboarding.tsx:731,913-915`) — every vendor would need a crypto wallet to activate. Fix: drop `hasUsdcBaseFundingMethod` from the gate (keep spendable-or-stripe + auto-reload), remove USDC from vendor/admin launch blockers, update portal copy, keep the USDC panel as optional, and report provider-backed USDC as not applicable to launch until configured. Preserve all USDC funding-method and ledger foundations. Acceptance: provisioning unit test — walletReady true with Stripe+auto-reload and no USDC; settings and dogfood readiness do not block on USDC.
 
 **0.7 Config one-liners.** `heroku config:set TRUST_PROXY=true -a cardshellz-echelon` (session cookies currently issued without `Secure` — cookie flag keys off TRUST_PROXY, `server/index.ts:127`, while trust-proxy itself keys off NODE_ENV). Verify login after. Keep `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` pinned.
 
@@ -96,7 +97,7 @@ Three PRs, spec'd in detail there; the invariant to protect: **displayed cost = 
 
 **3.2 P3.2 synchronous reservation (D3).** Acceptance currently validates availability but reserves post-commit at WMS sync (in-code P0.1a comment, `dropship-order-acceptance.repository.ts:266-277`); the last-unit race leaves a debited vendor + on-hold WMS order with manual-only recovery. Implement the in-code plan: acceptance awaits the reservation before confirming. Unblocks the two §18 rollback tests (write them with it). Until it ships, ops runbook: admin `retry-wms-sync` + manual wallet credit.
 
-**3.3 Money/tracking safety nets.** (a) Tracking-push reconciliation is blind to dropship: sweep filters `c.provider IN ('ebay','shopify')` but the dropship channel is `manual`, and the dropship path never writes the `tracking_pushed` OMS event the sweep looks for (`oms-flow-reconciliation.service.ts:377-404`) — include the dropship channel and/or emit the event. (b) Pending ACH that fails after `processing` is never voided — phantom pending balance forever; add the void transition on `payment_intent.payment_failed` + a ledger-vs-aggregate reconciliation check. (c) Replace the two always-green readiness stubs (`split_shipment_handoff`, `usdc_base_funding` — the latter should reflect D6's descope) in `dropship-ops-surface-service.ts:1243,1313`.
+**3.3 Money/tracking safety nets.** (a) Tracking-push reconciliation is blind to dropship: sweep filters `c.provider IN ('ebay','shopify')` but the dropship channel is `manual`, and the dropship path never writes the `tracking_pushed` OMS event the sweep looks for (`oms-flow-reconciliation.service.ts:377-404`) — include the dropship channel and/or emit the event. (b) Pending ACH that fails after `processing` is never voided — phantom pending balance forever; add the void transition on `payment_intent.payment_failed` + a ledger-vs-aggregate reconciliation check. (c) Replace the always-green `split_shipment_handoff` readiness stub. The USDC readiness stub moves to an honest not-applicable launch status in item 0.6.
 
 **3.4 UX Batch A** (deep review §8.3 quick wins): hold→fund loop (open-holds banner on Wallet, "Fund now" CTA on held orders, handle the Stripe return query params that are currently ignored); pre-accept confirm with the quoted debit on the manual Accept path; pagination on Orders/Returns/ledger/alerts (all hardcoded page 1/limit 50); **passkey enrollment UI** (`registerPasskey` exists with zero callers — this is what makes step-up bearable); vendor-language pass + strip internals (idempotency key/request hash off the Returns detail, token internals off Settings); alerts unread badge in the shell; step-up scope relaxation (money actions keep 10-min proofs; selection/preferences get session-long).
 
@@ -113,7 +114,7 @@ My Listings page (needs a vendor GET-listings endpoint — none exists; pairs wi
 
 ## 8. Design-doc amendments (update `DROPSHIP-V2-CONSOLIDATED-DESIGN.md`)
 
-§3 auth → standalone credentials model (D1). §10 → USDC not launch-blocking (D6). §8 → allocation implemented via the channel allocation engine + channel rules as admin caps (D2). §14 → add My Listings page; specify the operating dashboard; add the notification deep-link contract and a vendor-facing error dictionary as build requirements (deep review §8.4). §7 → suggested retail = Card Shellz live retail (retail cache), margin display per M1/M4.
+§3 auth → standalone credentials model (D1). §10 → USDC is a planned optional rail and not launch-blocking (D6). §8 → allocation implemented via the channel allocation engine + channel rules as admin caps (D2). §14 → add My Listings page; specify the operating dashboard; add the notification deep-link contract and a vendor-facing error dictionary as build requirements (deep review §8.4). §7 → suggested retail = Card Shellz live retail (retail cache), margin display per M1/M4.
 
 ## 9. Working agreement
 

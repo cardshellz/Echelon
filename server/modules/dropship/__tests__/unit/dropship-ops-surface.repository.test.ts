@@ -358,7 +358,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
     });
   });
 
-  it("blocks dogfood readiness when USDC Base funding is not registered", async () => {
+  it("does not block dogfood readiness when optional USDC Base funding is not registered", async () => {
     const query = vi.fn(async () => ({
       rows: [makeDogfoodReadinessRow({
         active_usdc_base_funding_method_count: "0",
@@ -372,14 +372,11 @@ describe("PgDropshipOpsSurfaceRepository", () => {
       limit: 50,
     });
 
-    expect(result.items[0]?.readinessStatus).toBe("blocked");
+    expect(result.items[0]?.readinessStatus).toBe("ready");
     expect(result.items[0]?.metrics).toMatchObject({
       activeUsdcBaseFundingMethodCount: 0,
     });
-    expect(result.items[0]?.checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
-      status: "blocked",
-      message: "No active USDC Base funding method with a wallet address is registered.",
-    });
+    expect(result.items[0]?.checks.find((check) => check.key === "usdc_base_funding")).toBeUndefined();
   });
 
   it("marks dogfood notification readiness ready with launch defaults and no vendor overrides", async () => {

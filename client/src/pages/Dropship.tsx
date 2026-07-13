@@ -3028,7 +3028,7 @@ function WalletOpsTab() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold">Confirmed USDC transfer</h2>
-            <p className="text-sm text-muted-foreground">Admin-only settled credit for a verified Base transaction. Wallet ledger and USDC ledger are recorded atomically.</p>
+            <p className="text-sm text-muted-foreground">Optional admin-assisted rail. Independently verify the Base transfer before recording it; this flow does not query Base. Wallet and USDC ledgers are recorded atomically.</p>
           </div>
           <CircleDollarSign className="h-5 w-5 text-muted-foreground" />
         </div>
@@ -3180,7 +3180,7 @@ function WalletOpsTab() {
           onClick={creditConfirmedUsdc}
         >
           <CircleDollarSign className={pendingAction === "usdc" ? "h-4 w-4 animate-pulse" : "h-4 w-4"} />
-          Credit USDC
+          Record verified transfer
         </Button>
       </section>
     </div>
@@ -5400,6 +5400,7 @@ function SystemReadinessPanel({
 
   const blockedCount = checks.filter((check) => check.status === "blocked").length;
   const warningCount = checks.filter((check) => check.status === "warning").length;
+  const notApplicableCount = checks.filter((check) => check.status === "not_applicable").length;
 
   return (
     <section className="rounded-md border bg-card p-4">
@@ -5407,7 +5408,7 @@ function SystemReadinessPanel({
         <div>
           <h2 className="text-lg font-semibold">System prerequisites</h2>
           <p className="text-sm text-muted-foreground">
-            {blockedCount} blocked / {warningCount} warning
+            {blockedCount} blocked / {warningCount} warning / {notApplicableCount} not applicable
           </p>
         </div>
         <Badge variant="outline" className={systemReadinessTone(blockedCount, warningCount)}>
@@ -5422,11 +5423,11 @@ function SystemReadinessPanel({
                 <div className="font-medium">{check.label}</div>
                 <div className="mt-1 text-sm text-muted-foreground">{check.message}</div>
               </div>
-              <Badge variant="outline" className={dogfoodReadinessStatusTone(check.status)}>
+              <Badge variant="outline" className={systemReadinessCheckTone(check.status)}>
                 {formatStatus(check.status)}
               </Badge>
             </div>
-            {check.status !== "ready" && (
+            {check.requiredEnv.length > 0 && check.status !== "ready" && check.status !== "not_applicable" && (
               <div className="mt-2 text-xs text-muted-foreground">
                 Env: {check.requiredEnv.join(", ")}
               </div>
@@ -8737,6 +8738,11 @@ function dogfoodReadinessStatusTone(status: DropshipDogfoodReadinessStatus): str
   if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
   return "border-rose-200 bg-rose-50 text-rose-800";
+}
+
+function systemReadinessCheckTone(status: DropshipSystemReadinessCheck["status"]): string {
+  if (status === "not_applicable") return "border-zinc-200 bg-zinc-50 text-zinc-700";
+  return dogfoodReadinessStatusTone(status);
 }
 
 function workerSweepMessageForResponse(response: DropshipAdminWorkerSweepResponse): string {

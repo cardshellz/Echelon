@@ -77,7 +77,6 @@ describe("DropshipOpsSurfaceService", () => {
     expect(sections.find((section) => section.key === "wallet_payment")?.blockers).toEqual([
       "auto_reload_required",
       "stripe_funding_method_required",
-      "usdc_base_funding_method_required",
     ]);
   });
 
@@ -181,7 +180,7 @@ describe("DropshipOpsSurfaceService", () => {
     });
   });
 
-  it("requires USDC Base funding for the launch wallet settings section", () => {
+  it("does not require USDC Base funding for the launch wallet settings section", () => {
     const sections = buildDropshipSettingsSections({
       vendorStatus: "active",
       entitlementStatus: "active",
@@ -200,13 +199,13 @@ describe("DropshipOpsSurfaceService", () => {
     });
 
     expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
-      status: "attention_required",
-      summary: "USDC Base funding needs setup.",
-      blockers: ["usdc_base_funding_method_required"],
+      status: "ready",
+      summary: "Wallet funding and auto-reload ready.",
+      blockers: [],
     });
   });
 
-  it("marks launch wallet settings ready with Stripe-ready auto-reload and USDC Base funding even when balance is zero", () => {
+  it("keeps optional USDC funding from changing launch wallet readiness", () => {
     const sections = buildDropshipSettingsSections({
       vendorStatus: "active",
       entitlementStatus: "active",
@@ -226,7 +225,7 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
       status: "ready",
-      summary: "Wallet funding, USDC Base, and auto-reload ready.",
+      summary: "Wallet funding and auto-reload ready.",
       blockers: [],
     });
   });
@@ -255,7 +254,12 @@ describe("DropshipOpsSurfaceService", () => {
       SMTP_FROM: "Dropship Ops <dropship@example.test>",
     });
 
-    expect(checks.every((check) => check.status === "ready")).toBe(true);
+    expect(checks.every((check) => check.status === "ready" || check.status === "not_applicable")).toBe(true);
+    expect(checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
+      status: "not_applicable",
+      requiredEnv: [],
+      message: expect.stringContaining("planned optional funding rail"),
+    });
     expect(JSON.stringify(checks)).not.toContain("ebay-secret");
     expect(JSON.stringify(checks)).not.toContain("shopify-secret");
     expect(JSON.stringify(checks)).not.toContain("shipstation-secret");
@@ -308,7 +312,7 @@ describe("DropshipOpsSurfaceService", () => {
     });
     expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
-      status: "ready",
+      status: "not_applicable",
       requiredEnv: [],
     });
   });

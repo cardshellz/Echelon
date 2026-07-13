@@ -353,7 +353,7 @@ describe("DropshipVendorProvisioningService", () => {
     ]);
   });
 
-  it("marks wallet onboarding complete when Stripe-ready funding, USDC Base funding, and auto-reload are present", async () => {
+  it("marks wallet onboarding complete with Stripe-ready auto-reload and no USDC funding method", async () => {
     repository.vendor = makeVendorProfile({
       status: "active",
     });
@@ -362,7 +362,7 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
-      activeUsdcBaseFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 0,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
@@ -374,7 +374,7 @@ describe("DropshipVendorProvisioningService", () => {
     expect(state.wallet).toMatchObject({
       hasSpendableBalance: false,
       hasStripeReadyFundingMethod: true,
-      hasUsdcBaseFundingMethod: true,
+      hasUsdcBaseFundingMethod: false,
       autoReloadConfigured: true,
       walletReady: true,
     });
@@ -414,7 +414,7 @@ describe("DropshipVendorProvisioningService", () => {
     });
   });
 
-  it("keeps wallet onboarding incomplete when USDC Base funding is missing", async () => {
+  it("keeps wallet onboarding incomplete when auto-reload is missing even with spendable balance", async () => {
     repository.vendor = makeVendorProfile({
       status: "active",
     });
@@ -424,10 +424,10 @@ describe("DropshipVendorProvisioningService", () => {
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
       activeUsdcBaseFundingMethodCount: 0,
-      autoReloadEnabled: true,
-      autoReloadFundingMethodId: 8,
-      autoReloadFundingMethodActive: true,
-      autoReloadFundingMethodReady: true,
+      autoReloadEnabled: false,
+      autoReloadFundingMethodId: null,
+      autoReloadFundingMethodActive: false,
+      autoReloadFundingMethodReady: false,
     };
 
     const state = await service.getOnboardingState("member-1");
@@ -436,7 +436,7 @@ describe("DropshipVendorProvisioningService", () => {
       hasSpendableBalance: true,
       hasStripeReadyFundingMethod: true,
       hasUsdcBaseFundingMethod: false,
-      autoReloadConfigured: true,
+      autoReloadConfigured: false,
       walletReady: false,
     });
     expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({

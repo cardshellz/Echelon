@@ -1118,7 +1118,6 @@ function mapDogfoodReadinessRow(row: DogfoodReadinessRow): DropshipDogfoodReadin
     walletAvailableBalanceCents,
     activeFundingMethodCount,
     activeStripeFundingMethodCount,
-    activeUsdcBaseFundingMethodCount,
     autoReloadFundingMethodReady,
     notificationPreferenceCount,
   });
@@ -1518,7 +1517,6 @@ function buildDogfoodChecks(input: {
   walletAvailableBalanceCents: number;
   activeFundingMethodCount: number;
   activeStripeFundingMethodCount: number;
-  activeUsdcBaseFundingMethodCount: number;
   autoReloadFundingMethodReady: boolean;
   notificationPreferenceCount: number;
 }): DropshipDogfoodReadinessCheck[] {
@@ -1662,14 +1660,6 @@ function buildDogfoodChecks(input: {
           : input.activeFundingMethodCount > 0
             ? "Wallet has active funding method(s), but none are Stripe card/ACH methods ready for wallet funding."
             : "Wallet has no available balance or active funding method.",
-    },
-    {
-      key: "usdc_base_funding",
-      label: "USDC Base funding",
-      status: input.activeUsdcBaseFundingMethodCount > 0 ? "ready" : "blocked",
-      message: input.activeUsdcBaseFundingMethodCount > 0
-        ? `${input.activeUsdcBaseFundingMethodCount} active USDC Base funding method(s) registered.`
-        : "No active USDC Base funding method with a wallet address is registered.",
     },
     {
       key: "auto_reload",

@@ -301,8 +301,7 @@ export function buildOnboardingState(input: {
     && input.wallet.autoReloadFundingMethodReady;
   const hasSpendableBalance = input.wallet.availableBalanceCents > 0;
   const walletReady = (hasSpendableBalance || hasStripeReadyFundingMethod)
-    && autoReloadConfigured
-    && hasUsdcBaseFundingMethod;
+    && autoReloadConfigured;
 
   return {
     vendor: input.vendor,

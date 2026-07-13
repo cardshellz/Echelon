@@ -58,7 +58,7 @@ Required capabilities:
 - eBay live listings after vendor approval.
 - Shared Dropship allocation pool.
 - Admin-configured marketplace quantity caps.
-- Wallet with ACH, card, and USDC funding rails.
+- Wallet with ACH and card funding rails.
 - Auto-reload required.
 - Real cost-based shipping quote using admin-managed rate tables.
 - Multiwarehouse quote and reservation alignment.
@@ -73,6 +73,7 @@ Likely capabilities:
 
 - Stronger onboarding automation.
 - Better admin setup checks and blockers.
+- Optional provider-backed USDC funding on Base.
 - Wallet statements and receipts.
 - Expanded operational dashboards.
 - Return and claim workflow refinement.
@@ -401,6 +402,9 @@ Funding rails at launch:
 
 - Stripe ACH.
 - Stripe card.
+
+Planned optional funding rail:
+
 - USDC on Base.
 
 Wallet rules:
@@ -410,7 +414,8 @@ Wallet rules:
 - Echelon wallet ledger is authoritative for spendable balance.
 - Funding rails create ledger entries; they do not replace the ledger.
 - Wallet must track available and pending balances.
-- Card and USDC can become available after confirmed success.
+- Card can become available after confirmed success.
+- USDC can become available only after a provider-backed Base transfer is verified and credited to the ledger.
 - ACH becomes available only after settlement.
 - Wallet debit and inventory reservation happen as one atomic acceptance unit.
 
@@ -427,8 +432,11 @@ Payment hold:
 
 USDC:
 
-- USDC on Base is launch-blocking.
-- Implementation should support allowance/pull or equivalent confirmed transfer flow.
+- USDC on Base is optional and must not block vendor activation or launch readiness.
+- Existing wallet-address registration, atomic-unit transaction records, idempotency, audit, and wallet-ledger foundations remain part of the platform.
+- Customer-facing USDC funding is not considered available until provider-backed chain verification and the custody/settlement model are implemented.
+- Implementation should support allowance/pull or an equivalent verified transfer flow.
+- Wallet credit must be derived from verified transfer data under an explicit USDC-to-USD accounting policy; operators must not enter independent USD and atomic-unit amounts as the production settlement source.
 - The ledger, not the chain event alone, remains the spendability source.
 
 ---
@@ -891,7 +899,7 @@ These are not conceptual design blockers, but must be specified during implement
 - Exact Dropship OMS channel lookup key or configuration mechanism.
 - Exact Echelon catalog fields used for product line/category selection.
 - Exact multiwarehouse allocation and reservation API integration.
-- Exact USDC smart contract and custody/settlement flow.
+- Exact USDC provider, smart contract, custody, settlement, confirmation/reorg, and refund flow for the planned optional rail.
 - Exact notification provider for email.
 - Exact PDF receipt/statement generator.
 - Exact frontend state/routing/form libraries.
