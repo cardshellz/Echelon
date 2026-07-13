@@ -28,6 +28,24 @@ export function resolveFlowReplayAction(
   if (!issue.replaySafe) return null;
 
   if (issue.code === "OMS_PAID_WITHOUT_WMS") {
+    const replayOutcome = typeof evidence._replay_outcome === "string"
+      ? evidence._replay_outcome
+      : null;
+    if (replayOutcome === "failed") {
+      const retryQueueId = positiveInteger(evidence._replay_retry_id);
+      return retryQueueId === null
+        ? null
+        : {
+            kind: "webhook_retry",
+            sourceId: retryQueueId,
+            endpoint: `/api/oms/ops/webhook-retry/${retryQueueId}/requeue`,
+            label: "Retry failed replay",
+            pendingLabel: "Requeuing replay",
+            successTitle: "Paid event replay requeued",
+          };
+    }
+    if (replayOutcome !== null) return null;
+
     const omsOrderId = positiveInteger(evidence.oms_order_id);
     const sourceInboxId = positiveInteger(evidence._replay_source_inbox_id);
     return omsOrderId === null || sourceInboxId === null

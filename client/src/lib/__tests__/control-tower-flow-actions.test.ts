@@ -29,6 +29,40 @@ describe("resolveFlowReplayAction", () => {
     })).toBeNull();
   });
 
+  it.each(["queued", "retrying", "succeeded", "unresolved", "unknown"])(
+    "does not offer another paid replay while the latest replay is %s",
+    (outcome) => {
+      expect(resolveFlowReplayAction(
+        { code: "OMS_PAID_WITHOUT_WMS", replaySafe: true },
+        {
+          oms_order_id: 255347,
+          _replay_source_inbox_id: 79377,
+          _replay_outcome: outcome,
+          _replay_retry_id: 116708,
+        },
+      )).toBeNull();
+    },
+  );
+
+  it("requeues the failed retry row instead of creating another paid replay", () => {
+    expect(resolveFlowReplayAction(
+      { code: "OMS_PAID_WITHOUT_WMS", replaySafe: true },
+      {
+        oms_order_id: 255347,
+        _replay_source_inbox_id: null,
+        _replay_outcome: "failed",
+        _replay_retry_id: 116708,
+      },
+    )).toEqual({
+      kind: "webhook_retry",
+      sourceId: 116708,
+      endpoint: "/api/oms/ops/webhook-retry/116708/requeue",
+      label: "Retry failed replay",
+      pendingLabel: "Requeuing replay",
+      successTitle: "Paid event replay requeued",
+    });
+  });
+
   it("maps a replay-safe failed inbox row to the existing OMS replay endpoint", () => {
     expect(resolveFlowReplayAction(
       { code: "WEBHOOK_INBOX_FAILED", replaySafe: true },
