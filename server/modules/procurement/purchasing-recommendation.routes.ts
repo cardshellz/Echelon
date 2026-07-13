@@ -499,6 +499,13 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
     orderUomLabel: string;
     estimatedCostMills: number | null;
     estimatedCostCents: number | null;
+    pricingBasis: PurchasingRecommendationItem["supplierBasis"]["pricingBasis"];
+    purchaseUom: string | null;
+    quotedUnitCostMills: number | null;
+    piecesPerPurchaseUom: number | null;
+    quoteReference: string | null;
+    quotedAt: string | Date | null;
+    quoteValidUntil: string | null;
     supplierBasis: PurchasingRecommendationItem["supplierBasis"];
     candidateScore: PurchasingRecommendationItem["recommendationCandidateScore"];
     qualityGate: PurchasingRecommendationItem["qualityGate"];
@@ -530,6 +537,13 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
       orderUomLabel: item.orderUomLabel,
       estimatedCostMills: item.estimatedCostMills,
       estimatedCostCents: item.estimatedCostCents,
+      pricingBasis: item.supplierBasis.pricingBasis,
+      purchaseUom: item.supplierBasis.purchaseUom,
+      quotedUnitCostMills: item.supplierBasis.quotedUnitCostMills,
+      piecesPerPurchaseUom: item.supplierBasis.piecesPerPurchaseUom,
+      quoteReference: item.supplierBasis.quoteReference,
+      quotedAt: item.supplierBasis.quotedAt,
+      quoteValidUntil: item.supplierBasis.quoteValidUntil,
       supplierBasis: item.supplierBasis,
       candidateScore: item.recommendationCandidateScore,
       qualityGate: item.qualityGate,
@@ -699,6 +713,13 @@ function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: Retu
         orderUomLabel: sourceItem.orderUomLabel ?? "units",
         estimatedCostMills: sourceItem.estimatedCostMills ?? sourceItem.supplierBasis?.estimatedCostMills ?? null,
         estimatedCostCents: sourceItem.estimatedCostCents ?? sourceItem.supplierBasis?.estimatedCostCents ?? null,
+        pricingBasis: sourceItem.pricingBasis ?? sourceItem.supplierBasis?.pricingBasis ?? "legacy_unknown",
+        purchaseUom: sourceItem.purchaseUom ?? sourceItem.supplierBasis?.purchaseUom ?? null,
+        quotedUnitCostMills: sourceItem.quotedUnitCostMills ?? sourceItem.supplierBasis?.quotedUnitCostMills ?? null,
+        piecesPerPurchaseUom: sourceItem.piecesPerPurchaseUom ?? sourceItem.supplierBasis?.piecesPerPurchaseUom ?? null,
+        quoteReference: sourceItem.quoteReference ?? sourceItem.supplierBasis?.quoteReference ?? null,
+        quotedAt: sourceItem.quotedAt ?? sourceItem.supplierBasis?.quotedAt ?? null,
+        quoteValidUntil: sourceItem.quoteValidUntil ?? sourceItem.supplierBasis?.quoteValidUntil ?? null,
         supplierBasis: sourceItem.supplierBasis ?? null,
         candidateScore,
         qualityGate: currentItem?.qualityGate ?? snapshotItem.qualityGate ?? null,
@@ -734,6 +755,11 @@ function buildAcceptedRecommendationReviewQueue(decisionRows: any[], queue: Retu
 }
 
 function recommendationEconomicBasis(item: any) {
+  const rawQuotedAt = item?.quotedAt ?? item?.supplierBasis?.quotedAt ?? null;
+  const parsedQuotedAt = rawQuotedAt ? new Date(rawQuotedAt) : null;
+  const rawMinimumOrderPieces = item?.minimumOrderPieces ??
+    item?.supplierBasis?.minimumOrderPieces ??
+    null;
   return {
     productId: Number(item?.productId),
     productVariantId: Number(item?.productVariantId),
@@ -744,7 +770,36 @@ function recommendationEconomicBasis(item: any) {
     orderUomUnits: Number(item?.orderUomUnits),
     estimatedCostMills: item?.estimatedCostMills ?? item?.supplierBasis?.estimatedCostMills ?? null,
     estimatedCostCents: item?.estimatedCostCents ?? item?.supplierBasis?.estimatedCostCents ?? null,
+    pricingBasis: item?.pricingBasis ?? item?.supplierBasis?.pricingBasis ?? "legacy_unknown",
+    purchaseUom: item?.purchaseUom ?? item?.supplierBasis?.purchaseUom ?? null,
+    quotedUnitCostMills: item?.quotedUnitCostMills ?? item?.supplierBasis?.quotedUnitCostMills ?? null,
+    piecesPerPurchaseUom: item?.piecesPerPurchaseUom ?? item?.supplierBasis?.piecesPerPurchaseUom ?? null,
+    minimumOrderPieces: rawMinimumOrderPieces === null ? null : Number(rawMinimumOrderPieces),
+    quoteReference: item?.quoteReference ?? item?.supplierBasis?.quoteReference ?? null,
+    quotedAt: parsedQuotedAt && !Number.isNaN(parsedQuotedAt.getTime()) ? parsedQuotedAt.toISOString() : null,
+    quoteValidUntil: item?.quoteValidUntil ?? item?.supplierBasis?.quoteValidUntil ?? null,
   };
+}
+
+function hasCompleteExplicitRecommendationQuote(item: any): boolean {
+  const basis = recommendationEconomicBasis(item);
+  if (!basis.quotedAt) return false;
+  if (basis.pricingBasis === "per_piece") {
+    return Number.isSafeInteger(Number(basis.quotedUnitCostMills)) &&
+      Number(basis.quotedUnitCostMills) >= 0 &&
+      basis.purchaseUom === null &&
+      basis.piecesPerPurchaseUom === null;
+  }
+  return basis.pricingBasis === "per_purchase_uom" &&
+    typeof basis.purchaseUom === "string" &&
+    basis.purchaseUom.trim().length > 0 &&
+    Number.isSafeInteger(Number(basis.quotedUnitCostMills)) &&
+    Number(basis.quotedUnitCostMills) >= 0 &&
+    Number.isSafeInteger(Number(basis.piecesPerPurchaseUom)) &&
+    Number(basis.piecesPerPurchaseUom) > 0 &&
+    Number.isSafeInteger(Number(basis.suggestedOrderPieces)) &&
+    Number(basis.suggestedOrderPieces) > 0 &&
+    Number(basis.suggestedOrderPieces) % Number(basis.piecesPerPurchaseUom) === 0;
 }
 
 function changedRecommendationEconomicFields(currentItem: any, acceptedItem: any): string[] {
@@ -1061,6 +1116,15 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           const handoffItem = item.acceptedItem;
           if (!handoffItem || typeof handoffItem !== "object") {
             skipped.push(buildAcceptedRecommendationHandoffSkipped(selection, "accepted_snapshot_incomplete", item));
+            continue;
+          }
+          if (!hasCompleteExplicitRecommendationQuote(handoffItem)) {
+            skipped.push(buildAcceptedRecommendationHandoffSkipped(
+              selection,
+              "supplier_quote_basis_review_required",
+              item,
+              { pricingBasis: recommendationEconomicBasis(handoffItem).pricingBasis },
+            ));
             continue;
           }
           const changedEconomicFields = changedRecommendationEconomicFields(item, handoffItem);

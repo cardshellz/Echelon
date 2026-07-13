@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { productVariants, products, vendorProducts, vendors } from "@shared/schema";
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22,7 +23,11 @@ function buildInsertChain(returnValue: any[] = []) {
   };
 }
 
-function buildMockDb(headerReturn: any, captureInserts: any[]) {
+function buildMockDb(
+  headerReturn: any,
+  captureInserts: any[],
+  references: { product?: any; variant?: any } = {},
+) {
   const txInsert = vi.fn((table: any) => {
     const chain = {
       values: vi.fn((rows: any) => {
@@ -36,10 +41,52 @@ function buildMockDb(headerReturn: any, captureInserts: any[]) {
     };
     return chain;
   });
+  const rowsFor = (table: unknown): any[] => {
+    if (table === vendors) {
+      return [{ id: 1, active: 1, currency: "USD" }];
+    }
+    if (table === products) {
+      return [{
+        id: 1,
+        sku: "PRODUCT-SKU-1",
+        name: "Product 1",
+        isActive: true,
+        ...references.product,
+      }];
+    }
+    if (table === productVariants) {
+      return [{
+        id: 11,
+        productId: 1,
+        sku: "SKU-1",
+        name: "case size",
+        unitsPerVariant: 1,
+        isActive: true,
+        ...references.variant,
+      }];
+    }
+    if (table === vendorProducts) return [];
+    return [];
+  };
   const tx = {
     insert: txInsert,
     update: vi.fn(),
-    select: vi.fn(),
+    select: vi.fn(() => {
+      let table: unknown;
+      const chain: any = {
+        from: vi.fn((value: unknown) => {
+          table = value;
+          return chain;
+        }),
+        where: vi.fn(() => chain),
+        limit: vi.fn(() => chain),
+        orderBy: vi.fn(() => chain),
+        for: vi.fn(async () => rowsFor(table)),
+        then: (resolve: any, reject: any) =>
+          Promise.resolve(rowsFor(table)).then(resolve, reject),
+      };
+      return chain;
+    }),
   };
   return {
     insert: vi.fn().mockReturnValue(buildInsertChain()),
@@ -142,10 +189,10 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
       expect(row.packagingCostCents).toBe(117000);
       // Line total = goods + packaging (exact)
       expect(row.lineTotalCents).toBe(1277000);
-      // Derived unit cost from subtotal (product + packaging):
-      // 1277000 * 100 / 200000 = 638.5 → 639 mills (half-up)
-      expect(row.unitCostMills).toBe(639);
-      // Derived cents: 1277000 / 200000 = 6.385 → 6 cents (half-up)
+      // Derived unit quote excludes the separately stored packaging charge:
+      // 1160000 * 100 / 200000 = 580 mills.
+      expect(row.unitCostMills).toBe(580);
+      // Derived cents: 1160000 / 200000 = 5.8 → 6 cents (half-up)
       expect(row.unitCostCents).toBe(6);
     });
 
@@ -166,7 +213,14 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
         }),
       });
       svc = createPurchasingService(
-        buildMockDb({ id: 42 }, captureInserts),
+        buildMockDb({ id: 42 }, captureInserts, {
+          product: { sku: "PRODUCT-SKU" },
+          variant: {
+            sku: "VARIANT-SKU-C1000",
+            name: "Case of 1000",
+            unitsPerVariant: 1000,
+          },
+        }),
         storage,
       );
 
@@ -205,7 +259,11 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
         }),
       });
       svc = createPurchasingService(
-        buildMockDb({ id: 42 }, captureInserts),
+        buildMockDb(
+          { id: 42 },
+          captureInserts,
+          { product: { sku: "PRODUCT-SKU" } },
+        ),
         storage,
       );
 
@@ -357,9 +415,10 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
       expect(row.totalProductCostCents).toBe(500);
       expect(row.packagingCostCents).toBe(50);
       expect(row.lineTotalCents).toBe(550);
-      // Derived from subtotal (product + packaging), NOT from old 375 mills
-      // (500 + 50) * 100 / 100 = 550 mills
-      expect(row.unitCostMills).toBe(550);
+      // Derived from the goods total, NOT from old 375 mills; packaging stays
+      // as a separate exact-cent layer and is not folded into the unit quote.
+      // 500 * 100 / 100 = 500 mills
+      expect(row.unitCostMills).toBe(500);
     });
   });
 

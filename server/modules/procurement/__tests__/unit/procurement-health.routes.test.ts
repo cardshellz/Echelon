@@ -245,6 +245,7 @@ describe("procurement health routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         estimated_cost_cents: 125,
+        vendor_quoted_at: "2026-05-20T00:00:00.000Z",
         vendor_product_updated_at: "2026-05-20T00:00:00.000Z",
       },
     ]);

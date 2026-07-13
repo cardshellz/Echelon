@@ -1,5 +1,50 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  purchaseOrderLines,
+  purchaseOrders,
+  purchasingRecommendationPoHandoffs,
+} from "@shared/schema";
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+
+const VERSION = new Date("2026-07-13T12:00:00.000Z");
+
+function recommendationOwnedLineDb() {
+  const rowsFor = (table: unknown) => {
+    if (table === purchaseOrderLines) return [{ id: 51, purchaseOrderId: 41 }];
+    if (table === purchaseOrders) {
+      return [{
+        id: 41,
+        status: "draft",
+        physicalStatus: "draft",
+        financialStatus: "unbilled",
+        invoicedTotalCents: 0,
+        paidTotalCents: 0,
+        updatedAt: VERSION,
+      }];
+    }
+    if (table === purchasingRecommendationPoHandoffs) return [{ id: 92 }];
+    return [];
+  };
+  const tx = {
+    select: vi.fn(() => {
+      let table: unknown;
+      const builder: any = {
+        from: vi.fn((nextTable: unknown) => {
+          table = nextTable;
+          return builder;
+        }),
+        where: vi.fn(() => builder),
+        limit: vi.fn(() => builder),
+        for: vi.fn(async () => rowsFor(table)),
+        then: (resolve: (rows: unknown[]) => unknown) => resolve(rowsFor(table)),
+      };
+      return builder;
+    }),
+  };
+  return {
+    transaction: vi.fn((work: (transaction: typeof tx) => Promise<unknown>) => work(tx)),
+  };
+}
 
 describe("recommendation PO handoff delete guards", () => {
   it("blocks hard deletion of a mapped draft PO", async () => {
@@ -18,38 +63,34 @@ describe("recommendation PO handoff delete guards", () => {
     expect(storage.deletePurchaseOrder).not.toHaveBeenCalled();
   });
 
-  it("blocks hard deletion of a mapped recommendation line", async () => {
-    const storage = {
-      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 51, purchaseOrderId: 41 }),
-      getPurchaseOrderById: vi.fn().mockResolvedValue({ id: 41, status: "draft" }),
-      getRecommendationPoHandoffForLine: vi.fn().mockResolvedValue({ id: 92, purchaseOrderLineId: 51 }),
-      deletePurchaseOrderLine: vi.fn(),
-    };
-    const service = createPurchasingService({} as any, storage as any);
+  it("blocks soft cancellation of a recommendation-owned line", async () => {
+    const db = recommendationOwnedLineDb();
+    const service = createPurchasingService(db as any, {} as any);
 
-    await expect(service.deleteLine(51, "admin-user")).rejects.toMatchObject<PurchasingError>({
+    await expect(service.deleteLine(51, {
+      expectedPoUpdatedAt: VERSION.toISOString(),
+      expectedLineUpdatedAt: VERSION.toISOString(),
+      reason: "Operator requested removal",
+    }, "admin-user")).rejects.toMatchObject<PurchasingError>({
       statusCode: 409,
-      message: "Cannot delete a recommendation-created PO line; cancel the PO and accept a new recommendation",
-      details: { code: "RECOMMENDATION_PO_LINE_DELETE_BLOCKED", handoffId: 92 },
+      message: "Recommendation-created purchase orders must be cancelled and regenerated instead of edited",
+      details: { code: "RECOMMENDATION_PO_LINE_AMEND_BLOCKED", handoffId: 92 },
     });
-    expect(storage.deletePurchaseOrderLine).not.toHaveBeenCalled();
   });
 
   it("blocks amendments that would detach a mapped line from its accepted economics", async () => {
-    const storage = {
-      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 51, purchaseOrderId: 41 }),
-      getPurchaseOrderById: vi.fn().mockResolvedValue({ id: 41, status: "draft" }),
-      getRecommendationPoHandoffForLine: vi.fn().mockResolvedValue({ id: 92, purchaseOrderLineId: 51 }),
-      updatePurchaseOrderLine: vi.fn(),
-    };
-    const service = createPurchasingService({} as any, storage as any);
+    const db = recommendationOwnedLineDb();
+    const service = createPurchasingService(db as any, {} as any);
 
-    await expect(service.updateLine(51, { unitCostCents: 99 }, "admin-user")).rejects.toMatchObject<PurchasingError>({
+    await expect(service.updateLine(51, {
+      expectedPoUpdatedAt: VERSION.toISOString(),
+      expectedLineUpdatedAt: VERSION.toISOString(),
+      notes: "Attempted edit",
+    }, "admin-user")).rejects.toMatchObject<PurchasingError>({
       statusCode: 409,
-      message: "Cannot amend a recommendation-created PO line; cancel the PO and accept a new recommendation",
+      message: "Recommendation-created purchase orders must be cancelled and regenerated instead of edited",
       details: { code: "RECOMMENDATION_PO_LINE_AMEND_BLOCKED", handoffId: 92 },
     });
-    expect(storage.updatePurchaseOrderLine).not.toHaveBeenCalled();
   });
 
   it("preserves hard deletion behavior for unmapped manual drafts", async () => {

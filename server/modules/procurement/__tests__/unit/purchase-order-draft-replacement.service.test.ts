@@ -2,8 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   poEvents,
+  products,
+  productVariants,
   purchaseOrderLines,
   purchaseOrders,
+  purchasingRecommendationPoHandoffs,
+  vendorProducts,
+  vendors,
 } from "@shared/schema";
 import {
   createPurchasingService,
@@ -154,7 +159,9 @@ function buildStorage() {
 type HarnessOptions = {
   currentPo?: Record<string, unknown> | null;
   existingLines?: Record<string, unknown>[];
+  vendorProductRows?: Record<string, unknown>[];
   eventError?: Error;
+  downstreamRows?: Array<{ line_id: number; blocker: string }>;
 };
 
 function buildDb(options: HarnessOptions = {}) {
@@ -162,17 +169,56 @@ function buildDb(options: HarnessOptions = {}) {
   const currentLines = options.existingLines ?? [existingLine(10, 1), existingLine(11, 2)];
   const updates: Array<{ table: unknown; patch: Record<string, unknown> }> = [];
   const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
-  let selectIndex = 0;
   let nextLineId = 99;
 
+  const rowsFor = (table: unknown) => {
+    if (table === purchaseOrders) return currentPo ? [currentPo] : [];
+    if (table === purchasingRecommendationPoHandoffs) return [];
+    if (table === purchaseOrderLines) return currentLines;
+    if (table === vendors) {
+      return [{
+        id: 1,
+        active: 1,
+        currency: "USD",
+        paymentTermsDays: 45,
+        paymentTermsType: "net",
+        shipFromAddress: "New address",
+      }];
+    }
+    if (table === products) {
+      return [{ id: 7, sku: "SKU-7", name: "Product 7", isActive: true }];
+    }
+    if (table === productVariants) {
+      return [{
+        id: 70,
+        productId: 7,
+        sku: "SKU-7-P100",
+        name: "Pack of 100",
+        unitsPerVariant: 100,
+        isActive: true,
+      }];
+    }
+    if (table === vendorProducts) return options.vendorProductRows ?? [];
+    return [];
+  };
+
   const tx: any = {
+    execute: vi.fn().mockResolvedValue({ rows: options.downstreamRows ?? [] }),
     select: vi.fn(() => {
-      const rows = selectIndex++ === 0 ? (currentPo ? [currentPo] : []) : currentLines;
+      let table: unknown;
       const builder: any = {
-        from: vi.fn(() => builder),
+        from: vi.fn((nextTable: unknown) => {
+          table = nextTable;
+          return builder;
+        }),
         where: vi.fn(() => builder),
         limit: vi.fn(() => builder),
-        for: vi.fn().mockResolvedValue(rows),
+        orderBy: vi.fn(() => builder),
+        for: vi.fn(async () => rowsFor(table)),
+        then: (
+          resolve: (value: unknown) => unknown,
+          reject?: (reason: unknown) => unknown,
+        ) => Promise.resolve(rowsFor(table)).then(resolve, reject),
       };
       return builder;
     }),
@@ -398,6 +444,159 @@ describe("draft PO full replacement", () => {
       details: { code: "PO_DRAFT_LINE_HAS_ACTIVITY", line_id: 10 },
     });
     expect(harness.updates).toEqual([]);
+  });
+
+  it("rejects line replacement when downstream records exist despite clean counters", async () => {
+    const harness = buildDb({
+      downstreamRows: [{ line_id: 10, blocker: "vendor_invoice_lines" }],
+    });
+    const service = createPurchasingService(harness.db, storage);
+
+    await expect(
+      service.updateDraftPurchaseOrderWithLines(42, updateInput(), "user-9"),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      details: {
+        code: "PO_DRAFT_LINE_DOWNSTREAM_LINKS",
+        blockers: [{ lineId: 10, blocker: "vendor_invoice_lines" }],
+      },
+    });
+    expect(harness.updates).toEqual([]);
+    expect(harness.inserts).toEqual([]);
+  });
+
+  it("rejects client-forged recommendation provenance before DB access", async () => {
+    const harness = buildDb();
+    const service = createPurchasingService(harness.db, storage);
+    const input = updateInput({
+      lines: [{
+        lineId: 10,
+        lineType: "product",
+        productId: 7,
+        productVariantId: 70,
+        expectedReceiveVariantId: 70,
+        expectedReceiveUnitsPerVariant: 100,
+        orderQty: 10,
+        pricing: {
+          basis: "per_piece",
+          quantityPieces: 10,
+          unitCostMills: 10_000,
+        },
+        pricingSource: "recommendation",
+      }],
+    });
+
+    await expect(
+      service.updateDraftPurchaseOrderWithLines(42, input, "user-9"),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      details: { code: "PO_LINE_PRICING_SOURCE_FORBIDDEN" },
+    });
+    expect(harness.db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects a materially future-dated manual quote before DB access", async () => {
+    const harness = buildDb();
+    const service = createPurchasingService(harness.db, storage, {
+      now: () => new Date(FIXED_NOW.getTime()),
+    });
+
+    await expect(
+      service.updateDraftPurchaseOrderWithLines(42, updateInput({
+        lines: [{
+          lineId: 10,
+          lineType: "product",
+          productId: 7,
+          productVariantId: 70,
+          expectedReceiveVariantId: 70,
+          expectedReceiveUnitsPerVariant: 100,
+          orderQty: 10,
+          pricing: {
+            basis: "per_piece",
+            quantityPieces: 10,
+            unitCostMills: 10_000,
+          },
+          pricingSource: "manual",
+          quotedAt: new Date("2026-07-12T00:00:00.000Z"),
+        }],
+      }), "user-9"),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      details: { code: "PO_LINE_QUOTED_AT_IN_FUTURE", lineIndex: 0 },
+    });
+    expect(harness.db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expired or stale catalog quote again under the transaction lock", async () => {
+    const catalogRow = {
+      id: 501,
+      vendorId: 1,
+      productId: 7,
+      productVariantId: 70,
+      isActive: 1,
+      pricingBasis: "per_piece",
+      quotedUnitCostMills: 10_000,
+      unitCostMills: 10_000,
+      unitCostCents: 100,
+      quoteReference: "Q-OLD",
+      quotedAt: new Date("2024-01-01T00:00:00.000Z"),
+      quoteValidUntil: null,
+    };
+    storage.getVendorProductById.mockResolvedValue(catalogRow);
+    const harness = buildDb({ vendorProductRows: [catalogRow] });
+    const service = createPurchasingService(harness.db, storage, {
+      now: () => new Date(FIXED_NOW.getTime()),
+    });
+
+    await expect(
+      service.updateDraftPurchaseOrderWithLines(
+        42,
+        updateInput({
+          lines: [{
+            lineId: 10,
+            clientId: "product-10",
+            lineType: "product",
+            productId: 7,
+            productVariantId: 70,
+            expectedReceiveVariantId: 70,
+            expectedReceiveUnitsPerVariant: 100,
+            vendorProductId: 501,
+            orderQty: 10,
+            pricingSource: "vendor_catalog",
+            pricing: {
+              basis: "per_piece",
+              quantityPieces: 10,
+              unitCostMills: 10_000,
+            },
+          }],
+        }),
+        "user-9",
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      details: { code: "PO_LINE_VENDOR_CATALOG_QUOTE_STALE", vendorProductId: 501 },
+    });
+    expect(harness.updates).toEqual([]);
+    expect(harness.inserts).toEqual([]);
+  });
+
+  it("advances the draft version even when the injected clock has not moved", async () => {
+    const harness = buildDb({ existingLines: [] });
+    const service = createPurchasingService(harness.db, storage, {
+      now: () => new Date(CURRENT_VERSION.getTime()),
+    });
+    const input = updateInput({
+      lines: [{
+        clientId: "fee-new",
+        lineType: "fee",
+        description: "Tooling",
+        orderQty: 1,
+        unitCostMills: 250_000,
+      }],
+    });
+
+    const result = await service.updateDraftPurchaseOrderWithLines(42, input, "user-9");
+    expect(new Date(result.po.updatedAt).getTime()).toBe(CURRENT_VERSION.getTime() + 1);
   });
 
   it("fails the transaction when the immutable audit event cannot be written", async () => {

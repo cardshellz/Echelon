@@ -33,10 +33,12 @@ vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
 vi.mock("../../purchasing.service", () => ({
   PurchasingError: class PurchasingError extends Error {
     statusCode: number;
+    details?: Record<string, unknown>;
 
-    constructor(message: string, statusCode = 400) {
+    constructor(message: string, statusCode = 400, details?: Record<string, unknown>) {
       super(message);
       this.statusCode = statusCode;
+      this.details = details;
     }
   },
 }));
@@ -46,6 +48,7 @@ import { registerPurchasingAdminRoutes } from "../../purchasing-admin.routes";
 function buildPurchasingMock(overrides: Record<string, any> = {}) {
   return {
     getVendorProducts: vi.fn(),
+    getVendorProductById: vi.fn(),
     createVendorProduct: vi.fn(),
     updateVendorProduct: vi.fn(),
     deleteVendorProduct: vi.fn(),
@@ -123,6 +126,364 @@ describe("purchasing admin routes", () => {
     expect(body).toEqual({ vendorProducts: [{ id: 7, vendorId: 3 }] });
   });
 
+  it("normalizes an explicit purchase-UOM quote on generic vendor-product create", async () => {
+    const purchasing = buildPurchasingMock({
+      createVendorProduct: vi.fn().mockResolvedValue({ id: 17 }),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-products", {
+      vendorId: 3,
+      productId: 9,
+      productVariantId: 11,
+      vendorSku: " CASE-9 ",
+      pricing: {
+        basis: "per_purchase_uom",
+        purchaseUom: "case",
+        uomQuantity: 2,
+        piecesPerUom: 24,
+        quotedCostMillsPerUom: 12_345,
+      },
+      quotedAt: "2026-07-01",
+      packSize: 24,
+      isPreferred: 1,
+    });
+
+    expect(status).toBe(201);
+    expect(body).toEqual({ id: 17 });
+    expect(purchasing.createVendorProduct).toHaveBeenCalledWith(expect.objectContaining({
+      vendorId: 3,
+      productId: 9,
+      productVariantId: 11,
+      vendorSku: "CASE-9",
+      packSize: 24,
+      isPreferred: 1,
+      unitCostMills: 514,
+      unitCostCents: 5,
+      pricingBasis: "per_purchase_uom",
+      purchaseUom: "case",
+      quotedUnitCostMills: 12_345,
+      piecesPerPurchaseUom: 24,
+      quoteReference: null,
+      quotedAt: new Date("2026-07-01T00:00:00.000Z"),
+      quoteValidUntil: null,
+    }), "test-user");
+  });
+
+  it("does not fabricate a verification date for reusable catalog pricing", async () => {
+    const purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-products", {
+      vendorId: 3,
+      productId: 9,
+      pricing: {
+        basis: "per_piece",
+        quantityPieces: 12,
+        unitCostMills: 12_345,
+      },
+    });
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("VENDOR_CATALOG_QUOTED_AT_REQUIRED");
+    expect(purchasing.createVendorProduct).not.toHaveBeenCalled();
+  });
+
+  it("normalizes legacy cents on create and labels the unprovable quote basis", async () => {
+    const purchasing = buildPurchasingMock({
+      createVendorProduct: vi.fn().mockResolvedValue({ id: 18 }),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status } = await requestJson(server.url, "POST", "/api/vendor-products", {
+      vendorId: 3,
+      productId: 9,
+      unitCostCents: 123,
+      isActive: 1,
+    });
+
+    expect(status).toBe(201);
+    expect(purchasing.createVendorProduct).toHaveBeenCalledWith({
+      vendorId: 3,
+      productId: 9,
+      isActive: 1,
+      unitCostMills: 12_300,
+      unitCostCents: 123,
+      pricingBasis: "legacy_unknown",
+      purchaseUom: null,
+      quotedUnitCostMills: null,
+      piecesPerPurchaseUom: null,
+      quoteReference: null,
+      quotedAt: null,
+      quoteValidUntil: null,
+    }, "test-user");
+  });
+
+  it("requires a price on generic vendor-product create", async () => {
+    const purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-products", {
+      vendorId: 3,
+      productId: 9,
+      vendorSku: "V-9",
+    });
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("VENDOR_CATALOG_PRICE_REQUIRED");
+    expect(purchasing.createVendorProduct).not.toHaveBeenCalled();
+  });
+
+  it("rejects derived quote provenance and other mass-assigned create fields", async () => {
+    const purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-products", {
+      vendorId: 3,
+      productId: 9,
+      unitCostCents: 123,
+      pricingBasis: "per_piece",
+      quotedUnitCostMills: 12_300,
+      updatedAt: "2026-07-13T00:00:00.000Z",
+    });
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("VENDOR_PRODUCT_REQUEST_INVALID");
+    expect(body.details.issues[0].message).toContain("Unrecognized key");
+    expect(purchasing.createVendorProduct).not.toHaveBeenCalled();
+  });
+
+  it("rejects quantity-specific extended-total pricing in the reusable catalog", async () => {
+    const purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-products", {
+      vendorId: 3,
+      productId: 9,
+      pricing: {
+        basis: "extended_total",
+        quantityPieces: 10,
+        quotedTotalCents: 999,
+      },
+    });
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("VENDOR_CATALOG_EXTENDED_TOTAL_NOT_REUSABLE");
+    expect(purchasing.createVendorProduct).not.toHaveBeenCalled();
+  });
+
+  it("preserves stored quote fields on a metadata-only patch", async () => {
+    const purchasing = buildPurchasingMock({
+      updateVendorProduct: vi.fn().mockResolvedValue({ id: 17 }),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status } = await requestJson(server.url, "PATCH", "/api/vendor-products/17", {
+      vendorSku: " NEW-SKU ",
+      isActive: 0,
+    });
+
+    expect(status).toBe(200);
+    expect(purchasing.updateVendorProduct).toHaveBeenCalledWith(17, {
+      vendorSku: "NEW-SKU",
+      isActive: 0,
+    }, "test-user");
+  });
+
+  it("corrects quote metadata without refreshing the stored quote timestamp", async () => {
+    const purchasing = buildPurchasingMock({
+      updateVendorProduct: vi.fn().mockResolvedValue({ id: 17 }),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status } = await requestJson(server.url, "PATCH", "/api/vendor-products/17", {
+      quoteReference: " Q-2026-44 ",
+      quoteValidUntil: "2026-12-31",
+    });
+
+    expect(status).toBe(200);
+    expect(purchasing.updateVendorProduct).toHaveBeenCalledWith(17, {
+      quoteReference: "Q-2026-44",
+      quoteValidUntil: "2026-12-31",
+    }, "test-user");
+  });
+
+  it("resets quote provenance when a patch supplies legacy money", async () => {
+    const purchasing = buildPurchasingMock({
+      updateVendorProduct: vi.fn().mockResolvedValue({ id: 17 }),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status } = await requestJson(server.url, "PATCH", "/api/vendor-products/17", {
+      unitCostMills: 12_345,
+      unitCostCents: 123,
+    });
+
+    expect(status).toBe(200);
+    expect(purchasing.updateVendorProduct).toHaveBeenCalledWith(17, {
+      unitCostMills: 12_345,
+      unitCostCents: 123,
+      pricingBasis: "legacy_unknown",
+      purchaseUom: null,
+      quotedUnitCostMills: null,
+      piecesPerPurchaseUom: null,
+      quoteReference: null,
+      quotedAt: null,
+      quoteValidUntil: null,
+    }, "test-user");
+  });
+
+  it("rejects invalid 0|1 flags and invalid patch ids before calling storage", async () => {
+    const purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+
+    const invalidFlag = await requestJson(server.url, "PATCH", "/api/vendor-products/17", {
+      isPreferred: 2,
+    });
+    const invalidId = await requestJson(server.url, "PATCH", "/api/vendor-products/not-a-number", {
+      isActive: 1,
+    });
+
+    expect(invalidFlag.status).toBe(400);
+    expect(invalidFlag.body.details.code).toBe("VENDOR_PRODUCT_REQUEST_INVALID");
+    expect(invalidId.status).toBe(400);
+    expect(invalidId.body.details.code).toBe("VENDOR_PRODUCT_ID_INVALID");
+    expect(purchasing.updateVendorProduct).not.toHaveBeenCalled();
+  });
+
+  it("strictly normalizes explicit pricing on the PO-line catalog upsert", async () => {
+    const purchasing = buildPurchasingMock({
+      bulkUpsertVendorCatalog: vi.fn().mockResolvedValue({
+        created: [{ vendorProductId: 71, productId: 10, productVariantId: 20 }],
+        updated: [],
+        skipped: [],
+      }),
+      getVendorProductById: vi.fn().mockResolvedValue({ id: 71 }),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-products/upsert", {
+      vendorId: 4,
+      productId: 10,
+      productVariantId: 20,
+      vendorSku: " V-10 ",
+      pricing: {
+        basis: "per_piece",
+        quantityPieces: 12,
+        unitCostMills: 12_345,
+      },
+      quotedAt: "2026-07-01",
+      packSize: 6,
+      isPreferred: true,
+    });
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ vp: { id: 71 }, created: true });
+    expect(purchasing.bulkUpsertVendorCatalog).toHaveBeenCalledWith(4, [{
+      productId: 10,
+      productVariantId: 20,
+      vendorSku: "V-10",
+      pricing: {
+        basis: "per_piece",
+        quantityPieces: 12,
+        unitCostMills: 12_345,
+      },
+      quotedAt: new Date("2026-07-01T00:00:00.000Z"),
+      packSize: 6,
+      isPreferred: true,
+    }], "test-user");
+  });
+
+  it("normalizes legacy money and resets provenance on an existing upsert row", async () => {
+    const purchasing = buildPurchasingMock({
+      bulkUpsertVendorCatalog: vi.fn().mockResolvedValue({
+        created: [],
+        updated: [{ vendorProductId: 71, productId: 10, productVariantId: 20 }],
+        skipped: [],
+      }),
+      getVendorProductById: vi.fn().mockResolvedValue({ id: 71 }),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status } = await requestJson(server.url, "POST", "/api/vendor-products/upsert", {
+      vendorId: 4,
+      productId: 10,
+      productVariantId: 20,
+      unitCostCents: 123,
+      isPreferred: false,
+    });
+
+    expect(status).toBe(200);
+    expect(purchasing.bulkUpsertVendorCatalog).toHaveBeenCalledWith(4, [{
+      productId: 10,
+      productVariantId: 20,
+      unitCostCents: 123,
+      isPreferred: false,
+    }], "test-user");
+  });
+
+  it("rejects explicit pricing combined with legacy mirrors on simple upsert", async () => {
+    const purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-products/upsert", {
+      vendorId: 4,
+      productId: 10,
+      productVariantId: 20,
+      pricing: {
+        basis: "per_piece",
+        quantityPieces: 12,
+        unitCostMills: 12_345,
+      },
+      unitCostMills: 12_345,
+      unitCostCents: 123,
+    });
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("VENDOR_CATALOG_PRICING_AMBIGUOUS");
+    expect(purchasing.bulkUpsertVendorCatalog).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing price, variant, invalid flags, and mass-assigned fields on simple upsert", async () => {
+    const purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+
+    const noPrice = await requestJson(server.url, "POST", "/api/vendor-products/upsert", {
+      vendorId: 4,
+      productId: 10,
+      productVariantId: 20,
+    });
+    const noVariant = await requestJson(server.url, "POST", "/api/vendor-products/upsert", {
+      vendorId: 4,
+      productId: 10,
+      unitCostCents: 123,
+    });
+    const invalidFlag = await requestJson(server.url, "POST", "/api/vendor-products/upsert", {
+      vendorId: 4,
+      productId: 10,
+      productVariantId: 20,
+      unitCostCents: 123,
+      isPreferred: 2,
+    });
+    const massAssigned = await requestJson(server.url, "POST", "/api/vendor-products/upsert", {
+      vendorId: 4,
+      productId: 10,
+      productVariantId: 20,
+      unitCostCents: 123,
+      pricingBasis: "per_piece",
+    });
+
+    expect(noPrice.status).toBe(400);
+    expect(noPrice.body.details.code).toBe("VENDOR_CATALOG_PRICE_REQUIRED");
+    expect(noVariant.status).toBe(400);
+    expect(noVariant.body.details.code).toBe("VENDOR_PRODUCT_REQUEST_INVALID");
+    expect(invalidFlag.status).toBe(400);
+    expect(invalidFlag.body.details.code).toBe("VENDOR_PRODUCT_REQUEST_INVALID");
+    expect(massAssigned.status).toBe(400);
+    expect(massAssigned.body.details.code).toBe("VENDOR_PRODUCT_REQUEST_INVALID");
+    expect(purchasing.bulkUpsertVendorCatalog).not.toHaveBeenCalled();
+  });
+
   it("normalizes bulk vendor catalog entries", async () => {
     const purchasing = buildPurchasingMock({
       bulkUpsertVendorCatalog: vi.fn().mockResolvedValue({ created: 1, updated: 0 }),
@@ -170,6 +531,47 @@ describe("purchasing admin routes", () => {
       ],
       "test-user",
     );
+    const normalizedEntry = purchasing.bulkUpsertVendorCatalog.mock.calls[0][1][0];
+    expect(Object.prototype.hasOwnProperty.call(normalizedEntry, "quoteReference")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(normalizedEntry, "quotedAt")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(normalizedEntry, "quoteValidUntil")).toBe(false);
+  });
+
+  it("preserves explicit null quote metadata while normalizing bulk entries", async () => {
+    const purchasing = buildPurchasingMock({
+      bulkUpsertVendorCatalog: vi.fn().mockResolvedValue({ created: 1, updated: 0 }),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status } = await requestJson(
+      server.url,
+      "POST",
+      "/api/vendors/4/catalog/bulk-upsert",
+      {
+        entries: [{
+          product_id: 10,
+          product_variant_id: 20,
+          pricing: {
+            basis: "per_piece",
+            quantityPieces: 1,
+            unitCostMills: 0,
+          },
+          quote_reference: null,
+          quoted_at: "2026-07-12",
+          quote_valid_until: null,
+        }],
+      },
+    );
+
+    expect(status).toBe(200);
+    const normalizedEntry = purchasing.bulkUpsertVendorCatalog.mock.calls[0][1][0];
+    expect(normalizedEntry).toMatchObject({
+      quoteReference: null,
+      quotedAt: new Date("2026-07-12T00:00:00.000Z"),
+      quoteValidUntil: null,
+    });
+    expect(Object.prototype.hasOwnProperty.call(normalizedEntry, "quoteReference")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(normalizedEntry, "quoteValidUntil")).toBe(true);
   });
 
   it("serves approval tiers from the purchasing service", async () => {

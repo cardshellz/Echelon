@@ -39,7 +39,9 @@ const MAX_PO_NUMBER_ATTEMPTS = 10_000;
 const RECOMMENDATION_LOCK_PREFIX = "procurement:purchasing-recommendation:";
 
 function uniquePositiveIds(ids: readonly number[]): number[] {
-  return [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+  return [...new Set(ids)]
+    .filter((id) => Number.isSafeInteger(id) && id > 0)
+    .sort((left, right) => left - right);
 }
 
 function uniqueNonEmptyStrings(values: readonly string[]): string[] {
@@ -74,14 +76,21 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
       }
     },
 
-    async getTransactionTimestamp() {
-      const result = await tx.execute(sql`SELECT clock_timestamp() AS now`);
-      const value = (result.rows[0] as { now?: Date | string } | undefined)?.now;
+    async getTransactionClock() {
+      const result = await tx.execute(sql`
+        SELECT transaction_timestamp() AS now, current_date::text AS current_date
+      `);
+      const row = result.rows[0] as { now?: Date | string; current_date?: string } | undefined;
+      const value = row?.now;
       const timestamp = value instanceof Date ? value : new Date(String(value ?? ""));
       if (Number.isNaN(timestamp.getTime())) {
         throw new Error("Database transaction timestamp is unavailable");
       }
-      return timestamp;
+      const date = String(row?.current_date ?? "");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new Error("Database transaction date is unavailable");
+      }
+      return { timestamp, date };
     },
 
     async getAutoDraftRunForUpdate(id) {
@@ -177,11 +186,22 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
           vendorSku: vendorProducts.vendorSku,
           unitCostCents: vendorProducts.unitCostCents,
           unitCostMills: vendorProducts.unitCostMills,
+          pricingBasis: vendorProducts.pricingBasis,
+          purchaseUom: vendorProducts.purchaseUom,
+          quotedUnitCostMills: vendorProducts.quotedUnitCostMills,
+          piecesPerPurchaseUom: vendorProducts.piecesPerPurchaseUom,
+          moq: vendorProducts.moq,
+          quoteReference: vendorProducts.quoteReference,
+          quotedAt: vendorProducts.quotedAt,
+          quotedAtDate: sql<string | null>`${vendorProducts.quotedAt}::date::text`,
+          quoteValidUntil: vendorProducts.quoteValidUntil,
+          updatedAt: vendorProducts.updatedAt,
           isPreferred: vendorProducts.isPreferred,
           isActive: vendorProducts.isActive,
         })
         .from(vendorProducts)
         .where(inArray(vendorProducts.id, safeIds))
+        .orderBy(vendorProducts.id)
         .for("share") as RecommendationVendorProductRecord[];
     },
 
@@ -200,6 +220,7 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
         })
         .from(vendors)
         .where(inArray(vendors.id, safeIds))
+        .orderBy(vendors.id)
         .for("share") as RecommendationVendorRecord[];
     },
 
@@ -216,6 +237,7 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
         })
         .from(products)
         .where(inArray(products.id, safeIds))
+        .orderBy(products.id)
         .for("share") as RecommendationProductRecord[];
     },
 
@@ -233,6 +255,7 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
         })
         .from(productVariants)
         .where(inArray(productVariants.id, safeIds))
+        .orderBy(productVariants.id)
         .for("share") as RecommendationProductVariantRecord[];
     },
 

@@ -81,6 +81,30 @@ function toAutomaticHandoffItem(
   if (!Number.isSafeInteger(vendorProductId) || Number(vendorProductId) <= 0) {
     throw new RangeError(`Recommendation ${item.recommendationId} has no valid supplier catalog binding`);
   }
+  if (item.supplierBasis.pricingBasis === "legacy_unknown") {
+    throw new RangeError(`Recommendation ${item.recommendationId} requires supplier quote-basis review`);
+  }
+  const quotedUnitCostMills = item.supplierBasis.quotedUnitCostMills;
+  if (!Number.isSafeInteger(quotedUnitCostMills) || Number(quotedUnitCostMills) < 0) {
+    throw new RangeError(`Recommendation ${item.recommendationId} has no valid original supplier quote`);
+  }
+  const quotedAt = item.supplierBasis.quotedAt
+    ? new Date(item.supplierBasis.quotedAt)
+    : null;
+  if (!quotedAt || Number.isNaN(quotedAt.getTime())) {
+    throw new RangeError(`Recommendation ${item.recommendationId} has no verified supplier quote date`);
+  }
+  if (
+    item.supplierBasis.pricingBasis === "per_purchase_uom" &&
+    (
+      !item.supplierBasis.purchaseUom?.trim() ||
+      !Number.isSafeInteger(item.supplierBasis.piecesPerPurchaseUom) ||
+      Number(item.supplierBasis.piecesPerPurchaseUom) <= 0 ||
+      item.suggestedOrderPieces % Number(item.supplierBasis.piecesPerPurchaseUom) !== 0
+    )
+  ) {
+    throw new RangeError(`Recommendation ${item.recommendationId} has an invalid supplier purchase-UOM quote`);
+  }
 
   return {
     recommendationId: item.recommendationId,
@@ -96,6 +120,13 @@ function toAutomaticHandoffItem(
     productName: item.productName,
     estimatedCostMills: item.estimatedCostMills,
     estimatedCostCents: item.estimatedCostCents,
+    pricingBasis: item.supplierBasis.pricingBasis,
+    purchaseUom: item.supplierBasis.purchaseUom,
+    quotedUnitCostMills: Number(quotedUnitCostMills),
+    piecesPerPurchaseUom: item.supplierBasis.piecesPerPurchaseUom,
+    quoteReference: item.supplierBasis.quoteReference,
+    quotedAt,
+    quoteValidUntil: item.supplierBasis.quoteValidUntil,
     candidateScore: item.recommendationCandidateScore.score,
     candidateBand: item.recommendationCandidateScore.band,
     recommendationSnapshot: {

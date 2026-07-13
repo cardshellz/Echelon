@@ -15,6 +15,14 @@ import { AlertCircle } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { cn } from "@/lib/utils";
 import { formatMills, centsToMills } from "@shared/utils/money";
+import type {
+  PerPiecePricingInput,
+  PerPurchaseUomPricingInput,
+} from "@shared/utils/po-line-pricing";
+
+export type ReusableCatalogPricingInput =
+  | PerPiecePricingInput
+  | PerPurchaseUomPricingInput;
 
 export type CatalogCandidate = {
   clientId: string;
@@ -26,17 +34,39 @@ export type CatalogCandidate = {
   // remains for back-compat display of legacy candidates.
   unitCostCents: number;
   unitCostMills?: number;
+  // Original vendor-facing quote. Extended totals are intentionally excluded
+  // because they are quantity-specific and cannot become a reusable price.
+  pricing?: ReusableCatalogPricingInput;
+  // Reusable catalog automation requires a real supplier quote date. A PO
+  // line may still use an undated manual price without entering the catalog.
+  quotedAt?: string | null;
 };
 
 // Render per-unit cost at 4 decimals so the dialog matches what will
 // actually be stored on the vendor_products row. If the candidate doesn't
 // carry mills (legacy producer), we derive them from cents (exact).
-function formatCandidateCost(c: CatalogCandidate): string {
+export function formatCatalogCandidateQuote(c: CatalogCandidate): {
+  amount: string;
+  detail?: string;
+} {
+  if (c.pricing?.basis === "per_purchase_uom") {
+    return {
+      amount: `${formatMills(c.pricing.quotedCostMillsPerUom)} per ${c.pricing.purchaseUom}`,
+      detail: `${c.pricing.piecesPerUom.toLocaleString()} pieces per ${c.pricing.purchaseUom}`,
+    };
+  }
+  if (c.pricing?.basis === "per_piece") {
+    return { amount: `${formatMills(c.pricing.unitCostMills)} per item` };
+  }
   const mills =
     typeof c.unitCostMills === "number"
       ? c.unitCostMills
-      : centsToMills(Math.max(0, c.unitCostCents | 0));
-  return formatMills(mills);
+      : centsToMills(
+          Number.isSafeInteger(c.unitCostCents) && c.unitCostCents >= 0
+            ? c.unitCostCents
+            : 0,
+        );
+  return { amount: `${formatMills(mills)} per item` };
 }
 
 export type AddToCatalogDecision =
@@ -76,6 +106,14 @@ export function AddToCatalogDialog(props: Props) {
   const selectedCount = useMemo(
     () => candidates.filter((c) => selected[c.clientId]).length,
     [candidates, selected],
+  );
+  const selectedMissingQuoteDate = useMemo(
+    () => candidates.some((c) => selected[c.clientId] && !c.quotedAt),
+    [candidates, selected],
+  );
+  const anyMissingQuoteDate = useMemo(
+    () => candidates.some((c) => !c.quotedAt),
+    [candidates],
   );
 
   return (
@@ -118,11 +156,13 @@ export function AddToCatalogDialog(props: Props) {
             </div>
 
             <div className="max-h-[50vh] overflow-y-auto divide-y border rounded-md">
-              {candidates.map((c) => (
-                <div
-                  key={c.clientId}
-                  className="flex items-center gap-3 px-3 py-2 text-sm"
-                >
+              {candidates.map((c) => {
+                const quote = formatCatalogCandidateQuote(c);
+                return (
+                  <div
+                    key={c.clientId}
+                    className="flex items-center gap-3 px-3 py-2 text-sm"
+                  >
                   {reviewMode ? (
                     <Checkbox
                       checked={!!selected[c.clientId]}
@@ -148,11 +188,18 @@ export function AddToCatalogDialog(props: Props) {
                       </span>
                     )}
                   </span>
-                  <span className="tabular-nums text-xs">
-                    {formatCandidateCost(c)}/ea
-                  </span>
-                </div>
-              ))}
+                    <span className="tabular-nums text-xs text-right shrink-0">
+                      <span className="block">{quote.amount}</span>
+                      {quote.detail && (
+                        <span className="block text-muted-foreground">{quote.detail}</span>
+                      )}
+                      {!c.quotedAt && (
+                        <span className="block text-amber-700">Quote date required</span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
 
             {error && (
@@ -174,7 +221,7 @@ export function AddToCatalogDialog(props: Props) {
                 disabled={submitting}
                 onClick={() => onDecide({ action: "add-none" })}
               >
-                Add none
+                Save PO without catalog
               </Button>
               {!reviewMode && (
                 <Button
@@ -187,7 +234,7 @@ export function AddToCatalogDialog(props: Props) {
               )}
               {reviewMode ? (
                 <Button
-                  disabled={submitting}
+                  disabled={submitting || selectedMissingQuoteDate}
                   onClick={() =>
                     onDecide({
                       action: "add-selected",
@@ -205,10 +252,14 @@ export function AddToCatalogDialog(props: Props) {
                 </Button>
               ) : (
                 <Button
-                  disabled={submitting}
+                  disabled={submitting || anyMissingQuoteDate}
                   onClick={() => onDecide({ action: "add-all" })}
                 >
-                  {submitting ? "Adding..." : "Add all"}
+                  {submitting
+                    ? "Adding..."
+                    : anyMissingQuoteDate
+                      ? "Quote date required"
+                      : "Add all"}
                 </Button>
               )}
             </div>

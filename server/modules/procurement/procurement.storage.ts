@@ -112,6 +112,7 @@ export interface IProcurementStorage {
       vendorProductId: number;
       productId: number;
       productVariantId: number | null;
+      receiveUnitsPerVariant: number | null;
       sku: string | null;
       productName: string;
       variantName: string | null;
@@ -121,6 +122,10 @@ export interface IProcurementStorage {
       // Per-unit cost in mills (4-decimal). Derived from unit_cost_cents
       // when unit_cost_mills is NULL (legacy rows).
       unitCostMills: number;
+      pricingBasis: "legacy_unknown" | "per_piece" | "per_purchase_uom";
+      purchaseUom: string | null;
+      quotedUnitCostMills: number | null;
+      piecesPerPurchaseUom: number | null;
       packSize: number | null;
       moq: number | null;
       leadTimeDays: number | null;
@@ -429,7 +434,13 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async deleteVendorProduct(id: number): Promise<boolean> {
-    const result = await db.delete(vendorProducts).where(eq(vendorProducts.id, id)).returning();
+    // Vendor-product ids are retained on historical PO lines as quote
+    // provenance. "Delete" therefore means deactivate, never physical erase.
+    const result = await db
+      .update(vendorProducts)
+      .set({ isActive: 0, updatedAt: new Date() })
+      .where(eq(vendorProducts.id, id))
+      .returning();
     return result.length > 0;
   },
 
@@ -452,6 +463,7 @@ export const procurementMethods: IProcurementStorage = {
       vendor_product_id: number;
       product_id: number;
       product_variant_id: number | null;
+      receive_units_per_variant: number | string | null;
       sku: string | null;
       product_name: string;
       variant_name: string | null;
@@ -459,6 +471,13 @@ export const procurementMethods: IProcurementStorage = {
       vendor_product_name: string | null;
       unit_cost_cents: number | string | null;
       unit_cost_mills: number | string | null;
+      pricing_basis: "legacy_unknown" | "per_piece" | "per_purchase_uom" | null;
+      purchase_uom: string | null;
+      quoted_unit_cost_mills: number | string | null;
+      pieces_per_purchase_uom: number | null;
+      quote_reference: string | null;
+      quoted_at: Date | null;
+      quote_valid_until: string | null;
       pack_size: number | null;
       moq: number | null;
       lead_time_days: number | null;
@@ -469,6 +488,7 @@ export const procurementMethods: IProcurementStorage = {
           vp.id              AS vendor_product_id,
           vp.product_id      AS product_id,
           vp.product_variant_id AS product_variant_id,
+          pv.units_per_variant AS receive_units_per_variant,
           p.sku              AS sku,
           p.name             AS product_name,
           pv.name            AS variant_name,
@@ -476,7 +496,14 @@ export const procurementMethods: IProcurementStorage = {
           vp.vendor_product_name AS vendor_product_name,
           vp.unit_cost_cents AS unit_cost_cents,
           vp.unit_cost_mills AS unit_cost_mills,
-          NULL               AS pack_size,
+          vp.pricing_basis   AS pricing_basis,
+          vp.purchase_uom    AS purchase_uom,
+          vp.quoted_unit_cost_mills AS quoted_unit_cost_mills,
+          vp.pieces_per_purchase_uom AS pieces_per_purchase_uom,
+          vp.quote_reference AS quote_reference,
+          vp.quoted_at AS quoted_at,
+          vp.quote_valid_until AS quote_valid_until,
+          vp.pack_size       AS pack_size,
           vp.moq             AS moq,
           vp.lead_time_days  AS lead_time_days,
           vp.is_preferred    AS is_preferred,
@@ -512,6 +539,8 @@ export const procurementMethods: IProcurementStorage = {
       vendorProductId: Number(r.vendor_product_id),
       productId: Number(r.product_id),
       productVariantId: r.product_variant_id != null ? Number(r.product_variant_id) : null,
+      receiveUnitsPerVariant:
+        r.receive_units_per_variant != null ? Number(r.receive_units_per_variant) : null,
       sku: r.sku,
       productName: r.product_name,
       variantName: r.variant_name,
@@ -525,6 +554,18 @@ export const procurementMethods: IProcurementStorage = {
         r.unit_cost_mills != null
           ? Number(r.unit_cost_mills)
           : Number(r.unit_cost_cents ?? 0) * 100,
+      pricingBasis:
+        r.pricing_basis === "per_piece" || r.pricing_basis === "per_purchase_uom"
+          ? r.pricing_basis
+          : "legacy_unknown" as const,
+      purchaseUom: r.purchase_uom,
+      quotedUnitCostMills:
+        r.quoted_unit_cost_mills != null ? Number(r.quoted_unit_cost_mills) : null,
+      piecesPerPurchaseUom:
+        r.pieces_per_purchase_uom != null ? Number(r.pieces_per_purchase_uom) : null,
+      quoteReference: r.quote_reference,
+      quotedAt: r.quoted_at,
+      quoteValidUntil: r.quote_valid_until,
       packSize: r.pack_size != null ? Number(r.pack_size) : null,
       moq: r.moq != null ? Number(r.moq) : null,
       leadTimeDays: r.lead_time_days != null ? Number(r.lead_time_days) : null,
@@ -1350,10 +1391,21 @@ export const procurementMethods: IProcurementStorage = {
         preferred_vendor.vendor_name AS preferred_vendor_name,
         preferred_vendor.unit_cost_cents AS estimated_cost_cents,
         preferred_vendor.unit_cost_mills AS estimated_cost_mills,
+        preferred_vendor.pricing_basis AS vendor_pricing_basis,
+        preferred_vendor.purchase_uom AS vendor_purchase_uom,
+        preferred_vendor.quoted_unit_cost_mills AS vendor_quoted_unit_cost_mills,
+        preferred_vendor.pieces_per_purchase_uom AS vendor_pieces_per_purchase_uom,
+        preferred_vendor.moq AS vendor_moq,
+        preferred_vendor.quote_reference AS vendor_quote_reference,
+        preferred_vendor.quoted_at AS vendor_quoted_at,
+        preferred_vendor.quoted_at_date AS vendor_quoted_at_date,
+        preferred_vendor.quote_valid_until AS vendor_quote_valid_until,
         preferred_vendor.last_cost_cents,
         preferred_vendor.last_purchased_at AS vendor_product_last_purchased_at,
         preferred_vendor.updated_at AS vendor_product_updated_at,
         preferred_vendor.lead_time_days AS vendor_lead_time_days,
+        transaction_timestamp() AS recommendation_analysis_as_of,
+        current_date::text AS recommendation_analysis_date,
         COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
         COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
         COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
@@ -1596,6 +1648,15 @@ export const procurementMethods: IProcurementStorage = {
           v.name AS vendor_name,
           vp.unit_cost_cents,
           vp.unit_cost_mills,
+          vp.pricing_basis,
+          vp.purchase_uom,
+          vp.quoted_unit_cost_mills,
+          vp.pieces_per_purchase_uom,
+          vp.moq,
+          vp.quote_reference,
+          vp.quoted_at,
+          vp.quoted_at::date::text AS quoted_at_date,
+          vp.quote_valid_until,
           vp.last_cost_cents,
           vp.last_purchased_at,
           vp.updated_at,
@@ -1606,6 +1667,11 @@ export const procurementMethods: IProcurementStorage = {
         WHERE vp.product_id = p.id
           AND vp.is_preferred = 1
           AND vp.is_active = 1
+          AND v.active = 1
+          AND (
+            vp.product_variant_id = order_uom.variant_id
+            OR vp.product_variant_id IS NULL
+          )
         ORDER BY
           CASE
             WHEN vp.product_variant_id = order_uom.variant_id THEN 0

@@ -5,6 +5,7 @@ import {
   PO_PHYSICAL_STATUSES,
   PO_FINANCIAL_STATUSES,
 } from "@shared/schema/procurement.schema";
+import type { PoLinePricingInput } from "@shared/utils/po-line-pricing";
 
 // Spec A feature flag shape. Only `useNewPoEditor` matters on this page;
 // the rest of the keys are queried together and ignored here.
@@ -24,6 +25,26 @@ import { Textarea } from "@/components/ui/textarea";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { useToast } from "@/hooks/use-toast";
+import {
+  PoLinePricingEditor,
+  createEmptyPoLinePricingDraft,
+  createVendorCatalogPricingDraft,
+  evaluatePoLinePricingDraft,
+  formatVendorCatalogQuote,
+  isVendorCatalogQuoteReusable,
+  vendorCatalogQuoteStatus,
+  type PoLinePricingEditorDraft,
+} from "@/features/po-edit/PoLinePricingEditor";
+import {
+  PoLineQuoteMetadataEditor,
+  createEmptyPoLineQuoteMetadataDraft,
+  createPoLineQuoteMetadataDraftFromStored,
+  evaluatePoLineQuoteMetadataDraft,
+  populatedPoLineQuoteMetadata,
+  type PoLineQuoteMetadataPayload,
+  type PoLineQuoteMetadataDraft,
+} from "@/features/po-edit/PoLineQuoteMetadataEditor";
+import { canUseFullPurchaseOrderEditor } from "@/features/po-edit/purchase-order-editability";
 import { format } from "date-fns";
 import {
   ShoppingCart,
@@ -76,6 +97,8 @@ type PurchaseOrder = {
   totalCents: number | null;
   expectedDeliveryDate: string | null;
   createdAt: string;
+  source?: string | null;
+  metadata?: Record<string, unknown> | null;
   vendor?: Vendor;
   // Exception counts (migration 0566)
   openExceptionCount?: number;
@@ -188,31 +211,32 @@ function DualTrackCell({ po }: { po: PurchaseOrder }) {
 type InlineLineItem = {
   id: string; // temp client-side id
   productId: number;
-  productVariantId: number;
+  expectedReceiveVariantId: number;
+  expectedReceiveUnitsPerVariant: number;
   productName: string;
   sku: string;
   orderQty: number;
-  totalCostDollars: string;
+  lineTotalCents: number;
+  unitCostMills: number;
   unitCostCents: number;
-  unitsPerUom: number;
+  pricing: PoLinePricingInput;
+  pricingSource: "manual" | "vendor_catalog";
   vendorSku: string;
   vendorProductId?: number;
   saveToVendorCatalog: boolean;
+  quoteMetadata: PoLineQuoteMetadataPayload;
 };
-
-/** Convert a dollar string to cents without floating-point artifacts */
-function dollarsToCents(dollars: string): number {
-  const parts = dollars.split(".");
-  const whole = parseInt(parts[0] || "0", 10) * 100;
-  if (!parts[1]) return whole;
-  const frac = parts[1].padEnd(2, "0");
-  const cents = parseInt(frac.slice(0, 2), 10);
-  return whole + cents;
-}
 
 function formatCentsShort(cents: number | null | undefined): string {
   if (!cents) return "$0.00";
   return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function genPoCreateIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return (crypto as any).randomUUID();
+  }
+  return `po-create-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export default function PurchaseOrders() {
@@ -257,7 +281,7 @@ export default function PurchaseOrders() {
   // existing detail page where receipts/invoices/shipments/history tabs
   // still live.
   function poHref(po: PurchaseOrder): string {
-    if (useNewPoEditor && po.status === "draft") {
+    if (useNewPoEditor && canUseFullPurchaseOrderEditor(po)) {
       return `/purchase-orders/${po.id}/edit`;
     }
     return `/purchase-orders/${po.id}`;
@@ -289,12 +313,17 @@ export default function PurchaseOrders() {
   const [addingLine, setAddingLine] = useState(false);
   const [inlineSelectedProduct, setInlineSelectedProduct] = useState<any>(null);
   const [inlineSelectedVariant, setInlineSelectedVariant] = useState<any>(null);
-  const [inlineQty, setInlineQty] = useState("1");
-  const [inlineTotalCost, setInlineTotalCost] = useState("");
+  const [inlinePricing, setInlinePricing] = useState<PoLinePricingEditorDraft>(
+    createEmptyPoLinePricingDraft,
+  );
+  const [inlineQuoteMetadata, setInlineQuoteMetadata] = useState<PoLineQuoteMetadataDraft>(
+    createEmptyPoLineQuoteMetadataDraft,
+  );
   const [inlineVendorSku, setInlineVendorSku] = useState("");
   const [inlineCatalogMode, setInlineCatalogMode] = useState<"catalog" | "search">("catalog");
   const [inlineCatalogSearch, setInlineCatalogSearch] = useState("");
   const [inlineSelectedCatalogEntry, setInlineSelectedCatalogEntry] = useState<any>(null);
+  const [inlineCatalogPricingUntouched, setInlineCatalogPricingUntouched] = useState(false);
 
   // Queries
   const { data: poData } = useQuery<{ purchaseOrders: PurchaseOrder[]; total: number }>({
@@ -384,10 +413,16 @@ export default function PurchaseOrders() {
   // Create mutation with inline lines + optional send-to-vendor
   const createMutation = useMutation({
     mutationFn: async ({ poData, lines, sendToVendor }: { poData: typeof newPO; lines: InlineLineItem[]; sendToVendor: boolean }) => {
-      // Step 1: Create the PO
+      if (lines.length === 0) {
+        throw new Error("Add at least one line before creating the purchase order.");
+      }
+      // Header and lines are one atomic, idempotent purchasing command.
       const res = await fetch("/api/purchase-orders", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": genPoCreateIdempotencyKey(),
+        },
         body: JSON.stringify({
           vendorId: poData.vendorId,
           poType: poData.poType,
@@ -396,71 +431,73 @@ export default function PurchaseOrders() {
           expectedDeliveryDate: poData.expectedDeliveryDate || undefined,
           vendorNotes: poData.vendorNotes || undefined,
           internalNotes: poData.internalNotes || undefined,
+          lines: lines.map((line) => ({
+            productId: line.productId,
+            expectedReceiveVariantId: line.expectedReceiveVariantId,
+            expectedReceiveUnitsPerVariant: line.expectedReceiveUnitsPerVariant,
+            vendorProductId: line.vendorProductId,
+            vendorSku: line.vendorSku || undefined,
+            pricingSource: line.pricingSource,
+            pricing: line.pricing,
+            ...populatedPoLineQuoteMetadata(line.quoteMetadata),
+          })),
+          advance_to_sent: sendToVendor,
         }),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({}));
         throw new Error(err.error || "Failed to create PO");
       }
-      const po = await res.json();
+      const result = await res.json();
+      const po = result?.po ?? result;
 
-      // Step 2: Add lines in bulk if any
-      if (lines.length > 0) {
-        const bulkRes = await fetch(`/api/purchase-orders/${po.id}/lines/bulk`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            lines: lines.map(l => ({
-              productId: l.productId,
-              productVariantId: l.productVariantId,
-              vendorProductId: l.vendorProductId,
-              orderQty: l.orderQty,
-              unitCostCents: l.unitCostCents,
-              unitsPerUom: l.unitsPerUom,
-              vendorSku: l.vendorSku || undefined,
-            })),
-          }),
-        });
-        if (!bulkRes.ok) {
-          const err = await bulkRes.json();
-          throw new Error(err.error || "Failed to add lines");
-        }
-
-        // Save to vendor catalog for each line that opted in
-        for (const line of lines) {
-          if (line.saveToVendorCatalog && poData.vendorId) {
-            try {
-              await fetch("/api/vendor-products/upsert", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  vendorId: poData.vendorId,
-                  productId: line.productId,
-                  productVariantId: line.productVariantId,
-                  vendorSku: line.vendorSku || "",
-                  unitCostCents: line.unitCostCents,
-                  packSize: line.unitsPerUom,
-                  isPreferred: false,
-                }),
-              });
-            } catch { /* non-critical */ }
+      // Catalog persistence is a separate idempotent batch: the PO remains
+      // authoritative even if this convenience step needs operator retry.
+      let catalogSaveError: string | undefined;
+      const catalogEntries = lines
+        .filter((line) => line.saveToVendorCatalog && line.pricing.basis !== "extended_total")
+        .map((line) => ({
+          productId: line.productId,
+          productVariantId: line.expectedReceiveVariantId,
+          vendorSku: line.vendorSku || null,
+          pricing: line.pricing,
+          ...populatedPoLineQuoteMetadata(line.quoteMetadata),
+          packSize: line.pricing.basis === "per_purchase_uom"
+            ? line.pricing.piecesPerUom
+            : 1,
+          isPreferred: false,
+        }));
+      if (catalogEntries.length > 0 && poData.vendorId) {
+        try {
+          const catalogResponse = await fetch(
+            `/api/vendors/${poData.vendorId}/catalog/bulk-upsert`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Idempotency-Key": genPoCreateIdempotencyKey(),
+              },
+              body: JSON.stringify({ entries: catalogEntries }),
+            },
+          );
+          if (!catalogResponse.ok) {
+            const errorBody = await catalogResponse.json().catch(() => ({}));
+            catalogSaveError = errorBody?.error || "Vendor catalog update failed";
           }
+        } catch (error) {
+          catalogSaveError = error instanceof Error
+            ? error.message
+            : "Vendor catalog update failed";
         }
       }
 
-      // Step 3: Send to vendor if requested
-      if (sendToVendor && lines.length > 0) {
-        const sendRes = await fetch(`/api/purchase-orders/${po.id}/send-to-vendor`, { method: "POST" });
-        if (!sendRes.ok) {
-          // PO was created but send failed — navigate anyway
-          const err = await sendRes.json();
-          return { ...po, sendError: err.error };
-        }
-        const sentPo = await sendRes.json();
-        return { ...sentPo, wasSent: true };
-      }
+      return {
+        ...po,
+        wasSent: sendToVendor && (result?.status === "sent" || po?.status === "sent"),
+        sendError: result?.sendError,
+        catalogSaveError,
+      };
 
-      return po;
     },
     onSuccess: (po) => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
@@ -469,6 +506,12 @@ export default function PurchaseOrders() {
       setInlineLines([]);
       if (po.sendError) {
         toast({ title: "PO created (send failed)", description: po.sendError, variant: "destructive" });
+      } else if (po.catalogSaveError) {
+        toast({
+          title: po.wasSent ? "PO created and sent" : "Purchase order created",
+          description: `The PO succeeded, but the vendor catalog was not updated: ${po.catalogSaveError}`,
+          variant: "destructive",
+        });
       } else if (po.wasSent) {
         toast({ title: "PO created & sent", description: `${po.poNumber} sent to vendor` });
       } else {
@@ -532,7 +575,9 @@ export default function PurchaseOrders() {
   ).slice(0, 50);
 
   // Inline line item helpers
-  const inlineLinesTotal = inlineLines.reduce((sum, l) => sum + dollarsToCents(l.totalCostDollars || "0"), 0);
+  const inlinePricingEvaluation = evaluatePoLinePricingDraft(inlinePricing);
+  const inlineQuoteMetadataEvaluation = evaluatePoLineQuoteMetadataDraft(inlineQuoteMetadata);
+  const inlineLinesTotal = inlineLines.reduce((sum, line) => sum + line.lineTotalCents, 0);
   const filteredInlineProducts = products
     .filter((p: any) =>
       !inlineProductSearch ||
@@ -557,33 +602,43 @@ export default function PurchaseOrders() {
   function resetInlineLineForm() {
     setInlineSelectedProduct(null);
     setInlineSelectedVariant(null);
-    setInlineQty("1");
-    setInlineTotalCost("");
+    setInlinePricing(createEmptyPoLinePricingDraft());
+    setInlineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
     setInlineVendorSku("");
     setInlineProductSearch("");
     setInlineCatalogSearch("");
     setInlineSelectedCatalogEntry(null);
+    setInlineCatalogPricingUntouched(false);
     setAddingLine(false);
   }
 
   function addInlineLine() {
-    if (!inlineSelectedVariant || !inlineTotalCost) return;
-    const qty = parseInt(inlineQty) || 1;
-    const totalCents = dollarsToCents(inlineTotalCost);
-    const unitCostCents = qty > 0 ? totalCents / qty : 0;
+    const pricing = inlinePricingEvaluation.pricing;
+    const normalized = inlinePricingEvaluation.normalized;
+    const quoteMetadata = inlineQuoteMetadataEvaluation.metadata;
+    if (!inlineSelectedVariant || !pricing || !normalized || !quoteMetadata) return;
     const newItem: InlineLineItem = {
       id: `temp-${Date.now()}-${Math.random()}`,
       productId: inlineSelectedProduct?.id || 0,
-      productVariantId: inlineSelectedVariant.id,
+      expectedReceiveVariantId: inlineSelectedVariant.id,
+      expectedReceiveUnitsPerVariant: inlineSelectedVariant.unitsPerVariant || 1,
       productName: inlineSelectedProduct?.name || "",
       sku: inlineSelectedVariant.sku,
-      orderQty: qty,
-      totalCostDollars: inlineTotalCost,
-      unitCostCents,
-      unitsPerUom: inlineSelectedVariant.unitsPerVariant || 1,
+      orderQty: normalized.orderQty,
+      lineTotalCents: normalized.totalProductCostCents,
+      unitCostMills: normalized.unitCostMills,
+      unitCostCents: normalized.unitCostCents,
+      pricing,
+      pricingSource: inlineSelectedCatalogEntry && inlineCatalogPricingUntouched
+        ? "vendor_catalog"
+        : "manual",
       vendorSku: inlineVendorSku,
       vendorProductId: inlineSelectedCatalogEntry?.id,
-      saveToVendorCatalog: !inlineSelectedCatalogEntry, // save new entries to catalog
+      saveToVendorCatalog:
+        !inlineSelectedCatalogEntry &&
+        pricing.basis !== "extended_total" &&
+        quoteMetadata.quotedAt !== null,
+      quoteMetadata,
     };
     setInlineLines(prev => [...prev, newItem]);
     resetInlineLineForm();
@@ -1043,7 +1098,7 @@ export default function PurchaseOrders() {
                           <div className="text-xs text-muted-foreground flex gap-2">
                             <span className="font-mono">{line.sku}</span>
                             <span>Qty: {line.orderQty.toLocaleString()}</span>
-                            <span className="font-mono">{formatCentsShort(dollarsToCents(line.totalCostDollars))}</span>
+                            <span className="font-mono">{formatCentsShort(line.lineTotalCents)}</span>
                           </div>
                         </div>
                         <Button variant="ghost" size="sm" className="min-h-[44px] min-w-[44px] p-0 shrink-0" onClick={() => removeInlineLine(line.id)}>
@@ -1067,21 +1122,21 @@ export default function PurchaseOrders() {
                       <Button
                         variant={inlineCatalogMode === "catalog" ? "default" : "ghost"}
                         size="sm" className="flex-1 h-8 text-xs"
-                        onClick={() => { setInlineCatalogMode("catalog"); setInlineSelectedProduct(null); setInlineSelectedVariant(null); setInlineSelectedCatalogEntry(null); }}
+                        onClick={() => { setInlineCatalogMode("catalog"); setInlineSelectedProduct(null); setInlineSelectedVariant(null); setInlineSelectedCatalogEntry(null); setInlineCatalogPricingUntouched(false); setInlinePricing(createEmptyPoLinePricingDraft()); setInlineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft()); }}
                       >
                         Catalog{vendorCatalog.length > 0 ? ` (${vendorCatalog.length})` : ""}
                       </Button>
                       <Button
                         variant={inlineCatalogMode === "search" ? "default" : "ghost"}
                         size="sm" className="flex-1 h-8 text-xs"
-                        onClick={() => { setInlineCatalogMode("search"); setInlineSelectedCatalogEntry(null); setInlineSelectedProduct(null); setInlineSelectedVariant(null); }}
+                        onClick={() => { setInlineCatalogMode("search"); setInlineSelectedCatalogEntry(null); setInlineCatalogPricingUntouched(false); setInlineSelectedProduct(null); setInlineSelectedVariant(null); setInlinePricing(createEmptyPoLinePricingDraft()); setInlineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft()); }}
                       >
                         All Products
                       </Button>
                     </div>
 
                     {/* Catalog mode */}
-                    {inlineCatalogMode === "catalog" && !inlineSelectedVariant && (
+                    {inlineCatalogMode === "catalog" && !inlineSelectedCatalogEntry && !inlineSelectedVariant && (
                       <>
                         <Input
                           placeholder="Filter catalog..."
@@ -1099,6 +1154,7 @@ export default function PurchaseOrders() {
                             {filteredInlineCatalog.slice(0, 30).map((entry: any) => {
                               const product = products.find((p: any) => p.id === entry.productId);
                               const variant = product?.variants?.find((v: any) => v.id === entry.productVariantId);
+                              const quoteStatus = vendorCatalogQuoteStatus(entry);
                               return (
                                 <button
                                   key={entry.id}
@@ -1106,10 +1162,15 @@ export default function PurchaseOrders() {
                                   className="w-full text-left p-2 hover:bg-muted/50 transition-colors"
                                   onClick={() => {
                                     setInlineSelectedCatalogEntry(entry);
+                                    setInlineCatalogPricingUntouched(
+                                      isVendorCatalogQuoteReusable(entry),
+                                    );
                                     setInlineSelectedProduct(product || null);
+                                    setInlineVendorSku(entry.vendorSku || "");
+                                    setInlinePricing(createVendorCatalogPricingDraft(entry));
+                                    setInlineQuoteMetadata(createPoLineQuoteMetadataDraftFromStored(entry));
                                     if (variant) {
                                       setInlineSelectedVariant(variant);
-                                      setInlineVendorSku(entry.vendorSku || "");
                                     }
                                   }}
                                 >
@@ -1119,9 +1180,17 @@ export default function PurchaseOrders() {
                                       <div className="text-xs text-muted-foreground flex gap-1.5 flex-wrap">
                                         {variant && <span className="font-mono">{variant.sku}</span>}
                                         {entry.vendorSku && <span>· {entry.vendorSku}</span>}
+                                        {(!entry.pricingBasis || entry.pricingBasis === "legacy_unknown") && (
+                                          <span className="text-amber-700">· Verify legacy price</span>
+                                        )}
+                                        {quoteStatus !== "usable" && quoteStatus !== "legacy" && (
+                                          <span className="text-amber-700">· Quote review required</span>
+                                        )}
                                       </div>
                                     </div>
-                                    <div className="text-sm font-mono shrink-0">{formatCentsShort(entry.unitCostCents)}</div>
+                                    <div className="text-sm font-mono shrink-0">
+                                      {formatVendorCatalogQuote(entry)}
+                                    </div>
                                   </div>
                                 </button>
                               );
@@ -1129,6 +1198,67 @@ export default function PurchaseOrders() {
                           </div>
                         )}
                       </>
+                    )}
+
+                    {inlineCatalogMode === "catalog" && inlineSelectedCatalogEntry && !inlineSelectedVariant && inlineSelectedProduct && (
+                      <div className="space-y-2 rounded-md border p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium truncate">{inlineSelectedProduct.name}</div>
+                            {inlineSelectedCatalogEntry.vendorSku && (
+                              <div className="text-xs text-muted-foreground font-mono">{inlineSelectedCatalogEntry.vendorSku}</div>
+                            )}
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 p-0"
+                            onClick={() => {
+                              setInlineSelectedCatalogEntry(null);
+                              setInlineCatalogPricingUntouched(false);
+                              setInlineSelectedProduct(null);
+                              setInlinePricing(createEmptyPoLinePricingDraft());
+                              setInlineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
+                            }}
+                          >
+                            <AlertCircle className="h-3 w-3" />
+                          </Button>
+                        </div>
+                        <Label className="text-xs">Receive as *</Label>
+                        <Popover open={inlineVariantOpen} onOpenChange={setInlineVariantOpen}>
+                          <PopoverTrigger asChild>
+                            <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
+                              <span className="truncate">Select receiving configuration...</span>
+                              <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                            <Command>
+                              <CommandList>
+                                <CommandEmpty>No receiving configurations.</CommandEmpty>
+                                <CommandGroup>
+                                  {(inlineSelectedProduct.variants || []).map((variant: any) => (
+                                    <CommandItem
+                                      key={variant.id}
+                                      value={String(variant.id)}
+                                      onSelect={() => {
+                                        setInlineSelectedVariant(variant);
+                                        setInlineVariantOpen(false);
+                                      }}
+                                    >
+                                      <span className="font-mono text-xs mr-2">{variant.sku}</span>
+                                      <span className="truncate">{variant.name}</span>
+                                      {(variant.unitsPerVariant || 1) > 1 && (
+                                        <span className="ml-auto text-xs text-muted-foreground">{variant.unitsPerVariant} pcs</span>
+                                      )}
+                                    </CommandItem>
+                                  ))}
+                                </CommandGroup>
+                              </CommandList>
+                            </Command>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
                     )}
 
                     {/* Search mode - product picker */}
@@ -1153,6 +1283,9 @@ export default function PurchaseOrders() {
                                       value={String(p.id)}
                                       onSelect={() => {
                                         setInlineSelectedProduct(p);
+                                        setInlinePricing(createEmptyPoLinePricingDraft());
+                                        setInlineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
+                                        setInlineVendorSku("");
                                         setInlineProductOpen(false);
                                         setInlineProductSearch("");
                                         // Auto-select if only one variant
@@ -1208,28 +1341,61 @@ export default function PurchaseOrders() {
                           <span className="font-mono">{inlineSelectedVariant.sku}</span>
                           <span className="text-muted-foreground">—</span>
                           <span className="truncate">{inlineSelectedProduct?.name}</span>
-                          <Button variant="ghost" size="sm" className="h-6 w-6 p-0 ml-auto shrink-0" onClick={() => { setInlineSelectedVariant(null); setInlineSelectedProduct(inlineCatalogMode === "catalog" ? null : inlineSelectedProduct); setInlineSelectedCatalogEntry(null); }}>
+                          <Button variant="ghost" size="sm" className="h-6 w-6 p-0 ml-auto shrink-0" onClick={() => { setInlineSelectedVariant(null); setInlineSelectedProduct(inlineCatalogMode === "catalog" ? null : inlineSelectedProduct); setInlineSelectedCatalogEntry(null); setInlineCatalogPricingUntouched(false); setInlinePricing(createEmptyPoLinePricingDraft()); setInlineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft()); }}>
                             <AlertCircle className="h-3 w-3" />
                           </Button>
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <div className="space-y-1">
-                            <Label className="text-xs">Qty (pieces)</Label>
-                            <Input type="number" min="1" value={inlineQty} onChange={e => setInlineQty(e.target.value)} className="h-10" />
-                          </div>
-                          <div className="space-y-1">
-                            <Label className="text-xs">Total Cost ($)</Label>
-                            <Input type="number" min="0" step="0.01" placeholder="0.00" value={inlineTotalCost} onChange={e => setInlineTotalCost(e.target.value)} className="h-10" />
-                          </div>
-                        </div>
-                        {inlineTotalCost && parseInt(inlineQty) > 0 && (
-                          <div className="text-xs text-muted-foreground">
-                            Unit cost: {formatCentsShort(dollarsToCents(inlineTotalCost) / parseInt(inlineQty))}/pc
-                          </div>
+                        <PoLinePricingEditor
+                          value={inlinePricing}
+                          onChange={(next) => {
+                            setInlinePricing(next);
+                            setInlineCatalogPricingUntouched(false);
+                          }}
+                          receiveConfiguration={{
+                            label: `${inlineSelectedVariant.sku} — ${inlineSelectedVariant.name}`,
+                            unitsPerVariant: inlineSelectedVariant.unitsPerVariant || 1,
+                          }}
+                        />
+                        <PoLineQuoteMetadataEditor
+                          value={inlineQuoteMetadata}
+                          onChange={(next) => {
+                            setInlineQuoteMetadata(next);
+                            setInlineCatalogPricingUntouched(false);
+                          }}
+                        />
+                        {inlineSelectedCatalogEntry && (!inlineSelectedCatalogEntry.pricingBasis || inlineSelectedCatalogEntry.pricingBasis === "legacy_unknown") && (
+                          <p className="text-xs text-amber-700">
+                            This legacy catalog price has no verified quote basis. Confirm it before adding; the line will be recorded as manual pricing.
+                          </p>
                         )}
+                        <div className="space-y-1">
+                          <Label className="text-xs">Vendor SKU</Label>
+                          <Input
+                            value={inlineVendorSku}
+                            onChange={(event) => setInlineVendorSku(event.target.value)}
+                            placeholder="Supplier's catalog number"
+                          />
+                        </div>
+                        {inlinePricing.basis === "extended_total" && (
+                          <p className="text-xs text-muted-foreground">
+                            This quantity-specific total will stay on the PO and will not be saved as a reusable catalog price.
+                          </p>
+                        )}
+                        {!inlineSelectedCatalogEntry &&
+                          inlinePricing.basis !== "extended_total" &&
+                          !inlineQuoteMetadata.quotedAt && (
+                            <p className="text-xs text-amber-700">
+                              Without a quote date, this price stays on the PO only and will not be saved for catalog automation.
+                            </p>
+                          )}
                         <div className="flex gap-2">
                           <Button variant="outline" size="sm" className="min-h-[44px] flex-1" onClick={resetInlineLineForm}>Cancel</Button>
-                          <Button size="sm" className="min-h-[44px] flex-1" onClick={addInlineLine} disabled={!inlineTotalCost || parseInt(inlineQty) < 1}>
+                          <Button
+                            size="sm"
+                            className="min-h-[44px] flex-1"
+                            onClick={addInlineLine}
+                            disabled={!inlinePricingEvaluation.pricing || !inlineQuoteMetadataEvaluation.metadata}
+                          >
                             <Plus className="h-4 w-4 mr-1" /> Add
                           </Button>
                         </div>
@@ -1253,7 +1419,7 @@ export default function PurchaseOrders() {
                   variant="outline"
                   className="min-h-[44px]"
                   onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, sendToVendor: false })}
-                  disabled={!newPO.vendorId || createMutation.isPending}
+                  disabled={!newPO.vendorId || inlineLines.length === 0 || createMutation.isPending}
                 >
                   {createMutation.isPending ? "Creating..." : "Save Draft"}
                 </Button>
@@ -1261,7 +1427,7 @@ export default function PurchaseOrders() {
               <Button
                 className="min-h-[44px]"
                 onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, sendToVendor: isSoloMode && inlineLines.length > 0 })}
-                disabled={!newPO.vendorId || createMutation.isPending}
+                disabled={!newPO.vendorId || inlineLines.length === 0 || createMutation.isPending}
               >
                 {createMutation.isPending ? "Creating..." : (
                   isSoloMode && inlineLines.length > 0 ? "Create & Send" : "Create Draft"

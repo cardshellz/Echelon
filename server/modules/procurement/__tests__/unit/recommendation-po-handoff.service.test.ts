@@ -81,11 +81,19 @@ function acceptedDecision(
         productVariantId,
         preferredVendorId: 7,
         vendorProductId: 701,
-        suggestedOrderQty: 3,
+        suggestedOrderQty: 300,
         suggestedOrderPieces: 300,
-        orderUomUnits: 100,
+        orderUomUnits: 1,
         estimatedCostMills: 50,
         estimatedCostCents: 1,
+        pricingBasis: "per_piece",
+        purchaseUom: null,
+        quotedUnitCostMills: 50,
+        piecesPerPurchaseUom: null,
+        quoteReference: "QUOTE-701",
+        quotedAt: "2026-07-01T12:00:00.000Z",
+        quoteValidUntil: "2026-08-31",
+        supplierBasis: { minimumOrderPieces: 1 },
         sku: "SKU-101",
       },
     },
@@ -115,6 +123,16 @@ function baseState(): FakeState {
       vendorSku: "V-101",
       unitCostCents: 1,
       unitCostMills: 50,
+      pricingBasis: "per_piece",
+      purchaseUom: null,
+      quotedUnitCostMills: 50,
+      piecesPerPurchaseUom: null,
+      moq: 1,
+      quoteReference: "QUOTE-701",
+      quotedAt: new Date("2026-07-01T12:00:00.000Z"),
+      quotedAtDate: "2026-07-01",
+      quoteValidUntil: "2026-08-31",
+      updatedAt: new Date("2026-07-01T12:00:00.000Z"),
       isPreferred: 1,
       isActive: 1,
     }],
@@ -159,8 +177,8 @@ function baseCommand(): AcceptedRecommendationPoHandoffCommand {
       productId: 101,
       productVariantId: 1001,
       suggestedPieces: 300,
-      orderUomUnits: 100,
-      orderUomLabel: "Case",
+      orderUomUnits: 1,
+      orderUomLabel: "pieces",
       vendorId: 7,
       vendorProductId: 701,
       sku: "SKU-101",
@@ -180,19 +198,31 @@ function automaticCommand(): AutomaticRecommendationPoHandoffCommand {
       recommendationId: "101:1001:30",
       productId: 101,
       productVariantId: 1001,
-      suggestedOrderQty: 3,
+      suggestedOrderQty: 300,
       suggestedOrderPieces: 300,
-      orderUomUnits: 100,
-      orderUomLabel: "Case",
+      orderUomUnits: 1,
+      orderUomLabel: "pieces",
       vendorId: 7,
       vendorProductId: 701,
       sku: "SKU-101",
       productName: "Product 101",
       estimatedCostMills: 50,
       estimatedCostCents: 1,
+      pricingBasis: "per_piece",
+      purchaseUom: null,
+      quotedUnitCostMills: 50,
+      piecesPerPurchaseUom: null,
+      quoteReference: "QUOTE-701",
+      quotedAt: new Date("2026-07-01T12:00:00.000Z"),
+      quoteValidUntil: "2026-08-31",
       candidateScore: 88,
       candidateBand: "strong_candidate",
-      recommendationSnapshot: { item: { explanation: "Order three cases." } },
+      recommendationSnapshot: {
+        item: {
+          explanation: "Order three cases.",
+          supplierBasis: { minimumOrderPieces: 1 },
+        },
+      },
     }],
     completion: {
       itemsAnalyzed: 12,
@@ -212,17 +242,20 @@ function buildHarness(initialState = baseState()) {
   let committed = cloneState(initialState);
   let failOnCreateHandoff = false;
   let failOnCompleteRun = false;
+  let transactionCalls = 0;
   const lockCalls: string[][] = [];
+  const catalogLockCalls: string[] = [];
 
   const repository: RecommendationPoHandoffRepository = {
     async transaction<T>(work: (unitOfWork: RecommendationPoHandoffUnitOfWork) => Promise<T>): Promise<T> {
+      transactionCalls += 1;
       const staged = cloneState(committed);
       const unitOfWork: RecommendationPoHandoffUnitOfWork = {
         async lockRecommendationKeys(keys) {
           lockCalls.push([...keys]);
         },
-        async getTransactionTimestamp() {
-          return NOW;
+        async getTransactionClock() {
+          return { timestamp: NOW, date: "2026-07-11" };
         },
         async getAutoDraftRunForUpdate(id) {
           return staged.autoDraftRuns.find((row) => row.id === id) ?? null;
@@ -260,15 +293,19 @@ function buildHarness(initialState = baseState()) {
           return staged.handoffs.filter((row) => ids.includes(row.acceptedDecisionId));
         },
         async getVendorProducts(ids) {
+          catalogLockCalls.push("vendorProduct");
           return staged.vendorProducts.filter((row) => ids.includes(row.id));
         },
         async getVendors(ids) {
+          catalogLockCalls.push("vendor");
           return staged.vendors.filter((row) => ids.includes(row.id));
         },
         async getProducts(ids) {
+          catalogLockCalls.push("product");
           return staged.products.filter((row) => ids.includes(row.id));
         },
         async getProductVariants(ids) {
+          catalogLockCalls.push("variant");
           return staged.variants.filter((row) => ids.includes(row.id));
         },
         async createPurchaseOrder(values, numberDate) {
@@ -322,6 +359,10 @@ function buildHarness(initialState = baseState()) {
   return {
     repository,
     lockCalls,
+    catalogLockCalls,
+    get transactionCalls() {
+      return transactionCalls;
+    },
     get state() {
       return committed;
     },
@@ -362,6 +403,11 @@ describe("recommendation PO handoff service", () => {
         unitCostCents: 1,
         totalProductCostCents: 150,
         lineTotalCents: 150,
+        pricingBasis: "per_piece",
+        quotedUnitCostMills: 50,
+        quoteReference: "QUOTE-701",
+        quotedAt: new Date("2026-07-01T12:00:00.000Z"),
+        quoteValidUntil: "2026-08-31",
       }),
     ]);
     expect(harness.state.statusHistory).toHaveLength(1);
@@ -400,6 +446,229 @@ describe("recommendation PO handoff service", () => {
       JSON.stringify(["101:1001:30", "held_by_policy"]),
       JSON.stringify(["101:1001:30", "po_mutation"]),
     ]]);
+    expect(harness.catalogLockCalls).toEqual(["vendor", "product", "variant", "vendorProduct"]);
+  });
+
+  it("preserves a per-purchase-UOM quote and derives its exact UOM quantity", async () => {
+    const state = baseState();
+    const snapshotItem = (state.decisions[0].recommendationSnapshot as any).item;
+    Object.assign(snapshotItem, {
+      estimatedCostMills: 125,
+      estimatedCostCents: 1,
+      pricingBasis: "per_purchase_uom",
+      purchaseUom: "case",
+      quotedUnitCostMills: 12_500,
+      piecesPerPurchaseUom: 100,
+    });
+    Object.assign(state.vendorProducts[0], {
+      unitCostMills: 125,
+      unitCostCents: 1,
+      pricingBasis: "per_purchase_uom",
+      purchaseUom: "case",
+      quotedUnitCostMills: 12_500,
+      piecesPerPurchaseUom: 100,
+    });
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    const result = await service.createAcceptedHandoff(baseCommand());
+
+    expect(result.pos[0]).toMatchObject({ subtotalCents: 375, totalCents: 375 });
+    expect(harness.state.lines[0]).toMatchObject({
+      orderQty: 300,
+      pricingBasis: "per_purchase_uom",
+      purchaseUom: "case",
+      purchaseUomQuantity: 3,
+      piecesPerPurchaseUom: 100,
+      quotedUnitCostMills: 12_500,
+      unitCostMills: 125,
+      totalProductCostCents: 375,
+      lineTotalCents: 375,
+    });
+  });
+
+  it("keeps the supplier purchase UOM independent from warehouse receive-pack units", async () => {
+    const state = baseState();
+    const snapshotItem = (state.decisions[0].recommendationSnapshot as any).item;
+    Object.assign(snapshotItem, {
+      suggestedOrderQty: 6,
+      suggestedOrderPieces: 36,
+      orderUomUnits: 6,
+      estimatedCostMills: 50,
+      estimatedCostCents: 1,
+      pricingBasis: "per_purchase_uom",
+      purchaseUom: "pack",
+      quotedUnitCostMills: 300,
+      piecesPerPurchaseUom: 6,
+      supplierBasis: { minimumOrderPieces: 31 },
+    });
+    Object.assign(state.vendorProducts[0], {
+      unitCostMills: 50,
+      unitCostCents: 1,
+      pricingBasis: "per_purchase_uom",
+      purchaseUom: "pack",
+      quotedUnitCostMills: 300,
+      piecesPerPurchaseUom: 6,
+      moq: 31,
+    });
+    const command = baseCommand();
+    Object.assign(command.items[0], {
+      suggestedPieces: 36,
+      orderUomUnits: 6,
+      orderUomLabel: "pack",
+    });
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    const result = await service.createAcceptedHandoff(command);
+
+    expect(result.pos[0]).toMatchObject({ subtotalCents: 18, totalCents: 18 });
+    expect(harness.state.lines[0]).toMatchObject({
+      orderQty: 36,
+      expectedReceiveVariantId: 1001,
+      expectedReceiveUnitsPerVariant: 100,
+      purchaseUom: "pack",
+      purchaseUomQuantity: 6,
+      piecesPerPurchaseUom: 6,
+      totalProductCostCents: 18,
+    });
+  });
+
+  it("creates an automatic PO from a current zero-dollar supplier quote", async () => {
+    const state = baseState();
+    Object.assign(state.vendorProducts[0], {
+      unitCostMills: 0,
+      unitCostCents: 0,
+      quotedUnitCostMills: 0,
+    });
+    const command = automaticCommand();
+    Object.assign(command.items[0], {
+      estimatedCostMills: 0,
+      estimatedCostCents: 0,
+      quotedUnitCostMills: 0,
+    });
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    const result = await service.createAutomaticHandoff(command);
+
+    expect(result.pos[0]).toMatchObject({ subtotalCents: 0, totalCents: 0 });
+    expect(harness.state.lines[0]).toMatchObject({
+      unitCostMills: 0,
+      unitCostCents: 0,
+      quotedUnitCostMills: 0,
+      totalProductCostCents: 0,
+      lineTotalCents: 0,
+    });
+  });
+
+  it("blocks legacy catalog pricing until its quote basis is confirmed", async () => {
+    const state = baseState();
+    state.vendorProducts[0] = {
+      ...state.vendorProducts[0],
+      pricingBasis: "legacy_unknown",
+      purchaseUom: null,
+      quotedUnitCostMills: null,
+      piecesPerPurchaseUom: null,
+    };
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
+      statusCode: 409,
+      code: "RECOMMENDATION_VENDOR_QUOTE_BASIS_REVIEW_REQUIRED",
+      context: { vendorProductId: 701, pricingBasis: "legacy_unknown" },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("rejects a changed quote basis even when normalized per-piece mills are unchanged", async () => {
+    const state = baseState();
+    Object.assign(state.vendorProducts[0], {
+      pricingBasis: "per_purchase_uom",
+      purchaseUom: "pack",
+      quotedUnitCostMills: 500,
+      piecesPerPurchaseUom: 10,
+    });
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
+      statusCode: 409,
+      code: "RECOMMENDATION_VENDOR_QUOTE_CHANGED",
+      context: { vendorProductId: 701, field: "pricingBasis" },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("rejects a locked catalog MOQ change instead of silently increasing the accepted quantity", async () => {
+    const state = baseState();
+    state.vendorProducts[0].moq = 400;
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
+      statusCode: 409,
+      code: "RECOMMENDATION_VENDOR_MOQ_CHANGED",
+      context: {
+        vendorProductId: 701,
+        acceptedMinimumOrderPieces: 1,
+        currentMinimumOrderPieces: 400,
+      },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+    expect(harness.state.lines).toHaveLength(0);
+  });
+
+  it("rejects an invalid locked catalog MOQ before PO creation", async () => {
+    const state = baseState();
+    state.vendorProducts[0].moq = 0;
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
+      statusCode: 409,
+      code: "RECOMMENDATION_VENDOR_MOQ_INVALID",
+      context: { vendorProductId: 701, minimumOrderPieces: 0 },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("rejects PostgreSQL INTEGER overflow before opening an accepted-handoff transaction", async () => {
+    const harness = buildHarness();
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = baseCommand();
+    command.items[0].suggestedPieces = 2_147_483_648;
+
+    await expect(service.createAcceptedHandoff(command)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.transactionCalls).toBe(0);
+    expect(harness.lockCalls).toHaveLength(0);
+  });
+
+  it("rejects PostgreSQL INTEGER overflow in automatic quantities and run counters before DB access", async () => {
+    const quantityHarness = buildHarness();
+    const quantityService = createRecommendationPoHandoffService(quantityHarness.repository);
+    const quantityCommand = automaticCommand();
+    quantityCommand.items[0].suggestedOrderQty = 2_147_483_648;
+
+    await expect(quantityService.createAutomaticHandoff(quantityCommand)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_AUTOMATIC_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(quantityHarness.transactionCalls).toBe(0);
+
+    const counterHarness = buildHarness();
+    const counterService = createRecommendationPoHandoffService(counterHarness.repository);
+    const counterCommand = automaticCommand();
+    counterCommand.completion.itemsAnalyzed = 2_147_483_648;
+    await expect(counterService.createAutomaticHandoff(counterCommand)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_AUTOMATIC_RECOMMENDATION_HANDOFF",
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(counterHarness.transactionCalls).toBe(0);
   });
 
   it("creates one independent draft PO per vendor with exact line mappings", async () => {
@@ -417,6 +686,14 @@ describe("recommendation PO handoff service", () => {
         orderUomUnits: 10,
         estimatedCostMills: 125,
         estimatedCostCents: 1,
+        pricingBasis: "per_piece",
+        purchaseUom: null,
+        quotedUnitCostMills: 125,
+        piecesPerPurchaseUom: null,
+        quoteReference: "QUOTE-802",
+        quotedAt: "2026-07-02T12:00:00.000Z",
+        quoteValidUntil: "2026-08-31",
+        supplierBasis: { minimumOrderPieces: 1 },
       },
     };
     state.decisions.push(secondDecision);
@@ -428,6 +705,16 @@ describe("recommendation PO handoff service", () => {
       vendorSku: "V-202",
       unitCostCents: 1,
       unitCostMills: 125,
+      pricingBasis: "per_piece",
+      purchaseUom: null,
+      quotedUnitCostMills: 125,
+      piecesPerPurchaseUom: null,
+      moq: 1,
+      quoteReference: "QUOTE-802",
+      quotedAt: new Date("2026-07-02T12:00:00.000Z"),
+      quotedAtDate: "2026-07-02",
+      quoteValidUntil: "2026-08-31",
+      updatedAt: new Date("2026-07-02T12:00:00.000Z"),
       isPreferred: 1,
       isActive: 1,
     });
@@ -499,15 +786,86 @@ describe("recommendation PO handoff service", () => {
     const state = baseState();
     state.vendorProducts[0].unitCostMills = 75;
     state.vendorProducts[0].unitCostCents = 1;
+    state.vendorProducts[0].quotedUnitCostMills = 75;
     const harness = buildHarness(state);
     const service = createRecommendationPoHandoffService(harness.repository);
 
     await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
       statusCode: 409,
-      code: "RECOMMENDATION_VENDOR_COST_CHANGED",
-      context: { acceptedUnitCostMills: 50, currentUnitCostMills: 75 },
+      code: "RECOMMENDATION_VENDOR_QUOTE_CHANGED",
+      context: { field: "quotedUnitCostMills", accepted: 50, current: 75 },
     } satisfies Partial<RecommendationPoHandoffError>);
     expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it("requires a new acceptance when immutable quote metadata changes", async () => {
+    const state = baseState();
+    state.vendorProducts[0].quoteReference = "QUOTE-701-REV-2";
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
+      statusCode: 409,
+      code: "RECOMMENDATION_VENDOR_QUOTE_CHANGED",
+      context: {
+        vendorProductId: 701,
+        field: "quoteReference",
+        accepted: "QUOTE-701",
+        current: "QUOTE-701-REV-2",
+      },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
+  it.each([
+    {
+      label: "expired",
+      quotedAt: new Date("2026-07-01T12:00:00.000Z"),
+      quotedAtDate: "2026-07-01",
+      quoteValidUntil: "2026-07-10",
+      code: "RECOMMENDATION_VENDOR_QUOTE_EXPIRED",
+    },
+    {
+      label: "older than the automation maximum",
+      quotedAt: new Date("2025-07-10T17:59:59.000Z"),
+      quotedAtDate: "2025-07-10",
+      quoteValidUntil: null,
+      code: "RECOMMENDATION_VENDOR_QUOTE_STALE",
+    },
+    {
+      label: "future-dated beyond clock skew",
+      quotedAt: new Date("2026-07-11T18:05:00.001Z"),
+      quotedAtDate: "2026-07-11",
+      quoteValidUntil: "2026-08-31",
+      code: "RECOMMENDATION_VENDOR_QUOTE_FUTURE_DATED",
+    },
+  ])("rejects a locked $label quote at handoff transaction time", async ({
+    quotedAt,
+    quotedAtDate,
+    quoteValidUntil,
+    code,
+  }) => {
+    const state = baseState();
+    const snapshotItem = (state.decisions[0].recommendationSnapshot as any).item;
+    Object.assign(snapshotItem, {
+      quotedAt: quotedAt.toISOString(),
+      quoteValidUntil,
+    });
+    Object.assign(state.vendorProducts[0], { quotedAt, quotedAtDate, quoteValidUntil });
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
+      statusCode: 409,
+      code,
+      context: {
+        vendorProductId: 701,
+        transactionTimestamp: NOW.toISOString(),
+        transactionDate: "2026-07-11",
+      },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+    expect(harness.state.lines).toHaveLength(0);
   });
 
   it("rejects an accepted decision that already has a PO-line handoff", async () => {
@@ -629,6 +987,9 @@ describe("recommendation PO handoff service", () => {
         decisionReason: "automatic_recommendation_po_handoff",
       }),
     ]);
+    expect((harness.state.decisions.at(-2)?.recommendationSnapshot as any).item.supplierBasis).toMatchObject({
+      minimumOrderPieces: 1,
+    });
     expect(harness.state.handoffs).toEqual([
       expect.objectContaining({
         acceptedDecisionId: 11,

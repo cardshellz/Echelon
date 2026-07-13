@@ -11,7 +11,7 @@
  * - Reorder-to-PO generation
  */
 
-import { eq, and, sql, inArray, ne } from "drizzle-orm";
+import { eq, and, sql, inArray, ne, lte, desc, getTableColumns } from "drizzle-orm";
 import {
   inboundShipmentLines,
   landedCostSnapshots,
@@ -22,8 +22,14 @@ import {
   apPaymentAllocations as apPaymentAllocationsTable,
   purchaseOrders as purchaseOrdersTable,
   purchaseOrderLines as purchaseOrderLinesTable,
+  poApprovalTiers as poApprovalTiersTable,
   poStatusHistory as poStatusHistoryTable,
   poEvents as poEventsTable,
+  purchasingRecommendationPoHandoffs as purchasingRecommendationPoHandoffsTable,
+  auditEvents as auditEventsTable,
+  products as productsTable,
+  productVariants as productVariantsTable,
+  vendors as vendorsTable,
   vendorProducts as vendorProductsTable,
   warehouseSettings as warehouseSettingsTable,
 } from "@shared/schema";
@@ -39,6 +45,11 @@ import {
   centsToMills,
   millsToCents,
 } from "@shared/utils/money";
+import {
+  normalizePoLinePricing,
+  type NormalizedPoLinePricing,
+  type PoLinePricingInput,
+} from "@shared/utils/po-line-pricing";
 import {
   detectQtyVariance,
   detectPastDue,
@@ -71,6 +82,46 @@ import {
   buildPurchaseOrderDraftHeaderChange,
   purchaseOrderDraftHeaderPatchSchema,
 } from "./purchase-order-draft-header";
+import {
+  createPurchaseOrderLineCommands,
+  PurchaseOrderLineCommandError,
+  vendorCatalogPricingMatches,
+  vendorCatalogQuoteUsability,
+} from "./purchase-order-line-commands";
+import { assessSupplierQuoteValidity } from "./supplier-quote-validity";
+
+const PG_INTEGER_MAX = 2_147_483_647;
+const MAX_INLINE_PO_LINES = 2_000;
+const MAX_BULK_CATALOG_ENTRIES = 2_000;
+const MAX_QUOTE_CLOCK_SKEW_MS = 5 * 60 * 1_000;
+const PO_NUMBER_ALLOCATION_ATTEMPTS = 5;
+const PO_NUMBER_UNIQUE_CONSTRAINTS = new Set([
+  "purchase_orders_po_number_active_uidx",
+  "purchase_orders_po_number_unique",
+  "purchase_orders_po_number_key",
+]);
+
+function isPoNumberUniqueViolation(error: any): boolean {
+  const databaseError = error?.code === "23505"
+    ? error
+    : error?.cause?.code === "23505"
+      ? error.cause
+      : null;
+  if (!databaseError) return false;
+  if (PO_NUMBER_UNIQUE_CONSTRAINTS.has(String(databaseError.constraint ?? ""))) return true;
+
+  // node-postgres always includes the violated constraint for a real unique
+  // violation. Keep the detail/message fallback for wrapped database clients
+  // that discard that field, but never retry an unrelated unique failure.
+  const diagnostic = `${databaseError.detail ?? ""} ${databaseError.message ?? ""}`.toLowerCase();
+  return diagnostic.includes("po_number") || diagnostic.includes("po number");
+}
+
+function isValidIsoDateOnly(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -182,6 +233,13 @@ export type PurchaseOrderLineInput = {
   totalProductCostCents?: number;
   packagingCostCents?: number;
   vendorProductId?: number | null;
+  vendorSku?: string | null;
+  notes?: string | null;
+  pricing?: PoLinePricingInput;
+  pricingSource?: "legacy" | "manual" | "vendor_catalog" | "recommendation";
+  quoteReference?: string | null;
+  quotedAt?: Date | null;
+  quoteValidUntil?: string | null;
 };
 
 export type CreatePurchaseOrderWithLinesInput = {
@@ -200,6 +258,13 @@ export type UpdateDraftPurchaseOrderWithLinesInput =
   CreatePurchaseOrderWithLinesInput & {
     expectedUpdatedAt: Date;
   };
+
+type CreatePurchaseOrderInternalOptions = {
+  additionalEvent?: {
+    eventType: string;
+    payload: Record<string, unknown>;
+  };
+};
 
 const EDITABLE_STATUSES = new Set(["draft"]);
 // Broader set for amending existing lines (cost corrections, qty adjustments) — any non-terminal state
@@ -265,6 +330,42 @@ export function createPurchasingService(
   options: { now?: () => Date } = {},
 ) {
   const now = options.now ?? (() => new Date());
+  const lineCommands = createPurchaseOrderLineCommands(db);
+
+  async function runLineCommand<T>(command: () => Promise<T>): Promise<T> {
+    try {
+      return await command();
+    } catch (error: any) {
+      if (error instanceof PurchaseOrderLineCommandError) {
+        throw new PurchasingError(error.message, error.statusCode, error.details);
+      }
+      throw error;
+    }
+  }
+
+  const hardenedAddLine = (
+    purchaseOrderId: number,
+    input: unknown,
+    userId?: string,
+  ) => runLineCommand(() => lineCommands.addLine(purchaseOrderId, input, userId));
+
+  const hardenedAddBulkLines = (
+    purchaseOrderId: number,
+    input: unknown,
+    userId?: string,
+  ) => runLineCommand(() => lineCommands.addBulkLines(purchaseOrderId, input, userId));
+
+  const hardenedUpdateLine = (
+    lineId: number,
+    input: unknown,
+    userId?: string,
+  ) => runLineCommand(() => lineCommands.updateLine(lineId, input, userId));
+
+  const hardenedCancelLine = (
+    lineId: number,
+    input: unknown,
+    userId?: string,
+  ) => runLineCommand(() => lineCommands.cancelLine(lineId, input, userId));
 
   // ── Helpers ─────────────────────────────────────────────────────
 
@@ -312,25 +413,20 @@ export function createPurchasingService(
       resolvedTotalProductCostCents = line.totalProductCostCents as number;
       resolvedPackagingCostCents = Number(line.packagingCostCents) || 0;
       subtotalCents = resolvedTotalProductCostCents + resolvedPackagingCostCents;
-      // Derive per-unit from subtotal (product + packaging) / qty so the
-      // full cost basis flows through to inventory lots and COGS.
+      // Normalize the product quote only. Packaging remains its own exact-cent
+      // layer and must never be folded into the vendor's per-piece quote.
       resolvedUnitCostMills =
         qty > 0
           ? Number(
               signedRoundHalfUpDiv(
-                BigInt(subtotalCents) * BigInt(100),
+                BigInt(resolvedTotalProductCostCents) * BigInt(100),
                 BigInt(qty),
               ),
             )
           : 0;
       resolvedUnitCostCents =
         qty > 0
-          ? Number(
-              signedRoundHalfUpDiv(
-                BigInt(subtotalCents),
-                BigInt(qty),
-              ),
-            )
+          ? signedMillsToCents(resolvedUnitCostMills)
           : 0;
     } else {
       // OLD SHAPE: mills or cents as source (backward compat).
@@ -676,6 +772,422 @@ export function createPurchasingService(
     });
   }
 
+  type LifecycleExpectation = {
+    status: string;
+    updatedAtMs: number | null;
+  };
+
+  type LockedLifecycleEconomics = {
+    po: any;
+    lines: any[];
+    subtotalCents: number;
+    totalCents: number;
+    lineCount: number;
+    receivedLineCount: number;
+    newestLineUpdatedAtMs: number | null;
+    correctedLegacyEconomics: boolean;
+  };
+
+  async function observeLifecycleState(
+    id: number,
+    allowedStatuses: readonly string[],
+    invalidMessage: (status: string) => string,
+  ): Promise<LifecycleExpectation> {
+    const observed = await storage.getPurchaseOrderById(id);
+    if (!observed) throw new PurchasingError("Purchase order not found", 404);
+    if (!allowedStatuses.includes(observed.status)) {
+      throw new PurchasingError(invalidMessage(observed.status), 400);
+    }
+    const updatedAtMs = observed.updatedAt == null
+      ? null
+      : new Date(observed.updatedAt).getTime();
+    return {
+      status: observed.status,
+      updatedAtMs: Number.isNaN(updatedAtMs) ? null : updatedAtMs,
+    };
+  }
+
+  function assertLifecycleExpectation(po: any, expectation: LifecycleExpectation): void {
+    const lockedUpdatedAtMs = po.updatedAt == null ? null : new Date(po.updatedAt).getTime();
+    const timestampChanged =
+      expectation.updatedAtMs !== null &&
+      (Number.isNaN(lockedUpdatedAtMs) || lockedUpdatedAtMs !== expectation.updatedAtMs);
+    if (po.status !== expectation.status || timestampChanged) {
+      throw new PurchasingError(
+        "Purchase order changed while the lifecycle action was waiting for its lock",
+        409,
+        {
+          code: "PO_LIFECYCLE_CONFLICT",
+          expectedStatus: expectation.status,
+          currentStatus: po.status,
+        },
+      );
+    }
+  }
+
+  async function lockLifecycleEconomics(
+    tx: any,
+    id: number,
+    expectation: LifecycleExpectation,
+  ): Promise<LockedLifecycleEconomics> {
+    const headerRows = await tx
+      .select()
+      .from(purchaseOrdersTable)
+      .where(eq(purchaseOrdersTable.id, id))
+      .limit(1)
+      .for("update");
+    const po = headerRows[0];
+    if (!po) throw new PurchasingError("Purchase order not found", 404);
+    assertLifecycleExpectation(po, expectation);
+
+    // Header-first lock ordering matches all hardened line commands. Once the
+    // header is locked, no line writer can enter; locking every active line
+    // then gives this transaction a stable economic snapshot.
+    const lines = await tx
+      .select({
+        ...getTableColumns(purchaseOrderLinesTable),
+        // Keep calendar-date comparisons in the database session's timezone.
+        // Deriving this from the JavaScript Date's UTC representation can move
+        // a near-midnight quote onto the wrong day.
+        quotedAtDate: sql<string | null>`${purchaseOrderLinesTable.quotedAt}::date::text`,
+      })
+      .from(purchaseOrderLinesTable)
+      .where(and(
+        eq(purchaseOrderLinesTable.purchaseOrderId, id),
+        ne(purchaseOrderLinesTable.status, "cancelled"),
+      ))
+      .orderBy(purchaseOrderLinesTable.id)
+      .for("update");
+
+    if (!lines.some((line: any) => Number(line.orderQty) > 0)) {
+      throw new PurchasingError("PO must have at least one line with quantity > 0", 400);
+    }
+
+    let subtotal = BigInt(0);
+    let receivedLineCount = 0;
+    let newestLineUpdatedAtMs: number | null = null;
+    let correctedLegacyEconomics = false;
+    const explicitQuoteBases = new Set(["per_piece", "per_purchase_uom", "extended_total"]);
+
+    for (const line of lines) {
+      let trustedLineTotal = storedMoneyAsBigInt(line.lineTotalCents, "line_total_cents");
+
+      // Explicit quote rows are protected by the quote-pricing database
+      // identity constraint, including sub-cent remainder math. Re-deriving
+      // those rows from rounded cents would destroy that precision. Legacy
+      // rows have no such invariant, so repair their derived cent fields while
+      // holding the row lock and use the repaired amount in the decision.
+      if (!explicitQuoteBases.has(String(line.pricingBasis ?? "legacy_unknown"))) {
+        const costs = calculateLineCosts(line);
+        for (const [field, value] of Object.entries({
+          line_total_cents: costs.lineTotalCents,
+          discount_cents: costs.discountCents,
+          tax_cents: costs.taxCents,
+        })) {
+          if (!Number.isSafeInteger(value)) {
+            throw new PurchasingError(`Stored line cannot produce a safe ${field}`, 409, {
+              code: "PO_LIFECYCLE_LINE_MONEY_INVALID",
+              lineId: line.id,
+              field,
+            });
+          }
+        }
+        trustedLineTotal = BigInt(costs.lineTotalCents);
+        if (
+          Number(line.lineTotalCents) !== costs.lineTotalCents ||
+          Number(line.discountCents ?? 0) !== costs.discountCents ||
+          Number(line.taxCents ?? 0) !== costs.taxCents
+        ) {
+          const repaired = await tx
+            .update(purchaseOrderLinesTable)
+            .set({
+              lineTotalCents: costs.lineTotalCents,
+              discountCents: costs.discountCents,
+              taxCents: costs.taxCents,
+              updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+            })
+            .where(and(
+              eq(purchaseOrderLinesTable.id, line.id),
+              eq(purchaseOrderLinesTable.purchaseOrderId, id),
+              ne(purchaseOrderLinesTable.status, "cancelled"),
+            ))
+            .returning({ id: purchaseOrderLinesTable.id });
+          if (!repaired[0]) {
+            throw new PurchasingError("A purchase order line changed during lifecycle validation", 409, {
+              code: "PO_LIFECYCLE_LINE_CONFLICT",
+              lineId: line.id,
+            });
+          }
+          correctedLegacyEconomics = true;
+        }
+      }
+
+      subtotal += trustedLineTotal;
+      if (line.status === "received") receivedLineCount++;
+      if (line.updatedAt != null) {
+        const lineUpdatedAtMs = new Date(line.updatedAt).getTime();
+        if (!Number.isNaN(lineUpdatedAtMs)) {
+          newestLineUpdatedAtMs = newestLineUpdatedAtMs === null
+            ? lineUpdatedAtMs
+            : Math.max(newestLineUpdatedAtMs, lineUpdatedAtMs);
+        }
+      }
+    }
+
+    const total =
+      subtotal -
+      storedMoneyAsBigInt(po.discountCents, "discount_cents") +
+      storedMoneyAsBigInt(po.taxCents, "tax_cents") +
+      storedMoneyAsBigInt(po.shippingCostCents, "shipping_cost_cents");
+
+    return {
+      po,
+      lines,
+      subtotalCents: safeIntegerMoney(subtotal, "subtotal_cents"),
+      totalCents: safeIntegerMoney(total, "total_cents"),
+      lineCount: lines.length,
+      receivedLineCount,
+      newestLineUpdatedAtMs,
+      correctedLegacyEconomics,
+    };
+  }
+
+  async function getMatchingApprovalTierTx(tx: any, totalCents: number): Promise<any | null> {
+    const rows = await tx
+      .select()
+      .from(poApprovalTiersTable)
+      .where(and(
+        lte(poApprovalTiersTable.thresholdCents, totalCents),
+        eq(poApprovalTiersTable.active, 1),
+      ))
+      .orderBy(desc(poApprovalTiersTable.thresholdCents))
+      .limit(1)
+      .for("share");
+    return rows[0] ?? null;
+  }
+
+  async function getActiveApprovalTiersTx(tx: any): Promise<any[]> {
+    return await tx
+      .select()
+      .from(poApprovalTiersTable)
+      .where(eq(poApprovalTiersTable.active, 1))
+      .orderBy(poApprovalTiersTable.id)
+      .for("share");
+  }
+
+  function lifecycleTotalsPatch(economics: LockedLifecycleEconomics) {
+    return {
+      subtotalCents: economics.subtotalCents,
+      totalCents: economics.totalCents,
+      lineCount: economics.lineCount,
+      receivedLineCount: economics.receivedLineCount,
+    };
+  }
+
+  type LifecycleQuoteClock = {
+    evaluatedAt: Date;
+    currentDate: string;
+  };
+
+  async function getLifecycleQuoteClockTx(tx: any): Promise<LifecycleQuoteClock> {
+    const result = await tx.execute(sql`
+      SELECT
+        transaction_timestamp() AS quote_evaluated_at,
+        current_date::text AS quote_current_date
+    `);
+    const row = result.rows?.[0];
+    const evaluatedAt = row?.quote_evaluated_at instanceof Date
+      ? row.quote_evaluated_at
+      : new Date(String(row?.quote_evaluated_at ?? ""));
+    const currentDate = String(row?.quote_current_date ?? "");
+    if (
+      Number.isNaN(evaluatedAt.getTime()) ||
+      !isValidIsoDateOnly(currentDate)
+    ) {
+      throw new PurchasingError("Database quote-validation clock is unavailable", 500, {
+        code: "PO_QUOTE_CLOCK_UNAVAILABLE",
+      });
+    }
+    return { evaluatedAt, currentDate };
+  }
+
+  function lifecycleQuoteError(
+    line: any,
+    status: "invalid" | "future" | "expired" | "stale",
+    currentDate: string,
+  ): PurchasingError {
+    const messages = {
+      invalid: "A purchase-order line has invalid quote dates",
+      future: "A purchase-order line quote is dated in the future",
+      expired: "A purchase-order line quote has expired",
+      stale: "A purchase-order line quote is stale and has no explicit validity date",
+    } as const;
+    return new PurchasingError(messages[status], 409, {
+      code: `PO_LINE_QUOTE_${status.toUpperCase()}`,
+      lineId: line.id,
+      lineNumber: line.lineNumber ?? null,
+      pricingSource: line.pricingSource ?? null,
+      pricingBasis: line.pricingBasis ?? null,
+      quotedAt: line.quotedAt ?? null,
+      quoteValidUntil: line.quoteValidUntil ?? null,
+      currentDate,
+    });
+  }
+
+  async function assertLifecycleQuotesReadyTx(
+    tx: any,
+    economics: LockedLifecycleEconomics,
+  ): Promise<void> {
+    const unreviewedLegacyProduct = economics.lines.find((line: any) =>
+      (line.lineType ?? "product") === "product" &&
+      (line.pricingBasis ?? "legacy_unknown") === "legacy_unknown",
+    );
+    if (unreviewedLegacyProduct) {
+      throw new PurchasingError(
+        "A legacy product line must be reviewed and given an explicit vendor quote basis before submission or sending",
+        409,
+        {
+          code: "PO_LINE_QUOTE_REVIEW_REQUIRED",
+          lineId: unreviewedLegacyProduct.id,
+          lineNumber: unreviewedLegacyProduct.lineNumber ?? null,
+          pricingSource: unreviewedLegacyProduct.pricingSource ?? "legacy",
+          pricingBasis: unreviewedLegacyProduct.pricingBasis ?? "legacy_unknown",
+        },
+      );
+    }
+
+    const datedOrTrustedLines = economics.lines.filter((line: any) =>
+      line.pricingSource === "vendor_catalog" ||
+      line.pricingSource === "recommendation" ||
+      line.quotedAt != null ||
+      line.quoteValidUntil != null,
+    );
+    if (datedOrTrustedLines.length === 0) return;
+
+    const clock = await getLifecycleQuoteClockTx(tx);
+    for (const line of datedOrTrustedLines) {
+      const validUntil = line.quoteValidUntil == null
+        ? null
+        : String(line.quoteValidUntil).slice(0, 10);
+      if (validUntil !== null && !isValidIsoDateOnly(validUntil)) {
+        throw lifecycleQuoteError(line, "invalid", clock.currentDate);
+      }
+      if (validUntil !== null && validUntil < clock.currentDate) {
+        throw lifecycleQuoteError(line, "expired", clock.currentDate);
+      }
+
+      // Manual quotes may intentionally omit a quote date. A stated date,
+      // and every trusted catalog/recommendation snapshot, must still be
+      // current at the moment approval or sending commits.
+      if (line.quotedAt == null) {
+        if (line.pricingSource === "vendor_catalog" || line.pricingSource === "recommendation") {
+          throw lifecycleQuoteError(line, "invalid", clock.currentDate);
+        }
+        continue;
+      }
+      const validity = assessSupplierQuoteValidity({
+        quotedAt: line.quotedAt,
+        quotedAtDate: line.quotedAtDate ?? null,
+        quoteValidUntil: validUntil,
+        asOf: clock.evaluatedAt,
+        currentDate: clock.currentDate,
+      });
+      if (validity.status === "invalid" || validity.status === "future" || validity.status === "expired" || validity.status === "stale") {
+        throw lifecycleQuoteError(line, validity.status, clock.currentDate);
+      }
+    }
+
+    const trustedLines = datedOrTrustedLines.filter((line: any) =>
+      line.pricingSource === "vendor_catalog" || line.pricingSource === "recommendation",
+    );
+    if (trustedLines.length === 0) return;
+    const vendorProductIds = [...new Set(trustedLines.map((line: any) => Number(line.vendorProductId)))]
+      .filter((id) => Number.isSafeInteger(id) && id > 0)
+      .sort((left, right) => left - right);
+    if (vendorProductIds.length !== new Set(trustedLines.map((line: any) => Number(line.vendorProductId))).size) {
+      throw new PurchasingError("A trusted purchase-order line is missing vendor catalog provenance", 409, {
+        code: "PO_LINE_VENDOR_CATALOG_PROVENANCE_INVALID",
+      });
+    }
+    const catalogRows = await tx
+      .select()
+      .from(vendorProductsTable)
+      .where(inArray(vendorProductsTable.id, vendorProductIds))
+      .orderBy(vendorProductsTable.id)
+      .for("share");
+    const catalogById = new Map<number, any>(
+      catalogRows.map((row: any) => [Number(row.id), row]),
+    );
+    for (const line of trustedLines) {
+      const vendorProduct = catalogById.get(Number(line.vendorProductId));
+      if (
+        !vendorProduct ||
+        Number(vendorProduct.isActive ?? 0) !== 1 ||
+        Number(vendorProduct.vendorId) !== Number(economics.po.vendorId) ||
+        Number(vendorProduct.productId) !== Number(line.productId)
+      ) {
+        throw new PurchasingError(
+          "A trusted vendor catalog mapping is no longer active for this PO vendor and product",
+          409,
+          {
+            code: "PO_LINE_VENDOR_CATALOG_PROVENANCE_INACTIVE",
+            lineId: line.id,
+            vendorProductId: line.vendorProductId ?? null,
+          },
+        );
+      }
+    }
+  }
+
+  async function updateLockedLifecycleHeader(
+    tx: any,
+    economics: LockedLifecycleEconomics,
+    patch: Record<string, unknown>,
+  ): Promise<any> {
+    const po = economics.po;
+    const conditions = [
+      eq(purchaseOrdersTable.id, po.id),
+      eq(purchaseOrdersTable.status, po.status),
+    ];
+    if (po.physicalStatus != null) {
+      conditions.push(eq(purchaseOrdersTable.physicalStatus, po.physicalStatus));
+    }
+    if (po.updatedAt != null) {
+      conditions.push(eq(purchaseOrdersTable.updatedAt, po.updatedAt));
+    }
+    const rows = await tx
+      .update(purchaseOrdersTable)
+      .set({
+        ...patch,
+        updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+      })
+      .where(and(...conditions))
+      .returning();
+    if (!rows[0]) {
+      throw new PurchasingError("Purchase order changed during the lifecycle transition", 409, {
+        code: "PO_LIFECYCLE_CONFLICT",
+      });
+    }
+    return rows[0];
+  }
+
+  function approvalCoversLockedEconomics(
+    economics: LockedLifecycleEconomics,
+    tier: any,
+  ): boolean {
+    const approvedAtMs = economics.po.approvedAt == null
+      ? Number.NaN
+      : new Date(economics.po.approvedAt).getTime();
+    if (
+      Number.isNaN(approvedAtMs) ||
+      Number(economics.po.approvalTierId) !== Number(tier.id) ||
+      economics.correctedLegacyEconomics
+    ) {
+      return false;
+    }
+    return economics.newestLineUpdatedAtMs === null || economics.newestLineUpdatedAtMs <= approvedAtMs;
+  }
+
   // recordStatusChange removed in favor of storage.updatePurchaseOrderStatusWithHistory
 
   function assertTransition(currentStatus: string, targetStatus: string) {
@@ -992,46 +1504,121 @@ export function createPurchasingService(
     const vendor = await storage.getVendorById(data.vendorId);
     if (!vendor) throw new PurchasingError("Vendor not found", 404);
 
-    const poNumber = await storage.generatePoNumber();
-
-    try {
-      const po = await storage.createPurchaseOrder({
-        poNumber,
-        vendorId: data.vendorId,
-        warehouseId: data.warehouseId,
-        status: "draft",
-        poType: data.poType || "standard",
-        priority: data.priority || "normal",
-        expectedDeliveryDate: data.expectedDeliveryDate,
-        shipToAddress: data.shipToAddress,
-        shippingMethod: data.shippingMethod,
-        incoterms: data.incoterms,
-        freightTerms: data.freightTerms,
-        vendorNotes: data.vendorNotes,
-        internalNotes: data.internalNotes,
-        source: data.source ?? "manual",
-        currency: vendor.currency || "USD",
-        paymentTermsDays: vendor.paymentTermsDays,
-        paymentTermsType: vendor.paymentTermsType,
-        shipFromAddress: vendor.shipFromAddress,
-        createdBy: data.createdBy,
-        updatedBy: data.createdBy,
-      }, {
-        fromStatus: null,
-        toStatus: "draft",
-        changedBy: data.createdBy,
-        notes: "PO created"
-      });
-      return po;
-    } catch (error: any) {
-      if (error?.code === "23505") {
-        throw new PurchasingError(
-          `PO number '${poNumber}' already in use by an active record.`,
-          409,
-        );
+    let lastConflictingPoNumber: string | null = null;
+    for (let attempt = 1; attempt <= PO_NUMBER_ALLOCATION_ATTEMPTS; attempt++) {
+      const poNumber = await storage.generatePoNumber();
+      try {
+        return await storage.createPurchaseOrder({
+          poNumber,
+          vendorId: data.vendorId,
+          warehouseId: data.warehouseId,
+          status: "draft",
+          poType: data.poType || "standard",
+          priority: data.priority || "normal",
+          expectedDeliveryDate: data.expectedDeliveryDate,
+          shipToAddress: data.shipToAddress,
+          shippingMethod: data.shippingMethod,
+          incoterms: data.incoterms,
+          freightTerms: data.freightTerms,
+          vendorNotes: data.vendorNotes,
+          internalNotes: data.internalNotes,
+          source: data.source ?? "manual",
+          currency: vendor.currency || "USD",
+          paymentTermsDays: vendor.paymentTermsDays,
+          paymentTermsType: vendor.paymentTermsType,
+          shipFromAddress: vendor.shipFromAddress,
+          createdBy: data.createdBy,
+          updatedBy: data.createdBy,
+        }, {
+          fromStatus: null,
+          toStatus: "draft",
+          changedBy: data.createdBy,
+          notes: "PO created"
+        });
+      } catch (error: any) {
+        if (!isPoNumberUniqueViolation(error)) throw error;
+        lastConflictingPoNumber = poNumber;
+        if (attempt < PO_NUMBER_ALLOCATION_ATTEMPTS) continue;
       }
-      throw error;
     }
+
+    throw new PurchasingError(
+      "Could not allocate a unique PO number after concurrent create attempts",
+      409,
+      {
+        code: "PO_NUMBER_ALLOCATION_EXHAUSTED",
+        attempts: PO_NUMBER_ALLOCATION_ATTEMPTS,
+        lastPoNumber: lastConflictingPoNumber,
+      },
+    );
+  }
+
+  async function lockCleanDraftHeaderForMutation(
+    tx: any,
+    id: number,
+  ): Promise<any> {
+    const locked = await tx
+      .select()
+      .from(purchaseOrdersTable)
+      .where(eq(purchaseOrdersTable.id, id))
+      .limit(1)
+      .for("update");
+    const po = locked[0];
+    if (!po) throw new PurchasingError("Purchase order not found", 404);
+
+    const physicalStatus = po.physicalStatus ?? po.status;
+    const financialStatus = po.financialStatus ?? "unbilled";
+    if (
+      po.status !== "draft" ||
+      physicalStatus !== "draft" ||
+      financialStatus !== "unbilled"
+    ) {
+      throw new PurchasingError(`Cannot edit PO in '${po.status}' status`, 400, {
+        code: "PO_NOT_EDITABLE",
+        status: po.status,
+        physicalStatus,
+        financialStatus,
+      });
+    }
+    if (
+      storedMoneyAsBigInt(po.invoicedTotalCents, "invoiced_total_cents") !== BigInt(0) ||
+      storedMoneyAsBigInt(po.paidTotalCents, "paid_total_cents") !== BigInt(0)
+    ) {
+      throw new PurchasingError("Cannot edit a draft after financial activity exists", 409, {
+        code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY",
+      });
+    }
+
+    const recommendationHandoffs = await tx
+      .select({ id: purchasingRecommendationPoHandoffsTable.id })
+      .from(purchasingRecommendationPoHandoffsTable)
+      .where(eq(purchasingRecommendationPoHandoffsTable.purchaseOrderId, id))
+      .limit(1);
+    if (recommendationHandoffs[0]) {
+      throw new PurchasingError(
+        "Cannot edit the header of a recommendation-created PO; cancel it and accept a new recommendation",
+        409,
+        {
+          code: "RECOMMENDATION_PO_HEADER_AMEND_BLOCKED",
+          handoffId: recommendationHandoffs[0].id,
+        },
+      );
+    }
+
+    return po;
+  }
+
+  function cleanDraftHeaderCasConditions(po: any): any[] {
+    const conditions = [
+      eq(purchaseOrdersTable.id, po.id),
+      eq(purchaseOrdersTable.status, "draft"),
+      eq(purchaseOrdersTable.physicalStatus, "draft"),
+      eq(purchaseOrdersTable.financialStatus, "unbilled"),
+    ];
+    if (po.updatedAt != null) {
+      conditions.push(eq(purchaseOrdersTable.updatedAt, po.updatedAt));
+    }
+    return conditions;
   }
 
   async function updatePO(
@@ -1053,40 +1640,19 @@ export function createPurchasingService(
     }
 
     return db.transaction(async (tx: any) => {
-      const locked = await tx
-        .select()
-        .from(purchaseOrdersTable)
-        .where(eq(purchaseOrdersTable.id, id))
-        .limit(1)
-        .for("update");
-      const po = locked[0];
-      if (!po) throw new PurchasingError("Purchase order not found", 404);
-
-      const physicalStatus = po.physicalStatus ?? po.status;
-      if (!EDITABLE_STATUSES.has(po.status) || physicalStatus !== "draft") {
-        throw new PurchasingError(`Cannot edit PO in '${po.status}' status`, 400, {
-          code: "PO_NOT_EDITABLE",
-          status: po.status,
-          physicalStatus,
-        });
-      }
+      const po = await lockCleanDraftHeaderForMutation(tx, id);
 
       const change = buildPurchaseOrderDraftHeaderChange(po, parsed.data);
       if (change.changedFields.length === 0) return po;
 
-      const updatedAt = now();
       const result = await tx
         .update(purchaseOrdersTable)
         .set({
           ...change.patch,
           ...(userId ? { updatedBy: userId } : {}),
-          updatedAt,
+          updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
         })
-        .where(and(
-          eq(purchaseOrdersTable.id, id),
-          eq(purchaseOrdersTable.status, "draft"),
-          eq(purchaseOrdersTable.physicalStatus, "draft"),
-        ))
+        .where(and(...cleanDraftHeaderCasConditions(po)))
         .returning();
       const updated = result[0];
       if (!updated) {
@@ -1109,21 +1675,16 @@ export function createPurchasingService(
     input: DeliverySchedulePatch & { notes?: string },
     userId?: string,
   ) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-
-    const physicalStatus = po.physicalStatus ?? po.status;
-    if (
-      TERMINAL_DELIVERY_SCHEDULE_STATUSES.has(po.status) ||
-      TERMINAL_DELIVERY_SCHEDULE_STATUSES.has(physicalStatus)
-    ) {
-      throw new PurchasingError("Cannot update the delivery schedule on a terminal PO", 400, {
-        code: "DELIVERY_SCHEDULE_TERMINAL_PO",
-        status: po.status,
-        physicalStatus,
+    if (!Number.isSafeInteger(id) || id <= 0 || id > PG_INTEGER_MAX) {
+      throw new PurchasingError("Purchase order id must be a positive integer", 400, {
+        code: "INVALID_PURCHASE_ORDER_ID",
       });
     }
-
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new PurchasingError("Delivery schedule update is required", 400, {
+        code: "DELIVERY_SCHEDULE_INVALID_PATCH",
+      });
+    }
     const hasExpected = input.expectedDeliveryDate !== undefined;
     const hasConfirmed = input.confirmedDeliveryDate !== undefined;
     if (!hasExpected && !hasConfirmed) {
@@ -1132,52 +1693,101 @@ export function createPurchasingService(
       });
     }
 
-    const issues = validateDeliverySchedulePatch(po, input);
-    if (issues.length > 0) {
-      const issue = issues[0];
-      throw new PurchasingError(issue.message, 400, issue);
-    }
+    return db.transaction(async (tx: any) => {
+      const locked = await tx
+        .select()
+        .from(purchaseOrdersTable)
+        .where(eq(purchaseOrdersTable.id, id))
+        .limit(1)
+        .for("update");
+      const po = locked[0];
+      if (!po) throw new PurchasingError("Purchase order not found", 404);
 
-    const patch: Record<string, Date | null | string | undefined> = {};
-    const changes: string[] = [];
-    if (hasExpected && !sameDeliveryDate(po.expectedDeliveryDate, input.expectedDeliveryDate)) {
-      patch.expectedDeliveryDate = input.expectedDeliveryDate ?? null;
-      changes.push("requested delivery date");
-    }
-    if (hasConfirmed && !sameDeliveryDate(po.confirmedDeliveryDate, input.confirmedDeliveryDate)) {
-      patch.confirmedDeliveryDate = input.confirmedDeliveryDate ?? null;
-      changes.push("vendor confirmed delivery date");
-    }
+      const physicalStatus = po.physicalStatus ?? po.status;
+      if (
+        TERMINAL_DELIVERY_SCHEDULE_STATUSES.has(po.status) ||
+        TERMINAL_DELIVERY_SCHEDULE_STATUSES.has(physicalStatus)
+      ) {
+        throw new PurchasingError("Cannot update the delivery schedule on a terminal PO", 400, {
+          code: "DELIVERY_SCHEDULE_TERMINAL_PO",
+          status: po.status,
+          physicalStatus,
+        });
+      }
 
-    if (changes.length === 0) return po;
+      const issues = validateDeliverySchedulePatch(po, input);
+      if (issues.length > 0) {
+        const issue = issues[0];
+        throw new PurchasingError(issue.message, 400, issue);
+      }
 
-    const before = {
-      expected_delivery_date: deliveryDateIso(po.expectedDeliveryDate),
-      confirmed_delivery_date: deliveryDateIso(po.confirmedDeliveryDate),
-    };
-    const after = {
-      expected_delivery_date: hasExpected
-        ? deliveryDateIso(input.expectedDeliveryDate)
-        : before.expected_delivery_date,
-      confirmed_delivery_date: hasConfirmed
-        ? deliveryDateIso(input.confirmedDeliveryDate)
-        : before.confirmed_delivery_date,
-    };
-    const notes = input.notes?.trim() || `Updated ${changes.join(" and ")}`;
+      const patch: Record<string, Date | null> = {};
+      const changes: string[] = [];
+      if (hasExpected && !sameDeliveryDate(po.expectedDeliveryDate, input.expectedDeliveryDate)) {
+        patch.expectedDeliveryDate = input.expectedDeliveryDate ?? null;
+        changes.push("requested delivery date");
+      }
+      if (hasConfirmed && !sameDeliveryDate(po.confirmedDeliveryDate, input.confirmedDeliveryDate)) {
+        patch.confirmedDeliveryDate = input.confirmedDeliveryDate ?? null;
+        changes.push("vendor confirmed delivery date");
+      }
+      if (changes.length === 0) return po;
 
-    return updatePurchaseOrderStatusWithEvent(
-      id,
-      { ...patch, updatedBy: userId },
-      {
+      const before = {
+        expected_delivery_date: deliveryDateIso(po.expectedDeliveryDate),
+        confirmed_delivery_date: deliveryDateIso(po.confirmedDeliveryDate),
+      };
+      const after = {
+        expected_delivery_date: hasExpected
+          ? deliveryDateIso(input.expectedDeliveryDate)
+          : before.expected_delivery_date,
+        confirmed_delivery_date: hasConfirmed
+          ? deliveryDateIso(input.confirmedDeliveryDate)
+          : before.confirmed_delivery_date,
+      };
+      const notes = input.notes?.trim() || `Updated ${changes.join(" and ")}`;
+      const conditions = [
+        eq(purchaseOrdersTable.id, id),
+        eq(purchaseOrdersTable.status, po.status),
+      ];
+      if (po.physicalStatus != null) {
+        conditions.push(eq(purchaseOrdersTable.physicalStatus, po.physicalStatus));
+      }
+      if (po.updatedAt != null) {
+        conditions.push(eq(purchaseOrdersTable.updatedAt, po.updatedAt));
+      }
+      const updatedRows = await tx
+        .update(purchaseOrdersTable)
+        .set({
+          ...patch,
+          ...(userId ? { updatedBy: userId } : {}),
+          updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+        })
+        .where(and(...conditions))
+        .returning();
+      const updated = updatedRows[0];
+      if (!updated) {
+        throw new PurchasingError(
+          "Purchase order changed while the delivery schedule update was being applied",
+          409,
+          { code: "PO_DELIVERY_SCHEDULE_CONFLICT" },
+        );
+      }
+
+      await tx.insert(poStatusHistoryTable).values({
+        purchaseOrderId: id,
         fromStatus: po.status,
         toStatus: po.status,
         changedBy: userId,
         notes,
-      },
-      "delivery_schedule_updated",
-      userId,
-      { before, after, notes },
-    );
+      });
+      await emitPoEventTx(tx, id, "delivery_schedule_updated", userId, {
+        before,
+        after,
+        notes,
+      });
+      return updated;
+    });
   }
 
   async function deletePO(id: number) {
@@ -1198,14 +1808,11 @@ export function createPurchasingService(
   }
 
   // ── INCOTERMS & HEADER CHARGES ────────────────────────────────────
-  // Allows updating incoterms + shipping/tax charges at any non-cancelled status.
-  // Discount is limited to draft. All changes are audit-trailed.
+  // Incoterms and header charges are approval inputs. They may only change on
+  // a financially clean draft, and the totals + audit event must commit with
+  // the edit so an approved amount can never be altered through this endpoint.
 
-  function fmtCents(cents: number | null | undefined): string {
-    return `$${((Number(cents) || 0) / 100).toFixed(2)}`;
-  }
-
-    async function updateIncotermsAndCharges(
+  async function updateIncotermsAndCharges(
       id: number,
       updates: {
         incoterms?: string | null;
@@ -1216,46 +1823,195 @@ export function createPurchasingService(
       },
       userId?: string,
     ) {
-      const po = await storage.getPurchaseOrderById(id);
-      if (!po) throw new PurchasingError("Purchase order not found", 404);
-      if (po.status === "cancelled") throw new PurchasingError("Cannot update a cancelled PO", 400);
-  
-      const changes: string[] = [];
-      const patch: Record<string, any> = {};
-  
-      if (updates.incoterms !== undefined && updates.incoterms !== po.incoterms) {
-        changes.push(`Incoterms: ${po.incoterms || "none"} → ${updates.incoterms || "none"}`);
-        patch.incoterms = updates.incoterms;
+      if (!Number.isSafeInteger(id) || id <= 0 || id > PG_INTEGER_MAX) {
+        throw new PurchasingError("Purchase order id must be a positive integer", 400, {
+          code: "INVALID_PURCHASE_ORDER_ID",
+        });
       }
-      if (updates.discountCents !== undefined && updates.discountCents !== Number(po.discountCents)) {
-        if (po.status !== "draft") throw new PurchasingError("Discount can only be changed in draft status", 400);
-        changes.push(`Discount: ${fmtCents(po.discountCents)} → ${fmtCents(updates.discountCents)}`);
-        patch.discountCents = updates.discountCents;
-      }
-      if (updates.taxCents !== undefined && updates.taxCents !== Number(po.taxCents)) {
-        changes.push(`Tax: ${fmtCents(po.taxCents)} → ${fmtCents(updates.taxCents)}`);
-        patch.taxCents = updates.taxCents;
-      }
-      if (updates.shippingCostCents !== undefined && updates.shippingCostCents !== Number(po.shippingCostCents)) {
-        changes.push(`Shipping: ${fmtCents(po.shippingCostCents)} → ${fmtCents(updates.shippingCostCents)}`);
-        patch.shippingCostCents = updates.shippingCostCents;
-      }
-      if (updates.overReceiptTolerancePct !== undefined && updates.overReceiptTolerancePct !== Number(po.overReceiptTolerancePct)) {
-        changes.push(`Over-Receipt Tolerance: ${Number(po.overReceiptTolerancePct || 0)}% → ${updates.overReceiptTolerancePct}%`);
-        patch.overReceiptTolerancePct = String(updates.overReceiptTolerancePct);
+      if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
+        throw new PurchasingError("Incoterms or header charges update is required", 400, {
+          code: "INVALID_PO_HEADER_CHARGES_PATCH",
+        });
       }
 
-    if (changes.length === 0) return po;
+      const suppliedFields = [
+        "incoterms",
+        "discountCents",
+        "taxCents",
+        "shippingCostCents",
+        "overReceiptTolerancePct",
+      ].filter((field) => (updates as Record<string, unknown>)[field] !== undefined);
+      if (suppliedFields.length === 0) {
+        throw new PurchasingError("At least one incoterm or header charge field is required", 400, {
+          code: "INVALID_PO_HEADER_CHARGES_PATCH",
+        });
+      }
 
-    patch.updatedBy = userId;
-    // No status transition here — incoterms/charges edits don't change PO
-    // status, they just modify header fields. Use the plain update helper.
-    // (The earlier call site passed historyData with wrong field names
-    // oldStatus/newStatus/changeNotes that don't map to po_status_history
-    // columns, so to_status stayed NULL and the insert blew up.)
-    // Audit trail is still captured on po_events via the parent mutation.
-    await storage.updatePurchaseOrder(id, patch);
-    return await recalculateTotals(id, userId);
+      let normalizedIncoterms: string | null | undefined;
+      if (updates.incoterms !== undefined) {
+        if (updates.incoterms !== null && typeof updates.incoterms !== "string") {
+          throw new PurchasingError("incoterms must be a string or null", 400, {
+            code: "INVALID_PO_HEADER_CHARGES_PATCH",
+            field: "incoterms",
+          });
+        }
+        normalizedIncoterms = typeof updates.incoterms === "string"
+          ? updates.incoterms.trim() || null
+          : null;
+        if (normalizedIncoterms != null && normalizedIncoterms.length > 10) {
+          throw new PurchasingError("incoterms must be at most 10 characters", 400, {
+            code: "INVALID_PO_HEADER_CHARGES_PATCH",
+            field: "incoterms",
+          });
+        }
+      }
+      for (const field of ["discountCents", "taxCents", "shippingCostCents"] as const) {
+        const value = updates[field];
+        if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+          throw new PurchasingError(`${field} must be a non-negative integer number of cents`, 400, {
+            code: "INVALID_PO_HEADER_CHARGES_PATCH",
+            field,
+          });
+        }
+      }
+      if (
+        updates.overReceiptTolerancePct !== undefined &&
+        (
+          !Number.isFinite(updates.overReceiptTolerancePct) ||
+          updates.overReceiptTolerancePct < 0 ||
+          updates.overReceiptTolerancePct > 100 ||
+          Math.round(updates.overReceiptTolerancePct * 100) / 100 !==
+            updates.overReceiptTolerancePct
+        )
+      ) {
+        throw new PurchasingError(
+          "overReceiptTolerancePct must be between 0 and 100 with at most two decimal places",
+          400,
+          {
+            code: "INVALID_PO_HEADER_CHARGES_PATCH",
+            field: "overReceiptTolerancePct",
+          },
+        );
+      }
+
+      return db.transaction(async (tx: any) => {
+        const po = await lockCleanDraftHeaderForMutation(tx, id);
+        const patch: Record<string, unknown> = {};
+        const changedFields: string[] = [];
+        const before: Record<string, unknown> = {};
+        const after: Record<string, unknown> = {};
+        const track = (
+          column: string,
+          auditField: string,
+          current: unknown,
+          requested: unknown,
+          stored: unknown = requested,
+        ) => {
+          if (requested === undefined || requested === current) return;
+          changedFields.push(auditField);
+          before[auditField] = current ?? null;
+          after[auditField] = requested ?? null;
+          patch[column] = stored;
+        };
+
+        track("incoterms", "incoterms", po.incoterms ?? null, normalizedIncoterms);
+        track(
+          "discountCents",
+          "discount_cents",
+          Number(po.discountCents ?? 0),
+          updates.discountCents,
+        );
+        track("taxCents", "tax_cents", Number(po.taxCents ?? 0), updates.taxCents);
+        track(
+          "shippingCostCents",
+          "shipping_cost_cents",
+          Number(po.shippingCostCents ?? 0),
+          updates.shippingCostCents,
+        );
+        track(
+          "overReceiptTolerancePct",
+          "over_receipt_tolerance_pct",
+          Number(po.overReceiptTolerancePct ?? 0),
+          updates.overReceiptTolerancePct,
+          updates.overReceiptTolerancePct === undefined
+            ? undefined
+            : String(updates.overReceiptTolerancePct),
+        );
+        if (changedFields.length === 0) return po;
+
+        const lines = await tx
+          .select()
+          .from(purchaseOrderLinesTable)
+          .where(and(
+            eq(purchaseOrderLinesTable.purchaseOrderId, id),
+            ne(purchaseOrderLinesTable.status, "cancelled"),
+          ))
+          .orderBy(purchaseOrderLinesTable.id)
+          .for("update");
+        let subtotal = BigInt(0);
+        let receivedLineCount = 0;
+        for (const line of lines) {
+          subtotal += storedMoneyAsBigInt(line.lineTotalCents, "line_total_cents");
+          if (line.status === "received") receivedLineCount++;
+        }
+
+        const discountCents = updates.discountCents === undefined
+          ? storedMoneyAsBigInt(po.discountCents, "discount_cents")
+          : BigInt(updates.discountCents);
+        const taxCents = updates.taxCents === undefined
+          ? storedMoneyAsBigInt(po.taxCents, "tax_cents")
+          : BigInt(updates.taxCents);
+        const shippingCostCents = updates.shippingCostCents === undefined
+          ? storedMoneyAsBigInt(po.shippingCostCents, "shipping_cost_cents")
+          : BigInt(updates.shippingCostCents);
+        const computedTotal = subtotal - discountCents + taxCents + shippingCostCents;
+        if (computedTotal < BigInt(0)) {
+          throw new PurchasingError(
+            "Header discount cannot make the purchase order total negative",
+            400,
+            {
+              code: "PO_TOTAL_NEGATIVE",
+              subtotalCents: safeIntegerMoney(subtotal, "subtotal_cents"),
+              discountCents: safeIntegerMoney(discountCents, "discount_cents"),
+              taxCents: safeIntegerMoney(taxCents, "tax_cents"),
+              shippingCostCents: safeIntegerMoney(shippingCostCents, "shipping_cost_cents"),
+            },
+          );
+        }
+        const subtotalCents = safeIntegerMoney(subtotal, "subtotal_cents");
+        const totalCents = safeIntegerMoney(computedTotal, "total_cents");
+        before.subtotal_cents = Number(po.subtotalCents ?? 0);
+        before.total_cents = Number(po.totalCents ?? 0);
+        after.subtotal_cents = subtotalCents;
+        after.total_cents = totalCents;
+
+        const updatedRows = await tx
+          .update(purchaseOrdersTable)
+          .set({
+            ...patch,
+            subtotalCents,
+            totalCents,
+            lineCount: lines.length,
+            receivedLineCount,
+            ...(userId ? { updatedBy: userId } : {}),
+            updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+          })
+          .where(and(...cleanDraftHeaderCasConditions(po)))
+          .returning();
+        const updated = updatedRows[0];
+        if (!updated) {
+          throw new PurchasingError("Purchase order changed while header charges were being applied", 409, {
+            code: "PO_DRAFT_EDIT_CONFLICT",
+          });
+        }
+
+        await emitPoEventTx(tx, id, "incoterms_charges_updated", userId, {
+          changed_fields: changedFields,
+          before,
+          after,
+        });
+        return updated;
+      });
   }
 
   // ── LINE MANAGEMENT ─────────────────────────────────────────────
@@ -1551,153 +2307,349 @@ export function createPurchasingService(
 
   // ── STATUS TRANSITIONS ──────────────────────────────────────────
 
-  async function submit(id: number, userId?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-
-    // Validate at least 1 non-cancelled line with qty > 0
-    const lines = await storage.getPurchaseOrderLines(id);
-    const activeLines = lines.filter((l: any) => l.status !== "cancelled" && l.orderQty > 0);
-    if (activeLines.length === 0) {
-      throw new PurchasingError("PO must have at least one line with quantity > 0", 400);
+  async function writeLifecycleAuditTx(
+    tx: any,
+    purchaseOrderId: number,
+    histories: Array<{
+      fromStatus: string | null;
+      toStatus: string;
+      changedBy?: string;
+      notes?: string;
+    }>,
+    events: Array<{ type: string; payload: Record<string, unknown> }>,
+    userId?: string,
+  ): Promise<void> {
+    for (const history of histories) {
+      await tx.insert(poStatusHistoryTable).values({
+        purchaseOrderId,
+        ...history,
+        changedBy: history.changedBy ?? userId ?? null,
+      });
     }
-
-    // Recalculate totals before checking approval
-    await recalculateTotals(id, userId);
-    const updatedPo = await storage.getPurchaseOrderById(id);
-    const totalCents = Number(updatedPo.totalCents || 0);
-
-    // Check approval tiers
-    const tier = await storage.getMatchingApprovalTier(totalCents);
-
-    if (tier) {
-      // Needs approval
-      assertTransition(po.status, "pending_approval");
-      return updatePurchaseOrderStatusWithEvent(
-        id,
-        {
-          status: "pending_approval",
-          approvalTierId: tier.id,
-          updatedBy: userId,
-        },
-        {
-          fromStatus: po.status,
-          toStatus: "pending_approval",
-          changedBy: userId,
-          notes: `Approval required: ${tier.tierName}`,
-        },
-        "submitted",
-        userId,
-        {
-          from_status: po.status,
-          to_status: "pending_approval",
-          tier_id: tier.id,
-          tier_name: tier.tierName,
-          total_cents: totalCents,
-        },
-      );
-    } else {
-      // Auto-approve (no tier matches)
-      assertTransition(po.status, "approved");
-      return updatePurchaseOrderStatusWithEvent(
-        id,
-        {
-          status: "approved",
-          approvedBy: userId,
-          approvedAt: new Date(),
-          approvalNotes: "Auto-approved (below approval threshold)",
-          updatedBy: userId,
-        },
-        {
-          fromStatus: po.status,
-          toStatus: "approved",
-          changedBy: userId,
-          notes: "Auto-approved (below threshold)",
-        },
-        "approved",
-        userId,
-        {
-          from_status: po.status,
-          to_status: "approved",
-          auto: true,
-          reason: "below_threshold",
-          total_cents: totalCents,
-        },
-      );
+    for (const event of events) {
+      await emitPoEventTx(tx, purchaseOrderId, event.type, userId, event.payload);
     }
   }
 
-  async function returnToDraft(id: number, userId?: string, notes?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-    assertTransition(po.status, "draft");
+  async function moveLockedPoToPendingApproval(
+    tx: any,
+    economics: LockedLifecycleEconomics,
+    tier: any,
+    userId?: string,
+    approvalInvalidated = false,
+  ): Promise<any> {
+    const fromStatus = economics.po.status;
+    const updated = await updateLockedLifecycleHeader(tx, economics, {
+      ...lifecycleTotalsPatch(economics),
+      status: "pending_approval",
+      physicalStatus: "draft",
+      approvalTierId: tier.id,
+      approvedBy: null,
+      approvedAt: null,
+      approvalNotes: null,
+      updatedBy: userId ?? null,
+    });
+    await writeLifecycleAuditTx(
+      tx,
+      economics.po.id,
+      [{
+        fromStatus,
+        toStatus: "pending_approval",
+        notes: approvalInvalidated
+          ? `Approval invalidated by changed economics; ${tier.tierName} approval is required`
+          : `Approval required: ${tier.tierName}`,
+      }],
+      [{
+        type: "submitted",
+        payload: {
+          from_status: fromStatus,
+          to_status: "pending_approval",
+          tier_id: tier.id,
+          tier_name: tier.tierName,
+          total_cents: economics.totalCents,
+          approval_invalidated: approvalInvalidated,
+        },
+      }],
+      userId,
+    );
+    return updated;
+  }
 
-    return updatePurchaseOrderStatusWithEvent(
+  type LockedSendResult = {
+    po: any;
+    status: "pending_approval" | "sent";
+    pendingApproval: boolean;
+  };
+
+  async function sendWithLockedEconomics(
+    poId: number,
+    userId: string | undefined,
+    expectation: LifecycleExpectation,
+    options: {
+      allowDraft: boolean;
+      soloModeOnly: boolean;
+      sentNotes: string;
+    },
+  ): Promise<LockedSendResult> {
+    return db.transaction(async (tx: any) => {
+      const economics = await lockLifecycleEconomics(tx, poId, expectation);
+      const po = economics.po;
+      if (po.status !== "approved" && !(options.allowDraft && po.status === "draft")) {
+        throw new PurchasingError(
+          `Cannot send PO in '${po.status}' status`,
+          409,
+          { code: "PO_LIFECYCLE_CONFLICT" },
+        );
+      }
+      if ((po.physicalStatus ?? "draft") !== "draft") {
+        throw new PurchasingError(
+          `Cannot send PO with physical status '${po.physicalStatus}'`,
+          409,
+          { code: "PO_LIFECYCLE_PHYSICAL_CONFLICT" },
+        );
+      }
+
+      await assertLifecycleQuotesReadyTx(tx, economics);
+
+      let requireApproval = false;
+      if (options.soloModeOnly) {
+        const activeTiers = await getActiveApprovalTiersTx(tx);
+        if (activeTiers.length > 0) {
+          throw new PurchasingError(
+            "Approval tiers are configured. Use the individual Submit/Approve/Send steps.",
+            400,
+          );
+        }
+      } else {
+        const settings = await getProcurementSettingsTx(tx);
+        requireApproval = settings.requireApproval;
+      }
+
+      const tier = requireApproval
+        ? await getMatchingApprovalTierTx(tx, economics.totalCents)
+        : null;
+      if (tier) {
+        if (po.status === "draft") {
+          const pendingPo = await moveLockedPoToPendingApproval(tx, economics, tier, userId);
+          return { po: pendingPo, status: "pending_approval", pendingApproval: true };
+        }
+        if (!approvalCoversLockedEconomics(economics, tier)) {
+          const pendingPo = await moveLockedPoToPendingApproval(
+            tx,
+            economics,
+            tier,
+            userId,
+            true,
+          );
+          return { po: pendingPo, status: "pending_approval", pendingApproval: true };
+        }
+      }
+
+      const dbTimestamp = sql`date_trunc('milliseconds', transaction_timestamp())`;
+      const autoApproved = po.status === "draft";
+      const approvalNotes = requireApproval
+        ? "Auto-approved (no matching tier)"
+        : options.soloModeOnly
+          ? "Auto-approved (solo mode - no approval tiers)"
+          : "Auto-approved (approval not required)";
+      const updated = await updateLockedLifecycleHeader(tx, economics, {
+        ...lifecycleTotalsPatch(economics),
+        status: "sent",
+        physicalStatus: "sent",
+        ...(autoApproved ? {
+          approvedBy: userId ?? null,
+          approvedAt: dbTimestamp,
+          approvalNotes,
+          approvalTierId: null,
+        } : {}),
+        sentToVendorAt: dbTimestamp,
+        orderDate: po.orderDate ?? dbTimestamp,
+        updatedBy: userId ?? null,
+      });
+
+      const histories: Array<{ fromStatus: string | null; toStatus: string; notes?: string }> = [];
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      if (autoApproved) {
+        histories.push({ fromStatus: "draft", toStatus: "approved", notes: approvalNotes });
+        events.push({
+          type: "approved",
+          payload: {
+            from_status: "draft",
+            to_status: "approved",
+            auto: true,
+            require_approval: requireApproval,
+            total_cents: economics.totalCents,
+          },
+        });
+      }
+      histories.push({ fromStatus: "approved", toStatus: "sent", notes: options.sentNotes });
+      events.push({
+        type: "sent_to_vendor",
+        payload: {
+          method: "pdf_placeholder",
+          pdf_placeholder: true,
+          total_cents: economics.totalCents,
+        },
+      });
+      await writeLifecycleAuditTx(tx, poId, histories, events, userId);
+      return { po: updated, status: "sent", pendingApproval: false };
+    });
+  }
+
+  async function submit(id: number, userId?: string) {
+    const expectation = await observeLifecycleState(
       id,
-      {
+      ["draft"],
+      (status) => `Cannot submit PO in '${status}' status`,
+    );
+    return db.transaction(async (tx: any) => {
+      const economics = await lockLifecycleEconomics(tx, id, expectation);
+      await assertLifecycleQuotesReadyTx(tx, economics);
+      const tier = await getMatchingApprovalTierTx(tx, economics.totalCents);
+      if (tier) {
+        return moveLockedPoToPendingApproval(tx, economics, tier, userId);
+      }
+
+      const dbTimestamp = sql`date_trunc('milliseconds', transaction_timestamp())`;
+      const updated = await updateLockedLifecycleHeader(tx, economics, {
+        ...lifecycleTotalsPatch(economics),
+        status: "approved",
+        approvalTierId: null,
+        approvedBy: userId ?? null,
+        approvedAt: dbTimestamp,
+        approvalNotes: "Auto-approved (below approval threshold)",
+        updatedBy: userId ?? null,
+      });
+      await writeLifecycleAuditTx(
+        tx,
+        id,
+        [{ fromStatus: "draft", toStatus: "approved", notes: "Auto-approved (below threshold)" }],
+        [{
+          type: "approved",
+          payload: {
+            from_status: "draft",
+            to_status: "approved",
+            auto: true,
+            reason: "below_threshold",
+            total_cents: economics.totalCents,
+          },
+        }],
+        userId,
+      );
+      return updated;
+    });
+  }
+
+  async function returnToDraft(id: number, userId?: string, notes?: string) {
+    const expectation = await observeLifecycleState(
+      id,
+      ["pending_approval"],
+      (status) => `Cannot return PO in '${status}' status to draft`,
+    );
+    return db.transaction(async (tx: any) => {
+      const economics = await lockLifecycleEconomics(tx, id, expectation);
+      const updated = await updateLockedLifecycleHeader(tx, economics, {
+        ...lifecycleTotalsPatch(economics),
         status: "draft",
+        physicalStatus: "draft",
         approvalTierId: null,
         approvedBy: null,
         approvedAt: null,
         approvalNotes: null,
-        updatedBy: userId,
-      },
-      {
-        fromStatus: po.status,
-        toStatus: "draft",
-        changedBy: userId,
-        notes: notes || "Returned to draft",
-      },
-      "returned_to_draft",
-      userId,
-      {
-        from_status: po.status,
-        to_status: "draft",
-        notes: notes ?? null,
-      },
-    );
+        updatedBy: userId ?? null,
+      });
+      await writeLifecycleAuditTx(
+        tx,
+        id,
+        [{
+          fromStatus: economics.po.status,
+          toStatus: "draft",
+          notes: notes || "Returned to draft",
+        }],
+        [{
+          type: "returned_to_draft",
+          payload: {
+            from_status: economics.po.status,
+            to_status: "draft",
+            notes: notes ?? null,
+            total_cents: economics.totalCents,
+          },
+        }],
+        userId,
+      );
+      return updated;
+    });
   }
 
   async function approve(id: number, userId?: string, notes?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-    assertTransition(po.status, "approved");
-
-    return updatePurchaseOrderStatusWithEvent(
+    const expectation = await observeLifecycleState(
       id,
-      {
-        status: "approved",
-        approvedBy: userId,
-        approvedAt: new Date(),
-        approvalNotes: notes,
-        updatedBy: userId,
-      },
-      {
-        fromStatus: po.status,
-        toStatus: "approved",
-        changedBy: userId,
-        notes: notes || "Approved",
-      },
-      "approved",
-      userId,
-      {
-        from_status: po.status,
-        to_status: "approved",
-        notes: notes ?? null,
-      },
+      ["draft", "pending_approval"],
+      (status) => `Cannot approve PO in '${status}' status`,
     );
+    return db.transaction(async (tx: any) => {
+      const economics = await lockLifecycleEconomics(tx, id, expectation);
+      await assertLifecycleQuotesReadyTx(tx, economics);
+      const currentTier = await getMatchingApprovalTierTx(tx, economics.totalCents);
+      if (
+        economics.po.status === "pending_approval" &&
+        currentTier &&
+        Number(economics.po.approvalTierId) !== Number(currentTier.id)
+      ) {
+        throw new PurchasingError(
+          "Purchase order economics changed to a different approval tier; submit it again",
+          409,
+          {
+            code: "PO_APPROVAL_TIER_CHANGED",
+            previousTierId: economics.po.approvalTierId ?? null,
+            currentTierId: currentTier.id,
+            totalCents: economics.totalCents,
+          },
+        );
+      }
+
+      const dbTimestamp = sql`date_trunc('milliseconds', transaction_timestamp())`;
+      const updated = await updateLockedLifecycleHeader(tx, economics, {
+        ...lifecycleTotalsPatch(economics),
+        status: "approved",
+        approvalTierId: currentTier?.id ?? economics.po.approvalTierId ?? null,
+        approvedBy: userId ?? null,
+        approvedAt: dbTimestamp,
+        approvalNotes: notes ?? null,
+        updatedBy: userId ?? null,
+      });
+      await writeLifecycleAuditTx(
+        tx,
+        id,
+        [{ fromStatus: economics.po.status, toStatus: "approved", notes: notes || "Approved" }],
+        [{
+          type: "approved",
+          payload: {
+            from_status: economics.po.status,
+            to_status: "approved",
+            notes: notes ?? null,
+            tier_id: currentTier?.id ?? economics.po.approvalTierId ?? null,
+            total_cents: economics.totalCents,
+          },
+        }],
+        userId,
+      );
+      return updated;
+    });
   }
 
   async function send(id: number, userId?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-    assertTransition(po.status, "sent");
-
-    const result = await transitionPhysical(id, "sent", userId, "Sent to vendor", {
-      orderDate: new Date(),
+    const expectation = await observeLifecycleState(
+      id,
+      ["approved"],
+      (status) => `Cannot send PO in '${status}' status`,
+    );
+    const result = await sendWithLockedEconomics(id, userId, expectation, {
+      allowDraft: false,
+      soloModeOnly: false,
+      sentNotes: "Sent to vendor",
     });
-
-    return result;
+    return result.po;
   }
 
   /**
@@ -1706,73 +2658,17 @@ export function createPurchasingService(
    * Returns the updated PO. Caller can then optionally open the email dialog.
    */
   async function sendToVendor(id: number, userId?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-
-    // Only works from draft or approved status
-    if (!["draft", "approved"].includes(po.status)) {
-      throw new PurchasingError(
-        `Cannot send-to-vendor from '${po.status}' status. Use individual steps.`,
-        400,
-      );
-    }
-
-    // Check if we're in solo mode (no approval tiers)
-    const tiers = await storage.getAllPoApprovalTiers();
-    if (tiers.length > 0) {
-      throw new PurchasingError(
-        "Approval tiers are configured. Use the individual Submit/Approve/Send steps.",
-        400,
-      );
-    }
-
-    // If draft, validate and auto-approve first
-    if (po.status === "draft") {
-      const lines = await storage.getPurchaseOrderLines(id);
-      const activeLines = lines.filter((l: any) => l.status !== "cancelled" && l.orderQty > 0);
-      if (activeLines.length === 0) {
-        throw new PurchasingError("PO must have at least one line with quantity > 0", 400);
-      }
-
-      // Recalculate totals
-      await recalculateTotals(id, userId);
-
-      // Auto-approve
-      await updatePurchaseOrderStatusWithEvent(
-        id,
-        {
-        status: "approved",
-        approvedBy: userId,
-        approvedAt: new Date(),
-        approvalNotes: "Auto-approved (solo mode — no approval tiers)",
-        updatedBy: userId,
-        },
-        {
-          fromStatus: "draft",
-          toStatus: "approved",
-          changedBy: userId,
-          notes: "Auto-approved (solo mode)",
-        },
-        "approved",
-        userId,
-        {
-          from_status: "draft",
-          to_status: "approved",
-          auto: true,
-          reason: "solo_mode",
-        },
-      );
-    }
-
-    // Now send
-    return await transitionPhysical(
+    const expectation = await observeLifecycleState(
       id,
-      "sent",
-      userId,
-      "Sent to vendor (solo mode)",
-      { orderDate: new Date() },
-      "approved",
+      ["draft", "approved"],
+      (status) => `Cannot send-to-vendor from '${status}' status. Use individual steps.`,
     );
+    const result = await sendWithLockedEconomics(id, userId, expectation, {
+      allowDraft: true,
+      soloModeOnly: true,
+      sentNotes: "Sent to vendor (solo mode)",
+    });
+    return result.po;
   }
 
   async function acknowledge(id: number, data: { vendorRefNumber?: string; confirmedDeliveryDate?: Date }, userId?: string) {
@@ -3369,6 +4265,38 @@ export function createPurchasingService(
     return rows[0] as Record<ProcurementSettingKey, boolean>;
   }
 
+  async function getProcurementSettingsTx(
+    tx: any,
+  ): Promise<Record<ProcurementSettingKey, boolean>> {
+    const projection = {
+      requireApproval: warehouseSettingsTable.requireApproval,
+      autoSendOnApprove: warehouseSettingsTable.autoSendOnApprove,
+      requireAcknowledgeBeforeReceive: warehouseSettingsTable.requireAcknowledgeBeforeReceive,
+      hideIncotermsDomestic: warehouseSettingsTable.hideIncotermsDomestic,
+      enableShipmentTracking: warehouseSettingsTable.enableShipmentTracking,
+      autoPutawayLocation: warehouseSettingsTable.autoPutawayLocation,
+      autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
+      oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
+      useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
+    };
+    const rows = await tx
+      .select(projection)
+      .from(warehouseSettingsTable)
+      .where(eq(warehouseSettingsTable.warehouseCode, "DEFAULT"))
+      .limit(1)
+      .for("share");
+    if (rows[0]) return rows[0] as Record<ProcurementSettingKey, boolean>;
+
+    const fallback = await tx
+      .select(projection)
+      .from(warehouseSettingsTable)
+      .limit(1)
+      .for("share");
+    return fallback[0]
+      ? fallback[0] as Record<ProcurementSettingKey, boolean>
+      : { ...PROCUREMENT_SETTING_DEFAULTS };
+  }
+
   async function updateProcurementSetting(
     key: string,
     value: boolean,
@@ -3475,18 +4403,30 @@ export function createPurchasingService(
     if (!input || typeof input !== "object") {
       throw new PurchasingError("Request body is required", 400);
     }
-    if (!Number.isSafeInteger(input.vendorId) || input.vendorId <= 0) {
+    if (
+      !Number.isSafeInteger(input.vendorId) ||
+      input.vendorId <= 0 ||
+      input.vendorId > PG_INTEGER_MAX
+    ) {
       throw new PurchasingError("vendor_id is required", 400);
     }
     if (
       input.warehouseId !== undefined &&
       input.warehouseId !== null &&
-      (!Number.isSafeInteger(input.warehouseId) || input.warehouseId <= 0)
+      (!Number.isSafeInteger(input.warehouseId) ||
+        input.warehouseId <= 0 ||
+        input.warehouseId > PG_INTEGER_MAX)
     ) {
       throw new PurchasingError("warehouse_id must be a positive integer or null", 400);
     }
     if (!Array.isArray(input.lines) || input.lines.length === 0) {
       throw new PurchasingError("At least one line is required", 400);
+    }
+    if (input.lines.length > MAX_INLINE_PO_LINES) {
+      throw new PurchasingError(
+        `A purchase order may contain at most ${MAX_INLINE_PO_LINES} lines`,
+        400,
+      );
     }
     if (input.poType !== undefined && !poTypeEnum.includes(input.poType as any)) {
       throw new PurchasingError(`po_type must be one of ${poTypeEnum.join(", ")}`, 400);
@@ -3515,7 +4455,11 @@ export function createPurchasingService(
         if (!options.allowExistingLineIds) {
           throw new PurchasingError(`${label}.line_id is not valid when creating a PO`, 400);
         }
-        if (!Number.isSafeInteger(line.lineId) || line.lineId <= 0) {
+        if (
+          !Number.isSafeInteger(line.lineId) ||
+          line.lineId <= 0 ||
+          line.lineId > PG_INTEGER_MAX
+        ) {
           throw new PurchasingError(`${label}.line_id must be a positive integer`, 400);
         }
         if (existingLineIds.has(line.lineId)) {
@@ -3547,7 +4491,8 @@ export function createPurchasingService(
       if (lineType === "product") {
         if (
           !Number.isSafeInteger(line.productId) ||
-          (line.productId as number) <= 0
+          (line.productId as number) <= 0 ||
+          (line.productId as number) > PG_INTEGER_MAX
         ) {
           throw new PurchasingError(`${label}.product_id is required`, 400);
         }
@@ -3559,7 +4504,7 @@ export function createPurchasingService(
           if (
             value !== undefined &&
             value !== null &&
-            (!Number.isSafeInteger(value) || value <= 0)
+            (!Number.isSafeInteger(value) || value <= 0 || value > PG_INTEGER_MAX)
           ) {
             throw new PurchasingError(`${label}.${field} must be a positive integer`, 400);
           }
@@ -3569,7 +4514,8 @@ export function createPurchasingService(
           line.expectedReceiveUnitsPerVariant !== null &&
           (
             !Number.isSafeInteger(line.expectedReceiveUnitsPerVariant) ||
-            line.expectedReceiveUnitsPerVariant <= 0
+              line.expectedReceiveUnitsPerVariant <= 0 ||
+              line.expectedReceiveUnitsPerVariant > PG_INTEGER_MAX
           )
         ) {
           throw new PurchasingError(
@@ -3616,8 +4562,120 @@ export function createPurchasingService(
         }
       }
 
+      let normalizedQuotePricing: NormalizedPoLinePricing | null = null;
+      if (line.pricing !== undefined) {
+        if (lineType !== "product") {
+          throw new PurchasingError(`${label}.pricing is only valid on product lines`, 400);
+        }
+        try {
+          normalizedQuotePricing = normalizePoLinePricing(line.pricing);
+        } catch (error: any) {
+          throw new PurchasingError(`${label}.pricing is invalid: ${error.message}`, 400, {
+            code: "PO_LINE_PRICING_INVALID",
+            lineIndex: idx,
+          });
+        }
+        if (line.orderQty !== normalizedQuotePricing.orderQty) {
+          throw new PurchasingError(
+            `${label}.quantity_ordered must equal the piece quantity derived from pricing`,
+            400,
+            {
+              code: "PO_LINE_PRICING_QUANTITY_MISMATCH",
+              quantityOrdered: line.orderQty,
+              pricingQuantityPieces: normalizedQuotePricing.orderQty,
+            },
+          );
+        }
+      }
+      if (
+        line.pricingSource !== undefined &&
+        !["legacy", "manual", "vendor_catalog", "recommendation"].includes(line.pricingSource)
+      ) {
+        throw new PurchasingError(`${label}.pricing_source is invalid`, 400);
+      }
+      if (line.pricingSource === "vendor_catalog" && !line.vendorProductId) {
+        throw new PurchasingError(
+          `${label}.vendor_product_id is required for vendor_catalog pricing`,
+          400,
+        );
+      }
+      if (
+        normalizedQuotePricing &&
+        line.pricingSource !== undefined &&
+        line.pricingSource !== "manual" &&
+        line.pricingSource !== "vendor_catalog"
+      ) {
+        throw new PurchasingError(
+          `${label}.pricing_source cannot claim trusted legacy or recommendation provenance`,
+          400,
+          { code: "PO_LINE_PRICING_SOURCE_FORBIDDEN" },
+        );
+      }
+      if (
+        !normalizedQuotePricing &&
+        line.pricingSource !== undefined &&
+        line.pricingSource !== "legacy"
+      ) {
+        throw new PurchasingError(
+          `${label}.pricing_source must be legacy when no explicit quote basis is supplied`,
+          400,
+          { code: "PO_LINE_PRICING_SOURCE_INVALID_FOR_LEGACY" },
+        );
+      }
+      if (
+        line.vendorSku !== undefined &&
+        line.vendorSku !== null &&
+        (typeof line.vendorSku !== "string" || line.vendorSku.length > 100)
+      ) {
+        throw new PurchasingError(`${label}.vendor_sku must be at most 100 characters`, 400);
+      }
+      if (
+        line.quoteReference !== undefined &&
+        line.quoteReference !== null &&
+        (typeof line.quoteReference !== "string" || line.quoteReference.length > 255)
+      ) {
+        throw new PurchasingError(`${label}.quote_reference must be at most 255 characters`, 400);
+      }
+      if (
+        line.quotedAt !== undefined &&
+        line.quotedAt !== null &&
+        (!(line.quotedAt instanceof Date) || Number.isNaN(line.quotedAt.getTime()))
+      ) {
+        throw new PurchasingError(`${label}.quoted_at must be a valid date`, 400);
+      }
+      if (
+        line.quotedAt instanceof Date &&
+        line.quotedAt.getTime() > now().getTime() + MAX_QUOTE_CLOCK_SKEW_MS
+      ) {
+        throw new PurchasingError(`${label}.quoted_at cannot be materially in the future`, 400, {
+          code: "PO_LINE_QUOTED_AT_IN_FUTURE",
+          lineIndex: idx,
+        });
+      }
+      if (
+        line.quoteValidUntil !== undefined &&
+        line.quoteValidUntil !== null &&
+        (
+          typeof line.quoteValidUntil !== "string" ||
+          !isValidIsoDateOnly(line.quoteValidUntil)
+        )
+      ) {
+        throw new PurchasingError(`${label}.quote_valid_until must be YYYY-MM-DD`, 400);
+      }
+      if (
+        line.quotedAt instanceof Date &&
+        line.quoteValidUntil &&
+        line.quoteValidUntil < line.quotedAt.toISOString().slice(0, 10)
+      ) {
+        throw new PurchasingError(
+          `${label}.quote_valid_until cannot be earlier than quoted_at`,
+          400,
+          { code: "PO_LINE_QUOTE_DATE_INVALID", lineIndex: idx },
+        );
+      }
+
       // Qty rule.
-      if (!Number.isSafeInteger(line.orderQty)) {
+      if (!Number.isSafeInteger(line.orderQty) || line.orderQty > PG_INTEGER_MAX) {
         throw new PurchasingError(
           `${label}.quantity_ordered must be an integer`,
           400,
@@ -3657,9 +4715,16 @@ export function createPurchasingService(
         line.totalProductCostCents !== undefined &&
         line.totalProductCostCents !== null;
 
-      if (!hasCents && !hasMills && !hasTotals) {
+      if (normalizedQuotePricing && (hasCents || hasMills || hasTotals)) {
         throw new PurchasingError(
-          `${label}.unit_cost_cents, unit_cost_mills, or total_product_cost_cents is required`,
+          `${label}: pricing cannot be combined with legacy unit/total cost fields`,
+          400,
+          { code: "PO_LINE_PRICING_AMBIGUOUS" },
+        );
+      }
+      if (!normalizedQuotePricing && !hasCents && !hasMills && !hasTotals) {
+        throw new PurchasingError(
+          `${label}.pricing or a legacy unit/total cost field is required`,
           400,
         );
       }
@@ -3684,20 +4749,23 @@ export function createPurchasingService(
       if (
         line.packagingCostCents !== undefined &&
         line.packagingCostCents !== null &&
-        !Number.isSafeInteger(line.packagingCostCents)
+        (!Number.isSafeInteger(line.packagingCostCents) ||
+          (lineType === "product" && line.packagingCostCents < 0))
       ) {
         throw new PurchasingError(
-          `${label}.packaging_cost_cents must be an integer`,
+          `${label}.packaging_cost_cents must be a non-negative integer for product lines`,
           400,
         );
       }
 
       // Sign check (type-specific). Use totals if present, else mills, else cents.
-      const primaryCost = hasTotals
-        ? (line.totalProductCostCents as number)
-        : hasMills
-          ? (line.unitCostMills as number)
-          : (line.unitCostCents as number);
+      const primaryCost = normalizedQuotePricing
+        ? normalizedQuotePricing.totalProductCostCents
+        : hasTotals
+          ? (line.totalProductCostCents as number)
+          : hasMills
+            ? (line.unitCostMills as number)
+            : (line.unitCostCents as number);
       switch (lineType) {
         case "product":
         case "fee":
@@ -3797,7 +4865,9 @@ export function createPurchasingService(
     lineType: PoLineType;
     variant: any;
     product: any;
+    vendorProduct: any;
     costs: ReturnType<typeof calculateLineCosts>;
+    pricing: NormalizedPoLinePricing | null;
   };
 
   async function resolvePurchaseOrderLines(
@@ -3808,10 +4878,17 @@ export function createPurchasingService(
         const lineType: PoLineType = line.lineType ?? "product";
         let variant: any = null;
         let product: any = null;
+        let vendorProduct: any = null;
         if (lineType === "product") {
           product = await storage.getProductById(line.productId as number);
           if (!product) {
             throw new PurchasingError(`Product ${line.productId} not found`, 404);
+          }
+          if (product.isActive === false || product.status === "archived") {
+            throw new PurchasingError(`Product ${line.productId} is inactive`, 409, {
+              code: "PO_LINE_PRODUCT_INACTIVE",
+              productId: line.productId,
+            });
           }
           const expectedReceiveVariantId =
             line.expectedReceiveVariantId ?? line.productVariantId ?? null;
@@ -3832,14 +4909,40 @@ export function createPurchasingService(
                 400,
               );
             }
+            if (variant.isActive === false) {
+              throw new PurchasingError(
+                `Expected receive variant ${expectedReceiveVariantId} is inactive`,
+                409,
+                { code: "PO_LINE_RECEIVE_VARIANT_INACTIVE" },
+              );
+            }
+            if (
+              line.expectedReceiveUnitsPerVariant != null &&
+              Number(variant.unitsPerVariant) !== line.expectedReceiveUnitsPerVariant
+            ) {
+              throw new PurchasingError(
+                `Expected receive variant ${expectedReceiveVariantId} quantity changed`,
+                409,
+                {
+                  code: "PO_LINE_RECEIVE_UNITS_MISMATCH",
+                  submittedUnits: line.expectedReceiveUnitsPerVariant,
+                  actualUnits: variant.unitsPerVariant,
+                },
+              );
+            }
           }
 
           if (line.vendorProductId !== undefined && line.vendorProductId !== null) {
-            const vendorProduct = await storage.getVendorProductById(line.vendorProductId);
+            vendorProduct = await storage.getVendorProductById(line.vendorProductId);
             if (
               !vendorProduct ||
               Number(vendorProduct.vendorId) !== input.vendorId ||
-              Number(vendorProduct.productId) !== Number(product.id)
+              Number(vendorProduct.productId) !== Number(product.id) ||
+              (
+                vendorProduct.productVariantId != null &&
+                Number(vendorProduct.productVariantId) !== (variant?.id ?? null)
+              ) ||
+              Number(vendorProduct.isActive ?? 0) !== 1
             ) {
               throw new PurchasingError(
                 `Vendor product ${line.vendorProductId} does not match vendor ${input.vendorId} and product ${product.id}`,
@@ -3847,17 +4950,50 @@ export function createPurchasingService(
               );
             }
           }
+          if (line.pricingSource === "vendor_catalog") {
+            if (!vendorProduct || !line.pricing) {
+              throw new PurchasingError(
+                "vendor_catalog pricing requires vendorProductId and explicit pricing",
+                400,
+                { code: "PO_LINE_VENDOR_CATALOG_SOURCE_REQUIRES_LINK" },
+              );
+            }
+            if (!vendorCatalogPricingMatches(vendorProduct, line.pricing)) {
+              throw new PurchasingError(
+                `Vendor product ${line.vendorProductId} pricing no longer matches the submitted quote`,
+                409,
+                {
+                  code: "PO_LINE_VENDOR_CATALOG_PRICE_MISMATCH",
+                  vendorProductId: line.vendorProductId,
+                  catalogPricingBasis: vendorProduct.pricingBasis ?? "legacy_unknown",
+                },
+              );
+            }
+          }
         }
 
-        const costs = calculateLineCosts({
-          orderQty: line.orderQty,
-          unitCostCents: Number(line.unitCostCents) || 0,
-          unitCostMills: typeof line.unitCostMills === "number" ? line.unitCostMills : null,
-          totalProductCostCents:
-            typeof line.totalProductCostCents === "number" ? line.totalProductCostCents : null,
-          packagingCostCents:
-            typeof line.packagingCostCents === "number" ? line.packagingCostCents : null,
-        });
+        const pricing = line.pricing ? normalizePoLinePricing(line.pricing) : null;
+        const packagingCostCents = Number(line.packagingCostCents) || 0;
+        const costs = pricing
+          ? {
+              subtotalCents: pricing.totalProductCostCents + packagingCostCents,
+              discountCents: 0,
+              taxCents: 0,
+              lineTotalCents: pricing.totalProductCostCents + packagingCostCents,
+              totalProductCostCents: pricing.totalProductCostCents,
+              packagingCostCents,
+              unitCostMills: pricing.unitCostMills,
+              unitCostCents: pricing.unitCostCents,
+            }
+          : calculateLineCosts({
+              orderQty: line.orderQty,
+              unitCostCents: Number(line.unitCostCents) || 0,
+              unitCostMills: typeof line.unitCostMills === "number" ? line.unitCostMills : null,
+              totalProductCostCents:
+                typeof line.totalProductCostCents === "number" ? line.totalProductCostCents : null,
+              packagingCostCents:
+                typeof line.packagingCostCents === "number" ? line.packagingCostCents : null,
+            });
         for (const [field, value] of Object.entries(costs)) {
           if (!Number.isSafeInteger(value)) {
             throw new PurchasingError(`Calculated ${field} exceeds the supported integer range`, 400, {
@@ -3866,9 +5002,240 @@ export function createPurchasingService(
             });
           }
         }
-        return { line, lineType, variant, product, costs };
+        return { line, lineType, variant, product, vendorProduct, costs, pricing };
       }),
     );
+  }
+
+  async function lockAndValidatePurchaseOrderReferences(
+    tx: any,
+    vendorId: number,
+    resolvedLines: readonly ResolvedPurchaseOrderLine[],
+  ): Promise<any> {
+    const vendorRows = await tx
+      .select()
+      .from(vendorsTable)
+      .where(eq(vendorsTable.id, vendorId))
+      .limit(1)
+      .for("share");
+    const vendor = vendorRows[0];
+    if (!vendor) throw new PurchasingError("Vendor not found", 404);
+    if (Number(vendor.active) !== 1) {
+      throw new PurchasingError("Vendor is inactive", 409, {
+        code: "PO_VENDOR_INACTIVE",
+        vendorId,
+      });
+    }
+
+    const productLines = resolvedLines.filter((resolved) => resolved.lineType === "product");
+    const productIds = [...new Set(
+      productLines.map((resolved) => Number(resolved.line.productId)),
+    )].sort((a, b) => a - b);
+    const liveProducts = productIds.length === 0
+      ? []
+      : await tx
+          .select()
+          .from(productsTable)
+          .where(inArray(productsTable.id, productIds))
+          .orderBy(productsTable.id)
+          .for("share");
+    const productsById = new Map<number, any>(
+      liveProducts.map((row: any) => [Number(row.id), row]),
+    );
+    for (const resolved of productLines) {
+      const productId = Number(resolved.line.productId);
+      const live = productsById.get(productId);
+      if (!live) throw new PurchasingError(`Product ${productId} not found`, 404);
+      if (live.isActive === false || live.status === "archived") {
+        throw new PurchasingError(`Product ${productId} is inactive`, 409, {
+          code: "PO_LINE_PRODUCT_INACTIVE",
+          productId,
+        });
+      }
+      resolved.product = live;
+    }
+
+    const variantIds = [...new Set(
+      productLines
+        .map((resolved) =>
+          resolved.line.expectedReceiveVariantId ?? resolved.line.productVariantId ?? null,
+        )
+        .filter((id): id is number => id !== null),
+    )].sort((a, b) => a - b);
+    const liveVariants = variantIds.length === 0
+      ? []
+      : await tx
+          .select()
+          .from(productVariantsTable)
+          .where(inArray(productVariantsTable.id, variantIds))
+          .orderBy(productVariantsTable.id)
+          .for("share");
+    const variantsById = new Map<number, any>(
+      liveVariants.map((row: any) => [Number(row.id), row]),
+    );
+    for (const resolved of productLines) {
+      const variantId =
+        resolved.line.expectedReceiveVariantId ?? resolved.line.productVariantId ?? null;
+      if (variantId === null) {
+        resolved.variant = null;
+        continue;
+      }
+      const live = variantsById.get(Number(variantId));
+      if (!live) {
+        throw new PurchasingError(`Expected receive variant ${variantId} not found`, 404);
+      }
+      if (Number(live.productId) !== Number(resolved.product.id)) {
+        throw new PurchasingError(
+          `Expected receive variant ${variantId} does not belong to product ${resolved.product.id}`,
+          400,
+        );
+      }
+      if (live.isActive === false) {
+        throw new PurchasingError(`Expected receive variant ${variantId} is inactive`, 409, {
+          code: "PO_LINE_RECEIVE_VARIANT_INACTIVE",
+          productVariantId: variantId,
+        });
+      }
+      if (
+        resolved.line.expectedReceiveUnitsPerVariant != null &&
+        Number(live.unitsPerVariant) !== resolved.line.expectedReceiveUnitsPerVariant
+      ) {
+        throw new PurchasingError(`Expected receive variant ${variantId} quantity changed`, 409, {
+          code: "PO_LINE_RECEIVE_UNITS_MISMATCH",
+          submittedUnits: resolved.line.expectedReceiveUnitsPerVariant,
+          actualUnits: live.unitsPerVariant,
+        });
+      }
+      resolved.variant = live;
+    }
+
+    const linkedLines = productLines.filter(
+      (resolved) => resolved.line.vendorProductId !== undefined && resolved.line.vendorProductId !== null,
+    );
+    const vendorProductIds = [...new Set(
+      linkedLines.map((resolved) => Number(resolved.line.vendorProductId)),
+    )].sort((a, b) => a - b);
+    const liveVendorProducts = vendorProductIds.length === 0
+      ? []
+      : await tx
+          .select()
+          .from(vendorProductsTable)
+          .where(inArray(vendorProductsTable.id, vendorProductIds))
+          .orderBy(vendorProductsTable.id)
+          .for("share");
+    const liveById = new Map<number, any>(
+      liveVendorProducts.map((row: any) => [Number(row.id), row]),
+    );
+
+    for (const resolved of productLines) {
+      const vendorProductId = resolved.line.vendorProductId == null
+        ? null
+        : Number(resolved.line.vendorProductId);
+      if (vendorProductId === null) {
+        resolved.vendorProduct = null;
+        continue;
+      }
+      const live = liveById.get(vendorProductId);
+      const expectedVariantId = resolved.variant?.id ?? null;
+      if (
+        !live ||
+        Number(live.vendorId) !== vendorId ||
+        Number(live.productId) !== Number(resolved.product.id) ||
+        (live.productVariantId != null && Number(live.productVariantId) !== expectedVariantId) ||
+        Number(live.isActive ?? 0) !== 1
+      ) {
+        throw new PurchasingError(
+          `Vendor product ${vendorProductId} changed before the PO could be saved`,
+          409,
+          { code: "PO_LINE_VENDOR_PRODUCT_MISMATCH", vendorProductId },
+        );
+      }
+      resolved.vendorProduct = live;
+
+      if (resolved.line.pricingSource !== "vendor_catalog") continue;
+      if (
+        !resolved.line.pricing ||
+        !vendorCatalogPricingMatches(live, resolved.line.pricing)
+      ) {
+        throw new PurchasingError(
+          `Vendor product ${vendorProductId} pricing changed before the PO could be saved`,
+          409,
+          {
+            code: "PO_LINE_VENDOR_CATALOG_PRICE_MISMATCH",
+            vendorProductId,
+            catalogPricingBasis: live.pricingBasis ?? "legacy_unknown",
+          },
+        );
+      }
+      const quoteUsability = vendorCatalogQuoteUsability(live, now());
+      if (!quoteUsability.usable) {
+        throw new PurchasingError(
+          `Vendor product ${vendorProductId} has an expired, stale, future-dated, or unverified quote`,
+          409,
+          { code: quoteUsability.code, vendorProductId },
+        );
+      }
+    }
+    return vendor;
+  }
+
+
+  async function assertNoDraftLineDownstreamLinks(
+    tx: any,
+    lineIds: readonly number[],
+  ): Promise<void> {
+    if (lineIds.length === 0) return;
+    const ids = sql.join(lineIds.map((id) => sql`${id}`), sql`, `);
+    const result = await tx.execute(sql`
+      SELECT blocked.line_id, blocked.blocker
+      FROM (
+        SELECT purchase_order_line_id AS line_id, 'inbound_shipment_lines'::text AS blocker
+          FROM procurement.inbound_shipment_lines
+          WHERE purchase_order_line_id IN (${ids})
+        UNION ALL
+        SELECT purchase_order_line_id, 'po_receipts'::text
+          FROM procurement.po_receipts
+          WHERE purchase_order_line_id IN (${ids})
+        UNION ALL
+        SELECT purchase_order_line_id, 'vendor_invoice_lines'::text
+          FROM procurement.vendor_invoice_lines
+          WHERE purchase_order_line_id IN (${ids})
+        UNION ALL
+        SELECT purchase_order_line_id, 'landed_cost_snapshots'::text
+          FROM procurement.landed_cost_snapshots
+          WHERE purchase_order_line_id IN (${ids})
+        UNION ALL
+        SELECT purchase_order_line_id, 'landed_cost_adjustments'::text
+          FROM procurement.landed_cost_adjustments
+          WHERE purchase_order_line_id IN (${ids})
+        UNION ALL
+        SELECT purchase_order_line_id, 'receiving_lines'::text
+          FROM procurement.receiving_lines
+          WHERE purchase_order_line_id IN (${ids})
+        UNION ALL
+        SELECT po_line_id, 'inventory_lots'::text
+          FROM inventory.inventory_lots
+          WHERE po_line_id IN (${ids})
+        UNION ALL
+        SELECT parent_line_id, 'active_child_lines'::text
+          FROM procurement.purchase_order_lines
+          WHERE parent_line_id IN (${ids})
+            AND id NOT IN (${ids})
+            AND status <> 'cancelled'
+      ) AS blocked
+      LIMIT 100
+    `);
+    const blockers = (result.rows ?? []).map((row: any) => ({
+      lineId: Number(row.line_id),
+      blocker: String(row.blocker),
+    }));
+    if (blockers.length > 0) {
+      throw new PurchasingError(
+        "Draft lines have downstream or dependent records and cannot be replaced",
+        409,
+        { code: "PO_DRAFT_LINE_DOWNSTREAM_LINKS", blockers },
+      );
+    }
   }
 
   function buildPurchaseOrderLineValues(
@@ -3877,6 +5244,10 @@ export function createPurchasingService(
     lineNumber: number,
   ): Record<string, unknown> {
     const isProduct = resolved.lineType === "product";
+    const trustedCatalog =
+      isProduct && resolved.line.pricingSource === "vendor_catalog"
+        ? resolved.vendorProduct
+        : null;
     return {
       purchaseOrderId,
       lineNumber,
@@ -3886,7 +5257,11 @@ export function createPurchasingService(
       vendorProductId: isProduct ? (resolved.line.vendorProductId ?? null) : null,
       sku: isProduct ? (resolved.product.sku ?? resolved.variant?.sku ?? null) : null,
       productName: isProduct ? resolved.product.name : null,
+      vendorSku: isProduct
+        ? (trustedCatalog ? (trustedCatalog.vendorSku ?? null) : (resolved.line.vendorSku ?? null))
+        : null,
       description: resolved.line.description ?? null,
+      notes: resolved.line.notes ?? null,
       unitOfMeasure: isProduct
         ? (resolved.variant?.name?.split(" ")[0]?.toLowerCase() ?? "each")
         : null,
@@ -3894,7 +5269,7 @@ export function createPurchasingService(
       expectedReceiveUnitsPerVariant: isProduct
         ? (resolved.line.expectedReceiveUnitsPerVariant || resolved.variant?.unitsPerVariant || 1)
         : 1,
-      orderQty: resolved.line.orderQty,
+      orderQty: resolved.pricing?.orderQty ?? resolved.line.orderQty,
       unitCostCents: resolved.costs.unitCostCents,
       unitCostMills: resolved.costs.unitCostMills,
       totalProductCostCents: isProduct ? resolved.costs.totalProductCostCents : 0,
@@ -3902,6 +5277,27 @@ export function createPurchasingService(
       discountCents: resolved.costs.discountCents,
       taxCents: resolved.costs.taxCents,
       lineTotalCents: resolved.costs.lineTotalCents,
+      pricingBasis: isProduct
+        ? (resolved.pricing?.pricingBasis ?? "legacy_unknown")
+        : "not_applicable",
+      pricingSource: isProduct
+        ? (resolved.pricing ? (resolved.line.pricingSource ?? "manual") : "legacy")
+        : "manual",
+      purchaseUom: resolved.pricing?.purchaseUom ?? null,
+      purchaseUomQuantity: resolved.pricing?.purchaseUomQuantity ?? null,
+      piecesPerPurchaseUom: resolved.pricing?.piecesPerPurchaseUom ?? null,
+      quotedUnitCostMills: resolved.pricing?.quotedUnitCostMills ?? null,
+      quotedTotalCents: resolved.pricing?.quotedTotalCents ?? null,
+      pricingRemainderMills: resolved.pricing?.pricingRemainderMills ?? 0,
+      quoteReference: isProduct
+        ? (trustedCatalog ? (trustedCatalog.quoteReference ?? null) : (resolved.line.quoteReference ?? null))
+        : null,
+      quotedAt: isProduct
+        ? (trustedCatalog ? (trustedCatalog.quotedAt ?? null) : (resolved.line.quotedAt ?? null))
+        : null,
+      quoteValidUntil: isProduct
+        ? (trustedCatalog ? (trustedCatalog.quoteValidUntil ?? null) : (resolved.line.quoteValidUntil ?? null))
+        : null,
       lineType: resolved.lineType,
       parentLineId: null,
       status: "open",
@@ -4015,6 +5411,17 @@ export function createPurchasingService(
       unit_cost_mills: line.unitCostMills ?? null,
       total_product_cost_cents: line.totalProductCostCents ?? 0,
       packaging_cost_cents: line.packagingCostCents ?? 0,
+      pricing_basis: line.pricingBasis ?? "legacy_unknown",
+      pricing_source: line.pricingSource ?? "legacy",
+      purchase_uom: line.purchaseUom ?? null,
+      purchase_uom_quantity: line.purchaseUomQuantity ?? null,
+      pieces_per_purchase_uom: line.piecesPerPurchaseUom ?? null,
+      quoted_unit_cost_mills: line.quotedUnitCostMills ?? null,
+      quoted_total_cents: line.quotedTotalCents ?? null,
+      pricing_remainder_mills: line.pricingRemainderMills ?? 0,
+      quote_reference: line.quoteReference ?? null,
+      quoted_at: auditDate(line.quotedAt),
+      quote_valid_until: line.quoteValidUntil ?? null,
       discount_cents: line.discountCents ?? 0,
       tax_cents: line.taxCents ?? 0,
       line_total_cents: line.lineTotalCents ?? 0,
@@ -4025,6 +5432,7 @@ export function createPurchasingService(
   async function createPurchaseOrderWithLines(
     input: CreatePurchaseOrderWithLinesInput,
     userId?: string,
+    internalOptions?: CreatePurchaseOrderInternalOptions,
   ): Promise<any> {
     validateCreateWithLinesInput(input);
 
@@ -4032,16 +5440,23 @@ export function createPurchasingService(
     if (!vendor) throw new PurchasingError("Vendor not found", 404);
     const resolvedLines = await resolvePurchaseOrderLines(input);
 
-    const poNumber = await storage.generatePoNumber();
-
     const subtotalCentsBigInt = resolvedLines.reduce(
       (sum, r) => sum + BigInt(r.costs.lineTotalCents),
       BigInt(0),
     );
     const subtotalCents = safeIntegerMoney(subtotalCentsBigInt, "subtotal_cents");
 
-    // Single transaction: header + lines + status history + po_events['created']
-    const created = await db.transaction(async (tx: any) => {
+    // Single transaction: header + lines + status history + po_events['created'].
+    // A concurrent creator can choose the same max+1 number. The unique index
+    // is the arbiter; a conflict rolls back the whole attempt and retries with
+    // a freshly generated number.
+    const createAttempt = async (poNumber: string) => db.transaction(async (tx: any) => {
+      // Close the catalog-price TOCTOU window before any PO rows are written.
+      const lockedVendor = await lockAndValidatePurchaseOrderReferences(
+        tx,
+        input.vendorId,
+        resolvedLines,
+      );
       const [header] = await tx
         .insert(purchaseOrdersTable)
         .values({
@@ -4055,10 +5470,10 @@ export function createPurchasingService(
           incoterms: input.incoterms ?? null,
           vendorNotes: input.vendorNotes ?? null,
           internalNotes: input.internalNotes ?? null,
-          currency: vendor.currency || "USD",
-          paymentTermsDays: vendor.paymentTermsDays,
-          paymentTermsType: vendor.paymentTermsType,
-          shipFromAddress: vendor.shipFromAddress,
+          currency: lockedVendor.currency || "USD",
+          paymentTermsDays: lockedVendor.paymentTermsDays,
+          paymentTermsType: lockedVendor.paymentTermsType,
+          shipFromAddress: lockedVendor.shipFromAddress,
           subtotalCents,
           totalCents: subtotalCents, // no header discount/tax/shipping on inline create
           lineCount: resolvedLines.length,
@@ -4096,10 +5511,40 @@ export function createPurchasingService(
         subtotal_cents: subtotalCents,
       });
 
+      if (internalOptions?.additionalEvent) {
+        await emitPoEventTx(
+          tx,
+          header.id,
+          internalOptions.additionalEvent.eventType,
+          userId,
+          internalOptions.additionalEvent.payload,
+        );
+      }
+
       return header;
     });
 
-    return created;
+    let lastConflictingPoNumber: string | null = null;
+    for (let attempt = 1; attempt <= PO_NUMBER_ALLOCATION_ATTEMPTS; attempt++) {
+      const poNumber = await storage.generatePoNumber();
+      try {
+        return await createAttempt(poNumber);
+      } catch (error: any) {
+        if (!isPoNumberUniqueViolation(error)) throw error;
+        lastConflictingPoNumber = poNumber;
+        if (attempt < PO_NUMBER_ALLOCATION_ATTEMPTS) continue;
+      }
+    }
+
+    throw new PurchasingError(
+      "Could not allocate a unique PO number after concurrent create attempts",
+      409,
+      {
+        code: "PO_NUMBER_ALLOCATION_EXHAUSTED",
+        attempts: PO_NUMBER_ALLOCATION_ATTEMPTS,
+        lastPoNumber: lastConflictingPoNumber,
+      },
+    );
   }
 
   // ── DRAFT FULL-REPLACEMENT FLOW ─────────────────────────────────────────
@@ -4113,7 +5558,7 @@ export function createPurchasingService(
     input: UpdateDraftPurchaseOrderWithLinesInput,
     userId?: string,
   ): Promise<{ po: any; lines: any[] }> {
-    if (!Number.isSafeInteger(id) || id <= 0) {
+    if (!Number.isSafeInteger(id) || id <= 0 || id > PG_INTEGER_MAX) {
       throw new PurchasingError("Purchase order id must be a positive integer", 400, {
         code: "INVALID_PURCHASE_ORDER_ID",
       });
@@ -4151,6 +5596,22 @@ export function createPurchasingService(
         .for("update");
       const currentPo = lockedHeaders[0];
       if (!currentPo) throw new PurchasingError("Purchase order not found", 404);
+
+      const recommendationHandoffs = await tx
+        .select({ id: purchasingRecommendationPoHandoffsTable.id })
+        .from(purchasingRecommendationPoHandoffsTable)
+        .where(eq(purchasingRecommendationPoHandoffsTable.purchaseOrderId, id))
+        .limit(1);
+      if (recommendationHandoffs[0]) {
+        throw new PurchasingError(
+          "Cannot replace lines on a recommendation-created PO; cancel it and accept a new recommendation",
+          409,
+          {
+            code: "RECOMMENDATION_PO_LINE_AMEND_BLOCKED",
+            handoffId: recommendationHandoffs[0].id,
+          },
+        );
+      }
 
       const physicalStatus = currentPo.physicalStatus ?? currentPo.status;
       const financialStatus = currentPo.financialStatus ?? "unbilled";
@@ -4223,7 +5684,26 @@ export function createPurchasingService(
         }
       }
 
-      const changedAt = now();
+      await assertNoDraftLineDownstreamLinks(
+        tx,
+        activeExistingLines.map((line: any) => Number(line.id)),
+      );
+      const lockedVendor = await lockAndValidatePurchaseOrderReferences(
+        tx,
+        input.vendorId,
+        resolvedLines,
+      );
+
+      const latestStoredTimestamp = [currentPo, ...activeExistingLines].reduce(
+        (latest, row: any) => {
+          const value = new Date(row.updatedAt).getTime();
+          return Number.isNaN(value) ? latest : Math.max(latest, value);
+        },
+        currentUpdatedAt.getTime(),
+      );
+      const changedAt = new Date(
+        Math.max(now().getTime(), latestStoredTimestamp + 1),
+      );
       const beforeHeader = snapshotDraftHeader(currentPo);
       const beforeLines = activeExistingLines
         .slice()
@@ -4259,6 +5739,23 @@ export function createPurchasingService(
           });
         }
         cancelledLineIds.push(existingLine.id);
+      }
+
+      // Retained line numbers may swap. Stage them at unique negative ids so
+      // the active (PO, line_number) unique index cannot see a transient
+      // duplicate while the final 1..N sequence is written.
+      if (retainedLineIds.size > 0) {
+        await tx
+          .update(purchaseOrderLinesTable)
+          .set({
+            lineNumber: sql`-${purchaseOrderLinesTable.id}`,
+            updatedAt: changedAt,
+          })
+          .where(and(
+            eq(purchaseOrderLinesTable.purchaseOrderId, id),
+            inArray(purchaseOrderLinesTable.id, [...retainedLineIds]),
+            eq(purchaseOrderLinesTable.status, "open"),
+          ));
       }
 
       const persistedLines: any[] = [];
@@ -4323,10 +5820,10 @@ export function createPurchasingService(
         incoterms: input.incoterms ?? null,
         vendorNotes: input.vendorNotes ?? null,
         internalNotes: input.internalNotes ?? null,
-        currency: vendorChanged ? (vendor.currency || "USD") : currentPo.currency,
-        paymentTermsDays: vendorChanged ? vendor.paymentTermsDays : currentPo.paymentTermsDays,
-        paymentTermsType: vendorChanged ? vendor.paymentTermsType : currentPo.paymentTermsType,
-        shipFromAddress: vendorChanged ? vendor.shipFromAddress : currentPo.shipFromAddress,
+        currency: vendorChanged ? (lockedVendor.currency || "USD") : currentPo.currency,
+        paymentTermsDays: vendorChanged ? lockedVendor.paymentTermsDays : currentPo.paymentTermsDays,
+        paymentTermsType: vendorChanged ? lockedVendor.paymentTermsType : currentPo.paymentTermsType,
+        shipFromAddress: vendorChanged ? lockedVendor.shipFromAddress : currentPo.shipFromAddress,
         subtotalCents,
         totalCents,
         lineCount: persistedLines.length,
@@ -4398,158 +5895,279 @@ export function createPurchasingService(
     poId: number,
     userId?: string,
   ): Promise<SendPurchaseOrderResult> {
-    const po = await storage.getPurchaseOrderById(poId);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-    if (po.status !== "draft" && po.status !== "approved") {
-      throw new PurchasingError(
-        `Cannot send PO in '${po.status}' status (must be draft or approved)`,
-        400,
-      );
-    }
-
-    // Validate at least one active line.
-    const lines = await storage.getPurchaseOrderLines(poId);
-    const activeLines = lines.filter((l: any) => l.status !== "cancelled" && l.orderQty > 0);
-    if (activeLines.length === 0) {
-      throw new PurchasingError("PO must have at least one line with quantity > 0", 400);
-    }
-
-    // Refresh totals before the approval check.
-    await recalculateTotals(poId, userId);
-    const fresh = await storage.getPurchaseOrderById(poId);
-    const totalCents = Number(fresh.totalCents || 0);
-
-    const settings = await getProcurementSettings();
-
-    // Approval gate. A matching tier + require_approval routes through
-    // pending_approval and does NOT generate a PDF.
-    if (settings.requireApproval && po.status === "draft") {
-      const tier = await storage.getMatchingApprovalTier(totalCents);
-      if (tier) {
-        const updated = await db.transaction(async (tx: any) => {
-          const [row] = await tx
-            .update(purchaseOrdersTable)
-            .set({
-              status: "pending_approval",
-              approvalTierId: tier.id,
-              updatedBy: userId ?? null,
-              updatedAt: new Date(),
-            })
-            .where(eq(purchaseOrdersTable.id, poId))
-            .returning();
-          await tx.insert(poStatusHistoryTable).values({
-            purchaseOrderId: poId,
-            fromStatus: po.status,
-            toStatus: "pending_approval",
-            changedBy: userId ?? null,
-            notes: `Submitted for approval (tier: ${tier.tierName})`,
-          });
-          await emitPoEventTx(tx, poId, "submitted", userId, {
-            tier_id: tier.id,
-            tier_name: tier.tierName,
-            total_cents: totalCents,
-          });
-          return row;
-        });
-        return {
-          po: updated,
-          status: "pending_approval",
-          pdf: null,
-          pendingApproval: true,
-        };
-      }
-    }
-
-    // Cascade draft → approved → sent atomically.
-    const updated = await db.transaction(async (tx: any) => {
-      let currentStatus = po.status;
-      if (currentStatus === "draft") {
-        await tx
-          .update(purchaseOrdersTable)
-          .set({
-            status: "approved",
-            approvedBy: userId ?? null,
-            approvedAt: new Date(),
-            approvalNotes: settings.requireApproval
-              ? "Auto-approved (no matching tier)"
-              : "Auto-approved (approval not required)",
-            updatedBy: userId ?? null,
-            updatedAt: new Date(),
-          })
-          .where(eq(purchaseOrdersTable.id, poId));
-        await tx.insert(poStatusHistoryTable).values({
-          purchaseOrderId: poId,
-          fromStatus: currentStatus,
-          toStatus: "approved",
-          changedBy: userId ?? null,
-          notes: settings.requireApproval
-            ? "Auto-approved (no matching tier)"
-            : "Auto-approved (approval not required)",
-        });
-        await emitPoEventTx(tx, poId, "approved", userId, {
-          auto: true,
-          require_approval: settings.requireApproval,
-          total_cents: totalCents,
-        });
-        currentStatus = "approved";
-      }
-
-      const now = new Date();
-      const sentChange = (() => {
-        try {
-          return buildPhysicalTransitionChange({
-            po: { ...fresh, status: currentStatus },
-            target: "sent",
-            userId: userId ?? undefined,
-            notes: "Sent to vendor (PDF placeholder)",
-            now,
-            extraPatch: { orderDate: fresh.orderDate ?? now },
-            historyFromStatus: currentStatus,
-          });
-        } catch (error) {
-          return toPurchasingError(error);
-        }
-      })();
-
-      const [row] = await tx
-        .update(purchaseOrdersTable)
-        .set({
-          ...sentChange.patch,
-          updatedBy: userId ?? null,
-          updatedAt: now,
-        })
-        .where(eq(purchaseOrdersTable.id, poId))
-        .returning();
-      await tx.insert(poStatusHistoryTable).values({
-        purchaseOrderId: poId,
-        ...sentChange.history,
-        changedBy: userId ?? null,
-      });
-      await emitPoEventTx(tx, poId, "sent_to_vendor", userId, {
-        method: "pdf_placeholder",
-        pdf_placeholder: true,
-      });
-      return row;
+    const expectation = await observeLifecycleState(
+      poId,
+      ["draft", "approved"],
+      (status) => `Cannot send PO in '${status}' status (must be draft or approved)`,
+    );
+    const result = await sendWithLockedEconomics(poId, userId, expectation, {
+      allowDraft: true,
+      soloModeOnly: false,
+      sentNotes: "Sent to vendor (PDF placeholder)",
     });
-
-    // PDF STUB. Do not generate a real PDF. The real generator will land in a
-    // later pass; callers should branch on `pdf.pdf_placeholder`.
     return {
-      po: updated,
-      status: "sent",
-      pdf: {
-        pdf_placeholder: true,
-        reason: "PDF generation not yet implemented",
-      },
-      pendingApproval: false,
+      po: result.po,
+      status: result.status,
+      pdf: result.pendingApproval
+        ? null
+        : {
+            pdf_placeholder: true,
+            reason: "PDF generation not yet implemented",
+          },
+      pendingApproval: result.pendingApproval,
     };
   }
 
   // ── DUPLICATE (Spec A) ──────────────────────────────────────────────────
   //
   // Duplicate an existing PO's lines into a fresh draft. Per spec §11.4 the
-  // default behavior is to refresh unit cost from the current vendor catalog
-  // when one exists; otherwise we fall back to the source line's cost.
+  // A current, usable catalog quote is preferred. Only a same-vendor copy may
+  // fall back to source product economics, and explicit quotes become manual.
+
+  function requiredDuplicateStoredInteger(
+    value: unknown,
+    field: string,
+    src: any,
+  ): number {
+    if (value === null || value === undefined || !Number.isSafeInteger(Number(value))) {
+      throw new PurchasingError(
+        `Source PO line ${src.id} has invalid ${field} quote provenance`,
+        409,
+        {
+          code: "PO_DUPLICATE_SOURCE_PRICING_INVALID",
+          sourceLineId: src.id,
+          field,
+        },
+      );
+    }
+    return Number(value);
+  }
+
+  function duplicateSourcePricing(src: any): PoLinePricingInput | null {
+    let pricing: PoLinePricingInput | null = null;
+    switch (src.pricingBasis) {
+      case "per_piece":
+        pricing = {
+          basis: "per_piece",
+          quantityPieces: requiredDuplicateStoredInteger(src.orderQty, "order_qty", src),
+          unitCostMills: requiredDuplicateStoredInteger(
+            src.quotedUnitCostMills,
+            "quoted_unit_cost_mills",
+            src,
+          ),
+        };
+        break;
+      case "per_purchase_uom":
+        pricing = {
+          basis: "per_purchase_uom",
+          purchaseUom: String(src.purchaseUom ?? ""),
+          uomQuantity: requiredDuplicateStoredInteger(
+            src.purchaseUomQuantity,
+            "purchase_uom_quantity",
+            src,
+          ),
+          piecesPerUom: requiredDuplicateStoredInteger(
+            src.piecesPerPurchaseUom,
+            "pieces_per_purchase_uom",
+            src,
+          ),
+          quotedCostMillsPerUom: requiredDuplicateStoredInteger(
+            src.quotedUnitCostMills,
+            "quoted_unit_cost_mills",
+            src,
+          ),
+        };
+        break;
+      case "extended_total":
+        pricing = {
+          basis: "extended_total",
+          quantityPieces: requiredDuplicateStoredInteger(src.orderQty, "order_qty", src),
+          quotedTotalCents: requiredDuplicateStoredInteger(
+            src.quotedTotalCents,
+            "quoted_total_cents",
+            src,
+          ),
+        };
+        break;
+      default:
+        return null;
+    }
+
+    try {
+      const normalized = normalizePoLinePricing(pricing);
+      if (normalized.orderQty !== Number(src.orderQty)) {
+        throw new RangeError("stored quote quantity does not equal order_qty");
+      }
+    } catch (error: any) {
+      throw new PurchasingError(
+        `Source PO line ${src.id} has invalid stored quote provenance and cannot be duplicated safely`,
+        409,
+        {
+          code: "PO_DUPLICATE_SOURCE_PRICING_INVALID",
+          sourceLineId: src.id,
+          pricingBasis: src.pricingBasis,
+          reason: error?.message ?? "invalid stored quote",
+        },
+      );
+    }
+    return pricing;
+  }
+
+  function duplicateManualQuoteDate(value: unknown, src: any): Date | null {
+    if (value === null || value === undefined) return null;
+    const parsed = value instanceof Date ? value : new Date(String(value));
+    if (Number.isNaN(parsed.getTime())) {
+      throw new PurchasingError(
+        `Source PO line ${src.id} has an invalid quoted_at value`,
+        409,
+        { code: "PO_DUPLICATE_SOURCE_QUOTE_DATE_INVALID", sourceLineId: src.id },
+      );
+    }
+    return parsed;
+  }
+
+  function duplicateManualValidUntil(value: unknown, src: any): string | null {
+    if (value === null || value === undefined) return null;
+    const dateOnly = value instanceof Date
+      ? value.toISOString().slice(0, 10)
+      : String(value).slice(0, 10);
+    if (!isValidIsoDateOnly(dateOnly)) {
+      throw new PurchasingError(
+        `Source PO line ${src.id} has an invalid quote_valid_until value`,
+        409,
+        { code: "PO_DUPLICATE_SOURCE_QUOTE_DATE_INVALID", sourceLineId: src.id },
+      );
+    }
+    return dateOnly;
+  }
+
+  function duplicateCatalogPricing(
+    vendorProduct: any,
+    orderQty: number,
+  ): PoLinePricingInput | null {
+    if (Number(vendorProduct?.isActive) !== 1) return null;
+    if (!vendorCatalogQuoteUsability(vendorProduct, now()).usable) return null;
+
+    let pricing: PoLinePricingInput | null = null;
+    if (vendorProduct.pricingBasis === "per_piece") {
+      if (vendorProduct.quotedUnitCostMills == null) return null;
+      pricing = {
+        basis: "per_piece",
+        quantityPieces: orderQty,
+        unitCostMills: Number(vendorProduct.quotedUnitCostMills),
+      };
+    } else if (vendorProduct.pricingBasis === "per_purchase_uom") {
+      if (vendorProduct.quotedUnitCostMills == null) return null;
+      const piecesPerUom = Number(vendorProduct.piecesPerPurchaseUom);
+      if (
+        !Number.isSafeInteger(piecesPerUom) ||
+        piecesPerUom <= 0 ||
+        orderQty % piecesPerUom !== 0
+      ) {
+        return null;
+      }
+      pricing = {
+        basis: "per_purchase_uom",
+        purchaseUom: String(vendorProduct.purchaseUom ?? ""),
+        uomQuantity: orderQty / piecesPerUom,
+        piecesPerUom,
+        quotedCostMillsPerUom: Number(vendorProduct.quotedUnitCostMills),
+      };
+    } else {
+      return null;
+    }
+
+    try {
+      const normalized = normalizePoLinePricing(pricing);
+      return normalized.orderQty === orderQty &&
+        vendorCatalogPricingMatches(vendorProduct, pricing)
+        ? pricing
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function findDuplicateCatalogQuote(
+    targetVendorId: number,
+    src: any,
+  ): Promise<{ vendorProduct: any; pricing: PoLinePricingInput } | null> {
+    const productId = Number(src.productId);
+    const receiveVariantId = src.expectedReceiveVariantId ?? src.productVariantId ?? null;
+    const catalogRows = await storage.getVendorProducts({
+      vendorId: targetVendorId,
+      productId,
+      isActive: 1,
+    }) ?? [];
+
+    const candidates = catalogRows
+      .filter((row: any) =>
+        Number(row.vendorId) === targetVendorId &&
+        Number(row.productId) === productId &&
+        Number(row.isActive) === 1 &&
+        (
+          row.productVariantId == null ||
+          Number(row.productVariantId) === Number(receiveVariantId)
+        ),
+      )
+      .sort((left: any, right: any) => {
+        const leftExact = left.productVariantId != null ? 1 : 0;
+        const rightExact = right.productVariantId != null ? 1 : 0;
+        if (leftExact !== rightExact) return rightExact - leftExact;
+        const preferred = Number(right.isPreferred ?? 0) - Number(left.isPreferred ?? 0);
+        if (preferred !== 0) return preferred;
+        return Number(left.id) - Number(right.id);
+      });
+
+    for (const vendorProduct of candidates) {
+      const pricing = duplicateCatalogPricing(vendorProduct, Number(src.orderQty));
+      if (pricing) return { vendorProduct, pricing };
+    }
+    return null;
+  }
+
+  function duplicateLegacyCost(src: any): Pick<
+    PurchaseOrderLineInput,
+    "unitCostMills" | "unitCostCents" | "totalProductCostCents"
+  > {
+    if (src.lineType === "product" || src.lineType == null) {
+      if (src.totalProductCostCents !== null && src.totalProductCostCents !== undefined) {
+        const total = Number(src.totalProductCostCents);
+        if (Number.isSafeInteger(total) && total >= 0) {
+          return { totalProductCostCents: total };
+        }
+      }
+    }
+    if (src.unitCostMills !== null && src.unitCostMills !== undefined) {
+      const mills = Number(src.unitCostMills);
+      if (Number.isSafeInteger(mills)) return { unitCostMills: mills };
+    }
+    if (src.unitCostCents !== null && src.unitCostCents !== undefined) {
+      const cents = Number(src.unitCostCents);
+      if (Number.isSafeInteger(cents)) return { unitCostCents: cents };
+    }
+    throw new PurchasingError(
+      `Source PO line ${src.id} has invalid legacy economics and cannot be duplicated safely`,
+      409,
+      { code: "PO_DUPLICATE_SOURCE_LEGACY_PRICE_INVALID", sourceLineId: src.id },
+    );
+  }
+
+  function duplicateProductPackagingCost(src: any): number {
+    const packagingCostCents = Number(src.packagingCostCents ?? 0);
+    if (!Number.isSafeInteger(packagingCostCents) || packagingCostCents < 0) {
+      throw new PurchasingError(
+        `Source PO line ${src.id} has invalid packaging economics and cannot be duplicated safely`,
+        409,
+        {
+          code: "PO_DUPLICATE_SOURCE_PACKAGING_INVALID",
+          sourceLineId: src.id,
+          packagingCostCents: src.packagingCostCents,
+        },
+      );
+    }
+    return packagingCostCents;
+  }
 
   async function duplicatePurchaseOrder(
     sourceId: number,
@@ -4564,9 +6182,10 @@ export function createPurchasingService(
     }
 
     const targetVendorId = overrides?.vendorId ?? source.vendorId;
+    const targetVendorChanged = Number(targetVendorId) !== Number(source.vendorId);
 
-    // Refresh costs from the current vendor catalog when available.
-    // Mills-aware: prefer catalog mills → source mills → derive from cents.
+    // Resolve product pricing without changing the stored piece quantity.
+    // Catalog provenance is trusted only after the create transaction locks it.
     //
     // Preserve line_type + parent relationships from the source. Since the
     // duplicated PO gets new DB ids, we remap parents via client-side ids.
@@ -4583,42 +6202,16 @@ export function createPurchasingService(
       if (src.status === "cancelled") continue;
       const srcLineType: PoLineType = (src.lineType as PoLineType) ?? "product";
 
-      // Start from source line's mills when present, else derive from cents.
-      let unitCostMills: number =
-        typeof src.unitCostMills === "number"
-          ? src.unitCostMills
-          : centsToMills(Number(src.unitCostCents || 0));
-      let vendorProductId: number | null = null;
-
-      // Vendor catalog refresh is only meaningful on product lines.
-      if (srcLineType === "product") {
-        try {
-          const vp = await storage.getPreferredVendorProduct(
-            src.productId,
-            src.expectedReceiveVariantId ?? src.productVariantId,
-          );
-          if (vp && vp.vendorId === targetVendorId) {
-            if (typeof vp.unitCostMills === "number" && vp.unitCostMills >= 0) {
-              unitCostMills = vp.unitCostMills;
-            } else if (typeof vp.unitCostCents === "number") {
-              unitCostMills = centsToMills(vp.unitCostCents);
-            }
-            vendorProductId = vp.id ?? null;
-          }
-        } catch {
-          // Non-fatal: fall back to source cost.
-        }
-      }
-
       const parentClientId =
         typeof src.parentLineId === "number"
           ? clientIdBySourceId.get(src.parentLineId) ?? null
           : null;
 
-      dupLines.push({
+      const baseLine: PurchaseOrderLineInput = {
         clientId: clientIdBySourceId.get(src.id),
         lineType: srcLineType,
         parentClientId,
+        productId: srcLineType === "product" ? Number(src.productId) : null,
         productVariantId: srcLineType === "product"
           ? (src.expectedReceiveVariantId ?? src.productVariantId ?? null)
           : null,
@@ -4627,16 +6220,97 @@ export function createPurchasingService(
           : null,
         expectedReceiveUnitsPerVariant: srcLineType === "product"
           ? (src.expectedReceiveUnitsPerVariant ?? src.unitsPerUom ?? 1)
-          : 1,
+          : undefined,
         orderQty: src.orderQty,
-        unitCostMills,
-        // Include cents (derived) so downstream validators that still look
-        // at cents don't choke. They must agree per validator rule.
-        // Signed conversion for discount/rebate/adjustment lines.
-        unitCostCents: signedMillsToCents(unitCostMills),
-        vendorProductId,
         description: src.description ?? null,
-      });
+        vendorSku: src.vendorSku ?? null,
+        notes: src.notes ?? null,
+      };
+
+      if (srcLineType !== "product") {
+        if (targetVendorChanged) {
+          throw new PurchasingError(
+            `Line ${src.lineNumber ?? src.id} is a ${srcLineType} line and must be reviewed for the target vendor`,
+            409,
+            {
+              code: "PO_DUPLICATE_TARGET_VENDOR_NON_PRODUCT_REVIEW_REQUIRED",
+              sourcePoId: source.id,
+              sourceLineId: src.id,
+              lineType: srcLineType,
+              targetVendorId,
+            },
+          );
+        }
+        dupLines.push({ ...baseLine, ...duplicateLegacyCost(src) });
+        continue;
+      }
+
+      const packagingCostCents = duplicateProductPackagingCost(src);
+      if (targetVendorChanged && packagingCostCents !== 0) {
+        throw new PurchasingError(
+          `Product line ${src.lineNumber ?? src.id} has a packaging cost that must be re-entered for the target vendor`,
+          409,
+          {
+            code: "PO_DUPLICATE_TARGET_VENDOR_PACKAGING_REVIEW_REQUIRED",
+            sourcePoId: source.id,
+            sourceLineId: src.id,
+            productId: src.productId,
+            targetVendorId,
+            packagingCostCents,
+          },
+        );
+      }
+
+      const catalogQuote = await findDuplicateCatalogQuote(targetVendorId, src);
+      if (catalogQuote) {
+        dupLines.push({
+          ...baseLine,
+          pricing: catalogQuote.pricing,
+          pricingSource: "vendor_catalog",
+          vendorProductId: Number(catalogQuote.vendorProduct.id),
+          vendorSku: catalogQuote.vendorProduct.vendorSku ?? null,
+          packagingCostCents,
+        });
+        continue;
+      }
+
+      if (targetVendorChanged) {
+        throw new PurchasingError(
+          `Product line ${src.lineNumber ?? src.id} has no active, usable catalog quote for the target vendor`,
+          409,
+          {
+            code: "PO_DUPLICATE_TARGET_VENDOR_QUOTE_REQUIRED",
+            sourcePoId: source.id,
+            sourceLineId: src.id,
+            productId: src.productId,
+            expectedReceiveVariantId:
+              src.expectedReceiveVariantId ?? src.productVariantId ?? null,
+            targetVendorId,
+          },
+        );
+      }
+
+      const sourcePricing = duplicateSourcePricing(src);
+      if (sourcePricing) {
+        dupLines.push({
+          ...baseLine,
+          pricing: sourcePricing,
+          pricingSource: "manual",
+          vendorProductId: null,
+          quoteReference: src.quoteReference ?? null,
+          quotedAt: duplicateManualQuoteDate(src.quotedAt, src),
+          quoteValidUntil: duplicateManualValidUntil(src.quoteValidUntil, src),
+          packagingCostCents,
+        });
+      } else {
+        dupLines.push({
+          ...baseLine,
+          ...duplicateLegacyCost(src),
+          pricingSource: "legacy",
+          vendorProductId: null,
+          packagingCostCents,
+        });
+      }
     }
 
     if (dupLines.length === 0) {
@@ -4646,22 +6320,27 @@ export function createPurchasingService(
     const created = await createPurchaseOrderWithLines(
       {
         vendorId: targetVendorId,
+        warehouseId: source.warehouseId ?? null,
         poType: source.poType ?? "standard",
         priority: source.priority ?? "normal",
         expectedDeliveryDate: overrides?.expectedDeliveryDate ?? null,
-        incoterms: source.incoterms ?? null,
-        vendorNotes: source.vendorNotes ?? null,
+        incoterms: targetVendorChanged ? null : (source.incoterms ?? null),
+        vendorNotes: targetVendorChanged ? null : (source.vendorNotes ?? null),
         internalNotes: source.internalNotes ?? null,
         lines: dupLines,
       },
       userId,
+      {
+        additionalEvent: {
+          eventType: "duplicated_from",
+          payload: {
+            source_po_id: source.id,
+            source_po_number: source.poNumber,
+            line_count: dupLines.length,
+          },
+        },
+      },
     );
-
-    await emitPoEvent(created.id, "duplicated_from", userId, {
-      source_po_id: source.id,
-      source_po_number: source.poNumber,
-      line_count: dupLines.length,
-    });
 
     return created;
   }
@@ -4685,11 +6364,15 @@ export function createPurchasingService(
     //   * unitCostMills is authoritative (4-decimal precision).
     //   * unitCostCents is accepted for legacy/back-compat callers.
     // If both are provided they must agree (cents == millsToCents(mills)).
-    unitCostCents?: number;
-    unitCostMills?: number;
-    packSize?: number;
-    moq?: number;
-    leadTimeDays?: number;
+    unitCostCents?: number | null;
+    unitCostMills?: number | null;
+    pricing?: PoLinePricingInput;
+    quoteReference?: string | null;
+    quotedAt?: Date | null;
+    quoteValidUntil?: string | null;
+    packSize?: number | null;
+    moq?: number | null;
+    leadTimeDays?: number | null;
     vendorSku?: string | null;
     vendorProductName?: string | null;
     isPreferred?: boolean;
@@ -4713,145 +6396,968 @@ export function createPurchasingService(
     }>;
   };
 
+  type ValidatedBulkCatalogEntry = {
+    entry: BulkCatalogEntry;
+    index: number;
+    variantId: number | null;
+    resolvedPricing: {
+      unitCostMills: number;
+      unitCostCents: number;
+      pricingBasis: "legacy_unknown" | "per_piece" | "per_purchase_uom";
+      purchaseUom: string | null;
+      quotedUnitCostMills: number | null;
+      piecesPerPurchaseUom: number | null;
+      quoteReference: string | null;
+      quotedAt: Date | null;
+      quoteValidUntil: string | null;
+    };
+  };
+
+  function bulkCatalogKey(productId: number, productVariantId: number | null): string {
+    return `${productId}:${productVariantId ?? 0}`;
+  }
+
+  function assertPositivePgInteger(value: unknown, field: string): asserts value is number {
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value <= 0 ||
+      value > PG_INTEGER_MAX
+    ) {
+      throw new PurchasingError(`${field} must be a positive PostgreSQL integer`, 400);
+    }
+  }
+
+  function assertNonnegativeSafeInteger(value: unknown, field: string): asserts value is number {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new PurchasingError(`${field} must be a non-negative safe integer`, 400);
+    }
+  }
+
+  function assertOptionalCatalogText(
+    value: unknown,
+    field: string,
+    maximumLength: number,
+  ): void {
+    if (value === undefined || value === null) return;
+    if (typeof value !== "string" || value.length > maximumLength) {
+      throw new PurchasingError(
+        `${field} must be a string of at most ${maximumLength} characters or null`,
+        400,
+      );
+    }
+  }
+
+  function resolveBulkCatalogEntryPricing(entry: BulkCatalogEntry, index: number) {
+    if (entry.pricing) {
+      if (entry.pricing.basis === "extended_total") {
+        throw new PurchasingError(
+          `entries[${index}].pricing is quantity-specific and cannot be reused as a catalog price`,
+          400,
+          { code: "VENDOR_CATALOG_EXTENDED_TOTAL_NOT_REUSABLE" },
+        );
+      }
+      let normalized: NormalizedPoLinePricing;
+      try {
+        normalized = normalizePoLinePricing(entry.pricing);
+      } catch (error: any) {
+        throw new PurchasingError(`entries[${index}].pricing is invalid: ${error.message}`, 400, {
+          code: "VENDOR_CATALOG_PRICING_INVALID",
+          index,
+        });
+      }
+      if (!(entry.quotedAt instanceof Date) || Number.isNaN(entry.quotedAt.getTime())) {
+        throw new PurchasingError(
+          `entries[${index}].quotedAt is required for an explicit reusable vendor catalog quote`,
+          400,
+          { code: "VENDOR_CATALOG_QUOTED_AT_REQUIRED", index },
+        );
+      }
+      if (
+        entry.unitCostMills !== undefined &&
+        entry.unitCostMills !== null &&
+        entry.unitCostMills !== normalized.unitCostMills
+      ) {
+        throw new PurchasingError(
+          `entries[${index}].unitCostMills does not match normalized pricing`,
+          400,
+        );
+      }
+      if (
+        entry.unitCostCents !== undefined &&
+        entry.unitCostCents !== null &&
+        entry.unitCostCents !== normalized.unitCostCents
+      ) {
+        throw new PurchasingError(
+          `entries[${index}].unitCostCents does not match normalized pricing`,
+          400,
+        );
+      }
+      return {
+        unitCostMills: normalized.unitCostMills,
+        unitCostCents: normalized.unitCostCents,
+        pricingBasis: entry.pricing.basis,
+        purchaseUom: normalized.purchaseUom,
+        quotedUnitCostMills: normalized.quotedUnitCostMills,
+        piecesPerPurchaseUom: normalized.piecesPerPurchaseUom,
+        quoteReference: entry.quoteReference?.trim() || null,
+        quotedAt: entry.quotedAt ?? null,
+        quoteValidUntil: entry.quoteValidUntil ?? null,
+      };
+    }
+
+    try {
+      const hasMills = entry.unitCostMills !== undefined && entry.unitCostMills !== null;
+      const unitCostMills = hasMills
+        ? Number(entry.unitCostMills)
+        : centsToMills(Number(entry.unitCostCents));
+      return {
+        unitCostMills,
+        unitCostCents: millsToCents(unitCostMills),
+        pricingBasis: "legacy_unknown" as const,
+        purchaseUom: null,
+        quotedUnitCostMills: null,
+        piecesPerPurchaseUom: null,
+        quoteReference: null,
+        quotedAt: null,
+        quoteValidUntil: null,
+      };
+    } catch (error: any) {
+      throw new PurchasingError(`entries[${index}] price is invalid: ${error.message}`, 400, {
+        code: "VENDOR_CATALOG_PRICING_INVALID",
+        index,
+      });
+    }
+  }
+
+  function catalogAuditSnapshot(row: any): Record<string, unknown> {
+    return {
+      unitCostCents: row?.unitCostCents ?? row?.unit_cost_cents ?? null,
+      unitCostMills: row?.unitCostMills ?? row?.unit_cost_mills ?? null,
+      pricingBasis: row?.pricingBasis ?? row?.pricing_basis ?? null,
+      purchaseUom: row?.purchaseUom ?? row?.purchase_uom ?? null,
+      quotedUnitCostMills:
+        row?.quotedUnitCostMills ?? row?.quoted_unit_cost_mills ?? null,
+      piecesPerPurchaseUom:
+        row?.piecesPerPurchaseUom ?? row?.pieces_per_purchase_uom ?? null,
+      packSize: row?.packSize ?? row?.pack_size ?? null,
+      moq: row?.moq ?? null,
+      leadTimeDays: row?.leadTimeDays ?? row?.lead_time_days ?? null,
+      isPreferred: row?.isPreferred ?? row?.is_preferred ?? null,
+      isActive: row?.isActive ?? row?.is_active ?? null,
+      vendorSku: row?.vendorSku ?? row?.vendor_sku ?? null,
+      vendorProductName: row?.vendorProductName ?? row?.vendor_product_name ?? null,
+      quoteReference: row?.quoteReference ?? row?.quote_reference ?? null,
+      quotedAt: row?.quotedAt ?? row?.quoted_at ?? null,
+      quoteValidUntil: row?.quoteValidUntil ?? row?.quote_valid_until ?? null,
+    };
+  }
+
+  function rethrowVendorCatalogWriteError(error: any): never {
+    if (
+      error?.code === "23505" &&
+      error?.constraint === "vendor_products_one_active_preferred_key_uidx"
+    ) {
+      throw new PurchasingError(
+        "Another active preferred vendor mapping already exists for this product/configuration",
+        409,
+        { code: "VENDOR_CATALOG_PREFERRED_CONFLICT" },
+      );
+    }
+    if (
+      error?.code === "23505" &&
+      (
+        error?.constraint === "vendor_products_vendor_product_variant_key_uidx" ||
+        error?.constraint === "vendor_products_vendor_product_variant_idx"
+      )
+    ) {
+      throw new PurchasingError("Vendor catalog mapping already exists or changed concurrently", 409, {
+        code: "VENDOR_CATALOG_MAPPING_CONFLICT",
+      });
+    }
+    throw error;
+  }
+
+  async function lockVendorProductReferences(
+    tx: any,
+    vendorId: number,
+    productId: number,
+    productVariantId: number | null,
+  ): Promise<void> {
+    const vendorRows = await tx.execute(sql`
+      SELECT id, active
+      FROM procurement.vendors
+      WHERE id = ${vendorId}
+      FOR UPDATE
+    `);
+    const vendor = vendorRows.rows?.[0];
+    if (!vendor) throw new PurchasingError("Vendor not found", 404);
+    if (Number(vendor.active) !== 1) {
+      throw new PurchasingError("Vendor is inactive", 409, {
+        code: "VENDOR_CATALOG_VENDOR_INACTIVE",
+        vendorId,
+      });
+    }
+
+    const productRows = await tx.execute(sql`
+      SELECT id, is_active
+      FROM catalog.products
+      WHERE id = ${productId}
+      FOR UPDATE
+    `);
+    const product = productRows.rows?.[0];
+    if (!product) {
+      throw new PurchasingError(`Product ${productId} not found`, 404, {
+        code: "VENDOR_CATALOG_PRODUCT_NOT_FOUND",
+        productId,
+      });
+    }
+    if (product.is_active !== true) {
+      throw new PurchasingError(`Product ${productId} is inactive`, 409, {
+        code: "VENDOR_CATALOG_PRODUCT_INACTIVE",
+        productId,
+      });
+    }
+
+    if (productVariantId === null) return;
+    const variantRows = await tx.execute(sql`
+      SELECT id, product_id, is_active
+      FROM catalog.product_variants
+      WHERE id = ${productVariantId}
+      FOR UPDATE
+    `);
+    const variant = variantRows.rows?.[0];
+    if (!variant) {
+      throw new PurchasingError(`Product variant ${productVariantId} not found`, 404, {
+        code: "VENDOR_CATALOG_VARIANT_NOT_FOUND",
+        productId,
+        productVariantId,
+      });
+    }
+    if (Number(variant.product_id) !== productId) {
+      throw new PurchasingError(
+        `Product variant ${productVariantId} does not belong to product ${productId}`,
+        400,
+        {
+          code: "VENDOR_CATALOG_VARIANT_PRODUCT_MISMATCH",
+          productId,
+          productVariantId,
+          actualProductId: Number(variant.product_id),
+        },
+      );
+    }
+    if (variant.is_active !== true) {
+      throw new PurchasingError(`Product variant ${productVariantId} is inactive`, 409, {
+        code: "VENDOR_CATALOG_VARIANT_INACTIVE",
+        productId,
+        productVariantId,
+      });
+    }
+  }
+
+  async function demoteCompetingPreferredMappings(
+    tx: any,
+    input: {
+      vendorId: number;
+      productId: number;
+      productVariantId: number | null;
+      updatedAt: Date;
+    },
+  ): Promise<Array<{ before: Record<string, unknown>; after: any }>> {
+    const result = await tx.execute(sql`
+      UPDATE procurement.vendor_products
+      SET
+        is_preferred = 0,
+        updated_at = ${input.updatedAt}
+      WHERE product_id = ${input.productId}
+        AND COALESCE(product_variant_id, 0) = ${input.productVariantId ?? 0}
+        AND vendor_id <> ${input.vendorId}
+        AND is_active = 1
+        AND is_preferred = 1
+      RETURNING *
+    `);
+    return (result.rows ?? []).map((row: any) => ({
+      before: catalogAuditSnapshot({ ...row, is_preferred: 1 }),
+      after: row,
+    }));
+  }
+
+  function appendPreferredDemotionAudits(
+    target: Array<Record<string, unknown>>,
+    demotions: Array<{ before: Record<string, unknown>; after: any }>,
+    actorType: "user" | "system",
+    actorId: string,
+    promoted: { vendorId: number; productId: number; productVariantId: number | null },
+  ): void {
+    for (const demotion of demotions) {
+      const vendorProductId = Number(demotion.after.id);
+      target.push({
+        level: "AUDIT",
+        actor: `${actorType}:${actorId}`,
+        action: "vendor_catalog.preferred_demoted",
+        target: `vendor_product:${vendorProductId}`,
+        changes: {
+          before: demotion.before,
+          after: catalogAuditSnapshot(demotion.after),
+        },
+        context: {
+          vendorProductId,
+          vendorId: Number(demotion.after.vendor_id),
+          productId: promoted.productId,
+          productVariantId: promoted.productVariantId,
+          promotedVendorId: promoted.vendorId,
+        },
+      });
+    }
+  }
+
+  function validateStoredVendorProductQuote(
+    row: Record<string, any>,
+    timestamp: Date,
+  ): void {
+    const explicit = row.pricingBasis === "per_piece" || row.pricingBasis === "per_purchase_uom";
+    if (!explicit) {
+      if (row.quoteReference != null || row.quotedAt != null || row.quoteValidUntil != null) {
+        throw new PurchasingError("Legacy catalog pricing cannot carry quote metadata", 400, {
+          code: "VENDOR_CATALOG_QUOTE_METADATA_REQUIRES_PRICING",
+        });
+      }
+      return;
+    }
+    if (!(row.quotedAt instanceof Date) || Number.isNaN(row.quotedAt.getTime())) {
+      throw new PurchasingError("Explicit catalog pricing requires quotedAt", 400, {
+        code: "VENDOR_CATALOG_QUOTED_AT_REQUIRED",
+      });
+    }
+    if (row.quotedAt.getTime() > timestamp.getTime() + MAX_QUOTE_CLOCK_SKEW_MS) {
+      throw new PurchasingError("quotedAt cannot be materially in the future", 400, {
+        code: "VENDOR_CATALOG_QUOTED_AT_IN_FUTURE",
+      });
+    }
+    if (
+      row.quoteValidUntil != null &&
+      (
+        typeof row.quoteValidUntil !== "string" ||
+        !isValidIsoDateOnly(row.quoteValidUntil)
+      )
+    ) {
+      throw new PurchasingError("quoteValidUntil must be a real YYYY-MM-DD date", 400);
+    }
+    if (
+      row.quoteValidUntil &&
+      row.quoteValidUntil < row.quotedAt.toISOString().slice(0, 10)
+    ) {
+      throw new PurchasingError("quoteValidUntil cannot be earlier than quotedAt", 400, {
+        code: "VENDOR_CATALOG_QUOTE_DATE_INVALID",
+      });
+    }
+  }
+
+  async function createVendorProduct(
+    data: Record<string, any>,
+    userId?: string | null,
+  ): Promise<any> {
+    assertPositivePgInteger(data.vendorId, "vendorId");
+    assertPositivePgInteger(data.productId, "productId");
+    if (data.productVariantId !== undefined && data.productVariantId !== null) {
+      assertPositivePgInteger(data.productVariantId, "productVariantId");
+    }
+    const variantId = data.productVariantId ?? null;
+    const writeTime = now();
+    validateStoredVendorProductQuote(data, writeTime);
+    const { actorType, actorId } = resolveActor(userId);
+
+    try {
+      return await db.transaction(async (tx: any) => {
+        await lockVendorProductReferences(tx, data.vendorId, data.productId, variantId);
+        const auditRows: Array<Record<string, unknown>> = [];
+        if (Number(data.isActive ?? 1) === 1 && Number(data.isPreferred ?? 0) === 1) {
+          const demotions = await demoteCompetingPreferredMappings(tx, {
+            vendorId: data.vendorId,
+            productId: data.productId,
+            productVariantId: variantId,
+            updatedAt: writeTime,
+          });
+          appendPreferredDemotionAudits(
+            auditRows,
+            demotions,
+            actorType,
+            actorId,
+            { vendorId: data.vendorId, productId: data.productId, productVariantId: variantId },
+          );
+        }
+        const insertedRows = await tx
+          .insert(vendorProductsTable)
+          .values({ ...data, productVariantId: variantId })
+          .returning();
+        const row = insertedRows[0];
+        if (!row) throw new PurchasingError("Vendor catalog mapping was not created", 409);
+        auditRows.push({
+          level: "AUDIT",
+          actor: `${actorType}:${actorId}`,
+          action: "vendor_catalog.created",
+          target: `vendor_product:${row.id}`,
+          changes: { before: null, after: catalogAuditSnapshot(row) },
+          context: {
+            vendorId: row.vendorId,
+            vendorProductId: row.id,
+            productId: row.productId,
+            productVariantId: row.productVariantId ?? null,
+          },
+        });
+        await tx.insert(auditEventsTable).values(auditRows);
+        return row;
+      });
+    } catch (error: any) {
+      rethrowVendorCatalogWriteError(error);
+    }
+  }
+
+  async function updateVendorProduct(
+    id: number,
+    updates: Record<string, any>,
+    userId?: string | null,
+  ): Promise<any | null> {
+    assertPositivePgInteger(id, "vendorProductId");
+    for (const identityField of ["vendorId", "productId", "productVariantId"]) {
+      if (Object.prototype.hasOwnProperty.call(updates, identityField)) {
+        throw new PurchasingError(
+          "Vendor-product identity is immutable; create a new mapping and deactivate this one",
+          409,
+          { code: "VENDOR_CATALOG_IDENTITY_IMMUTABLE", field: identityField },
+        );
+      }
+    }
+    const snapshot = await storage.getVendorProductById(id);
+    if (!snapshot) return null;
+    const { actorType, actorId } = resolveActor(userId);
+    const writeTime = now();
+
+    try {
+      return await db.transaction(async (tx: any) => {
+        await lockVendorProductReferences(
+          tx,
+          Number(snapshot.vendorId),
+          Number(snapshot.productId),
+          snapshot.productVariantId == null ? null : Number(snapshot.productVariantId),
+        );
+        const lockedRows = await tx
+          .select()
+          .from(vendorProductsTable)
+          .where(eq(vendorProductsTable.id, id))
+          .limit(1)
+          .for("update");
+        const current = lockedRows[0];
+        if (!current) return null;
+        if (
+          Number(current.vendorId) !== Number(snapshot.vendorId) ||
+          Number(current.productId) !== Number(snapshot.productId) ||
+          (current.productVariantId == null ? null : Number(current.productVariantId)) !==
+            (snapshot.productVariantId == null ? null : Number(snapshot.productVariantId))
+        ) {
+          throw new PurchasingError("Vendor-product identity changed concurrently; retry", 409, {
+            code: "VENDOR_CATALOG_CONFLICT_RETRY",
+          });
+        }
+
+        const effective = { ...current, ...updates };
+        validateStoredVendorProductQuote(effective, writeTime);
+        const auditRows: Array<Record<string, unknown>> = [];
+        if (Number(effective.isActive ?? 0) === 1 && Number(effective.isPreferred ?? 0) === 1) {
+          const demotions = await demoteCompetingPreferredMappings(tx, {
+            vendorId: Number(current.vendorId),
+            productId: Number(current.productId),
+            productVariantId: current.productVariantId == null
+              ? null
+              : Number(current.productVariantId),
+            updatedAt: writeTime,
+          });
+          appendPreferredDemotionAudits(
+            auditRows,
+            demotions,
+            actorType,
+            actorId,
+            {
+              vendorId: Number(current.vendorId),
+              productId: Number(current.productId),
+              productVariantId: current.productVariantId == null
+                ? null
+                : Number(current.productVariantId),
+            },
+          );
+        }
+        const updatedRows = await tx
+          .update(vendorProductsTable)
+          .set({ ...updates, updatedAt: writeTime })
+          .where(eq(vendorProductsTable.id, id))
+          .returning();
+        const row = updatedRows[0];
+        if (!row) return null;
+        const deactivated = Number(current.isActive ?? 0) === 1 && Number(row.isActive ?? 0) === 0;
+        auditRows.push({
+          level: "AUDIT",
+          actor: `${actorType}:${actorId}`,
+          action: deactivated ? "vendor_catalog.deactivated" : "vendor_catalog.updated",
+          target: `vendor_product:${row.id}`,
+          changes: {
+            before: catalogAuditSnapshot(current),
+            after: catalogAuditSnapshot(row),
+          },
+          context: {
+            vendorId: row.vendorId,
+            vendorProductId: row.id,
+            productId: row.productId,
+            productVariantId: row.productVariantId ?? null,
+          },
+        });
+        await tx.insert(auditEventsTable).values(auditRows);
+        return row;
+      });
+    } catch (error: any) {
+      rethrowVendorCatalogWriteError(error);
+    }
+  }
+
+  async function deactivateVendorProduct(
+    id: number,
+    userId?: string | null,
+  ): Promise<boolean> {
+    const row = await updateVendorProduct(id, { isActive: 0 }, userId);
+    return row !== null;
+  }
+
   async function bulkUpsertVendorCatalog(
     vendorId: number,
     entries: BulkCatalogEntry[],
     userId: string | null | undefined,
   ): Promise<BulkCatalogResult> {
-    if (!Number.isInteger(vendorId) || vendorId <= 0) {
-      throw new PurchasingError("vendorId is required", 400);
-    }
+    assertPositivePgInteger(vendorId, "vendorId");
     if (!Array.isArray(entries) || entries.length === 0) {
       throw new PurchasingError("entries must be a non-empty array", 400);
     }
+    if (entries.length > MAX_BULK_CATALOG_ENTRIES) {
+      throw new PurchasingError(
+        `entries cannot contain more than ${MAX_BULK_CATALOG_ENTRIES} items`,
+        400,
+        { code: "VENDOR_CATALOG_BATCH_TOO_LARGE", maximum: MAX_BULK_CATALOG_ENTRIES },
+      );
+    }
 
-    // Boundary validation (Rule #4). Reject the whole request on any bad
-    // entry so partial writes can't happen.
-    for (const [idx, e] of entries.entries()) {
-      if (!Number.isInteger(e.productId) || e.productId <= 0) {
-        throw new PurchasingError(`entries[${idx}].productId must be a positive integer`, 400);
+    // Reject the entire request before opening a transaction if any boundary
+    // value or duplicate business key is invalid.
+    const validatedEntries: ValidatedBulkCatalogEntry[] = [];
+    const firstIndexByKey = new Map<string, number>();
+    const boundaryNow = now();
+    for (const [idx, entry] of entries.entries()) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new PurchasingError(`entries[${idx}] must be an object`, 400);
       }
-      if (
-        e.productVariantId !== undefined &&
-        e.productVariantId !== null &&
-        (!Number.isInteger(e.productVariantId) || e.productVariantId <= 0)
-      ) {
+      assertPositivePgInteger(entry.productId, `entries[${idx}].productId`);
+      if (entry.productVariantId !== undefined && entry.productVariantId !== null) {
+        assertPositivePgInteger(
+          entry.productVariantId,
+          `entries[${idx}].productVariantId`,
+        );
+      }
+      const variantId = entry.productVariantId ?? null;
+      const key = bulkCatalogKey(entry.productId, variantId);
+      const firstIndex = firstIndexByKey.get(key);
+      if (firstIndex !== undefined) {
         throw new PurchasingError(
-          `entries[${idx}].productVariantId must be a positive integer or null`,
+          `entries[${idx}] duplicates entries[${firstIndex}] for product ${entry.productId}` +
+            (variantId === null ? " at product level" : ` variant ${variantId}`),
+          400,
+          {
+            code: "VENDOR_CATALOG_DUPLICATE_ENTRY",
+            firstIndex,
+            duplicateIndex: idx,
+            productId: entry.productId,
+            productVariantId: variantId,
+          },
+        );
+      }
+      firstIndexByKey.set(key, idx);
+
+      const hasCents = entry.unitCostCents !== undefined && entry.unitCostCents !== null;
+      const hasMills = entry.unitCostMills !== undefined && entry.unitCostMills !== null;
+      if (!entry.pricing && !hasCents && !hasMills) {
+        throw new PurchasingError(
+          `entries[${idx}].pricing, unitCostCents, or unitCostMills is required`,
           400,
         );
       }
-      const hasCents = e.unitCostCents !== undefined && e.unitCostCents !== null;
-      const hasMills = e.unitCostMills !== undefined && e.unitCostMills !== null;
-      if (!hasCents && !hasMills) {
-        throw new PurchasingError(
-          `entries[${idx}].unitCostCents or unitCostMills is required`,
-          400,
+      if (hasCents) {
+        assertNonnegativeSafeInteger(
+          entry.unitCostCents,
+          `entries[${idx}].unitCostCents`,
         );
       }
-      if (hasCents && (!Number.isInteger(e.unitCostCents) || (e.unitCostCents as number) < 0)) {
-        // Rule #3: integer cents only.
-        throw new PurchasingError(
-          `entries[${idx}].unitCostCents must be a non-negative integer (cents)`,
-          400,
-        );
-      }
-      if (hasMills && (!Number.isInteger(e.unitCostMills) || (e.unitCostMills as number) < 0)) {
-        throw new PurchasingError(
-          `entries[${idx}].unitCostMills must be a non-negative integer (mills)`,
-          400,
+      if (hasMills) {
+        assertNonnegativeSafeInteger(
+          entry.unitCostMills,
+          `entries[${idx}].unitCostMills`,
         );
       }
       if (hasCents && hasMills) {
-        const expected = millsToCents(e.unitCostMills as number);
-        if (expected !== (e.unitCostCents as number)) {
+        const expected = millsToCents(entry.unitCostMills as number);
+        if (expected !== entry.unitCostCents) {
           throw new PurchasingError(
-            `entries[${idx}]: unitCostMills (${e.unitCostMills}) and unitCostCents (${e.unitCostCents}) disagree; expected cents=${expected}`,
+            `entries[${idx}]: unitCostMills (${entry.unitCostMills}) and unitCostCents (${entry.unitCostCents}) disagree; expected cents=${expected}`,
             400,
           );
         }
       }
-      if (e.packSize !== undefined && (!Number.isInteger(e.packSize) || e.packSize <= 0)) {
-        throw new PurchasingError(`entries[${idx}].packSize must be a positive integer`, 400);
-      }
-      if (e.moq !== undefined && (!Number.isInteger(e.moq) || e.moq <= 0)) {
-        throw new PurchasingError(`entries[${idx}].moq must be a positive integer`, 400);
+
+      assertOptionalCatalogText(
+        entry.quoteReference,
+        `entries[${idx}].quoteReference`,
+        255,
+      );
+      const hasQuoteMetadata =
+        entry.quoteReference !== undefined ||
+        entry.quotedAt !== undefined ||
+        entry.quoteValidUntil !== undefined;
+      if (!entry.pricing && hasQuoteMetadata) {
+        throw new PurchasingError(
+          `entries[${idx}] quote metadata requires an explicit reusable pricing basis`,
+          400,
+          { code: "VENDOR_CATALOG_QUOTE_METADATA_REQUIRES_PRICING", index: idx },
+        );
       }
       if (
-        e.leadTimeDays !== undefined &&
-        (!Number.isInteger(e.leadTimeDays) || e.leadTimeDays < 0)
+        entry.quotedAt !== undefined &&
+        entry.quotedAt !== null &&
+        (!(entry.quotedAt instanceof Date) || Number.isNaN(entry.quotedAt.getTime()))
+      ) {
+        throw new PurchasingError(`entries[${idx}].quotedAt must be a valid date`, 400);
+      }
+      if (
+        entry.quotedAt &&
+        entry.quotedAt.getTime() > boundaryNow.getTime() + MAX_QUOTE_CLOCK_SKEW_MS
       ) {
         throw new PurchasingError(
-          `entries[${idx}].leadTimeDays must be a non-negative integer`,
+          `entries[${idx}].quotedAt cannot be materially in the future`,
+          400,
+          { code: "VENDOR_CATALOG_QUOTED_AT_IN_FUTURE", index: idx },
+        );
+      }
+      if (
+        entry.quoteValidUntil !== undefined &&
+        entry.quoteValidUntil !== null &&
+        (
+          typeof entry.quoteValidUntil !== "string" ||
+          !isValidIsoDateOnly(entry.quoteValidUntil)
+        )
+      ) {
+        throw new PurchasingError(
+          `entries[${idx}].quoteValidUntil must be a real YYYY-MM-DD date`,
           400,
         );
       }
+      if (
+        entry.pricing &&
+        entry.quoteValidUntil &&
+        entry.quoteValidUntil < entry.quotedAt!.toISOString().slice(0, 10)
+      ) {
+        throw new PurchasingError(
+          `entries[${idx}].quoteValidUntil cannot be earlier than quotedAt`,
+          400,
+          { code: "VENDOR_CATALOG_QUOTE_DATE_INVALID", index: idx },
+        );
+      }
+
+      const resolvedPricing = resolveBulkCatalogEntryPricing(entry, idx);
+      if (
+        resolvedPricing.piecesPerPurchaseUom !== null &&
+        resolvedPricing.piecesPerPurchaseUom > PG_INTEGER_MAX
+      ) {
+        throw new PurchasingError(
+          `entries[${idx}].pricing.piecesPerUom exceeds the PostgreSQL integer range`,
+          400,
+        );
+      }
+      if (entry.packSize !== undefined && entry.packSize !== null) {
+        assertPositivePgInteger(entry.packSize, `entries[${idx}].packSize`);
+      }
+      if (entry.moq !== undefined && entry.moq !== null) {
+        assertPositivePgInteger(entry.moq, `entries[${idx}].moq`);
+      }
+      if (entry.leadTimeDays !== undefined && entry.leadTimeDays !== null) {
+        if (
+          typeof entry.leadTimeDays !== "number" ||
+          !Number.isSafeInteger(entry.leadTimeDays) ||
+          entry.leadTimeDays < 0 ||
+          entry.leadTimeDays > PG_INTEGER_MAX
+        ) {
+          throw new PurchasingError(
+            `entries[${idx}].leadTimeDays must be a non-negative PostgreSQL integer`,
+            400,
+          );
+        }
+      }
+      if (entry.isPreferred !== undefined && typeof entry.isPreferred !== "boolean") {
+        throw new PurchasingError(`entries[${idx}].isPreferred must be a boolean`, 400);
+      }
+      assertOptionalCatalogText(entry.vendorSku, `entries[${idx}].vendorSku`, 100);
+      assertOptionalCatalogText(
+        entry.vendorProductName,
+        `entries[${idx}].vendorProductName`,
+        20_000,
+      );
+
+      validatedEntries.push({ entry, index: idx, variantId, resolvedPricing });
     }
 
-    const vendor = await storage.getVendorById(vendorId);
-    if (!vendor) throw new PurchasingError("Vendor not found", 404);
-
     const { actorType, actorId } = resolveActor(userId);
-    const timestamp = new Date().toISOString();
-
     const result: BulkCatalogResult = { created: [], updated: [], skipped: [] };
-    const auditLogs: Array<Record<string, unknown>> = [];
 
-    await db.transaction(async (tx: any) => {
-      for (const entry of entries) {
-        const variantId =
-          entry.productVariantId === undefined || entry.productVariantId === null
-            ? null
-            : entry.productVariantId;
+    try {
+      await db.transaction(async (tx: any) => {
+      // Lock references in a stable order. This makes validation current at
+      // commit time and serializes overlapping batches for one vendor.
+      const vendorLock = await tx.execute(sql`
+        SELECT id, active
+        FROM procurement.vendors
+        WHERE id = ${vendorId}
+        FOR UPDATE
+      `);
+      const vendor = vendorLock.rows?.[0];
+      if (!vendor) throw new PurchasingError("Vendor not found", 404);
+      if (Number(vendor.active) !== 1) {
+        throw new PurchasingError("Vendor is inactive", 409, {
+          code: "VENDOR_CATALOG_VENDOR_INACTIVE",
+          vendorId,
+        });
+      }
 
-        // Look up existing row by (vendorId, productId, productVariantId).
-        // The unique index vendor_products_vendor_product_variant_idx
-        // guarantees at most one match.
-        const matchConditions = [
-          eq(vendorProductsTable.vendorId, vendorId),
-          eq(vendorProductsTable.productId, entry.productId),
-          variantId === null
-            ? sql`${vendorProductsTable.productVariantId} IS NULL`
-            : eq(vendorProductsTable.productVariantId, variantId),
-        ];
-        const existingRows = await tx
-          .select()
-          .from(vendorProductsTable)
-          .where(and(...matchConditions))
-          .limit(1);
-        const existing = existingRows[0];
+      const productIds = [...new Set(validatedEntries.map(({ entry }) => entry.productId))]
+        .sort((a, b) => a - b);
+      const productLock = await tx.execute(sql`
+        SELECT id, is_active
+        FROM catalog.products
+        WHERE id IN (${sql.join(productIds.map((id) => sql`${id}`), sql`, `)})
+        ORDER BY id
+        FOR UPDATE
+      `);
+      const productsById = new Map<number, any>(
+        (productLock.rows ?? []).map((row: any) => [Number(row.id), row]),
+      );
+      for (const productId of productIds) {
+        const product = productsById.get(productId);
+        if (!product) {
+          throw new PurchasingError(`Product ${productId} not found`, 404, {
+            code: "VENDOR_CATALOG_PRODUCT_NOT_FOUND",
+            productId,
+          });
+        }
+        if (product.is_active !== true) {
+          throw new PurchasingError(`Product ${productId} is inactive`, 409, {
+            code: "VENDOR_CATALOG_PRODUCT_INACTIVE",
+            productId,
+          });
+        }
+      }
 
-        // Normalize to both precisions. Mills is authoritative when
-        // provided; cents is derived. If only cents is provided, derive
-        // mills exactly (cents × 100).
-        const entryHasMills =
-          typeof entry.unitCostMills === "number" && entry.unitCostMills >= 0;
-        const entryMills = entryHasMills
-          ? (entry.unitCostMills as number)
-          : centsToMills(Number(entry.unitCostCents) || 0);
-        const entryCents = entryHasMills
-          ? millsToCents(entryMills)
-          : Number(entry.unitCostCents) || 0;
+      const variantIds = [...new Set(
+        validatedEntries
+          .map(({ variantId }) => variantId)
+          .filter((id): id is number => id !== null),
+      )].sort((a, b) => a - b);
+      const variantsById = new Map<number, any>();
+      if (variantIds.length > 0) {
+        const variantLock = await tx.execute(sql`
+          SELECT id, product_id, is_active
+          FROM catalog.product_variants
+          WHERE id IN (${sql.join(variantIds.map((id) => sql`${id}`), sql`, `)})
+          ORDER BY id
+          FOR UPDATE
+        `);
+        for (const row of variantLock.rows ?? []) {
+          variantsById.set(Number(row.id), row);
+        }
+      }
+      for (const { entry, variantId } of validatedEntries) {
+        if (variantId === null) continue;
+        const variant = variantsById.get(variantId);
+        if (!variant) {
+          throw new PurchasingError(`Product variant ${variantId} not found`, 404, {
+            code: "VENDOR_CATALOG_VARIANT_NOT_FOUND",
+            productId: entry.productId,
+            productVariantId: variantId,
+          });
+        }
+        if (Number(variant.product_id) !== entry.productId) {
+          throw new PurchasingError(
+            `Product variant ${variantId} does not belong to product ${entry.productId}`,
+            400,
+            {
+              code: "VENDOR_CATALOG_VARIANT_PRODUCT_MISMATCH",
+              productId: entry.productId,
+              productVariantId: variantId,
+              actualProductId: Number(variant.product_id),
+            },
+          );
+        }
+        if (variant.is_active !== true) {
+          throw new PurchasingError(`Product variant ${variantId} is inactive`, 409, {
+            code: "VENDOR_CATALOG_VARIANT_INACTIVE",
+            productId: entry.productId,
+            productVariantId: variantId,
+          });
+        }
+      }
 
-        if (existing) {
-          // Don't overwrite non-null fields with null (per spec). Only
-          // fields explicitly provided (not undefined) overwrite.
+      const auditRows: Array<Record<string, unknown>> = [];
+      const quoteWriteTime = boundaryNow;
+      for (const { entry, variantId, resolvedPricing } of validatedEntries) {
+        if (entry.isPreferred === true) {
+          const demotions = await demoteCompetingPreferredMappings(tx, {
+            vendorId,
+            productId: entry.productId,
+            productVariantId: variantId,
+            updatedAt: quoteWriteTime,
+          });
+          appendPreferredDemotionAudits(
+            auditRows,
+            demotions,
+            actorType,
+            actorId,
+            { vendorId, productId: entry.productId, productVariantId: variantId },
+          );
+        }
+        const quotedAt = resolvedPricing.pricingBasis === "legacy_unknown"
+          ? null
+          : resolvedPricing.quotedAt;
+        const insertResult = await tx.execute(sql`
+          INSERT INTO procurement.vendor_products (
+            vendor_id,
+            product_id,
+            product_variant_id,
+            vendor_sku,
+            vendor_product_name,
+            unit_cost_cents,
+            unit_cost_mills,
+            pricing_basis,
+            purchase_uom,
+            quoted_unit_cost_mills,
+            pieces_per_purchase_uom,
+            quote_reference,
+            quoted_at,
+            quote_valid_until,
+            pack_size,
+            moq,
+            lead_time_days,
+            is_preferred,
+            is_active
+          ) VALUES (
+            ${vendorId},
+            ${entry.productId},
+            ${variantId},
+            ${entry.vendorSku ?? null},
+            ${entry.vendorProductName ?? null},
+            ${resolvedPricing.unitCostCents},
+            ${resolvedPricing.unitCostMills},
+            ${resolvedPricing.pricingBasis},
+            ${resolvedPricing.purchaseUom},
+            ${resolvedPricing.quotedUnitCostMills},
+            ${resolvedPricing.piecesPerPurchaseUom},
+            ${resolvedPricing.quoteReference},
+            ${quotedAt},
+            ${resolvedPricing.quoteValidUntil},
+            ${entry.packSize ?? resolvedPricing.piecesPerPurchaseUom ?? 1},
+            ${entry.moq ?? 1},
+            ${entry.leadTimeDays ?? null},
+            ${entry.isPreferred ? 1 : 0},
+            1
+          )
+          ON CONFLICT (
+            vendor_id,
+            product_id,
+            (COALESCE(product_variant_id, 0))
+          ) DO NOTHING
+          RETURNING *
+        `);
+        const inserted = insertResult.rows?.[0];
+        let row: any;
+        let before: Record<string, unknown> | null = null;
+        let action: "created" | "updated";
+
+        if (inserted) {
+          row = inserted;
+          result.created.push({
+            vendorProductId: Number(row.id),
+            productId: Number(row.product_id),
+            productVariantId: row.product_variant_id == null
+              ? null
+              : Number(row.product_variant_id),
+          });
+          action = "created";
+        } else {
+          // ON CONFLICT waits for a concurrent inserter. Re-select with a row
+          // lock to capture a stable before-image and prevent lost updates.
+          const existingResult = await tx.execute(sql`
+            SELECT *
+            FROM procurement.vendor_products
+            WHERE vendor_id = ${vendorId}
+              AND product_id = ${entry.productId}
+              AND COALESCE(product_variant_id, 0) = ${variantId ?? 0}
+            FOR UPDATE
+          `);
+          const existing = existingResult.rows?.[0];
+          if (!existing) {
+            throw new PurchasingError(
+              "Vendor catalog conflict could not be resolved; retry the request",
+              409,
+              {
+                code: "VENDOR_CATALOG_CONFLICT_RETRY",
+                vendorId,
+                productId: entry.productId,
+                productVariantId: variantId,
+              },
+            );
+          }
+          if (entry.isPreferred === undefined && Number(existing.is_preferred ?? 0) === 1) {
+            const demotions = await demoteCompetingPreferredMappings(tx, {
+              vendorId,
+              productId: entry.productId,
+              productVariantId: variantId,
+              updatedAt: quoteWriteTime,
+            });
+            appendPreferredDemotionAudits(
+              auditRows,
+              demotions,
+              actorType,
+              actorId,
+              { vendorId, productId: entry.productId, productVariantId: variantId },
+            );
+          }
+          before = catalogAuditSnapshot(existing);
           const patch: Record<string, unknown> = {
-            unitCostCents: entryCents,
-            unitCostMills: entryMills,
+            unitCostCents: resolvedPricing.unitCostCents,
+            unitCostMills: resolvedPricing.unitCostMills,
+            pricingBasis: resolvedPricing.pricingBasis,
+            purchaseUom: resolvedPricing.purchaseUom,
+            quotedUnitCostMills: resolvedPricing.quotedUnitCostMills,
+            piecesPerPurchaseUom: resolvedPricing.piecesPerPurchaseUom,
+            quoteReference: resolvedPricing.quoteReference,
+            quotedAt,
+            quoteValidUntil: resolvedPricing.quoteValidUntil,
             isActive: 1,
-            updatedAt: new Date(),
+            updatedAt: now(),
           };
-          if (entry.packSize !== undefined) patch.packSize = entry.packSize;
-          if (entry.moq !== undefined) patch.moq = entry.moq;
-          if (entry.leadTimeDays !== undefined) patch.leadTimeDays = entry.leadTimeDays;
+          if (entry.packSize !== undefined && entry.packSize !== null) {
+            patch.packSize = entry.packSize;
+          } else if (resolvedPricing.piecesPerPurchaseUom !== null) {
+            patch.packSize = resolvedPricing.piecesPerPurchaseUom;
+          }
+          if (entry.moq !== undefined && entry.moq !== null) patch.moq = entry.moq;
+          if (entry.leadTimeDays !== undefined && entry.leadTimeDays !== null) {
+            patch.leadTimeDays = entry.leadTimeDays;
+          }
           if (entry.vendorSku !== undefined && entry.vendorSku !== null) {
             patch.vendorSku = entry.vendorSku;
           }
-          if (
-            entry.vendorProductName !== undefined &&
-            entry.vendorProductName !== null
-          ) {
+          if (entry.vendorProductName !== undefined && entry.vendorProductName !== null) {
             patch.vendorProductName = entry.vendorProductName;
           }
           if (entry.isPreferred !== undefined) {
@@ -4861,92 +7367,74 @@ export function createPurchasingService(
           const updatedRows = await tx
             .update(vendorProductsTable)
             .set(patch)
-            .where(eq(vendorProductsTable.id, existing.id))
+            .where(eq(vendorProductsTable.id, Number(existing.id)))
             .returning();
-          const row = updatedRows[0];
+          row = updatedRows[0];
+          if (!row) {
+            throw new PurchasingError("Vendor catalog row disappeared during update", 409, {
+              code: "VENDOR_CATALOG_CONFLICT_RETRY",
+              vendorProductId: Number(existing.id),
+            });
+          }
           result.updated.push({
-            vendorProductId: row.id,
-            productId: row.productId,
-            productVariantId: row.productVariantId ?? null,
+            vendorProductId: Number(row.id),
+            productId: Number(row.productId),
+            productVariantId: row.productVariantId == null
+              ? null
+              : Number(row.productVariantId),
           });
-          auditLogs.push({
-            event: "vendor_catalog.updated",
-            actorType,
-            actorId,
-            timestamp,
-            vendorId,
-            vendorProductId: row.id,
-            productId: row.productId,
-            productVariantId: row.productVariantId ?? null,
-            before: {
-              unitCostCents: existing.unitCostCents,
-              packSize: existing.packSize,
-              moq: existing.moq,
-              leadTimeDays: existing.leadTimeDays,
-              isPreferred: existing.isPreferred,
-              vendorSku: existing.vendorSku,
-            },
-            after: {
-              unitCostCents: row.unitCostCents,
-              packSize: row.packSize,
-              moq: row.moq,
-              leadTimeDays: row.leadTimeDays,
-              isPreferred: row.isPreferred,
-              vendorSku: row.vendorSku,
-            },
-          });
-        } else {
-          const insertedRows = await tx
-            .insert(vendorProductsTable)
-            .values({
-              vendorId,
-              productId: entry.productId,
-              productVariantId: variantId,
-              vendorSku: entry.vendorSku ?? null,
-              vendorProductName: entry.vendorProductName ?? null,
-              unitCostCents: entryCents,
-              unitCostMills: entryMills,
-              packSize: entry.packSize ?? 1,
-              moq: entry.moq ?? 1,
-              leadTimeDays: entry.leadTimeDays ?? null,
-              isPreferred: entry.isPreferred ? 1 : 0,
-              isActive: 1,
-            })
-            .returning();
-          const row = insertedRows[0];
-          result.created.push({
-            vendorProductId: row.id,
-            productId: row.productId,
-            productVariantId: row.productVariantId ?? null,
-          });
-          auditLogs.push({
-            event: "vendor_catalog.created",
-            actorType,
-            actorId,
-            timestamp,
-            vendorId,
-            vendorProductId: row.id,
-            productId: row.productId,
-            productVariantId: row.productVariantId ?? null,
-            unitCostCents: row.unitCostCents,
-            packSize: row.packSize,
-            moq: row.moq,
-            leadTimeDays: row.leadTimeDays,
-            isPreferred: row.isPreferred,
-          });
+          action = "updated";
         }
-      }
-    });
 
-    // Emit audit trail AFTER the tx commits. Rule #8: structured JSON.
-    for (const line of auditLogs) {
-      console.log(JSON.stringify(line));
+        const vendorProductId = Number(row.id);
+        auditRows.push({
+          level: "AUDIT",
+          actor: `${actorType}:${actorId}`,
+          action: `vendor_catalog.${action}`,
+          target: `vendor_product:${vendorProductId}`,
+          changes: {
+            before,
+            after: catalogAuditSnapshot(row),
+          },
+          context: {
+            vendorId,
+            vendorProductId,
+            productId: entry.productId,
+            productVariantId: variantId,
+          },
+        });
+      }
+
+      // Audit persistence is deliberately atomic with the catalog changes.
+      // A failed audit insert rolls back every row in the batch.
+      if (auditRows.length > 0) {
+        await tx.insert(auditEventsTable).values(auditRows);
+      }
+      });
+    } catch (error: any) {
+      if (
+        error?.code === "23505" &&
+        error?.constraint === "vendor_products_one_active_preferred_key_uidx"
+      ) {
+        throw new PurchasingError(
+          "Another active preferred vendor mapping already exists for this product/configuration",
+          409,
+          { code: "VENDOR_CATALOG_PREFERRED_CONFLICT" },
+        );
+      }
+      if (
+        error?.code === "23505" &&
+        error?.constraint === "vendor_products_vendor_product_variant_key_uidx"
+      ) {
+        throw new PurchasingError("Vendor catalog mapping changed concurrently; retry", 409, {
+          code: "VENDOR_CATALOG_CONFLICT_RETRY",
+        });
+      }
+      throw error;
     }
 
     return result;
   }
-
-  // ── NEW-PO PRELOAD (Spec A §10.1) ───────────────────────────────────
   //
   // Returns vendor + suggested lines in one round trip so the editor page
   // can render without a cascade of follow-up fetches.
@@ -4966,6 +7454,14 @@ export function createPurchasingService(
     unitCostCents: number;
     unitCostMills: number;
     catalogSource: "vendor_catalog" | "product_default" | "duplicate" | "manual";
+    vendorProductId: number | null;
+    pricingBasis: "legacy_unknown" | "per_piece" | "per_purchase_uom";
+    purchaseUom: string | null;
+    quotedUnitCostMills: number | null;
+    piecesPerPurchaseUom: number | null;
+    quoteReference: string | null;
+    quotedAt: Date | null;
+    quoteValidUntil: string | null;
   };
 
   async function getNewPoPreload(params: {
@@ -4998,6 +7494,17 @@ export function createPurchasingService(
             ? src.unitCostMills
             : centsToMills(Number(src.unitCostCents || 0));
         let catalogSource: PreloadLine["catalogSource"] = "duplicate";
+        let vendorProductId: number | null = src.vendorProductId ?? null;
+        let pricingBasis: PreloadLine["pricingBasis"] =
+          src.pricingBasis === "per_piece" || src.pricingBasis === "per_purchase_uom"
+            ? src.pricingBasis
+            : "legacy_unknown";
+        let purchaseUom: string | null = src.purchaseUom ?? null;
+        let quotedUnitCostMills: number | null = src.quotedUnitCostMills ?? null;
+        let piecesPerPurchaseUom: number | null = src.piecesPerPurchaseUom ?? null;
+        let quoteReference: string | null = src.quoteReference ?? null;
+        let quotedAt: Date | null = src.quotedAt ?? null;
+        let quoteValidUntil: string | null = src.quoteValidUntil ?? null;
         try {
           const vp = await storage.getPreferredVendorProduct(
             src.productId,
@@ -5011,6 +7518,17 @@ export function createPurchasingService(
               unitCostMills = centsToMills(vp.unitCostCents);
               catalogSource = "vendor_catalog";
             }
+            vendorProductId = vp.id ?? null;
+            pricingBasis =
+              vp.pricingBasis === "per_piece" || vp.pricingBasis === "per_purchase_uom"
+                ? vp.pricingBasis
+                : "legacy_unknown";
+            purchaseUom = vp.purchaseUom ?? null;
+            quotedUnitCostMills = vp.quotedUnitCostMills ?? null;
+            piecesPerPurchaseUom = vp.piecesPerPurchaseUom ?? null;
+            quoteReference = vp.quoteReference ?? null;
+            quotedAt = vp.quotedAt ?? null;
+            quoteValidUntil = vp.quoteValidUntil ?? null;
           }
         } catch {
           // non-fatal
@@ -5028,6 +7546,14 @@ export function createPurchasingService(
           unitCostCents: millsToCents(unitCostMills),
           unitCostMills,
           catalogSource,
+          vendorProductId,
+          pricingBasis,
+          purchaseUom,
+          quotedUnitCostMills,
+          piecesPerPurchaseUom,
+          quoteReference,
+          quotedAt,
+          quoteValidUntil,
         });
       }
       return {
@@ -5060,6 +7586,14 @@ export function createPurchasingService(
           Number(variant.standardCostCents ?? variant.lastCostCents ?? 0),
         );
         let catalogSource: PreloadLine["catalogSource"] = "product_default";
+        let vendorProductId: number | null = null;
+        let pricingBasis: PreloadLine["pricingBasis"] = "legacy_unknown";
+        let purchaseUom: string | null = null;
+        let quotedUnitCostMills: number | null = null;
+        let piecesPerPurchaseUom: number | null = null;
+        let quoteReference: string | null = null;
+        let quotedAt: Date | null = null;
+        let quoteValidUntil: string | null = null;
         if (vendorId) {
           try {
             const vp = await storage.getPreferredVendorProduct(product.id, variant.id);
@@ -5071,6 +7605,17 @@ export function createPurchasingService(
                 unitCostMills = centsToMills(vp.unitCostCents);
                 catalogSource = "vendor_catalog";
               }
+              vendorProductId = vp.id ?? null;
+              pricingBasis =
+                vp.pricingBasis === "per_piece" || vp.pricingBasis === "per_purchase_uom"
+                  ? vp.pricingBasis
+                  : "legacy_unknown";
+              purchaseUom = vp.purchaseUom ?? null;
+              quotedUnitCostMills = vp.quotedUnitCostMills ?? null;
+              piecesPerPurchaseUom = vp.piecesPerPurchaseUom ?? null;
+              quoteReference = vp.quoteReference ?? null;
+              quotedAt = vp.quotedAt ?? null;
+              quoteValidUntil = vp.quoteValidUntil ?? null;
             }
           } catch {
             // non-fatal
@@ -5091,6 +7636,14 @@ export function createPurchasingService(
           unitCostCents: millsToCents(unitCostMills),
           unitCostMills,
           catalogSource,
+          vendorProductId,
+          pricingBasis,
+          purchaseUom,
+          quotedUnitCostMills,
+          piecesPerPurchaseUom,
+          quoteReference,
+          quotedAt,
+          quoteValidUntil,
         });
       }
     }
@@ -5144,11 +7697,11 @@ export function createPurchasingService(
     getPurchaseOrderByPoNumber: (poNumber: string) => storage.getPurchaseOrderByPoNumber(poNumber),
 
     // Lines
-    addLine,
+    addLine: hardenedAddLine,
     updateIncotermsAndCharges,
-    addBulkLines,
-    updateLine,
-    deleteLine,
+    addBulkLines: hardenedAddBulkLines,
+    updateLine: hardenedUpdateLine,
+    deleteLine: hardenedCancelLine,
     getPurchaseOrderLines: (poId: number) => storage.getPurchaseOrderLines(poId),
     getPurchaseOrderLineById: (id: number) => storage.getPurchaseOrderLineById(id),
 
@@ -5206,9 +7759,9 @@ export function createPurchasingService(
     getVendorProducts: (filters?: any) => storage.getVendorProducts(filters),
     getVendorProductById: (id: number) => storage.getVendorProductById(id),
     getPreferredVendorProduct: (productId: number, variantId?: number) => storage.getPreferredVendorProduct(productId, variantId),
-    createVendorProduct: (data: any) => (storage as any).createVendorProduct(data),
-    updateVendorProduct: (id: number, updates: any) => (storage as any).updateVendorProduct(id, updates),
-    deleteVendorProduct: (id: number) => (storage as any).deleteVendorProduct(id),
+    createVendorProduct,
+    updateVendorProduct,
+    deleteVendorProduct: deactivateVendorProduct,
     bulkUpsertVendorCatalog,
 
     // Spec A: inline create, one-click send, duplicate, preload, settings.

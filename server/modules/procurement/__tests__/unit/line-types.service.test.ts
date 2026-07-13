@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { productVariants, products, vendorProducts, vendors } from "@shared/schema";
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,13 +53,44 @@ function buildMockDb() {
     };
   }
   function makeTx() {
+    const rowsFor = (table: unknown): any[] => {
+      if (table === vendors) {
+        return [{ id: 1, active: 1, currency: "USD" }];
+      }
+      if (table === products) {
+        return [{ id: 101, sku: "TEST-SKU", name: "Test Product", isActive: true }];
+      }
+      if (table === productVariants) {
+        return [{
+          id: 101,
+          productId: 101,
+          sku: "TEST-SKU",
+          name: "each box",
+          unitsPerVariant: 1,
+          isActive: true,
+        }];
+      }
+      if (table === vendorProducts) return [];
+      return [];
+    };
     return {
       insert: vi.fn().mockImplementation(() => makeTxInsert()),
       update: vi.fn().mockImplementation(() => makeTxUpdate()),
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        limit: vi.fn().mockResolvedValue([]),
+      select: vi.fn(() => {
+        let table: unknown;
+        const chain: any = {
+          from: vi.fn((value: unknown) => {
+            table = value;
+            return chain;
+          }),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          orderBy: vi.fn(() => chain),
+          for: vi.fn(async () => rowsFor(table)),
+          then: (resolve: any, reject: any) =>
+            Promise.resolve(rowsFor(table)).then(resolve, reject),
+        };
+        return chain;
       }),
     };
   }
@@ -79,14 +111,14 @@ function buildMockStorage(): any {
     getVendorById: vi.fn().mockResolvedValue({ id: 1, currency: "USD" }),
     getProductVariantById: vi.fn().mockResolvedValue({
       id: 101,
-      productId: 201,
+      productId: 101,
       sku: "TEST-SKU",
       name: "each box",
       unitsPerVariant: 1,
       standardCostCents: 100,
       lastCostCents: 100,
     }),
-    getProductById: vi.fn().mockResolvedValue({ id: 201, name: "Test Product" }),
+    getProductById: vi.fn().mockResolvedValue({ id: 101, sku: "TEST-SKU", name: "Test Product" }),
     generatePoNumber: vi.fn().mockResolvedValue("PO-20260424-001"),
     getPurchaseOrders: vi.fn(),
     getPurchaseOrdersCount: vi.fn(),
