@@ -2,6 +2,8 @@
 
 *July 9, 2026 · engine code-complete in production, dormant until activated. Full design: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md).*
 
+> **July 13 update (PR #909):** cartonizer v3 replaces aggregate volume feasibility with real non-overlapping 3D unit placement, all six rotations, placement coordinates, geometry-driven splitting, and an automatic under-50-lb handling ceiling. Dropship now delegates to this shared core.
+
 ## 0 · TL;DR
 
 A greenfield, Amazon-style shipping engine is **fully built and deployed inside Echelon** (13 PRs, all merged; Heroku deploys green). It replaces Parcelify for checkout rates and, long-term, ShipStation for fulfillment. Nothing is customer-visible yet — activation is a deliberate, reversible sequence of data + config steps (§6). The remaining work is mostly **data entry (variant dimensions)** and **staged activation**, not code.
@@ -45,7 +47,7 @@ Everything lives in `server/modules/shipping-engine/` (hexagonal layout), regist
 
 | Layer | File | What it does |
 |---|---|---|
-| domain (pure) | `domain/cartonize.ts` | 3D bin-pack: box choice, splits, riders/own-container, 85% fill factor, fallback parcel when dims missing |
+| domain (pure) | `domain/cartonize.ts` | Cartonizer v3: real 3D placement with six rotations, non-overlap/bounds checks, box choice, geometry/weight splits, own-container handling, placement output, and explicit fallback when fit cannot be verified |
 | domain | `domain/zones.ts` | `resolveZone`: longest-prefix-wins postal matching; priority tiebreak; region-scoped rules skipped in v1 |
 | domain | `domain/rate-selection.ts` | Per-parcel rate band selection per (carrier, serviceCode) |
 | domain | `domain/eta.ts` | Delivery window = warehouse cutoff/timezone + transit_matrix business days |
@@ -68,7 +70,7 @@ Schema: `shipping.*` in the shared Postgres (Echelon owns it; the club app owns 
 |---|---|---|
 | `zone_rules` | country + postal-prefix → zone | 48 active US rules → `US-48` / `US-HIPRAK`; region labels NULLed by mig 124 (they made resolveZone skip HIPRAK rules) |
 | `rate_tables` + `rate_table_rows` | carrier/service, status, effective dating; zone × weight-band cents | ids 1 (US-48, 6 bands $4.99–$10.99) & 2 (US-HIPRAK, 5 bands $7.99–$29.94), **status=draft** — derived from 2,183 real orders; **91.2% of a 924-order backtest within $1** (56.2% exact); provenance in metadata |
-| `box_catalog` | boxes: dims, tare, max weight, cost, fill factor | **14 seeded Jul 9** from 4,259 real ShipStation shipments (top 14 dim combos ≈ 85% of volume, incl. 2 storage-box flats); tare/max/cost still default — review in admin |
+| `box_catalog` | boxes: inner dims, tare, optional lower max weight, cost, fill factor | **14 seeded Jul 9** from 4,259 real ShipStation shipments (top 14 dim combos ≈ 85% of volume, incl. 2 storage-box flats); dimensions/tare/cost still require review in admin. NULL max weight uses the automatic 22,679 g handling ceiling. |
 | `service_levels` + `service_level_methods` | sellable levels → carrier/method attachments | standard / expedited / express seeded, **all inactive** — the checkout kill-switch |
 | `transit_matrix` | zone × carrier/service business-day windows | 24 rows seeded (mig 120) — feeds ETA dates on rates |
 | `quote_snapshots` | every quote (checkout/shadow/manual) — calibration dataset | accumulating; first shadow run persisted Jul 9 |
@@ -112,6 +114,10 @@ Each step is independently reversible; nothing reaches customers until step 5.
 ## 7 · Key mechanics & invariants (do not break)
 
 - **Fail-empty, never fail-wrong:** the callback returns `{rates: []}` on any parse/zone/band/timeout failure. An empty response blocks checkout for that address rather than mispricing it. Keep that property.
+- **Fit means placement, not volume:** every non-SIOC packed unit must have an in-bounds, non-overlapping placement in the selected carton's inner dimensions. Aggregate cube and sorted single-item dimensions are only quick rejection checks.
+- **No arbitrary unit cap:** carton count is derived from physical dimensions, rotation, fill clearance, and packed weight. `max_units_per_package` is deprecated compatibility data and must not affect quotes.
+- **Handling ceiling:** ordinary packed cartons may not exceed 22,679 g including tare. A box-specific maximum may lower that limit but never raise it.
+- **Plan reuse includes engine version:** an active pack plan is idempotently reused only when both its input hash and cartonizer version match. Deploying a new cartonizer automatically supersedes older plans on their next evaluation.
 - **Draft = inert:** `quoteParcels` reads `status='active'` tables with effective-dating only. Rate review happens in draft safely.
 - **Inactive levels = silent engine:** quotes map to Shopify rates only through active `service_levels`. Both switches (levels + token) must be on for checkout to see anything.
 - **Zone resolution:** longest postal-prefix wins, then priority, then lowest id; region-scoped rules (`destination_region` set) are skipped by design in v1 — *never seed region labels on prefix rules* (that was the HIPRAK bug, fixed in mig 124).

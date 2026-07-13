@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { DropshipShippingConfigService, hashDropshipShippingConfigCommand, type DropshipBoxConfigRecord, type DropshipInsurancePoolPolicyRecord, type DropshipPackageProfileConfigRecord, type DropshipRateTableConfigRecord, type DropshipShippingConfigMutationResult, type DropshipShippingConfigOverview, type DropshipShippingConfigRepository, type DropshipShippingMarkupPolicyRecord, type DropshipZoneRuleConfigRecord } from "../../application/dropship-shipping-config-service";
+import {
+  DropshipShippingConfigService,
+  hashDropshipShippingConfigCommand,
+  type DropshipBoxConfigRecord,
+  type DropshipInsurancePoolPolicyRecord,
+  type DropshipPackageProfileConfigRecord,
+  type DropshipRateTableConfigRecord,
+  type DropshipShippingConfigMutationResult,
+  type DropshipShippingConfigRepository,
+  type DropshipShippingConfigSnapshot,
+  type DropshipShippingMarkupPolicyRecord,
+  type DropshipZoneRuleConfigRecord,
+} from "../../application/dropship-shipping-config-service";
 
 const now = new Date("2026-05-03T14:00:00.000Z");
 
@@ -28,6 +40,7 @@ describe("DropshipShippingConfigService", () => {
     expect(result.record.code).toBe("SMALL_MAILER");
     expect(repository.lastBoxInput).toMatchObject({
       code: "SMALL_MAILER",
+      maxWeightGrams: null,
       idempotencyKey: "shipping-box-001",
       requestHash: expect.any(String),
       now,
@@ -122,18 +135,21 @@ describe("DropshipShippingConfigService", () => {
     expect(repository.lastPackageProfileInput).not.toHaveProperty("weightGrams");
     expect(repository.lastPackageProfileInput).not.toHaveProperty("lengthMm");
   });
+
 });
 
 class FakeShippingConfigRepository implements DropshipShippingConfigRepository {
+  boxes: DropshipBoxConfigRecord[] = [];
+  packageProfiles: DropshipPackageProfileConfigRecord[] = [];
   lastBoxInput: Parameters<DropshipShippingConfigRepository["upsertBox"]>[0] | null = null;
   lastRateTableInput: Parameters<DropshipShippingConfigRepository["createRateTable"]>[0] | null = null;
   lastInsuranceInput: Parameters<DropshipShippingConfigRepository["createInsurancePolicy"]>[0] | null = null;
   lastPackageProfileInput: Parameters<DropshipShippingConfigRepository["upsertPackageProfile"]>[0] | null = null;
 
-  async getOverview(input: Parameters<DropshipShippingConfigRepository["getOverview"]>[0]): Promise<DropshipShippingConfigOverview> {
+  async getOverview(input: Parameters<DropshipShippingConfigRepository["getOverview"]>[0]): Promise<DropshipShippingConfigSnapshot> {
     return {
-      boxes: [],
-      packageProfiles: [],
+      boxes: this.boxes,
+      packageProfiles: this.packageProfiles,
       zoneRules: [],
       rateTables: [],
       activeMarkupPolicy: null,

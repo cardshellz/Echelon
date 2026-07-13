@@ -44,6 +44,7 @@ const upsertPackageProfileInputSchema = z.object({
   defaultCarrier: optionalTrimmedStringSchema(50),
   defaultService: optionalTrimmedStringSchema(80),
   defaultBoxId: positiveIdSchema.nullable().optional(),
+  // Deprecated compatibility input; ignored by cartonizer v3.
   maxUnitsPerPackage: positiveIdSchema.nullable().optional(),
   isActive: z.boolean().default(true),
   idempotencyKey: idempotencyKeySchema,
@@ -176,6 +177,7 @@ export interface DropshipPackageProfileConfigRecord {
   defaultCarrier: string | null;
   defaultService: string | null;
   defaultBoxId: number | null;
+  /** @deprecated Cartonizer v3 derives capacity from physical placement. */
   maxUnitsPerPackage: number | null;
   isActive: boolean;
   createdAt: Date;

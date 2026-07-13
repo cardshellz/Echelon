@@ -21,6 +21,7 @@ import { db } from "../../../db";
 import {
   cartonize,
   CARTONIZE_ENGINE,
+  isCartonizeCandidateVerified,
   type CartonizeBox,
   type CartonizeCandidate,
   type CartonizeItem,
@@ -290,11 +291,9 @@ export function buildCartonizeItems(
   return { items, warnings };
 }
 
-/** A packing is complete when no parcel degraded to a fallback. */
+/** A packing is complete only when every physical placement is verified. */
 export function isPackingComplete(candidate: CartonizeCandidate): boolean {
-  return candidate.strategy !== "fallback"
-    && candidate.parcels.length > 0
-    && candidate.parcels.every((p) => !p.reason.startsWith("fallback"));
+  return isCartonizeCandidateVerified(candidate);
 }
 
 // ---------------------------------------------------------------------------

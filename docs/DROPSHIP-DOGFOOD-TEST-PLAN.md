@@ -54,7 +54,7 @@ Confirmed so far:
 - Portal login worked for `bseager6@gmail.com` after the auth-flow fixes and password reset flow landed.
 - eBay connection flow worked after OAuth/connect-change-store fixes. Connected store is `marzcards`; do not accept fallback labels like `eBay connection 1` as final evidence.
 - Default warehouse has been set to warehouse ID `1` for the connected store. This is the 20 Leonberg ship-from warehouse.
-- Shipping config is "ready enough" for a single-carton dogfood SKU: default warehouse, box, product shipping/profile data, zone/rate, markup, insurance, and return policy were created through the admin UI. Final quote validation is still required.
+- Shipping config exists for a single-carton dogfood SKU: default warehouse, box, product shipping/profile data, zone/rate, markup, insurance, and return policy were created through the admin UI. Production profile `COGS-TEST-001-P1` is bounded at 4 units/package, but box `8X6X4` still needs a maximum loaded weight before final quote validation.
 - Latest relevant merged work after the prior 2026-06-29 status:
   - PR #746 simplified catalog preview row actions to one Expose/Hide action.
   - PR #748 clarified catalog exposure published/unpublished state.
@@ -108,6 +108,8 @@ Next operator steps:
 | [ ] | STOP-06 | Test catalog exposure is narrow. Do not use broad catalog exposure for the first pass. | Pending test SKU selection | Resume here next |
 | [ ] | STOP-07 | No unclear wallet, inventory, fulfillment, or tracking state exists before retrying any action. |  |  |
 | [ ] | STOP-08 | Manual worker sweeps are only run for a specific stuck record with captured evidence. |  |  |
+| [x] | STOP-09 | Production proxy/session config and automatic order processing are enabled. | Release `v2366`; `TRUST_PROXY=true`; `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` verified 2026-07-13 | Complete one authenticated portal login after the config restart |
+| [ ] | STOP-10 | The test SKU has canonical positive weight and all three dimensions; the chosen box has accurate inner dimensions and tare; cartonizer v3 returns no fallback parcel. | Legacy `COGS-TEST-001-P1.max_units_per_package=4` and `8X6X4.max_weight_grams=NULL` are not blockers after PR #909 | Verify package data and capture the multi-unit carton/quote result before listing testing |
 
 ## Master Checklist
 
@@ -118,7 +120,7 @@ Next operator steps:
 | [x] | 2. Store connection | Vendor OAuth, store identity, and order/listing config are correct. | eBay store `marzcards` connected; verify one more time after latest deploy |
 | [ ] | 3. Admin readiness gate | Internal source, system readiness, launch gate, and one ready vendor/store are clean. | Need final readiness screenshot/evidence after latest deploy |
 | [ ] | 4. Catalog exposure | Exactly the intended SKU or variant is exposed. | Resume here after package-data verification |
-| [ ] | 5. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. | Config created for single-carton test; package editor and final quote still need validation |
+| [ ] | 5. Shipping config | Package, rate, markup, insurance, and return policies cover the test SKU. | Verify canonical SKU/box measurements, then complete final carton and quote validation |
 | [ ] | 6. Listing push | One marketplace listing is created and mapped back to Echelon identity. |  |
 | [ ] | 7. Order intake | One external marketplace order ingests once with correct vendor/store/line identity. |  |
 | [ ] | 8. Wallet and acceptance | Funding/hold/debit behavior is traceable and order acceptance is idempotent. |  |
@@ -295,6 +297,7 @@ Goal: prove the test SKU can calculate shipping and use the intended policy stac
 | [x] | SHIPCFG-01 | Open `Shipping config`. | Shipping config page used during setup |  |
 | [ ] | SHIPCFG-02 | Confirm package or carton data applies to the test SKU. | Catalog variant package editor is available through PR #796 | Enter/save weight and dimensions for the chosen test SKU and capture evidence |
 | [x] | SHIPCFG-03 | Confirm box configuration exists. | Box created through admin UI | Full view/edit boxes UI still needed; see EX-008 |
+| [ ] | SHIPCFG-03A | Confirm cartonizer v3 uses the SKU's canonical dimensions and can place the requested quantity inside the box without overlap. Confirm every carton is under 50 lb or a lower box-specific limit. | `max_units_per_package` is deprecated; NULL `max_weight_grams` uses the automatic 22,679 g handling ceiling | Quote one unit and a multi-unit quantity; record carton count, selected box, packed weight, and any blocker |
 | [ ] | SHIPCFG-04 | Confirm rate table covers the test destination. | Zone/rate table created | Needs final quote validation |
 | [x] | SHIPCFG-05 | Confirm markup policy is configured. | Markup policy created | Capture policy ID if needed |
 | [x] | SHIPCFG-06 | Confirm insurance policy is configured. | Insurance policy created | Capture policy ID if needed |
@@ -303,7 +306,7 @@ Goal: prove the test SKU can calculate shipping and use the intended policy stac
 
 Phase pass criteria:
 
-- Shipping quote path has package data and rate coverage.
+- Shipping quote path has canonical package data, verified 3D carton output, and rate coverage.
 - Markup, insurance, and return policies are explicit.
 - No hardcoded shipping behavior is needed for this test.
 
@@ -554,7 +557,7 @@ Use one row per issue. Reference the exception ID in the related checklist row.
 | EX-006 | P2 | Phase 4 / catalog exposure UX | PR #739 | Admin catalog exposure rules were confusing: include/exclude language, decision column, priority number, draft rule set. | Admin can expose/hide catalog with clear rule run order and modal-based add rule flow. | Catalog exposure redesigned with expose/hide language and reorderable rules. | Verify deployed UI before setting narrow SKU exposure. | Frontend/backend | Fixed / verify |
 | EX-007 | P2 | Phase 4/5/8/14 / raw ID fields | PR #741 | Several admin modals required raw database IDs. | Operators select named records via dropdown/typeahead. | Selectors added for catalog targets, warehouses, wallet vendors/funding methods, and RMA references. | Verify deployed UI no longer asks for raw IDs in these flows. | Frontend/backend | Fixed / verify |
 | EX-008 | P2 | Phase 5 / boxes UI |  | Shipping boxes can be created, but there is no complete UI to view/edit/manage boxes. | Admin can list, edit, archive, and inspect shipping boxes. | Existing UI only surfaces created boxes in limited places. | Build full boxes management UI. | Frontend/backend | Open |
-| EX-009 | P2 | Phase 5 / cartonization |  | Current shipping setup is too simplistic for real product/box optimization. | Standalone cartonization engine chooses box(es), orientations, and packing based on ordered SKUs and dimensions; usable by dropship and other channels. | Single-carton setup is acceptable only for the first dogfood SKU. | Design/build plug-and-play cartonization service. | Architecture/engineering | Open |
+| EX-009 | P2 | Phase 5 / cartonization | PR #909 | Current shipping setup was too simplistic for real product/box optimization. | Standalone cartonization engine chooses box(es), orientations, and packing based on ordered SKUs and dimensions; usable by dropship and other channels. | Shared cartonizer v3 performs non-overlapping 3D placement with six rotations, emits coordinates/orientations, co-packs compatible SKUs, splits on geometry or weight, and now powers dropship. Maximum units/package is ignored. Rider/void consolidation remains off until void dimensions are modeled. | Merge/deploy PR #909, then verify one-unit, multi-unit, mixed-SKU, long-item rejection, and packed-weight behavior in production. | Architecture/engineering | Fixed / verify |
 | EX-010 | P2 | Phase 5 / box code structure |  | Box `code` is free-form and the meaning versus name is unclear. | Operational code has a documented or generated structure; name remains human-readable. | Free-form code exists today. | Define box code convention/generator and validation. | Product/engineering | Open |
 | EX-011 | P2 | Phase 5 / product shipping profile model | PR #794, PR #796 | Current "package profile" concept is confusing and asks for variant IDs; SKU dimensions belong in catalog and should feed shipping. | Product/SKU dimensions live in catalog; shipping engine consumes them for box optimization. | Package tools moved to Catalog > Variants and per-SKU package line editor was added. | Verify deployed editor persists package data and confirm shipping/listing flows consume catalog variant package fields. | Architecture/engineering | Fixed / verify |
 | EX-012 | P2 | Phase 5 / rate zones strategy |  | Shipping zones/rate tables may be the wrong long-term model if carrier API rating is available. | Decide between rate table by zone/weight/package dimensions versus carrier API rating. | For dogfood, static config is created enough to continue. | Document and choose long-term carrier/rate architecture. | Product/architecture | Open |

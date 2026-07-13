@@ -256,9 +256,13 @@ export async function ensurePackPlan(
     const inputHash = computePackPlanInputHash(items, boxes);
 
     const existing = await deps.findActivePlan(wmsOrderId);
-    if (existing && existing.inputHash === inputHash) {
-      // Same inputs → the stored plan is already this packing (cartonize is
-      // deterministic). Return it unchanged — no supersede, no insert.
+    if (
+      existing
+      && existing.inputHash === inputHash
+      && existing.engineVersion === ENGINE_VERSION
+    ) {
+      // Same inputs and engine version mean the stored plan is already this
+      // deterministic packing. Return it unchanged — no supersede, no insert.
       return { plan: existing, parcels, instruction, complete };
     }
 

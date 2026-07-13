@@ -12,22 +12,23 @@ describe("BasicDropshipCartonizationProvider", () => {
     const client = makeClient({
       packageRows: [{
         product_variant_id: 101,
+        sku: "SKU-101",
         weight_grams: 200,
         length_mm: 150,
         width_mm: 100,
         height_mm: 20,
+        shipping_group_code: "protection",
         ship_alone: true,
         default_carrier: "USPS",
         default_service: "Ground Advantage",
         default_box_id: 7,
-        max_units_per_package: 1,
       }],
     });
     const provider = new BasicDropshipCartonizationProvider(makePool(client));
 
     const result = await provider.cartonize(makeRequest());
 
-    expect(result.engine).toEqual({ name: "basic_catalog_package_cartonization", version: "2" });
+    expect(result.engine).toEqual({ name: "cardshellz-cartonizer", version: "3.0.0" });
     expect(result.packages).toEqual([expect.objectContaining({
       productVariantId: 101,
       quantity: 1,
@@ -38,8 +39,10 @@ describe("BasicDropshipCartonizationProvider", () => {
     })]);
     const packageQuery = client.queries.find((query) => query.sql.includes("FROM catalog.product_variants pv"));
     expect(packageQuery?.sql).toContain("pv.weight_grams");
+    expect(packageQuery?.sql).toContain("catalog.shipping_groups");
     expect(packageQuery?.sql).toContain("LEFT JOIN dropship.dropship_package_profiles pp");
     expect(packageQuery?.sql).not.toContain("pp.weight_grams");
+    expect(packageQuery?.sql).not.toContain("max_units_per_package");
   });
 
   it("fails closed when catalog package data is incomplete even if boxes exist", async () => {

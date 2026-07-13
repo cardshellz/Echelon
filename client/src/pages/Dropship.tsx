@@ -389,7 +389,6 @@ interface ShippingPackageProfileFormState {
   defaultCarrier: string;
   defaultService: string;
   defaultBoxId: string;
-  maxUnitsPerPackage: string;
   isActive: boolean;
 }
 
@@ -562,7 +561,6 @@ const emptyShippingPackageProfileForm: ShippingPackageProfileFormState = {
   defaultCarrier: "",
   defaultService: "",
   defaultBoxId: "",
-  maxUnitsPerPackage: "",
   isActive: true,
 };
 
@@ -3727,7 +3725,6 @@ function ShippingConfigTab() {
         defaultCarrier: profileForm.defaultCarrier,
         defaultService: profileForm.defaultService,
         defaultBoxId: profileForm.defaultBoxId,
-        maxUnitsPerPackage: profileForm.maxUnitsPerPackage,
         isActive: profileForm.isActive,
         idempotencyKey: createDropshipIdempotencyKey("shipping-package-profile"),
       }));
@@ -3884,7 +3881,6 @@ function ShippingConfigTab() {
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
-
       <Tabs
         value={activeSection}
         onValueChange={(value) => setActiveSection(value as ShippingConfigSectionKey)}
@@ -4061,7 +4057,7 @@ function ShippingBoxPanel({
         <ShippingInput label="Width in" value={form.widthIn} onChange={(value) => onChange((current) => ({ ...current, widthIn: value }))} />
         <ShippingInput label="Height in" value={form.heightIn} onChange={(value) => onChange((current) => ({ ...current, heightIn: value }))} />
         <ShippingInput label="Tare weight lb" value={form.tareWeightLb} onChange={(value) => onChange((current) => ({ ...current, tareWeightLb: value }))} />
-        <ShippingInput label="Max weight lb" value={form.maxWeightLb} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxWeightLb: value }))} />
+        <ShippingInput label="Lower box weight limit lb" value={form.maxWeightLb} placeholder="Optional; 50 lb handling cap applies" onChange={(value) => onChange((current) => ({ ...current, maxWeightLb: value }))} />
         <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
       </div>
       <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
@@ -4113,7 +4109,6 @@ function ShippingPackageProfilePanel({
                   defaultCarrier: profile.defaultCarrier ?? "",
                   defaultService: profile.defaultService ?? "",
                   defaultBoxId: profile.defaultBoxId === null ? "" : String(profile.defaultBoxId),
-                  maxUnitsPerPackage: profile.maxUnitsPerPackage === null ? "" : String(profile.maxUnitsPerPackage),
                   isActive: profile.isActive,
                 }
               : { ...emptyShippingPackageProfileForm, productVariantId: value });
@@ -4148,7 +4143,6 @@ function ShippingPackageProfilePanel({
             <p className="text-sm text-muted-foreground">Select a variant to verify its catalog package data.</p>
           )}
         </div>
-        <ShippingInput label="Max units/package" value={form.maxUnitsPerPackage} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxUnitsPerPackage: value }))} />
         <ShippingInput label="Default carrier" value={form.defaultCarrier} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultCarrier: value }))} />
         <ShippingInput label="Default service" value={form.defaultService} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultService: value }))} />
         <div>
@@ -4563,13 +4557,13 @@ function ShippingConfigOverviewDashboard({
       section: "Boxes",
       configured: `${activeCount(config.boxes)} active / ${config.boxes.length} loaded`,
       ready: activeCount(config.boxes) > 0,
-      detail: "Physical boxes and mailers available for package selection.",
+      detail: "Inner dimensions drive 3D placement; packed cartons are capped at 50 lb unless a lower box limit applies.",
     },
     {
       section: "Variant shipping overrides",
       configured: `${activeCount(config.packageProfiles)} active / ${config.packageProfiles.length} configured`,
       ready: true,
-      detail: "Optional SKU-level packing and service behavior; package dimensions come from Catalog Variants.",
+      detail: "Optional ship-alone, default-box, carrier, and service behavior; capacity comes from Catalog Variant dimensions.",
     },
     {
       section: "Zones",
@@ -4660,7 +4654,7 @@ function ShippingBoxesTable({
       rows={config.boxes.map((box) => [
         box.code,
         `${formatMmAsInches(box.lengthMm)} x ${formatMmAsInches(box.widthMm)} x ${formatMmAsInches(box.heightMm)} in`,
-        `${formatGramsAsPounds(box.tareWeightGrams)} lb tare${box.maxWeightGrams ? ` / ${formatGramsAsPounds(box.maxWeightGrams)} lb max` : ""}`,
+        `${formatGramsAsPounds(box.tareWeightGrams)} lb tare / ${box.maxWeightGrams ? `${formatGramsAsPounds(box.maxWeightGrams)} lb lower limit` : "50 lb handling cap"}`,
         box.isActive ? "Active" : "Inactive",
       ])}
     />

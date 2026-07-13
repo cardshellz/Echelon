@@ -2,15 +2,17 @@
 
 Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedited/…), the engine finds the **cheapest carrier+method** satisfying the promise, and the WMS hands the pack station an **optimized box/split plan**. Replaces Parcelify.
 
+> **Implementation update — 2026-07-13:** cartonizer v3 now performs real non-overlapping 3D placement with six rotations and emits unit coordinates/orientations. Dropship uses this same shared domain engine. The earlier volume-only/sorted-dimension cartonizer description below is superseded where noted.
+
 ## Verified current state (all claims checked in-file or against prod 2026-07-02)
 
 **Exists and reusable:**
 - **Dropship shipping stack in Echelon** (deployed 6/26, seed-data only, vendor-scoped — a TEMPLATE to generalize):
   - `dropship.dropship_box_catalog` (dropship.schema.ts:798-813) — code/name/L/W/H mm/tare/max-weight/active. Prod: 1 row ("Baby Box" 8×6×4).
-  - `dropship.dropship_package_profiles` (:815-834) — per-variant dims/weight/ship_alone/default box/max_units. Prod: 1 row.
+  - `dropship.dropship_package_profiles` (:815-834) — optional dropship overrides such as ship-alone, default box, and carrier/service preferences. Catalog variants own physical weight/dimensions. Legacy `max_units_per_package` is not a runtime cartonization input.
   - `dropship_rate_tables` + `_rows` (warehouse, zone, weight band, cents) + `dropship_zone_rules` (postal-prefix→zone, priority) (:836-878). Prod: 1 rate row, 1 zone rule.
   - Markup/insurance bps policies + `dropship_shipping_quote_snapshots` (idempotency_key, request_hash, quote_payload) (:880-939).
-  - **Working v1 cartonizer** `cartonizeDropshipItems` (server/modules/dropship/domain/shipping-quote.ts:112-171): ship_alone→1/box, max_units cap, weight+tare cap, smallest-volume-first. **Limitation confirmed: one SKU per package, single-unit dim check only.**
+  - **Shared cartonizer v3** `server/modules/shipping-engine/domain/cartonize.ts`: expands ordered quantities into physical units, tests all six rotations, rejects overlapping/out-of-bounds placements, returns per-unit coordinates, and splits on geometry or packed weight. Dropship delegates to it through `cartonizeDropshipItems`; no max-units cap is used.
   - Clean provider seams: `DropshipCartonizationProvider`, `DropshipShippingRateProvider` — plug-and-play interfaces already in the codebase's idiom.
 - **Membership policy plane — DONE & LIVE** (club app, PRs #171-183, ahead of the stale local clone): `plan_benefit_assignments` with `shipping_group_id` dimension → compact **523-byte** `cardshellz.shipping_thresholds` shop metafield (verified live, 6 plans, updated 6/23) → `cardshellz-shipping-discount` Function (ACTIVE DiscountAutomaticApp) → member free shipping rendering $0 on live orders. The proven pattern for all member shipping benefits.
 - **C9 ShippingEngine port** (server/modules/shipping/engine.ts:26-106): push/hold/cancel/markShipped via ShipStation V1 with hardened 429 backoff; carrier normalization stamps_com→USPS, ups_walleted→UPS. Fulfillment-side only, zero rating.
@@ -37,7 +39,7 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 ```
 QUOTE PLANE (checkout, member-agnostic, <1s)
 Shopify checkout ──► CarrierService callback (Echelon, new)
-  cart items ──► sku→dims join ─► Split Planner ─► Cartonizer v2 ─► Rates (local tables)
+  cart items ──► sku→dims join ─► Split Planner ─► Cartonizer v3 ─► Rates (local tables)
              ─► ETA (cutoff + transit table) ─► service-level offers (Standard/Expedited/Express + dates)
   member benefits: shipping-discount Function (club app — LIVE) discounts per plan on top
 
@@ -48,14 +50,14 @@ order ingest ─► persist SHIP PLAN (re-cartonize with order-final items)
   ─► CALIBRATION LOOP: quoted vs actual → rate-table corrections
 ```
 
-**Ownership:** engine = new `shipping` Postgres schema + `server/modules/shipping-engine` module in **Echelon** (owns catalog, boxes, warehouses, WMS, pack station). Callback endpoint hosted by Echelon (Heroku), registered once via the club-app token (owns write_shipping). Member policy stays in club app + Function (proven). Dropship keeps its stack short-term; converges on shared tables later.
+**Ownership:** engine = new `shipping` Postgres schema + `server/modules/shipping-engine` module in **Echelon** (owns catalog, boxes, warehouses, WMS, pack station). Callback endpoint hosted by Echelon (Heroku), registered once via the club-app token (owns write_shipping). Member policy stays in club app + Function (proven). Dropship keeps its configuration tables short-term but already shares the same cartonizer domain core.
 
 ## Modules & contracts
 
 1. **Box Catalog** `shipping.box_catalog` — generalize dropship shape + add `kind` (box|mailer|envelope|own_container) + `cost_cents` (materials) + `carrier_dim_class` (e.g. USPS cubic tier). Admin CRUD (copy dropship routes).
 2. **Item Shipping Attributes** — populate `catalog.product_variants` dims/weight (canonical physical truth, per sellable variant now; UoM base-unit roll-up later) + `shipping.variant_shipping_attrs` (ship_alone/own_container, packing_class, fragility). Admin write path + CSV/measure-station bulk entry (none exists today). Shopify-weight backfill as seed.
-3. **Cartonizer v2** `cartonize(items, boxes) → candidatePackings[]` — generalize the dropship function: (a) multi-SKU mixed-box via volume-fill FFD + sorted-dims feasibility, (b) quantity volumetrics (N units bounded by volume fill factor AND weight), (c) own-container passthrough, (d) emit 1–3 candidate packings so rates picks the cheapest (breaks the cost-aware circularity), (e) never throws — degrades to a fallback packing + warning. Keep the provider seam (Paccurate can A/B later).
-   **DECIDED 2026-07-02 (user confirmed): co-mingling = RIDER/VOID model, not group×group rules.** Shipping groups stay the default partition (storage boxes ship flat, separately). Exception mechanism: `rider_eligible` flag on soft/thin variants (sleeve packs) + `rider_void` caps (volume/weight/count) on own-container variants (large storage boxes). Consolidation pass runs after cartonization and absorbs riders ONLY if it eliminates an entire parcel (kill-a-label-or-do-nothing — behavior stays binary, cost always ≤ today). PackPlan makes it explicit to the packer ("add-in: 3× sleeves, tuck flat"); v2 packing UI "didn't fit — split out" action records deviations → calibration disables chronically failing rider combos. Policy/physics separation: free-shipping thresholds key on shipping-group SPEND (unchanged); rates key on parcels — riders never touch threshold logic.
+3. **Cartonizer v3** `cartonize(items, boxes) → candidatePackings[]` — shared pure-domain engine with multi-SKU packing, physical units for every ordered quantity, all six orthogonal rotations, non-overlap and box-boundary enforcement, per-unit placement output, own-container passthrough, fill-factor clearance, and geometry/weight-driven multi-carton splits. Every ordinary carton is capped at 22,679 g (under 50 lb); a box may set a lower structural maximum. Missing dimensions or no-fit conditions produce an explicit fallback warning for shadow/fulfillment callers, while dropship quote flow fails closed instead of pricing an unverified carton. The provider seam remains available for later A/B comparison.
+   **DECIDED 2026-07-02 (user confirmed): co-mingling = RIDER/VOID model, not group×group rules.** Shipping groups stay the default partition (storage boxes ship flat, separately). Rider consolidation now defaults off because cubic void alone cannot prove physical placement. Re-enable it only after void regions have real dimensions and can use the same non-overlap checks. Policy/physics separation remains: free-shipping thresholds key on shipping-group spend; rates key on parcels.
 4. **Split Planner** `plan(order) → shipments[]` — v1: single origin, split = cartonizer output grouping; deliberate rate-naming strategy for multi-profile carts. Split-across-origins deferred (99%+ single-origin).
 5. **Rates Engine** `rate(packing, dest, serviceLevel) → quotes[]` — local deterministic tables (`shipping.rate_tables/_rows/zone_rules`, generalized from dropship incl. effective dating + cheapest-wins) serving the callback in <100ms for LOWER-48. **DECIDED 2026-07-02 (user): hybrid** — HI/AK/PR destinations make a LIVE ShipStation v2 rate call inside the callback (~0.75% of orders; hard 2s timeout, fallback to padded HIPRAK table row — the callback must ALWAYS return a rate). Matches Parcelify's existing Domestic-49 + HIPRAK zone split. **Cart display DECIDED: stays STATIC** (62.5% of orders sub-$69 but lower-48 paid rates cluster $5-$14; HI/AK only 0.75%) — sourced from the rate table's typical lower-48 band instead of the hardcoded 899/1099 cents in main-cart-shellz.liquid:557, with copy "Estimated for continental US — final rate at checkout." No zip-entry UX in cart.
 6. **Carrier Adapters** — NEW rating port (separate from C9 fulfillment port, same conventions): `getRates(packing, dest) → carrier quotes`, `getTransit(...)`. v1 adapter: **ShipStation API v2 (ShipEngine)** — quotes the same stamps_com/ups_walleted wallet accounts labels are bought on ⇒ quote = actual label cost. Used OFFLINE to build/refresh rate tables + spot-calibrate, not at checkout.
@@ -76,8 +78,8 @@ order ingest ─► persist SHIP PLAN (re-cartonize with order-final items)
 ## Walkthrough decisions LOCKED 2026-07-02
 1. **Cart display**: static, rate-table-sourced, "Estimated for continental US" copy. No zip-entry UX.
 2. **Checkout rating**: hybrid — local tables lower-48, LIVE ShipStation v2 call for HI/AK/PR (2s timeout → padded table fallback; callback always returns a rate).
-3. **Co-mingling**: rider/void model (see Cartonizer v2). Groups = default partition; riders absorb only when a whole parcel is eliminated.
-4. **Fill math**: flat ~85% volume fill factor, items treated as rectangular bricks; per-SKU overrides added ONLY when pack-station feedback shows chronic misfit. No per-product nesting factors in the measuring program.
+3. **Co-mingling**: rider/void model (see Cartonizer v3). Groups = default partition. Rider absorption remains disabled until void regions have physical dimensions and can pass the same placement checks.
+4. **Fill math**: flat ~85% volume clearance plus real 3D placement; items are rectangular bricks that may use any of six rotations. Per-SKU constraints are added only when fragility, nesting, or orientation rules are known, not as arbitrary max-unit limits.
 5. **Multi-warehouse**: FULL multi-origin in v1 (user explicitly chose over model-only) — inventory-aware origin selection, split-across-origins, combined quotes. ⚠️ Implication: OMS must support one order → multiple warehouse-scoped shipments (today wms.orders has a single warehouse_id; routing-at-ingestion is single-origin). This is the largest v1 work item.
 6. **SIOC**: manual `ships_in_own_container` checkbox per variant in Echelon; system pre-suggests sealed case-level variants from the pack hierarchy; user approves.
 7. **Carrier accounts (verified via V1 API 7/2)**: FedEx = OWN account; USPS (stamps_com), UPS (ups_walleted), DHL Express, GlobalPost = ShipStation wallet. v2 quotes = real negotiated costs.

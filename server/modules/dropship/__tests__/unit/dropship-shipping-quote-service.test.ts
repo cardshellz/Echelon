@@ -37,13 +37,24 @@ import type {
 const now = new Date("2026-05-01T16:00:00.000Z");
 
 describe("dropship shipping quote domain", () => {
-  it("cartonizes profiles deterministically and calculates basis-point fees with integer math", () => {
+  it("derives carton count from physical placement without a max-units setting", () => {
     const packages = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 3 },
       ]),
-      packageProfiles: [makePackageProfile({ productVariantId: 101, maxUnitsPerPackage: 2 })],
-      boxes: [makeBox({ id: 2, code: "LARGE", lengthMm: 300 }), makeBox({ id: 1, code: "SMALL" })],
+      packageProfiles: [makePackageProfile({
+        productVariantId: 101,
+        lengthMm: 60,
+        widthMm: 60,
+        heightMm: 60,
+      })],
+      boxes: [makeBox({
+        id: 1,
+        code: "CUBE",
+        lengthMm: 100,
+        widthMm: 100,
+        heightMm: 100,
+      })],
     });
 
     expect(packages.map((carton) => ({
@@ -52,10 +63,193 @@ describe("dropship shipping quote domain", () => {
       boxCode: carton.boxCode,
       weightGrams: carton.weightGrams,
     }))).toEqual([
-      { sequence: 1, quantity: 2, boxCode: "SMALL", weightGrams: 220 },
-      { sequence: 2, quantity: 1, boxCode: "SMALL", weightGrams: 120 },
+      { sequence: 1, quantity: 1, boxCode: "CUBE", weightGrams: 120 },
+      { sequence: 2, quantity: 1, boxCode: "CUBE", weightGrams: 120 },
+      { sequence: 3, quantity: 1, boxCode: "CUBE", weightGrams: 120 },
     ]);
     expect(calculateBasisPointsFeeCents(999, { bps: 200 })).toBe(19);
+  });
+
+  it("co-packs compatible SKUs from the same order", () => {
+    const packages = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 1 },
+        { productVariantId: 102, quantity: 1 },
+      ]),
+      packageProfiles: [
+        makePackageProfile({
+          productVariantId: 101,
+          lengthMm: 40,
+          widthMm: 40,
+          heightMm: 40,
+        }),
+        makePackageProfile({
+          productVariantId: 102,
+          lengthMm: 40,
+          widthMm: 40,
+          heightMm: 40,
+        }),
+      ],
+      boxes: [makeBox({
+        lengthMm: 100,
+        widthMm: 50,
+        heightMm: 50,
+      })],
+    });
+
+    expect(packages).toHaveLength(1);
+    expect(packages[0]).toMatchObject({
+      productVariantId: null,
+      quantity: 2,
+      items: [
+        { productVariantId: 101, quantity: 1 },
+        { productVariantId: 102, quantity: 1 },
+      ],
+    });
+    expect(packages[0].placements).toHaveLength(2);
+  });
+
+  it("keeps SKUs with different requested services in separate packing batches", () => {
+    const packages = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 1 },
+        { productVariantId: 102, quantity: 1 },
+      ]),
+      packageProfiles: [
+        makePackageProfile({
+          productVariantId: 101,
+          defaultCarrier: "USPS",
+          defaultService: "Ground Advantage",
+        }),
+        makePackageProfile({
+          productVariantId: 102,
+          defaultCarrier: "UPS",
+          defaultService: "Ground",
+        }),
+      ],
+      boxes: [makeBox()],
+    });
+
+    expect(packages).toHaveLength(2);
+    expect(packages.map((carton) => [
+      carton.productVariantId,
+      carton.requestedCarrier,
+      carton.requestedService,
+    ])).toEqual([
+      [101, "USPS", "Ground Advantage"],
+      [102, "UPS", "Ground"],
+    ]);
+  });
+
+  it("keeps catalog shipping groups in separate cartons", () => {
+    const packages = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 1 },
+        { productVariantId: 102, quantity: 1 },
+      ]),
+      packageProfiles: [
+        makePackageProfile({
+          productVariantId: 101,
+          shippingGroupCode: "protection",
+        }),
+        makePackageProfile({
+          productVariantId: 102,
+          shippingGroupCode: "storage_boxes",
+        }),
+      ],
+      boxes: [makeBox({
+        lengthMm: 500,
+        widthMm: 500,
+        heightMm: 500,
+      })],
+    });
+
+    expect(packages).toHaveLength(2);
+    expect(packages.map((carton) => carton.productVariantId).sort()).toEqual([101, 102]);
+  });
+
+  it("keeps ship-alone quantities in one carton per unit", () => {
+    const packages = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 2 },
+      ]),
+      packageProfiles: [makePackageProfile({ shipAlone: true })],
+      boxes: [makeBox()],
+    });
+
+    expect(packages).toHaveLength(2);
+    expect(packages.every((carton) => carton.quantity === 1)).toBe(true);
+  });
+
+  it("blocks a long item whose volume fits but whose dimensions do not", () => {
+    let thrown: unknown;
+    try {
+      cartonizeDropshipItems({
+        items: normalizeDropshipQuoteItems([
+          { productVariantId: 101, quantity: 1 },
+        ]),
+        packageProfiles: [makePackageProfile({
+          productVariantId: 101,
+          lengthMm: 2000,
+          widthMm: 20,
+          heightMm: 20,
+        })],
+        boxes: [makeBox({
+          lengthMm: 200,
+          widthMm: 200,
+          heightMm: 200,
+        })],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(DropshipError);
+    expect(thrown).toMatchObject({ code: "DROPSHIP_CARTONIZATION_BLOCKED" });
+  });
+
+  it("uses item rotation when the carton requires it", () => {
+    const packages = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 1 },
+      ]),
+      packageProfiles: [makePackageProfile({
+        productVariantId: 101,
+        lengthMm: 90,
+        widthMm: 40,
+        heightMm: 30,
+      })],
+      boxes: [makeBox({
+        code: "ROTATED",
+        lengthMm: 40,
+        widthMm: 30,
+        heightMm: 90,
+      })],
+    });
+
+    expect(packages).toHaveLength(1);
+    expect(packages[0].boxCode).toBe("ROTATED");
+  });
+
+  it("splits packages at the automatic 50 lb handling ceiling", () => {
+    const packages = cartonizeDropshipItems({
+      items: normalizeDropshipQuoteItems([
+        { productVariantId: 101, quantity: 2 },
+      ]),
+      packageProfiles: [makePackageProfile({
+        productVariantId: 101,
+        weightGrams: 12000,
+      })],
+      boxes: [makeBox({
+        lengthMm: 1000,
+        widthMm: 1000,
+        heightMm: 1000,
+        maxWeightGrams: null,
+      })],
+    });
+
+    expect(packages).toHaveLength(2);
+    expect(packages.every((carton) => carton.weightGrams <= 22679)).toBe(true);
   });
 
   it("blocks cartonization when canonical catalog package data is missing", () => {
@@ -124,6 +318,7 @@ describe("DropshipShippingQuoteService", () => {
       dunnageCents: 0,
     });
     expect(repository.snapshots[0]?.quotePayload).toMatchObject({
+      version: 2,
       policies: {
         shippingMarkup: { source: "config", markupBps: 1000 },
         insurancePool: { source: "config", feeBps: 200 },
@@ -132,6 +327,10 @@ describe("DropshipShippingQuoteService", () => {
         cartonization: { name: "fake_cartonization" },
         rates: { name: "fake_rates" },
       },
+      packages: [{
+        items: [{ productVariantId: 101, quantity: 2 }],
+        placements: expect.any(Array),
+      }],
     });
     expect(repository.lastCreateInput?.actor).toEqual({ actorType: "vendor", actorId: "member-1" });
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_SHIPPING_QUOTE_CREATED" });
@@ -358,15 +557,16 @@ function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): 
 function makePackageProfile(overrides: Partial<DropshipPackageProfile> = {}): DropshipPackageProfile {
   return {
     productVariantId: 101,
+    sku: "SKU-101",
     weightGrams: 100,
     lengthMm: 100,
     widthMm: 75,
     heightMm: 20,
+    shippingGroupCode: null,
     shipAlone: false,
     defaultCarrier: null,
     defaultService: null,
     defaultBoxId: null,
-    maxUnitsPerPackage: null,
     ...overrides,
   };
 }

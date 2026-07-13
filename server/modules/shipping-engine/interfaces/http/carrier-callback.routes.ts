@@ -37,7 +37,11 @@ import {
   warehouses,
 } from "@shared/schema";
 import { db } from "../../../../db";
-import { cartonize, type CartonizeItem } from "../../domain/cartonize";
+import {
+  cartonize,
+  isCartonizeCandidateVerified,
+  type CartonizeItem,
+} from "../../domain/cartonize";
 import { deliveryWindow, type DeliveryWindow } from "../../domain/eta";
 import { rateComboKey } from "../../domain/rate-selection";
 import {
@@ -308,6 +312,9 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
     const boxes = await loadActiveBoxes(originWarehouseId);
     const packing = cartonize(items, boxes);
     const candidate = packing.candidates[0];
+    if (!isCartonizeCandidateVerified(candidate)) {
+      throw new Error("Cartonizer could not verify physical placement for every ordered unit.");
+    }
 
     const rates = await quoteParcels({
       originWarehouseId,

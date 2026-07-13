@@ -668,6 +668,7 @@ export interface DropshipShippingPackageProfileConfig {
   defaultCarrier: string | null;
   defaultService: string | null;
   defaultBoxId: number | null;
+  /** @deprecated Cartonizer v3 derives capacity from physical placement. */
   maxUnitsPerPackage: number | null;
   isActive: boolean;
   createdAt: string;
@@ -829,6 +830,7 @@ export interface DropshipShippingPackageProfileInput {
   defaultCarrier: string | null;
   defaultService: string | null;
   defaultBoxId: number | null;
+  /** @deprecated Cartonizer v3 derives capacity from physical placement. */
   maxUnitsPerPackage: number | null;
   isActive: boolean;
   idempotencyKey: string;
@@ -3041,6 +3043,9 @@ export function buildShippingBoxInput(input: {
   isActive: boolean;
   idempotencyKey: string;
 }): DropshipShippingBoxInput {
+  const maxWeightGrams = input.maxWeightGrams.trim()
+    ? parsePositiveInteger(input.maxWeightGrams, "maxWeightGrams")
+    : null;
   return {
     boxId: input.boxId?.trim() ? parsePositiveInteger(input.boxId, "boxId") : undefined,
     code: requiredTrimmedString(input.code, "code", 80),
@@ -3049,7 +3054,7 @@ export function buildShippingBoxInput(input: {
     widthMm: parsePositiveInteger(input.widthMm, "widthMm"),
     heightMm: parsePositiveInteger(input.heightMm, "heightMm"),
     tareWeightGrams: parseNonNegativeInteger(input.tareWeightGrams, "tareWeightGrams"),
-    maxWeightGrams: input.maxWeightGrams.trim() ? parsePositiveInteger(input.maxWeightGrams, "maxWeightGrams") : null,
+    maxWeightGrams,
     isActive: input.isActive,
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };
@@ -3061,7 +3066,6 @@ export function buildShippingPackageProfileInput(input: {
   defaultCarrier: string;
   defaultService: string;
   defaultBoxId: string;
-  maxUnitsPerPackage: string;
   isActive: boolean;
   idempotencyKey: string;
 }): DropshipShippingPackageProfileInput {
@@ -3071,9 +3075,7 @@ export function buildShippingPackageProfileInput(input: {
     defaultCarrier: input.defaultCarrier.trim() || null,
     defaultService: input.defaultService.trim() || null,
     defaultBoxId: input.defaultBoxId.trim() ? parsePositiveInteger(input.defaultBoxId, "defaultBoxId") : null,
-    maxUnitsPerPackage: input.maxUnitsPerPackage.trim()
-      ? parsePositiveInteger(input.maxUnitsPerPackage, "maxUnitsPerPackage")
-      : null,
+    maxUnitsPerPackage: null,
     isActive: input.isActive,
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };
