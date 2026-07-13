@@ -3,7 +3,6 @@ import { cancelOrder, markOrderShipped } from "../orders/order-status-core";
 import type { OmsOpsIssue } from "./ops-health.service";
 import {
   enqueueDelayedTrackingPush,
-  enqueueOmsWmsSyncRetry,
   enqueueShopifyFulfillmentRetry,
   enqueueShipStationShipmentPushRetry,
   enqueueWmsShipmentCreateRetry,
@@ -98,6 +97,9 @@ export interface OmsFlowRemediationResult {
   wmsOrderId: number | null;
   shipmentId: number | null;
   retryQueueId?: number | null;
+  sourceInboxId?: number | null;
+  provider?: string | null;
+  topic?: string | null;
 }
 
 function getDefaultDb(): any {
@@ -1032,15 +1034,6 @@ async function autoRemediateCriticalFlowIssues(
       },
     },
     {
-      code: "OMS_PAID_WITHOUT_WMS",
-      inputFromSample: (sample) => {
-        const omsOrderId = Number(sample.oms_order_id ?? sample.id);
-        return Number.isInteger(omsOrderId) && omsOrderId > 0
-          ? { code: "OMS_PAID_WITHOUT_WMS", omsOrderId }
-          : null;
-      },
-    },
-    {
       code: "WMS_READY_WITHOUT_SHIPMENT",
       inputFromSample: (sample) => {
         const wmsOrderId = Number(sample.wms_order_id ?? sample.id);
@@ -1242,58 +1235,157 @@ export async function remediateOmsFlowIssue(
 
   if (input.code === "OMS_PAID_WITHOUT_WMS") {
     const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
-    const result = await db.execute(sql`
-      SELECT oo.id
-      FROM oms.oms_orders oo
-      WHERE oo.id = ${omsOrderId}
-        AND oo.status NOT IN ('cancelled', 'shipped')
-        AND oo.financial_status IN ('paid', 'partially_paid')
-        AND NOT EXISTS (
-          SELECT 1
-          FROM wms.orders wo
-          WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
-             OR (wo.source_table_id = oo.id::text)
-        )
-      LIMIT 1
-    `);
+    return withOptionalTransaction(db, async (tx) => {
+      // Serialize operator clicks for one OMS order. The retry worker preserves
+      // the original inbox identity, so the paid handler replays the succeeded
+      // source event instead of creating a second receipt.
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(hashtext('oms_paid_without_wms_replay'), ${omsOrderId})
+      `);
 
-    if (rows(result).length === 0) {
+      const targetResult = await tx.execute(sql`
+        SELECT oo.id,
+               paid_inbox.id AS paid_inbox_id
+        FROM oms.oms_orders oo
+        LEFT JOIN LATERAL (
+          SELECT wi.id
+          FROM oms.webhook_inbox wi
+          WHERE wi.provider = 'shopify'
+            AND wi.topic = 'orders/paid'
+            AND wi.status = 'succeeded'
+            AND COALESCE(wi.payload->>'id', wi.payload->>'order_id') = oo.external_order_id
+          ORDER BY COALESCE(wi.processed_at, wi.updated_at, wi.first_received_at) DESC NULLS LAST,
+                   wi.id DESC
+          LIMIT 1
+        ) paid_inbox ON TRUE
+        WHERE oo.id = ${omsOrderId}
+          AND oo.status NOT IN ('cancelled', 'shipped')
+          AND oo.financial_status IN ('paid', 'partially_paid')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.orders wo
+            WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+               OR (wo.source_table_id = oo.id::text)
+          )
+        LIMIT 1
+      `);
+
+      const target = firstRow<{ id: number; paid_inbox_id: number | null }>(targetResult);
+      if (!target) {
+        return {
+          code: input.code,
+          action: "paid_replay_not_queued",
+          changed: false,
+          omsOrderId,
+          wmsOrderId: null,
+          shipmentId: null,
+          retryQueueId: null,
+          sourceInboxId: null,
+          provider: "shopify",
+          topic: "orders/paid",
+        };
+      }
+
+      const sourceInboxId = Number(target.paid_inbox_id);
+      if (!Number.isInteger(sourceInboxId) || sourceInboxId <= 0) {
+        throw new Error(
+          `No succeeded Shopify orders/paid inbox event found for OMS order ${omsOrderId}`,
+        );
+      }
+
+      const pendingResult = await tx.execute(sql`
+        SELECT id
+        FROM oms.webhook_retry_queue
+        WHERE provider = 'shopify'
+          AND topic = 'orders/paid'
+          AND source_inbox_id = ${sourceInboxId}
+          AND status = 'pending'
+        ORDER BY id DESC
+        LIMIT 1
+      `);
+      const pending = firstRow<{ id: number }>(pendingResult);
+      if (pending) {
+        return {
+          code: input.code,
+          action: "orders_paid_replay_already_pending",
+          changed: false,
+          omsOrderId,
+          wmsOrderId: null,
+          shipmentId: null,
+          retryQueueId: Number(pending.id),
+          sourceInboxId,
+          provider: "shopify",
+          topic: "orders/paid",
+        };
+      }
+
+      const queuedResult = await tx.execute(sql`
+        INSERT INTO oms.webhook_retry_queue (
+          provider,
+          topic,
+          payload,
+          source_inbox_id,
+          attempts,
+          last_error,
+          next_retry_at,
+          status,
+          created_at,
+          updated_at
+        )
+        SELECT wi.provider,
+               wi.topic,
+               wi.payload,
+               wi.id,
+               0,
+               ${`Control Tower paid-event replay for OMS order ${omsOrderId} by ${input.operator || "unknown"}`},
+               NOW(),
+               'pending',
+               NOW(),
+               NOW()
+        FROM oms.webhook_inbox wi
+        WHERE wi.id = ${sourceInboxId}
+          AND wi.provider = 'shopify'
+          AND wi.topic = 'orders/paid'
+          AND wi.status = 'succeeded'
+        RETURNING id
+      `);
+      const queued = firstRow<{ id: number }>(queuedResult);
+      if (!queued) {
+        throw new Error(
+          `Succeeded Shopify orders/paid inbox event ${sourceInboxId} is no longer replayable`,
+        );
+      }
+      const retryQueueId = Number(queued.id);
+
+      await tx.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        VALUES (
+          ${omsOrderId},
+          'flow_reconciliation_remediated',
+          ${JSON.stringify({
+            code: input.code,
+            operator: input.operator,
+            action: "replay_orders_paid",
+            sourceInboxId,
+            retryQueueId,
+          })}::jsonb,
+          NOW()
+        )
+      `);
+
       return {
         code: input.code,
-        action: "wms_sync_not_queued",
-        changed: false,
+        action: "queued_orders_paid_replay",
+        changed: true,
         omsOrderId,
         wmsOrderId: null,
         shipmentId: null,
-        retryQueueId: null,
+        retryQueueId,
+        sourceInboxId,
+        provider: "shopify",
+        topic: "orders/paid",
       };
-    }
-
-    await enqueueOmsWmsSyncRetry(
-      db,
-      omsOrderId,
-      new Error(`manual remediation by ${input.operator || "unknown"}`),
-    );
-
-    await db.execute(sql`
-      INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-      VALUES (
-        ${omsOrderId},
-        'flow_reconciliation_remediated',
-        ${JSON.stringify({ code: input.code, operator: input.operator })}::jsonb,
-        NOW()
-      )
-    `);
-
-    return {
-      code: input.code,
-      action: "queued_oms_wms_sync",
-      changed: true,
-      omsOrderId,
-      wmsOrderId: null,
-      shipmentId: null,
-      retryQueueId: null,
-    };
+    });
   }
 
   if (input.code === "WMS_READY_WITHOUT_SHIPMENT") {

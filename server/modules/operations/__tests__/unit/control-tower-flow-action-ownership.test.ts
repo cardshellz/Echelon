@@ -30,12 +30,15 @@ describe("Control Tower flow action ownership", () => {
     expect(FLOW_MONITOR_SOURCE).toContain('hasPermission("operations", "triage")');
   });
 
-  it("requires the Control Tower triage permission at both replay endpoints", () => {
+  it("requires the Control Tower triage permission at every replay endpoint", () => {
     expect(OMS_ROUTES_SOURCE).toMatch(
       /webhook-inbox\/:id\/replay"[\s\S]{0,160}requirePermission\("operations", "triage"\)/,
     );
     expect(OMS_ROUTES_SOURCE).toMatch(
       /webhook-retry\/:id\/requeue"[\s\S]{0,160}requirePermission\("operations", "triage"\)/,
+    );
+    expect(OMS_ROUTES_SOURCE).toMatch(
+      /reconciliation\/remediate"[\s\S]{0,160}requirePermission\("operations", "triage"\)/,
     );
   });
 });

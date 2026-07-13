@@ -3,6 +3,32 @@ import { describe, expect, it } from "vitest";
 import { resolveFlowReplayAction } from "../control-tower-flow-actions";
 
 describe("resolveFlowReplayAction", () => {
+  it("maps a paid-without-WMS row to the guarded OMS remediation endpoint", () => {
+    expect(resolveFlowReplayAction(
+      { code: "OMS_PAID_WITHOUT_WMS", replaySafe: true },
+      { oms_order_id: "255347", _replay_source_inbox_id: 79377 },
+    )).toEqual({
+      kind: "oms_remediation",
+      sourceId: 255347,
+      endpoint: "/api/oms/ops/reconciliation/remediate",
+      body: { code: "OMS_PAID_WITHOUT_WMS", omsOrderId: 255347 },
+      label: "Replay paid event",
+      pendingLabel: "Queuing paid replay",
+      successTitle: "Paid event replay queued",
+    });
+  });
+
+  it("does not render paid replay without both the OMS order and canonical paid source", () => {
+    const issue = { code: "OMS_PAID_WITHOUT_WMS", replaySafe: true };
+    expect(resolveFlowReplayAction(issue, {
+      oms_order_id: 255347,
+      _replay_source_inbox_id: null,
+    })).toBeNull();
+    expect(resolveFlowReplayAction(issue, {
+      _replay_source_inbox_id: 79377,
+    })).toBeNull();
+  });
+
   it("maps a replay-safe failed inbox row to the existing OMS replay endpoint", () => {
     expect(resolveFlowReplayAction(
       { code: "WEBHOOK_INBOX_FAILED", replaySafe: true },

@@ -1,9 +1,10 @@
-export type FlowReplayActionKind = "webhook_inbox" | "webhook_retry";
+export type FlowReplayActionKind = "webhook_inbox" | "webhook_retry" | "oms_remediation";
 
 export interface FlowReplayAction {
   kind: FlowReplayActionKind;
   sourceId: number;
   endpoint: string;
+  body?: Record<string, unknown>;
   label: string;
   pendingLabel: string;
   successTitle: string;
@@ -25,6 +26,22 @@ export function resolveFlowReplayAction(
   evidence: Record<string, unknown>,
 ): FlowReplayAction | null {
   if (!issue.replaySafe) return null;
+
+  if (issue.code === "OMS_PAID_WITHOUT_WMS") {
+    const omsOrderId = positiveInteger(evidence.oms_order_id);
+    const sourceInboxId = positiveInteger(evidence._replay_source_inbox_id);
+    return omsOrderId === null || sourceInboxId === null
+      ? null
+      : {
+          kind: "oms_remediation",
+          sourceId: omsOrderId,
+          endpoint: "/api/oms/ops/reconciliation/remediate",
+          body: { code: issue.code, omsOrderId },
+          label: "Replay paid event",
+          pendingLabel: "Queuing paid replay",
+          successTitle: "Paid event replay queued",
+        };
+  }
 
   if (issue.code === "WEBHOOK_INBOX_FAILED") {
     const inboxId = positiveInteger(evidence.inbox_id);

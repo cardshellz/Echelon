@@ -188,9 +188,11 @@ interface FlowBucketResponse {
 }
 
 interface FlowReplayResponse {
-  retryQueueId: number;
-  provider: string;
-  topic: string;
+  retryQueueId: number | null;
+  provider?: string | null;
+  topic?: string | null;
+  changed?: boolean;
+  action?: string;
 }
 
 interface FlowOverviewResponse {
@@ -1056,14 +1058,19 @@ function FlowOverview(props: {
 
   const replayMutation = useMutation({
     mutationFn: async (action: FlowReplayAction) => {
-      const response = await apiRequest("POST", action.endpoint);
+      const response = await apiRequest("POST", action.endpoint, action.body);
       const result = await response.json() as FlowReplayResponse;
       return { action, result };
     },
     onSuccess: async ({ action, result }) => {
+      const retryDescription = result.provider && result.topic && result.retryQueueId
+        ? `${result.provider}/${result.topic} retry #${result.retryQueueId}`
+        : humanize(result.action || "replay not queued");
       toast({
-        title: action.successTitle,
-        description: `${result.provider}/${result.topic} retry #${result.retryQueueId}`,
+        title: result.changed === false
+          ? result.retryQueueId ? "Replay already queued" : "Replay not needed"
+          : action.successTitle,
+        description: retryDescription,
       });
       await bucketQuery.refetch();
     },
@@ -1247,6 +1254,7 @@ function FlowOverview(props: {
                           const fields = Object.entries(row).filter(([key, value]) => (
                             value !== null
                             && value !== undefined
+                            && !key.startsWith("_")
                             && !["order_number", "external_order_number", "channel_order_number"].includes(key)
                           ));
                           return (
