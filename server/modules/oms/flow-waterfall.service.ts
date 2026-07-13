@@ -92,6 +92,36 @@ export interface FlowWaterfall {
   channelWriteback: ChannelWritebackHealth;
 }
 
+export type FlowReplayOutcome =
+  | "queued"
+  | "retrying"
+  | "succeeded"
+  | "failed"
+  | "unresolved"
+  | "unknown";
+
+export interface FlowReplayActivity {
+  oms_order_id: number | string;
+  order_number: string | null;
+  retry_id: number;
+  source_inbox_id: number | null;
+  queue_status: string | null;
+  outcome: FlowReplayOutcome;
+  attempts: number;
+  last_error: string | null;
+  requested_at: Date | string;
+  updated_at: Date | string | null;
+  next_retry_at: Date | string | null;
+  wms_order_id: number | null;
+  warehouse_status: string | null;
+}
+
+export interface FlowBucketSamples {
+  code: string;
+  rows: any[];
+  replayActivity: FlowReplayActivity[];
+}
+
 interface FlowIssueDef {
   code: string;
   kind: IssueKind;
@@ -215,7 +245,37 @@ const BASE_ISSUES: FlowIssueDef[] = [
     why: "The customer paid but the order never made it to the warehouse to be picked. Re-send it to the warehouse — it's safe to re-run.",
     remediation: "REPLAY_AFTER_FIX", replaySafe: true,
     count: (win: any) => sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`,
-    sample: (win: any) => sql`SELECT oo.external_order_number AS order_number, oo.status, oo.financial_status, oo.ordered_at AS at FROM oms.oms_orders oo WHERE oo.status NOT IN ('cancelled','shipped') AND oo.financial_status IN ('paid','partially_paid') AND oo.ordered_at > ${win} AND NOT EXISTS (SELECT 1 FROM wms.orders wo WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text)) ORDER BY oo.ordered_at DESC LIMIT 50`,
+    sample: (win: any) => sql`
+      SELECT oo.id AS oms_order_id,
+             oo.external_order_number AS order_number,
+             oo.status,
+             oo.financial_status,
+             oo.ordered_at AS at,
+             paid_inbox.id AS _replay_source_inbox_id
+      FROM oms.oms_orders oo
+      LEFT JOIN LATERAL (
+        SELECT wi.id
+        FROM oms.webhook_inbox wi
+        WHERE wi.provider = 'shopify'
+          AND wi.topic = 'orders/paid'
+          AND wi.status = 'succeeded'
+          AND COALESCE(wi.payload->>'id', wi.payload->>'order_id') = oo.external_order_id
+        ORDER BY COALESCE(wi.processed_at, wi.updated_at, wi.first_received_at) DESC NULLS LAST,
+                 wi.id DESC
+        LIMIT 1
+      ) paid_inbox ON TRUE
+      WHERE oo.status NOT IN ('cancelled','shipped')
+        AND oo.financial_status IN ('paid','partially_paid')
+        AND oo.ordered_at > ${win}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM wms.orders wo
+          WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+             OR (wo.source_table_id = oo.id::text)
+        )
+      ORDER BY oo.ordered_at DESC
+      LIMIT 50
+    `,
   },
   {
     code: "OMS_DOUBLE_PICKING", kind: "duplicate", stage: "oms_to_wms", severity: "critical",
@@ -730,6 +790,63 @@ function rows(r: any): any[] {
   return Array.isArray(r?.rows) ? r.rows : [];
 }
 
+async function getPaidReplayActivity(tx: any, win: any): Promise<FlowReplayActivity[]> {
+  const result = await tx.execute(sql`
+    WITH latest_replays AS (
+      SELECT DISTINCT ON (e.order_id)
+             e.order_id AS oms_order_id,
+             (e.details->>'retryQueueId')::int AS retry_id,
+             e.created_at AS requested_at
+      FROM oms.oms_order_events e
+      WHERE e.event_type = 'flow_reconciliation_remediated'
+        AND e.details->>'code' = 'OMS_PAID_WITHOUT_WMS'
+        AND e.details->>'action' = 'replay_orders_paid'
+        AND COALESCE(e.details->>'retryQueueId', '') ~ '^[1-9][0-9]*$'
+        AND e.created_at > ${win}
+      ORDER BY e.order_id, e.created_at DESC, e.id DESC
+    )
+    SELECT lr.oms_order_id,
+           oo.external_order_number AS order_number,
+           lr.retry_id,
+           q.source_inbox_id,
+           q.status AS queue_status,
+           CASE
+             WHEN q.id IS NULL THEN 'unknown'
+             WHEN q.status = 'pending' AND q.attempts = 0 THEN 'queued'
+             WHEN q.status = 'pending' THEN 'retrying'
+             WHEN q.status = 'dead' THEN 'failed'
+             WHEN q.status = 'success' AND wo.id IS NOT NULL THEN 'succeeded'
+             WHEN q.status = 'success' THEN 'unresolved'
+             ELSE 'unknown'
+           END AS outcome,
+           COALESCE(q.attempts, 0)::int AS attempts,
+           CASE
+             WHEN q.status = 'dead' OR (q.status = 'pending' AND q.attempts > 0)
+             THEN q.last_error
+             ELSE NULL
+           END AS last_error,
+           lr.requested_at,
+           q.updated_at,
+           q.next_retry_at,
+           wo.id AS wms_order_id,
+           wo.warehouse_status
+    FROM latest_replays lr
+    JOIN oms.oms_orders oo ON oo.id = lr.oms_order_id
+    LEFT JOIN oms.webhook_retry_queue q ON q.id = lr.retry_id
+    LEFT JOIN LATERAL (
+      SELECT candidate.id, candidate.warehouse_status
+      FROM wms.orders candidate
+      WHERE (candidate.source = 'oms' AND candidate.oms_fulfillment_order_id = oo.id::text)
+         OR candidate.source_table_id = oo.id::text
+      ORDER BY candidate.id DESC
+      LIMIT 1
+    ) wo ON TRUE
+    ORDER BY lr.requested_at DESC
+    LIMIT 50
+  `);
+  return rows(result) as FlowReplayActivity[];
+}
+
 export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = {}): Promise<FlowWaterfall> {
   const windowDays = Math.min(MAX_WINDOW_DAYS, Math.max(1, Math.floor(opts.windowDays || DEFAULT_WINDOW_DAYS)));
 
@@ -871,14 +988,18 @@ export async function getFlowBucketSamples(
   db: any,
   code: string,
   opts: { windowDays?: number } = {},
-): Promise<{ code: string; rows: any[] }> {
+): Promise<FlowBucketSamples> {
   const windowDays = Math.min(MAX_WINDOW_DAYS, Math.max(1, Math.floor(opts.windowDays || DEFAULT_WINDOW_DAYS)));
   return await db.transaction(async (tx: any) => {
     await tx.execute(sql`SET TRANSACTION READ ONLY`);
     await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`));
     const win = sql`NOW() - make_interval(days => ${windowDays})`;
     const def = FLOW_ISSUES.find((i) => i.code === code);
-    if (!def) return { code, rows: [] };
-    return { code, rows: rows(await tx.execute(def.sample(win))) };
+    if (!def) return { code, rows: [], replayActivity: [] };
+    const currentRows = rows(await tx.execute(def.sample(win)));
+    const replayActivity = code === "OMS_PAID_WITHOUT_WMS"
+      ? await getPaidReplayActivity(tx, win)
+      : [];
+    return { code, rows: currentRows, replayActivity };
   });
 }

@@ -81,6 +81,7 @@ export function registerOmsRoutes(app: Express) {
         Number.isFinite(requested) && requested > 0
           ? Math.min(365, Math.floor(requested))
           : undefined;
+      res.setHeader("Cache-Control", "private, no-store");
       res.json(await getFlowBucketSamples(db, code, { windowDays }));
     } catch (err: any) {
       console.error("[OMS Routes] Flow bucket error:", err);
@@ -160,31 +161,35 @@ export function registerOmsRoutes(app: Express) {
     },
   );
 
-  app.post("/api/oms/ops/reconciliation/remediate", requireAuth, async (req: Request, res: Response) => {
-    try {
-      const operator =
-        req.session.user?.username ||
-        req.session.user?.displayName ||
-        String(req.session.user?.id || "unknown");
-      const result = await remediateOmsFlowIssue(db, {
-        code: String(req.body?.code || ""),
-        omsOrderId: req.body?.omsOrderId,
-        wmsOrderId: req.body?.wmsOrderId,
-        shipmentId: req.body?.shipmentId,
-        operator,
-      });
-      res.json(result);
-    } catch (err: any) {
-      console.error("[OMS Routes] Reconciliation remediation error:", err);
-      const message = err?.message || "Failed to remediate OMS flow issue";
-      const status = /positive integer/i.test(message)
-        ? 400
-        : /unsupported/i.test(message)
-          ? 409
-          : 500;
-      res.status(status).json({ error: message });
-    }
-  });
+  app.post(
+    "/api/oms/ops/reconciliation/remediate",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const operator =
+          req.session.user?.username ||
+          req.session.user?.displayName ||
+          String(req.session.user?.id || "unknown");
+        const result = await remediateOmsFlowIssue(db, {
+          code: String(req.body?.code || ""),
+          omsOrderId: req.body?.omsOrderId,
+          wmsOrderId: req.body?.wmsOrderId,
+          shipmentId: req.body?.shipmentId,
+          operator,
+        });
+        res.json(result);
+      } catch (err: any) {
+        console.error("[OMS Routes] Reconciliation remediation error:", err);
+        const message = err?.message || "Failed to remediate OMS flow issue";
+        const status = /positive integer/i.test(message)
+          ? 400
+          : /unsupported|no succeeded Shopify orders\/paid|no longer replayable/i.test(message)
+            ? 409
+            : 500;
+        res.status(status).json({ error: message });
+      }
+    },
+  );
 
   // -----------------------------------------------------------------------
   // GET /api/oms/orders — list orders with filters

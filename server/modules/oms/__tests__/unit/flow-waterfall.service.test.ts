@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { getFlowWaterfall } from "../../flow-waterfall.service";
+import { getFlowBucketSamples, getFlowWaterfall } from "../../flow-waterfall.service";
 
 const FLOW_WATERFALL_SRC = readFileSync(
   resolve(__dirname, "../../flow-waterfall.service.ts"),
@@ -45,6 +45,55 @@ describe("getFlowWaterfall", () => {
   it("defaults to a 30-day window when none is provided", async () => {
     const result = await getFlowWaterfall(fakeDb());
     expect(result.windowDays).toBe(30);
+  });
+
+  it("exposes a canonical paid replay source for paid orders missing WMS", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "OMS_PAID_WITHOUT_WMS"');
+    const end = FLOW_WATERFALL_SRC.indexOf('\n  },', start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("oo.id AS oms_order_id");
+    expect(issueBlock).toContain("paid_inbox.id AS _replay_source_inbox_id");
+    expect(issueBlock).toContain("wi.topic = 'orders/paid'");
+    expect(issueBlock).toContain("wi.status = 'succeeded'");
+  });
+
+  it("returns durable paid replay activity with the current exception rows", async () => {
+    const replay = {
+      oms_order_id: "255347",
+      order_number: "#60237",
+      retry_id: 116708,
+      queue_status: "success",
+      outcome: "succeeded",
+      attempts: 0,
+      wms_order_id: 205426,
+      warehouse_status: "ready",
+    };
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ oms_order_id: "255999" }] })
+      .mockResolvedValueOnce({ rows: [replay] });
+    const db = { transaction: async (fn: (tx: any) => any) => fn({ execute }) };
+
+    const result = await getFlowBucketSamples(db, "OMS_PAID_WITHOUT_WMS");
+
+    expect(result.rows).toEqual([{ oms_order_id: "255999" }]);
+    expect(result.replayActivity).toEqual([replay]);
+    expect(execute).toHaveBeenCalledTimes(4);
+  });
+
+  it("derives paid replay outcomes from the audit, queue, and WMS records", () => {
+    const activityBlock = FLOW_WATERFALL_SRC.slice(
+      FLOW_WATERFALL_SRC.indexOf("async function getPaidReplayActivity"),
+      FLOW_WATERFALL_SRC.indexOf("export async function getFlowWaterfall"),
+    );
+
+    expect(activityBlock).toContain("flow_reconciliation_remediated");
+    expect(activityBlock).toContain("e.details->>'retryQueueId'");
+    expect(activityBlock).toContain("q.status = 'pending' AND q.attempts = 0 THEN 'queued'");
+    expect(activityBlock).toContain("q.status = 'success' AND wo.id IS NOT NULL THEN 'succeeded'");
+    expect(activityBlock).toContain("q.status = 'success' THEN 'unresolved'");
   });
 
   it("keeps stale tracking detection shipment-scoped", () => {

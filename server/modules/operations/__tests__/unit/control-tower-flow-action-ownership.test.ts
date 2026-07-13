@@ -25,17 +25,28 @@ describe("Control Tower flow action ownership", () => {
   });
 
   it("renders replay controls from existing Control Tower evidence", () => {
-    expect(FLOW_MONITOR_SOURCE).toContain("resolveFlowReplayAction(selectedIssue, row)");
+    expect(FLOW_MONITOR_SOURCE).toContain("resolveFlowReplayAction(selectedIssue, replayStatus");
     expect(FLOW_MONITOR_SOURCE).toContain("replayMutation.mutate(replayAction)");
     expect(FLOW_MONITOR_SOURCE).toContain('hasPermission("operations", "triage")');
   });
 
-  it("requires the Control Tower triage permission at both replay endpoints", () => {
+  it("shows durable replay outcomes and polls while replay work is pending", () => {
+    expect(FLOW_MONITOR_SOURCE).toContain("Recent replay activity");
+    expect(FLOW_MONITOR_SOURCE).toContain('item.outcome === "queued" || item.outcome === "retrying"');
+    expect(FLOW_MONITOR_SOURCE).toContain("Live {bucketQuery.data?.rows.length.toLocaleString()");
+    expect(FLOW_MONITOR_SOURCE).toContain("normally within five minutes");
+    expect(OMS_ROUTES_SOURCE).toContain('res.setHeader("Cache-Control", "private, no-store")');
+  });
+
+  it("requires the Control Tower triage permission at every replay endpoint", () => {
     expect(OMS_ROUTES_SOURCE).toMatch(
       /webhook-inbox\/:id\/replay"[\s\S]{0,160}requirePermission\("operations", "triage"\)/,
     );
     expect(OMS_ROUTES_SOURCE).toMatch(
       /webhook-retry\/:id\/requeue"[\s\S]{0,160}requirePermission\("operations", "triage"\)/,
+    );
+    expect(OMS_ROUTES_SOURCE).toMatch(
+      /reconciliation\/remediate"[\s\S]{0,160}requirePermission\("operations", "triage"\)/,
     );
   });
 });

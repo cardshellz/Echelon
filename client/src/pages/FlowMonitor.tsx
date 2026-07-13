@@ -185,12 +185,33 @@ interface FlowIssueSnapshot {
 interface FlowBucketResponse {
   code: string;
   rows: Array<Record<string, unknown>>;
+  replayActivity?: FlowReplayActivity[];
+}
+
+type FlowReplayOutcome = "queued" | "retrying" | "succeeded" | "failed" | "unresolved" | "unknown";
+
+interface FlowReplayActivity {
+  oms_order_id: number | string;
+  order_number: string | null;
+  retry_id: number;
+  source_inbox_id: number | null;
+  queue_status: string | null;
+  outcome: FlowReplayOutcome;
+  attempts: number;
+  last_error: string | null;
+  requested_at: string;
+  updated_at: string | null;
+  next_retry_at: string | null;
+  wms_order_id: number | null;
+  warehouse_status: string | null;
 }
 
 interface FlowReplayResponse {
-  retryQueueId: number;
-  provider: string;
-  topic: string;
+  retryQueueId: number | null;
+  provider?: string | null;
+  topic?: string | null;
+  changed?: boolean;
+  action?: string;
 }
 
 interface FlowOverviewResponse {
@@ -396,6 +417,59 @@ function formatFlowRecordValue(key: string, value: unknown): string {
     if (!Number.isNaN(timestamp.getTime())) return timestamp.toLocaleString();
   }
   return text;
+}
+
+function replayActivityKey(value: unknown): string | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? String(parsed) : null;
+}
+
+function replayOutcomeLabel(outcome: FlowReplayOutcome): string {
+  if (outcome === "queued") return "Queued";
+  if (outcome === "retrying") return "Retrying";
+  if (outcome === "succeeded") return "Reached WMS";
+  if (outcome === "failed") return "Replay failed";
+  if (outcome === "unresolved") return "Still blocked";
+  return "Status unavailable";
+}
+
+function replayOutcomeClass(outcome: FlowReplayOutcome): string {
+  if (outcome === "succeeded") return "border-emerald-300 bg-emerald-50 text-emerald-800";
+  if (outcome === "queued") return "border-blue-300 bg-blue-50 text-blue-800";
+  if (outcome === "retrying") return "border-amber-300 bg-amber-50 text-amber-800";
+  if (outcome === "failed" || outcome === "unresolved") return "border-red-300 bg-red-50 text-red-800";
+  return "border-slate-300 bg-slate-50 text-slate-700";
+}
+
+function replayOutcomeIcon(outcome: FlowReplayOutcome) {
+  if (outcome === "succeeded") return <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />;
+  if (outcome === "queued" || outcome === "retrying") {
+    return <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />;
+  }
+  return <AlertCircle className="mr-1.5 h-3.5 w-3.5" />;
+}
+
+function replayOutcomeDescription(activity: FlowReplayActivity): string {
+  if (activity.outcome === "queued") {
+    return "Waiting for the retry worker to process the paid event.";
+  }
+  if (activity.outcome === "retrying") {
+    return activity.next_retry_at
+      ? `Attempt ${activity.attempts} failed. Next attempt ${formatTimestamp(activity.next_retry_at)}.`
+      : `Attempt ${activity.attempts} failed and will be retried.`;
+  }
+  if (activity.outcome === "succeeded") {
+    const warehouse = activity.wms_order_id ? `WMS order ${activity.wms_order_id}` : "A WMS order";
+    const status = activity.warehouse_status ? ` is ${humanize(activity.warehouse_status).toLowerCase()}` : " was created";
+    return `${warehouse}${status}.`;
+  }
+  if (activity.outcome === "failed") {
+    return activity.last_error || "The retry exhausted its attempts without reaching WMS.";
+  }
+  if (activity.outcome === "unresolved") {
+    return "The paid event finished processing, but the order still has no WMS order. Do not replay it again without investigating.";
+  }
+  return "The replay audit exists, but its queue record could not be resolved.";
 }
 
 function localDateTimeValue(date: Date): string {
@@ -1052,18 +1126,39 @@ function FlowOverview(props: {
     ),
     enabled: selectedIssueCode !== null && selectedStage !== null && snapshot !== null,
     staleTime: 60_000,
+    refetchInterval: (query) => {
+      const activity = (query.state.data as FlowBucketResponse | undefined)?.replayActivity ?? [];
+      return activity.some((item) => item.outcome === "queued" || item.outcome === "retrying")
+        ? 5_000
+        : false;
+    },
   });
+
+  const replayActivity = bucketQuery.data?.replayActivity ?? [];
+  const replayActivityByOrderId = useMemo(() => {
+    const indexed = new Map<string, FlowReplayActivity>();
+    for (const activity of replayActivity) {
+      const key = replayActivityKey(activity.oms_order_id);
+      if (key) indexed.set(key, activity);
+    }
+    return indexed;
+  }, [replayActivity]);
 
   const replayMutation = useMutation({
     mutationFn: async (action: FlowReplayAction) => {
-      const response = await apiRequest("POST", action.endpoint);
+      const response = await apiRequest("POST", action.endpoint, action.body);
       const result = await response.json() as FlowReplayResponse;
       return { action, result };
     },
     onSuccess: async ({ action, result }) => {
+      const retryDescription = result.provider && result.topic && result.retryQueueId
+        ? `${result.provider}/${result.topic} retry #${result.retryQueueId}`
+        : humanize(result.action || "replay not queued");
       toast({
-        title: action.successTitle,
-        description: `${result.provider}/${result.topic} retry #${result.retryQueueId}`,
+        title: result.changed === false
+          ? result.retryQueueId ? "Replay already queued" : "Replay not needed"
+          : action.successTitle,
+        description: retryDescription,
       });
       await bucketQuery.refetch();
     },
@@ -1174,7 +1269,7 @@ function FlowOverview(props: {
             <DialogTitle>{selectedStage?.label} exceptions</DialogTitle>
             <DialogDescription>
               {selectedStage
-                ? `${selectedStage.issues.length.toLocaleString()} root cause${selectedStage.issues.length === 1 ? "" : "s"} · ${selectedStage.monitorMatches.toLocaleString()} monitor matches in the last ${snapshot?.windowDays ?? 30} days`
+                ? `${selectedStage.issues.length.toLocaleString()} root cause${selectedStage.issues.length === 1 ? "" : "s"} · ${selectedStage.monitorMatches.toLocaleString()} snapshot matches in the last ${snapshot?.windowDays ?? 30} days`
                 : "Order-flow exceptions"}
             </DialogDescription>
           </DialogHeader>
@@ -1218,13 +1313,54 @@ function FlowOverview(props: {
                     </div>
                   </section>
 
+                  {replayActivity.length > 0 && (
+                    <section className="border-t pt-4">
+                      <div className="mb-3">
+                        <div className="text-xs font-semibold uppercase text-muted-foreground">Recent replay activity</div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Queue and WMS outcomes update automatically while work is pending.
+                        </p>
+                      </div>
+                      <div className="divide-y border-y">
+                        {replayActivity.map((activity) => (
+                          <div key={activity.retry_id} className="py-3">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium">
+                                  {activity.order_number || `OMS order ${activity.oms_order_id}`}
+                                </div>
+                                <div className="mt-1 text-xs text-muted-foreground">
+                                  Retry {activity.retry_id} requested {formatTimestamp(activity.requested_at)}
+                                </div>
+                              </div>
+                              <Badge variant="outline" className={cn("w-fit", replayOutcomeClass(activity.outcome))}>
+                                {replayOutcomeIcon(activity.outcome)}
+                                {replayOutcomeLabel(activity.outcome)}
+                              </Badge>
+                            </div>
+                            <p className={cn(
+                              "mt-2 text-xs",
+                              activity.outcome === "failed" || activity.outcome === "unresolved"
+                                ? "text-red-800"
+                                : "text-muted-foreground",
+                            )}>
+                              {replayOutcomeDescription(activity)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
                   <section className="border-t pt-4">
                     <div className="mb-3 flex items-center justify-between gap-3">
                       <div>
                         <div className="text-xs font-semibold uppercase text-muted-foreground">Current evidence</div>
                         <p className="mt-1 text-xs text-muted-foreground">Up to 50 current records from this exact monitor condition.</p>
                       </div>
-                      <span className="text-xs tabular-nums text-muted-foreground">Snapshot count {selectedIssue.count.toLocaleString()}</span>
+                      <span className="text-right text-xs tabular-nums text-muted-foreground">
+                        Live {bucketQuery.data?.rows.length.toLocaleString() ?? "-"} · snapshot {selectedIssue.count.toLocaleString()}
+                      </span>
                     </div>
 
                     {bucketQuery.isLoading ? (
@@ -1238,8 +1374,17 @@ function FlowOverview(props: {
                       <div className="divide-y border-y">
                         {bucketQuery.data.rows.map((row, index) => {
                           const orderReference = flowOrderReference(row);
+                          const replayStatus = replayActivityByOrderId.get(
+                            replayActivityKey(row.oms_order_id) ?? "",
+                          ) ?? null;
                           const replayAction = props.canReplay
-                            ? resolveFlowReplayAction(selectedIssue, row)
+                            ? resolveFlowReplayAction(selectedIssue, replayStatus
+                              ? {
+                                  ...row,
+                                  _replay_outcome: replayStatus.outcome,
+                                  _replay_retry_id: replayStatus.retry_id,
+                                }
+                              : row)
                             : null;
                           const replayingThisRow = replayMutation.isPending
                             && replayMutation.variables?.kind === replayAction?.kind
@@ -1247,6 +1392,7 @@ function FlowOverview(props: {
                           const fields = Object.entries(row).filter(([key, value]) => (
                             value !== null
                             && value !== undefined
+                            && !key.startsWith("_")
                             && !["order_number", "external_order_number", "channel_order_number"].includes(key)
                           ));
                           return (
@@ -1254,6 +1400,12 @@ function FlowOverview(props: {
                               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                 <div className="min-w-0 truncate text-sm font-medium">{flowRecordTitle(row, index)}</div>
                                 <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
+                                  {replayStatus && (
+                                    <Badge variant="outline" className={replayOutcomeClass(replayStatus.outcome)}>
+                                      {replayOutcomeIcon(replayStatus.outcome)}
+                                      {replayOutcomeLabel(replayStatus.outcome)}
+                                    </Badge>
+                                  )}
                                   {replayAction && (
                                     <Button
                                       variant="outline"
@@ -1288,7 +1440,8 @@ function FlowOverview(props: {
                       </div>
                     ) : (
                       <div className="border bg-muted/20 p-4 text-sm text-muted-foreground">
-                        No rows currently match. The background snapshot may be older than the live evidence query.
+                        No records currently match this condition. Successful replays have cleared from the live list;
+                        the snapshot count updates on the next background refresh, normally within five minutes.
                       </div>
                     )}
                   </section>
