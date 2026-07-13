@@ -419,37 +419,45 @@ export function createOmsService(db: any, reservationService?: any) {
           : undefined;
 
         if (existingLine) {
-          const authority = buildLineAuthorityState(data, item, existingLine);
           await db.transaction(async (tx: any) => {
+            const [lockedLine] = await tx
+              .select()
+              .from(omsOrderLines)
+              .where(eq(omsOrderLines.id, existingLine.id))
+              .for("update")
+              .limit(1);
+            const previousAuthority = lockedLine ?? existingLine;
+            const authority = buildLineAuthorityState(data, item, previousAuthority);
+
             await tx
               .update(omsOrderLines)
               .set({
-                productVariantId: productVariantId ?? existingLine.productVariantId,
-                externalProductId: item.externalProductId ?? existingLine.externalProductId ?? null,
-                sku: item.sku ?? existingLine.sku,
-                title: item.title ?? existingLine.title,
-                name: item.name ?? existingLine.name ?? item.title ?? null,
-                variantTitle: item.variantTitle ?? existingLine.variantTitle,
+                productVariantId: productVariantId ?? previousAuthority.productVariantId,
+                externalProductId: item.externalProductId ?? previousAuthority.externalProductId ?? null,
+                sku: item.sku ?? previousAuthority.sku,
+                title: item.title ?? previousAuthority.title,
+                name: item.name ?? previousAuthority.name ?? item.title ?? null,
+                variantTitle: item.variantTitle ?? previousAuthority.variantTitle,
                 quantity: item.quantity,
                 ...authorityValues(authority),
-                paidPriceCents: item.paidPriceCents ?? existingLine.paidPriceCents ?? 0,
-                retailPriceCents: item.retailPriceCents ?? existingLine.retailPriceCents ?? 0,
-                totalPriceCents: item.totalCents ?? existingLine.totalPriceCents ?? 0,
-                totalDiscountCents: item.discountCents ?? existingLine.totalDiscountCents ?? 0,
-                planDiscountCents: item.planDiscountCents ?? existingLine.planDiscountCents ?? 0,
-                couponDiscountCents: item.couponDiscountCents ?? existingLine.couponDiscountCents ?? 0,
-                taxable: item.taxable ?? existingLine.taxable ?? true,
-                requiresShipping: item.requiresShipping ?? existingLine.requiresShipping ?? true,
-                fulfillableQuantity: item.fulfillableQuantity ?? existingLine.fulfillableQuantity ?? null,
-                fulfillmentService: item.fulfillmentService ?? existingLine.fulfillmentService ?? null,
-                fulfillmentProvider: item.fulfillmentProvider ?? existingLine.fulfillmentProvider ?? null,
-                providerFulfillmentOrderId: item.providerFulfillmentOrderId ?? existingLine.providerFulfillmentOrderId ?? null,
-                providerFulfillmentOrderLineItemId: item.providerFulfillmentOrderLineItemId ?? existingLine.providerFulfillmentOrderLineItemId ?? null,
-                properties: item.properties ?? existingLine.properties ?? null,
-                compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice ?? existingLine.compareAtPriceCents,
-                taxLines: item.taxLines ?? existingLine.taxLines ?? null,
-                discountAllocations: item.discountAllocations ?? existingLine.discountAllocations ?? null,
-                orderNumber: data.externalOrderNumber || existingLine.orderNumber || null,
+                paidPriceCents: item.paidPriceCents ?? previousAuthority.paidPriceCents ?? 0,
+                retailPriceCents: item.retailPriceCents ?? previousAuthority.retailPriceCents ?? 0,
+                totalPriceCents: item.totalCents ?? previousAuthority.totalPriceCents ?? 0,
+                totalDiscountCents: item.discountCents ?? previousAuthority.totalDiscountCents ?? 0,
+                planDiscountCents: item.planDiscountCents ?? previousAuthority.planDiscountCents ?? 0,
+                couponDiscountCents: item.couponDiscountCents ?? previousAuthority.couponDiscountCents ?? 0,
+                taxable: item.taxable ?? previousAuthority.taxable ?? true,
+                requiresShipping: item.requiresShipping ?? previousAuthority.requiresShipping ?? true,
+                fulfillableQuantity: item.fulfillableQuantity ?? previousAuthority.fulfillableQuantity ?? null,
+                fulfillmentService: item.fulfillmentService ?? previousAuthority.fulfillmentService ?? null,
+                fulfillmentProvider: item.fulfillmentProvider ?? previousAuthority.fulfillmentProvider ?? null,
+                providerFulfillmentOrderId: item.providerFulfillmentOrderId ?? previousAuthority.providerFulfillmentOrderId ?? null,
+                providerFulfillmentOrderLineItemId: item.providerFulfillmentOrderLineItemId ?? previousAuthority.providerFulfillmentOrderLineItemId ?? null,
+                properties: item.properties ?? previousAuthority.properties ?? null,
+                compareAtPriceCents: item.compareAtPriceCents ?? variantCompareAtPrice ?? previousAuthority.compareAtPriceCents,
+                taxLines: item.taxLines ?? previousAuthority.taxLines ?? null,
+                discountAllocations: item.discountAllocations ?? previousAuthority.discountAllocations ?? null,
+                orderNumber: data.externalOrderNumber || previousAuthority.orderNumber || null,
                 updatedAt: new Date(),
               })
               .where(eq(omsOrderLines.id, existingLine.id));
@@ -460,7 +468,7 @@ export function createOmsService(db: any, reservationService?: any) {
               orderLineId: existingLine.id,
               eventType: "line_updated",
               sourceEventId: data.sourceEventId ?? null,
-              previous: existingLine,
+              previous: previousAuthority,
               authority,
             });
           });
