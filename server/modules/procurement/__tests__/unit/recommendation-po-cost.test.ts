@@ -54,6 +54,19 @@ describe("resolveRecommendationPoCost", () => {
     });
   });
 
+  it("accepts an explicit zero-dollar supplier cost", () => {
+    expect(resolveRecommendationPoCost({
+      estimatedCostMills: 0,
+      estimatedCostCents: 0,
+      orderQtyPieces: 100,
+    })).toEqual({
+      unitCostMills: 0,
+      unitCostCents: 0,
+      totalProductCostCents: 0,
+      lineTotalCents: 0,
+    });
+  });
+
   it("rejects a stale cent mirror instead of silently persisting inconsistent money", () => {
     expect(() => resolveRecommendationPoCost({
       estimatedCostMills: 50,
@@ -64,7 +77,7 @@ describe("resolveRecommendationPoCost", () => {
 
   it.each([
     { estimatedCostMills: null, estimatedCostCents: null, orderQtyPieces: 1 },
-    { estimatedCostMills: 0, estimatedCostCents: 0, orderQtyPieces: 1 },
+    { estimatedCostMills: -1, estimatedCostCents: 0, orderQtyPieces: 1 },
     { estimatedCostMills: 50, estimatedCostCents: 1, orderQtyPieces: 0 },
     { estimatedCostMills: 50.5, estimatedCostCents: 1, orderQtyPieces: 1 },
   ])("rejects missing or unsafe cost input %#", (input) => {

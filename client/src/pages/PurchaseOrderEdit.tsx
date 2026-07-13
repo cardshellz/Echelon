@@ -94,6 +94,26 @@ import {
   type AddToCatalogDecision,
   type CatalogCandidate,
 } from "@/features/po-edit/AddToCatalogDialog";
+import {
+  PoLinePricingEditor,
+  createEmptyPoLinePricingDraft,
+  createPerPiecePricingDraft,
+  createVendorCatalogPricingDraft,
+  evaluatePoLinePricingDraft,
+  formatVendorCatalogQuote,
+  isVendorCatalogQuoteReusable,
+  vendorCatalogQuoteStatus,
+  type PoLinePricingEditorDraft,
+} from "@/features/po-edit/PoLinePricingEditor";
+import {
+  PoLineQuoteMetadataEditor,
+  evaluatePoLineQuoteMetadataDraft,
+  type PoLineQuoteMetadataDraft,
+} from "@/features/po-edit/PoLineQuoteMetadataEditor";
+import {
+  canUseFullPurchaseOrderEditor,
+  isImmutableRecommendationPurchaseOrder,
+} from "@/features/po-edit/purchase-order-editability";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -122,6 +142,8 @@ type ProductLite = {
   variants?: ProductVariantLite[];
 };
 
+type PricingSource = "legacy" | "manual" | "vendor_catalog" | "recommendation";
+
 type LineDraft = {
   // Stable database identity for a line loaded from an existing draft.
   // New client-only lines remain null until the draft update returns their ids.
@@ -143,6 +165,21 @@ type LineDraft = {
   productName: string;
   sku: string | null;
   orderQty: number;
+  // The vendor quote in the form in which it was issued. Product quantity,
+  // normalized per-piece cost, and exact product total are all derived from
+  // this draft. Non-product lines intentionally leave it null and retain
+  // their existing signed-money behavior.
+  pricingDraft: PoLinePricingEditorDraft | null;
+  // Existing legacy_unknown lines expose a convenience pricing draft without
+  // changing their persisted provenance on an unrelated save. This flips to
+  // true only for stored explicit pricing or after the operator edits/confirms
+  // the quote.
+  hasExplicitPricing: boolean;
+  preserveLegacyPricing: boolean;
+  pricingSource: PricingSource | null;
+  quoteReference: string | null;
+  quotedAt: string | null;
+  quoteValidUntil: string | null;
   // Per-unit cost in mills (1/10000 of a dollar). Computed-derived for
   // product lines (from totalProductCostCents / qty). Still source of
   // truth for non-product lines (fee, discount, etc.).
@@ -166,6 +203,7 @@ type CatalogSearchResponse = {
     vendorProductId: number;
     productId: number;
     productVariantId: number | null;
+    receiveUnitsPerVariant: number | null;
     sku: string | null;
     productName: string;
     variantName: string | null;
@@ -173,6 +211,13 @@ type CatalogSearchResponse = {
     vendorProductName: string | null;
     unitCostCents: number;
     unitCostMills: number;
+    pricingBasis?: string | null;
+    purchaseUom?: string | null;
+    piecesPerPurchaseUom?: number | null;
+    quotedUnitCostMills?: number | null;
+    quoteReference?: string | null;
+    quotedAt?: string | null;
+    quoteValidUntil?: string | null;
     packSize: number | null;
     moq: number | null;
     leadTimeDays: number | null;
@@ -201,7 +246,18 @@ type PreloadResponse = {
     suggestedQty: number;
     unitCostCents: number;
     unitCostMills?: number;
+    pricingBasis?: string | null;
+    purchaseUom?: string | null;
+    piecesPerPurchaseUom?: number | null;
+    quotedUnitCostMills?: number | null;
+    quoteReference?: string | null;
+    quotedAt?: string | null;
+    quoteValidUntil?: string | null;
     catalogSource: string;
+    // Optional for compatibility with older preload responses. A catalog
+    // quote is trusted as vendor_catalog provenance only when its row id is
+    // present; otherwise the original quote basis is still shown as manual.
+    vendorProductId?: number | null;
   }>;
   sourcePo: { poNumber: string; note: string } | null;
 };
@@ -510,7 +566,265 @@ function newClientId(): string {
   return `ln-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function centsToExactDollarString(cents: number): string {
+  const safeCents = Number.isSafeInteger(cents) && cents >= 0 ? cents : 0;
+  const whole = Math.floor(safeCents / 100);
+  const fraction = safeCents % 100;
+  return `${whole}.${String(fraction).padStart(2, "0")}`;
+}
+
+function optionalPositiveIntegerString(value: unknown): string {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? String(parsed) : "";
+}
+
+function optionalNonnegativeMillsString(value: unknown): string {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0
+    ? millsToDollarString(parsed)
+    : "";
+}
+
+function optionalNonnegativeCentsString(value: unknown): string {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0
+    ? centsToExactDollarString(parsed)
+    : "";
+}
+
+function pricingDraftFromStoredLine(
+  line: any,
+  orderQty: number,
+  fallbackUnitCostMills: number,
+): PoLinePricingEditorDraft {
+  switch (line?.pricingBasis) {
+    case "per_piece":
+      return createEmptyPoLinePricingDraft({
+        basis: "per_piece",
+        quantityPieces: optionalPositiveIntegerString(orderQty),
+        unitPriceDollars: optionalNonnegativeMillsString(line.quotedUnitCostMills),
+      });
+    case "per_purchase_uom":
+      return createEmptyPoLinePricingDraft({
+        basis: "per_purchase_uom",
+        purchaseUom: typeof line.purchaseUom === "string" ? line.purchaseUom : "",
+        uomQuantity: optionalPositiveIntegerString(line.purchaseUomQuantity),
+        piecesPerUom: optionalPositiveIntegerString(line.piecesPerPurchaseUom),
+        pricePerUomDollars: optionalNonnegativeMillsString(line.quotedUnitCostMills),
+      });
+    case "extended_total":
+      return createEmptyPoLinePricingDraft({
+        basis: "extended_total",
+        quantityPieces: optionalPositiveIntegerString(orderQty),
+        quotedTotalDollars: optionalNonnegativeCentsString(line.quotedTotalCents),
+      });
+    default:
+      // A legacy_unknown product line has no original quote provenance to
+      // reconstruct. Present its current normalized unit cost as an explicit
+      // per-piece convenience draft; it is persisted only after the operator
+      // edits or confirms it and then submits the PO.
+      return createPerPiecePricingDraft(
+        Number.isSafeInteger(orderQty) && orderQty > 0 ? orderQty : 1,
+        Number.isSafeInteger(fallbackUnitCostMills) && fallbackUnitCostMills >= 0
+          ? fallbackUnitCostMills
+          : 0,
+      );
+  }
+}
+
+function pricingSourceFromStoredLine(value: unknown): PricingSource {
+  return value === "manual" ||
+    value === "vendor_catalog" ||
+    value === "recommendation" ||
+    value === "legacy"
+    ? value
+    : "legacy";
+}
+
+function pricingBasisLabel(basis: PoLinePricingEditorDraft["basis"]): string {
+  if (basis === "per_purchase_uom") return "Case / pack quote";
+  if (basis === "extended_total") return "Extended quote";
+  return "Per-item quote";
+}
+
+function pricingSourceLabel(source: PricingSource | null): string {
+  if (source === "vendor_catalog") return "Vendor catalog";
+  if (source === "recommendation") return "Purchasing recommendation";
+  if (source === "legacy") return "Legacy line";
+  return "Manual vendor quote";
+}
+
+export function isExplicitVendorQuoteBasis(value: unknown): boolean {
+  return value === "per_piece" ||
+    value === "per_purchase_uom" ||
+    value === "extended_total";
+}
+
+export function quoteMetadataOnlyLinePatch(
+  line: { hasExplicitPricing: boolean },
+  metadata: Pick<LineDraft, "quoteReference" | "quotedAt" | "quoteValidUntil">,
+): Partial<LineDraft> {
+  return {
+    ...metadata,
+    // Changing quote metadata on explicit pricing is an operator edit, but it
+    // must never turn inferred legacy economics into an explicit quote.
+    ...(line.hasExplicitPricing ? { pricingSource: "manual" as const } : {}),
+  };
+}
+
+export function poLineQuoteMetadataDraft(
+  line: Pick<LineDraft, "quoteReference" | "quotedAt" | "quoteValidUntil">,
+): PoLineQuoteMetadataDraft {
+  return {
+    quoteReference: line.quoteReference ?? "",
+    quotedAt: line.quotedAt ? String(line.quotedAt).slice(0, 10) : "",
+    quoteValidUntil: line.quoteValidUntil
+      ? String(line.quoteValidUntil).slice(0, 10)
+      : "",
+  };
+}
+
+export function poLineQuoteMetadataError(
+  line: Pick<LineDraft, "quoteReference" | "quotedAt" | "quoteValidUntil">,
+): string | null {
+  return evaluatePoLineQuoteMetadataDraft(poLineQuoteMetadataDraft(line)).error;
+}
+
+export function quoteMetadataEditorLinePatch(
+  line: Pick<
+    LineDraft,
+    "hasExplicitPricing" | "quoteReference" | "quotedAt" | "quoteValidUntil"
+  >,
+  next: PoLineQuoteMetadataDraft,
+): Partial<LineDraft> {
+  const current = poLineQuoteMetadataDraft(line);
+  return quoteMetadataOnlyLinePatch(line, {
+    quoteReference: next.quoteReference !== current.quoteReference
+      ? next.quoteReference || null
+      : line.quoteReference,
+    // Preserve an untouched timestamp exactly; date inputs intentionally carry
+    // only a calendar date and must not truncate provenance on another edit.
+    quotedAt: next.quotedAt !== current.quotedAt
+      ? (next.quotedAt ? `${next.quotedAt}T00:00:00.000Z` : null)
+      : line.quotedAt,
+    quoteValidUntil: next.quoteValidUntil !== current.quoteValidUntil
+      ? next.quoteValidUntil || null
+      : line.quoteValidUntil,
+  });
+}
+
+export function catalogReceiveConfiguration(row: {
+  productVariantId?: number | null;
+  receiveUnitsPerVariant?: number | null;
+}): Pick<
+  LineDraft,
+  "productVariantId" | "expectedReceiveVariantId" | "expectedReceiveUnitsPerVariant"
+> {
+  const variantId = Number(row.productVariantId);
+  const validVariantId = Number.isSafeInteger(variantId) && variantId > 0
+    ? variantId
+    : null;
+  const units = Number(row.receiveUnitsPerVariant);
+  const validUnits = Number.isSafeInteger(units) && units > 0 ? units : null;
+  return {
+    productVariantId: validVariantId,
+    expectedReceiveVariantId: validVariantId,
+    expectedReceiveUnitsPerVariant: validVariantId === null ? null : validUnits,
+  };
+}
+
+export function resolvePreloadCatalogPricingIdentity(line: {
+  catalogSource?: string | null;
+  pricingBasis?: string | null;
+  vendorProductId?: number | null;
+  quotedAt?: string | Date | null;
+  quoteValidUntil?: string | null;
+}): {
+  hasReusableCatalogPricing: boolean;
+  vendorProductId: number | null;
+  pricingSource: "manual" | "vendor_catalog";
+} {
+  const hasReusableCatalogPricing =
+    line.catalogSource === "vendor_catalog" &&
+    isVendorCatalogQuoteReusable(line);
+  const vendorProductId = Number(line.vendorProductId);
+  const trustedVendorProductId =
+    Number.isSafeInteger(vendorProductId) && vendorProductId > 0
+      ? vendorProductId
+      : null;
+  return {
+    hasReusableCatalogPricing,
+    vendorProductId: trustedVendorProductId,
+    pricingSource:
+      hasReusableCatalogPricing && trustedVendorProductId !== null
+        ? "vendor_catalog"
+        : "manual",
+  };
+}
+
+export function applyCatalogUpsertMatchesToLines(
+  sourceLines: LineDraft[],
+  candidates: CatalogCandidate[],
+  upsertedCandidates: CatalogCandidate[],
+  result: { created?: any[]; updated?: any[] } | null | undefined,
+): LineDraft[] {
+  const upsertedClientIds = new Set(upsertedCandidates.map((candidate) => candidate.clientId));
+  const returnedRows = [
+    ...(Array.isArray(result?.created) ? result.created : []),
+    ...(Array.isArray(result?.updated) ? result.updated : []),
+  ];
+  return sourceLines.map((line) => {
+    if (!upsertedClientIds.has(line.clientId)) return line;
+    const candidate = candidates.find((item) => item.clientId === line.clientId);
+    const match = returnedRows.find(
+      (row: any) =>
+        Number(row?.productId) === Number(candidate?.productId ?? line.productId) &&
+        (row?.productVariantId ?? null) ===
+          (candidate?.productVariantId ?? line.expectedReceiveVariantId ?? line.productVariantId ?? null),
+    );
+    const vendorProductId = Number(match?.vendorProductId);
+    if (!Number.isSafeInteger(vendorProductId) || vendorProductId <= 0) {
+      // A successful bulk response must identify the reusable catalog row.
+      // Keep the line manual if an older/incomplete server omits that id; this
+      // avoids asserting vendor_catalog provenance without a verifiable link.
+      return {
+        ...line,
+        catalogOriginallyAbsent: false,
+        vendorProductId: null,
+        pricingSource: "manual",
+      };
+    }
+    return {
+      ...line,
+      catalogOriginallyAbsent: false,
+      vendorProductId,
+      pricingSource: "vendor_catalog",
+    };
+  });
+}
+
+function normalizedPricingPatch(
+  pricingDraft: PoLinePricingEditorDraft,
+  pricingSource?: PricingSource,
+): Partial<LineDraft> {
+  const evaluation = evaluatePoLinePricingDraft(pricingDraft);
+  return {
+    pricingDraft,
+    hasExplicitPricing: true,
+    preserveLegacyPricing: false,
+    ...(pricingSource ? { pricingSource } : {}),
+    ...(evaluation.normalized
+      ? {
+          orderQty: evaluation.normalized.orderQty,
+          unitCostMills: evaluation.normalized.unitCostMills,
+          totalProductCostCents: evaluation.normalized.totalProductCostCents,
+        }
+      : {}),
+  };
+}
+
 function emptyLine(lineType: PoLineType = "product"): LineDraft {
+  const isProduct = lineType === "product";
   return {
     serverLineId: null,
     clientId: newClientId(),
@@ -524,6 +838,13 @@ function emptyLine(lineType: PoLineType = "product"): LineDraft {
     productName: "",
     sku: null,
     orderQty: 1,
+    pricingDraft: isProduct ? createEmptyPoLinePricingDraft() : null,
+    hasExplicitPricing: false,
+    preserveLegacyPricing: false,
+    pricingSource: isProduct ? "manual" : null,
+    quoteReference: null,
+    quotedAt: null,
+    quoteValidUntil: null,
     unitCostMills: 0,
     totalProductCostCents: 0,
     packagingCostCents: 0,
@@ -603,7 +924,7 @@ export default function PurchaseOrderEdit() {
   const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
   const [catalogSubmitting, setCatalogSubmitting] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
-  const catalogResolverRef = useRef<((ok: boolean) => void) | null>(null);
+  const catalogResolverRef = useRef<((resolvedLines: LineDraft[]) => void) | null>(null);
 
   // Remember the initial snapshot so we only flip dirty on real changes.
   const snapshotRef = useRef<string>("");
@@ -758,30 +1079,52 @@ export default function PurchaseOrderEdit() {
     }
     if (preload.lines?.length > 0 && lines.length === 0) {
       setLines(
-        preload.lines.map((l) => ({
-          serverLineId: null,
-          clientId: newClientId(),
-          // Preloaded lines are always product lines (the preload endpoint
-          // returns catalog suggestions, not typed non-product lines).
-          lineType: "product" as PoLineType,
-          description: "",
-          parentClientId: null,
-          productVariantId: l.productVariantId,
-          expectedReceiveVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
-          expectedReceiveUnitsPerVariant: l.expectedReceiveUnitsPerVariant ?? 1,
-          productId: l.productId,
-          productName: l.productName,
-          sku: l.sku,
-          orderQty: l.suggestedQty > 0 ? l.suggestedQty : 1,
+        preload.lines.map((l) => {
+          const orderQty = l.suggestedQty > 0 ? l.suggestedQty : 1;
           // Prefer server-provided mills; fall back to cents × 100 for
           // legacy responses that don't yet include unit_cost_mills.
-          unitCostMills:
+          const unitCostMills =
             typeof l.unitCostMills === "number"
               ? l.unitCostMills
-              : centsToMills(Number(l.unitCostCents) || 0),
-          totalProductCostCents: 0, // User enters total from invoice
-          packagingCostCents: 0,
-        })),
+              : centsToMills(Number(l.unitCostCents) || 0);
+          const {
+            vendorProductId,
+            pricingSource,
+          } = resolvePreloadCatalogPricingIdentity(l);
+          const hasExplicitCatalogPricing = isExplicitVendorQuoteBasis(l.pricingBasis);
+          // Preserve the vendor-facing basis even when an old/expired quote
+          // is downgraded to manual review. Trust and representation are two
+          // separate decisions.
+          const pricingDraft = createVendorCatalogPricingDraft({ ...l, moq: orderQty });
+          const normalized = evaluatePoLinePricingDraft(pricingDraft).normalized;
+          return {
+            serverLineId: null,
+            clientId: newClientId(),
+            // Preloaded lines are always product lines (the preload endpoint
+            // returns catalog suggestions, not typed non-product lines).
+            lineType: "product" as PoLineType,
+            description: "",
+            parentClientId: null,
+            productVariantId: l.productVariantId,
+            expectedReceiveVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
+            expectedReceiveUnitsPerVariant: l.expectedReceiveUnitsPerVariant ?? 1,
+            productId: l.productId,
+            productName: l.productName,
+            sku: l.sku,
+            orderQty: normalized?.orderQty ?? orderQty,
+            pricingDraft,
+            hasExplicitPricing: hasExplicitCatalogPricing,
+            preserveLegacyPricing: false,
+            pricingSource,
+            quoteReference: l.quoteReference ?? null,
+            quotedAt: l.quotedAt ?? null,
+            quoteValidUntil: l.quoteValidUntil ?? null,
+            unitCostMills: normalized?.unitCostMills ?? unitCostMills,
+            totalProductCostCents: normalized?.totalProductCostCents ?? 0,
+            packagingCostCents: 0,
+            vendorProductId,
+          };
+        }),
       );
     }
     if (preload.sourcePo) {
@@ -803,11 +1146,14 @@ export default function PurchaseOrderEdit() {
     },
     enabled: isEditMode && Boolean(editId),
   });
+  const immutableExistingPo = isEditMode &&
+    isImmutableRecommendationPurchaseOrder(existingPo);
 
   useEffect(() => {
     if (!existingPo) return;
-    if (existingPo.status !== "draft") {
-      // Editor only supports drafts for now. Redirect to detail.
+    if (!canUseFullPurchaseOrderEditor(existingPo)) {
+      // Non-drafts and recommendation-owned economic snapshots are managed
+      // from detail, where lifecycle actions do not require a replacement PUT.
       navigate(`/purchase-orders/${existingPo.id}`);
       return;
     }
@@ -857,6 +1203,13 @@ export default function PurchaseOrderEdit() {
           : unitCostMills > 0 && qty > 0
             ? Math.round((unitCostMills * qty) / 100)
             : 0;
+      const pricingDraft =
+        lineType === "product" ? pricingDraftFromStoredLine(l, qty, unitCostMills) : null;
+      const hasExplicitPricing =
+        lineType === "product" && isExplicitVendorQuoteBasis(l.pricingBasis);
+      const normalizedPricing = pricingDraft
+        ? evaluatePoLinePricingDraft(pricingDraft).normalized
+        : null;
       const serverLineId = Number(l.id);
       return {
         serverLineId:
@@ -875,9 +1228,28 @@ export default function PurchaseOrderEdit() {
         productId: l.productId ?? null,
         productName: l.productName ?? "",
         sku: l.sku ?? null,
-        orderQty: l.orderQty,
-        unitCostMills,
-        totalProductCostCents,
+        orderQty: hasExplicitPricing ? (normalizedPricing?.orderQty ?? l.orderQty) : l.orderQty,
+        pricingDraft: lineType === "product" ? pricingDraft : null,
+        hasExplicitPricing,
+        preserveLegacyPricing: lineType === "product" && !hasExplicitPricing,
+        pricingSource:
+          lineType === "product" ? pricingSourceFromStoredLine(l.pricingSource) : null,
+        quoteReference:
+          lineType === "product" && typeof l.quoteReference === "string"
+            ? l.quoteReference
+            : null,
+        quotedAt:
+          lineType === "product" && l.quotedAt != null ? String(l.quotedAt) : null,
+        quoteValidUntil:
+          lineType === "product" && l.quoteValidUntil != null
+            ? String(l.quoteValidUntil).slice(0, 10)
+            : null,
+        unitCostMills: hasExplicitPricing
+          ? (normalizedPricing?.unitCostMills ?? unitCostMills)
+          : unitCostMills,
+        totalProductCostCents: hasExplicitPricing
+          ? (normalizedPricing?.totalProductCostCents ?? totalProductCostCents)
+          : totalProductCostCents,
         packagingCostCents: serverPackaging,
         vendorProductId: l.vendorProductId ?? null,
         catalogOriginallyAbsent: null,
@@ -927,7 +1299,7 @@ export default function PurchaseOrderEdit() {
       const totalProduct = Number(l.totalProductCostCents) || 0;
       const packaging = Number(l.packagingCostCents) || 0;
       let lineTotal: number;
-      if (l.lineType === "product" && totalProduct > 0) {
+      if (l.lineType === "product") {
         lineTotal = totalProduct + packaging;
       } else {
         if (qty === 0 || mills === 0) continue;
@@ -992,12 +1364,22 @@ export default function PurchaseOrderEdit() {
           errors[l.clientId] = "Pick a product";
           continue;
         }
-        if (qty <= 0) {
-          errors[l.clientId] = "Quantity must be greater than 0";
+        if (!l.pricingDraft) {
+          errors[l.clientId] = "Enter the vendor quote";
           continue;
         }
-        if (mills < 0) {
-          errors[l.clientId] = "Unit cost cannot be negative";
+        if (!l.hasExplicitPricing && !l.preserveLegacyPricing) {
+          errors[l.clientId] = "Confirm the vendor quote";
+          continue;
+        }
+        const pricingEvaluation = evaluatePoLinePricingDraft(l.pricingDraft);
+        if (!pricingEvaluation.normalized) {
+          errors[l.clientId] = pricingEvaluation.error ?? "Enter a valid vendor quote";
+          continue;
+        }
+        const metadataError = poLineQuoteMetadataError(l);
+        if (metadataError) {
+          errors[l.clientId] = metadataError;
           continue;
         }
         continue;
@@ -1050,7 +1432,7 @@ export default function PurchaseOrderEdit() {
   const hasLineErrors = Object.keys(lineErrors).length > 0;
   const hasNoLines = lines.length === 0;
   const noVendor = !selectedVendor;
-  const canSave = !saving && !hasLineErrors && !hasNoLines && !noVendor;
+  const canSave = !immutableExistingPo && !saving && !hasLineErrors && !hasNoLines && !noVendor;
   const canSaveDraft = canSave && (!isEditMode || dirty);
 
   // ── Dirty nav prompt ──────────────────────────────────────────────────
@@ -1079,12 +1461,16 @@ export default function PurchaseOrderEdit() {
 
       if (l.lineType === "product") {
         if (!l.productId) return `${label}: pick a product.`;
-        if (!Number.isInteger(l.orderQty) || l.orderQty <= 0)
-          return `${label}: quantity must be a positive integer.`;
-        // Spec F Phase 1: validate total product cost instead of unit cost.
-        const totalCost = l.totalProductCostCents ?? 0;
-        if (!Number.isInteger(totalCost) || totalCost < 0)
-          return `${label}: total product cost must be zero or more.`;
+        if (!l.pricingDraft) return `${label}: enter the vendor quote.`;
+        if (!l.hasExplicitPricing && !l.preserveLegacyPricing) {
+          return `${label}: confirm the vendor quote.`;
+        }
+        const pricingEvaluation = evaluatePoLinePricingDraft(l.pricingDraft);
+        if (!pricingEvaluation.normalized) {
+          return `${label}: ${pricingEvaluation.error ?? "enter a valid vendor quote."}`;
+        }
+        const metadataError = poLineQuoteMetadataError(l);
+        if (metadataError) return `${label}: ${metadataError}`;
         continue;
       }
 
@@ -1133,7 +1519,15 @@ export default function PurchaseOrderEdit() {
     for (const l of lines) {
       if (l.catalogOriginallyAbsent !== true) continue;
       if (!l.productId) continue;
-      if (!Number.isInteger(l.unitCostMills) || l.unitCostMills < 0) continue;
+      if (!l.pricingDraft) continue;
+      const pricingEvaluation = evaluatePoLinePricingDraft(l.pricingDraft);
+      const reusablePricing = pricingEvaluation.pricing;
+      // Extended totals are quantity-specific and cannot become a reusable
+      // vendor catalog price.
+      if (!reusablePricing || reusablePricing.basis === "extended_total") {
+        continue;
+      }
+      if (!pricingEvaluation.normalized) continue;
       out.push({
         clientId: l.clientId,
         productId: l.productId,
@@ -1141,22 +1535,24 @@ export default function PurchaseOrderEdit() {
         productName: l.productName || "(unnamed)",
         sku: l.sku,
         // Dialog displays 4-decimal mills; cents derived for back-compat.
-        unitCostMills: l.unitCostMills,
-        unitCostCents: millsToCents(l.unitCostMills),
+        unitCostMills: pricingEvaluation.normalized.unitCostMills,
+        unitCostCents: pricingEvaluation.normalized.unitCostCents,
+        pricing: reusablePricing,
+        quotedAt: l.quotedAt,
       });
     }
     return out;
   }
 
-  async function maybePromptAddToCatalog(): Promise<boolean> {
-    if (!selectedVendor) return true;
+  async function maybePromptAddToCatalog(): Promise<LineDraft[]> {
+    if (!selectedVendor) return lines;
     const candidates = computeCatalogCandidates();
-    if (candidates.length === 0) return true;
+    if (candidates.length === 0) return lines;
     setCatalogCandidates(candidates);
     setCatalogError(null);
     setCatalogSubmitting(false);
     setCatalogDialogOpen(true);
-    return new Promise<boolean>((resolve) => {
+    return new Promise<LineDraft[]>((resolve) => {
       catalogResolverRef.current = resolve;
     });
   }
@@ -1165,16 +1561,15 @@ export default function PurchaseOrderEdit() {
     if (!selectedVendor) return;
     const resolver = catalogResolverRef.current;
     if (decision.action === "add-none") {
+      const resolvedLines = lines.map((line) =>
+        catalogCandidates.some((candidate) => candidate.clientId === line.clientId)
+          ? { ...line, catalogOriginallyAbsent: false }
+          : line,
+      );
+      setLines(resolvedLines);
       setCatalogDialogOpen(false);
       catalogResolverRef.current = null;
-      resolver?.(true);
-      setLines((prev) =>
-        prev.map((l) =>
-          catalogCandidates.some((c) => c.clientId === l.clientId)
-            ? { ...l, catalogOriginallyAbsent: false }
-            : l,
-        ),
-      );
+      resolver?.(resolvedLines);
       return;
     }
     const toSend: CatalogCandidate[] =
@@ -1184,30 +1579,41 @@ export default function PurchaseOrderEdit() {
             decision.selectedClientIds.includes(c.clientId),
           );
     if (toSend.length === 0) {
+      const resolvedLines = lines.map((line) =>
+        catalogCandidates.some((candidate) => candidate.clientId === line.clientId)
+          ? { ...line, catalogOriginallyAbsent: false }
+          : line,
+      );
+      setLines(resolvedLines);
       setCatalogDialogOpen(false);
       catalogResolverRef.current = null;
-      resolver?.(true);
-      setLines((prev) =>
-        prev.map((l) =>
-          catalogCandidates.some((c) => c.clientId === l.clientId)
-            ? { ...l, catalogOriginallyAbsent: false }
-            : l,
-        ),
-      );
+      resolver?.(resolvedLines);
       return;
     }
     setCatalogSubmitting(true);
     setCatalogError(null);
     try {
       const body = {
-        entries: toSend.map((c) => ({
-          productId: c.productId,
-          productVariantId: c.productVariantId,
-          // Mills is authoritative; cents is sent for back-compat. Server
-          // validator rejects the pair if they disagree.
-          unitCostMills: c.unitCostMills,
-          unitCostCents: c.unitCostCents,
-        })),
+        entries: toSend.map((c) => {
+          const sourceLine = lines.find((line) => line.clientId === c.clientId);
+          const pricingEvaluation = sourceLine?.pricingDraft
+            ? evaluatePoLinePricingDraft(sourceLine.pricingDraft)
+            : null;
+          if (
+            !pricingEvaluation?.pricing ||
+            pricingEvaluation.pricing.basis === "extended_total"
+          ) {
+            throw new Error(`${c.productName}: enter a reusable item or case/pack price.`);
+          }
+          return {
+            productId: c.productId,
+            productVariantId: c.productVariantId,
+            pricing: pricingEvaluation.pricing,
+            quoteReference: sourceLine?.quoteReference ?? null,
+            quotedAt: sourceLine?.quotedAt ?? null,
+            quoteValidUntil: sourceLine?.quoteValidUntil ?? null,
+          };
+        }),
       };
       const res = await fetch(
         `/api/vendors/${selectedVendor.id}/catalog/bulk-upsert`,
@@ -1224,29 +1630,17 @@ export default function PurchaseOrderEdit() {
       if (!res.ok) {
         throw new Error(data?.error || "Catalog upsert failed");
       }
-      const upsertedClientIds = new Set(toSend.map((c) => c.clientId));
-      setLines((prev) =>
-        prev.map((l) => {
-          if (!upsertedClientIds.has(l.clientId)) return l;
-          const match = [
-            ...(data?.created ?? []),
-            ...(data?.updated ?? []),
-          ].find(
-            (row: any) =>
-              row.productId === l.productId &&
-              (row.productVariantId ?? null) === (l.productVariantId ?? null),
-          );
-          return {
-            ...l,
-            catalogOriginallyAbsent: false,
-            vendorProductId: match?.vendorProductId ?? l.vendorProductId ?? null,
-          };
-        }),
+      const resolvedLines = applyCatalogUpsertMatchesToLines(
+        lines,
+        catalogCandidates,
+        toSend,
+        data,
       );
+      setLines(resolvedLines);
       setCatalogDialogOpen(false);
       setCatalogSubmitting(false);
       catalogResolverRef.current = null;
-      resolver?.(true);
+      resolver?.(resolvedLines);
     } catch (e: any) {
       setCatalogError(e?.message || "Catalog upsert failed");
       setCatalogSubmitting(false);
@@ -1257,7 +1651,13 @@ export default function PurchaseOrderEdit() {
 
   // ── Save ──────────────────────────────────────────────────────────────
   const saveMutation = useMutation({
-    mutationFn: async (advanceToSent: boolean) => {
+    mutationFn: async ({
+      advanceToSent,
+      linesToSave,
+    }: {
+      advanceToSent: boolean;
+      linesToSave: LineDraft[];
+    }) => {
       if (!selectedVendor) throw new Error("Vendor required");
       if (isEditMode && (!editId || !loadedVersionRef.current)) {
         throw new Error("The draft version is unavailable. Reload the PO before saving.");
@@ -1270,41 +1670,77 @@ export default function PurchaseOrderEdit() {
         incoterms: showIncotermsField ? incoterms || null : null,
         vendor_notes: vendorNotes || null,
         internal_notes: internalNotes || null,
-        lines: lines.map((l) => ({
-          line_id: l.serverLineId ?? undefined,
-          line_type: l.lineType,
-          client_id: l.clientId,
-          parent_client_id: l.parentClientId ?? null,
-          description: l.description || null,
-          // Purchasing identity is product_id + piece qty. expected_receive_*
-          // tells receiving which configuration to expect.
-          ...(l.lineType === "product"
-            ? {
-                product_id: l.productId,
-                product_variant_id: l.expectedReceiveVariantId,
-                expected_receive_variant_id: l.expectedReceiveVariantId,
-                expected_receive_units_per_variant: l.expectedReceiveUnitsPerVariant,
+        lines: linesToSave.map((l, index) => {
+          const common = {
+            line_id: l.serverLineId ?? undefined,
+            line_type: l.lineType,
+            client_id: l.clientId,
+            parent_client_id: l.parentClientId ?? null,
+            description: l.description || null,
+            vendor_product_id: l.vendorProductId ?? null,
+          };
+
+          if (l.lineType === "product") {
+            const productIdentity = {
+              product_id: l.productId,
+              expected_receive_variant_id: l.expectedReceiveVariantId,
+              expected_receive_units_per_variant: l.expectedReceiveUnitsPerVariant,
+            };
+
+            // Do not silently assign a quote basis to a legacy_unknown line
+            // during an unrelated draft edit. Its stored total-based shape is
+            // retained until the operator explicitly confirms the quote UI.
+            if (!l.hasExplicitPricing) {
+              if (!l.preserveLegacyPricing) {
+                throw new Error(`Line ${index + 1}: confirm the vendor quote.`);
               }
-            : {
-                product_id: null,
-                product_variant_id: null,
-                expected_receive_variant_id: null,
-                expected_receive_units_per_variant: null,
-              }),
-          quantity_ordered: l.orderQty,
-          // Spec F Phase 1: product lines send totals (new shape).
-          // Non-product lines continue sending unit_cost_mills (old shape).
-          ...(l.lineType === "product"
-            ? {
+              return {
+                ...common,
+                ...productIdentity,
+                quantity_ordered: l.orderQty,
                 total_product_cost_cents: l.totalProductCostCents ?? 0,
                 packaging_cost_cents: l.packagingCostCents ?? 0,
-              }
-            : {
-                unit_cost_mills: l.unitCostMills,
-                unit_cost_cents: signedMillsToCents(l.unitCostMills),
-              }),
-          vendor_product_id: l.vendorProductId ?? null,
-        })),
+              };
+            }
+
+            if (!l.pricingDraft) {
+              throw new Error(`Line ${index + 1}: enter the vendor quote.`);
+            }
+            const pricingEvaluation = evaluatePoLinePricingDraft(l.pricingDraft);
+            if (!pricingEvaluation.pricing || !pricingEvaluation.normalized) {
+              throw new Error(
+                `Line ${index + 1}: ${pricingEvaluation.error ?? "enter a valid vendor quote."}`,
+              );
+            }
+            return {
+              ...common,
+              // Purchasing identity is product_id + piece qty. The receiving
+              // fields remain independent from the vendor's purchase UOM.
+              ...productIdentity,
+              quantity_ordered: pricingEvaluation.normalized.orderQty,
+              pricing: pricingEvaluation.pricing,
+              pricingSource: l.pricingSource ?? "manual",
+              quoteReference: l.quoteReference,
+              quotedAt: l.quotedAt,
+              quoteValidUntil: l.quoteValidUntil,
+              // Packaging is an additive exact-cent amount and is not part of
+              // the supplier's product quote normalization.
+              packaging_cost_cents: l.packagingCostCents ?? 0,
+            };
+          }
+
+          // Typed non-product lines keep their existing signed legacy-money
+          // contract and never send product quote fields.
+          return {
+            ...common,
+            product_id: null,
+            expected_receive_variant_id: null,
+            expected_receive_units_per_variant: null,
+            quantity_ordered: l.orderQty,
+            unit_cost_mills: l.unitCostMills,
+            unit_cost_cents: signedMillsToCents(l.unitCostMills),
+          };
+        }),
         advance_to_sent: advanceToSent,
         ...(isEditMode ? { expected_updated_at: loadedVersionRef.current } : {}),
       };
@@ -1326,6 +1762,10 @@ export default function PurchaseOrderEdit() {
   });
 
   async function handleSaveDraft() {
+    if (immutableExistingPo) {
+      if (existingPo?.id) navigate(`/purchase-orders/${existingPo.id}`);
+      return;
+    }
     if (isEditMode && !dirty) return;
     const err = validateForSubmit();
     if (err) {
@@ -1334,15 +1774,13 @@ export default function PurchaseOrderEdit() {
     }
     setSaving(true);
     try {
-      const proceed = await maybePromptAddToCatalog();
-      if (!proceed) {
-        // User cancelled the catalog upsert or the upsert failed.
-        // Do NOT save the PO in that case.
-        return;
-      }
-      const result = await saveMutation.mutateAsync(false);
+      const linesToSave = await maybePromptAddToCatalog();
+      const result = await saveMutation.mutateAsync({
+        advanceToSent: false,
+        linesToSave,
+      });
       const po = result?.po ?? result;
-      let savedLines = lines;
+      let savedLines = linesToSave;
       if (isEditMode) {
         const serverLineIdByClientId = new Map<string, number>();
         for (const savedLine of Array.isArray(result?.lines) ? result.lines : []) {
@@ -1355,7 +1793,7 @@ export default function PurchaseOrderEdit() {
             serverLineIdByClientId.set(savedLine.clientId, lineId);
           }
         }
-        savedLines = lines.map((line) => ({
+        savedLines = linesToSave.map((line) => ({
           ...line,
           serverLineId: serverLineIdByClientId.get(line.clientId) ?? line.serverLineId,
         }));
@@ -1386,6 +1824,10 @@ export default function PurchaseOrderEdit() {
   }
 
   async function handleSaveAndSend() {
+    if (immutableExistingPo) {
+      if (existingPo?.id) navigate(`/purchase-orders/${existingPo.id}`);
+      return;
+    }
     const err = validateForSubmit();
     if (err) {
       toast({ title: "Cannot send", description: err, variant: "destructive" });
@@ -1393,11 +1835,11 @@ export default function PurchaseOrderEdit() {
     }
     setSaving(true);
     try {
-      const proceed = await maybePromptAddToCatalog();
-      if (!proceed) {
-        return;
-      }
-      const result = await saveMutation.mutateAsync(true);
+      const linesToSave = await maybePromptAddToCatalog();
+      const result = await saveMutation.mutateAsync({
+        advanceToSent: true,
+        linesToSave,
+      });
       const po = result?.po ?? result;
       if (result?.sendError) {
         toast({
@@ -1470,6 +1912,14 @@ export default function PurchaseOrderEdit() {
   }
 
   // ── Render ────────────────────────────────────────────────────────────
+  if (immutableExistingPo) {
+    return (
+      <div className="p-6 text-center text-muted-foreground">
+        Opening the preserved recommendation purchase order...
+      </div>
+    );
+  }
+
   return (
     <div className="p-4 md:p-6 space-y-4 max-w-5xl mx-auto">
       {/* Header */}
@@ -1563,6 +2013,15 @@ export default function PurchaseOrderEdit() {
                                 ...line,
                                 vendorProductId: null,
                                 catalogOriginallyAbsent: null,
+                                ...(line.lineType === "product"
+                                  ? {
+                                      pricingSource: "manual" as PricingSource,
+                                      preserveLegacyPricing: false,
+                                      quoteReference: null,
+                                      quotedAt: null,
+                                      quoteValidUntil: null,
+                                    }
+                                  : {}),
                               })),
                             );
                           }
@@ -1694,14 +2153,14 @@ export default function PurchaseOrderEdit() {
                                 SKU
                               </TableHead>
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-24 px-3 py-2.5">
-                                Qty
+                                Pieces
                               </TableHead>
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium w-36 px-3 py-2.5">
                                 Receive As
                               </TableHead>
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
-                                <div>Product Cost</div>
-                                <div className="text-[10px] font-normal text-slate-400 normal-case">$ per unit shown below</div>
+                                <div>Vendor Quote</div>
+                                <div className="text-[10px] font-normal text-slate-400 normal-case">original basis preserved</div>
                               </TableHead>
                               <TableHead className="text-xs uppercase tracking-wide text-slate-500 font-medium text-right w-36 px-3 py-2.5">
                                 <div>Packaging</div>
@@ -2242,25 +2701,27 @@ function ProductLineTableRow({
   const catalogQuery = useVendorCatalogSearch(vendorId, productSearch);
   const inCatalog = catalogQuery.data?.inCatalog ?? [];
   const outOfCatalog = catalogQuery.data?.outOfCatalog ?? [];
+  const [quotePopoverOpen, setQuotePopoverOpen] = useState(false);
+  const pricingDraft =
+    line.pricingDraft ??
+    createEmptyPoLinePricingDraft({ quantityPieces: String(line.orderQty || 1) });
+  const pricingEvaluation = evaluatePoLinePricingDraft(pricingDraft);
+  const activeNormalizedPricing = line.hasExplicitPricing
+    ? pricingEvaluation.normalized
+    : null;
 
-  // Line total in cents. For product lines (Spec F Phase 1), source of
-  // truth is totalProductCostCents + packagingCostCents (exact in cents).
-  // Falls back to mills computation for backward compat.
-  const totalProduct = Number(line.totalProductCostCents) || 0;
+  // Product economics come from the quote normalizer; packaging remains an
+  // independent exact-cent addition.
+  const totalProduct =
+    activeNormalizedPricing?.totalProductCostCents ??
+    (Number(line.totalProductCostCents) || 0);
   const packaging = Number(line.packagingCostCents) || 0;
-  const lineTotalCents =
-    totalProduct > 0
-      ? totalProduct + packaging
-      : Number(line.orderQty) > 0 && Number(line.unitCostMills) > 0
-        ? computeLineTotalCentsFromMills(
-            Number(line.unitCostMills),
-            Number(line.orderQty),
-          )
-        : 0;
+  const lineTotalCents = totalProduct + packaging;
 
   // Per-unit values (mills) for below-input microcopy.
-  const qty = Number(line.orderQty) || 0;
-  const productPerUnit = perUnitMillsFromCents(totalProduct, qty);
+  const qty = activeNormalizedPricing?.orderQty ?? (Number(line.orderQty) || 0);
+  const productPerUnit =
+    activeNormalizedPricing?.unitCostMills ?? perUnitMillsFromCents(totalProduct, qty);
   const packagingPerUnit = perUnitMillsFromCents(packaging, qty);
   const totalPerUnit = perUnitMillsFromCents(totalProduct + packaging, qty);
   const expectedReceiveUnits = Math.max(
@@ -2306,26 +2767,38 @@ function ProductLineTableRow({
                       {inCatalog.slice(0, 30).map((row) => {
                         const key = `cat-${row.vendorProductId}`;
                         const hints: string[] = [];
+                        const quoteStatus = vendorCatalogQuoteStatus(row);
                         if (row.packSize && row.packSize > 1) hints.push(`pack ${row.packSize}`);
                         if (row.moq && row.moq > 1) hints.push(`MOQ ${row.moq}`);
+                        if (quoteStatus !== "usable" && quoteStatus !== "legacy") {
+                          hints.push("quote review required");
+                        }
                         return (
                           <CommandItem
                             key={key}
                             value={key}
                             onSelect={() => {
+                              const hasReusableCatalogPricing =
+                                isVendorCatalogQuoteReusable(row);
+                              const catalogPricingDraft = createVendorCatalogPricingDraft({
+                                ...row,
+                                moq: Math.max(qty > 0 ? qty : 1, Number(row.moq) || 1),
+                              });
+                              const receiveConfiguration = catalogReceiveConfiguration(row);
                               onChange({
+                                ...normalizedPricingPatch(
+                                  catalogPricingDraft,
+                                  hasReusableCatalogPricing ? "vendor_catalog" : "manual",
+                                ),
                                 productId: row.productId,
-                                productVariantId: row.productVariantId ?? null,
-                                expectedReceiveVariantId: row.productVariantId ?? null,
-                                expectedReceiveUnitsPerVariant: row.packSize ?? 1,
+                                ...receiveConfiguration,
                                 productName: row.productName,
                                 sku: row.sku ?? null,
-                                unitCostMills:
-                                  typeof row.unitCostMills === "number"
-                                    ? row.unitCostMills
-                                    : centsToMills(row.unitCostCents),
                                 vendorProductId: row.vendorProductId,
                                 catalogOriginallyAbsent: false,
+                                quoteReference: row.quoteReference ?? null,
+                                quotedAt: row.quotedAt ?? null,
+                                quoteValidUntil: row.quoteValidUntil ?? null,
                               });
                               setPopoverOpen(false);
                               setProductSearch("");
@@ -2342,11 +2815,7 @@ function ProductLineTableRow({
                               {row.variantName ? ` · ${row.variantName}` : ""}
                             </span>
                             <span className="ml-2 text-xs tabular-nums">
-                              {formatMills(
-                                typeof row.unitCostMills === "number"
-                                  ? row.unitCostMills
-                                  : centsToMills(row.unitCostCents),
-                              )}
+                              {formatVendorCatalogQuote(row)}
                               {hints.length > 0 && (
                                 <span className="text-muted-foreground"> · {hints.join(", ")}</span>
                               )}
@@ -2366,6 +2835,9 @@ function ProductLineTableRow({
                             key={key}
                             value={key}
                             onSelect={() => {
+                              const manualPricingDraft = createEmptyPoLinePricingDraft({
+                                quantityPieces: String(qty > 0 ? qty : 1),
+                              });
                               onChange({
                                 productId: row.productId,
                                 productVariantId: row.productVariantId ?? null,
@@ -2375,6 +2847,15 @@ function ProductLineTableRow({
                                 sku: row.sku ?? null,
                                 vendorProductId: null,
                                 catalogOriginallyAbsent: vendorId ? true : null,
+                                pricingDraft: manualPricingDraft,
+                                hasExplicitPricing: false,
+                                preserveLegacyPricing: false,
+                                pricingSource: "manual",
+                                quoteReference: null,
+                                quotedAt: null,
+                                quoteValidUntil: null,
+                                unitCostMills: 0,
+                                totalProductCostCents: 0,
                               });
                               setPopoverOpen(false);
                               setProductSearch("");
@@ -2414,14 +2895,12 @@ function ProductLineTableRow({
           ) : null}
         </TableCell>
 
-        {/* Qty cell */}
-        <TableCell className="px-3 py-3">
-          <QuantityInput
-            qty={line.orderQty}
-            onChangeQty={(q) => onChange({ orderQty: q })}
-            ariaLabel={`Line ${idx + 1} quantity`}
-            className="w-full text-right font-mono tabular-nums"
-          />
+        {/* Piece quantity is derived from the quote basis. */}
+        <TableCell className="px-3 py-3 text-right">
+          <div className="font-mono text-sm tabular-nums py-2" data-testid={`line-qty-${idx}`}>
+            {qty > 0 ? qty.toLocaleString() : "—"}
+          </div>
+          <div className="text-[10px] text-slate-400">from quote</div>
         </TableCell>
 
         <TableCell className="px-3 py-3">
@@ -2437,33 +2916,93 @@ function ProductLineTableRow({
           )}
         </TableCell>
 
-        {/* Product Cost cell */}
+        {/* Vendor quote cell */}
         <TableCell className="px-3 py-3">
-          <div className="relative w-full">
-            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
-            <DollarInput
-              cents={line.totalProductCostCents ?? 0}
-              onChangeCents={(c) => {
-                const totalProductCostCents = Math.max(0, c);
-                const q = line.orderQty || 1;
-                const unitCostMills =
-                  q > 0 ? Math.round((totalProductCostCents * 100) / q) : 0;
-                onChange({ totalProductCostCents, unitCostMills });
-              }}
-              ariaLabel={`Line ${idx + 1} total product cost`}
-              className="w-full pl-6 pr-2"
-            />
-          </div>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div className="text-xs text-slate-400 text-right mt-1 tabular-nums cursor-help">
-                {formatPerUnit(productPerUnit)}/unit
+          <Popover open={quotePopoverOpen} onOpenChange={setQuotePopoverOpen}>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className={`w-full rounded-md border px-3 py-2 text-left hover:bg-slate-50 ${
+                  line.hasExplicitPricing ? "border-slate-200" : "border-amber-300 bg-amber-50/40"
+                }`}
+                aria-label={`Edit vendor quote for line ${idx + 1}`}
+              >
+                <span className="block text-xs text-slate-500">
+                  {line.hasExplicitPricing
+                    ? pricingBasisLabel(pricingDraft.basis)
+                    : line.preserveLegacyPricing
+                      ? "Legacy pricing — review"
+                      : "Enter vendor quote"}
+                </span>
+                <span className="block text-right font-mono text-sm font-medium tabular-nums">
+                  {!pricingEvaluation.normalized && !line.preserveLegacyPricing
+                    ? "—"
+                    : formatCents(totalProduct)}
+                </span>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              className="w-[min(42rem,calc(100vw-2rem))] max-h-[80vh] overflow-y-auto p-5"
+            >
+              <div className="space-y-5">
+                <div>
+                  <div className="font-semibold">Vendor quote</div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Preserve the quote exactly as the supplier issued it. Receiving configuration is separate.
+                  </p>
+                </div>
+
+                {line.preserveLegacyPricing && (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 space-y-2">
+                    <p>
+                      This legacy line has no recorded quote basis. It will remain unchanged unless you confirm or edit this pricing.
+                    </p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={!pricingEvaluation.normalized}
+                      onClick={() => onChange(normalizedPricingPatch(pricingDraft, "manual"))}
+                    >
+                      Confirm as price per item
+                    </Button>
+                  </div>
+                )}
+
+                <PoLinePricingEditor
+                  value={pricingDraft}
+                  onChange={(next) => onChange(normalizedPricingPatch(next, "manual"))}
+                  receiveConfiguration={{
+                    label: line.productName || line.sku || "Selected product",
+                    unitsPerVariant: expectedReceiveUnits,
+                  }}
+                />
+
+                <div className="border-t pt-4 space-y-3">
+                  <div className="space-y-2">
+                    <Label>Pricing source</Label>
+                    <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                      {pricingSourceLabel(line.pricingSource)}
+                    </div>
+                  </div>
+                  {line.hasExplicitPricing ? (
+                    <PoLineQuoteMetadataEditor
+                      value={poLineQuoteMetadataDraft(line)}
+                      onChange={(next) => onChange(quoteMetadataEditorLinePatch(line, next))}
+                    />
+                  ) : (
+                    <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                      Confirm the vendor quote basis and amount before adding quote reference or validity details.
+                    </p>
+                  )}
+                </div>
               </div>
-            </TooltipTrigger>
-            <TooltipContent side="top" sideOffset={4} className="text-xs">
-              Full precision: {perUnitFullPrecisionDollars(productPerUnit)}/unit
-            </TooltipContent>
-          </Tooltip>
+            </PopoverContent>
+          </Popover>
+          <div className="text-xs text-slate-400 text-right mt-1 tabular-nums">
+            {formatPerUnit(productPerUnit)}/piece
+          </div>
         </TableCell>
 
         {/* Packaging cell */}

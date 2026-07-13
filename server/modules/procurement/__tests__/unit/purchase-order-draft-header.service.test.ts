@@ -12,20 +12,33 @@ const FIXED_NOW = new Date("2026-07-11T00:30:00.000Z");
 
 function buildDb(
   currentPo: Record<string, unknown> | null,
-  options: { updateResult?: Record<string, unknown>[]; eventError?: Error } = {},
+  options: {
+    updateResult?: Record<string, unknown>[];
+    eventError?: Error;
+    recommendationHandoff?: Record<string, unknown> | null;
+  } = {},
 ) {
   const updates: Record<string, unknown>[] = [];
   const events: Record<string, unknown>[] = [];
   const lock = vi.fn().mockResolvedValue(currentPo ? [currentPo] : []);
-  const selectBuilder: any = {
-    from: vi.fn(() => selectBuilder),
-    where: vi.fn(() => selectBuilder),
-    limit: vi.fn(() => selectBuilder),
-    for: lock,
-  };
+  let selectIndex = 0;
+  const select = vi.fn(() => {
+    const index = selectIndex++;
+    const rows = index === 0
+      ? (currentPo ? [currentPo] : [])
+      : (options.recommendationHandoff ? [options.recommendationHandoff] : []);
+    const selectBuilder: any = {
+      from: vi.fn(() => selectBuilder),
+      where: vi.fn(() => selectBuilder),
+      limit: vi.fn(() => selectBuilder),
+      for: index === 0 ? lock : vi.fn().mockResolvedValue(rows),
+      then: (resolve: any, reject: any) => Promise.resolve(rows).then(resolve, reject),
+    };
+    return selectBuilder;
+  });
 
   const tx: any = {
-    select: vi.fn(() => selectBuilder),
+    select,
     update: vi.fn(() => ({
       set: vi.fn((patch: Record<string, unknown>) => {
         updates.push(patch);
@@ -85,14 +98,14 @@ describe("draft purchase order header updates", () => {
 
     expect(harness.db.transaction).toHaveBeenCalledTimes(1);
     expect(harness.lock).toHaveBeenCalledWith("update");
-    expect(harness.updates).toEqual([
-      {
-        priority: "high",
-        internalNotes: "Expedite after confirmation",
-        updatedBy: "user-9",
-        updatedAt: FIXED_NOW,
-      },
-    ]);
+    expect(harness.updates).toHaveLength(1);
+    expect(harness.updates[0]).toMatchObject({
+      priority: "high",
+      internalNotes: "Expedite after confirmation",
+      updatedBy: "user-9",
+    });
+    expect(harness.updates[0].updatedAt).toBeDefined();
+    expect(harness.updates[0].updatedAt).not.toBeInstanceOf(Date);
     expect(harness.updates[0]).not.toHaveProperty("status");
     expect(harness.updates[0]).not.toHaveProperty("totalCents");
     expect(harness.events).toEqual([
@@ -146,6 +159,35 @@ describe("draft purchase order header updates", () => {
     await expect(service.updatePO(42, { priority: "rush" }, "user-9")).rejects.toMatchObject({
       statusCode: 400,
       details: { code: "PO_NOT_EDITABLE", status: "draft", physicalStatus: "sent" },
+    } satisfies Partial<PurchasingError>);
+    expect(harness.updates).toEqual([]);
+    expect(harness.events).toEqual([]);
+  });
+
+  it("rejects header edits on a recommendation-owned draft", async () => {
+    const harness = buildDb(draftPo(), {
+      recommendationHandoff: { id: 501 },
+    });
+    const service = createPurchasingService(harness.db, {} as any);
+
+    await expect(service.updatePO(42, { priority: "rush" }, "user-9")).rejects.toMatchObject({
+      statusCode: 409,
+      details: {
+        code: "RECOMMENDATION_PO_HEADER_AMEND_BLOCKED",
+        handoffId: 501,
+      },
+    } satisfies Partial<PurchasingError>);
+    expect(harness.updates).toEqual([]);
+    expect(harness.events).toEqual([]);
+  });
+
+  it("rejects draft header edits after financial activity exists", async () => {
+    const harness = buildDb(draftPo({ invoicedTotalCents: 100 }));
+    const service = createPurchasingService(harness.db, {} as any);
+
+    await expect(service.updatePO(42, { priority: "rush" }, "user-9")).rejects.toMatchObject({
+      statusCode: 409,
+      details: { code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY" },
     } satisfies Partial<PurchasingError>);
     expect(harness.updates).toEqual([]);
     expect(harness.events).toEqual([]);

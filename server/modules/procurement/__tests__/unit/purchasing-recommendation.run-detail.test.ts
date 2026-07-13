@@ -27,6 +27,11 @@ describe("purchasing recommendation run detail", () => {
           vendor_product_id: 701,
           preferred_vendor_id: 7,
           preferred_vendor_name: "Vendor",
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 100,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         },
         {
           product_id: 2,
@@ -189,7 +194,7 @@ describe("purchasing recommendation run detail", () => {
     });
     expect(detail.actionableRecommendations[0]).toMatchObject({
       sku: "ORDER-ME",
-      suggestedOrderQty: 1,
+      suggestedOrderQty: 4,
       preferredVendorName: "Vendor",
       confidenceFactors: expect.arrayContaining([
         "Recent demand history is sufficient for velocity-based forecasting.",
@@ -202,7 +207,7 @@ describe("purchasing recommendation run detail", () => {
         avgDailyUsagePieces: 1,
         leadTimeSource: "product",
         safetyStockSource: "product",
-        orderUomSource: "variant",
+        orderUomSource: "base_piece",
       },
       reviewSignal: {
         action: "create_po",
@@ -280,6 +285,11 @@ describe("purchasing recommendation run detail", () => {
           preferred_vendor_id: 7,
           preferred_vendor_name: "Vendor",
           estimated_cost_cents: 1200,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 120000,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
           vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
         },
       ],

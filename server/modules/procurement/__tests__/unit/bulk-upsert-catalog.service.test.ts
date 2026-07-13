@@ -43,18 +43,17 @@ function buildSelectChain(returnValue: any[]) {
 }
 
 function buildMockDb(options: {
-  existingRowsPerEntry?: any[][];
-  insertReturns?: any[][];
+  executeRows?: any[][];
   updateReturns?: any[][];
   transactionThrows?: Error;
 } = {}) {
-  const existingQueue = [...(options.existingRowsPerEntry ?? [])];
-  const insertQueue = [...(options.insertReturns ?? [])];
+  const executeQueue = [...(options.executeRows ?? [])];
   const updateQueue = [...(options.updateReturns ?? [])];
 
   const tx = {
-    select: vi.fn(() => buildSelectChain(existingQueue.shift() ?? [])),
-    insert: vi.fn(() => buildInsertChain(insertQueue.shift() ?? [])),
+    execute: vi.fn(async () => ({ rows: executeQueue.shift() ?? [] })),
+    select: vi.fn(() => buildSelectChain([])),
+    insert: vi.fn(() => buildInsertChain([])),
     update: vi.fn(() => buildUpdateChain(updateQueue.shift() ?? [])),
   };
 
@@ -125,7 +124,7 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog validation", () => {
       svc.bulkUpsertVendorCatalog(0, [
         { productId: 1, unitCostCents: 100 },
       ], "u1"),
-    ).rejects.toThrow(/vendorId is required/);
+    ).rejects.toThrow(/vendorId must be a positive PostgreSQL integer/);
   });
 
   it("rejects float unitCostCents (Rule #3 guard)", async () => {
@@ -134,7 +133,7 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog validation", () => {
       svc.bulkUpsertVendorCatalog(1, [
         { productId: 1, unitCostCents: 10.5 },
       ], "u1"),
-    ).rejects.toThrow(/non-negative integer/);
+    ).rejects.toThrow(/non-negative safe integer/);
   });
 
   it("rejects negative unitCostCents", async () => {
@@ -143,12 +142,30 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog validation", () => {
       svc.bulkUpsertVendorCatalog(1, [
         { productId: 1, unitCostCents: -1 },
       ], "u1"),
-    ).rejects.toThrow(/non-negative integer/);
+    ).rejects.toThrow(/non-negative safe integer/);
+  });
+
+  it("requires a real quote date before explicit pricing becomes reusable", async () => {
+    const db = buildMockDb();
+    const svc = createPurchasingService(db as any, buildMockStorage());
+    await expect(
+      svc.bulkUpsertVendorCatalog(1, [{
+        productId: 1,
+        pricing: {
+          basis: "per_piece",
+          quantityPieces: 12,
+          unitCostMills: 10_000,
+        },
+      }], "u1"),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      details: { code: "VENDOR_CATALOG_QUOTED_AT_REQUIRED", index: 0 },
+    } satisfies Partial<PurchasingError>);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   it("404s when vendor missing", async () => {
-    const storage = buildMockStorage({ getVendorById: vi.fn().mockResolvedValue(null) });
-    const svc = createPurchasingService(buildMockDb() as any, storage);
+    const svc = createPurchasingService(buildMockDb({ executeRows: [[]] }) as any, buildMockStorage());
     await expect(
       svc.bulkUpsertVendorCatalog(999, [
         { productId: 1, unitCostCents: 100 },
@@ -162,25 +179,32 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog validation", () => {
       svc.bulkUpsertVendorCatalog(1, [
         { productId: 1.5 as any, unitCostCents: 100 },
       ], "u1"),
-    ).rejects.toThrow(/productId must be a positive integer/);
+    ).rejects.toThrow(/productId must be a positive PostgreSQL integer/);
   });
 });
 
 describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog flow", () => {
   it("inserts a new row when none exists and skips the update path", async () => {
     const db = buildMockDb({
-      existingRowsPerEntry: [[]], // one entry, no existing row
-      insertReturns: [[{
+      executeRows: [
+        [{ id: 42, active: 1 }],
+        [{ id: 1, is_active: true }],
+        [{ id: 11, product_id: 1, is_active: true }],
+        [{
         id: 100,
-        productId: 1,
-        productVariantId: 11,
-        unitCostCents: 1299,
-        packSize: 12,
+        product_id: 1,
+        product_variant_id: 11,
+        unit_cost_cents: 1299,
+        unit_cost_mills: 129900,
+        pricing_basis: "legacy_unknown",
+        pack_size: 12,
         moq: 1,
-        leadTimeDays: null,
-        isPreferred: 0,
-        vendorSku: null,
-      }]],
+        lead_time_days: null,
+        is_preferred: 0,
+        is_active: 1,
+        vendor_sku: null,
+      }],
+      ],
     });
     const svc = createPurchasingService(db as any, buildMockStorage());
     const result = await svc.bulkUpsertVendorCatalog(42, [
@@ -191,24 +215,34 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog flow", () => {
       { vendorProductId: 100, productId: 1, productVariantId: 11 },
     ]);
     expect(result.updated).toEqual([]);
-    expect(db._tx.insert).toHaveBeenCalledTimes(1);
+    expect(db._tx.execute).toHaveBeenCalledTimes(4);
+    expect(db._tx.insert).toHaveBeenCalledTimes(1); // durable audit
     expect(db._tx.update).not.toHaveBeenCalled();
   });
 
   it("updates an existing row (idempotent replay) instead of inserting duplicate", async () => {
     const db = buildMockDb({
-      existingRowsPerEntry: [[{
+      executeRows: [
+        [{ id: 42, active: 1 }],
+        [{ id: 1, is_active: true }],
+        [{ id: 11, product_id: 1, is_active: true }],
+        [],
+        [{
         id: 100,
-        vendorId: 42,
-        productId: 1,
-        productVariantId: 11,
-        unitCostCents: 1000,
-        packSize: 6,
+        vendor_id: 42,
+        product_id: 1,
+        product_variant_id: 11,
+        unit_cost_cents: 1000,
+        unit_cost_mills: 100000,
+        pricing_basis: "legacy_unknown",
+        pack_size: 6,
         moq: 1,
-        leadTimeDays: null,
-        isPreferred: 0,
-        vendorSku: null,
-      }]],
+        lead_time_days: null,
+        is_preferred: 0,
+        is_active: 1,
+        vendor_sku: null,
+      }],
+      ],
       updateReturns: [[{
         id: 100,
         productId: 1,
@@ -230,7 +264,7 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog flow", () => {
       { vendorProductId: 100, productId: 1, productVariantId: 11 },
     ]);
     expect(db._tx.update).toHaveBeenCalledTimes(1);
-    expect(db._tx.insert).not.toHaveBeenCalled();
+    expect(db._tx.insert).toHaveBeenCalledTimes(1); // durable audit
   });
 
   it("rolls back the whole batch when the transaction throws", async () => {

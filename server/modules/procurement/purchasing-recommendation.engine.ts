@@ -8,6 +8,10 @@ import {
   type PurchasingDemandForecastTrend,
   type PurchasingDemandForecastWindowDiagnostics,
 } from "./purchasing-demand-forecast.engine";
+import {
+  assessSupplierQuoteValidity,
+  RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS,
+} from "./supplier-quote-validity";
 
 export type PurchasingRecommendationStatus =
   | "stockout"
@@ -29,13 +33,23 @@ export type PurchasingRecommendationDemandQuality = PurchasingDemandForecastQual
 export type PurchasingRecommendationDemandTrend = PurchasingDemandForecastTrend;
 export type PurchasingRecommendationLeadTimeSource = "vendor_product" | "product" | "default";
 export type PurchasingRecommendationSafetyStockSource = "product" | "default";
-export type PurchasingRecommendationOrderUomSource = "variant" | "default_each";
+export type PurchasingRecommendationOrderUomSource = "supplier_quote" | "base_piece";
 export type PurchasingRecommendationSupplierCostSource =
   | "vendor_unit_cost_mills"
   | "vendor_unit_cost_cents"
   | "last_purchase_cost"
   | "missing";
-export type PurchasingRecommendationSupplierCostQuality = "current" | "stale" | "unverified" | "missing";
+export type PurchasingRecommendationSupplierCostQuality =
+  | "current"
+  | "stale"
+  | "expired"
+  | "future"
+  | "unverified"
+  | "missing";
+export type PurchasingRecommendationSupplierPricingBasis =
+  | "legacy_unknown"
+  | "per_piece"
+  | "per_purchase_uom";
 export type PurchasingRecommendationSupplierCycleSignal =
   | "open_supply_past_due"
   | "open_supply_covers_cycle"
@@ -179,9 +193,20 @@ export interface PurchasingRecommendationRawRow {
   preferred_vendor_name?: string | null;
   estimated_cost_cents?: number | string | null;
   estimated_cost_mills?: number | string | null;
+  vendor_pricing_basis?: string | null;
+  vendor_purchase_uom?: string | null;
+  vendor_quoted_unit_cost_mills?: number | string | null;
+  vendor_pieces_per_purchase_uom?: number | string | null;
+  vendor_moq?: number | string | null;
+  vendor_quote_reference?: string | null;
+  vendor_quoted_at?: string | Date | null;
+  vendor_quoted_at_date?: string | null;
+  vendor_quote_valid_until?: string | null;
   last_cost_cents?: number | string | null;
   vendor_product_last_purchased_at?: string | Date | null;
   vendor_product_updated_at?: string | Date | null;
+  recommendation_analysis_as_of?: string | Date | null;
+  recommendation_analysis_date?: string | null;
   unit_cost_cents?: number | string | null;
   forward_demand_pieces?: number | string | null;
   forward_demand_raw_pieces?: number | string | null;
@@ -269,6 +294,14 @@ export interface PurchasingRecommendationItem {
     costQuality: PurchasingRecommendationSupplierCostQuality;
     estimatedCostMills: number | null;
     estimatedCostCents: number | null;
+    pricingBasis: PurchasingRecommendationSupplierPricingBasis;
+    purchaseUom: string | null;
+    quotedUnitCostMills: number | null;
+    piecesPerPurchaseUom: number | null;
+    minimumOrderPieces: number | null;
+    quoteReference: string | null;
+    quotedAt: string | Date | null;
+    quoteValidUntil: string | null;
     lastCostCents: number | null;
     lastPurchasedAt: string | Date | null;
     vendorProductUpdatedAt: string | Date | null;
@@ -407,13 +440,6 @@ export interface PurchasingRecommendationResult {
   lookbackDays: number;
 }
 
-const HIERARCHY_LABELS: Record<number, string> = {
-  1: "Pack",
-  2: "Box",
-  3: "Case",
-  4: "Skid",
-};
-
 const DEFAULTS: PurchasingRecommendationDefaults = {
   leadTimeDays: 14,
   safetyStockDays: 7,
@@ -442,6 +468,43 @@ function asPositiveNumberOrNull(value: unknown): number | null {
 function asPositiveSafeIntegerOrNull(value: unknown): number | null {
   const parsed = asNumber(value, NaN);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function asNonnegativeSafeIntegerOrNull(value: unknown): number | null {
+  const parsed = asNumber(value, NaN);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function resolveSupplierQuoteBasis(row: PurchasingRecommendationRawRow): {
+  pricingBasis: PurchasingRecommendationSupplierPricingBasis;
+  purchaseUom: string | null;
+  quotedUnitCostMills: number | null;
+  piecesPerPurchaseUom: number | null;
+  complete: boolean;
+} {
+  const rawBasis = row.vendor_pricing_basis;
+  const pricingBasis: PurchasingRecommendationSupplierPricingBasis =
+    rawBasis === "per_piece" || rawBasis === "per_purchase_uom"
+      ? rawBasis
+      : "legacy_unknown";
+  const purchaseUom = typeof row.vendor_purchase_uom === "string" && row.vendor_purchase_uom.trim()
+    ? row.vendor_purchase_uom.trim()
+    : null;
+  const quotedUnitCostMills = asNonnegativeSafeIntegerOrNull(row.vendor_quoted_unit_cost_mills);
+  const piecesPerPurchaseUom = asPositiveSafeIntegerOrNull(row.vendor_pieces_per_purchase_uom);
+  const complete = pricingBasis === "per_piece"
+    ? purchaseUom === null && quotedUnitCostMills !== null && piecesPerPurchaseUom === null
+    : pricingBasis === "per_purchase_uom"
+      ? purchaseUom !== null && quotedUnitCostMills !== null && piecesPerPurchaseUom !== null
+      : false;
+
+  return {
+    pricingBasis,
+    purchaseUom,
+    quotedUnitCostMills,
+    piecesPerPurchaseUom,
+    complete,
+  };
 }
 
 function roundRatio(value: number): number {
@@ -650,6 +713,9 @@ function buildQualityControls(input: {
   actionable: boolean;
   hasReceiveConfiguration: boolean;
   hasSupplierCatalogBinding: boolean;
+  hasExplicitSupplierQuote: boolean;
+  supplierQuoteQuantityCompatible: boolean;
+  supplierMinimumOrderValid: boolean;
 }): PurchasingRecommendationQualityControl[] {
   const controls: PurchasingRecommendationQualityControl[] = [];
   const demandSample =
@@ -754,13 +820,32 @@ function buildQualityControls(input: {
       });
     }
 
-    if (input.costQuality === "stale") {
+    if (input.costQuality === "future") {
       controls.push({
         area: "supplier_cost",
-        severity: "review",
+        severity: "block",
+        code: "future_supplier_quote",
+        label: "Supplier quote is future-dated",
+        detail: "The preferred vendor quote is dated in the future and cannot be used for automated purchasing.",
+      });
+    } else if (input.costQuality === "expired") {
+      controls.push({
+        area: "supplier_cost",
+        severity: "block",
+        code: "expired_supplier_quote",
+        label: "Supplier quote expired",
+        detail: "The preferred vendor quote is past its explicit validity date.",
+      });
+    } else if (input.costQuality === "stale") {
+      const isQuote = input.costSource !== "last_purchase_cost";
+      controls.push({
+        area: "supplier_cost",
+        severity: isQuote ? "block" : "review",
         code: "stale_supplier_cost",
-        label: "Stale supplier cost",
-        detail: "Preferred vendor cost has not been verified in over 365 days.",
+        label: isQuote ? "Stale supplier quote" : "Stale supplier cost",
+        detail: isQuote
+          ? `Preferred vendor quote is older than the ${RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS}-day automation limit.`
+          : `Preferred vendor cost has not been verified in over ${RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS} days.`,
       });
     } else if (input.costQuality === "unverified") {
       controls.push({
@@ -790,6 +875,30 @@ function buildQualityControls(input: {
       code: "missing_supplier_catalog_binding",
       label: "Missing supplier catalog binding",
       detail: "Link an active preferred vendor-product row before automated purchasing can create a PO line.",
+    });
+  } else if (input.actionable && !input.supplierMinimumOrderValid) {
+    controls.push({
+      area: "supplier_catalog",
+      severity: "block",
+      code: "invalid_supplier_minimum_order",
+      label: "Invalid supplier minimum order",
+      detail: "The preferred supplier catalog MOQ must be a positive whole number of base pieces before automated purchasing can create a PO line.",
+    });
+  } else if (input.actionable && !input.hasExplicitSupplierQuote) {
+    controls.push({
+      area: "supplier_catalog",
+      severity: "block",
+      code: "supplier_quote_basis_unconfirmed",
+      label: "Supplier quote basis needs confirmation",
+      detail: "Confirm whether the vendor catalog price is per piece or per purchase UOM before automated purchasing can create a PO line.",
+    });
+  } else if (input.actionable && !input.supplierQuoteQuantityCompatible) {
+    controls.push({
+      area: "supplier_catalog",
+      severity: "block",
+      code: "supplier_quote_uom_quantity_mismatch",
+      label: "Recommended quantity does not fit the supplier quote UOM",
+      detail: "Adjust the recommended pieces to a whole number of the vendor's quoted purchase UOM before PO creation.",
     });
   }
 
@@ -992,7 +1101,13 @@ function buildConfidenceFactors(input: {
     if (input.costQuality === "current") {
       factors.push("Preferred vendor cost was verified recently.");
     } else if (input.costQuality === "stale") {
-      factors.push("Preferred vendor cost was last verified over 365 days ago.");
+      factors.push(input.costSource === "last_purchase_cost"
+        ? `Preferred vendor cost was last verified over ${RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS} days ago.`
+        : `Preferred vendor quote is older than ${RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS} days.`);
+    } else if (input.costQuality === "expired") {
+      factors.push("Preferred vendor quote is past its explicit validity date.");
+    } else if (input.costQuality === "future") {
+      factors.push("Preferred vendor quote is future-dated and cannot be trusted yet.");
     } else if (input.costQuality === "unverified") {
       factors.push("Preferred vendor cost age could not be verified.");
     }
@@ -1008,22 +1123,11 @@ function buildConfidenceFactors(input: {
     factors.push("Preferred vendor is missing.");
   }
 
-  if (input.orderUomSource === "default_each") {
-    factors.push("Order UOM defaults to each because no higher ordering unit is configured.");
+  if (input.orderUomSource === "base_piece") {
+    factors.push("Order quantity uses base pieces independently of the warehouse receive configuration.");
   }
 
   return factors;
-}
-
-function mostRecentDate(...values: Array<string | Date | null | undefined>): Date | null {
-  let latest: Date | null = null;
-  for (const value of values) {
-    if (!value) continue;
-    const parsed = value instanceof Date ? value : new Date(value);
-    if (Number.isNaN(parsed.getTime())) continue;
-    if (!latest || parsed.getTime() > latest.getTime()) latest = parsed;
-  }
-  return latest;
 }
 
 function parseDate(value: string | Date | null | undefined): Date | null {
@@ -1271,7 +1375,11 @@ function resolveSupplierCost(input: {
   unitCostCents: number | null;
   lastCostCents: number | null;
   lastPurchasedAt: string | Date | null;
-  vendorProductUpdatedAt: string | Date | null;
+  quotedAt: string | Date | null;
+  quotedAtDate: string | null;
+  quoteValidUntil: string | null;
+  asOf: Date;
+  currentDate: string | null;
 }): {
   estimatedCostMills: number | null;
   estimatedCostCents: number | null;
@@ -1305,18 +1413,35 @@ function resolveSupplierCost(input: {
     };
   }
 
-  const verificationDate = mostRecentDate(input.lastPurchasedAt, input.vendorProductUpdatedAt);
+  if (costSource === "vendor_unit_cost_mills" || costSource === "vendor_unit_cost_cents") {
+    const validity = assessSupplierQuoteValidity({
+      quotedAt: input.quotedAt,
+      quotedAtDate: input.quotedAtDate,
+      quoteValidUntil: input.quoteValidUntil,
+      asOf: input.asOf,
+      currentDate: input.currentDate,
+    });
+    const quoteQuality: PurchasingRecommendationSupplierCostQuality =
+      validity.status === "current" ||
+      validity.status === "stale" ||
+      validity.status === "expired" ||
+      validity.status === "future"
+        ? validity.status
+        : "unverified";
+    return { estimatedCostMills, estimatedCostCents, costSource, costQuality: quoteQuality };
+  }
+
+  const verificationDate = parseDate(input.lastPurchasedAt);
   if (!verificationDate) {
     return { estimatedCostMills, estimatedCostCents, costSource, costQuality: "unverified" };
   }
-
-  const ageMs = Date.now() - verificationDate.getTime();
-  const staleMs = 365 * 24 * 60 * 60 * 1000;
+  const ageMs = input.asOf.getTime() - verificationDate.getTime();
+  const staleMs = RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS * MS_PER_DAY;
   return {
     estimatedCostMills,
     estimatedCostCents,
     costSource,
-    costQuality: ageMs > staleMs ? "stale" : "current",
+    costQuality: ageMs < 0 ? "unverified" : ageMs > staleMs ? "stale" : "current",
   };
 }
 
@@ -1600,13 +1725,37 @@ export function generatePurchasingRecommendations(
     const adjustedReorderPoint = reorderPoint + forwardDemandPieces;
     const effectiveSupply = available + onOrderPieces;
     const rawOrderQtyPieces = Math.max(0, adjustedReorderPoint - effectiveSupply);
-    const orderUomUnits = asPositiveInt(row.order_uom_units, 1);
-    const orderUomLevel = asNumber(row.order_uom_level);
-    const orderUomSource: PurchasingRecommendationOrderUomSource = asNumber(row.order_uom_units) > 0 ? "variant" : "default_each";
-    const orderUomLabel = HIERARCHY_LABELS[orderUomLevel] || (orderUomUnits > 1 ? `${orderUomUnits}pk` : "pcs");
-    const suggestedOrderQty =
-      orderUomUnits > 1 ? Math.ceil(rawOrderQtyPieces / orderUomUnits) : Math.ceil(rawOrderQtyPieces);
-    const suggestedOrderPieces = suggestedOrderQty * orderUomUnits;
+    const supplierQuote = resolveSupplierQuoteBasis(row);
+    // A vendor's ordering multiple is commercial quote data, not a warehouse
+    // receive-pack constraint. Keep the selected receive variant available for
+    // PO receipt configuration, but never use its units-per-variant to round a
+    // purchase recommendation.
+    const orderUomUnits = supplierQuote.complete && supplierQuote.pricingBasis === "per_purchase_uom"
+      ? supplierQuote.piecesPerPurchaseUom!
+      : 1;
+    const orderUomSource: PurchasingRecommendationOrderUomSource =
+      supplierQuote.complete && supplierQuote.pricingBasis === "per_purchase_uom"
+        ? "supplier_quote"
+        : "base_piece";
+    const orderUomLabel = orderUomSource === "supplier_quote"
+      ? supplierQuote.purchaseUom!
+      : "pieces";
+    const hasStoredMinimumOrder = row.vendor_moq !== null && row.vendor_moq !== undefined && row.vendor_moq !== "";
+    const minimumOrderPieces = hasStoredMinimumOrder
+      ? asPositiveSafeIntegerOrNull(row.vendor_moq)
+      : null;
+    const supplierMinimumOrderValid = !hasStoredMinimumOrder || minimumOrderPieces !== null;
+    // MOQ is stored in base pieces. A null MOQ means that the vendor has not
+    // stated a minimum, so the only effective floor is one piece. Invalid
+    // stored values are surfaced as a blocking quality control below.
+    const effectiveMinimumOrderPieces = minimumOrderPieces ?? 1;
+    const effectiveOrderIncrement = orderUomUnits;
+    const suggestedOrderPieces = rawOrderQtyPieces > 0
+      ? Math.ceil(
+        Math.max(rawOrderQtyPieces, effectiveMinimumOrderPieces) / effectiveOrderIncrement,
+      ) * effectiveOrderIncrement
+      : 0;
+    const suggestedOrderQty = suggestedOrderPieces / orderUomUnits;
     const status = classifyRecommendation({
       available,
       avgDailyUsage,
@@ -1630,14 +1779,24 @@ export function generatePurchasingRecommendations(
     const preferredVendorId = row.preferred_vendor_id == null ? null : asNumber(row.preferred_vendor_id);
     const preferredVendorName = row.preferred_vendor_name ?? null;
     const vendorProductId = row.vendor_product_id == null ? null : asNumber(row.vendor_product_id);
-    const lastCostCents = asPositiveSafeIntegerOrNull(row.last_cost_cents);
+    const supplierQuoteQuantityCompatible = supplierQuote.pricingBasis !== "per_purchase_uom" || (
+      supplierQuote.complete &&
+      supplierQuote.piecesPerPurchaseUom !== null &&
+      suggestedOrderPieces % supplierQuote.piecesPerPurchaseUom === 0
+    );
+    const lastCostCents = asNonnegativeSafeIntegerOrNull(row.last_cost_cents);
+    const supplierAnalysisAsOf = parseDate(row.recommendation_analysis_as_of) ?? asOf;
     const supplierCost = resolveSupplierCost({
-      estimatedCostMills: asPositiveSafeIntegerOrNull(row.estimated_cost_mills),
-      estimatedCostCents: asPositiveSafeIntegerOrNull(row.estimated_cost_cents),
-      unitCostCents: asPositiveSafeIntegerOrNull(row.unit_cost_cents),
+      estimatedCostMills: asNonnegativeSafeIntegerOrNull(row.estimated_cost_mills),
+      estimatedCostCents: asNonnegativeSafeIntegerOrNull(row.estimated_cost_cents),
+      unitCostCents: asNonnegativeSafeIntegerOrNull(row.unit_cost_cents),
       lastCostCents,
       lastPurchasedAt: row.vendor_product_last_purchased_at ?? null,
-      vendorProductUpdatedAt: row.vendor_product_updated_at ?? null,
+      quotedAt: row.vendor_quoted_at ?? null,
+      quotedAtDate: row.vendor_quoted_at_date ?? null,
+      quoteValidUntil: row.vendor_quote_valid_until ?? null,
+      asOf: supplierAnalysisAsOf,
+      currentDate: row.recommendation_analysis_date ?? null,
     });
     const estimatedCostMills = supplierCost.estimatedCostMills;
     const estimatedCostCents = supplierCost.estimatedCostCents;
@@ -1734,6 +1893,9 @@ export function generatePurchasingRecommendations(
       actionable,
       hasReceiveConfiguration: productVariantId !== undefined && productVariantId > 0,
       hasSupplierCatalogBinding: vendorProductId !== null && vendorProductId > 0,
+      hasExplicitSupplierQuote: supplierQuote.complete,
+      supplierQuoteQuantityCompatible,
+      supplierMinimumOrderValid,
     });
     const autopilotBlockers = qualityControls;
     const qualityGate = buildQualityGate({
@@ -1795,6 +1957,14 @@ export function generatePurchasingRecommendations(
         costQuality: supplierCost.costQuality,
         estimatedCostMills,
         estimatedCostCents,
+        pricingBasis: supplierQuote.pricingBasis,
+        purchaseUom: supplierQuote.purchaseUom,
+        quotedUnitCostMills: supplierQuote.quotedUnitCostMills,
+        piecesPerPurchaseUom: supplierQuote.piecesPerPurchaseUom,
+        minimumOrderPieces,
+        quoteReference: row.vendor_quote_reference ?? null,
+        quotedAt: row.vendor_quoted_at ?? null,
+        quoteValidUntil: row.vendor_quote_valid_until ?? null,
         lastCostCents,
         lastPurchasedAt: row.vendor_product_last_purchased_at ?? null,
         vendorProductUpdatedAt: row.vendor_product_updated_at ?? null,

@@ -1,30 +1,86 @@
 import { z } from "zod";
-import { resolveRecommendationPoCost } from "./recommendation-po-cost";
+import {
+  normalizePoLinePricing,
+  type NormalizedPoLinePricing,
+} from "@shared/utils/po-line-pricing";
 import { autoDraftRunCompletionSchema } from "./auto-draft-run-lifecycle.service";
+import {
+  assessSupplierQuoteValidity,
+  RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS,
+} from "./supplier-quote-validity";
 
 const recommendationKinds = ["skipped", "held_by_policy", "quality_review_required", "auto_draft_eligible"] as const;
 const operatorDecisionValues = ["reviewed", "accepted_for_po", "deferred", "dismissed"] as const;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
-const positiveSafeInteger = z.number().int().positive().refine(Number.isSafeInteger, {
-  message: "must be a safe integer",
-});
 const nonnegativeSafeInteger = z.number().int().nonnegative().refine(Number.isSafeInteger, {
   message: "must be a safe integer",
 });
+const positivePostgresInteger = z.number().int().positive().max(POSTGRES_INTEGER_MAX);
+const nonnegativePostgresInteger = z.number().int().nonnegative().max(POSTGRES_INTEGER_MAX);
 
 const nullableBoundedString = (maximum: number) => z.string().trim().max(maximum).nullable();
+const nullableBoundedStoredString = (maximum: number) => z.string().max(maximum).nullable();
+const supplierPricingBasisSchema = z.enum(["per_piece", "per_purchase_uom"]);
+const isoDateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}, "must be a valid YYYY-MM-DD calendar date");
+const quoteTimestampSchema = z.preprocess((value) => {
+  if (value instanceof Date) return value;
+  if (typeof value === "string" && value.trim()) return new Date(value);
+  return value;
+}, z.date());
+
+type ExplicitSupplierQuote = {
+  pricingBasis: "per_piece" | "per_purchase_uom";
+  purchaseUom: string | null;
+  quotedUnitCostMills: number;
+  piecesPerPurchaseUom: number | null;
+  quoteReference: string | null;
+  quotedAt: Date;
+  quoteValidUntil: string | null;
+};
+
+function validateExplicitSupplierQuote(
+  value: ExplicitSupplierQuote,
+  context: z.RefinementCtx,
+): void {
+  if (value.pricingBasis === "per_piece") {
+    if (value.purchaseUom !== null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "per-piece pricing cannot include purchaseUom", path: ["purchaseUom"] });
+    }
+    if (value.piecesPerPurchaseUom !== null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "per-piece pricing cannot include piecesPerPurchaseUom", path: ["piecesPerPurchaseUom"] });
+    }
+  } else {
+    if (!value.purchaseUom?.trim()) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "per-purchase-UOM pricing requires purchaseUom", path: ["purchaseUom"] });
+    }
+    if (value.piecesPerPurchaseUom === null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "per-purchase-UOM pricing requires piecesPerPurchaseUom", path: ["piecesPerPurchaseUom"] });
+    }
+  }
+  if (value.quoteValidUntil && value.quoteValidUntil < value.quotedAt.toISOString().slice(0, 10)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "quoteValidUntil cannot be earlier than quotedAt",
+      path: ["quoteValidUntil"],
+    });
+  }
+}
 
 const handoffItemSchema = z.object({
-  acceptedDecisionId: positiveSafeInteger,
+  acceptedDecisionId: positivePostgresInteger,
   recommendationId: z.string().trim().min(1).max(160),
   kind: z.enum(recommendationKinds),
-  productId: positiveSafeInteger,
-  productVariantId: positiveSafeInteger,
-  suggestedPieces: positiveSafeInteger,
-  orderUomUnits: positiveSafeInteger,
+  productId: positivePostgresInteger,
+  productVariantId: positivePostgresInteger,
+  suggestedPieces: positivePostgresInteger,
+  orderUomUnits: positivePostgresInteger,
   orderUomLabel: z.string().trim().min(1).max(100),
-  vendorId: positiveSafeInteger,
-  vendorProductId: positiveSafeInteger,
+  vendorId: positivePostgresInteger,
+  vendorProductId: positivePostgresInteger,
   sku: nullableBoundedString(100),
   productName: nullableBoundedString(2_000),
   candidateScore: z.number().int().min(0).max(100).nullable(),
@@ -39,18 +95,25 @@ const handoffCommandSchema = z.object({
 
 const automaticHandoffItemSchema = z.object({
   recommendationId: z.string().trim().min(1).max(160),
-  productId: positiveSafeInteger,
-  productVariantId: positiveSafeInteger,
-  suggestedOrderQty: positiveSafeInteger,
-  suggestedOrderPieces: positiveSafeInteger,
-  orderUomUnits: positiveSafeInteger,
+  productId: positivePostgresInteger,
+  productVariantId: positivePostgresInteger,
+  suggestedOrderQty: positivePostgresInteger,
+  suggestedOrderPieces: positivePostgresInteger,
+  orderUomUnits: positivePostgresInteger,
   orderUomLabel: z.string().trim().min(1).max(100),
-  vendorId: positiveSafeInteger,
-  vendorProductId: positiveSafeInteger,
+  vendorId: positivePostgresInteger,
+  vendorProductId: positivePostgresInteger,
   sku: nullableBoundedString(100),
   productName: nullableBoundedString(2_000),
-  estimatedCostMills: positiveSafeInteger.nullable(),
+  estimatedCostMills: nonnegativeSafeInteger.nullable(),
   estimatedCostCents: nonnegativeSafeInteger.nullable(),
+  pricingBasis: supplierPricingBasisSchema,
+  purchaseUom: nullableBoundedString(50),
+  quotedUnitCostMills: nonnegativeSafeInteger,
+  piecesPerPurchaseUom: positivePostgresInteger.nullable(),
+  quoteReference: nullableBoundedStoredString(255),
+  quotedAt: quoteTimestampSchema,
+  quoteValidUntil: isoDateOnlySchema.nullable(),
   candidateScore: z.number().int().min(0).max(100).nullable(),
   candidateBand: nullableBoundedString(40),
   recommendationSnapshot: z.record(z.unknown()),
@@ -62,31 +125,89 @@ const automaticHandoffItemSchema = z.object({
       path: ["estimatedCostMills"],
     });
   }
+  validateExplicitSupplierQuote(value, context);
+  if (
+    value.pricingBasis === "per_purchase_uom" &&
+    value.piecesPerPurchaseUom !== null &&
+    value.suggestedOrderPieces % value.piecesPerPurchaseUom !== 0
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "suggestedOrderPieces must be divisible by piecesPerPurchaseUom",
+      path: ["suggestedOrderPieces"],
+    });
+  }
 });
 
 const automaticHandoffCommandSchema = z.object({
   actorId: z.string().trim().min(1).max(100),
-  autoDraftRunId: positiveSafeInteger,
+  autoDraftRunId: positivePostgresInteger,
   items: z.array(automaticHandoffItemSchema).max(2_000),
   completion: autoDraftRunCompletionSchema,
-}).strict();
+}).strict().superRefine((value, context) => {
+  const counts = ["itemsAnalyzed", "skippedNoVendor", "skippedOnOrder", "skippedExcluded"] as const;
+  for (const field of counts) {
+    const parsed = nonnegativePostgresInteger.safeParse(value.completion[field]);
+    if (!parsed.success) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${field} must fit a PostgreSQL INTEGER`,
+        path: ["completion", field],
+      });
+    }
+  }
+});
 
 const acceptedRecommendationEconomicBasisSchema = z.object({
-  productId: positiveSafeInteger,
-  productVariantId: positiveSafeInteger,
-  preferredVendorId: positiveSafeInteger,
-  vendorProductId: positiveSafeInteger,
-  suggestedOrderQty: positiveSafeInteger,
-  suggestedOrderPieces: positiveSafeInteger,
-  orderUomUnits: positiveSafeInteger,
-  estimatedCostMills: positiveSafeInteger.nullable(),
+  productId: positivePostgresInteger,
+  productVariantId: positivePostgresInteger,
+  preferredVendorId: positivePostgresInteger,
+  vendorProductId: positivePostgresInteger,
+  suggestedOrderQty: positivePostgresInteger,
+  suggestedOrderPieces: positivePostgresInteger,
+  orderUomUnits: positivePostgresInteger,
+  estimatedCostMills: nonnegativeSafeInteger.nullable(),
   estimatedCostCents: nonnegativeSafeInteger.nullable(),
+  pricingBasis: supplierPricingBasisSchema,
+  purchaseUom: nullableBoundedString(50),
+  quotedUnitCostMills: nonnegativeSafeInteger,
+  piecesPerPurchaseUom: positivePostgresInteger.nullable(),
+  quoteReference: nullableBoundedStoredString(255),
+  quotedAt: quoteTimestampSchema,
+  quoteValidUntil: isoDateOnlySchema.nullable(),
+  supplierBasis: z.object({
+    // Vendor MOQ is expressed in base pieces, independently of both the
+    // receive configuration and the vendor's quote UOM.
+    minimumOrderPieces: positivePostgresInteger.nullable(),
+  }).passthrough(),
 }).passthrough().superRefine((value, context) => {
   if (value.estimatedCostMills === null && value.estimatedCostCents === null) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       message: "accepted recommendation supplier cost is required",
       path: ["estimatedCostMills"],
+    });
+  }
+  validateExplicitSupplierQuote(value, context);
+  if (
+    value.pricingBasis === "per_purchase_uom" &&
+    value.piecesPerPurchaseUom !== null &&
+    value.suggestedOrderPieces % value.piecesPerPurchaseUom !== 0
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "suggestedOrderPieces must be divisible by piecesPerPurchaseUom",
+      path: ["suggestedOrderPieces"],
+    });
+  }
+  if (
+    value.supplierBasis.minimumOrderPieces !== null &&
+    value.suggestedOrderPieces < value.supplierBasis.minimumOrderPieces
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "suggestedOrderPieces must meet the accepted supplier minimum order",
+      path: ["suggestedOrderPieces"],
     });
   }
 });
@@ -99,10 +220,10 @@ const recordDecisionSchema = z.object({
   decisionReason: nullableBoundedString(100),
   note: nullableBoundedString(2_000),
   source: z.literal("operator"),
-  autoDraftRunId: positiveSafeInteger.nullable().optional(),
-  productId: positiveSafeInteger.nullable(),
-  productVariantId: positiveSafeInteger.nullable(),
-  vendorId: positiveSafeInteger.nullable(),
+  autoDraftRunId: positivePostgresInteger.nullable().optional(),
+  productId: positivePostgresInteger.nullable(),
+  productVariantId: positivePostgresInteger.nullable(),
+  vendorId: positivePostgresInteger.nullable(),
   sku: nullableBoundedString(100),
   productName: nullableBoundedString(2_000),
   candidateScore: z.number().int().min(0).max(100).nullable(),
@@ -171,6 +292,16 @@ export interface RecommendationVendorProductRecord {
   vendorSku: string | null;
   unitCostCents: number | null;
   unitCostMills: number | null;
+  pricingBasis: "legacy_unknown" | "per_piece" | "per_purchase_uom";
+  purchaseUom: string | null;
+  quotedUnitCostMills: number | null;
+  piecesPerPurchaseUom: number | null;
+  moq: number | null;
+  quoteReference: string | null;
+  quotedAt: Date | null;
+  quotedAtDate: string | null;
+  quoteValidUntil: string | null;
+  updatedAt: Date;
   isPreferred: number | null;
   isActive: number | null;
 }
@@ -249,6 +380,17 @@ export interface NewRecommendationPurchaseOrderLine {
   unitCostMills: number;
   totalProductCostCents: number;
   packagingCostCents: 0;
+  pricingBasis: "per_piece" | "per_purchase_uom";
+  pricingSource: "recommendation";
+  purchaseUom: string | null;
+  purchaseUomQuantity: number | null;
+  piecesPerPurchaseUom: number | null;
+  quotedUnitCostMills: number;
+  quotedTotalCents: null;
+  pricingRemainderMills: number;
+  quoteReference: string | null;
+  quotedAt: Date;
+  quoteValidUntil: string | null;
   discountCents: 0;
   taxCents: 0;
   lineTotalCents: number;
@@ -268,7 +410,7 @@ export interface NewRecommendationPoHandoffRecord extends Omit<RecommendationPoH
 
 export interface RecommendationPoHandoffUnitOfWork {
   lockRecommendationKeys(keys: readonly string[]): Promise<void>;
-  getTransactionTimestamp(): Promise<Date>;
+  getTransactionClock(): Promise<{ timestamp: Date; date: string }>;
   getAutoDraftRunForUpdate(id: number): Promise<RecommendationAutoDraftRunRecord | null>;
   completeAutoDraftRun(id: number, values: {
     status: "success";
@@ -367,10 +509,12 @@ export class RecommendationPoHandoffError extends Error {
 type ResolvedHandoffItem = AcceptedRecommendationPoHandoffItem & {
   acceptedDecision: RecommendationDecisionRecord;
   acceptedBasis: AcceptedRecommendationEconomicBasis;
+  liveQuote: ExplicitSupplierQuote;
   vendorProduct: RecommendationVendorProductRecord;
   vendor: RecommendationVendorRecord;
   product: RecommendationProductRecord;
   variant: RecommendationProductVariantRecord;
+  normalizedPricing: NormalizedPoLinePricing;
   unitCostMills: number;
   unitCostCents: number;
   totalProductCostCents: number;
@@ -390,7 +534,11 @@ function recommendationMutationLockKey(recommendationId: string): string {
   return JSON.stringify([recommendationId, "po_mutation"]);
 }
 
-function parseInput<T>(schema: z.ZodType<T>, input: unknown, code: string): T {
+function parseInput<TSchema extends z.ZodTypeAny>(
+  schema: TSchema,
+  input: unknown,
+  code: string,
+): z.output<TSchema> {
   const parsed = schema.safeParse(input);
   if (!parsed.success) {
     throw new RecommendationPoHandoffError(
@@ -400,7 +548,7 @@ function parseInput<T>(schema: z.ZodType<T>, input: unknown, code: string): T {
       { issues: parsed.error.issues },
     );
   }
-  return parsed.data;
+  return parsed.data as z.output<TSchema>;
 }
 
 function mapById<T extends { id: number }>(rows: readonly T[]): Map<number, T> {
@@ -637,6 +785,203 @@ function assertNoNewerDecisionAcrossKinds(
   }
 }
 
+function normalizeRecommendationSupplierQuote(
+  quote: ExplicitSupplierQuote,
+  suggestedPieces: number,
+): NormalizedPoLinePricing {
+  if (quote.pricingBasis === "per_piece") {
+    return normalizePoLinePricing({
+      basis: "per_piece",
+      quantityPieces: suggestedPieces,
+      unitCostMills: quote.quotedUnitCostMills,
+    });
+  }
+
+  const piecesPerUom = quote.piecesPerPurchaseUom;
+  if (piecesPerUom === null || suggestedPieces % piecesPerUom !== 0) {
+    throw new RecommendationPoHandoffError(
+      "Recommended pieces must be divisible by the vendor's quoted purchase-UOM quantity",
+      409,
+      "RECOMMENDATION_PURCHASE_UOM_QUANTITY_MISMATCH",
+      { suggestedPieces, piecesPerPurchaseUom: piecesPerUom },
+    );
+  }
+  const purchaseUomQuantity = suggestedPieces / piecesPerUom;
+  if (!Number.isInteger(purchaseUomQuantity) || purchaseUomQuantity > POSTGRES_INTEGER_MAX) {
+    throw new RecommendationPoHandoffError(
+      "The derived purchase-UOM quantity exceeds the PostgreSQL INTEGER range",
+      409,
+      "RECOMMENDATION_PURCHASE_UOM_QUANTITY_OUT_OF_RANGE",
+      { suggestedPieces, piecesPerPurchaseUom: piecesPerUom, purchaseUomQuantity },
+    );
+  }
+  return normalizePoLinePricing({
+    basis: "per_purchase_uom",
+    purchaseUom: quote.purchaseUom ?? "",
+    uomQuantity: purchaseUomQuantity,
+    piecesPerUom,
+    quotedCostMillsPerUom: quote.quotedUnitCostMills,
+  });
+}
+
+function requireLiveExplicitSupplierQuote(
+  vendorProduct: RecommendationVendorProductRecord,
+): ExplicitSupplierQuote {
+  if (vendorProduct.pricingBasis === "legacy_unknown") {
+    throw new RecommendationPoHandoffError(
+      "The supplier catalog price basis must be confirmed before recommendation PO handoff",
+      409,
+      "RECOMMENDATION_VENDOR_QUOTE_BASIS_REVIEW_REQUIRED",
+      { vendorProductId: vendorProduct.id, pricingBasis: vendorProduct.pricingBasis },
+    );
+  }
+  const parsed = z.object({
+    pricingBasis: supplierPricingBasisSchema,
+    purchaseUom: nullableBoundedString(50),
+    quotedUnitCostMills: nonnegativeSafeInteger,
+    piecesPerPurchaseUom: positivePostgresInteger.nullable(),
+    quoteReference: nullableBoundedStoredString(255),
+    quotedAt: z.date(),
+    quoteValidUntil: isoDateOnlySchema.nullable(),
+  }).superRefine(validateExplicitSupplierQuote).safeParse(vendorProduct);
+  if (!parsed.success) {
+    throw new RecommendationPoHandoffError(
+      "The supplier catalog quote is incomplete and must be reviewed before PO handoff",
+      409,
+      "RECOMMENDATION_VENDOR_QUOTE_INVALID",
+      { vendorProductId: vendorProduct.id, issues: parsed.error.issues },
+    );
+  }
+  return parsed.data;
+}
+
+function requireValidSupplierMinimumOrder(
+  vendorProduct: RecommendationVendorProductRecord,
+): number | null {
+  if (vendorProduct.moq === null) return null;
+  if (
+    !Number.isSafeInteger(vendorProduct.moq) ||
+    vendorProduct.moq <= 0 ||
+    vendorProduct.moq > POSTGRES_INTEGER_MAX
+  ) {
+    throw new RecommendationPoHandoffError(
+      "The supplier catalog MOQ must be a positive whole number of base pieces",
+      409,
+      "RECOMMENDATION_VENDOR_MOQ_INVALID",
+      { vendorProductId: vendorProduct.id, minimumOrderPieces: vendorProduct.moq },
+    );
+  }
+  return vendorProduct.moq;
+}
+
+function assertAcceptedMinimumOrderStillCurrent(
+  acceptedMinimumOrderPieces: number | null,
+  liveMinimumOrderPieces: number | null,
+  suggestedPieces: number,
+  vendorProductId: number,
+): void {
+  if (acceptedMinimumOrderPieces !== liveMinimumOrderPieces) {
+    throw new RecommendationPoHandoffError(
+      "The supplier minimum order changed after the recommendation was accepted",
+      409,
+      "RECOMMENDATION_VENDOR_MOQ_CHANGED",
+      {
+        vendorProductId,
+        acceptedMinimumOrderPieces,
+        currentMinimumOrderPieces: liveMinimumOrderPieces,
+      },
+    );
+  }
+  const effectiveMinimumOrderPieces = liveMinimumOrderPieces ?? 1;
+  if (suggestedPieces < effectiveMinimumOrderPieces) {
+    throw new RecommendationPoHandoffError(
+      "The accepted recommendation no longer meets the supplier minimum order",
+      409,
+      "RECOMMENDATION_VENDOR_MOQ_NOT_MET",
+      { vendorProductId, suggestedPieces, minimumOrderPieces: liveMinimumOrderPieces },
+    );
+  }
+}
+
+function assertLiveSupplierQuoteIsUsable(
+  vendorProduct: RecommendationVendorProductRecord,
+  liveQuote: ExplicitSupplierQuote,
+  clock: { timestamp: Date; date: string },
+): void {
+  const validity = assessSupplierQuoteValidity({
+    quotedAt: liveQuote.quotedAt,
+    quotedAtDate: vendorProduct.quotedAtDate,
+    quoteValidUntil: liveQuote.quoteValidUntil,
+    asOf: clock.timestamp,
+    currentDate: clock.date,
+  });
+  if (validity.status === "current") return;
+
+  const codeByStatus: Record<string, string> = {
+    future: "RECOMMENDATION_VENDOR_QUOTE_FUTURE_DATED",
+    expired: "RECOMMENDATION_VENDOR_QUOTE_EXPIRED",
+    stale: "RECOMMENDATION_VENDOR_QUOTE_STALE",
+    missing: "RECOMMENDATION_VENDOR_QUOTE_INVALID",
+    invalid: "RECOMMENDATION_VENDOR_QUOTE_INVALID",
+  };
+  const messageByStatus: Record<string, string> = {
+    future: "The supplier quote is future-dated and cannot be used for PO handoff",
+    expired: "The supplier quote expired before PO handoff",
+    stale: `The supplier quote is older than the ${RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS}-day automation limit`,
+    missing: "The supplier quote has no verification timestamp",
+    invalid: "The supplier quote validity metadata is invalid",
+  };
+  throw new RecommendationPoHandoffError(
+    messageByStatus[validity.status] ?? "The supplier quote is not valid for PO handoff",
+    409,
+    codeByStatus[validity.status] ?? "RECOMMENDATION_VENDOR_QUOTE_INVALID",
+    {
+      vendorProductId: vendorProduct.id,
+      quotedAt: liveQuote.quotedAt.toISOString(),
+      quoteValidUntil: liveQuote.quoteValidUntil,
+      transactionTimestamp: clock.timestamp.toISOString(),
+      transactionDate: clock.date,
+      quoteAgeDays: validity.ageDays,
+      maxQuoteAgeDays: validity.maxAgeDays,
+    },
+  );
+}
+
+function comparableQuoteValue(value: ExplicitSupplierQuote[keyof ExplicitSupplierQuote]): string | number | null {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function assertAcceptedQuoteStillCurrent(
+  accepted: ExplicitSupplierQuote,
+  live: ExplicitSupplierQuote,
+  vendorProductId: number,
+): void {
+  const fields: Array<keyof ExplicitSupplierQuote> = [
+    "pricingBasis",
+    "purchaseUom",
+    "quotedUnitCostMills",
+    "piecesPerPurchaseUom",
+    "quoteReference",
+    "quotedAt",
+    "quoteValidUntil",
+  ];
+  const changedField = fields.find(
+    (field) => comparableQuoteValue(accepted[field]) !== comparableQuoteValue(live[field]),
+  );
+  if (!changedField) return;
+  throw new RecommendationPoHandoffError(
+    "The supplier quote changed after the recommendation was accepted",
+    409,
+    "RECOMMENDATION_VENDOR_QUOTE_CHANGED",
+    {
+      vendorProductId,
+      field: changedField,
+      accepted: comparableQuoteValue(accepted[changedField]),
+      current: comparableQuoteValue(live[changedField]),
+    },
+  );
+}
+
 function resolveCatalogRows(
   items: readonly AcceptedRecommendationPoHandoffItem[],
   acceptedById: ReadonlyMap<number, AcceptedDecisionBinding>,
@@ -644,6 +989,7 @@ function resolveCatalogRows(
   vendors: readonly RecommendationVendorRecord[],
   products: readonly RecommendationProductRecord[],
   variants: readonly RecommendationProductVariantRecord[],
+  clock: { timestamp: Date; date: string },
 ): ResolvedHandoffItem[] {
   const vendorProductById = mapById(vendorProducts);
   const vendorById = mapById(vendors);
@@ -677,26 +1023,6 @@ function resolveCatalogRows(
         { productVariantId: variant.id, productId: product.id },
       );
     }
-    if (variant.unitsPerVariant !== item.orderUomUnits) {
-      throw new RecommendationPoHandoffError(
-        "The receive configuration quantity changed after recommendation review",
-        409,
-        "RECOMMENDATION_RECEIVE_UNITS_CHANGED",
-        {
-          productVariantId: variant.id,
-          expectedUnits: item.orderUomUnits,
-          actualUnits: variant.unitsPerVariant,
-        },
-      );
-    }
-    if (item.suggestedPieces % item.orderUomUnits !== 0) {
-      throw new RecommendationPoHandoffError(
-        "Recommended pieces must be divisible by the receive configuration quantity",
-        409,
-        "RECOMMENDATION_PIECES_NOT_RECEIVABLE",
-        { suggestedPieces: item.suggestedPieces, orderUomUnits: item.orderUomUnits },
-      );
-    }
     if (
       vendorProduct.vendorId !== vendor.id ||
       vendorProduct.productId !== product.id ||
@@ -718,39 +1044,67 @@ function resolveCatalogRows(
       );
     }
 
-    let liveCost: ReturnType<typeof resolveRecommendationPoCost>;
-    let acceptedCost: ReturnType<typeof resolveRecommendationPoCost>;
+    const liveMinimumOrderPieces = requireValidSupplierMinimumOrder(vendorProduct);
+    assertAcceptedMinimumOrderStillCurrent(
+      acceptedBasis.supplierBasis.minimumOrderPieces,
+      liveMinimumOrderPieces,
+      item.suggestedPieces,
+      vendorProduct.id,
+    );
+
+    const acceptedQuote: ExplicitSupplierQuote = {
+      pricingBasis: acceptedBasis.pricingBasis,
+      purchaseUom: acceptedBasis.purchaseUom,
+      quotedUnitCostMills: acceptedBasis.quotedUnitCostMills,
+      piecesPerPurchaseUom: acceptedBasis.piecesPerPurchaseUom,
+      quoteReference: acceptedBasis.quoteReference,
+      quotedAt: acceptedBasis.quotedAt,
+      quoteValidUntil: acceptedBasis.quoteValidUntil,
+    };
+    const liveQuote = requireLiveExplicitSupplierQuote(vendorProduct);
+    assertLiveSupplierQuoteIsUsable(vendorProduct, liveQuote, clock);
+    assertAcceptedQuoteStillCurrent(acceptedQuote, liveQuote, vendorProduct.id);
+
+    let normalizedPricing: NormalizedPoLinePricing;
     try {
-      liveCost = resolveRecommendationPoCost({
-        estimatedCostMills: vendorProduct.unitCostMills,
-        estimatedCostCents: vendorProduct.unitCostCents,
-        orderQtyPieces: item.suggestedPieces,
-      });
-      acceptedCost = resolveRecommendationPoCost({
-        estimatedCostMills: acceptedBasis.estimatedCostMills,
-        estimatedCostCents: acceptedBasis.estimatedCostCents,
-        orderQtyPieces: acceptedBasis.suggestedOrderPieces,
-      });
+      normalizedPricing = normalizeRecommendationSupplierQuote(liveQuote, item.suggestedPieces);
     } catch (error) {
+      if (error instanceof RecommendationPoHandoffError) throw error;
       throw new RecommendationPoHandoffError(
-        `The supplier cost is invalid: ${(error as Error).message}`,
+        `The supplier quote is invalid: ${(error as Error).message}`,
         409,
-        "RECOMMENDATION_VENDOR_COST_INVALID",
+        "RECOMMENDATION_VENDOR_QUOTE_INVALID",
         { vendorProductId: vendorProduct.id },
       );
     }
+
     if (
-      liveCost.unitCostMills !== acceptedCost.unitCostMills ||
-      liveCost.unitCostCents !== acceptedCost.unitCostCents
+      vendorProduct.unitCostMills !== normalizedPricing.unitCostMills ||
+      vendorProduct.unitCostCents !== normalizedPricing.unitCostCents
     ) {
       throw new RecommendationPoHandoffError(
-        "The supplier cost changed after the recommendation was accepted",
+        "The supplier catalog's normalized cost does not agree with its original quote",
         409,
-        "RECOMMENDATION_VENDOR_COST_CHANGED",
+        "RECOMMENDATION_VENDOR_QUOTE_NORMALIZATION_INVALID",
         {
           vendorProductId: vendorProduct.id,
-          acceptedUnitCostMills: acceptedCost.unitCostMills,
-          currentUnitCostMills: liveCost.unitCostMills,
+          expectedUnitCostMills: normalizedPricing.unitCostMills,
+          currentUnitCostMills: vendorProduct.unitCostMills,
+        },
+      );
+    }
+    if (
+      (acceptedBasis.estimatedCostMills !== null && acceptedBasis.estimatedCostMills !== normalizedPricing.unitCostMills) ||
+      (acceptedBasis.estimatedCostCents !== null && acceptedBasis.estimatedCostCents !== normalizedPricing.unitCostCents)
+    ) {
+      throw new RecommendationPoHandoffError(
+        "The accepted recommendation's normalized cost does not agree with its supplier quote",
+        409,
+        "ACCEPTED_RECOMMENDATION_QUOTE_NORMALIZATION_INVALID",
+        {
+          acceptedDecisionId: acceptedDecision.id,
+          expectedUnitCostMills: normalizedPricing.unitCostMills,
+          acceptedUnitCostMills: acceptedBasis.estimatedCostMills,
         },
       );
     }
@@ -759,11 +1113,16 @@ function resolveCatalogRows(
       ...item,
       acceptedDecision,
       acceptedBasis,
+      liveQuote,
       vendorProduct,
       vendor,
       product,
       variant,
-      ...acceptedCost,
+      normalizedPricing,
+      unitCostMills: normalizedPricing.unitCostMills,
+      unitCostCents: normalizedPricing.unitCostCents,
+      totalProductCostCents: normalizedPricing.totalProductCostCents,
+      lineTotalCents: normalizedPricing.totalProductCostCents,
     };
   });
 }
@@ -772,21 +1131,22 @@ async function loadResolvedHandoffItems(
   unitOfWork: RecommendationPoHandoffUnitOfWork,
   items: readonly AcceptedRecommendationPoHandoffItem[],
   acceptedById: ReadonlyMap<number, AcceptedDecisionBinding>,
+  clock: { timestamp: Date; date: string },
 ): Promise<ResolvedHandoffItem[]> {
   const vendorProductIds = [...new Set(items.map((item) => item.vendorProductId))];
   const vendorIds = [...new Set(items.map((item) => item.vendorId))];
   const productIds = [...new Set(items.map((item) => item.productId))];
   const variantIds = [...new Set(items.map((item) => item.productVariantId))];
-  const vendorProducts = await unitOfWork.getVendorProducts(vendorProductIds);
   const vendors = await unitOfWork.getVendors(vendorIds);
   const products = await unitOfWork.getProducts(productIds);
   const variants = await unitOfWork.getProductVariants(variantIds);
-  assertCompleteLookup(vendorProductIds, vendorProducts, "vendor product");
+  const vendorProducts = await unitOfWork.getVendorProducts(vendorProductIds);
   assertCompleteLookup(vendorIds, vendors, "vendor");
   assertCompleteLookup(productIds, products, "product");
   assertCompleteLookup(variantIds, variants, "product variant");
+  assertCompleteLookup(vendorProductIds, vendorProducts, "vendor product");
 
-  return resolveCatalogRows(items, acceptedById, vendorProducts, vendors, products, variants);
+  return resolveCatalogRows(items, acceptedById, vendorProducts, vendors, products, variants, clock);
 }
 
 type HandoffPersistenceOptions = {
@@ -899,6 +1259,17 @@ async function persistResolvedHandoffs(
         unitCostMills: item.unitCostMills,
         totalProductCostCents: item.totalProductCostCents,
         packagingCostCents: 0,
+        pricingBasis: item.acceptedBasis.pricingBasis,
+        pricingSource: "recommendation",
+        purchaseUom: item.normalizedPricing.purchaseUom,
+        purchaseUomQuantity: item.normalizedPricing.purchaseUomQuantity,
+        piecesPerPurchaseUom: item.normalizedPricing.piecesPerPurchaseUom,
+        quotedUnitCostMills: item.normalizedPricing.quotedUnitCostMills!,
+        quotedTotalCents: null,
+        pricingRemainderMills: item.normalizedPricing.pricingRemainderMills,
+        quoteReference: item.liveQuote.quoteReference,
+        quotedAt: item.liveQuote.quotedAt,
+        quoteValidUntil: item.liveQuote.quoteValidUntil,
         discountCents: 0,
         taxCents: 0,
         lineTotalCents: item.lineTotalCents,
@@ -1035,7 +1406,7 @@ export function createRecommendationPoHandoffService(
 
     return repository.transaction(async (unitOfWork) => {
       await unitOfWork.lockRecommendationKeys([lockKey, mutationLockKey].sort());
-      const now = await unitOfWork.getTransactionTimestamp();
+      const { timestamp: now } = await unitOfWork.getTransactionClock();
       return unitOfWork.createDecision({
         ...parsed,
         autoDraftRunId: parsed.autoDraftRunId ?? null,
@@ -1063,7 +1434,8 @@ export function createRecommendationPoHandoffService(
     try {
       return await repository.transaction(async (unitOfWork) => {
         await unitOfWork.lockRecommendationKeys([...new Set([...uniqueKeys, ...mutationKeys])].sort());
-        const now = await unitOfWork.getTransactionTimestamp();
+        const clock = await unitOfWork.getTransactionClock();
+        const now = clock.timestamp;
 
         const acceptedDecisions = await unitOfWork.getDecisionsForUpdate(acceptedDecisionIds);
         const latestDecisions = await unitOfWork.getLatestActiveDecisions(
@@ -1081,7 +1453,7 @@ export function createRecommendationPoHandoffService(
         );
         assertNoNewerDecisionAcrossKinds(parsed.items, acceptedById, latestAcrossKinds);
 
-        const resolvedItems = await loadResolvedHandoffItems(unitOfWork, parsed.items, acceptedById);
+        const resolvedItems = await loadResolvedHandoffItems(unitOfWork, parsed.items, acceptedById, clock);
         return persistResolvedHandoffs(unitOfWork, resolvedItems, {
           actorId: parsed.actorId,
           now,
@@ -1143,7 +1515,8 @@ export function createRecommendationPoHandoffService(
         }
 
         await unitOfWork.lockRecommendationKeys([...new Set([...keys, ...mutationKeys])].sort());
-        const now = await unitOfWork.getTransactionTimestamp();
+        const clock = await unitOfWork.getTransactionClock();
+        const now = clock.timestamp;
         const runStartedAt = run.runAt instanceof Date ? run.runAt : new Date(run.runAt);
         if (Number.isNaN(runStartedAt.getTime())) {
           throw new RecommendationPoHandoffError(
@@ -1188,6 +1561,13 @@ export function createRecommendationPoHandoffService(
             orderUomUnits: item.orderUomUnits,
             estimatedCostMills: item.estimatedCostMills,
             estimatedCostCents: item.estimatedCostCents,
+            pricingBasis: item.pricingBasis,
+            purchaseUom: item.purchaseUom,
+            quotedUnitCostMills: item.quotedUnitCostMills,
+            piecesPerPurchaseUom: item.piecesPerPurchaseUom,
+            quoteReference: item.quoteReference,
+            quotedAt: item.quotedAt,
+            quoteValidUntil: item.quoteValidUntil,
           };
           const parsedBasis = acceptedRecommendationEconomicBasisSchema.safeParse(snapshotItem);
           if (!parsedBasis.success) {
@@ -1258,7 +1638,7 @@ export function createRecommendationPoHandoffService(
           handedOff: [],
         };
         if (handoffItems.length > 0) {
-          const resolvedItems = await loadResolvedHandoffItems(unitOfWork, handoffItems, acceptedById);
+          const resolvedItems = await loadResolvedHandoffItems(unitOfWork, handoffItems, acceptedById, clock);
           persisted = await persistResolvedHandoffs(unitOfWork, resolvedItems, {
             actorId: parsed.actorId,
             now,

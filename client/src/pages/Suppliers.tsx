@@ -62,6 +62,16 @@ import {
   Package,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  VendorCatalogQuoteEditor,
+  buildVendorCatalogQuoteWrite,
+  createNewVendorCatalogQuoteDraft,
+  createVendorCatalogQuoteDraft,
+  evaluateVendorCatalogQuoteDraft,
+  formatVendorCatalogQuoteSummary,
+  type VendorCatalogQuoteDraft,
+  type VendorCatalogQuoteSnapshot,
+} from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,6 +115,13 @@ type VendorProduct = {
   // Present on rows written by the new mills-aware code path. Legacy rows
   // (pre-migration 0561) are NULL.
   unitCostMills?: number | null;
+  pricingBasis?: string | null;
+  purchaseUom?: string | null;
+  quotedUnitCostMills?: number | null;
+  piecesPerPurchaseUom?: number | null;
+  quoteReference?: string | null;
+  quotedAt?: string | null;
+  quoteValidUntil?: string | null;
   packSize: number | null;
   moq: number | null;
   leadTimeDays: number | null;
@@ -139,15 +156,6 @@ type ProductVariant = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Re-exported mills helpers for catalog per-unit cost (4-decimal precision).
-import {
-  dollarsToMills,
-  millsToDollarString,
-  formatMills,
-  millsToCents,
-  centsToMills,
-} from "@shared/utils/money";
-
 function formatCents(cents: number | null | undefined): string {
   if (cents == null || cents === 0) return "$0.00";
   return `$${(Number(cents) / 100).toLocaleString("en-US", {
@@ -157,24 +165,12 @@ function formatCents(cents: number | null | undefined): string {
 }
 
 // Legacy cents parser — rounded input to the nearest cent via parseFloat
-// (floating point!). The catalog editor now uses parseMillsInput instead;
-// this function is retained for other forms (vendor-level dollar fields).
+// Vendor-level dollar fields retain their existing cents contract. Reusable
+// product quotes use the exact mills-aware catalog editor.
 function parseDollarsInput(val: string): number | null {
   const n = parseFloat(val);
   if (isNaN(n) || n < 0) return null;
   return n * 100;
-}
-
-// Integer mills parser for the catalog unit-cost field. Returns null on
-// blank / non-numeric / negative input so mutations can skip bad values.
-function parseMillsInput(val: string): number | null {
-  const trimmed = (val ?? "").trim();
-  if (!trimmed) return null;
-  try {
-    return dollarsToMills(trimmed);
-  } catch {
-    return null;
-  }
 }
 
 function centsToInputStr(cents: number | null | undefined): string {
@@ -183,11 +179,59 @@ function centsToInputStr(cents: number | null | undefined): string {
   return String(dollars);
 }
 
-// Render mills as a 4-decimal string for the vendor-product form input.
-// Empty mills → "" so the placeholder shows.
-function millsToInputStr(mills: number | null | undefined): string {
-  if (mills == null) return "";
-  return millsToDollarString(mills);
+const PG_INTEGER_MAX = 2_147_483_647;
+
+function parseOptionalWholeNumber(
+  value: string,
+  label: string,
+  minimum: number,
+): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`${label} must be a whole number.`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > PG_INTEGER_MAX) {
+    throw new Error(
+      `${label} must be between ${minimum.toLocaleString("en-US")} and ${PG_INTEGER_MAX.toLocaleString("en-US")}.`,
+    );
+  }
+  return parsed;
+}
+
+type VendorProductOperationalFields = {
+  packSize: string;
+  moq: string;
+  leadTimeDays: string;
+};
+
+function vendorProductOperationalValues(form: VendorProductOperationalFields) {
+  return {
+    packSize: parseOptionalWholeNumber(form.packSize, "Operational pack size", 1),
+    moq: parseOptionalWholeNumber(form.moq, "MOQ", 1),
+    leadTimeDays: parseOptionalWholeNumber(form.leadTimeDays, "Lead time", 0),
+  };
+}
+
+function vendorProductOperationalError(form: VendorProductOperationalFields): string | null {
+  try {
+    vendorProductOperationalValues(form);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "Enter valid catalog operational values.";
+  }
+}
+
+function vendorCatalogQuoteSaveError(
+  draft: VendorCatalogQuoteDraft,
+  original: VendorCatalogQuoteSnapshot | null,
+): string | null {
+  // Existing legacy/incomplete mappings may still receive operational-only
+  // edits. buildVendorCatalogQuoteWrite deliberately leaves their economics
+  // untouched until an operator starts the explicit quote-review flow.
+  if (draft.state === "review_required" && original) return null;
+  return evaluateVendorCatalogQuoteDraft(draft).error;
 }
 
 const VENDOR_TYPE_BADGES: Record<
@@ -258,7 +302,6 @@ const EMPTY_VP_FORM = {
   productVariantId: null as number | null,
   vendorSku: "",
   vendorProductName: "",
-  unitCostDollars: "",
   packSize: "",
   moq: "",
   leadTimeDays: "",
@@ -289,6 +332,10 @@ export default function Suppliers() {
   const [vpDialogOpen, setVpDialogOpen] = useState(false);
   const [editingVP, setEditingVP] = useState<VendorProduct | null>(null);
   const [vpForm, setVpForm] = useState({ ...EMPTY_VP_FORM });
+  const [vpQuoteDraft, setVpQuoteDraft] = useState<VendorCatalogQuoteDraft>(
+    () => createNewVendorCatalogQuoteDraft(),
+  );
+  const [vpOriginalQuote, setVpOriginalQuote] = useState<VendorCatalogQuoteSnapshot | null>(null);
   const [productSearch, setProductSearch] = useState("");
   const [productPopoverOpen, setProductPopoverOpen] = useState(false);
 
@@ -503,24 +550,25 @@ export default function Suppliers() {
   // -----------------------------------------------------------------------
 
   const createVPMutation = useMutation({
-    mutationFn: async (form: typeof vpForm & { vendorId: number }) => {
-      // Per-unit cost: parse to mills (4-decimal precision). Cents is
-      // derived (half-up) and sent for back-compat. Server validator
-      // rejects disagreeing pairs.
-      const unitCostMills = parseMillsInput(form.unitCostDollars);
-      const unitCostCents =
-        unitCostMills !== null ? millsToCents(unitCostMills) : null;
+    mutationFn: async ({
+      form,
+      vendorId,
+      quote,
+    }: {
+      form: typeof vpForm;
+      vendorId: number;
+      quote: VendorCatalogQuoteDraft;
+    }) => {
+      const quoteWrite = buildVendorCatalogQuoteWrite(quote);
+      const operationalValues = vendorProductOperationalValues(form);
       const res = await apiRequest("POST", "/api/vendor-products", {
-        vendorId: form.vendorId,
+        vendorId,
         productId: form.productId,
         productVariantId: form.productVariantId || null,
         vendorSku: form.vendorSku || null,
         vendorProductName: form.vendorProductName || null,
-        unitCostMills,
-        unitCostCents,
-        packSize: form.packSize ? parseInt(form.packSize) : null,
-        moq: form.moq ? parseInt(form.moq) : null,
-        leadTimeDays: form.leadTimeDays ? parseInt(form.leadTimeDays) : null,
+        ...quoteWrite,
+        ...operationalValues,
         isPreferred: form.isPreferred ? 1 : 0,
         notes: form.notes || null,
       });
@@ -547,23 +595,21 @@ export default function Suppliers() {
     mutationFn: async ({
       id,
       form,
+      quote,
+      originalQuote,
     }: {
       id: number;
       form: typeof vpForm;
+      quote: VendorCatalogQuoteDraft;
+      originalQuote: VendorCatalogQuoteSnapshot;
     }) => {
-      const unitCostMills = parseMillsInput(form.unitCostDollars);
-      const unitCostCents =
-        unitCostMills !== null ? millsToCents(unitCostMills) : null;
+      const quoteWrite = buildVendorCatalogQuoteWrite(quote, originalQuote);
+      const operationalValues = vendorProductOperationalValues(form);
       const res = await apiRequest("PATCH", `/api/vendor-products/${id}`, {
-        productId: form.productId,
-        productVariantId: form.productVariantId || null,
         vendorSku: form.vendorSku || null,
         vendorProductName: form.vendorProductName || null,
-        unitCostMills,
-        unitCostCents,
-        packSize: form.packSize ? parseInt(form.packSize) : null,
-        moq: form.moq ? parseInt(form.moq) : null,
-        leadTimeDays: form.leadTimeDays ? parseInt(form.leadTimeDays) : null,
+        ...quoteWrite,
+        ...operationalValues,
         isPreferred: form.isPreferred ? 1 : 0,
         notes: form.notes || null,
       });
@@ -647,6 +693,8 @@ export default function Suppliers() {
   function openCreateVP(vendorId: number) {
     setEditingVP(null);
     setVpForm({ ...EMPTY_VP_FORM });
+    setVpQuoteDraft(createNewVendorCatalogQuoteDraft());
+    setVpOriginalQuote(null);
     setProductSearch("");
     setVpDialogOpen(true);
   }
@@ -658,21 +706,14 @@ export default function Suppliers() {
       productVariantId: vp.productVariantId,
       vendorSku: vp.vendorSku || "",
       vendorProductName: vp.vendorProductName || "",
-      // Preserve 4-decimal precision when editing. Prefer server-provided
-      // unit_cost_mills; fall back to centsToMills for legacy (NULL mills)
-      // rows so the editor never silently widens precision by accident.
-      unitCostDollars:
-        (vp as any).unitCostMills != null
-          ? millsToInputStr((vp as any).unitCostMills)
-          : vp.unitCostCents != null
-            ? millsToInputStr(centsToMills(vp.unitCostCents))
-            : "",
       packSize: vp.packSize != null ? String(vp.packSize) : "",
       moq: vp.moq != null ? String(vp.moq) : "",
       leadTimeDays: vp.leadTimeDays != null ? String(vp.leadTimeDays) : "",
       isPreferred: vp.isPreferred === 1,
       notes: vp.notes || "",
     });
+    setVpQuoteDraft(createVendorCatalogQuoteDraft(vp));
+    setVpOriginalQuote(vp);
     setProductSearch("");
     setVpDialogOpen(true);
   }
@@ -703,10 +744,30 @@ export default function Suppliers() {
       });
       return;
     }
+    const validationError =
+      vendorCatalogQuoteSaveError(vpQuoteDraft, vpOriginalQuote) ??
+      vendorProductOperationalError(vpForm);
+    if (validationError) {
+      toast({
+        title: "Complete the supplier catalog entry",
+        description: validationError,
+        variant: "destructive",
+      });
+      return;
+    }
     if (editingVP) {
-      updateVPMutation.mutate({ id: editingVP.id, form: vpForm });
+      updateVPMutation.mutate({
+        id: editingVP.id,
+        form: vpForm,
+        quote: vpQuoteDraft,
+        originalQuote: vpOriginalQuote ?? editingVP,
+      });
     } else if (expandedVendorId) {
-      createVPMutation.mutate({ ...vpForm, vendorId: expandedVendorId });
+      createVPMutation.mutate({
+        form: vpForm,
+        vendorId: expandedVendorId,
+        quote: vpQuoteDraft,
+      });
     }
   }
 
@@ -750,6 +811,9 @@ export default function Suppliers() {
   const vendorMutating =
     createVendorMutation.isPending || updateVendorMutation.isPending;
   const vpMutating = createVPMutation.isPending || updateVPMutation.isPending;
+  const vpSaveError =
+    vendorCatalogQuoteSaveError(vpQuoteDraft, vpOriginalQuote) ??
+    vendorProductOperationalError(vpForm);
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
@@ -983,17 +1047,14 @@ export default function Suppliers() {
                                     {vp.vendorSku && (
                                       <span>Vendor: {vp.vendorSku}</span>
                                     )}
-                                    {(vp.unitCostMills != null ||
-                                      vp.unitCostCents != null) && (
-                                      <span>
-                                        {formatMills(
-                                          vp.unitCostMills ??
-                                            centsToMills(vp.unitCostCents ?? 0),
-                                        )}
-                                      </span>
+                                    <span>
+                                      {formatVendorCatalogQuoteSummary(vp).amount}
+                                    </span>
+                                    {formatVendorCatalogQuoteSummary(vp).reviewRequired && (
+                                      <span className="text-amber-700">Review quote</span>
                                     )}
                                     {vp.moq != null && (
-                                      <span>MOQ {vp.moq}</span>
+                                      <span>MOQ {vp.moq} pieces</span>
                                     )}
                                     {vp.isPreferred === 1 && (
                                       <Star className="h-3 w-3 fill-amber-400 text-amber-400 inline" />
@@ -1213,13 +1274,13 @@ export default function Suppliers() {
                                       <TableHead>Vendor SKU</TableHead>
                                       <TableHead>Product Name</TableHead>
                                       <TableHead className="text-right">
-                                        Unit Cost
+                                        Vendor Quote
                                       </TableHead>
                                       <TableHead className="text-right">
                                         Pack Size
                                       </TableHead>
                                       <TableHead className="text-right">
-                                        MOQ
+                                        MOQ (pieces)
                                       </TableHead>
                                       <TableHead className="text-right">
                                         Lead Time
@@ -1243,14 +1304,18 @@ export default function Suppliers() {
                                           {vp.vendorProductName ||
                                             resolveProductName(vp)}
                                         </TableCell>
-                                        <TableCell className="text-right font-mono text-sm">
-                                          {vp.unitCostMills != null
-                                            ? formatMills(vp.unitCostMills)
-                                            : vp.unitCostCents != null
-                                              ? formatMills(
-                                                  centsToMills(vp.unitCostCents),
-                                                )
-                                              : "-"}
+                                        <TableCell className="text-right text-sm">
+                                          <div className="font-mono">
+                                            {formatVendorCatalogQuoteSummary(vp).amount}
+                                          </div>
+                                          <div className={cn(
+                                            "text-[11px]",
+                                            formatVendorCatalogQuoteSummary(vp).reviewRequired
+                                              ? "text-amber-700"
+                                              : "text-muted-foreground",
+                                          )}>
+                                            {formatVendorCatalogQuoteSummary(vp).detail}
+                                          </div>
                                         </TableCell>
                                         <TableCell className="text-right">
                                           {vp.packSize ?? "-"}
@@ -1645,7 +1710,7 @@ export default function Suppliers() {
       {/* Add / Edit Vendor Product Dialog                                   */}
       {/* ================================================================= */}
       <Dialog open={vpDialogOpen} onOpenChange={setVpDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
               {editingVP ? "Edit Product Mapping" : "Add Product Mapping"}
@@ -1669,6 +1734,7 @@ export default function Suppliers() {
                   <Button
                     variant="outline"
                     role="combobox"
+                    disabled={!!editingVP}
                     className="w-full justify-between h-10 font-normal"
                   >
                     {vpForm.productId
@@ -1730,6 +1796,11 @@ export default function Suppliers() {
                   </Command>
                 </PopoverContent>
               </Popover>
+              {editingVP && (
+                <p className="text-xs text-muted-foreground">
+                  Product and variant identify this historical catalog mapping and cannot be reassigned.
+                </p>
+              )}
             </div>
 
             {/* Variant select (only if product is chosen and has variants) */}
@@ -1737,6 +1808,7 @@ export default function Suppliers() {
               <div className="space-y-2">
                 <Label>Variant</Label>
                 <Select
+                  disabled={!!editingVP}
                   value={
                     vpForm.productVariantId
                       ? String(vpForm.productVariantId)
@@ -1794,47 +1866,37 @@ export default function Suppliers() {
               </div>
             </div>
 
-            {/* Unit Cost + Pack Size */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Unit Cost ($)</Label>
-                <Input
-                  type="number"
-                  step="0.0001"
-                  min="0"
-                  value={vpForm.unitCostDollars}
-                  onChange={(e) =>
-                    setVpForm((f) => ({
-                      ...f,
-                      unitCostDollars: e.target.value,
-                    }))
-                  }
-                  placeholder="0.00"
-                  className="h-10"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Pack Size</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  value={vpForm.packSize}
-                  onChange={(e) =>
-                    setVpForm((f) => ({ ...f, packSize: e.target.value }))
-                  }
-                  placeholder="e.g. 12"
-                  className="h-10"
-                />
-              </div>
+            <VendorCatalogQuoteEditor
+              value={vpQuoteDraft}
+              onChange={setVpQuoteDraft}
+            />
+
+            <div className="space-y-2">
+              <Label>Operational pack size</Label>
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={vpForm.packSize}
+                onChange={(e) =>
+                  setVpForm((f) => ({ ...f, packSize: e.target.value }))
+                }
+                placeholder="Optional catalog packaging default"
+                className="h-10"
+              />
+              <p className="text-xs text-muted-foreground">
+                Used for catalog operations only. It does not change the verified quote basis above.
+              </p>
             </div>
 
             {/* MOQ + Lead Time */}
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>MOQ</Label>
+                <Label>MOQ (base pieces)</Label>
                 <Input
                   type="number"
                   min="1"
+                  step="1"
                   value={vpForm.moq}
                   onChange={(e) =>
                     setVpForm((f) => ({ ...f, moq: e.target.value }))
@@ -1842,12 +1904,16 @@ export default function Suppliers() {
                   placeholder="Minimum order qty"
                   className="h-10"
                 />
+                <p className="text-xs text-muted-foreground">
+                  Independent of the supplier quote UOM and warehouse receiving configuration.
+                </p>
               </div>
               <div className="space-y-2">
                 <Label>Lead Time (days)</Label>
                 <Input
                   type="number"
                   min="0"
+                  step="1"
                   value={vpForm.leadTimeDays}
                   onChange={(e) =>
                     setVpForm((f) => ({
@@ -1895,7 +1961,7 @@ export default function Suppliers() {
               >
                 Cancel
               </Button>
-              <Button onClick={handleVPSubmit} disabled={vpMutating}>
+              <Button onClick={handleVPSubmit} disabled={vpMutating || !!vpSaveError}>
                 {vpMutating
                   ? "Saving..."
                   : editingVP
@@ -1903,6 +1969,11 @@ export default function Suppliers() {
                   : "Add Product"}
               </Button>
             </div>
+            {vpSaveError && (
+              <p className="text-xs text-amber-700 text-right" aria-live="polite">
+                {vpSaveError}
+              </p>
+            )}
           </div>
         </DialogContent>
       </Dialog>

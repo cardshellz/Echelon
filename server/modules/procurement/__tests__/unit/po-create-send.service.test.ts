@@ -41,6 +41,50 @@ function buildMockDb() {
   };
 }
 
+function buildLifecycleDb(selectResults: any[][]) {
+  const updatePatches: any[] = [];
+  const insertedRows: any[] = [];
+  let selectIndex = 0;
+  const tx: any = {
+    select: vi.fn(() => {
+      const rows = selectResults[selectIndex++] ?? [];
+      const chain: any = {
+        from: vi.fn(() => chain),
+        where: vi.fn(() => chain),
+        orderBy: vi.fn(() => chain),
+        limit: vi.fn(() => chain),
+        for: vi.fn(async () => rows),
+        then: (resolve: any, reject: any) => Promise.resolve(rows).then(resolve, reject),
+      };
+      return chain;
+    }),
+    update: vi.fn(() => ({
+      set: vi.fn((patch: any) => {
+        updatePatches.push(patch);
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([{ id: 1, ...patch }]),
+          })),
+        };
+      }),
+    })),
+    insert: vi.fn(() => ({
+      values: vi.fn((row: any) => {
+        insertedRows.push(row);
+        return Promise.resolve([]);
+      }),
+    })),
+  };
+  return {
+    updatePatches,
+    insertedRows,
+    select: tx.select,
+    update: tx.update,
+    insert: tx.insert,
+    transaction: vi.fn(async (fn: any) => fn(tx)),
+  } as any;
+}
+
 function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
   return {
     getPurchaseOrders: vi.fn(),
@@ -174,49 +218,18 @@ describe("Spec A — sendPurchaseOrder status gate", () => {
   });
 
   it("rejects PO with no active lines", async () => {
-    storage.getPurchaseOrderById.mockResolvedValue({ id: 1, status: "draft" });
-    storage.getPurchaseOrderLines.mockResolvedValue([
-      { orderQty: 0, status: "open" },
-      { orderQty: 10, status: "cancelled" },
-    ]);
+    const po = { id: 1, status: "draft", physicalStatus: "draft" };
+    storage.getPurchaseOrderById.mockResolvedValue(po);
+    svc = createPurchasingService(
+      buildLifecycleDb([[po], [{ id: 10, orderQty: 0, status: "open" }]]),
+      storage,
+    );
     await expect(svc.sendPurchaseOrder(1, "u1")).rejects.toThrow(
       /at least one line with quantity > 0/,
     );
   });
 
   it("sends through the lifecycle transition so physicalStatus stays in sync", async () => {
-    const updatePatches: any[] = [];
-    const insertedRows: any[] = [];
-    const db = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        limit: vi.fn().mockResolvedValue([]),
-      }),
-      insert: vi.fn(),
-      update: vi.fn(),
-      transaction: vi.fn(async (fn: any) => {
-        const tx = {
-          update: vi.fn(() => ({
-            set: vi.fn((patch: any) => {
-              updatePatches.push(patch);
-              return {
-                where: vi.fn(() => ({
-                  returning: vi.fn().mockResolvedValue([{ id: 1, ...patch }]),
-                })),
-              };
-            }),
-          })),
-          insert: vi.fn(() => ({
-            values: vi.fn((row: any) => {
-              insertedRows.push(row);
-              return Promise.resolve([]);
-            }),
-          })),
-        };
-        return fn(tx);
-      }),
-    };
     const po = {
       id: 1,
       status: "draft",
@@ -228,32 +241,29 @@ describe("Spec A — sendPurchaseOrder status gate", () => {
       sentToVendorAt: null,
       orderDate: null,
     };
+    const line = {
+      id: 10,
+      status: "open",
+      pricingBasis: "per_piece",
+      orderQty: 1,
+      unitCostCents: 100,
+      lineTotalCents: 100,
+    };
+    const db = buildLifecycleDb([[po], [line], [], []]);
     storage = buildMockStorage({
       getPurchaseOrderById: vi.fn().mockResolvedValue(po),
-      getPurchaseOrderLines: vi.fn().mockResolvedValue([
-        {
-          id: 10,
-          status: "open",
-          orderQty: 1,
-          unitCostCents: 100,
-          lineTotalCents: 100,
-        },
-      ]),
-      updatePurchaseOrder: vi.fn().mockResolvedValue({ ...po, totalCents: 100 }),
-      updatePurchaseOrderLine: vi.fn(),
-      getMatchingApprovalTier: vi.fn().mockResolvedValue(null),
     });
     svc = createPurchasingService(db, storage);
 
     const result = await svc.sendPurchaseOrder(1, "u1");
 
     expect(result.status).toBe("sent");
-    const sentPatch = updatePatches.at(-1);
+    const sentPatch = db.updatePatches.at(-1);
     expect(sentPatch.status).toBe("sent");
     expect(sentPatch.physicalStatus).toBe("sent");
-    expect(sentPatch.sentToVendorAt).toBeInstanceOf(Date);
-    expect(sentPatch.orderDate).toBeInstanceOf(Date);
-    expect(insertedRows).toContainEqual(
+    expect(sentPatch.sentToVendorAt).toBeDefined();
+    expect(sentPatch.orderDate).toBeDefined();
+    expect(db.insertedRows).toContainEqual(
       expect.objectContaining({
         purchaseOrderId: 1,
         fromStatus: "approved",
@@ -261,7 +271,7 @@ describe("Spec A — sendPurchaseOrder status gate", () => {
         changedBy: "u1",
       }),
     );
-    expect(insertedRows).toContainEqual(
+    expect(db.insertedRows).toContainEqual(
       expect.objectContaining({
         poId: 1,
         eventType: "sent_to_vendor",

@@ -289,9 +289,9 @@ describe("purchasing recommendation routes", () => {
           available: 4,
           avgDailyUsage: 2,
           reorderPoint: 6,
-          suggestedOrderQty: 1,
-          suggestedOrderPieces: 10,
-          orderUomLabel: "Box",
+          suggestedOrderQty: 2,
+          suggestedOrderPieces: 2,
+          orderUomLabel: "pieces",
           status: "order_now",
         },
       ],
@@ -334,6 +334,11 @@ describe("purchasing recommendation routes", () => {
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
     ]);
@@ -358,8 +363,8 @@ describe("purchasing recommendation routes", () => {
         {
           sku: "STRICT-REVIEW",
           productName: "Strict Review Candidate",
-          suggestedOrderQty: 1,
-          orderUomLabel: "Box",
+          suggestedOrderQty: 9,
+          orderUomLabel: "pieces",
           recommendationCandidateScore: {
             band: "review_candidate",
           },
@@ -444,6 +449,7 @@ describe("purchasing recommendation routes", () => {
         preferred_vendor_id: 88,
         preferred_vendor_name: "Vendor B",
         estimated_cost_cents: 250,
+        vendor_quoted_at: "2024-01-01T00:00:00.000Z",
         vendor_product_updated_at: "2024-01-01T00:00:00.000Z",
       },
     ]);
@@ -554,6 +560,11 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         estimated_cost_cents: 125,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 12500,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: new Date().toISOString(),
         vendor_product_updated_at: new Date().toISOString(),
       },
       {
@@ -592,6 +603,11 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         estimated_cost_cents: 125,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 12500,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: new Date().toISOString(),
         vendor_product_updated_at: new Date().toISOString(),
       },
     ]);
@@ -710,6 +726,11 @@ describe("purchasing recommendation routes", () => {
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
       {
@@ -733,6 +754,11 @@ describe("purchasing recommendation routes", () => {
         vendor_product_id: 8803,
         preferred_vendor_id: 88,
         preferred_vendor_name: "Vendor B",
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: new Date().toISOString(),
       },
     ]);
     server = await startServer(buildApp());
@@ -857,6 +883,11 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         estimated_cost_cents: 125,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 12500,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: new Date().toISOString(),
         vendor_product_updated_at: new Date().toISOString(),
       },
       {
@@ -895,6 +926,11 @@ describe("purchasing recommendation routes", () => {
         safety_stock_days: 1,
         order_uom_units: 10,
         estimated_cost_cents: 125,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 12500,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: new Date().toISOString(),
         vendor_product_updated_at: new Date().toISOString(),
       },
     ]);
@@ -988,6 +1024,11 @@ describe("purchasing recommendation routes", () => {
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
     ]);
@@ -1063,6 +1104,11 @@ describe("purchasing recommendation routes", () => {
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
     ]);
@@ -1095,11 +1141,15 @@ describe("purchasing recommendation routes", () => {
         item: expect.objectContaining({
           sku: "QUEUE-HELD",
           kind: "held_by_policy",
-          suggestedOrderPieces: 10,
-          orderUomUnits: 10,
+          suggestedOrderPieces: 9,
+          orderUomUnits: 1,
           vendorProductId: 7702,
           estimatedCostMills: 100000,
           estimatedCostCents: 1000,
+          pricingBasis: "per_piece",
+          purchaseUom: null,
+          quotedUnitCostMills: 100000,
+          piecesPerPurchaseUom: null,
         }),
       }),
     }));
@@ -1227,6 +1277,11 @@ describe("purchasing recommendation routes", () => {
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
     ]);
@@ -1250,13 +1305,20 @@ describe("purchasing recommendation routes", () => {
             productName: "Queue Held",
             preferredVendorId: 77,
             vendorProductId: 7702,
-            suggestedOrderQty: 1,
-            suggestedOrderPieces: 10,
-            orderUomUnits: 10,
-            orderUomLabel: "Case",
+            suggestedOrderQty: 9,
+            suggestedOrderPieces: 9,
+            orderUomUnits: 1,
+            orderUomLabel: "pieces",
             preferredVendorName: "Vendor",
             estimatedCostMills: 100000,
             estimatedCostCents: 1000,
+            pricingBasis: "per_piece",
+            purchaseUom: null,
+            quotedUnitCostMills: 100000,
+            piecesPerPurchaseUom: null,
+            quoteReference: null,
+            quotedAt: "2026-05-18T12:00:00.000Z",
+            quoteValidUntil: null,
           },
         },
       },
@@ -1353,6 +1415,12 @@ describe("purchasing recommendation routes", () => {
         preferred_vendor_id: 77,
         preferred_vendor_name: "Vendor",
         estimated_cost_cents: 1000,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 100000,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_moq: 1,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       },
     ]);
@@ -1376,13 +1444,23 @@ describe("purchasing recommendation routes", () => {
             productName: "Queue Held",
             preferredVendorId: 77,
             vendorProductId: 7702,
-            suggestedOrderQty: 1,
-            suggestedOrderPieces: 10,
-            orderUomUnits: 10,
-            orderUomLabel: "Case",
+            suggestedOrderQty: 9,
+            suggestedOrderPieces: 9,
+            orderUomUnits: 1,
+            orderUomLabel: "pieces",
             preferredVendorName: "Vendor",
             estimatedCostMills: 100000,
             estimatedCostCents: 1000,
+            pricingBasis: "per_piece",
+            purchaseUom: null,
+            quotedUnitCostMills: 100000,
+            piecesPerPurchaseUom: null,
+            supplierBasis: {
+              minimumOrderPieces: 1,
+            },
+            quoteReference: null,
+            quotedAt: "2026-05-18T12:00:00.000Z",
+            quoteValidUntil: null,
           },
         },
       },
@@ -1410,8 +1488,8 @@ describe("purchasing recommendation routes", () => {
     });
     server = await startServer(buildApp());
 
-    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderQty = 2;
-    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderPieces = 20;
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderQty = 18;
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderPieces = 18;
     const drifted = await requestJson(
       server.url,
       "POST",
@@ -1428,8 +1506,27 @@ describe("purchasing recommendation routes", () => {
       },
     });
     expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).not.toHaveBeenCalled();
-    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderQty = 1;
-    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderPieces = 10;
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderQty = 9;
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.suggestedOrderPieces = 9;
+
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.supplierBasis.minimumOrderPieces = 2;
+    const moqDrifted = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/recommendation-accepted-queue/create-po",
+      { items: [{ recommendationId: "202:2002:30", kind: "held_by_policy" }] },
+    );
+    expect(moqDrifted).toMatchObject({
+      status: 409,
+      body: {
+        skipped: [{
+          reason: "accepted_economics_changed",
+          context: { changedFields: ["minimumOrderPieces"] },
+        }],
+      },
+    });
+    expect(mocks.recommendationPoHandoffService.createAcceptedHandoff).not.toHaveBeenCalled();
+    acceptedHandoffDecisionRows[0].recommendationSnapshot.item.supplierBasis.minimumOrderPieces = 1;
 
     const { status, body } = await requestJson(
       server.url,
@@ -1454,8 +1551,8 @@ describe("purchasing recommendation routes", () => {
           kind: "held_by_policy",
           productId: 202,
           productVariantId: 2002,
-          suggestedPieces: 10,
-          orderUomUnits: 10,
+          suggestedPieces: 9,
+          orderUomUnits: 1,
           vendorProductId: 7702,
           vendorId: 77,
           sku: "QUEUE-HELD",
@@ -1917,6 +2014,11 @@ describe("purchasing recommendation routes", () => {
         vendor_product_id: 7042,
         preferred_vendor_id: 7,
         estimated_cost_mills: 12500,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 12500,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: new Date().toISOString(),
         vendor_product_updated_at: new Date().toISOString(),
       },
       {

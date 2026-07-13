@@ -69,6 +69,7 @@ describe("Spec A follow-up \u2014 searchVendorCatalog", () => {
           vendor_product_id: 10,
           product_id: 1,
           product_variant_id: 11,
+          receive_units_per_variant: 6,
           sku: "SHLZ-TOP-1",
           product_name: "Shellz Top Box",
           variant_name: "1oz",
@@ -84,6 +85,7 @@ describe("Spec A follow-up \u2014 searchVendorCatalog", () => {
           vendor_product_id: 20,
           product_id: 2,
           product_variant_id: 21,
+          receive_units_per_variant: 12,
           sku: "SHLZ-TOP-2",
           product_name: "Shellz Top Box",
           variant_name: "2oz",
@@ -129,6 +131,7 @@ describe("Spec A follow-up \u2014 searchVendorCatalog", () => {
       vendorProductId: 10,
       productId: 1,
       productVariantId: 11,
+      receiveUnitsPerVariant: 6,
       unitCostCents: 1299,
       isPreferred: true,
     });

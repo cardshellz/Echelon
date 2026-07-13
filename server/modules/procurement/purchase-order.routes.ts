@@ -26,6 +26,7 @@ import {
   type PoLifecycleCommand,
 } from "./purchase-order-lifecycle.service";
 import { purchaseOrderDraftHeaderPatchSchema } from "./purchase-order-draft-header";
+import type { PoLinePricingInput } from "@shared/utils/po-line-pricing";
 
 function parseNullableDateInput(value: unknown, fieldLabel: string): Date | null | undefined {
   if (value === undefined) return undefined;
@@ -46,6 +47,38 @@ function parseNullableDateInput(value: unknown, fieldLabel: string): Date | null
   return date;
 }
 
+function mapPoLinePricingInput(line: any): PoLinePricingInput | undefined {
+  const pricing = line?.pricing;
+  if (!pricing || typeof pricing !== "object") return undefined;
+  const basis = pricing.basis ?? pricing.pricing_basis;
+  if (basis === "per_piece") {
+    return {
+      basis,
+      quantityPieces: Number(pricing.quantityPieces ?? pricing.quantity_pieces),
+      unitCostMills: Number(pricing.unitCostMills ?? pricing.unit_cost_mills),
+    };
+  }
+  if (basis === "per_purchase_uom") {
+    return {
+      basis,
+      purchaseUom: String(pricing.purchaseUom ?? pricing.purchase_uom ?? ""),
+      uomQuantity: Number(pricing.uomQuantity ?? pricing.uom_quantity),
+      piecesPerUom: Number(pricing.piecesPerUom ?? pricing.pieces_per_uom),
+      quotedCostMillsPerUom: Number(
+        pricing.quotedCostMillsPerUom ?? pricing.quoted_cost_mills_per_uom,
+      ),
+    };
+  }
+  if (basis === "extended_total") {
+    return {
+      basis,
+      quantityPieces: Number(pricing.quantityPieces ?? pricing.quantity_pieces),
+      quotedTotalCents: Number(pricing.quotedTotalCents ?? pricing.quoted_total_cents),
+    };
+  }
+  return pricing as PoLinePricingInput;
+}
+
 function mapPurchaseOrderLineInput(line: any, includeLineId: boolean): PurchaseOrderLineInput {
   const rawCents = line?.unit_cost_cents ?? line?.unitCostCents;
   const rawMills = line?.unit_cost_mills ?? line?.unitCostMills;
@@ -56,6 +89,22 @@ function mapPurchaseOrderLineInput(line: any, includeLineId: boolean): PurchaseO
     line?.expected_receive_variant_id ?? line?.expectedReceiveVariantId ?? variantIdRaw;
   const expectedReceiveUnitsPerVariantRaw =
     line?.expected_receive_units_per_variant ?? line?.expectedReceiveUnitsPerVariant;
+  const pricing = mapPoLinePricingInput(line);
+  const pricingSource = line?.pricing_source ?? line?.pricingSource;
+  if (
+    !includeLineId &&
+    pricingSource !== undefined &&
+    pricingSource !== "manual" &&
+    pricingSource !== "vendor_catalog"
+  ) {
+    throw new PurchasingError("New PO lines may only use manual or vendor_catalog pricing", 400, {
+      code: "PO_LINE_PRICING_SOURCE_FORBIDDEN",
+    });
+  }
+  const rawOrderQty = line?.quantity_ordered ?? line?.orderQty;
+  const pricingOrderQty = pricing?.basis === "per_purchase_uom"
+    ? pricing.uomQuantity * pricing.piecesPerUom
+    : pricing?.quantityPieces;
   const mapped: PurchaseOrderLineInput = {
     lineType,
     clientId: line?.client_id ?? line?.clientId ?? undefined,
@@ -72,8 +121,18 @@ function mapPurchaseOrderLineInput(line: any, includeLineId: boolean): PurchaseO
       lineType === "product" && expectedReceiveUnitsPerVariantRaw != null
         ? Number(expectedReceiveUnitsPerVariantRaw)
         : null,
-    orderQty: Number(line?.quantity_ordered ?? line?.orderQty),
+    orderQty: Number(rawOrderQty ?? pricingOrderQty),
     vendorProductId: line?.vendor_product_id ?? line?.vendorProductId ?? undefined,
+    vendorSku: line?.vendor_sku ?? line?.vendorSku ?? null,
+    notes: line?.notes ?? null,
+    pricing,
+    pricingSource,
+    quoteReference: line?.quote_reference ?? line?.quoteReference ?? null,
+    quotedAt: parseNullableDateInput(
+      line?.quoted_at ?? line?.quotedAt,
+      "quotedAt",
+    ) ?? null,
+    quoteValidUntil: line?.quote_valid_until ?? line?.quoteValidUntil ?? null,
   };
 
   if (includeLineId) {
@@ -373,7 +432,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
         });
       } catch (error: any) {
         if (error instanceof PurchasingError) {
-          return res.status(error.statusCode).json({ error: error.message });
+          return res.status(error.statusCode).json({ error: error.message, details: error.details });
         }
         console.error("[POST /api/purchase-orders] error:", error);
         res.status(500).json({ error: error.message });
@@ -614,7 +673,8 @@ export function registerPurchaseOrderRoutes(app: Express) {
     }
   });
 
-  // Update incoterms and/or header charges (discount in draft only; shipping/tax any non-cancelled status)
+  // Incoterms, tolerance, and header charges are approval inputs and are
+  // therefore editable only while the PO is a financially clean draft.
   app.patch("/api/purchase-orders/:id/incoterms-charges", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const { incoterms, discountCents, taxCents, shippingCostCents, overReceiptTolerancePct } = req.body;
@@ -625,7 +685,9 @@ export function registerPurchaseOrderRoutes(app: Express) {
       );
       res.json(po);
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) {
+        return res.status(error.statusCode).json({ error: error.message, details: error.details });
+      }
       res.status(500).json({ error: error.message });
     }
   });
@@ -702,17 +764,17 @@ export function registerPurchaseOrderRoutes(app: Express) {
       const line = await purchasing.addLine(Number(req.params.id), req.body, req.session.user?.id);
       res.status(201).json(line);
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       res.status(500).json({ error: error.message });
     }
   });
 
   app.post("/api/purchase-orders/:id/lines/bulk", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const lines = await purchasing.addBulkLines(Number(req.params.id), req.body.lines, req.session.user?.id);
+      const lines = await purchasing.addBulkLines(Number(req.params.id), req.body, req.session.user?.id);
       res.status(201).json({ lines });
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       res.status(500).json({ error: error.message });
     }
   });
@@ -722,17 +784,17 @@ export function registerPurchaseOrderRoutes(app: Express) {
       const line = await purchasing.updateLine(Number(req.params.lineId), req.body, req.session.user?.id);
       res.json(line);
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       res.status(500).json({ error: error.message });
     }
   });
 
   app.delete("/api/purchase-orders/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      await purchasing.deleteLine(Number(req.params.lineId), req.session.user?.id);
-      res.json({ success: true });
+      const line = await purchasing.deleteLine(Number(req.params.lineId), req.body, req.session.user?.id);
+      res.json({ success: true, line });
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       res.status(500).json({ error: error.message });
     }
   });

@@ -86,6 +86,13 @@ function recommendationRows() {
     vendor_product_id: 701,
     preferred_vendor_id: 7,
     estimated_cost_mills: 50,
+    vendor_pricing_basis: "per_piece",
+    vendor_purchase_uom: null,
+    vendor_quoted_unit_cost_mills: 50,
+    vendor_pieces_per_purchase_uom: null,
+    vendor_quote_reference: "QUOTE-701",
+    vendor_quoted_at: new Date().toISOString(),
+    vendor_quote_valid_until: "2099-12-31",
     vendor_product_updated_at: new Date().toISOString(),
   }];
 }
@@ -151,11 +158,20 @@ describe("auto-draft job", () => {
         recommendationId: "1:11:90",
         productId: 1,
         productVariantId: 11,
-        suggestedOrderPieces: 10,
-        orderUomUnits: 10,
+        suggestedOrderQty: 4,
+        suggestedOrderPieces: 4,
+        orderUomUnits: 1,
+        orderUomLabel: "pieces",
         vendorId: 7,
         vendorProductId: 701,
         estimatedCostMills: 50,
+        pricingBasis: "per_piece",
+        purchaseUom: null,
+        quotedUnitCostMills: 50,
+        piecesPerPurchaseUom: null,
+        quoteReference: "QUOTE-701",
+        quotedAt: expect.any(Date),
+        quoteValidUntil: "2099-12-31",
         candidateBand: "strong_candidate",
         recommendationSnapshot: expect.objectContaining({
           analysis: { lookbackDays: 90 },
@@ -238,6 +254,35 @@ describe("auto-draft job", () => {
         autoDraftEligibleCount: 0,
         autoDraftReviewRequiredCount: 1,
       },
+    });
+  });
+
+  it("keeps legacy catalog prices in review until their vendor quote basis is confirmed", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([{
+      ...recommendationRows()[0],
+      vendor_pricing_basis: "legacy_unknown",
+      vendor_purchase_uom: null,
+      vendor_quoted_unit_cost_mills: null,
+      vendor_pieces_per_purchase_uom: null,
+    }]);
+
+    const result = await runAutoDraftJob({ triggeredBy: "scheduler" });
+
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+    expect(mocks.lifecycle.completeRun).toHaveBeenCalledWith({
+      runId: 500,
+      completion: expect.objectContaining({
+        summaryJson: expect.objectContaining({
+          recommendationSummary: expect.objectContaining({
+            autoDraftEligibleCount: 0,
+            autoDraftReviewRequiredCount: 1,
+          }),
+        }),
+      }),
+    });
+    expect(result.recommendationSummary).toMatchObject({
+      autoDraftEligibleCount: 0,
+      autoDraftReviewRequiredCount: 1,
     });
   });
 
