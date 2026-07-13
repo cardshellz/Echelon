@@ -2,6 +2,7 @@ export type DropshipSectionStatus = "ready" | "attention_required" | "coming_soo
 export type DropshipSeverity = "info" | "warning" | "error";
 export type DropshipStorePlatform = "ebay" | "shopify";
 export type DropshipDogfoodReadinessStatus = "ready" | "warning" | "blocked";
+export type DropshipSystemReadinessStatus = DropshipDogfoodReadinessStatus | "not_applicable";
 export type DropshipListingMode = "draft_first" | "live" | "manual_only";
 export type DropshipListingInventoryMode = "managed_quantity_sync" | "manual_quantity" | "disabled";
 export type DropshipListingPriceMode = "vendor_defined" | "connection_default" | "disabled";
@@ -418,7 +419,7 @@ export interface DropshipDogfoodReadinessCheck {
 export interface DropshipSystemReadinessCheck {
   key: string;
   label: string;
-  status: DropshipDogfoodReadinessStatus;
+  status: DropshipSystemReadinessStatus;
   message: string;
   requiredEnv: string[];
 }

@@ -760,11 +760,13 @@ function walletMetricDetail(
 }
 
 function walletGateDetail(onboarding: DropshipOnboardingState): string {
+  if (onboarding.wallet.walletReady) return "Wallet funding and auto-reload are ready.";
   if (!onboarding.wallet.autoReloadEnabled) return "Auto-reload is not enabled.";
   if (!onboarding.wallet.autoReloadFundingMethodReady) return "Auto-reload needs a ready funding method.";
-  if (!onboarding.wallet.hasUsdcBaseFundingMethod) return "USDC Base funding method is missing.";
-  if (!onboarding.wallet.hasSpendableBalance) return "No spendable balance yet.";
-  return "Wallet is ready.";
+  if (!onboarding.wallet.hasStripeReadyFundingMethod && !onboarding.wallet.hasSpendableBalance) {
+    return "Add a Stripe card or ACH funding method.";
+  }
+  return "Wallet setup needs attention.";
 }
 
 function connectedStoreSummaryDetail(connection: DropshipStoreConnectionSummary): string {

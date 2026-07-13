@@ -19,6 +19,9 @@ This is a current pickup checkpoint for continuing the dropship program on anoth
 - The Dropship Shipping Config UI now exposes variant overrides and links package-data editing back to Catalog Variants.
 - A fresh eBay listing preview now snapshots catalog weight into the listing intent. Old queued jobs without that field fail explicitly and must be recreated from a fresh preview.
 - No migration was required for item 0.5.
+- Batch 0 item 0.6 is implemented in this change set: Stripe card/ACH plus auto-reload can satisfy wallet readiness without a USDC method.
+- USDC remains a planned optional funding rail. Its funding-method, atomic-unit ledger, idempotency, audit, and admin-assisted credit foundations remain intact.
+- Provider-backed USDC verification is explicitly not applicable to launch readiness until the provider/custody/settlement milestone is implemented.
 
 ## Verification already completed for PR #903
 
@@ -38,19 +41,25 @@ This is a current pickup checkpoint for continuing the dropship program on anoth
 5. Run the `SHIPCFG-04` and `SHIPCFG-08` quote checks from the dogfood test plan and record the evidence.
 6. Inspect the authenticated Shipping Config > Variant overrides UI after deployment.
 
+## Verification completed for item 0.6
+
+- Focused provisioning and readiness suite: 3 files and 58 tests passed.
+- TypeScript: `npm run check` passed.
+- No migration or production data change is required.
+
+After deployment, verify an eligible vendor with a Stripe card/ACH method and usable auto-reload reaches wallet-ready status without a USDC method. Confirm portal onboarding, Settings, admin dogfood readiness, and system prerequisites all agree; the system prerequisite should show USDC as `not applicable`, not blocked or ready.
+
 Do not treat the July 9 production row counts, the `marzcards` listing mode, channel 103 assignments, or `TRUST_PROXY` state as current without re-reading production config/data.
 
 ## Next implementation work
 
-Continue with Batch 0 item 0.6 from `docs/DROPSHIP-DEV-HANDOFF-2026-07-09.md`:
+After item 0.6 is merged and deployed, continue with Batch 0 item 0.7 from `docs/DROPSHIP-DEV-HANDOFF-2026-07-09.md`:
 
-- Remove USDC as a required activation condition.
-- Keep USDC available as an optional funding method.
-- Preserve the spendable-wallet or Stripe funding requirement and auto-reload requirement exactly as specified.
-- Update backend readiness, vendor onboarding copy, and tests together.
-- Use a fresh branch and fresh PR from current `origin/main`.
+- Set and verify `TRUST_PROXY=true` in Heroku so production session cookies can be issued securely behind the proxy.
+- Keep `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` pinned.
+- Verify portal login after the config change.
 
-After 0.6, proceed in order through 0.7 and 0.8. Do not skip directly to later batches without recording why.
+Then proceed to item 0.8. Do not skip directly to later batches without recording why.
 
 ## Working agreement
 
@@ -81,4 +90,4 @@ git pull --ff-only origin main
 
 ## Pickup prompt for Codex
 
-> Continue the Echelon dropship program. First read `docs/DROPSHIP-LAPTOP-HANDOFF-2026-07-12.md`, then the authoritative documents it lists. Fetch `origin/main` and verify PR #903 is present. Do not assume the recorded production state is current. Report the exact current branch/commit and the next incomplete work-order item with file evidence. Then implement Batch 0 item 0.6 on a fresh branch, including backend behavior, UI/copy, tests, failure modes, and the handoff status update. Do not reuse a merged PR branch.
+> Continue the Echelon dropship program. First read `docs/DROPSHIP-LAPTOP-HANDOFF-2026-07-12.md`, then the authoritative documents it lists. Fetch `origin/main` and verify the item 0.6 change is present. Do not assume the recorded production state is current. Report the exact current branch/commit and deployment state, complete the recorded live verification, then continue with Batch 0 item 0.7 followed by 0.8. Do not reuse a merged PR branch.
