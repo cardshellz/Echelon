@@ -57,4 +57,38 @@ describe("getFlowWaterfall", () => {
     expect(staleBlock).toContain("latest_push");
     expect(staleBlock).not.toContain("DISTINCT ON (e.order_id)");
   });
+
+  it("classifies known production dead-letter signatures without depending on legacy topic names", () => {
+    const taxonomyBlock = FLOW_WATERFALL_SRC.slice(
+      FLOW_WATERFALL_SRC.indexOf("const DEAD_LETTER_REASON_CODE"),
+      FLOW_WATERFALL_SRC.indexOf("const DEAD_LETTER_LABELS"),
+    );
+
+    expect(taxonomyBlock).toContain("rq.last_error LIKE '%no items with positive quantity%' THEN 'SHOPIFY_PUSH_NO_POSITIVE_QTY'");
+    expect(taxonomyBlock).toContain("rq.last_error LIKE '%no fulfillment-order line item%' THEN 'SHOPIFY_PUSH_SKU_NOT_ON_FO'");
+    expect(taxonomyBlock).toContain("rq.last_error LIKE '%fulfillment push returned false%' THEN 'CHANNEL_PUSH_RETURNED_FALSE'");
+    expect(taxonomyBlock).toContain("rq.last_error LIKE '%status ''cancelled'' is not pushable%' THEN 'SHIPMENT_NOT_PUSHABLE_CANCELLED'");
+    expect(taxonomyBlock).not.toContain("rq.topic = 'shopify_fulfillment_push' AND rq.last_error LIKE '%no items with positive quantity%'");
+    expect(taxonomyBlock).not.toContain("rq.topic = 'shopify_fulfillment_push' AND rq.last_error LIKE '%no fulfillment-order line item%'");
+  });
+
+  it("counts dead-letter monitor matches as scoped work items inside the selected window", () => {
+    const deadLetterBlock = FLOW_WATERFALL_SRC.slice(
+      FLOW_WATERFALL_SRC.indexOf("const deadLetterCount"),
+      FLOW_WATERFALL_SRC.indexOf("export const FLOW_ISSUES"),
+    );
+    const groupedPassBlock = FLOW_WATERFALL_SRC.slice(
+      FLOW_WATERFALL_SRC.indexOf("const dlRows"),
+      FLOW_WATERFALL_SRC.indexOf("const dlMap"),
+    );
+
+    expect(deadLetterBlock).toContain("DEAD_LETTER_SCOPE_KEY");
+    expect(deadLetterBlock).toContain("DEAD_LETTER_OBSERVED_AT");
+    expect(deadLetterBlock).toContain("AND ${DEAD_LETTER_OBSERVED_AT} > ${win}");
+    expect(deadLetterBlock).toContain("COUNT(*)::int AS retry_row_count");
+    expect(deadLetterBlock).toContain("retry_ids");
+    expect(groupedPassBlock).toContain("dead_retry_scopes");
+    expect(groupedPassBlock).toContain("GROUP BY 1, 2");
+    expect(groupedPassBlock).toContain("FROM dead_retry_scopes");
+  });
 });

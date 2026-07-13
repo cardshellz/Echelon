@@ -120,8 +120,10 @@ const DEAD_LETTER_REASON_CODE = sql`CASE
   WHEN rq.provider = 'shipstation' AND rq.last_error LIKE '%Negative Inventory Guard%' THEN 'SHIPNOTIFY_NO_INVENTORY'
   WHEN rq.provider = 'shipstation' AND rq.last_error LIKE '%no parseable wms-item lineItemKey%' THEN 'SHIPNOTIFY_UNMAPPED_LINEITEM'
   WHEN rq.provider = 'shipstation' AND rq.last_error LIKE '%shipment not found%' THEN 'SHIPNOTIFY_SHIPMENT_NOT_FOUND'
-  WHEN rq.topic = 'shopify_fulfillment_push' AND rq.last_error LIKE '%no items with positive quantity%' THEN 'SHOPIFY_PUSH_NO_POSITIVE_QTY'
-  WHEN rq.topic = 'shopify_fulfillment_push' AND rq.last_error LIKE '%no fulfillment-order line item%' THEN 'SHOPIFY_PUSH_SKU_NOT_ON_FO'
+  WHEN rq.last_error LIKE '%no items with positive quantity%' THEN 'SHOPIFY_PUSH_NO_POSITIVE_QTY'
+  WHEN rq.last_error LIKE '%no fulfillment-order line item%' THEN 'SHOPIFY_PUSH_SKU_NOT_ON_FO'
+  WHEN rq.last_error LIKE '%fulfillment push returned false%' THEN 'CHANNEL_PUSH_RETURNED_FALSE'
+  WHEN rq.last_error LIKE '%status ''cancelled'' is not pushable%' THEN 'SHIPMENT_NOT_PUSHABLE_CANCELLED'
   WHEN rq.topic = 'oms_wms_sync' AND rq.last_error LIKE '%no WMS order%' THEN 'OMS_WMS_SYNC_NO_ORDER'
   WHEN rq.last_error LIKE '%2 character country code%' THEN 'SHIPSTATION_COUNTRY_CODE'
   WHEN rq.last_error LIKE '%cents must be >= 0%' THEN 'PUSH_NEGATIVE_TOTAL'
@@ -136,12 +138,42 @@ const DEAD_LETTER_REASON_CODE = sql`CASE
   WHEN rq.last_error IS NULL THEN 'NO_MESSAGE'
   ELSE 'UNCLASSIFIED' END`;
 
+const DEAD_LETTER_OBSERVED_AT = sql`COALESCE(rq.updated_at, rq.next_retry_at, rq.created_at)`;
+
+const DEAD_LETTER_ENTITY_SCOPE = sql`COALESCE(
+  'shipment:' || NULLIF(rq.payload->>'shipmentId', ''),
+  'oms_order:' || NULLIF(rq.payload->>'omsOrderId', ''),
+  'oms_order:' || NULLIF(rq.payload->>'orderId', ''),
+  'wms_order:' || NULLIF(rq.payload->>'wmsOrderId', ''),
+  'channel_order:' || NULLIF(rq.payload->>'order_id', ''),
+  'channel_order:' || NULLIF(rq.payload #>> '{notification,data,orderId}', ''),
+  'channel_order:' || NULLIF(rq.payload->>'id', ''),
+  'external_order:' || NULLIF(rq.payload->>'externalOrderId', ''),
+  'external_order:' || NULLIF(rq.payload->>'external_order_id', ''),
+  'order_number:' || NULLIF(rq.payload->>'name', ''),
+  'order_number:' || NULLIF(rq.payload->>'order_number', ''),
+  'order_number:' || NULLIF(rq.payload->>'orderNumber', ''),
+  'shipstation_batch:' || (regexp_match(COALESCE(rq.payload->>'resource_url', ''), 'batchId=([0-9]+)'))[1],
+  'retry:' || rq.id::text
+)`;
+
+const DEAD_LETTER_SCOPE_KEY = sql`CONCAT_WS(':',
+  ${DEAD_LETTER_REASON_CODE},
+  ${DEAD_LETTER_ENTITY_SCOPE},
+  CASE
+    WHEN (${DEAD_LETTER_REASON_CODE}) = 'UNCLASSIFIED' THEN md5(COALESCE(rq.last_error, ''))
+    ELSE NULL
+  END
+)`;
+
 const DEAD_LETTER_LABELS: Record<string, string> = {
   SHIPNOTIFY_NO_INVENTORY: "Couldn't ship — nothing in stock to deduct",
   SHIPNOTIFY_UNMAPPED_LINEITEM: "Ship update — items didn't match the order",
   SHIPNOTIFY_SHIPMENT_NOT_FOUND: "Ship update — shipment not found",
   SHOPIFY_PUSH_NO_POSITIVE_QTY: "Tracking push — shipment had no items",
   SHOPIFY_PUSH_SKU_NOT_ON_FO: "Tracking push — item not on the order",
+  CHANNEL_PUSH_RETURNED_FALSE: "Tracking push — provider did not accept update",
+  SHIPMENT_NOT_PUSHABLE_CANCELLED: "Shipment push — cancelled shipment",
   OMS_WMS_SYNC_NO_ORDER: "Hand-off — no warehouse order was created",
   SHIPSTATION_COUNTRY_CODE: "Push — country code must be 2 letters",
   PUSH_NEGATIVE_TOTAL: "Push — order total came out negative",
@@ -555,6 +587,14 @@ const DEAD_LETTER_REASONS: DeadLetterReasonDef[] = [
     message: "Tracking push — item isn't on the order",
     why: "Shopify says the item we shipped isn't on its copy of the order (often a pre-order or a changed line). Reconcile the order on Shopify, then re-send tracking.",
     remediation: "INVESTIGATE", replaySafe: false },
+  { code: "CHANNEL_PUSH_RETURNED_FALSE", stage: "writeback", severity: "warning",
+    message: "Tracking push did not confirm",
+    why: "The channel writeback returned false instead of confirming the tracking update. Do not blind-retry this bucket; verify the provider order and the physical shipment first, then repair the owning OMS/WMS state or retry from the confirmed shipment.",
+    remediation: "MANUAL_REVIEW", replaySafe: false },
+  { code: "SHIPMENT_NOT_PUSHABLE_CANCELLED", stage: "engine_push", severity: "info",
+    message: "Cancelled shipment was sent to push",
+    why: "A cancelled shipment reached a push workflow that only accepts active shipments. This is terminal historical noise unless a replacement shipment is missing; verify there is no active package to push, then clear it with an ignored or resolved disposition.",
+    remediation: "PURGE_OBSOLETE", replaySafe: false },
   { code: "OMS_WMS_SYNC_NO_ORDER", stage: "oms_to_wms", severity: "critical",
     message: "Hand-off failed — no warehouse order created",
     why: "Sending the order to the warehouse produced nothing, so it can't be picked. Re-send it to the warehouse.",
@@ -597,21 +637,83 @@ const DEAD_LETTER_REASONS: DeadLetterReasonDef[] = [
     remediation: "INVESTIGATE", replaySafe: false },
 ];
 
-// Drill-down rows for ONE reason bucket (the dead-letter row query + reason filter).
-// Resolves an order ref per topic so the rows are actionable: oms_wms_sync carries
-// {omsOrderId} → oms_orders.external_order_number; shopify_fulfillment_push carries
-// {shipmentId} → our shipment → wms order number; SHIP_NOTIFY carries only a ShipStation
-// {resource_url batchId} (a batch of many orders — no single order), surfaced as
-// shipstation_batch so it can at least be opened in ShipStation.
-const deadLetterRows = (reasonCode: string) => sql`SELECT ${DEAD_LETTER_REASON_CODE} AS reason_code, COALESCE(rq.payload->>'name', rq.payload->>'order_number', rq.payload->>'orderNumber', oo.external_order_number, wo.order_number) AS order_number, rq.payload->>'shipmentId' AS shipment_id, (regexp_match(rq.payload->>'resource_url', 'batchId=([0-9]+)'))[1] AS shipstation_batch, rq.provider, rq.topic, rq.attempts, rq.last_error, rq.next_retry_at, rq.updated_at AS at, rq.id AS retry_id FROM oms.webhook_retry_queue rq LEFT JOIN wms.outbound_shipments os ON os.id = NULLIF(rq.payload->>'shipmentId','')::int LEFT JOIN wms.orders wo ON wo.id = os.order_id LEFT JOIN oms.oms_orders oo ON oo.id = NULLIF(rq.payload->>'omsOrderId','')::int WHERE rq.status = 'dead' AND (${DEAD_LETTER_REASON_CODE}) = ${reasonCode} ORDER BY rq.updated_at DESC NULLS LAST LIMIT 50`;
+const deadLetterCount = (reasonCode: string, win: any) => sql`
+  WITH dead_retry_scopes AS (
+    SELECT ${DEAD_LETTER_SCOPE_KEY} AS scope_key
+    FROM oms.webhook_retry_queue rq
+    WHERE rq.status = 'dead'
+      AND ${DEAD_LETTER_OBSERVED_AT} > ${win}
+      AND (${DEAD_LETTER_REASON_CODE}) = ${reasonCode}
+    GROUP BY 1
+  )
+  SELECT COUNT(*)::int AS count FROM dead_retry_scopes
+`;
+
+// Drill-down rows for ONE reason bucket, grouped by durable operational scope.
+// The row remains actionable (latest retry_id for requeue paths) while also
+// showing retry_row_count/retry_ids so repeated attempts are evidence, not count inflation.
+const deadLetterRows = (reasonCode: string, win: any) => sql`
+  WITH dead_retry_rows AS (
+    SELECT
+      ${DEAD_LETTER_REASON_CODE} AS reason_code,
+      ${DEAD_LETTER_SCOPE_KEY} AS scope_key,
+      ${DEAD_LETTER_OBSERVED_AT} AS observed_at,
+      COALESCE(
+        rq.payload->>'name',
+        rq.payload->>'order_number',
+        rq.payload->>'orderNumber',
+        oo.external_order_number,
+        wo.order_number
+      ) AS order_number,
+      rq.payload->>'shipmentId' AS shipment_id,
+      (regexp_match(COALESCE(rq.payload->>'resource_url', ''), 'batchId=([0-9]+)'))[1] AS shipstation_batch,
+      rq.provider,
+      rq.topic,
+      rq.attempts,
+      rq.last_error,
+      rq.next_retry_at,
+      rq.id AS retry_id
+    FROM oms.webhook_retry_queue rq
+    LEFT JOIN wms.outbound_shipments os
+      ON os.id = CASE WHEN rq.payload->>'shipmentId' ~ '^[0-9]+$' THEN (rq.payload->>'shipmentId')::int END
+    LEFT JOIN wms.orders wo
+      ON wo.id = os.order_id
+    LEFT JOIN oms.oms_orders oo
+      ON oo.id = CASE WHEN rq.payload->>'omsOrderId' ~ '^[0-9]+$' THEN (rq.payload->>'omsOrderId')::int END
+      OR oo.id = CASE WHEN rq.payload->>'orderId' ~ '^[0-9]+$' THEN (rq.payload->>'orderId')::int END
+    WHERE rq.status = 'dead'
+      AND ${DEAD_LETTER_OBSERVED_AT} > ${win}
+      AND (${DEAD_LETTER_REASON_CODE}) = ${reasonCode}
+  )
+  SELECT
+    reason_code,
+    scope_key,
+    (array_agg(order_number ORDER BY observed_at DESC NULLS LAST) FILTER (WHERE order_number IS NOT NULL))[1] AS order_number,
+    (array_agg(shipment_id ORDER BY observed_at DESC NULLS LAST) FILTER (WHERE shipment_id IS NOT NULL))[1] AS shipment_id,
+    (array_agg(shipstation_batch ORDER BY observed_at DESC NULLS LAST) FILTER (WHERE shipstation_batch IS NOT NULL))[1] AS shipstation_batch,
+    (array_agg(provider ORDER BY observed_at DESC NULLS LAST))[1] AS provider,
+    (array_agg(topic ORDER BY observed_at DESC NULLS LAST))[1] AS topic,
+    MAX(attempts)::int AS attempts,
+    COUNT(*)::int AS retry_row_count,
+    array_agg(retry_id ORDER BY observed_at DESC NULLS LAST) AS retry_ids,
+    (array_agg(retry_id ORDER BY observed_at DESC NULLS LAST))[1] AS retry_id,
+    (array_agg(last_error ORDER BY observed_at DESC NULLS LAST) FILTER (WHERE last_error IS NOT NULL))[1] AS last_error,
+    MAX(next_retry_at) AS next_retry_at,
+    MIN(observed_at) AS first_seen_at,
+    MAX(observed_at) AS at
+  FROM dead_retry_rows
+  GROUP BY reason_code, scope_key
+  ORDER BY MAX(observed_at) DESC NULLS LAST
+  LIMIT 50
+`;
 
 const DEAD_LETTER_ISSUES: FlowIssueDef[] = DEAD_LETTER_REASONS.map((r) => ({
   code: r.code, kind: "queue_failure", stage: r.stage, severity: r.severity,
   message: r.message, why: r.why, remediation: r.remediation, replaySafe: r.replaySafe,
   // Counts come from ONE grouped pass in getFlowWaterfall (pool-friendly); this
   // standalone form is used by the registry test and any direct count.
-  count: () => sql`SELECT COUNT(*)::int AS count FROM oms.webhook_retry_queue rq WHERE rq.status = 'dead' AND (${DEAD_LETTER_REASON_CODE}) = ${r.code}`,
-  sample: () => deadLetterRows(r.code),
+  count: (win: any) => deadLetterCount(r.code, win),
+  sample: (win: any) => deadLetterRows(r.code, win),
 }));
 
 export const FLOW_ISSUES: FlowIssueDef[] = [...BASE_ISSUES, ...DEAD_LETTER_ISSUES];
@@ -691,7 +793,20 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
 
     // ---- dead-letter reason counts in ONE grouped pass (one query feeds every
     // queue_failure bucket AND the sidebar breakdown — keeps the tiny pool happy) ----
-    const dlRows = rows(await tx.execute(sql`SELECT ${DEAD_LETTER_REASON_CODE} AS code, COUNT(*)::int AS count FROM oms.webhook_retry_queue rq WHERE rq.status = 'dead' GROUP BY 1`));
+    const dlRows = rows(await tx.execute(sql`
+      WITH dead_retry_scopes AS (
+        SELECT
+          ${DEAD_LETTER_REASON_CODE} AS code,
+          ${DEAD_LETTER_SCOPE_KEY} AS scope_key
+        FROM oms.webhook_retry_queue rq
+        WHERE rq.status = 'dead'
+          AND ${DEAD_LETTER_OBSERVED_AT} > ${win}
+        GROUP BY 1, 2
+      )
+      SELECT code, COUNT(*)::int AS count
+      FROM dead_retry_scopes
+      GROUP BY code
+    `));
     const dlMap: Record<string, number> = {};
     for (const r of dlRows) dlMap[String(r.code)] = Number(r.count) || 0;
 
