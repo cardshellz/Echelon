@@ -397,7 +397,7 @@ describe("oms-flow-reconciliation.service", () => {
     warn.mockRestore();
   });
 
-  it("auto-remediates missing WMS and missing shipment bridge issues through retry rows", async () => {
+  it("leaves replay-after-fix orders for operators while auto-remediating missing shipments", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
     const db = {
@@ -427,10 +427,6 @@ describe("oms-flow-reconciliation.service", () => {
         .mockResolvedValueOnce(sampleRows([]))
         // Auto-close cleanup finds no resolved dead fulfillment/tracking retries.
         .mockResolvedValueOnce(sampleRows([]))
-        // OMS_PAID_WITHOUT_WMS remediation SELECT + duplicate retry check + audit event.
-        .mockResolvedValueOnce(sampleRows([{ id: 10 }]))
-        .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(sampleRows([]))
         // WMS_READY_WITHOUT_SHIPMENT remediation SELECT + duplicate retry check + audit event.
         .mockResolvedValueOnce(sampleRows([{ id: 20, oms_order_id: "10" }]))
         .mockResolvedValueOnce(sampleRows([]))
@@ -449,10 +445,9 @@ describe("oms-flow-reconciliation.service", () => {
       "OMS_PAID_WITHOUT_WMS",
       "WMS_READY_WITHOUT_SHIPMENT",
     ]);
-    expect(inserts).toHaveLength(2);
-    expect((inserts[0] as any).topic).toBe("oms_wms_sync");
-    expect((inserts[1] as any).topic).toBe("wms_shipment_create");
-    expect(warn).toHaveBeenCalledWith(
+    expect(inserts).toHaveLength(1);
+    expect((inserts[0] as any).topic).toBe("wms_shipment_create");
+    expect(warn).not.toHaveBeenCalledWith(
       expect.stringContaining("auto-remediated 1 OMS_PAID_WITHOUT_WMS row"),
     );
     expect(warn).toHaveBeenCalledWith(
@@ -569,19 +564,18 @@ describe("oms-flow-reconciliation.service", () => {
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
-  it("queues OMS to WMS sync remediation through the retry queue", async () => {
-    const inserts: unknown[] = [];
-    const db = {
+  it("queues the canonical succeeded orders/paid event instead of a no-op WMS sync", async () => {
+    const tx = {
       execute: vi
         .fn()
-        .mockResolvedValueOnce(sampleRows([{ id: 10 }]))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(sampleRows([{ id: 10, paid_inbox_id: 79377 }]))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(sampleRows([{ id: 901 }]))
         .mockResolvedValueOnce(sampleRows([])),
-      insert: vi.fn(() => ({
-        values: vi.fn(async (row: unknown) => {
-          inserts.push(row);
-          return undefined;
-        }),
-      })),
+    };
+    const db = {
+      transaction: vi.fn(async (fn: (inner: any) => Promise<unknown>) => fn(tx)),
     };
 
     const result = await remediateOmsFlowIssue(db, {
@@ -591,15 +585,70 @@ describe("oms-flow-reconciliation.service", () => {
     });
 
     expect(result).toMatchObject({
-      action: "queued_oms_wms_sync",
+      action: "queued_orders_paid_replay",
       changed: true,
       omsOrderId: 10,
       wmsOrderId: null,
+      retryQueueId: 901,
+      sourceInboxId: 79377,
+      provider: "shopify",
+      topic: "orders/paid",
     });
-    expect(inserts).toHaveLength(1);
-    expect((inserts[0] as any).topic).toBe("oms_wms_sync");
-    expect((inserts[0] as any).payload).toEqual({ omsOrderId: 10 });
-    expect(db.execute).toHaveBeenCalledTimes(3);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(tx.execute).toHaveBeenCalledTimes(5);
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("hashtext('oms_paid_without_wms_replay')");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("wi.topic = 'orders/paid'");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("SELECT wi.provider");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("wi.payload");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("source_inbox_id");
+    expect(OMS_FLOW_RECONCILIATION_SRC).not.toContain("enqueueOmsWmsSyncRetry");
+    expect(OMS_FLOW_RECONCILIATION_SRC).not.toContain("queued_oms_wms_sync");
+  });
+
+  it("returns the existing pending paid replay instead of enqueuing a duplicate", async () => {
+    const tx = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(sampleRows([{ id: 10, paid_inbox_id: 79377 }]))
+        .mockResolvedValueOnce(sampleRows([{ id: 901 }])),
+    };
+    const db = {
+      transaction: vi.fn(async (fn: (inner: any) => Promise<unknown>) => fn(tx)),
+    };
+
+    const result = await remediateOmsFlowIssue(db, {
+      code: "OMS_PAID_WITHOUT_WMS",
+      omsOrderId: 10,
+      operator: "ops",
+    });
+
+    expect(result).toMatchObject({
+      action: "orders_paid_replay_already_pending",
+      changed: false,
+      retryQueueId: 901,
+      sourceInboxId: 79377,
+    });
+    expect(tx.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects paid replay when no canonical succeeded paid event exists", async () => {
+    const tx = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(sampleRows([{ id: 10, paid_inbox_id: null }])),
+    };
+    const db = {
+      transaction: vi.fn(async (fn: (inner: any) => Promise<unknown>) => fn(tx)),
+    };
+
+    await expect(remediateOmsFlowIssue(db, {
+      code: "OMS_PAID_WITHOUT_WMS",
+      omsOrderId: 10,
+      operator: "ops",
+    })).rejects.toThrow(/No succeeded Shopify orders\/paid inbox event/);
+    expect(tx.execute).toHaveBeenCalledTimes(2);
   });
 
   it("queues WMS shipment creation remediation through the retry queue", async () => {

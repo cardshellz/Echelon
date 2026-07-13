@@ -47,6 +47,17 @@ describe("getFlowWaterfall", () => {
     expect(result.windowDays).toBe(30);
   });
 
+  it("exposes a canonical paid replay source for paid orders missing WMS", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "OMS_PAID_WITHOUT_WMS"');
+    const end = FLOW_WATERFALL_SRC.indexOf('\n  },', start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("oo.id AS oms_order_id");
+    expect(issueBlock).toContain("paid_inbox.id AS _replay_source_inbox_id");
+    expect(issueBlock).toContain("wi.topic = 'orders/paid'");
+    expect(issueBlock).toContain("wi.status = 'succeeded'");
+  });
+
   it("keeps stale tracking detection shipment-scoped", () => {
     const staleBlock = FLOW_WATERFALL_SRC.slice(
       FLOW_WATERFALL_SRC.indexOf('code: "CHANNEL_TRACKING_STALE"'),
