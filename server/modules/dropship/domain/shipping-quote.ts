@@ -1,4 +1,11 @@
 import { DropshipError } from "./errors";
+import {
+  cartonize,
+  isCartonizeCandidateVerified,
+  type CartonizeBox,
+  type CartonizeItem,
+  type CartonPlacement,
+} from "../../shipping-engine/domain/cartonize";
 
 export const DROPSHIP_DEFAULT_SHIPPING_CURRENCY = "USD";
 export const DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS = 0;
@@ -24,15 +31,16 @@ export interface NormalizedDropshipShippingQuoteItem extends DropshipShippingQuo
 
 export interface DropshipPackageProfile {
   productVariantId: number;
+  sku: string | null;
   weightGrams: number;
   lengthMm: number;
   widthMm: number;
   heightMm: number;
+  shippingGroupCode: string | null;
   shipAlone: boolean;
   defaultCarrier: string | null;
   defaultService: string | null;
   defaultBoxId: number | null;
-  maxUnitsPerPackage: number | null;
 }
 
 export interface DropshipBoxCatalogEntry {
@@ -49,7 +57,9 @@ export interface DropshipBoxCatalogEntry {
 
 export interface DropshipCartonizedPackage {
   packageSequence: number;
-  productVariantId: number;
+  items: DropshipCartonizedPackageItem[];
+  placements: CartonPlacement[];
+  productVariantId: number | null;
   quantity: number;
   boxId: number;
   boxCode: string;
@@ -59,6 +69,23 @@ export interface DropshipCartonizedPackage {
   heightMm: number;
   requestedCarrier: string | null;
   requestedService: string | null;
+}
+
+export interface DropshipCartonizedPackageItem {
+  productVariantId: number;
+  quantity: number;
+}
+
+interface DropshipPackingBatchLine {
+  profile: DropshipPackageProfile;
+  quantity: number;
+}
+
+interface DropshipPackingBatch {
+  lines: DropshipPackingBatchLine[];
+  requestedCarrier: string | null;
+  requestedService: string | null;
+  defaultBoxId: number | null;
 }
 
 export interface DropshipPercentageFeePolicy {
@@ -114,9 +141,7 @@ export function cartonizeDropshipItems(input: {
   packageProfiles: readonly DropshipPackageProfile[];
   boxes: readonly DropshipBoxCatalogEntry[];
 }): DropshipCartonizedPackage[] {
-  const activeBoxes = input.boxes
-    .filter((box) => box.isActive)
-    .sort(compareBoxesForSelection);
+  const activeBoxes = input.boxes.filter((box) => box.isActive);
   if (activeBoxes.length === 0) {
     throw new DropshipError(
       "DROPSHIP_BOX_CATALOG_REQUIRED",
@@ -127,7 +152,8 @@ export function cartonizeDropshipItems(input: {
   const profilesByVariantId = new Map(
     input.packageProfiles.map((profile) => [profile.productVariantId, profile]),
   );
-  const packages: DropshipCartonizedPackage[] = [];
+  const batches: DropshipPackingBatch[] = [];
+  const compatibleBatches = new Map<string, DropshipPackingBatch>();
 
   for (const item of input.items) {
     const profile = profilesByVariantId.get(item.productVariantId);
@@ -139,34 +165,84 @@ export function cartonizeDropshipItems(input: {
       );
     }
 
-    let remaining = item.quantity;
-    while (remaining > 0) {
-      const targetUnits = profile.shipAlone
-        ? 1
-        : Math.min(profile.maxUnitsPerPackage ?? remaining, remaining);
-      const carton = findCartonForUnits({
-        profile,
-        activeBoxes,
-        targetUnits,
-      });
+    if (profile.shipAlone) {
+      for (let unit = 0; unit < item.quantity; unit += 1) {
+        batches.push({
+          lines: [{ profile, quantity: 1 }],
+          requestedCarrier: profile.defaultCarrier,
+          requestedService: profile.defaultService,
+          defaultBoxId: profile.defaultBoxId,
+        });
+      }
+      continue;
+    }
 
-      packages.push({
-        packageSequence: packages.length + 1,
-        productVariantId: item.productVariantId,
-        quantity: carton.quantity,
-        boxId: carton.box.id,
-        boxCode: carton.box.code,
-        weightGrams: carton.weightGrams,
-        lengthMm: carton.box.lengthMm,
-        widthMm: carton.box.widthMm,
-        heightMm: carton.box.heightMm,
+    const compatibilityKey = JSON.stringify([
+      profile.defaultCarrier,
+      profile.defaultService,
+      profile.defaultBoxId,
+    ]);
+    let batch = compatibleBatches.get(compatibilityKey);
+    if (!batch) {
+      batch = {
+        lines: [],
         requestedCarrier: profile.defaultCarrier,
         requestedService: profile.defaultService,
-      });
-      remaining -= carton.quantity;
+        defaultBoxId: profile.defaultBoxId,
+      };
+      compatibleBatches.set(compatibilityKey, batch);
+      batches.push(batch);
     }
+    batch.lines.push({ profile, quantity: item.quantity });
   }
 
+  const packages: DropshipCartonizedPackage[] = [];
+  for (const batch of batches) {
+    const eligibleBoxes = resolveEligibleDropshipBoxes(batch, activeBoxes);
+    const packing = cartonize(
+      batch.lines.map(({ profile, quantity }) =>
+        mapDropshipProfileToCartonizeItem(profile, quantity)),
+      eligibleBoxes.map(mapDropshipBoxToCartonizeBox),
+      { allowRiders: false },
+    );
+    const candidate = packing.candidates[0];
+    if (!isCartonizeCandidateVerified(candidate) || candidate.parcels.some((parcel) =>
+      parcel.boxId === null)) {
+      throw new DropshipError(
+        "DROPSHIP_CARTONIZATION_BLOCKED",
+        "No active dropship box can physically pack every ordered unit.",
+        {
+          items: batch.lines.map(({ profile, quantity }) => ({
+            productVariantId: profile.productVariantId,
+            quantity,
+          })),
+          warnings: candidate?.warnings ?? [],
+        },
+      );
+    }
+
+    for (const parcel of candidate.parcels) {
+      const cartonItems = parcel.items.map((line) => ({
+        productVariantId: line.productVariantId,
+        quantity: line.quantity,
+      }));
+      packages.push({
+        packageSequence: packages.length + 1,
+        items: cartonItems,
+        placements: parcel.placements.map((placement) => ({ ...placement })),
+        productVariantId: cartonItems.length === 1 ? cartonItems[0].productVariantId : null,
+        quantity: cartonItems.reduce((sum, line) => sum + line.quantity, 0),
+        boxId: parcel.boxId as number,
+        boxCode: parcel.boxCode as string,
+        weightGrams: parcel.estWeightGrams,
+        lengthMm: parcel.lengthMm,
+        widthMm: parcel.widthMm,
+        heightMm: parcel.heightMm,
+        requestedCarrier: batch.requestedCarrier,
+        requestedService: batch.requestedService,
+      });
+    }
+  }
   return packages;
 }
 
@@ -191,95 +267,62 @@ export function calculateBasisPointsFeeCents(
   return feeCents;
 }
 
-function findCartonForUnits(input: {
-  profile: DropshipPackageProfile;
-  activeBoxes: readonly DropshipBoxCatalogEntry[];
-  targetUnits: number;
-}): { box: DropshipBoxCatalogEntry; quantity: number; weightGrams: number } {
-  let quantity = input.targetUnits;
-  while (quantity > 0) {
-    const weightGrams = input.profile.weightGrams * quantity;
-    const box = selectBoxForPackage({
-      profile: input.profile,
-      activeBoxes: input.activeBoxes,
-      packageWeightGrams: weightGrams,
-    });
-    if (box) {
-      return {
-        box,
-        quantity,
-        weightGrams: weightGrams + box.tareWeightGrams,
-      };
-    }
-    quantity -= 1;
-  }
-
-  throw new DropshipError(
-    "DROPSHIP_CARTONIZATION_BLOCKED",
-    "No active dropship box can fit the SKU package profile.",
-    { productVariantId: input.profile.productVariantId },
-  );
-}
-
-function selectBoxForPackage(input: {
-  profile: DropshipPackageProfile;
-  activeBoxes: readonly DropshipBoxCatalogEntry[];
-  packageWeightGrams: number;
-}): DropshipBoxCatalogEntry | null {
-  const requestedBox = input.profile.defaultBoxId
-    ? input.activeBoxes.find((box) => box.id === input.profile.defaultBoxId)
-    : null;
-
-  if (input.profile.defaultBoxId && !requestedBox) {
+function resolveEligibleDropshipBoxes(
+  batch: DropshipPackingBatch,
+  activeBoxes: readonly DropshipBoxCatalogEntry[],
+): DropshipBoxCatalogEntry[] {
+  if (batch.defaultBoxId === null) return [...activeBoxes];
+  const requestedBox = activeBoxes.find((box) => box.id === batch.defaultBoxId);
+  if (!requestedBox) {
     throw new DropshipError(
       "DROPSHIP_PACKAGE_PROFILE_BOX_REQUIRED",
       "Configured dropship package profile default box is not active.",
       {
-        productVariantId: input.profile.productVariantId,
-        defaultBoxId: input.profile.defaultBoxId,
+        productVariantIds: batch.lines.map((line) => line.profile.productVariantId),
+        defaultBoxId: batch.defaultBoxId,
       },
     );
   }
-
-  if (requestedBox) {
-    return boxFitsPackage(requestedBox, input.profile, input.packageWeightGrams)
-      ? requestedBox
-      : null;
-  }
-
-  return input.activeBoxes.find((box) => boxFitsPackage(
-    box,
-    input.profile,
-    input.packageWeightGrams,
-  )) ?? null;
+  return [requestedBox];
 }
 
-function boxFitsPackage(
-  box: DropshipBoxCatalogEntry,
+function mapDropshipProfileToCartonizeItem(
   profile: DropshipPackageProfile,
-  packageWeightGrams: number,
-): boolean {
-  const sortedBoxDims = [box.lengthMm, box.widthMm, box.heightMm].sort(sortAscending);
-  const sortedProfileDims = [profile.lengthMm, profile.widthMm, profile.heightMm].sort(sortAscending);
-  const dimensionsFit = sortedProfileDims.every((dimension, index) => dimension <= sortedBoxDims[index]);
-  const packageWeightWithTare = packageWeightGrams + box.tareWeightGrams;
-  const weightFits = box.maxWeightGrams === null || packageWeightWithTare <= box.maxWeightGrams;
-  return dimensionsFit && weightFits;
+  quantity: number,
+): CartonizeItem {
+  return {
+    productVariantId: profile.productVariantId,
+    sku: profile.sku,
+    quantity,
+    weightGrams: profile.weightGrams,
+    lengthMm: profile.lengthMm,
+    widthMm: profile.widthMm,
+    heightMm: profile.heightMm,
+    shippingGroupCode: profile.shippingGroupCode,
+    shipsInOwnContainer: false,
+    riderEligible: false,
+    riderVoidCm3: null,
+    riderVoidMaxWeightGrams: null,
+    riderVoidMaxItems: null,
+  };
 }
 
-function compareBoxesForSelection(
-  left: DropshipBoxCatalogEntry,
-  right: DropshipBoxCatalogEntry,
-): number {
-  const leftVolume = left.lengthMm * left.widthMm * left.heightMm;
-  const rightVolume = right.lengthMm * right.widthMm * right.heightMm;
-  return leftVolume - rightVolume
-    || left.tareWeightGrams - right.tareWeightGrams
-    || left.id - right.id;
-}
-
-function sortAscending(left: number, right: number): number {
-  return left - right;
+function mapDropshipBoxToCartonizeBox(
+  box: DropshipBoxCatalogEntry,
+): CartonizeBox {
+  return {
+    id: box.id,
+    code: box.code,
+    kind: "box",
+    lengthMm: box.lengthMm,
+    widthMm: box.widthMm,
+    heightMm: box.heightMm,
+    tareWeightGrams: box.tareWeightGrams,
+    maxWeightGrams: box.maxWeightGrams,
+    costCents: 0,
+    fillFactorBps: 10_000,
+    isActive: box.isActive,
+  };
 }
 
 function assertNonNegativeSafeInteger(name: string, value: number): void {

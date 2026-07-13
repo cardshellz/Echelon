@@ -824,6 +824,7 @@ export const dropshipPackageProfiles = dropshipSchema.table("dropship_package_pr
   defaultCarrier: varchar("default_carrier", { length: 50 }),
   defaultService: varchar("default_service", { length: 80 }),
   defaultBoxId: integer("default_box_id").references(() => dropshipBoxCatalog.id, { onDelete: "set null" }),
+  // Deprecated compatibility field. Cartonizer v3 derives capacity from physical placement.
   maxUnitsPerPackage: integer("max_units_per_package"),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

@@ -276,7 +276,13 @@ describe("buildCartonizeItems", () => {
 describe("isPackingComplete", () => {
   const parcel = {
     boxId: 1, boxCode: "BOX-S", siocProductVariantId: null,
-    items: [], estWeightGrams: 100, billableWeightGrams: 100,
+    items: [{ productVariantId: 101, sku: "SLV-100", quantity: 1, isRider: false }],
+    placements: [{
+      productVariantId: 101, sku: "SLV-100", unitSequence: 1,
+      orientation: "LWH",
+      xMm: 0, yMm: 0, zMm: 0, lengthMm: 1, widthMm: 1, heightMm: 1,
+    }],
+    estWeightGrams: 100, billableWeightGrams: 100,
     lengthMm: 1, widthMm: 1, heightMm: 1, shippingGroupCode: null,
     reason: "packed fewest-parcels",
   };

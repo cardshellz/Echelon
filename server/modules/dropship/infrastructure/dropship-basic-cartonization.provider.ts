@@ -10,23 +10,22 @@ import {
   type DropshipBoxCatalogEntry,
   type DropshipPackageProfile,
 } from "../domain/shipping-quote";
+import { CARTONIZE_ENGINE } from "../../shipping-engine/domain/cartonize";
 
-const BASIC_DROPSHIP_CARTONIZATION_ENGINE = {
-  name: "basic_catalog_package_cartonization",
-  version: "2",
-} as const;
+const BASIC_DROPSHIP_CARTONIZATION_ENGINE = CARTONIZE_ENGINE;
 
 interface PackageProfileRow {
   product_variant_id: number;
+  sku: string | null;
   weight_grams: number;
   length_mm: number;
   width_mm: number;
   height_mm: number;
+  shipping_group_code: string | null;
   ship_alone: boolean;
   default_carrier: string | null;
   default_service: string | null;
   default_box_id: number | null;
-  max_units_per_package: number | null;
 }
 
 interface BoxRow {
@@ -71,16 +70,21 @@ export class BasicDropshipCartonizationProvider implements DropshipCartonization
     try {
       const result = await client.query<PackageProfileRow>(
         `SELECT pv.id AS product_variant_id,
+                pv.sku,
                 pv.weight_grams,
                 pv.length_mm,
                 pv.width_mm,
                 pv.height_mm,
+                sg.code AS shipping_group_code,
                 COALESCE(pp.ship_alone, false) AS ship_alone,
                 pp.default_carrier,
                 pp.default_service,
-                pp.default_box_id,
-                pp.max_units_per_package
+                pp.default_box_id
          FROM catalog.product_variants pv
+         INNER JOIN catalog.products p
+           ON p.id = pv.product_id
+         LEFT JOIN catalog.shipping_groups sg
+           ON sg.id = p.shipping_group_id
          LEFT JOIN dropship.dropship_package_profiles pp
            ON pp.product_variant_id = pv.id
           AND pp.is_active = true
@@ -117,15 +121,16 @@ export class BasicDropshipCartonizationProvider implements DropshipCartonization
 function mapPackageProfileRow(row: PackageProfileRow): DropshipPackageProfile {
   return {
     productVariantId: row.product_variant_id,
+    sku: row.sku,
     weightGrams: row.weight_grams,
     lengthMm: row.length_mm,
     widthMm: row.width_mm,
     heightMm: row.height_mm,
+    shippingGroupCode: row.shipping_group_code,
     shipAlone: row.ship_alone,
     defaultCarrier: row.default_carrier,
     defaultService: row.default_service,
     defaultBoxId: row.default_box_id,
-    maxUnitsPerPackage: row.max_units_per_package,
   };
 }
 

@@ -24,8 +24,9 @@ This is a current pickup checkpoint for continuing the dropship program on anoth
 - Provider-backed USDC verification is explicitly not applicable to launch readiness until the provider/custody/settlement milestone is implemented.
 - PR #908 is merged and deployed: release `v2365` runs merge commit `fe5c13f8`; config release `v2366` set `TRUST_PROXY=true`.
 - `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` remains pinned. The production login screen loads after the restart; an authenticated login remains a manual check.
-- Batch 0 item 0.8 is implemented in the current branch: active boxes require maximum loaded weight, active variant overrides require maximum units per package, and legacy gaps are visible in Shipping Config.
-- Production profile `COGS-TEST-001-P1` is bounded at 4 units/package. Active box `8X6X4` still has no maximum loaded weight and must be corrected before quote testing.
+- Batch 0 item 0.8 is implemented in PR #909 as shared cartonizer v3: real 3D unit placement, all six rotations, geometry/weight-driven carton splitting, recorded placements, and an automatic 22,679 g (under 50 lb) packed-carton ceiling.
+- Maximum units/package is no longer a cartonization input or UI setting. Box maximum weight is an optional lower structural limit; a NULL value uses the automatic handling ceiling.
+- Production profile `COGS-TEST-001-P1` still contains legacy `max_units_per_package=4` and active box `8X6X4` has no lower maximum weight. Neither blocks quote testing after PR #909; canonical SKU dimensions, box inner dimensions, tare, and the generated quote do.
 
 ## Verification already completed for PR #903
 
@@ -57,11 +58,11 @@ Do not treat the July 9 production row counts, the `marzcards` listing mode, or 
 
 ## Next implementation work
 
-After the item 0.8 change is merged and deployed:
+After PR #909 is merged and deployed:
 
 1. Sign in to the production portal once to close the manual item 0.7 session check.
-2. In Shipping Config, set and verify a safe maximum loaded weight for box `8X6X4`; confirm the guardrail warning clears.
-3. Resume the dogfood plan at Phase 3/4. Verify readiness, canonical package data, narrow catalog exposure, and then `SHIPCFG-04`/`SHIPCFG-08`.
+2. In Catalog Variants, verify the dogfood SKU has positive weight plus length, width, and height; verify `8X6X4` has accurate inner dimensions and tare.
+3. Resume the dogfood plan at Phase 3/4. Verify readiness, narrow catalog exposure, and then use `SHIPCFG-04`/`SHIPCFG-08` to prove carton count and shipping price.
 4. Do not begin a listing push while any hard-stop row remains open.
 
 ## Working agreement

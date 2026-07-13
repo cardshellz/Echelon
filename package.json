@@ -73,6 +73,7 @@
     "@types/multer": "^2.0.0",
     "@types/papaparse": "^5.5.2",
     "bcrypt": "^6.0.0",
+    "binpackingjs": "4.1.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",

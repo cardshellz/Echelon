@@ -769,16 +769,15 @@ describe("dropship ops surface client helpers", () => {
       defaultCarrier: "USPS",
       defaultService: "",
       defaultBoxId: "",
-      maxUnitsPerPackage: "4",
       isActive: true,
       idempotencyKey: "package-profile-1",
     })).toMatchObject({
       productVariantId: 10,
-      maxUnitsPerPackage: 4,
+      maxUnitsPerPackage: null,
       defaultService: null,
     });
 
-    expect(() => buildShippingBoxInput({
+    expect(buildShippingBoxInput({
       code: "unbounded",
       name: "Unbounded box",
       lengthMm: "230",
@@ -788,17 +787,16 @@ describe("dropship ops surface client helpers", () => {
       maxWeightGrams: "",
       isActive: true,
       idempotencyKey: "shipping-box-unbounded",
-    })).toThrow("maxWeightGrams is required for active boxes.");
-    expect(() => buildShippingPackageProfileInput({
+    })).toMatchObject({ maxWeightGrams: null });
+    expect(buildShippingPackageProfileInput({
       productVariantId: "10",
       shipAlone: false,
       defaultCarrier: "",
       defaultService: "",
       defaultBoxId: "",
-      maxUnitsPerPackage: "",
       isActive: true,
       idempotencyKey: "package-profile-unbounded",
-    })).toThrow("maxUnitsPerPackage is required for active package profiles.");
+    })).toMatchObject({ maxUnitsPerPackage: null });
 
     expect(buildShippingZoneRuleInput({
       originWarehouseId: "1",

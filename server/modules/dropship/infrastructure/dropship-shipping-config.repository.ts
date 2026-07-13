@@ -10,8 +10,8 @@ import type {
   DropshipRateTableRowConfigRecord,
   DropshipShippingConfigCommandContext,
   DropshipShippingConfigMutationResult,
+  DropshipShippingConfigOverview,
   DropshipShippingConfigRepository,
-  DropshipShippingConfigSnapshot,
   DropshipShippingMarkupPolicyRecord,
   DropshipZoneRuleConfigRecord,
   ListDropshipShippingConfigInput,
@@ -142,7 +142,7 @@ export class PgDropshipShippingConfigRepository implements DropshipShippingConfi
 
   async getOverview(
     input: ListDropshipShippingConfigInput & { generatedAt: Date },
-  ): Promise<DropshipShippingConfigSnapshot> {
+  ): Promise<DropshipShippingConfigOverview> {
     const client = await this.dbPool.connect();
     try {
       const boxes = await listBoxesWithClient(client);

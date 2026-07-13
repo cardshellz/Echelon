@@ -31,7 +31,7 @@ describe("DropshipShippingConfigService", () => {
       widthMm: 160,
       heightMm: 10,
       tareWeightGrams: 12,
-      maxWeightGrams: 1000,
+      maxWeightGrams: null,
       isActive: true,
       idempotencyKey: "shipping-box-001",
       actor: { actorType: "admin", actorId: "admin-1" },
@@ -40,6 +40,7 @@ describe("DropshipShippingConfigService", () => {
     expect(result.record.code).toBe("SMALL_MAILER");
     expect(repository.lastBoxInput).toMatchObject({
       code: "SMALL_MAILER",
+      maxWeightGrams: null,
       idempotencyKey: "shipping-box-001",
       requestHash: expect.any(String),
       now,
@@ -135,76 +136,6 @@ describe("DropshipShippingConfigService", () => {
     expect(repository.lastPackageProfileInput).not.toHaveProperty("lengthMm");
   });
 
-  it("reports active cartonizer configuration without bounded capacity", async () => {
-    const repository = new FakeShippingConfigRepository();
-    repository.boxes = [
-      makeBoxConfig({ boxId: 1, code: "SMALL", maxWeightGrams: null }),
-      makeBoxConfig({ boxId: 2, code: "INACTIVE", maxWeightGrams: null, isActive: false }),
-    ];
-    repository.packageProfiles = [
-      makePackageProfileConfig({ packageProfileId: 3, productVariantId: 10, variantSku: "SKU-10", maxUnitsPerPackage: null }),
-      makePackageProfileConfig({ packageProfileId: 4, productVariantId: 11, variantSku: "SKU-11", maxUnitsPerPackage: null, isActive: false }),
-    ];
-    const service = new DropshipShippingConfigService({
-      repository,
-      clock: { now: () => now },
-      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-    });
-
-    const result = await service.getOverview();
-
-    expect(result.validationWarnings).toEqual([
-      {
-        code: "box_max_weight_required",
-        entityType: "box",
-        entityId: 1,
-        label: "SMALL",
-        message: "Active box SMALL requires a maximum loaded weight.",
-      },
-      {
-        code: "package_profile_max_units_required",
-        entityType: "package_profile",
-        entityId: 3,
-        label: "SKU-10",
-        message: "Active variant override SKU-10 requires maximum units per package.",
-      },
-    ]);
-  });
-
-  it("rejects new active cartonizer config without capacity guardrails", async () => {
-    const repository = new FakeShippingConfigRepository();
-    const service = new DropshipShippingConfigService({
-      repository,
-      clock: { now: () => now },
-      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
-    });
-
-    await expect(service.upsertBox({
-      code: "SMALL",
-      name: "Small box",
-      lengthMm: 200,
-      widthMm: 150,
-      heightMm: 40,
-      tareWeightGrams: 20,
-      maxWeightGrams: null,
-      isActive: true,
-      idempotencyKey: "shipping-box-unbounded",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toThrow();
-    await expect(service.upsertPackageProfile({
-      productVariantId: 10,
-      shipAlone: false,
-      defaultCarrier: null,
-      defaultService: null,
-      defaultBoxId: null,
-      maxUnitsPerPackage: null,
-      isActive: true,
-      idempotencyKey: "package-profile-unbounded",
-      actor: { actorType: "admin", actorId: "admin-1" },
-    })).rejects.toThrow();
-    expect(repository.lastBoxInput).toBeNull();
-    expect(repository.lastPackageProfileInput).toBeNull();
-  });
 });
 
 class FakeShippingConfigRepository implements DropshipShippingConfigRepository {
@@ -359,49 +290,4 @@ class FakeShippingConfigRepository implements DropshipShippingConfigRepository {
       idempotentReplay: false,
     };
   }
-}
-
-function makeBoxConfig(overrides: Partial<DropshipBoxConfigRecord> = {}): DropshipBoxConfigRecord {
-  return {
-    boxId: 1,
-    code: "SMALL",
-    name: "Small box",
-    lengthMm: 200,
-    widthMm: 150,
-    heightMm: 40,
-    tareWeightGrams: 20,
-    maxWeightGrams: 1000,
-    isActive: true,
-    createdAt: now,
-    updatedAt: now,
-    ...overrides,
-  };
-}
-
-function makePackageProfileConfig(
-  overrides: Partial<DropshipPackageProfileConfigRecord> = {},
-): DropshipPackageProfileConfigRecord {
-  return {
-    packageProfileId: 1,
-    productVariantId: 10,
-    productId: 100,
-    productSku: "PRODUCT",
-    productName: "Product",
-    variantSku: "SKU-10",
-    variantName: "Variant",
-    weightGrams: 100,
-    lengthMm: 100,
-    widthMm: 75,
-    heightMm: 20,
-    packageDataComplete: true,
-    shipAlone: false,
-    defaultCarrier: null,
-    defaultService: null,
-    defaultBoxId: null,
-    maxUnitsPerPackage: 1,
-    isActive: true,
-    createdAt: now,
-    updatedAt: now,
-    ...overrides,
-  };
 }

@@ -31,15 +31,7 @@ const upsertBoxInputSchema = z.object({
   isActive: z.boolean().default(true),
   idempotencyKey: idempotencyKeySchema,
   actor: commandActorSchema,
-}).strict().superRefine((input, context) => {
-  if (input.isActive && input.maxWeightGrams == null) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["maxWeightGrams"],
-      message: "maxWeightGrams is required for active boxes.",
-    });
-  }
-});
+}).strict();
 
 const upsertPackageProfileInputSchema = z.object({
   productVariantId: positiveIdSchema,
@@ -52,19 +44,12 @@ const upsertPackageProfileInputSchema = z.object({
   defaultCarrier: optionalTrimmedStringSchema(50),
   defaultService: optionalTrimmedStringSchema(80),
   defaultBoxId: positiveIdSchema.nullable().optional(),
+  // Deprecated compatibility input; ignored by cartonizer v3.
   maxUnitsPerPackage: positiveIdSchema.nullable().optional(),
   isActive: z.boolean().default(true),
   idempotencyKey: idempotencyKeySchema,
   actor: commandActorSchema,
-}).strict().superRefine((input, context) => {
-  if (input.isActive && input.maxUnitsPerPackage == null) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["maxUnitsPerPackage"],
-      message: "maxUnitsPerPackage is required for active package profiles.",
-    });
-  }
-});
+}).strict();
 
 const upsertZoneRuleInputSchema = z.object({
   zoneRuleId: positiveIdSchema.optional(),
@@ -192,6 +177,7 @@ export interface DropshipPackageProfileConfigRecord {
   defaultCarrier: string | null;
   defaultService: string | null;
   defaultBoxId: number | null;
+  /** @deprecated Cartonizer v3 derives capacity from physical placement. */
   maxUnitsPerPackage: number | null;
   isActive: boolean;
   createdAt: Date;
@@ -260,18 +246,6 @@ export interface DropshipInsurancePoolPolicyRecord {
   createdAt: Date;
 }
 
-export type DropshipShippingConfigValidationWarningCode =
-  | "box_max_weight_required"
-  | "package_profile_max_units_required";
-
-export interface DropshipShippingConfigValidationWarning {
-  code: DropshipShippingConfigValidationWarningCode;
-  entityType: "box" | "package_profile";
-  entityId: number;
-  label: string;
-  message: string;
-}
-
 export interface DropshipShippingConfigOverview {
   boxes: DropshipBoxConfigRecord[];
   packageProfiles: DropshipPackageProfileConfigRecord[];
@@ -281,11 +255,8 @@ export interface DropshipShippingConfigOverview {
   activeInsurancePolicy: DropshipInsurancePoolPolicyRecord | null;
   markupPolicies: DropshipShippingMarkupPolicyRecord[];
   insurancePolicies: DropshipInsurancePoolPolicyRecord[];
-  validationWarnings: DropshipShippingConfigValidationWarning[];
   generatedAt: Date;
 }
-
-export type DropshipShippingConfigSnapshot = Omit<DropshipShippingConfigOverview, "validationWarnings">;
 
 export interface DropshipShippingConfigMutationResult<TRecord> {
   record: TRecord;
@@ -293,7 +264,7 @@ export interface DropshipShippingConfigMutationResult<TRecord> {
 }
 
 export interface DropshipShippingConfigRepository {
-  getOverview(input: ListDropshipShippingConfigInput & { generatedAt: Date }): Promise<DropshipShippingConfigSnapshot>;
+  getOverview(input: ListDropshipShippingConfigInput & { generatedAt: Date }): Promise<DropshipShippingConfigOverview>;
   upsertBox(
     input: NormalizedUpsertDropshipBoxInput & DropshipShippingConfigCommandContext,
   ): Promise<DropshipShippingConfigMutationResult<DropshipBoxConfigRecord>>;
@@ -350,14 +321,10 @@ export class DropshipShippingConfigService {
 
   async getOverview(input: unknown = {}): Promise<DropshipShippingConfigOverview> {
     const parsed = listShippingConfigInputSchema.parse(input);
-    const overview = await this.deps.repository.getOverview({
+    return this.deps.repository.getOverview({
       ...parsed,
       generatedAt: this.deps.clock.now(),
     });
-    return {
-      ...overview,
-      validationWarnings: buildDropshipShippingConfigValidationWarnings(overview),
-    };
   }
 
   async upsertBox(input: unknown): Promise<DropshipShippingConfigMutationResult<DropshipBoxConfigRecord>> {
@@ -547,33 +514,6 @@ export class DropshipShippingConfigService {
       },
     });
   }
-}
-
-export function buildDropshipShippingConfigValidationWarnings(
-  config: DropshipShippingConfigSnapshot,
-): DropshipShippingConfigValidationWarning[] {
-  const boxWarnings = config.boxes
-    .filter((box) => box.isActive && box.maxWeightGrams === null)
-    .map((box): DropshipShippingConfigValidationWarning => ({
-      code: "box_max_weight_required",
-      entityType: "box",
-      entityId: box.boxId,
-      label: box.code,
-      message: `Active box ${box.code} requires a maximum loaded weight.`,
-    }));
-  const packageProfileWarnings = config.packageProfiles
-    .filter((profile) => profile.isActive && profile.maxUnitsPerPackage === null)
-    .map((profile): DropshipShippingConfigValidationWarning => {
-      const label = profile.variantSku ?? `Variant ${profile.productVariantId}`;
-      return {
-        code: "package_profile_max_units_required",
-        entityType: "package_profile",
-        entityId: profile.packageProfileId,
-        label,
-        message: `Active variant override ${label} requires maximum units per package.`,
-      };
-    });
-  return [...boxWarnings, ...packageProfileWarnings];
 }
 
 export function hashDropshipShippingConfigCommand(commandType: string, payload: unknown): string {

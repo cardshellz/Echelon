@@ -72,6 +72,7 @@ function boxedParcel(overrides: Partial<CartonParcel> = {}): CartonParcel {
     boxCode: "M",
     siocProductVariantId: null,
     items: [{ productVariantId: 101, sku: "SLV-100", quantity: 2, isRider: false }],
+    placements: [],
     estWeightGrams: 340,
     billableWeightGrams: 400,
     lengthMm: 300,
@@ -89,6 +90,7 @@ function siocParcel(overrides: Partial<CartonParcel> = {}): CartonParcel {
     boxCode: null,
     siocProductVariantId: 201,
     items: [{ productVariantId: 201, sku: "QUAD-BOX", quantity: 1, isRider: false }],
+    placements: [],
     estWeightGrams: 900,
     billableWeightGrams: 900,
     lengthMm: 250,
@@ -105,7 +107,7 @@ const PLAN_ROW: ShippingPackPlan = {
   wmsOrderId: 42,
   shipmentRequestId: null,
   status: "active",
-  engineVersion: "cardshellz-cartonizer@2.0.0",
+  engineVersion: "cardshellz-cartonizer@3.0.0",
   inputHash: "stale-hash",
   warnings: [],
   createdAt: new Date("2026-07-01T00:00:00Z"),
@@ -253,7 +255,7 @@ describe("ensurePackPlan", () => {
     expect(persisted).toHaveLength(1);
     expect(persisted[0].wmsOrderId).toBe(42);
     expect(persisted[0].shipmentRequestId).toBeNull();
-    expect(persisted[0].engineVersion).toBe("cardshellz-cartonizer@2.0.0");
+    expect(persisted[0].engineVersion).toBe("cardshellz-cartonizer@3.0.0");
     expect(persisted[0].inputHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -283,6 +285,25 @@ describe("ensurePackPlan", () => {
     expect(result).not.toBeNull();
     expect(persisted).toHaveLength(1); // persistPlan owns supersede+insert transactionally
     expect(result!.plan.inputHash).toBe(persisted[0].inputHash);
+  });
+
+  it("supersedes a plan produced by an older cartonizer version", async () => {
+    const first = fakeDeps({});
+    await ensurePackPlan({ wmsOrderId: 42 }, first.deps);
+    const currentHash = first.persisted[0].inputHash;
+    const next = fakeDeps({
+      activePlan: {
+        ...PLAN_ROW,
+        engineVersion: "cardshellz-cartonizer@2.0.0",
+        inputHash: currentHash,
+      },
+    });
+
+    const result = await ensurePackPlan({ wmsOrderId: 42 }, next.deps);
+
+    expect(result).not.toBeNull();
+    expect(next.persisted).toHaveLength(1);
+    expect(next.persisted[0].engineVersion).toBe("cardshellz-cartonizer@3.0.0");
   });
 
   it("returns null and persists nothing when the packing degrades to fallback", async () => {

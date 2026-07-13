@@ -454,7 +454,7 @@ function buildQuotePayload(input: {
 }): Record<string, unknown> {
   const ratesByPackage = new Map(input.rateMatches.map((rate) => [rate.packageSequence, rate]));
   return {
-    version: 1,
+    version: 2,
     destination: input.destination,
     items: input.items,
     zone: input.zone,
@@ -469,6 +469,8 @@ function buildQuotePayload(input: {
       const rate = ratesByPackage.get(carton.packageSequence);
       return {
         packageSequence: carton.packageSequence,
+        items: carton.items,
+        placements: carton.placements,
         productVariantId: carton.productVariantId,
         quantity: carton.quantity,
         boxId: carton.boxId,
