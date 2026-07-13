@@ -7,6 +7,8 @@ import { rm, readFile } from "fs/promises";
 const allowlist = [
   "@google/generative-ai",
   "axios",
+  // v4.1.0's CommonJS export is .js under type:module and crashes when externalized.
+  "binpackingjs",
   "connect-pg-simple",
   "cors",
   "date-fns",
