@@ -15,7 +15,8 @@ Audience: developers picking up dropship work. This is the **work order**: every
 
 - Dogfood is paused before the first listing push (test plan Phase 3/4). Vendor `bseager6@gmail.com` / eBay store `marzcards` / warehouse 1.
 - Prod is current with main; deploys green (the 07-05 migration-collision outage was fixed on main via the `121_` rename).
-- Prod data: 1 package profile, 1 box, 1 zone rule, 1 rate row, 1 listing config (**`listing_mode='draft_first'`** — must be flipped for the eBay test). Dropship channel id **103** exists with **no** warehouse assignments and **no** allocation rules. `TRUST_PROXY` is **unset** on Heroku. `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` is set — keep it pinned (the worker silently no-ops without it).
+- Prod data recorded on July 9: 1 package profile, 1 box, 1 zone rule, 1 rate row, 1 listing config (**`listing_mode='draft_first'`** — must be flipped for the eBay test). Dropship channel id **103** existed with **no** warehouse assignments and **no** allocation rules. Re-query these values before relying on them.
+- July 13 production update: release `v2365` deployed merge commit `fe5c13f8` (PR #908), and config release `v2366` set `TRUST_PROXY=true`. `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` remains pinned. The portal login screen loads after the restart; an authenticated login remains a manual verification.
 
 ## 1. Recorded decisions (owner, 2026-07-05 / 07-09)
 
@@ -54,6 +55,8 @@ Implementation status (2026-07-13):
 | 0.4 | Code default implemented: new eBay configs use `live`; Shopify remains `draft_first`. The existing `marzcards` production config still requires an explicit post-deploy flip. |
 | 0.5 | Implemented: quote cartonization, listing/eBay push, and dogfood readiness use canonical Catalog Variant package data; dropship profiles are override-only. Production quote verification remains. |
 | 0.6 | Implemented: USDC is no longer an activation, settings, or dogfood-readiness requirement. The optional funding-method/ledger foundation remains, and provider-backed USDC is reported as not applicable to launch until configured. Production portal verification remains. |
+| 0.7 | Production configured: `TRUST_PROXY=true` in release `v2366`; order-processing worker remains `true`; login screen health verified. Authenticated login remains manual. |
+| 0.8 | Implemented in the current change set: active config writes require bounded weight/unit capacity, legacy gaps are reported by the config service and admin UI, and the multi-unit test is pinned to explicit limits. Production box data still needs correction before quote testing. |
 
 **0.1 eBay HTTP 400 must not tear down the store connection.** `isPermanentAuthFailureStatus` treats 400 as a permanent auth failure in BOTH `dropship-ebay-listing-push.provider.ts:428-430` and `dropship-ebay-tracking.provider.ts` (~:298); any eBay validation 400 then nulls token refs and deletes vault rows via `recordAuthFailure` (`dropship-marketplace-credentials.ts:237-262`), forcing full OAuth reconnect and blocking remaining job items. Fix: 401/403 only in both API-call paths (400 stays fatal only on the token-refresh endpoint = `invalid_grant`). Acceptance: unit test — eBay 400 on push/tracking fails the item without touching connection status/tokens. (Deep review §3.2.)
 
@@ -69,7 +72,11 @@ Implementation status (2026-07-13):
 
 **0.7 Config one-liners.** `heroku config:set TRUST_PROXY=true -a cardshellz-echelon` (session cookies currently issued without `Secure` — cookie flag keys off TRUST_PROXY, `server/index.ts:127`, while trust-proxy itself keys off NODE_ENV). Verify login after. Keep `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` pinned.
 
+Production result, July 13: both flags are `true`; release `v2366` completed successfully. `https://cardshellz.io/login` loads. Complete one authenticated portal login before closing the item.
+
 **0.8 Cartonizer guardrail (operational until cartonizer v2).** `boxFitsPackage` dimension-checks a single unit regardless of quantity; only weight caps bound a package (`domain/shipping-quote.ts:194-268`) → multi-unit orders can underquote. Until the shipping-engine cartonizer replaces this: every box row gets `max_weight_grams`, every profile gets `max_units_per_package`; add a config-service validation warning when either is null. The existing unit test asserting 2-units-in-a-1-unit-box (`dropship-shipping-quote-service.test.ts:40-57`) should be re-pinned to the guarded behavior. (§3.6.)
+
+Production data result, July 13: profile `COGS-TEST-001-P1` has `max_units_per_package=4`; active box `8X6X4` has `max_weight_grams=NULL`. Set a verified loaded-weight limit on that box before `SHIPCFG-04`/`SHIPCFG-08` quote testing.
 
 Then resume the dogfood test plan at Phase 3/4 per `docs/DROPSHIP-DOGFOOD-HANDOFF.md`, whose step 3 is now correct thanks to 0.5.
 

@@ -19,9 +19,13 @@ This is a current pickup checkpoint for continuing the dropship program on anoth
 - The Dropship Shipping Config UI now exposes variant overrides and links package-data editing back to Catalog Variants.
 - A fresh eBay listing preview now snapshots catalog weight into the listing intent. Old queued jobs without that field fail explicitly and must be recreated from a fresh preview.
 - No migration was required for item 0.5.
-- Batch 0 item 0.6 is implemented in this change set: Stripe card/ACH plus auto-reload can satisfy wallet readiness without a USDC method.
+- Batch 0 item 0.6 is implemented and deployed through PR #908: Stripe card/ACH plus auto-reload can satisfy wallet readiness without a USDC method.
 - USDC remains a planned optional funding rail. Its funding-method, atomic-unit ledger, idempotency, audit, and admin-assisted credit foundations remain intact.
 - Provider-backed USDC verification is explicitly not applicable to launch readiness until the provider/custody/settlement milestone is implemented.
+- PR #908 is merged and deployed: release `v2365` runs merge commit `fe5c13f8`; config release `v2366` set `TRUST_PROXY=true`.
+- `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` remains pinned. The production login screen loads after the restart; an authenticated login remains a manual check.
+- Batch 0 item 0.8 is implemented in the current branch: active boxes require maximum loaded weight, active variant overrides require maximum units per package, and legacy gaps are visible in Shipping Config.
+- Production profile `COGS-TEST-001-P1` is bounded at 4 units/package. Active box `8X6X4` still has no maximum loaded weight and must be corrected before quote testing.
 
 ## Verification already completed for PR #903
 
@@ -49,17 +53,16 @@ This is a current pickup checkpoint for continuing the dropship program on anoth
 
 After deployment, verify an eligible vendor with a Stripe card/ACH method and usable auto-reload reaches wallet-ready status without a USDC method. Confirm portal onboarding, Settings, admin dogfood readiness, and system prerequisites all agree; the system prerequisite should show USDC as `not applicable`, not blocked or ready.
 
-Do not treat the July 9 production row counts, the `marzcards` listing mode, channel 103 assignments, or `TRUST_PROXY` state as current without re-reading production config/data.
+Do not treat the July 9 production row counts, the `marzcards` listing mode, or channel 103 assignments as current without re-reading production config/data.
 
 ## Next implementation work
 
-After item 0.6 is merged and deployed, continue with Batch 0 item 0.7 from `docs/DROPSHIP-DEV-HANDOFF-2026-07-09.md`:
+After the item 0.8 change is merged and deployed:
 
-- Set and verify `TRUST_PROXY=true` in Heroku so production session cookies can be issued securely behind the proxy.
-- Keep `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` pinned.
-- Verify portal login after the config change.
-
-Then proceed to item 0.8. Do not skip directly to later batches without recording why.
+1. Sign in to the production portal once to close the manual item 0.7 session check.
+2. In Shipping Config, set and verify a safe maximum loaded weight for box `8X6X4`; confirm the guardrail warning clears.
+3. Resume the dogfood plan at Phase 3/4. Verify readiness, canonical package data, narrow catalog exposure, and then `SHIPCFG-04`/`SHIPCFG-08`.
+4. Do not begin a listing push while any hard-stop row remains open.
 
 ## Working agreement
 
@@ -90,4 +93,4 @@ git pull --ff-only origin main
 
 ## Pickup prompt for Codex
 
-> Continue the Echelon dropship program. First read `docs/DROPSHIP-LAPTOP-HANDOFF-2026-07-12.md`, then the authoritative documents it lists. Fetch `origin/main` and verify the item 0.6 change is present. Do not assume the recorded production state is current. Report the exact current branch/commit and deployment state, complete the recorded live verification, then continue with Batch 0 item 0.7 followed by 0.8. Do not reuse a merged PR branch.
+> Continue the Echelon dropship program. First read `docs/DROPSHIP-LAPTOP-HANDOFF-2026-07-12.md`, then the authoritative documents it lists. Fetch `origin/main` and verify the item 0.8 change is present. Do not assume the recorded production state is current. Report the exact current branch/commit and deployment state, complete the authenticated login and box-capacity checks, then resume the dogfood plan at Phase 3/4. Do not reuse a merged PR branch.

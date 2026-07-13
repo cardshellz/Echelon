@@ -736,6 +736,14 @@ export interface DropshipShippingInsurancePolicyConfig {
   createdAt: string;
 }
 
+export interface DropshipShippingConfigValidationWarning {
+  code: "box_max_weight_required" | "package_profile_max_units_required";
+  entityType: "box" | "package_profile";
+  entityId: number;
+  label: string;
+  message: string;
+}
+
 export interface DropshipShippingConfigOverview {
   boxes: DropshipShippingBoxConfig[];
   packageProfiles: DropshipShippingPackageProfileConfig[];
@@ -745,6 +753,7 @@ export interface DropshipShippingConfigOverview {
   activeInsurancePolicy: DropshipShippingInsurancePolicyConfig | null;
   markupPolicies: DropshipShippingMarkupPolicyConfig[];
   insurancePolicies: DropshipShippingInsurancePolicyConfig[];
+  validationWarnings: DropshipShippingConfigValidationWarning[];
   generatedAt: string;
 }
 
@@ -3041,6 +3050,12 @@ export function buildShippingBoxInput(input: {
   isActive: boolean;
   idempotencyKey: string;
 }): DropshipShippingBoxInput {
+  const maxWeightGrams = input.maxWeightGrams.trim()
+    ? parsePositiveInteger(input.maxWeightGrams, "maxWeightGrams")
+    : null;
+  if (input.isActive && maxWeightGrams === null) {
+    throw new Error("maxWeightGrams is required for active boxes.");
+  }
   return {
     boxId: input.boxId?.trim() ? parsePositiveInteger(input.boxId, "boxId") : undefined,
     code: requiredTrimmedString(input.code, "code", 80),
@@ -3049,7 +3064,7 @@ export function buildShippingBoxInput(input: {
     widthMm: parsePositiveInteger(input.widthMm, "widthMm"),
     heightMm: parsePositiveInteger(input.heightMm, "heightMm"),
     tareWeightGrams: parseNonNegativeInteger(input.tareWeightGrams, "tareWeightGrams"),
-    maxWeightGrams: input.maxWeightGrams.trim() ? parsePositiveInteger(input.maxWeightGrams, "maxWeightGrams") : null,
+    maxWeightGrams,
     isActive: input.isActive,
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };
@@ -3065,15 +3080,19 @@ export function buildShippingPackageProfileInput(input: {
   isActive: boolean;
   idempotencyKey: string;
 }): DropshipShippingPackageProfileInput {
+  const maxUnitsPerPackage = input.maxUnitsPerPackage.trim()
+    ? parsePositiveInteger(input.maxUnitsPerPackage, "maxUnitsPerPackage")
+    : null;
+  if (input.isActive && maxUnitsPerPackage === null) {
+    throw new Error("maxUnitsPerPackage is required for active package profiles.");
+  }
   return {
     productVariantId: parsePositiveInteger(input.productVariantId, "productVariantId"),
     shipAlone: input.shipAlone,
     defaultCarrier: input.defaultCarrier.trim() || null,
     defaultService: input.defaultService.trim() || null,
     defaultBoxId: input.defaultBoxId.trim() ? parsePositiveInteger(input.defaultBoxId, "defaultBoxId") : null,
-    maxUnitsPerPackage: input.maxUnitsPerPackage.trim()
-      ? parsePositiveInteger(input.maxUnitsPerPackage, "maxUnitsPerPackage")
-      : null,
+    maxUnitsPerPackage,
     isActive: input.isActive,
     idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey),
   };

@@ -37,12 +37,12 @@ import type {
 const now = new Date("2026-05-01T16:00:00.000Z");
 
 describe("dropship shipping quote domain", () => {
-  it("cartonizes profiles deterministically and calculates basis-point fees with integer math", () => {
+  it("uses explicit unit limits instead of treating a single-unit dimension check as multi-unit capacity", () => {
     const packages = cartonizeDropshipItems({
       items: normalizeDropshipQuoteItems([
         { productVariantId: 101, quantity: 3 },
       ]),
-      packageProfiles: [makePackageProfile({ productVariantId: 101, maxUnitsPerPackage: 2 })],
+      packageProfiles: [makePackageProfile({ productVariantId: 101, maxUnitsPerPackage: 1 })],
       boxes: [makeBox({ id: 2, code: "LARGE", lengthMm: 300 }), makeBox({ id: 1, code: "SMALL" })],
     });
 
@@ -52,8 +52,9 @@ describe("dropship shipping quote domain", () => {
       boxCode: carton.boxCode,
       weightGrams: carton.weightGrams,
     }))).toEqual([
-      { sequence: 1, quantity: 2, boxCode: "SMALL", weightGrams: 220 },
+      { sequence: 1, quantity: 1, boxCode: "SMALL", weightGrams: 120 },
       { sequence: 2, quantity: 1, boxCode: "SMALL", weightGrams: 120 },
+      { sequence: 3, quantity: 1, boxCode: "SMALL", weightGrams: 120 },
     ]);
     expect(calculateBasisPointsFeeCents(999, { bps: 200 })).toBe(19);
   });

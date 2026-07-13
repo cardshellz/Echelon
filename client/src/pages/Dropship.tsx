@@ -3662,6 +3662,13 @@ function ShippingConfigTab() {
     queryFn: () => fetchJson<DropshipWarehouseOption[]>("/api/warehouses"),
   });
   const config = shippingQuery.data?.config;
+  const validationWarnings = config?.validationWarnings ?? [];
+  const boxGuardrailWarningCount = validationWarnings.filter(
+    (warning) => warning.code === "box_max_weight_required",
+  ).length;
+  const profileGuardrailWarningCount = validationWarnings.filter(
+    (warning) => warning.code === "package_profile_max_units_required",
+  ).length;
   const productVariantOptions = useMemo(
     () => (variantsQuery.data ?? [])
       .filter((variant) => variant.isActive !== false && variant.active !== 0)
@@ -3884,6 +3891,30 @@ function ShippingConfigTab() {
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
+      {config && validationWarnings.length > 0 && (
+        <Alert className="border-amber-300 bg-amber-50 text-amber-950">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            <div className="font-medium">Basic cartonizer guardrails are incomplete.</div>
+            <div className="mt-1 text-sm">
+              {boxGuardrailWarningCount > 0 && (
+                <span>{boxGuardrailWarningCount} active box{boxGuardrailWarningCount === 1 ? " is" : "es are"} missing maximum loaded weight. </span>
+              )}
+              {profileGuardrailWarningCount > 0 && (
+                <span>{profileGuardrailWarningCount} active variant override{profileGuardrailWarningCount === 1 ? " is" : "s are"} missing maximum units per package.</span>
+              )}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {boxGuardrailWarningCount > 0 && (
+                <Button size="sm" variant="outline" onClick={() => setActiveSection("boxes")}>Review boxes</Button>
+              )}
+              {profileGuardrailWarningCount > 0 && (
+                <Button size="sm" variant="outline" onClick={() => setActiveSection("profiles")}>Review variant overrides</Button>
+              )}
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Tabs
         value={activeSection}
@@ -4061,7 +4092,7 @@ function ShippingBoxPanel({
         <ShippingInput label="Width in" value={form.widthIn} onChange={(value) => onChange((current) => ({ ...current, widthIn: value }))} />
         <ShippingInput label="Height in" value={form.heightIn} onChange={(value) => onChange((current) => ({ ...current, heightIn: value }))} />
         <ShippingInput label="Tare weight lb" value={form.tareWeightLb} onChange={(value) => onChange((current) => ({ ...current, tareWeightLb: value }))} />
-        <ShippingInput label="Max weight lb" value={form.maxWeightLb} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxWeightLb: value }))} />
+        <ShippingInput label="Max loaded weight lb" value={form.maxWeightLb} placeholder="Required while active" onChange={(value) => onChange((current) => ({ ...current, maxWeightLb: value }))} />
         <ShippingActiveSelect value={form.isActive} onChange={(isActive) => onChange((current) => ({ ...current, isActive }))} />
       </div>
       <Button className="mt-4 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSaving} onClick={onSave}>
@@ -4148,7 +4179,7 @@ function ShippingPackageProfilePanel({
             <p className="text-sm text-muted-foreground">Select a variant to verify its catalog package data.</p>
           )}
         </div>
-        <ShippingInput label="Max units/package" value={form.maxUnitsPerPackage} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, maxUnitsPerPackage: value }))} />
+        <ShippingInput label="Max units/package" value={form.maxUnitsPerPackage} placeholder="Required while active" onChange={(value) => onChange((current) => ({ ...current, maxUnitsPerPackage: value }))} />
         <ShippingInput label="Default carrier" value={form.defaultCarrier} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultCarrier: value }))} />
         <ShippingInput label="Default service" value={form.defaultService} placeholder="Optional" onChange={(value) => onChange((current) => ({ ...current, defaultService: value }))} />
         <div>
@@ -4558,18 +4589,30 @@ function ShippingConfigOverviewDashboard({
     return <EmptyState title="No shipping config" description="Dropship shipping configuration is not loaded." />;
   }
 
+  const validationWarnings = config.validationWarnings ?? [];
+  const boxGuardrailWarningCount = validationWarnings.filter(
+    (warning) => warning.code === "box_max_weight_required",
+  ).length;
+  const profileGuardrailWarningCount = validationWarnings.filter(
+    (warning) => warning.code === "package_profile_max_units_required",
+  ).length;
+
   const rows = [
     {
       section: "Boxes",
       configured: `${activeCount(config.boxes)} active / ${config.boxes.length} loaded`,
-      ready: activeCount(config.boxes) > 0,
-      detail: "Physical boxes and mailers available for package selection.",
+      ready: activeCount(config.boxes) > 0 && boxGuardrailWarningCount === 0,
+      detail: boxGuardrailWarningCount > 0
+        ? `${boxGuardrailWarningCount} active box limit${boxGuardrailWarningCount === 1 ? "" : "s"} must be completed.`
+        : "Physical boxes and mailers have bounded loaded weights.",
     },
     {
       section: "Variant shipping overrides",
       configured: `${activeCount(config.packageProfiles)} active / ${config.packageProfiles.length} configured`,
-      ready: true,
-      detail: "Optional SKU-level packing and service behavior; package dimensions come from Catalog Variants.",
+      ready: profileGuardrailWarningCount === 0,
+      detail: profileGuardrailWarningCount > 0
+        ? `${profileGuardrailWarningCount} active variant packing limit${profileGuardrailWarningCount === 1 ? "" : "s"} must be completed.`
+        : "SKU-level packing limits are bounded; package dimensions come from Catalog Variants.",
     },
     {
       section: "Zones",
@@ -4660,8 +4703,8 @@ function ShippingBoxesTable({
       rows={config.boxes.map((box) => [
         box.code,
         `${formatMmAsInches(box.lengthMm)} x ${formatMmAsInches(box.widthMm)} x ${formatMmAsInches(box.heightMm)} in`,
-        `${formatGramsAsPounds(box.tareWeightGrams)} lb tare${box.maxWeightGrams ? ` / ${formatGramsAsPounds(box.maxWeightGrams)} lb max` : ""}`,
-        box.isActive ? "Active" : "Inactive",
+        `${formatGramsAsPounds(box.tareWeightGrams)} lb tare / ${box.maxWeightGrams ? `${formatGramsAsPounds(box.maxWeightGrams)} lb max` : "Max missing"}`,
+        box.isActive && box.maxWeightGrams === null ? "Guardrail missing" : box.isActive ? "Active" : "Inactive",
       ])}
     />
   );
@@ -4689,8 +4732,9 @@ function ShippingProductProfilesTable({
           profile.defaultService,
           profile.defaultBoxId ? `Box ${profile.defaultBoxId}` : null,
           profile.shipAlone ? "Ships alone" : null,
+          profile.maxUnitsPerPackage ? `Up to ${profile.maxUnitsPerPackage}/package` : "Max units missing",
         ].filter(Boolean).join(" / ") || "None",
-        profile.isActive ? "Active" : "Inactive",
+        profile.isActive && profile.maxUnitsPerPackage === null ? "Guardrail missing" : profile.isActive ? "Active" : "Inactive",
       ])}
     />
   );
