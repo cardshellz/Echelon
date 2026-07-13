@@ -81,6 +81,7 @@ export function registerOmsRoutes(app: Express) {
         Number.isFinite(requested) && requested > 0
           ? Math.min(365, Math.floor(requested))
           : undefined;
+      res.setHeader("Cache-Control", "private, no-store");
       res.json(await getFlowBucketSamples(db, code, { windowDays }));
     } catch (err: any) {
       console.error("[OMS Routes] Flow bucket error:", err);
