@@ -1,3 +1,4 @@
+/** Shared cartonization core for every physical-order channel. */
 import {
   pack3D,
   RotationType,
@@ -111,7 +112,7 @@ export interface CartonizeResult {
   engine: { name: string; version: string };
 }
 
-export const CARTONIZE_ENGINE = { name: "cardshellz-cartonizer", version: "3.0.0" } as const;
+export const CARTONIZE_ENGINE = { name: "cardshellz-cartonizer", version: "3.1.0" } as const;
 export const MAX_MANUAL_CARTON_WEIGHT_GRAMS = 22_679;
 
 const DEFAULT_DIM_DIVISOR_CM3_PER_KG = 5000;

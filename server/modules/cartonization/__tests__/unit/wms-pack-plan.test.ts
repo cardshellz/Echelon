@@ -1,5 +1,5 @@
 /**
- * PACKER INSTRUCTION v1 — unit tests for pack-plan.service.
+ * PACKER INSTRUCTION v1 — unit tests for the WMS cartonization adapter.
  *
  * Injection style mirrors shadow-quote.test.ts: all loaders/writers are
  * injected fakes, no real DB. Coverage (Rule #9): happy path, instruction
@@ -18,7 +18,7 @@ import {
   PACK_INSTRUCTION_MAX_LENGTH,
   type PackPlanDeps,
   type PersistPlanInput,
-} from "../../application/pack-plan.service";
+} from "../../application/wms-pack-plan.service";
 import type {
   CartonizeBox,
   CartonizeItem,
@@ -107,7 +107,7 @@ const PLAN_ROW: ShippingPackPlan = {
   wmsOrderId: 42,
   shipmentRequestId: null,
   status: "active",
-  engineVersion: "cardshellz-cartonizer@3.0.0",
+  engineVersion: "cardshellz-cartonizer@3.1.0",
   inputHash: "stale-hash",
   warnings: [],
   createdAt: new Date("2026-07-01T00:00:00Z"),
@@ -237,6 +237,15 @@ describe("computePackPlanInputHash", () => {
     const h2 = computePackPlanInputHash([itemA], [boxes[0]]);
     expect(h1).not.toBe(h2);
   });
+
+  it("changes when an existing box's physical definition changes", () => {
+    const h1 = computePackPlanInputHash([itemA], boxes);
+    const h2 = computePackPlanInputHash([itemA], [
+      { ...boxes[0], lengthMm: boxes[0].lengthMm - 1 },
+      boxes[1],
+    ]);
+    expect(h1).not.toBe(h2);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -255,8 +264,13 @@ describe("ensurePackPlan", () => {
     expect(persisted).toHaveLength(1);
     expect(persisted[0].wmsOrderId).toBe(42);
     expect(persisted[0].shipmentRequestId).toBeNull();
-    expect(persisted[0].engineVersion).toBe("cardshellz-cartonizer@3.0.0");
+    expect(persisted[0].engineVersion).toBe("cardshellz-cartonizer@3.1.0");
     expect(persisted[0].inputHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(persisted[0].parcels[0].placements).toHaveLength(2);
+    expect(persisted[0].parcels[0].placements[0]).toMatchObject({
+      productVariantId: 101,
+      sku: "SLV-100",
+    });
   });
 
   it("is idempotent: same input_hash on the active plan → returns it, no write", async () => {
@@ -303,7 +317,7 @@ describe("ensurePackPlan", () => {
 
     expect(result).not.toBeNull();
     expect(next.persisted).toHaveLength(1);
-    expect(next.persisted[0].engineVersion).toBe("cardshellz-cartonizer@3.0.0");
+    expect(next.persisted[0].engineVersion).toBe("cardshellz-cartonizer@3.1.0");
   });
 
   it("returns null and persists nothing when the packing degrades to fallback", async () => {
@@ -362,6 +376,22 @@ describe("ensurePackPlan", () => {
     const { deps, persisted } = fakeDeps({});
     await ensurePackPlan({ wmsOrderId: 42, shipmentRequestId: 777 }, deps);
     expect(persisted[0].shipmentRequestId).toBe(777);
+  });
+
+  it("replaces an order-level plan when a shipment request later claims it", async () => {
+    const first = fakeDeps({});
+    await ensurePackPlan({ wmsOrderId: 42 }, first.deps);
+    const activePlan = {
+      ...PLAN_ROW,
+      inputHash: first.persisted[0].inputHash,
+      shipmentRequestId: null,
+    };
+    const next = fakeDeps({ activePlan });
+
+    await ensurePackPlan({ wmsOrderId: 42, shipmentRequestId: 777 }, next.deps);
+
+    expect(next.persisted).toHaveLength(1);
+    expect(next.persisted[0].shipmentRequestId).toBe(777);
   });
 });
 

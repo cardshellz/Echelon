@@ -24,7 +24,7 @@ This is a current pickup checkpoint for continuing the dropship program on anoth
 - Provider-backed USDC verification is explicitly not applicable to launch readiness until the provider/custody/settlement milestone is implemented.
 - PR #908 is merged and deployed: release `v2365` runs merge commit `fe5c13f8`; config release `v2366` set `TRUST_PROXY=true`.
 - `DROPSHIP_ORDER_PROCESSING_WORKER_ENABLED=true` remains pinned. The production login screen loads after the restart; an authenticated login remains a manual check.
-- Batch 0 item 0.8 is implemented in PR #909 as shared cartonizer v3: real 3D unit placement, all six rotations, geometry/weight-driven carton splitting, recorded placements, and an automatic 22,679 g (under 50 lb) packed-carton ceiling.
+- Batch 0 item 0.8 is implemented in PR #909 plus its rollout-safety follow-up as standalone cartonizer v3.1: real 3D unit placement, all six rotations, geometry/weight-driven carton splitting, persisted WMS placements, and an automatic 22,679 g (under 50 lb) packed-carton ceiling. Dropship, checkout, and WMS test paths use the same module. It is not a required WMS path: explicit generation and opt-in shadow observation are available for validation, default off, and cannot block or change order status.
 - Maximum units/package is no longer a cartonization input or UI setting. Box maximum weight is an optional lower structural limit; a NULL value uses the automatic handling ceiling.
 - Production profile `COGS-TEST-001-P1` still contains legacy `max_units_per_package=4` and active box `8X6X4` has no lower maximum weight. Neither blocks quote testing after PR #909; canonical SKU dimensions, box inner dimensions, tare, and the generated quote do.
 

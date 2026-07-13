@@ -9,7 +9,7 @@ import {
   type ShadowOrder,
   type ShadowOrderItem,
 } from "../../application/shadow-quote.service";
-import type { CartonizeBox, CartonizeCandidate, CartonizeItem } from "../../domain/cartonize";
+import type { CartonizeBox, CartonizeCandidate, CartonizeItem } from "../../../cartonization/domain/cartonize";
 import type { RateQuoteResult } from "../../application/rate-quote.service";
 
 // ---------------------------------------------------------------------------

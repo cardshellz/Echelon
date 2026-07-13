@@ -10,7 +10,7 @@ import {
   type DropshipBoxCatalogEntry,
   type DropshipPackageProfile,
 } from "../domain/shipping-quote";
-import { CARTONIZE_ENGINE } from "../../shipping-engine/domain/cartonize";
+import { CARTONIZE_ENGINE } from "../../cartonization/domain/cartonize";
 
 const BASIC_DROPSHIP_CARTONIZATION_ENGINE = CARTONIZE_ENGINE;
 

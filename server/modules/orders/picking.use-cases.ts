@@ -20,6 +20,10 @@ import type {
   ItemStatus,
   OrderStatus,
 } from "@shared/schema";
+import {
+  ensurePackPlan,
+  isWmsCartonizationShadowEnabled,
+} from "../cartonization";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -322,6 +326,12 @@ interface ChannelSyncLike {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
 }
 
+interface CartonizationLike {
+  ensurePackPlan(request: { wmsOrderId: number }): Promise<{ complete: boolean } | null>;
+}
+
+const PACKING_HANDOFF_STATUSES = new Set(["ready_to_ship", "picked", "staged"]);
+
 export class PickingUseCases {
   constructor(
     private readonly db: DrizzleDb,
@@ -329,6 +339,8 @@ export class PickingUseCases {
     private readonly replenishment: ReplenishmentService,
     private readonly storage: Storage,
     private readonly channelSync?: ChannelSyncLike,
+    private readonly cartonization?: CartonizationLike,
+    private readonly cartonizationShadowEnabled = false,
   ) {}
 
   private async logRejectedPickCommand(params: {
@@ -2477,6 +2489,8 @@ export class PickingUseCases {
       throw new ValidationError(`Order cannot be marked ready to ship: ${blockers.join("; ")}`);
     }
 
+    this.triggerCartonizationShadow(orderId);
+
     const order = await this.storage.updateOrderStatus(orderId, "ready_to_ship");
     if (!order) return null;
 
@@ -2547,8 +2561,15 @@ export class PickingUseCases {
   }
 
   private async resolvePostPickStatusForOrder(orderId: number, desiredStatus: string): Promise<string> {
-    if (desiredStatus !== "ready_to_ship") return desiredStatus;
+    if (!PACKING_HANDOFF_STATUSES.has(desiredStatus)) return desiredStatus;
+
+    if (desiredStatus !== "ready_to_ship") {
+      this.triggerCartonizationShadow(orderId);
+      return desiredStatus;
+    }
+
     const blockers = await this.getReadyToShipBlockers(orderId);
+    if (blockers.length === 0) this.triggerCartonizationShadow(orderId);
     return blockers.length > 0 ? "exception" : desiredStatus;
   }
 
@@ -2621,6 +2642,30 @@ export class PickingUseCases {
     }
 
     return blockers;
+  }
+
+  /**
+   * Observe the common WMS packing handoff without participating in it.
+   * This is deliberately fire-and-forget: even a stalled planner must never
+   * delay, change, or block an order status transition.
+   */
+  private triggerCartonizationShadow(orderId: number): void {
+    if (!this.cartonizationShadowEnabled || !this.cartonization) return;
+
+    void this.cartonization.ensurePackPlan({ wmsOrderId: orderId })
+      .then((plan) => {
+        if (!plan?.complete) {
+          console.warn(
+            `[CartonizationShadow] order ${orderId}: no verified plan; WMS handoff unchanged`,
+          );
+        }
+      })
+      .catch((error) => {
+        console.warn(
+          `[CartonizationShadow] order ${orderId}: execution failed; WMS handoff unchanged`,
+          error,
+        );
+      });
   }
 
   // -------------------------------------------------------------------------
@@ -2910,8 +2955,18 @@ export function createPickingService(
   replenishment: ReplenishmentService,
   storage: Storage,
   channelSync?: ChannelSyncLike,
+  cartonization: CartonizationLike = { ensurePackPlan },
+  cartonizationShadowEnabled = isWmsCartonizationShadowEnabled(),
 ) {
-  return new PickingUseCases(db, inventoryCore, replenishment, storage, channelSync);
+  return new PickingUseCases(
+    db,
+    inventoryCore,
+    replenishment,
+    storage,
+    channelSync,
+    cartonization,
+    cartonizationShadowEnabled,
+  );
 }
 
 export type { PickingUseCases as PickingService };

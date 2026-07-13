@@ -25,7 +25,9 @@ import {
   type CartonizeBox,
   type CartonizeCandidate,
   type CartonizeItem,
-} from "../domain/cartonize";
+} from "../../cartonization/domain/cartonize";
+import { buildCartonizeItems } from "../../cartonization/domain/build-items";
+export { buildCartonizeItems } from "../../cartonization/domain/build-items";
 import {
   quoteParcels,
   RATE_QUOTE_ENGINE,
@@ -35,7 +37,7 @@ import {
   loadActiveBoxes,
   loadPackingInputs,
   resolveVariantIdsBySku,
-} from "./packing-input.repository";
+} from "../../cartonization/infrastructure/packing-input.repository";
 
 /** Origin used when an order has no warehouse assigned (primary warehouse). */
 const DEFAULT_ORIGIN_WAREHOUSE_ID = 1;
@@ -245,50 +247,6 @@ async function runShadowForOrder(
   }
 
   return { packingComplete, ratesFound, warnings };
-}
-
-/**
- * Turn order lines into CartonizeItems. Lines whose SKU is not in the
- * catalog get a synthetic stub item (negative variant id, no dims) so the
- * cartonizer degrades them to fallback parcels instead of dropping units —
- * the shadow report must count them as data gaps, not skip them.
- * Exported for tests (pure).
- */
-export function buildCartonizeItems(
-  lines: ShadowOrderItem[],
-  variantIdBySku: Map<string, number>,
-  packingInputs: Map<number, CartonizeItem>,
-): { items: CartonizeItem[]; warnings: string[] } {
-  const items: CartonizeItem[] = [];
-  const warnings: string[] = [];
-  let syntheticId = -1;
-
-  for (const line of lines) {
-    if (line.quantity <= 0) continue;
-    const variantId = variantIdBySku.get(line.sku);
-    const input = variantId !== undefined ? packingInputs.get(variantId) : undefined;
-    if (input) {
-      items.push({ ...input, quantity: line.quantity });
-      continue;
-    }
-    warnings.push(`sku ${line.sku} not found in catalog; used stub item`);
-    items.push({
-      productVariantId: syntheticId--,
-      sku: line.sku,
-      quantity: line.quantity,
-      weightGrams: null,
-      lengthMm: null,
-      widthMm: null,
-      heightMm: null,
-      shippingGroupCode: null,
-      shipsInOwnContainer: false,
-      riderEligible: false,
-      riderVoidCm3: null,
-      riderVoidMaxWeightGrams: null,
-      riderVoidMaxItems: null,
-    });
-  }
-  return { items, warnings };
 }
 
 /** A packing is complete only when every physical placement is verified. */

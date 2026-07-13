@@ -41,7 +41,7 @@ import {
   cartonize,
   isCartonizeCandidateVerified,
   type CartonizeItem,
-} from "../../domain/cartonize";
+} from "../../../cartonization/domain/cartonize";
 import { deliveryWindow, type DeliveryWindow } from "../../domain/eta";
 import { rateComboKey } from "../../domain/rate-selection";
 import {
@@ -53,7 +53,7 @@ import {
   loadActiveBoxes,
   loadPackingInputs,
   resolveVariantIdsBySku,
-} from "../../application/packing-input.repository";
+} from "../../../cartonization/infrastructure/packing-input.repository";
 
 /** Respond by this deadline even if the quote pipeline is still running. */
 const RESPONSE_DEADLINE_MS = 2000;

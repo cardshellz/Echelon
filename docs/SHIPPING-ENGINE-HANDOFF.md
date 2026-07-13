@@ -2,7 +2,7 @@
 
 *July 9, 2026 · engine code-complete in production, dormant until activated. Full design: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md).*
 
-> **July 13 update (PR #909):** cartonizer v3 replaces aggregate volume feasibility with real non-overlapping 3D unit placement, all six rotations, placement coordinates, geometry-driven splitting, and an automatic under-50-lb handling ceiling. Dropship now delegates to this shared core.
+> **July 13 update (PR #909 + follow-up):** standalone cartonizer v3.1 replaces aggregate volume feasibility with real non-overlapping 3D unit placement, all six rotations, persisted placement coordinates, geometry-driven splitting, and an automatic under-50-lb handling ceiling. Dropship, checkout, and WMS test adapters delegate to the same core. WMS enforcement is not active: manual plan generation and opt-in shadow execution are the only rollout paths, and neither may block or change fulfillment status.
 
 ## 0 · TL;DR
 
@@ -47,15 +47,15 @@ Everything lives in `server/modules/shipping-engine/` (hexagonal layout), regist
 
 | Layer | File | What it does |
 |---|---|---|
-| domain (pure) | `domain/cartonize.ts` | Cartonizer v3: real 3D placement with six rotations, non-overlap/bounds checks, box choice, geometry/weight splits, own-container handling, placement output, and explicit fallback when fit cannot be verified |
+| cartonization (standalone) | `server/modules/cartonization` | Public cartonizer v3.1 plus WMS adapter: real 3D placement with six rotations, non-overlap/bounds checks, box choice, geometry/weight splits, own-container handling, persisted placements, explicit test generation, and non-enforcing shadow observation |
 | domain | `domain/zones.ts` | `resolveZone`: longest-prefix-wins postal matching; priority tiebreak; region-scoped rules skipped in v1 |
 | domain | `domain/rate-selection.ts` | Per-parcel rate band selection per (carrier, serviceCode) |
 | domain | `domain/eta.ts` | Delivery window = warehouse cutoff/timezone + transit_matrix business days |
 | domain | `domain/rate-table-import.ts` | CSV grid import parsing/validation |
 | application | `application/rate-quote.service.ts` | `quoteParcels`: zone → candidate rows (ACTIVE + effective-dated tables only) → per-parcel intersect → summed quotes; optional snapshot |
 | application | `application/shadow-quote.service.ts` | `runShadow`: replays recent real wms.orders through the full pipeline, persists 'shadow' snapshots, returns readiness report |
-| application | `application/pack-plan.service.ts`, `packing.service.ts` | Fulfillment-plane pack plans + actuals |
-| application | `application/packing-input.repository.ts` | Variant dims/weights/shipping-group/own-container loaders; active box loader |
+| application | `cartonization/application/wms-pack-plan.service.ts`, `shipping-engine/application/packing.service.ts` | Channel-neutral WMS pack plans + pack-station actuals |
+| infrastructure | `cartonization/infrastructure/packing-input.repository.ts` | Variant dims/weights/shipping-group/own-container loaders; active box loader |
 | application | `application/rate-calibration.service.ts` | Quoted-vs-actual calibration (needs ShipStation v2 key for live-rate comparison) |
 | infrastructure | `infrastructure/shipstation-v2-rating.adapter.ts` | ShipStation v2 live-rate adapter (offline calibration + HIPRAK) |
 | interfaces | `interfaces/http/*` | `carrier-callback` (unauthenticated, token-gated, registered before auth middleware), `shadow-admin`, `rate-table-admin`, `calibration-admin`, `packing`; plus `shipping-admin.routes.ts`, `outbound-shipments.routes.ts` |
@@ -74,7 +74,7 @@ Schema: `shipping.*` in the shared Postgres (Echelon owns it; the club app owns 
 | `service_levels` + `service_level_methods` | sellable levels → carrier/method attachments | standard / expedited / express seeded, **all inactive** — the checkout kill-switch |
 | `transit_matrix` | zone × carrier/service business-day windows | 24 rows seeded (mig 120) — feeds ETA dates on rates |
 | `quote_snapshots` | every quote (checkout/shadow/manual) — calibration dataset | accumulating; first shadow run persisted Jul 9 |
-| pack plans + actuals | fulfillment plane | schema live (mig 122), unused until pack-station rollout |
+| pack plans + actuals | fulfillment plane | schema live (migrations 122 + 135); plans are test/shadow artifacts and are not required for any WMS status transition |
 
 Variant fulfillment data lives on the catalog (`ProductDetail → Fulfillment characteristics`): weight, dims, shipping group, ships-in-own-container.
 
@@ -118,6 +118,7 @@ Each step is independently reversible; nothing reaches customers until step 5.
 - **No arbitrary unit cap:** carton count is derived from physical dimensions, rotation, fill clearance, and packed weight. `max_units_per_package` is deprecated compatibility data and must not affect quotes.
 - **Handling ceiling:** ordinary packed cartons may not exceed 22,679 g including tare. A box-specific maximum may lower that limit but never raise it.
 - **Plan reuse includes engine version:** an active pack plan is idempotently reused only when both its input hash and cartonizer version match. Deploying a new cartonizer automatically supersedes older plans on their next evaluation.
+- **WMS rollout safety:** `POST /api/shipping/packing/orders/:wmsOrderId/generate-plan` is the explicit per-order test path. Automatic observation is off by default and requires `SHIPPING_WMS_CARTONIZATION_SHADOW_ENABLED=true`; failures are logged only, never block a handoff, and never route an order to `exception`. Held and already-fulfilled units are excluded from generated plans. There is deliberately no runtime enforcement flag.
 - **Draft = inert:** `quoteParcels` reads `status='active'` tables with effective-dating only. Rate review happens in draft safely.
 - **Inactive levels = silent engine:** quotes map to Shopify rates only through active `service_levels`. Both switches (levels + token) must be on for checkout to see anything.
 - **Zone resolution:** longest postal-prefix wins, then priority, then lowest id; region-scoped rules (`destination_region` set) are skipped by design in v1 — *never seed region labels on prefix rules* (that was the HIPRAK bug, fixed in mig 124).
@@ -139,7 +140,7 @@ Each step is independently reversible; nothing reaches customers until step 5.
 
 1. **Expedited/Express service levels** — attach methods + rate tables, activate per level.
 2. **Calibration loop** — with the v2 key: scheduled quoted-vs-actual + live-rate comparison; adjust bands from `quote_snapshots`.
-3. **Pack-station rollout** — pack plans → Packing UI at the bench; capture actuals (box, weight, cost); this also fixes `carrier_cost_cents=0` everywhere.
+3. **Pack-station rollout** — run explicit plans first, then opt-in shadow observation; expose predicted plans in the Packing UI and capture actual box, weight, and cost. A separate cutover PR may propose enforcement only after SKU-dimension coverage, stocked-box coverage, verified-plan rate, no-fit rate, and predicted-vs-actual accuracy meet approved thresholds and operators have a usable exception workflow.
 4. **Multi-origin routing** — schema supports per-warehouse zone rules and rate rows; the callback currently prices from one origin (env-selected).
 5. **Member Express benefit** — express for all, discounted per plan via the Function (member-exclusive rates are impossible: CarrierService sees no customer; Functions can only reduce existing rates).
 6. **ShipStation replacement** — carrier adapters behind the provider seam (mig 115 varchar), FedEx-first.

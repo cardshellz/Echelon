@@ -1,21 +1,24 @@
 /**
+ * WMS adapter for the standalone cartonization module.
+ *
  * Pack plans — PACKER INSTRUCTION v1 (application layer).
  *
  * A pack plan is ONE record consumed by both pricing and the pack station
  * (docs/SHIPPING-ENGINE-DESIGN.md) so the quoted box choice and the physical
  * pack can never diverge. ensurePackPlan() cartonizes the order's shippable
- * items, persists plan + parcels + parcel items (superseding any prior active
+ * items, persists plan + parcels + unit placements (superseding any prior active
  * plan when the inputs changed), and renders a compact packer instruction
  * string ("BOX: M x2 + S x1") that rides ShipStation internalNotes.
  *
  * Contracts:
- *  - NEVER throws to callers: any failure → console.warn + null. A missing
- *    pack instruction must never block a push.
+ *  - NEVER throws to callers: any failure → console.warn + null. The WMS
+ *    packing handoff treats null as a blocker; the legacy ShipStation-note
+ *    wrapper may still omit the note without breaking an already-started push.
  *  - Idempotent: an ACTIVE plan whose input_hash matches the current inputs
  *    is returned unchanged; otherwise prior active plans for the order are
  *    marked 'superseded' and a new plan is inserted in one transaction.
- *  - Incomplete data never instructs a packer: if ANY parcel degraded to a
- *    fallback, nothing is persisted and no instruction is produced.
+ *  - Incomplete data never instructs a packer: if ANY physical unit lacks a
+ *    verified placement, nothing is persisted and no instruction is produced.
  *  - All shipping.pack_plans* writes live in THIS module (writer ratchet).
  */
 
@@ -33,16 +36,17 @@ import { db } from "../../../db";
 import {
   cartonize,
   CARTONIZE_ENGINE,
+  isCartonizeCandidateVerified,
   type CartonizeBox,
   type CartonizeItem,
   type CartonParcel,
 } from "../domain/cartonize";
-import { buildCartonizeItems } from "./shadow-quote.service";
+import { buildCartonizeItems } from "../domain/build-items";
 import {
   loadActiveBoxes,
   loadPackingInputs,
   resolveVariantIdsBySku,
-} from "./packing-input.repository";
+} from "../infrastructure/packing-input.repository";
 
 /** Origin used when an order has no warehouse assigned (primary warehouse). */
 const DEFAULT_ORIGIN_WAREHOUSE_ID = 1;
@@ -182,7 +186,21 @@ export function computePackPlanInputHash(
       .sort((a, b) =>
         a.productVariantId - b.productVariantId
         || (a.sku ?? "").localeCompare(b.sku ?? "")),
-    boxIds: boxes.map((b) => b.id).sort((a, b) => a - b),
+    boxes: boxes
+      .map((box) => ({
+        id: box.id,
+        code: box.code,
+        kind: box.kind,
+        lengthMm: box.lengthMm,
+        widthMm: box.widthMm,
+        heightMm: box.heightMm,
+        tareWeightGrams: box.tareWeightGrams,
+        maxWeightGrams: box.maxWeightGrams,
+        costCents: box.costCents,
+        fillFactorBps: box.fillFactorBps,
+        isActive: box.isActive,
+      }))
+      .sort((a, b) => a.id - b.id),
   };
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
@@ -239,7 +257,7 @@ export async function ensurePackPlan(
     const candidate = packing.candidates[0];
     const parcels = candidate.parcels;
     const instruction = buildBoxInstruction(parcels);
-    const complete = instruction !== null;
+    const complete = instruction !== null && isCartonizeCandidateVerified(candidate);
 
     if (!complete) {
       // Fallback/degraded packings are never persisted: fallback parcels can
@@ -255,11 +273,13 @@ export async function ensurePackPlan(
 
     const inputHash = computePackPlanInputHash(items, boxes);
 
+    const requestedShipmentId = request.shipmentRequestId ?? null;
     const existing = await deps.findActivePlan(wmsOrderId);
     if (
       existing
       && existing.inputHash === inputHash
       && existing.engineVersion === ENGINE_VERSION
+      && (requestedShipmentId === null || existing.shipmentRequestId === requestedShipmentId)
     ) {
       // Same inputs and engine version mean the stored plan is already this
       // deterministic packing. Return it unchanged — no supersede, no insert.
@@ -268,7 +288,7 @@ export async function ensurePackPlan(
 
     const plan = await deps.persistPlan({
       wmsOrderId,
-      shipmentRequestId: request.shipmentRequestId ?? null,
+      shipmentRequestId: requestedShipmentId,
       engineVersion: ENGINE_VERSION,
       inputHash,
       warnings: [...itemWarnings, ...candidate.warnings],
@@ -336,20 +356,26 @@ async function loadWmsOrder(
   return rows[0] ?? null;
 }
 
-/** Shippable lines only (requires_shipping = 1, qty > 0) — same filter as shadow mode. */
+/** Remaining physical lines only; held and already-fulfilled units do not enter this pack plan. */
 async function loadShippableOrderLines(wmsOrderId: number): Promise<PackPlanOrderLine[]> {
   const rows = await db
     .select({
       sku: orderItems.sku,
       quantity: orderItems.quantity,
+      fulfilledQuantity: orderItems.fulfilledQuantity,
       requiresShipping: orderItems.requiresShipping,
+      onHold: orderItems.onHold,
     })
     .from(orderItems)
     .where(eq(orderItems.orderId, wmsOrderId));
 
   return rows
-    .filter((row) => row.requiresShipping === 1 && row.quantity > 0)
-    .map((row) => ({ sku: row.sku, quantity: row.quantity }));
+    .map((row) => ({
+      ...row,
+      remainingQuantity: Math.max(0, row.quantity - row.fulfilledQuantity),
+    }))
+    .filter((row) => row.requiresShipping === 1 && !row.onHold && row.remainingQuantity > 0)
+    .map((row) => ({ sku: row.sku, quantity: row.remainingQuantity }));
 }
 
 async function findActivePlanForOrder(wmsOrderId: number): Promise<ShippingPackPlan | null> {
@@ -367,7 +393,7 @@ async function findActivePlanForOrder(wmsOrderId: number): Promise<ShippingPackP
 
 /**
  * One transaction: supersede prior active plans for the order, then insert
- * the new plan + parcels + parcel items. All writes to shipping.pack_plans*
+ * the new plan + parcels + parcel items/placements. All writes to shipping.pack_plans*
  * MUST stay in this module (writer ratchet).
  */
 async function persistPlanTransactional(input: PersistPlanInput): Promise<ShippingPackPlan> {
@@ -407,6 +433,7 @@ async function persistPlanTransactional(input: PersistPlanInput): Promise<Shippi
           lengthMm: parcel.lengthMm,
           widthMm: parcel.widthMm,
           heightMm: parcel.heightMm,
+          placements: parcel.placements,
         })
         .returning({ id: shippingPackPlanParcels.id });
 
