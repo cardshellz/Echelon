@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { productVariants, products, vendorProducts, vendors } from "@shared/schema";
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -42,10 +43,45 @@ function buildMockDb(headerReturn: any, captureInserts: any[]) {
     };
     return chain;
   });
+  const rowsFor = (table: unknown): any[] => {
+    if (table === vendors) {
+      return [{ id: 1, active: 1, currency: "USD" }];
+    }
+    if (table === products) {
+      return [{ id: 1, sku: "SKU-1", name: "Product 1", isActive: true }];
+    }
+    if (table === productVariants) {
+      return [{
+        id: 11,
+        productId: 1,
+        sku: "SKU-1",
+        name: "case size",
+        unitsPerVariant: 1,
+        isActive: true,
+      }];
+    }
+    if (table === vendorProducts) return [];
+    return [];
+  };
   const tx = {
     insert: txInsert,
     update: vi.fn(),
-    select: vi.fn(),
+    select: vi.fn(() => {
+      let table: unknown;
+      const chain: any = {
+        from: vi.fn((value: unknown) => {
+          table = value;
+          return chain;
+        }),
+        where: vi.fn(() => chain),
+        limit: vi.fn(() => chain),
+        orderBy: vi.fn(() => chain),
+        for: vi.fn(async () => rowsFor(table)),
+        then: (resolve: any, reject: any) =>
+          Promise.resolve(rowsFor(table)).then(resolve, reject),
+      };
+      return chain;
+    }),
   };
   return {
     insert: vi.fn().mockReturnValue(buildInsertChain()),

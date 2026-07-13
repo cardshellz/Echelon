@@ -1,4 +1,3 @@
-import { dollarsToCents } from "@shared/utils/money";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation, useSearch } from "wouter";
@@ -57,6 +56,16 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
+import {
+  VendorCatalogQuoteEditor,
+  buildVendorCatalogQuoteWrite,
+  createNewVendorCatalogQuoteDraft,
+  createVendorCatalogQuoteDraft,
+  evaluateVendorCatalogQuoteDraft,
+  formatVendorCatalogQuoteSummary,
+  type VendorCatalogQuoteDraft,
+  type VendorCatalogQuoteSnapshot,
+} from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
 
 const HIERARCHY_TYPES = [
   { level: 1, label: "Pack", prefix: "P" },
@@ -82,6 +91,81 @@ function parsePositiveInt(value: string | null): number | null {
 function safeInternalPath(path: string | null): string | null {
   if (!path || !path.startsWith("/") || path.startsWith("//")) return null;
   return path;
+}
+
+type SupplierMappingForm = {
+  vendorId: number;
+  vendorSku: string;
+  packSize: string;
+  moq: string;
+  leadTimeDays: string;
+  isPreferred: boolean;
+  notes: string;
+  quote: VendorCatalogQuoteDraft;
+  originalQuote: VendorCatalogQuoteSnapshot | null;
+};
+
+function createEmptySupplierMappingForm(): SupplierMappingForm {
+  return {
+    vendorId: 0,
+    vendorSku: "",
+    packSize: "1",
+    moq: "1",
+    leadTimeDays: "",
+    isPreferred: false,
+    notes: "",
+    quote: createNewVendorCatalogQuoteDraft(),
+    originalQuote: null,
+  };
+}
+
+const PG_INTEGER_MAX = 2_147_483_647;
+
+function parseSupplierOperationalInteger(
+  value: string,
+  label: string,
+  minimum: number,
+  required: boolean,
+): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    if (required) throw new Error(`${label} is required.`);
+    return null;
+  }
+  if (!/^\d+$/.test(trimmed)) throw new Error(`${label} must be a whole number.`);
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > PG_INTEGER_MAX) {
+    throw new Error(
+      `${label} must be between ${minimum.toLocaleString("en-US")} and ${PG_INTEGER_MAX.toLocaleString("en-US")}.`,
+    );
+  }
+  return parsed;
+}
+
+function supplierOperationalValues(form: SupplierMappingForm) {
+  return {
+    packSize: parseSupplierOperationalInteger(form.packSize, "Operational pack", 1, true)!,
+    moq: parseSupplierOperationalInteger(form.moq, "MOQ", 1, true)!,
+    leadTimeDays: parseSupplierOperationalInteger(form.leadTimeDays, "Lead time", 0, false),
+  };
+}
+
+function supplierMappingSaveError(form: SupplierMappingForm): string | null {
+  if (!(form.quote.state === "review_required" && form.originalQuote)) {
+    const quoteError = evaluateVendorCatalogQuoteDraft(form.quote).error;
+    if (quoteError) return quoteError;
+  }
+  try {
+    supplierOperationalValues(form);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "Enter valid supplier catalog values.";
+  }
+}
+
+async function supplierMappingError(response: Response, fallback: string): Promise<Error> {
+  const body = await response.json().catch(() => null);
+  return new Error(body?.message || body?.error || fallback);
 }
 
 const GRAMS_PER_POUND = 453.59237;
@@ -1187,17 +1271,11 @@ export default function ProductDetail() {
     enabled: activeTab === "suppliers",
   });
   const [showAddSupplierDialog, setShowAddSupplierDialog] = useState(false);
-  const [supplierForm, setSupplierForm] = useState({
-    vendorId: 0,
-    vendorSku: "",
-    unitCostCents: 0,
-    packSize: 1,
-    moq: 1,
-    leadTimeDays: 0,
-    isPreferred: false,
-    notes: "",
-  });
+  const [supplierForm, setSupplierForm] = useState<SupplierMappingForm>(
+    () => createEmptySupplierMappingForm(),
+  );
   const [editingSupplierId, setEditingSupplierId] = useState<number | null>(null);
+  const supplierSaveError = supplierMappingSaveError(supplierForm);
 
   // --- Overview edit state ---
   const [editForm, setEditForm] = useState({
@@ -1987,6 +2065,8 @@ export default function ProductDetail() {
   // --- Supplier (Vendor-Product) mutations ---
   const createSupplierMutation = useMutation({
     mutationFn: async (data: typeof supplierForm) => {
+      const quoteWrite = buildVendorCatalogQuoteWrite(data.quote);
+      const operationalValues = supplierOperationalValues(data);
       const res = await fetch("/api/vendor-products", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1994,54 +2074,54 @@ export default function ProductDetail() {
           vendorId: data.vendorId,
           productId: product?.productId,
           vendorSku: data.vendorSku || null,
-          unitCostCents: data.unitCostCents,
-          packSize: data.packSize,
-          moq: data.moq,
-          leadTimeDays: data.leadTimeDays || null,
+          ...quoteWrite,
+          ...operationalValues,
           isPreferred: data.isPreferred ? 1 : 0,
           isActive: 1,
           notes: data.notes || null,
         }),
       });
-      if (!res.ok) throw new Error("Failed to add supplier");
+      if (!res.ok) throw await supplierMappingError(res, "Failed to add supplier");
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/vendors`] });
       setShowAddSupplierDialog(false);
-      setSupplierForm({ vendorId: 0, vendorSku: "", unitCostCents: 0, packSize: 1, moq: 1, leadTimeDays: 0, isPreferred: false, notes: "" });
+      setSupplierForm(createEmptySupplierMappingForm());
       toast({ title: "Supplier added" });
     },
-    onError: () => {
-      toast({ title: "Failed to add supplier", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Failed to add supplier", description: error.message, variant: "destructive" });
     },
   });
 
   const updateSupplierMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: typeof supplierForm }) => {
+      const quoteWrite = buildVendorCatalogQuoteWrite(data.quote, data.originalQuote);
+      const operationalValues = supplierOperationalValues(data);
       const res = await fetch(`/api/vendor-products/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           vendorSku: data.vendorSku || null,
-          unitCostCents: data.unitCostCents,
-          packSize: data.packSize,
-          moq: data.moq,
-          leadTimeDays: data.leadTimeDays || null,
+          ...quoteWrite,
+          ...operationalValues,
           isPreferred: data.isPreferred ? 1 : 0,
           notes: data.notes || null,
         }),
       });
-      if (!res.ok) throw new Error("Failed to update supplier");
+      if (!res.ok) throw await supplierMappingError(res, "Failed to update supplier");
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/vendors`] });
       setEditingSupplierId(null);
+      setShowAddSupplierDialog(false);
+      setSupplierForm(createEmptySupplierMappingForm());
       toast({ title: "Supplier updated" });
     },
-    onError: () => {
-      toast({ title: "Failed to update supplier", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Failed to update supplier", description: error.message, variant: "destructive" });
     },
   });
 
@@ -3303,7 +3383,7 @@ export default function ProductDetail() {
                   </div>
                   <Button size="sm" className="min-h-[44px]" onClick={() => {
                     setEditingSupplierId(null);
-                    setSupplierForm({ vendorId: 0, vendorSku: "", unitCostCents: 0, packSize: 1, moq: 1, leadTimeDays: 0, isPreferred: false, notes: "" });
+                    setSupplierForm(createEmptySupplierMappingForm());
                     setShowAddSupplierDialog(true);
                   }}>
                     <Plus className="h-4 w-4 mr-2" />
@@ -3321,6 +3401,7 @@ export default function ProductDetail() {
                     <div className="space-y-3">
                       {vendorProducts.map((vp: any) => {
                         const vendor = supplierVendors.find((v: any) => v.id === vp.vendorId);
+                        const quoteSummary = formatVendorCatalogQuoteSummary(vp);
                         return (
                           <div key={vp.id} className="border rounded-md p-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
                             <div className="flex-1 min-w-0">
@@ -3332,9 +3413,12 @@ export default function ProductDetail() {
                               </div>
                               <div className="text-xs text-muted-foreground mt-0.5 flex flex-wrap gap-x-3">
                                 {vp.vendorSku && <span>Vendor SKU: <span className="font-mono">{vp.vendorSku}</span></span>}
-                                <span>Cost: ${((vp.unitCostCents || 0) / 100).toFixed(2)}</span>
+                                <span>{quoteSummary.amount}</span>
+                                <span className={quoteSummary.reviewRequired ? "text-amber-700" : ""}>
+                                  {quoteSummary.detail}
+                                </span>
                                 {vp.packSize > 1 && <span>Pack: {vp.packSize}</span>}
-                                {vp.moq > 1 && <span>MOQ: {vp.moq}</span>}
+                                {vp.moq > 1 && <span>MOQ: {vp.moq} base pieces</span>}
                                 {vp.leadTimeDays > 0 && <span>Lead: {vp.leadTimeDays}d</span>}
                               </div>
                             </div>
@@ -3344,12 +3428,13 @@ export default function ProductDetail() {
                                 setSupplierForm({
                                   vendorId: vp.vendorId,
                                   vendorSku: vp.vendorSku || "",
-                                  unitCostCents: vp.unitCostCents || 0,
-                                  packSize: vp.packSize || 1,
-                                  moq: vp.moq || 1,
-                                  leadTimeDays: vp.leadTimeDays || 0,
+                                  packSize: String(vp.packSize || 1),
+                                  moq: String(vp.moq || 1),
+                                  leadTimeDays: vp.leadTimeDays != null ? String(vp.leadTimeDays) : "",
                                   isPreferred: vp.isPreferred === 1,
                                   notes: vp.notes || "",
+                                  quote: createVendorCatalogQuoteDraft(vp),
+                                  originalQuote: vp,
                                 });
                                 setShowAddSupplierDialog(true);
                               }}>
@@ -3369,7 +3454,7 @@ export default function ProductDetail() {
 
               {/* Add/Edit Supplier Dialog */}
               <Dialog open={showAddSupplierDialog} onOpenChange={setShowAddSupplierDialog}>
-                <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+                <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto p-4">
                   <DialogHeader>
                     <DialogTitle>{editingSupplierId ? "Edit Supplier" : "Add Supplier"}</DialogTitle>
                     <DialogDescription className="sr-only">Form to add or edit a supplier</DialogDescription>
@@ -3390,30 +3475,33 @@ export default function ProductDetail() {
                         </Select>
                       </div>
                     )}
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <Label className="text-sm">Vendor SKU</Label>
-                        <Input className="h-11" value={supplierForm.vendorSku} onChange={(e) => setSupplierForm(prev => ({ ...prev, vendorSku: e.target.value }))} placeholder="Vendor's catalog #" />
-                      </div>
-                      <div>
-                        <Label className="text-sm">Unit Cost ($)</Label>
-                        <Input className="h-11" type="number" step="0.0001" value={String(supplierForm.unitCostCents / 100)} onChange={(e) => setSupplierForm(prev => ({ ...prev, unitCostCents: dollarsToCents(e.target.value || "0") }))} />
-                      </div>
+                    <div>
+                      <Label className="text-sm">Vendor SKU</Label>
+                      <Input className="h-11" value={supplierForm.vendorSku} onChange={(e) => setSupplierForm(prev => ({ ...prev, vendorSku: e.target.value }))} placeholder="Vendor's catalog #" />
                     </div>
+
+                    <VendorCatalogQuoteEditor
+                      value={supplierForm.quote}
+                      onChange={(quote) => setSupplierForm((previous) => ({ ...previous, quote }))}
+                    />
+
                     <div className="grid grid-cols-3 gap-4">
                       <div>
-                        <Label className="text-sm">Pack Size</Label>
-                        <Input className="h-11" type="number" value={supplierForm.packSize} onChange={(e) => setSupplierForm(prev => ({ ...prev, packSize: parseInt(e.target.value) || 1 }))} />
+                        <Label className="text-sm">Operational pack</Label>
+                        <Input className="h-11" type="number" min="1" step="1" value={supplierForm.packSize} onChange={(e) => setSupplierForm(prev => ({ ...prev, packSize: e.target.value }))} />
                       </div>
                       <div>
-                        <Label className="text-sm">MOQ</Label>
-                        <Input className="h-11" type="number" value={supplierForm.moq} onChange={(e) => setSupplierForm(prev => ({ ...prev, moq: parseInt(e.target.value) || 1 }))} />
+                        <Label className="text-sm">MOQ (base pieces)</Label>
+                        <Input className="h-11" type="number" min="1" step="1" value={supplierForm.moq} onChange={(e) => setSupplierForm(prev => ({ ...prev, moq: e.target.value }))} />
                       </div>
                       <div>
                         <Label className="text-sm">Lead Time (d)</Label>
-                        <Input className="h-11" type="number" value={supplierForm.leadTimeDays || ""} onChange={(e) => setSupplierForm(prev => ({ ...prev, leadTimeDays: parseInt(e.target.value) || 0 }))} />
+                        <Input className="h-11" type="number" min="0" step="1" value={supplierForm.leadTimeDays} onChange={(e) => setSupplierForm(prev => ({ ...prev, leadTimeDays: e.target.value }))} />
                       </div>
                     </div>
+                    <p className="text-xs text-muted-foreground">
+                      MOQ is counted in base pieces and is independent of the supplier quote UOM and warehouse receiving configuration.
+                    </p>
                     <div className="flex items-center gap-2">
                       <Checkbox checked={supplierForm.isPreferred} onCheckedChange={(checked) => setSupplierForm(prev => ({ ...prev, isPreferred: !!checked }))} />
                       <Label className="text-sm">Preferred supplier (used for auto-PO generation)</Label>
@@ -3424,7 +3512,7 @@ export default function ProductDetail() {
                     </div>
                     <div className="flex justify-end gap-2 pt-2">
                       <Button variant="outline" className="min-h-[44px]" onClick={() => setShowAddSupplierDialog(false)}>Cancel</Button>
-                      <Button className="min-h-[44px]" disabled={!supplierForm.vendorId || createSupplierMutation.isPending || updateSupplierMutation.isPending}
+                      <Button className="min-h-[44px]" disabled={!supplierForm.vendorId || !!supplierSaveError || createSupplierMutation.isPending || updateSupplierMutation.isPending}
                         onClick={() => {
                           if (editingSupplierId) {
                             updateSupplierMutation.mutate({ id: editingSupplierId, data: supplierForm });
@@ -3435,6 +3523,11 @@ export default function ProductDetail() {
                         {editingSupplierId ? "Update" : "Add Supplier"}
                       </Button>
                     </div>
+                    {supplierSaveError && (
+                      <p className="text-xs text-amber-700 text-right" aria-live="polite">
+                        {supplierSaveError}
+                      </p>
+                    )}
                   </div>
                 </DialogContent>
               </Dialog>

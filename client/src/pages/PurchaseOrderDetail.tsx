@@ -5,6 +5,9 @@ import {
   centsToMills,
 } from "@shared/utils/money";
 import {
+  type PoLinePricingInput,
+} from "@shared/utils/po-line-pricing";
+import {
   PO_PHYSICAL_STATUSES,
   PO_FINANCIAL_STATUSES,
 } from "@shared/schema/procurement.schema";
@@ -31,6 +34,31 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
+import {
+  PoLinePricingEditor,
+  createEmptyPoLinePricingDraft,
+  createVendorCatalogPricingDraft,
+  evaluatePoLinePricingDraft,
+  formatVendorCatalogQuote,
+  isVendorCatalogQuoteReusable,
+  vendorCatalogQuoteStatus,
+  type PoLinePricingEditorDraft,
+} from "@/features/po-edit/PoLinePricingEditor";
+import {
+  createStoredPoLinePricingDraft,
+  vendorCatalogPackSizeForPricing,
+} from "@/features/po-edit/stored-po-line-pricing";
+import {
+  PoLineQuoteMetadataEditor,
+  changedPoLineQuoteMetadata,
+  createEmptyPoLineQuoteMetadataDraft,
+  createPoLineQuoteMetadataDraftFromStored,
+  evaluatePoLineQuoteMetadataDraft,
+  populatedPoLineQuoteMetadata,
+  reusableCatalogQuoteDateMissing,
+  type PoLineQuoteMetadataDraft,
+} from "@/features/po-edit/PoLineQuoteMetadataEditor";
+import { isImmutableRecommendationPurchaseOrder } from "@/features/po-edit/purchase-order-editability";
 import {
   ShipmentReceiptPackResolutionDialog,
   type ShipmentReceiptPackResolution,
@@ -791,6 +819,40 @@ function formatLineUnitCost(line: {
   return formatMills(mills);
 }
 
+function formatStoredLineQuote(line: {
+  pricingBasis?: string | null;
+  purchaseUom?: string | null;
+  quotedUnitCostMills?: number | null;
+  quotedTotalCents?: number | null;
+}): string {
+  if (
+    line.pricingBasis === "per_piece" &&
+    line.quotedUnitCostMills != null
+  ) {
+    return `${formatMills(Number(line.quotedUnitCostMills))} per piece`;
+  }
+  if (
+    line.pricingBasis === "per_purchase_uom" &&
+    line.quotedUnitCostMills != null
+  ) {
+    return `${formatMills(Number(line.quotedUnitCostMills))} per ${line.purchaseUom || "purchase UOM"}`;
+  }
+  if (
+    line.pricingBasis === "extended_total" &&
+    line.quotedTotalCents != null
+  ) {
+    return `${formatCents(Number(line.quotedTotalCents))} quoted total`;
+  }
+  if (
+    line.pricingBasis === "per_piece" ||
+    line.pricingBasis === "per_purchase_uom" ||
+    line.pricingBasis === "extended_total"
+  ) {
+    return "Stored quote is incomplete";
+  }
+  return "Legacy price; quote basis unverified";
+}
+
 function createEmptyNewLine() {
   return {
     productId: 0,
@@ -803,6 +865,13 @@ function createEmptyNewLine() {
     vendorSku: "",
     description: "",
   };
+}
+
+function genPoLineIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return (crypto as any).randomUUID();
+  }
+  return `po-line-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function parsePositiveInt(value: string | null): number | null {
@@ -913,21 +982,38 @@ export default function PurchaseOrderDetail() {
 
   // Inline line editing state
   const [editingLineId, setEditingLineId] = useState<number | null>(null);
-  const [editingLineField, setEditingLineField] = useState<"unitCost" | "qty" | "sku" | null>(null);
-  const [editLineValue, setEditLineValue] = useState("");
+  const [editingLineField, setEditingLineField] = useState<"sku" | null>(null);
   const [skuVariants, setSkuVariants] = useState<Array<{ id: number; sku: string; name: string; unitsPerVariant: number }>>([]);
+  const [editingPricingLine, setEditingPricingLine] = useState<any | null>(null);
+  const [editLinePricing, setEditLinePricing] = useState<PoLinePricingEditorDraft>(
+    createEmptyPoLinePricingDraft,
+  );
+  const [editLineQuoteMetadata, setEditLineQuoteMetadata] = useState<PoLineQuoteMetadataDraft>(
+    createEmptyPoLineQuoteMetadataDraft,
+  );
+  const [originalEditLineQuoteMetadata, setOriginalEditLineQuoteMetadata] = useState<PoLineQuoteMetadataDraft>(
+    createEmptyPoLineQuoteMetadataDraft,
+  );
+  const [editRequiresLegacyConfirmation, setEditRequiresLegacyConfirmation] = useState(false);
+  const [legacyPricingConfirmed, setLegacyPricingConfirmed] = useState(false);
 
   // Add line form
   const [productSearch, setProductSearch] = useState("");
   const [productOpen, setProductOpen] = useState(false);
   const [variantOpen, setVariantOpen] = useState(false);
   const [selectedProductForLine, setSelectedProductForLine] = useState<any>(null);
-  const [totalCostDollars, setTotalCostDollars] = useState("");
+  const [linePricing, setLinePricing] = useState<PoLinePricingEditorDraft>(
+    createEmptyPoLinePricingDraft,
+  );
+  const [lineQuoteMetadata, setLineQuoteMetadata] = useState<PoLineQuoteMetadataDraft>(
+    createEmptyPoLineQuoteMetadataDraft,
+  );
   const [saveToVendorCatalog, setSaveToVendorCatalog] = useState(true);
   const [setAsPreferred, setSetAsPreferred] = useState(false);
   const [addLineMode, setAddLineMode] = useState<"catalog" | "search">("catalog");
   const [catalogSearch, setCatalogSearch] = useState("");
   const [selectedCatalogEntry, setSelectedCatalogEntry] = useState<any>(null);
+  const [catalogPricingUntouched, setCatalogPricingUntouched] = useState(false);
 
   // Inline Record Payment dialog (replaces navigate-to-/ap-payments flow)
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
@@ -949,6 +1035,7 @@ export default function PurchaseOrderDetail() {
     queryKey: [`/api/purchase-orders/${poId}`],
     enabled: !!poId,
   });
+  const immutableRecommendationPo = isImmutableRecommendationPurchaseOrder(po);
   const lifecycle = (po as any)?.lifecycle as PoLifecycleSummary | undefined;
   const autoDraftActionPlan = (po as any)?.autoDraftActionPlan as AutoDraftActionPlan | null | undefined;
   const lifecycleActionIds = new Set(
@@ -978,11 +1065,12 @@ export default function PurchaseOrderDetail() {
     if (
       procurementSettings?.useNewPoEditor === true &&
       po?.id &&
-      po?.status === "draft"
+      po?.status === "draft" &&
+      !immutableRecommendationPo
     ) {
       navigate(`/purchase-orders/${po.id}/edit`, { replace: true });
     }
-  }, [procurementSettings?.useNewPoEditor, po?.id, po?.status, navigate]);
+  }, [procurementSettings?.useNewPoEditor, po?.id, po?.status, immutableRecommendationPo, navigate]);
 
   const { data: historyData } = useQuery<{ history: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/history`],
@@ -1072,8 +1160,16 @@ export default function PurchaseOrderDetail() {
   const history = historyData?.history ?? [];
   const receipts = receiptsData?.receipts ?? [];
   const isDraft = po?.status === "draft";
-  const canEditLines = po && ["draft", "pending_approval", "approved", "sent", "acknowledged", "partially_received"].includes(po.status);
+  // Economics and receiving identity are mutable only while the PO is a draft.
+  // Post-draft corrections belong in the audited amendment workflow.
+  const canEditLines = Boolean(isDraft && !immutableRecommendationPo);
+  const canEditLine = (line: any) => canEditLines &&
+    (line.lineType ?? "product") === "product" &&
+    (line.status ?? "open") === "open" &&
+    [line.receivedQty, line.damagedQty, line.returnedQty, line.cancelledQty]
+      .every((quantity) => Number(quantity ?? 0) === 0);
   const isNotCancelled = po && !["cancelled"].includes(po.status);
+  const canEditHeader = Boolean(isNotCancelled && !immutableRecommendationPo);
   const canSubmitPo = canLifecycleAction("submit", po?.status === "draft");
   const canReturnPoToDraft = canLifecycleAction("return_to_draft", po?.status === "pending_approval");
   const canApprovePo = canLifecycleAction("approve", po?.status === "pending_approval");
@@ -1138,9 +1234,15 @@ export default function PurchaseOrderDetail() {
   );
   const receiveUnitsPerVariant =
     newLine.expectedReceiveUnitsPerVariant || newLine.unitsPerUom || 1;
-  const receiveConfigQty = receiveUnitsPerVariant > 1 && newLine.orderQty > 0
-    ? Math.ceil(newLine.orderQty / receiveUnitsPerVariant)
-    : null;
+  const linePricingEvaluation = evaluatePoLinePricingDraft(linePricing);
+  const editLinePricingEvaluation = evaluatePoLinePricingDraft(editLinePricing);
+  const lineQuoteMetadataEvaluation = evaluatePoLineQuoteMetadataDraft(lineQuoteMetadata);
+  const editLineQuoteMetadataEvaluation = evaluatePoLineQuoteMetadataDraft(editLineQuoteMetadata);
+  const catalogQuoteDateMissing = reusableCatalogQuoteDateMissing(
+    saveToVendorCatalog,
+    linePricing.basis,
+    lineQuoteMetadataEvaluation.metadata,
+  );
 
   // Mutations
   function createTransitionMutation(endpoint: string, method = "POST") {
@@ -1759,7 +1861,11 @@ export default function PurchaseOrderDetail() {
   const catalogUpsertMutation = useMutation({
     mutationFn: async (data: {
       vendorId: number; productId: number; productVariantId: number;
-      vendorSku: string; unitCostCents: number; packSize: number; isPreferred: boolean;
+      vendorSku: string; pricing: PoLinePricingInput;
+      packSize: number; isPreferred: boolean;
+      quoteReference?: string;
+      quotedAt?: string;
+      quoteValidUntil?: string;
     }) => {
       const res = await fetch("/api/vendor-products/upsert", {
         method: "POST",
@@ -1784,26 +1890,49 @@ export default function PurchaseOrderDetail() {
   });
 
   const addLineMutation = useMutation({
-    mutationFn: async (data: typeof newLine & { unitCostCents: number }) => {
+    mutationFn: async (data: {
+      productId: number;
+      expectedReceiveVariantId: number;
+      expectedReceiveUnitsPerVariant: number;
+      vendorProductId?: number;
+      vendorSku?: string;
+      description?: string;
+      pricingSource: "manual" | "vendor_catalog";
+      pricing: PoLinePricingInput;
+      expectedPoUpdatedAt: string;
+      quoteReference?: string;
+      quotedAt?: string;
+      quoteValidUntil?: string;
+    }) => {
       const res = await fetch(`/api/purchase-orders/${poId}/lines`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": genPoLineIdempotencyKey(),
+        },
         body: JSON.stringify(data),
       });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to add line");
+      }
       return res.json();
     },
-    onSuccess: () => {
-      // Capture before state reset
-      const totalCents = dollarsToCents(totalCostDollars || "0");
-      const derivedUnitCostCents = newLine.orderQty > 0 ? totalCents / newLine.orderQty : 0;
-      const catalogData = saveToVendorCatalog && po?.vendorId && selectedReceiveVariantId ? {
+    onSuccess: (_result, command) => {
+      const catalogData = saveToVendorCatalog && command.pricing.basis !== "extended_total" && po?.vendorId && command.expectedReceiveVariantId ? {
         vendorId: po.vendorId,
-        productId: newLine.productId,
-        productVariantId: selectedReceiveVariantId,
-        vendorSku: newLine.vendorSku,
-        unitCostCents: derivedUnitCostCents,
-        packSize: receiveUnitsPerVariant,
+        productId: command.productId,
+        productVariantId: command.expectedReceiveVariantId,
+        vendorSku: command.vendorSku || "",
+        pricing: command.pricing,
+        ...populatedPoLineQuoteMetadata({
+          quoteReference: command.quoteReference ?? null,
+          quotedAt: command.quotedAt ?? null,
+          quoteValidUntil: command.quoteValidUntil ?? null,
+        }),
+        // Catalog pack size describes the supplier's purchase UOM. Receiving
+        // configuration is intentionally independent.
+        packSize: vendorCatalogPackSizeForPricing(command.pricing),
         isPreferred: setAsPreferred,
       } : null;
 
@@ -1812,11 +1941,13 @@ export default function PurchaseOrderDetail() {
       setNewLine(createEmptyNewLine());
       setProductSearch("");
       setSelectedProductForLine(null);
-      setTotalCostDollars("");
+      setLinePricing(createEmptyPoLinePricingDraft());
+      setLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
       setSaveToVendorCatalog(true);
       setSetAsPreferred(false);
       setCatalogSearch("");
       setSelectedCatalogEntry(null);
+      setCatalogPricingUntouched(false);
       toast({ title: "Line added" });
 
       if (catalogData) catalogUpsertMutation.mutate(catalogData);
@@ -1827,9 +1958,26 @@ export default function PurchaseOrderDetail() {
   });
 
   const deleteLineMutation = useMutation({
-    mutationFn: async (lineId: number) => {
-      const res = await fetch(`/api/purchase-orders/lines/${lineId}`, { method: "DELETE" });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+    mutationFn: async (line: any) => {
+      if (!po?.updatedAt || !line?.updatedAt) {
+        throw new Error("The PO or line version is unavailable. Reload before removing this line.");
+      }
+      const res = await fetch(`/api/purchase-orders/lines/${line.id}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": genPoLineIdempotencyKey(),
+        },
+        body: JSON.stringify({
+          expectedPoUpdatedAt: po.updatedAt,
+          expectedLineUpdatedAt: line.updatedAt,
+          reason: "Removed from draft purchase order",
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to remove line");
+      }
       return res.json();
     },
     onSuccess: () => {
@@ -1842,13 +1990,26 @@ export default function PurchaseOrderDetail() {
   });
 
   const updateLineMutation = useMutation({
-    mutationFn: async ({ lineId, updates }: { lineId: number; updates: Record<string, any> }) => {
-      const res = await fetch(`/api/purchase-orders/lines/${lineId}`, {
+    mutationFn: async ({ line, updates }: { line: any; updates: Record<string, any> }) => {
+      if (!po?.updatedAt || !line?.updatedAt) {
+        throw new Error("The PO or line version is unavailable. Reload before editing this line.");
+      }
+      const res = await fetch(`/api/purchase-orders/lines/${line.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updates),
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": genPoLineIdempotencyKey(),
+        },
+        body: JSON.stringify({
+          ...updates,
+          expectedPoUpdatedAt: po.updatedAt,
+          expectedLineUpdatedAt: line.updatedAt,
+        }),
       });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to update line");
+      }
       return res.json();
     },
     onSuccess: () => {
@@ -1856,6 +2017,11 @@ export default function PurchaseOrderDetail() {
       setEditingLineId(null);
       setEditingLineField(null);
       setSkuVariants([]);
+      setEditingPricingLine(null);
+      setEditLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
+      setOriginalEditLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
+      setEditRequiresLegacyConfirmation(false);
+      setLegacyPricingConfirmed(false);
       toast({ title: "Line updated" });
     },
     onError: (err: Error) => {
@@ -1863,13 +2029,20 @@ export default function PurchaseOrderDetail() {
     },
   });
 
-  function startLineEdit(lineId: number, field: "unitCost" | "qty", currentValue: number) {
-    setEditingLineId(lineId);
-    setEditingLineField(field);
-    setEditLineValue(field === "unitCost" ? String(Number(currentValue) / 100) : String(currentValue));
+  function startPricingEdit(line: any) {
+    if (!canEditLine(line)) return;
+    const stored = createStoredPoLinePricingDraft(line);
+    setEditingPricingLine(line);
+    setEditLinePricing(stored.draft);
+    const storedMetadata = createPoLineQuoteMetadataDraftFromStored(line);
+    setEditLineQuoteMetadata(storedMetadata);
+    setOriginalEditLineQuoteMetadata(storedMetadata);
+    setEditRequiresLegacyConfirmation(stored.requiresLegacyConfirmation);
+    setLegacyPricingConfirmed(false);
   }
 
   async function startSkuEdit(line: any) {
+    if (!canEditLine(line)) return;
     setEditingLineId(line.id);
     setEditingLineField("sku");
     try {
@@ -1881,36 +2054,76 @@ export default function PurchaseOrderDetail() {
     } catch { /* ignore */ }
   }
 
-  function saveSkuEdit(lineId: number, variant: { id: number; sku: string; unitsPerVariant: number }) {
+  function saveSkuEdit(line: any, variant: { id: number; sku: string; unitsPerVariant: number }) {
+    if (!canEditLine(line)) return;
     updateLineMutation.mutate({
-      lineId,
+      line,
       updates: {
-        productVariantId: variant.id,
         expectedReceiveVariantId: variant.id,
         expectedReceiveUnitsPerVariant: variant.unitsPerVariant || 1,
-        unitsPerUom: variant.unitsPerVariant,
       },
     });
   }
 
-  function saveLineEdit(lineId: number) {
-    if (!editingLineField) return;
-    const val = parseFloat(editLineValue);
-    if (isNaN(val) || val < 0) {
-      toast({ title: "Invalid value", variant: "destructive" });
+  function savePricingEdit() {
+    if (!editingPricingLine || !canEditLine(editingPricingLine)) return;
+    const evaluation = evaluatePoLinePricingDraft(editLinePricing);
+    const metadataEvaluation = evaluatePoLineQuoteMetadataDraft(editLineQuoteMetadata);
+    if (!evaluation.pricing) {
+      toast({
+        title: "Invalid vendor quote",
+        description: evaluation.error ?? "Enter a complete vendor quote.",
+        variant: "destructive",
+      });
       return;
     }
-    const updates = editingLineField === "unitCost"
-      ? { unitCostCents: dollarsToCents(editLineValue) }
-      : { orderQty: Math.round(val) };
-    updateLineMutation.mutate({ lineId, updates });
+    if (!metadataEvaluation.metadata) {
+      toast({
+        title: "Invalid quote details",
+        description: metadataEvaluation.error ?? "Enter valid quote details.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (editRequiresLegacyConfirmation && !legacyPricingConfirmed) {
+      toast({
+        title: "Confirm the quote basis",
+        description: "This legacy line has no stored vendor quote basis. Confirm the quote before saving.",
+        variant: "destructive",
+      });
+      return;
+    }
+    updateLineMutation.mutate({
+      line: editingPricingLine,
+      // A human changed or confirmed this line. Keep its quote metadata, but
+      // mark the pricing source as manual rather than claiming an untouched
+      // catalog or recommendation value.
+      updates: {
+        pricing: evaluation.pricing,
+        pricingSource: "manual",
+        // Omit untouched metadata so editing economics never truncates an
+        // existing quote timestamp to its date-only input representation.
+        ...changedPoLineQuoteMetadata(
+          originalEditLineQuoteMetadata,
+          editLineQuoteMetadata,
+          metadataEvaluation.metadata,
+        ),
+      },
+    });
   }
 
   function cancelLineEdit() {
     setEditingLineId(null);
     setEditingLineField(null);
-    setEditLineValue("");
     setSkuVariants([]);
+  }
+
+  function closePricingEdit() {
+    setEditingPricingLine(null);
+    setEditLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
+    setOriginalEditLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
+    setEditRequiresLegacyConfirmation(false);
+    setLegacyPricingConfirmed(false);
   }
 
   const updateChargesMutation = useMutation({
@@ -2197,7 +2410,7 @@ export default function PurchaseOrderDetail() {
                 {poIncoterms
                   ? <span className="font-medium text-foreground">{poIncoterms}</span>
                   : <span className="italic text-amber-600">No incoterms set</span>}
-                {isNotCancelled && (
+                {canEditHeader && (
                   <Button
                     variant="ghost" size="icon" className="h-5 w-5 ml-0.5"
                     onClick={() => { setIncotermsEdit(poIncoterms || ""); setEditingIncoterms(true); }}
@@ -2464,7 +2677,7 @@ export default function PurchaseOrderDetail() {
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
               <div className="text-xs text-muted-foreground" title="Over-Receipt Tolerance %">Tolerance</div>
-              {isNotCancelled && !editingTolerance && (
+              {canEditHeader && !editingTolerance && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
                   onClick={() => { setToleranceVal(String(Number(po.overReceiptTolerancePct) || 0)); setEditingTolerance(true); }}
                 >
@@ -2507,7 +2720,7 @@ export default function PurchaseOrderDetail() {
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
               <div className="text-xs text-muted-foreground">Discount</div>
-              {isDraft && !editingDiscount && (
+              {canEditLines && !editingDiscount && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
                   onClick={() => { setDiscountDollars(((Number(po.discountCents) || 0) / 100).toFixed(2)); setEditingDiscount(true); }}
                 >
@@ -2542,7 +2755,7 @@ export default function PurchaseOrderDetail() {
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
               <div className="text-xs text-muted-foreground">Tax / Duties</div>
-              {taxApplicable && isNotCancelled && !editingTax && (
+              {taxApplicable && canEditHeader && !editingTax && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
                   onClick={() => { setTaxDollars(((Number(po.taxCents) || 0) / 100).toFixed(2)); setEditingTax(true); }}
                 >
@@ -2580,7 +2793,7 @@ export default function PurchaseOrderDetail() {
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
               <div className="text-xs text-muted-foreground">Freight</div>
-              {shippingApplicable && isNotCancelled && !editingShipping && (
+              {shippingApplicable && canEditHeader && !editingShipping && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
                   onClick={() => { setShippingDollars(((Number(po.shippingCostCents) || 0) / 100).toFixed(2)); setEditingShipping(true); }}
                 >
@@ -2632,13 +2845,15 @@ export default function PurchaseOrderDetail() {
       </div>
 
       {/* Auto-Draft Banner */}
-      {po.source === "auto_draft" && (
+      {immutableRecommendationPo && (
         <div className="bg-amber-50 border border-amber-200 rounded-md px-4 py-3 flex items-center gap-4 text-sm">
           <span className="text-lg flex-shrink-0">🤖</span>
           <div className="flex-1">
-            <strong className="text-amber-700">Auto-Draft</strong>
+            <strong className="text-amber-700">
+              {po.source === "auto_draft" ? "Auto-Draft" : "Recommendation Purchase Order"}
+            </strong>
             <p className="text-muted-foreground text-xs mt-0.5">
-              Created by the nightly auto-draft job{po.autoDraftDate ? ` on ${new Date(po.autoDraftDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}` : ""}. Review quantities and send to vendor when ready.
+              The accepted recommendation and vendor quote are preserved as an immutable economic snapshot. Review the lines, then use the lifecycle actions here to submit or send it without replacing the PO.
             </p>
           </div>
         </div>
@@ -2727,7 +2942,7 @@ export default function PurchaseOrderDetail() {
 
         {/* ── Lines Tab ── */}
         <TabsContent value="lines" className="space-y-4">
-          {isDraft && (
+          {canEditLines && (
             <Button variant="outline" onClick={() => setShowAddLineDialog(true)} className="min-h-[44px]">
               <Plus className="h-4 w-4 mr-2" />
               Add Line
@@ -2739,13 +2954,13 @@ export default function PurchaseOrderDetail() {
             {lines.length === 0 ? (
               <Card>
                 <CardContent className="p-4 text-center text-muted-foreground">
-                  No lines. {isDraft ? "Add items to this PO." : ""}
+                  No lines. {canEditLines ? "Add items to this PO." : ""}
                 </CardContent>
               </Card>
             ) : (
               lines.map((line: any) => {
-                const isEditingCostMobile = editingLineId === line.id && editingLineField === "unitCost";
-                const isEditingSkuMobile = editingLineId === line.id && editingLineField === "sku";
+                const canEditThisLine = canEditLine(line);
+                const isEditingSkuMobile = canEditThisLine && editingLineId === line.id && editingLineField === "sku";
                 return (
                 <Card key={line.id}>
                   <CardContent className="p-3">
@@ -2762,7 +2977,7 @@ export default function PurchaseOrderDetail() {
                                   className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === (line.expectedReceiveVariantId ?? line.productVariantId) ? "bg-muted font-bold" : ""}`}
                                   onClick={() => {
                                     if (v.id !== (line.expectedReceiveVariantId ?? line.productVariantId)) {
-                                      saveSkuEdit(line.id, v);
+                                      saveSkuEdit(line, v);
                                     } else {
                                       cancelLineEdit();
                                     }
@@ -2777,8 +2992,8 @@ export default function PurchaseOrderDetail() {
                         ) : (
                         <div className="flex items-center gap-2">
                           <span
-                            className={`font-mono text-sm ${canEditLines ? "cursor-pointer underline decoration-dotted" : ""}`}
-                            onClick={() => canEditLines && startSkuEdit(line)}
+                            className={`font-mono text-sm ${canEditThisLine ? "cursor-pointer underline decoration-dotted" : ""}`}
+                            onClick={() => canEditThisLine && startSkuEdit(line)}
                           >
                             {line.sku || "—"}
                           </span>
@@ -2787,39 +3002,34 @@ export default function PurchaseOrderDetail() {
                         )}
                         <div className="text-sm mt-1 truncate">{line.productName || "—"}</div>
                         <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
-                          <span>
+                          <span
+                            className={canEditThisLine ? "cursor-pointer underline decoration-dotted" : ""}
+                            onClick={() => canEditThisLine && startPricingEdit(line)}
+                            title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
+                          >
                             {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
                               ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)`
                               : `Qty: ${line.receivedQty || 0}/${line.orderQty}`}
                           </span>
-                          {isEditingCostMobile ? (
-                            <span className="flex items-center gap-1">
-                              $<Input
-                                type="number" min="0" step="0.000001" value={editLineValue}
-                                onChange={e => setEditLineValue(e.target.value)}
-                                className="h-6 w-20 text-xs font-mono" autoFocus
-                                onKeyDown={e => { if (e.key === "Enter") saveLineEdit(line.id); if (e.key === "Escape") cancelLineEdit(); }}
-                              />
-                              <Button size="sm" className="h-6 px-1" onClick={() => saveLineEdit(line.id)}><Check className="h-3 w-3" /></Button>
-                              <Button variant="ghost" size="sm" className="h-6 px-1" onClick={cancelLineEdit}><XCircle className="h-3 w-3" /></Button>
-                            </span>
-                          ) : (
-                            <span
-                              className={canEditLines ? "cursor-pointer underline decoration-dotted" : ""}
-                              onClick={() => canEditLines && startLineEdit(line.id, "unitCost", line.unitCostCents)}
-                            >
-                              @ {formatLineUnitCost(line)}/pc
-                            </span>
-                          )}
+                          <span
+                            className={canEditThisLine ? "cursor-pointer underline decoration-dotted" : ""}
+                            onClick={() => canEditThisLine && startPricingEdit(line)}
+                            title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
+                          >
+                            @ {formatLineUnitCost(line)}/pc
+                          </span>
                           <span className="font-medium">{formatCents(line.lineTotalCents)}</span>
                         </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          Vendor quote: {formatStoredLineQuote(line)}
+                        </div>
                       </div>
-                      {isDraft && (
+                      {canEditThisLine && (
                         <Button
                           variant="ghost"
                           size="sm"
                           className="min-h-[44px] min-w-[44px] p-0"
-                          onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line.id); }}
+                          onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line); }}
                         >
                           <Trash2 className="h-4 w-4 text-red-500" />
                         </Button>
@@ -2846,21 +3056,20 @@ export default function PurchaseOrderDetail() {
                   <TableHead className="text-right">Unit Cost</TableHead>
                   <TableHead className="text-right">Line Total</TableHead>
                   <TableHead>Status</TableHead>
-                  {isDraft && <TableHead className="w-12"></TableHead>}
+                  {canEditLines && <TableHead className="w-12"></TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {lines.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isDraft ? 10 : 9} className="text-center text-muted-foreground py-8">
-                      No lines. {isDraft ? "Click \"Add Line\" to add items." : ""}
+                    <TableCell colSpan={canEditLines ? 10 : 9} className="text-center text-muted-foreground py-8">
+                      No lines. {canEditLines ? "Click \"Add Line\" to add items." : ""}
                     </TableCell>
                   </TableRow>
                 ) : (
                   lines.map((line: any) => {
-                    const isEditingCost = editingLineId === line.id && editingLineField === "unitCost";
-                    const isEditingQty = editingLineId === line.id && editingLineField === "qty";
-                    const isEditingSku = editingLineId === line.id && editingLineField === "sku";
+                    const canEditThisLine = canEditLine(line);
+                    const isEditingSku = canEditThisLine && editingLineId === line.id && editingLineField === "sku";
                     return (
                     <TableRow key={line.id}>
                       <TableCell className="text-muted-foreground">{line.lineNumber}</TableCell>
@@ -2876,7 +3085,7 @@ export default function PurchaseOrderDetail() {
                                   className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === (line.expectedReceiveVariantId ?? line.productVariantId) ? "bg-muted font-bold" : ""}`}
                                   onClick={() => {
                                     if (v.id !== (line.expectedReceiveVariantId ?? line.productVariantId)) {
-                                      saveSkuEdit(line.id, v);
+                                      saveSkuEdit(line, v);
                                     } else {
                                       cancelLineEdit();
                                     }
@@ -2890,8 +3099,8 @@ export default function PurchaseOrderDetail() {
                           </div>
                         ) : (
                           <span
-                            className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
-                            onClick={() => canEditLines && startSkuEdit(line)}
+                            className={canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
+                            onClick={() => canEditThisLine && startSkuEdit(line)}
                           >
                             {line.sku || "—"}
                           </span>
@@ -2900,38 +3109,15 @@ export default function PurchaseOrderDetail() {
                       <TableCell className="max-w-[200px] truncate">{line.productName || "—"}</TableCell>
                       <TableCell className="font-mono text-xs">{line.vendorSku || "—"}</TableCell>
                       <TableCell className="text-right">
-                        {isEditingQty ? (
-                          <div className="flex items-center gap-1 justify-end">
-                            <Input
-                              type="number"
-                              min="1"
-                              step="1"
-                              value={editLineValue}
-                              onChange={e => setEditLineValue(e.target.value)}
-                              className="h-7 w-24 text-right text-sm font-mono"
-                              autoFocus
-                              onKeyDown={e => {
-                                if (e.key === "Enter") saveLineEdit(line.id);
-                                if (e.key === "Escape") cancelLineEdit();
-                              }}
-                            />
-                            <Button size="sm" className="h-7 px-1.5" onClick={() => saveLineEdit(line.id)} disabled={updateLineMutation.isPending}>
-                              <Check className="h-3 w-3" />
-                            </Button>
-                            <Button variant="ghost" size="sm" className="h-7 px-1.5" onClick={cancelLineEdit}>
-                              <XCircle className="h-3 w-3" />
-                            </Button>
-                          </div>
-                        ) : (
-                          <span
-                            className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
-                            onClick={() => canEditLines && startLineEdit(line.id, "qty", line.orderQty)}
-                          >
-                            {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
-                              ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
-                              : line.orderQty}
-                          </span>
-                        )}
+                        <span
+                          className={canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
+                          onClick={() => canEditThisLine && startPricingEdit(line)}
+                          title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
+                        >
+                          {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
+                            ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1))} expected)</span></>
+                            : line.orderQty}
+                        </span>
                       </TableCell>
                       <TableCell className="text-right">
                         {(line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1) > 1
@@ -2942,48 +3128,27 @@ export default function PurchaseOrderDetail() {
                         )}
                       </TableCell>
                       <TableCell className="text-right font-mono">
-                        {isEditingCost ? (
-                          <div className="flex items-center gap-1 justify-end">
-                            <span className="text-sm">$</span>
-                            <Input
-                              type="number"
-                              min="0"
-                              step="0.000001"
-                              value={editLineValue}
-                              onChange={e => setEditLineValue(e.target.value)}
-                              className="h-7 w-28 text-right text-sm font-mono"
-                              autoFocus
-                              onKeyDown={e => {
-                                if (e.key === "Enter") saveLineEdit(line.id);
-                                if (e.key === "Escape") cancelLineEdit();
-                              }}
-                            />
-                            <Button size="sm" className="h-7 px-1.5" onClick={() => saveLineEdit(line.id)} disabled={updateLineMutation.isPending}>
-                              <Check className="h-3 w-3" />
-                            </Button>
-                            <Button variant="ghost" size="sm" className="h-7 px-1.5" onClick={cancelLineEdit}>
-                              <XCircle className="h-3 w-3" />
-                            </Button>
-                          </div>
-                        ) : (
-                          <span
-                            className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
-                            onClick={() => canEditLines && startLineEdit(line.id, "unitCost", line.unitCostCents)}
-                          >
-                            {formatLineUnitCost(line)}
-                          </span>
-                        )}
+                        <span
+                          className={canEditThisLine ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
+                          onClick={() => canEditThisLine && startPricingEdit(line)}
+                          title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
+                        >
+                          {formatLineUnitCost(line)}
+                        </span>
+                        <div className="text-[11px] font-sans text-muted-foreground">
+                          {formatStoredLineQuote(line)}
+                        </div>
                       </TableCell>
                       <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-xs">{line.status}</Badge>
                       </TableCell>
-                      {isDraft && (
+                      {canEditThisLine && (
                         <TableCell>
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line.id); }}
+                            onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line); }}
                             disabled={deleteLineMutation.isPending}
                           >
                             <Trash2 className="h-4 w-4 text-red-500" />
@@ -3603,22 +3768,120 @@ export default function PurchaseOrderDetail() {
       </div>{/* end side rail */}
       </div>{/* end grid wrapper */}
 
+      {/* Quote-aware line pricing editor. Quantity and price are edited
+          together because their relationship depends on the vendor's basis. */}
+      <Dialog
+        open={editingPricingLine != null}
+        onOpenChange={(open) => {
+          if (!open && !updateLineMutation.isPending) closePricingEdit();
+        }}
+      >
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Vendor Quote</DialogTitle>
+            <DialogDescription>
+              Update the quantity in the same basis the supplier quoted. Echelon will derive the normalized per-piece cost and exact line total.
+            </DialogDescription>
+          </DialogHeader>
+
+          {editingPricingLine && (
+            <div className="space-y-4">
+              <div className="rounded-md border bg-muted/20 p-3 text-sm">
+                <div className="font-medium">
+                  {editingPricingLine.sku || `Line ${editingPricingLine.lineNumber}`}
+                  {editingPricingLine.productName ? ` — ${editingPricingLine.productName}` : ""}
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  Stored vendor quote: {formatStoredLineQuote(editingPricingLine)}
+                </div>
+              </div>
+
+              <PoLinePricingEditor
+                value={editLinePricing}
+                onChange={(next) => {
+                  setEditLinePricing(next);
+                  if (editRequiresLegacyConfirmation) {
+                    setLegacyPricingConfirmed(false);
+                  }
+                }}
+                receiveConfiguration={{
+                  label: editingPricingLine.sku || "Selected receiving configuration",
+                  unitsPerVariant:
+                    editingPricingLine.expectedReceiveUnitsPerVariant ||
+                    editingPricingLine.unitsPerUom ||
+                    1,
+                }}
+              />
+              <PoLineQuoteMetadataEditor
+                value={editLineQuoteMetadata}
+                onChange={setEditLineQuoteMetadata}
+              />
+
+              {editRequiresLegacyConfirmation && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-3 space-y-3 text-sm text-amber-950">
+                  <p>
+                    This legacy line stores only a normalized unit cost; it does not record how the vendor quoted it. Verify the original quote, choose the correct basis above, and confirm before saving.
+                  </p>
+                  <div className="flex items-start gap-2">
+                    <Checkbox
+                      id="confirmLegacyLinePricing"
+                      checked={legacyPricingConfirmed}
+                      onCheckedChange={(checked) => setLegacyPricingConfirmed(checked === true)}
+                    />
+                    <label htmlFor="confirmLegacyLinePricing" className="cursor-pointer leading-5">
+                      I verified the vendor quote and confirm the basis, quantity, and amount entered above.
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              <p className="text-xs text-muted-foreground">
+                Saving records this as an operator-confirmed manual quote. Existing quote reference and validity metadata remain attached to the line.
+              </p>
+
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="outline"
+                  onClick={closePricingEdit}
+                  disabled={updateLineMutation.isPending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={savePricingEdit}
+                  disabled={
+                    !editLinePricingEvaluation.pricing ||
+                    !editLineQuoteMetadataEvaluation.metadata ||
+                    (editRequiresLegacyConfirmation && !legacyPricingConfirmed) ||
+                    updateLineMutation.isPending
+                  }
+                >
+                  {updateLineMutation.isPending ? "Saving..." : "Save Quote & Quantity"}
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* ── Add Line Dialog ── */}
       <Dialog open={showAddLineDialog} onOpenChange={(open) => {
         setShowAddLineDialog(open);
         if (!open) {
           setProductSearch("");
           setSelectedProductForLine(null);
-          setTotalCostDollars("");
+          setLinePricing(createEmptyPoLinePricingDraft());
+          setLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
           setSaveToVendorCatalog(true);
           setSetAsPreferred(false);
           setNewLine(createEmptyNewLine());
           setCatalogSearch("");
           setSelectedCatalogEntry(null);
+          setCatalogPricingUntouched(false);
           setAddLineMode("catalog");
         }
       }}>
-        <DialogContent className="max-w-lg max-h-[85vh] flex flex-col overflow-hidden">
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col overflow-hidden">
           <style>{`.add-line-scroll [data-radix-popper-content-wrapper] { z-index: 9999 !important; }`}</style>
           <DialogHeader>
             <DialogTitle>Add Line Item</DialogTitle>
@@ -3641,8 +3904,10 @@ export default function PurchaseOrderDetail() {
                     setAddLineMode("catalog");
                     setSelectedProductForLine(null);
                     setSelectedCatalogEntry(null);
+                    setCatalogPricingUntouched(false);
                     setNewLine(createEmptyNewLine());
-                    setTotalCostDollars("");
+                    setLinePricing(createEmptyPoLinePricingDraft());
+                    setLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
                   }}
                 >
                   Supplier Catalog{vendorCatalog.length > 0 ? ` (${vendorCatalog.length})` : ""}
@@ -3654,8 +3919,10 @@ export default function PurchaseOrderDetail() {
                   onClick={() => {
                     setAddLineMode("search");
                     setSelectedCatalogEntry(null);
+                    setCatalogPricingUntouched(false);
                     setNewLine(createEmptyNewLine());
-                    setTotalCostDollars("");
+                    setLinePricing(createEmptyPoLinePricingDraft());
+                    setLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
                     setSelectedProductForLine(null);
                   }}
                 >
@@ -3692,9 +3959,11 @@ export default function PurchaseOrderDetail() {
                       className="h-7 w-7 shrink-0"
                       onClick={() => {
                         setSelectedCatalogEntry(null);
+                        setCatalogPricingUntouched(false);
                         setSelectedProductForLine(null);
                         setNewLine(createEmptyNewLine());
-                        setTotalCostDollars("");
+                        setLinePricing(createEmptyPoLinePricingDraft());
+                        setLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
                       }}
                     >
                       <XCircle className="h-4 w-4" />
@@ -3747,6 +4016,7 @@ export default function PurchaseOrderDetail() {
                           .map((entry: any) => {
                             const product = products.find((p: any) => p.id === entry.productId);
                             const variant = product?.variants?.find((v: any) => v.id === entry.productVariantId);
+                            const quoteStatus = vendorCatalogQuoteStatus(entry);
                             return (
                               <button
                                 key={entry.id}
@@ -3754,17 +4024,21 @@ export default function PurchaseOrderDetail() {
                                 className="w-full text-left p-2.5 hover:bg-muted/50 transition-colors"
                                 onClick={() => {
                                   setSelectedCatalogEntry(entry);
+                                  setCatalogPricingUntouched(
+                                    isVendorCatalogQuoteReusable(entry),
+                                  );
                                   setSelectedProductForLine(product || null);
                                   setNewLine(prev => ({
                                     ...prev,
                                     productId: entry.productId,
                                     productVariantId: entry.productVariantId || 0,
                                     expectedReceiveVariantId: entry.productVariantId || 0,
-                                    expectedReceiveUnitsPerVariant: entry.packSize || 1,
+                                    expectedReceiveUnitsPerVariant: variant?.unitsPerVariant || 1,
                                     vendorSku: entry.vendorSku || "",
-                                    unitsPerUom: entry.packSize || 1,
+                                    unitsPerUom: variant?.unitsPerVariant || 1,
                                   }));
-                                  setTotalCostDollars("");
+                                  setLinePricing(createVendorCatalogPricingDraft(entry));
+                                  setLineQuoteMetadata(createPoLineQuoteMetadataDraftFromStored(entry));
                                   setSaveToVendorCatalog(false);
                                 }}
                               >
@@ -3776,12 +4050,27 @@ export default function PurchaseOrderDetail() {
                                     <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5 flex-wrap">
                                       {variant && <span className="font-mono">{variant.sku}</span>}
                                       {entry.vendorSku && <span>· {entry.vendorSku}</span>}
-                                      {(entry.packSize || 1) > 1 && <span>· {entry.packSize} pcs/config</span>}
+                                      {entry.pricingBasis === "per_purchase_uom" && (
+                                        <span>
+                                          · {entry.piecesPerPurchaseUom || entry.packSize || 1} pcs/{entry.purchaseUom || "purchase UOM"}
+                                        </span>
+                                      )}
+                                      {(variant?.unitsPerVariant || 1) > 1 && (
+                                        <span>· Receive as {variant.unitsPerVariant} pcs/config</span>
+                                      )}
                                       {entry.moq > 1 && <span>· MOQ {entry.moq}</span>}
+                                      {(!entry.pricingBasis || entry.pricingBasis === "legacy_unknown") && (
+                                        <span className="text-amber-700">· Verify legacy price</span>
+                                      )}
+                                      {quoteStatus !== "usable" && quoteStatus !== "legacy" && (
+                                        <span className="text-amber-700">· Quote review required</span>
+                                      )}
                                     </div>
                                   </div>
                                   <div className="text-right shrink-0">
-                                    <div className="text-sm font-mono font-medium">{formatCents(entry.unitCostCents, { unitCost: true })}</div>
+                                    <div className="text-sm font-mono font-medium">
+                                      {formatVendorCatalogQuote(entry)}
+                                    </div>
                                     {entry.isPreferred ? (
                                       <div className="text-xs text-green-600">Preferred</div>
                                     ) : null}
@@ -3870,6 +4159,8 @@ export default function PurchaseOrderDetail() {
                                 value={String(p.id)}
                                 onSelect={() => {
                                   setSelectedProductForLine(p);
+                                  setLinePricing(createEmptyPoLinePricingDraft());
+                                  setLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
                                   setNewLine(prev => ({
                                     ...prev,
                                     productId: p.id,
@@ -3877,6 +4168,7 @@ export default function PurchaseOrderDetail() {
                                     expectedReceiveVariantId: 0,
                                     expectedReceiveUnitsPerVariant: 1,
                                     unitsPerUom: 1,
+                                    vendorSku: "",
                                   }));
                                   setProductOpen(false);
                                   setProductSearch("");
@@ -3948,38 +4240,31 @@ export default function PurchaseOrderDetail() {
             {selectedReceiveVariantId > 0 && (
               <>
                 <Separator />
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label>Qty (pieces) *</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      value={newLine.orderQty || ""}
-                      onChange={e => setNewLine(prev => ({ ...prev, orderQty: parseInt(e.target.value) || 0 }))}
-                      className="h-10"
-                    />
-                    {receiveConfigQty !== null && (
-                      <p className="text-xs text-muted-foreground">= {receiveConfigQty} configs @ {receiveUnitsPerVariant} pcs/config</p>
-                    )}
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Total Cost ($) *</Label>
-                    <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      placeholder="26320.00"
-                      value={totalCostDollars}
-                      onChange={e => setTotalCostDollars(e.target.value)}
-                      className="h-10"
-                    />
-                    {totalCostDollars && newLine.orderQty > 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        Unit Cost: {formatCents(dollarsToCents(totalCostDollars || "0") / newLine.orderQty, { unitCost: true })}/pc
-                      </p>
-                    )}
-                  </div>
-                </div>
+                <PoLinePricingEditor
+                  value={linePricing}
+                  onChange={(next) => {
+                    setLinePricing(next);
+                    setCatalogPricingUntouched(false);
+                  }}
+                  receiveConfiguration={{
+                    label: selectedVariant
+                      ? `${selectedVariant.sku} — ${selectedVariant.name}`
+                      : "Selected product configuration",
+                    unitsPerVariant: receiveUnitsPerVariant,
+                  }}
+                />
+                <PoLineQuoteMetadataEditor
+                  value={lineQuoteMetadata}
+                  onChange={(next) => {
+                    setLineQuoteMetadata(next);
+                    setCatalogPricingUntouched(false);
+                  }}
+                />
+                {selectedCatalogEntry && (!selectedCatalogEntry.pricingBasis || selectedCatalogEntry.pricingBasis === "legacy_unknown") && (
+                  <p className="text-xs text-amber-700">
+                    This legacy catalog price has no verified quote basis. Confirm it before adding; the line will be recorded as manual pricing.
+                  </p>
+                )}
 
                 <div className="space-y-2">
                   <Label>Vendor SKU</Label>
@@ -3995,24 +4280,39 @@ export default function PurchaseOrderDetail() {
                   <div className="flex items-center gap-2">
                     <Checkbox
                       id="saveToVendorCatalog"
-                      checked={saveToVendorCatalog}
+                      checked={saveToVendorCatalog && linePricing.basis !== "extended_total"}
                       onCheckedChange={(v) => setSaveToVendorCatalog(!!v)}
+                      disabled={linePricing.basis === "extended_total"}
                     />
                     <label htmlFor="saveToVendorCatalog" className="text-sm cursor-pointer select-none">
                       {selectedCatalogEntry ? "Update vendor catalog with new cost" : "Save to vendor catalog"}
                     </label>
                   </div>
-                  {saveToVendorCatalog && (
-                    <div className="flex items-center gap-2 ml-6">
-                      <Checkbox
-                        id="setAsPreferred"
-                        checked={setAsPreferred}
-                        onCheckedChange={(v) => setSetAsPreferred(!!v)}
-                      />
-                      <label htmlFor="setAsPreferred" className="text-sm cursor-pointer select-none text-muted-foreground">
-                        Set as preferred vendor for this product
-                      </label>
-                    </div>
+                  {saveToVendorCatalog && linePricing.basis !== "extended_total" && (
+                    <>
+                      {catalogQuoteDateMissing && (
+                        <p className="text-xs text-amber-700 ml-6" role="alert">
+                          Enter a quote date to save this reusable catalog price, or uncheck
+                          {" "}“{selectedCatalogEntry ? "Update vendor catalog with new cost" : "Save to vendor catalog"}”
+                          {" "}to add the line to this PO only.
+                        </p>
+                      )}
+                      <div className="flex items-center gap-2 ml-6">
+                        <Checkbox
+                          id="setAsPreferred"
+                          checked={setAsPreferred}
+                          onCheckedChange={(v) => setSetAsPreferred(!!v)}
+                        />
+                        <label htmlFor="setAsPreferred" className="text-sm cursor-pointer select-none text-muted-foreground">
+                          Set as preferred vendor for this product
+                        </label>
+                      </div>
+                    </>
+                  )}
+                  {linePricing.basis === "extended_total" && (
+                    <p className="text-xs text-muted-foreground ml-6">
+                      A quoted total is specific to this quantity and will remain on this PO rather than becoming a reusable catalog price.
+                    </p>
                   )}
                 </div>
               </>
@@ -4022,18 +4322,25 @@ export default function PurchaseOrderDetail() {
               <Button variant="outline" onClick={() => setShowAddLineDialog(false)}>Cancel</Button>
               <Button
                 onClick={() => {
-                  const totalCents = dollarsToCents(totalCostDollars || "0");
-                  const unitCostCents = newLine.orderQty > 0 ? totalCents / newLine.orderQty : 0;
+                  const pricing = linePricingEvaluation.pricing;
+                  const quoteMetadata = lineQuoteMetadataEvaluation.metadata;
+                  if (!pricing || !quoteMetadata || !po.updatedAt || catalogQuoteDateMissing) return;
                   addLineMutation.mutate({
-                    ...newLine,
-                    productVariantId: selectedReceiveVariantId,
+                    productId: newLine.productId,
                     expectedReceiveVariantId: selectedReceiveVariantId,
                     expectedReceiveUnitsPerVariant: receiveUnitsPerVariant,
-                    unitsPerUom: receiveUnitsPerVariant,
-                    unitCostCents,
+                    vendorProductId: selectedCatalogEntry?.id,
+                    vendorSku: newLine.vendorSku || undefined,
+                    description: newLine.description || undefined,
+                    pricingSource: selectedCatalogEntry && catalogPricingUntouched
+                      ? "vendor_catalog"
+                      : "manual",
+                    pricing,
+                    ...populatedPoLineQuoteMetadata(quoteMetadata),
+                    expectedPoUpdatedAt: po.updatedAt,
                   });
                 }}
-                disabled={!selectedReceiveVariantId || newLine.orderQty < 1 || !totalCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
+                disabled={!selectedReceiveVariantId || !linePricingEvaluation.pricing || !lineQuoteMetadataEvaluation.metadata || catalogQuoteDateMissing || !po.updatedAt || addLineMutation.isPending || catalogUpsertMutation.isPending}
               >
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
               </Button>

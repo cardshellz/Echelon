@@ -5,7 +5,7 @@ import {
 } from "../../purchasing-recommendation.engine";
 
 describe("purchasing recommendation engine", () => {
-  it("produces an explainable actionable recommendation using vendor lead time and order UOM", () => {
+  it("produces an explainable actionable recommendation using vendor lead time and per-piece ordering", () => {
     const result = generatePurchasingRecommendations({
       // Frozen clock (CLAUDE.md §3): fixtures pin latest_demand_at to
       // 2026-05-18 — without asOf these tests rot as wall-time passes
@@ -55,6 +55,13 @@ describe("purchasing recommendation engine", () => {
           preferred_vendor_id: 77,
           preferred_vendor_name: "Vendor",
           estimated_cost_mills: 12500,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 12500,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quote_reference: "QUOTE-770",
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+          vendor_quote_valid_until: "2026-06-30",
           last_cost_cents: 120,
           vendor_product_updated_at: new Date().toISOString(),
         },
@@ -77,9 +84,9 @@ describe("purchasing recommendation engine", () => {
       status: "order_now",
       leadTimeDays: 5,
       reorderPoint: 14,
-      suggestedOrderQty: 1,
-      suggestedOrderPieces: 10,
-      orderUomLabel: "Case",
+      suggestedOrderQty: 4,
+      suggestedOrderPieces: 4,
+      orderUomLabel: "pieces",
       preferredVendorId: 77,
       estimatedCostMills: 12500,
       estimatedCostCents: 125,
@@ -154,7 +161,7 @@ describe("purchasing recommendation engine", () => {
         latestDemandAt: "2026-05-18T12:00:00.000Z",
         leadTimeSource: "vendor_product",
         safetyStockSource: "product",
-        orderUomSource: "variant",
+        orderUomSource: "base_piece",
           demandWindowDiagnostics: {
             shortWindow: {
               label: "short",
@@ -210,7 +217,82 @@ describe("purchasing recommendation engine", () => {
       actionable: true,
       skippedReason: null,
     });
-    expect(result.items[0].explanation).toContain("Recommend 1 Case");
+    expect(result.items[0].explanation).toContain("Recommend 4 pieces");
+  });
+
+  it.each([
+    {
+      label: "expired",
+      quotedAt: "2026-07-01T12:00:00.000Z",
+      quoteValidUntil: "2026-07-10",
+      quality: "expired",
+      code: "expired_supplier_quote",
+    },
+    {
+      label: "older than the automation limit despite a recent catalog metadata update",
+      quotedAt: "2025-07-10T17:59:59.000Z",
+      quoteValidUntil: null,
+      quality: "stale",
+      code: "stale_supplier_cost",
+    },
+    {
+      label: "more than the allowed clock skew in the future",
+      quotedAt: "2026-07-11T18:06:00.000Z",
+      quoteValidUntil: null,
+      quality: "future",
+      code: "future_supplier_quote",
+    },
+  ])("blocks a $label supplier quote from auto-draft", ({ quotedAt, quoteValidUntil, quality, code }) => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-07-11T18:00:00.000Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 11,
+        variant_id: 111,
+        base_sku: "QUOTE-GUARD",
+        product_name: "Quote Guard Product",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        latest_demand_at: "2026-07-10T12:00:00.000Z",
+        on_order_pieces: 0,
+        vendor_lead_time_days: 3,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        order_uom_level: 3,
+        vendor_product_id: 771,
+        preferred_vendor_id: 77,
+        estimated_cost_mills: 12_500,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 12_500,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quote_reference: "QUOTE-GUARD-1",
+        vendor_quoted_at: quotedAt,
+        vendor_quoted_at_date: quotedAt.slice(0, 10),
+        vendor_quote_valid_until: quoteValidUntil,
+        vendor_product_updated_at: "2026-07-11T17:59:00.000Z",
+        recommendation_analysis_as_of: "2026-07-11T18:00:00.000Z",
+        recommendation_analysis_date: "2026-07-11",
+      }],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      confidence: "medium",
+      supplierBasis: {
+        costQuality: quality,
+        quoteReference: "QUOTE-GUARD-1",
+        quotedAt,
+        quoteValidUntil,
+      },
+      qualityGate: { autoDraftEligible: false, reason: "quality_control_block" },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({ area: "supplier_cost", severity: "block", code }),
+      ]),
+    });
   });
 
   it("blocks otherwise high-confidence recommendations without receivable supplier bindings", () => {
@@ -232,6 +314,11 @@ describe("purchasing recommendation engine", () => {
       order_uom_level: 3,
       preferred_vendor_id: 77,
       estimated_cost_mills: 12500,
+      vendor_pricing_basis: "per_piece",
+      vendor_purchase_uom: null,
+      vendor_quoted_unit_cost_mills: 12500,
+      vendor_pieces_per_purchase_uom: null,
+      vendor_quoted_at: "2026-05-18T12:00:00.000Z",
       vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
     };
     const result = generatePurchasingRecommendations({
@@ -335,6 +422,11 @@ describe("purchasing recommendation engine", () => {
           vendor_product_id: 770,
           preferred_vendor_id: 77,
           estimated_cost_mills: 12500,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 12500,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
           vendor_product_updated_at: new Date().toISOString(),
         },
       ],
@@ -392,6 +484,11 @@ describe("purchasing recommendation engine", () => {
           vendor_product_id: 770,
           preferred_vendor_id: 77,
           estimated_cost_mills: 12500,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 12500,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
           vendor_product_updated_at: new Date().toISOString(),
         },
       ],
@@ -481,7 +578,7 @@ describe("purchasing recommendation engine", () => {
 
     expect(result.items[0]).toMatchObject({
       status: "stockout",
-      suggestedOrderQty: 2,
+      suggestedOrderQty: 6,
       actionable: false,
       skippedReason: "no_vendor",
       reviewSignal: {
@@ -590,6 +687,12 @@ describe("purchasing recommendation engine", () => {
           order_uom_units: null,
           vendor_product_id: 5010,
           preferred_vendor_id: 10,
+          estimated_cost_mills: 100,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 100,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         },
       ],
       defaults: { leadTimeDays: 14, safetyStockDays: 7 },
@@ -619,7 +722,7 @@ describe("purchasing recommendation engine", () => {
         "Limited demand history in the lookback window.",
         "Lead time uses the default fallback.",
         "Safety stock uses the default fallback.",
-        "Order UOM defaults to each because no higher ordering unit is configured.",
+        "Order quantity uses base pieces independently of the warehouse receive configuration.",
       ]),
       demandBasis: {
         demandQuality: "thin_history",
@@ -633,7 +736,7 @@ describe("purchasing recommendation engine", () => {
         demandQuality: "thin_history",
         leadTimeSource: "default",
         safetyStockSource: "default",
-        orderUomSource: "default_each",
+        orderUomSource: "base_piece",
       },
     });
     expect(result.summary).toMatchObject({
@@ -671,6 +774,12 @@ describe("purchasing recommendation engine", () => {
           order_uom_units: 10,
           vendor_product_id: 6010,
           preferred_vendor_id: 10,
+          estimated_cost_mills: 100,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 100,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
         },
       ],
     });
@@ -865,6 +974,11 @@ describe("purchasing recommendation engine", () => {
           vendor_product_id: 6410,
           preferred_vendor_id: 10,
           estimated_cost_cents: 250,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 25000,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
           vendor_product_updated_at: new Date().toISOString(),
         },
       ],
@@ -931,6 +1045,11 @@ describe("purchasing recommendation engine", () => {
           vendor_product_id: 6310,
           preferred_vendor_id: 10,
           estimated_cost_cents: 250,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 25000,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
           vendor_product_updated_at: new Date().toISOString(),
         },
       ],
@@ -993,6 +1112,11 @@ describe("purchasing recommendation engine", () => {
           vendor_product_id: 6500,
           preferred_vendor_id: 10,
           estimated_cost_cents: 250,
+          vendor_pricing_basis: "per_piece",
+          vendor_purchase_uom: null,
+          vendor_quoted_unit_cost_mills: 25000,
+          vendor_pieces_per_purchase_uom: null,
+          vendor_quoted_at: "2026-05-18T12:00:00.000Z",
           vendor_product_updated_at: new Date().toISOString(),
         },
       ],
@@ -1000,7 +1124,7 @@ describe("purchasing recommendation engine", () => {
 
     expect(result.items[0]).toMatchObject({
       status: "stockout",
-      suggestedOrderPieces: 10,
+      suggestedOrderPieces: 8,
       confidence: "medium",
       qualityGate: {
         autoDraftEligible: false,
@@ -1084,7 +1208,7 @@ describe("purchasing recommendation engine", () => {
       estimatedCostCents: 225,
       qualityGate: {
         autoDraftEligible: false,
-        reason: "medium_confidence_review",
+        reason: "quality_control_block",
       },
       supplierBasis: {
         vendorProductId: 7010,
@@ -1105,6 +1229,11 @@ describe("purchasing recommendation engine", () => {
           severity: "review",
           code: "stale_supplier_cost",
         }),
+        expect.objectContaining({
+          area: "supplier_catalog",
+          severity: "block",
+          code: "supplier_quote_basis_unconfirmed",
+        }),
       ]),
       confidenceFactors: expect.arrayContaining([
         "Preferred vendor cost uses last purchase fallback.",
@@ -1116,6 +1245,207 @@ describe("purchasing recommendation engine", () => {
       mediumConfidenceCount: 1,
       autoDraftEligibleCount: 0,
       autoDraftReviewRequiredCount: 1,
+    });
+  });
+
+  it("requires legacy quote-basis review and ignores receive-pack units when applying a supplier quote UOM", () => {
+    const baseRow = {
+      variant_id: 801,
+      total_pieces: 0,
+      total_reserved_pieces: 0,
+      total_outbound_pieces: 60,
+      previous_outbound_pieces: 60,
+      demand_order_count: 12,
+      demand_active_days: 10,
+      latest_demand_at: "2026-05-18T12:00:00.000Z",
+      on_order_pieces: 0,
+      vendor_lead_time_days: 2,
+      safety_stock_days: 1,
+      order_uom_units: 10,
+      vendor_product_id: 8_010,
+      preferred_vendor_id: 80,
+      estimated_cost_mills: 50,
+      vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+      vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
+    };
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [
+        {
+          ...baseRow,
+          product_id: 80,
+          base_sku: "LEGACY-QUOTE",
+          vendor_pricing_basis: "legacy_unknown",
+        },
+        {
+          ...baseRow,
+          product_id: 81,
+          variant_id: 811,
+          vendor_product_id: 8_110,
+          base_sku: "UOM-MISMATCH",
+          vendor_pricing_basis: "per_purchase_uom",
+          vendor_purchase_uom: "pack",
+          vendor_quoted_unit_cost_mills: 300,
+          vendor_pieces_per_purchase_uom: 6,
+        },
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      supplierBasis: { pricingBasis: "legacy_unknown" },
+      qualityGate: { autoDraftEligible: false, reason: "quality_control_block" },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({ code: "supplier_quote_basis_unconfirmed", severity: "block" }),
+      ]),
+    });
+    expect(result.items[1]).toMatchObject({
+      suggestedOrderQty: 1,
+      suggestedOrderPieces: 6,
+      orderUomUnits: 6,
+      orderUomLabel: "pack",
+      supplierBasis: {
+        pricingBasis: "per_purchase_uom",
+        purchaseUom: "pack",
+        quotedUnitCostMills: 300,
+        piecesPerPurchaseUom: 6,
+      },
+    });
+    expect(result.items[1].autopilotBlockers).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "supplier_quote_uom_quantity_mismatch" }),
+    ]));
+  });
+
+  it("treats a current zero-dollar supplier quote as a present nonnegative cost", () => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 84,
+        variant_id: 841,
+        base_sku: "NO-CHARGE",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        latest_demand_at: "2026-05-18T12:00:00.000Z",
+        on_order_pieces: 0,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        vendor_product_id: 8_410,
+        preferred_vendor_id: 84,
+        estimated_cost_mills: 0,
+        estimated_cost_cents: 0,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 0,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+      }],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      estimatedCostMills: 0,
+      estimatedCostCents: 0,
+      orderUomUnits: 1,
+      supplierBasis: {
+        costSource: "vendor_unit_cost_mills",
+        costQuality: "current",
+        estimatedCostMills: 0,
+        estimatedCostCents: 0,
+        quotedUnitCostMills: 0,
+      },
+      qualityGate: { autoDraftEligible: true },
+    });
+  });
+
+  it("rounds a real reorder need up to the vendor MOQ using only the supplier quote increment", () => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 82,
+        variant_id: 821,
+        base_sku: "MOQ-UOM",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        latest_demand_at: "2026-05-18T12:00:00.000Z",
+        on_order_pieces: 0,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        vendor_product_id: 8_210,
+        preferred_vendor_id: 82,
+        estimated_cost_mills: 50,
+        vendor_pricing_basis: "per_purchase_uom",
+        vendor_purchase_uom: "pack",
+        vendor_quoted_unit_cost_mills: 300,
+        vendor_pieces_per_purchase_uom: 6,
+        vendor_moq: 31,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+      }],
+    });
+
+    // MOQ is 31 pieces and quote packs are 6. The warehouse receive pack of
+    // 10 does not constrain purchasing, so the next valid quantity is 36.
+    expect(result.items[0]).toMatchObject({
+      suggestedOrderQty: 6,
+      suggestedOrderPieces: 36,
+      orderUomUnits: 6,
+      orderUomLabel: "pack",
+      forecastProvenance: { orderUomSource: "supplier_quote" },
+      supplierBasis: {
+        minimumOrderPieces: 31,
+        piecesPerPurchaseUom: 6,
+      },
+      qualityGate: { autoDraftEligible: true },
+    });
+  });
+
+  it("blocks automation when a stored vendor MOQ is not a positive base-piece integer", () => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 83,
+        variant_id: 831,
+        base_sku: "BAD-MOQ",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        latest_demand_at: "2026-05-18T12:00:00.000Z",
+        on_order_pieces: 0,
+        vendor_lead_time_days: 2,
+        safety_stock_days: 1,
+        order_uom_units: 10,
+        vendor_product_id: 8_310,
+        preferred_vendor_id: 83,
+        estimated_cost_mills: 50,
+        vendor_pricing_basis: "per_piece",
+        vendor_purchase_uom: null,
+        vendor_quoted_unit_cost_mills: 50,
+        vendor_pieces_per_purchase_uom: null,
+        vendor_moq: 0,
+        vendor_quoted_at: "2026-05-18T12:00:00.000Z",
+      }],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      supplierBasis: { minimumOrderPieces: null },
+      qualityGate: { autoDraftEligible: false, reason: "quality_control_block" },
+      autopilotBlockers: expect.arrayContaining([
+        expect.objectContaining({ code: "invalid_supplier_minimum_order", severity: "block" }),
+      ]),
     });
   });
 });

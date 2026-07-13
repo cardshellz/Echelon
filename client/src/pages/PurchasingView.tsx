@@ -123,7 +123,7 @@ interface ReorderItem {
     };
     leadTimeSource: "vendor_product" | "product" | "default";
     safetyStockSource: "product" | "default";
-    orderUomSource: "variant" | "default_each";
+    orderUomSource: "supplier_quote" | "base_piece" | "variant" | "default_each";
     demandWindowDiagnostics?: {
       shortWindow?: {
         lookbackDays?: number;

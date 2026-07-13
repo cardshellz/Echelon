@@ -24,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { ExclusionRulesModal } from "@/components/purchasing/ExclusionRulesModal";
+import { isImmutableRecommendationPurchaseOrder } from "@/features/po-edit/purchase-order-editability";
 
 interface ForecastDiagnostics {
   recommendationCount: number;
@@ -1328,7 +1329,16 @@ export default function PurchasingDashboard() {
                         <div className="text-[10px] text-muted-foreground">estimated</div>
                       </div>
                     )}
-                    <Button size="sm" variant="outline" className="text-[11px] h-7 bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100 flex-shrink-0" onClick={() => navigate(useNewPoEditor ? `/purchase-orders/${po.id}/edit` : `/purchase-orders/${po.id}`)}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-[11px] h-7 bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100 flex-shrink-0"
+                      onClick={() => navigate(
+                        useNewPoEditor && !isImmutableRecommendationPurchaseOrder(po)
+                          ? `/purchase-orders/${po.id}/edit`
+                          : `/purchase-orders/${po.id}`,
+                      )}
+                    >
                       Review
                     </Button>
                   </div>

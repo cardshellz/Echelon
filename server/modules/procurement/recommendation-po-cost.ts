@@ -49,7 +49,7 @@ export function resolveRecommendationPoCost(input: RecommendationPoCostInput): R
   let unitCostMills: number;
   let unitCostCents: number;
   if (millsProvided) {
-    unitCostMills = positiveSafeInteger(input.estimatedCostMills, "estimatedCostMills");
+    unitCostMills = nonnegativeSafeInteger(input.estimatedCostMills, "estimatedCostMills");
     unitCostCents = millsToCents(unitCostMills);
     if (centsProvided) {
       const suppliedCents = nonnegativeSafeInteger(input.estimatedCostCents, "estimatedCostCents");
@@ -60,7 +60,7 @@ export function resolveRecommendationPoCost(input: RecommendationPoCostInput): R
       }
     }
   } else {
-    unitCostCents = positiveSafeInteger(input.estimatedCostCents, "estimatedCostCents");
+    unitCostCents = nonnegativeSafeInteger(input.estimatedCostCents, "estimatedCostCents");
     unitCostMills = centsToMills(unitCostCents);
   }
 

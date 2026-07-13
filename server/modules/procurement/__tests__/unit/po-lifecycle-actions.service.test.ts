@@ -12,9 +12,23 @@ vi.mock("../../po-exceptions.service", () => ({
 
 import { createPurchasingService } from "../../purchasing.service";
 
-function buildMockDb() {
+function buildMockDb(txSelectResults: any[][] = []) {
   const insertedRows: any[] = [];
   const updateCalls: Array<{ table: unknown; patch: any }> = [];
+  let txSelectIndex = 0;
+  const select = vi.fn(() => {
+    const rows = txSelectResults[txSelectIndex++] ?? [];
+    const chain: any = {
+      from: vi.fn(() => chain),
+      where: vi.fn(() => chain),
+      innerJoin: vi.fn(() => chain),
+      orderBy: vi.fn(() => chain),
+      limit: vi.fn(() => chain),
+      for: vi.fn(async () => rows),
+      then: (resolve: any, reject: any) => Promise.resolve(rows).then(resolve, reject),
+    };
+    return chain;
+  });
   const db: any = {
     insertedRows,
     updateCalls,
@@ -24,12 +38,7 @@ function buildMockDb() {
         return Promise.resolve([]);
       }),
     })),
-    select: vi.fn(() => ({
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockResolvedValue([]),
-      innerJoin: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockResolvedValue([]),
-    })),
+    select,
     update: vi.fn((table: unknown) => ({
       set: vi.fn((patch: any) => {
         updateCalls.push({ table, patch });
@@ -92,8 +101,13 @@ function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
 const activeProductLine = {
   id: 10,
   status: "open",
+  lineType: "product",
+  pricingBasis: "per_piece",
+  pricingSource: "manual",
   orderQty: 2,
   unitCostCents: 500,
+  unitCostMills: 50_000,
+  quotedUnitCostMills: 50_000,
   lineTotalCents: 1000,
   discountPercent: 0,
   taxRatePercent: 0,
@@ -107,16 +121,18 @@ describe("PO lifecycle actions", () => {
   });
 
   it("submit pending approval writes status history and a submitted event", async () => {
-    const db = buildMockDb();
+    const po = {
+      id: 1,
+      status: "draft",
+      physicalStatus: "draft",
+      totalCents: 1000,
+      discountCents: 0,
+      taxCents: 0,
+      shippingCostCents: 0,
+    };
+    const db = buildMockDb([[po], [activeProductLine], [{ id: 7, tierName: "Manager" }]]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 1,
-        status: "draft",
-        totalCents: 1000,
-        discountCents: 0,
-        taxCents: 0,
-        shippingCostCents: 0,
-      }),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
       getPurchaseOrderLines: vi.fn().mockResolvedValue([activeProductLine]),
       getMatchingApprovalTier: vi.fn().mockResolvedValue({ id: 7, tierName: "Manager" }),
       updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 1, status: "pending_approval" }),
@@ -157,9 +173,18 @@ describe("PO lifecycle actions", () => {
   });
 
   it("approve writes an approved event", async () => {
-    const db = buildMockDb();
+    const po = {
+      id: 2,
+      status: "pending_approval",
+      physicalStatus: "draft",
+      approvalTierId: null,
+      discountCents: 0,
+      taxCents: 0,
+      shippingCostCents: 0,
+    };
+    const db = buildMockDb([[po], [activeProductLine], []]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({ id: 2, status: "pending_approval" }),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
       updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 2, status: "approved" }),
     });
     const svc = createPurchasingService(db, storage);
@@ -332,17 +357,18 @@ describe("PO lifecycle actions", () => {
   });
 
   it("updates a nonterminal delivery schedule with history and event audit", async () => {
-    const db = buildMockDb();
+    const po = {
+      id: 36,
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
+      sentToVendorAt: new Date("2026-05-10T18:00:00.000Z"),
+      orderDate: new Date("2026-05-10T18:00:00.000Z"),
+      expectedDeliveryDate: null,
+      confirmedDeliveryDate: new Date("2026-05-01T00:00:00.000Z"),
+    };
+    const db = buildMockDb([[po]]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 36,
-        status: "acknowledged",
-        physicalStatus: "acknowledged",
-        sentToVendorAt: new Date("2026-05-10T18:00:00.000Z"),
-        orderDate: new Date("2026-05-10T18:00:00.000Z"),
-        expectedDeliveryDate: null,
-        confirmedDeliveryDate: new Date("2026-05-01T00:00:00.000Z"),
-      }),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
     });
     const svc = createPurchasingService(db, storage);
     const expectedDeliveryDate = new Date("2026-06-15T00:00:00.000Z");

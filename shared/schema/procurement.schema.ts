@@ -58,6 +58,33 @@ export type PoPriority = typeof poPriorityEnum[number];
 export const poLineStatusEnum = ["open", "partially_received", "received", "closed", "cancelled"] as const;
 export type PoLineStatus = typeof poLineStatusEnum[number];
 
+// How a vendor expressed the authoritative price on a PO line. Mills are an
+// internal precision unit; operators and integrations retain the vendor's
+// original quote basis instead of being forced into a per-piece quote.
+export const poLinePricingBasisEnum = [
+  "legacy_unknown",
+  "not_applicable",
+  "per_piece",
+  "per_purchase_uom",
+  "extended_total",
+] as const;
+export type PoLinePricingBasis = typeof poLinePricingBasisEnum[number];
+
+export const poLinePricingSourceEnum = [
+  "legacy",
+  "manual",
+  "vendor_catalog",
+  "recommendation",
+] as const;
+export type PoLinePricingSource = typeof poLinePricingSourceEnum[number];
+
+export const vendorProductPricingBasisEnum = [
+  "legacy_unknown",
+  "per_piece",
+  "per_purchase_uom",
+] as const;
+export type VendorProductPricingBasis = typeof vendorProductPricingBasisEnum[number];
+
 // Inventory type for products
 export const inventoryTypeEnum = ["inventory", "non_inventory", "expense"] as const;
 export type InventoryType = typeof inventoryTypeEnum[number];
@@ -134,13 +161,25 @@ export const vendorProducts = procurementSchema.table("vendor_products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: "cascade" }),
   productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
-  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }), // Specific variant if vendor sells at variant level
+  // Catalog identity is historical provenance. Variants are archived rather
+  // than deleted; RESTRICT prevents a delete from silently collapsing a
+  // variant mapping into the product-level NULL business key.
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "restrict" }), // Specific variant if vendor sells at variant level
   vendorSku: varchar("vendor_sku", { length: 100 }), // Vendor's own catalog number
   vendorProductName: text("vendor_product_name"), // Vendor's product name
   unitCostCents: bigint("unit_cost_cents", { mode: "number" }).default(0), // Negotiated cost per unit (cents; kept in sync with unit_cost_mills for back-compat)
   unitCostMills: bigint("unit_cost_mills", { mode: "number" }), // Negotiated cost per unit in mills (4-decimal precision). Authoritative when non-null.
+  // Original reusable vendor-catalog quote. Legacy mappings retain their
+  // existing normalized costs without inferring a quote basis.
+  pricingBasis: varchar("pricing_basis", { length: 30 }).notNull().default("legacy_unknown"),
+  purchaseUom: varchar("purchase_uom", { length: 50 }),
+  quotedUnitCostMills: bigint("quoted_unit_cost_mills", { mode: "number" }),
+  piecesPerPurchaseUom: integer("pieces_per_purchase_uom"),
+  quoteReference: varchar("quote_reference", { length: 255 }),
+  quotedAt: timestamp("quoted_at"),
+  quoteValidUntil: date("quote_valid_until"),
   packSize: integer("pack_size").default(1), // Units in vendor's selling unit
-  moq: integer("moq").default(1), // Minimum order quantity
+  moq: integer("moq").default(1), // Minimum order quantity in base pieces
   leadTimeDays: integer("lead_time_days"), // Vendor-specific override
   isPreferred: integer("is_preferred").default(0), // 1 = primary vendor for this product
   isActive: integer("is_active").default(1),
@@ -155,7 +194,70 @@ export const vendorProducts = procurementSchema.table("vendor_products", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("vendor_products_vendor_product_variant_idx").on(table.vendorId, table.productId, table.productVariantId),
+  // PostgreSQL treats NULL values as distinct in an ordinary unique index.
+  // Coalescing the nullable variant closes that hole for product-level vendor
+  // mappings while retaining one key for each concrete variant.
+  uniqueIndex("vendor_products_vendor_product_variant_key_uidx").on(
+    table.vendorId,
+    table.productId,
+    sql`COALESCE(${table.productVariantId}, 0)`,
+  ),
+  uniqueIndex("vendor_products_one_active_preferred_key_uidx")
+    .on(
+      table.productId,
+      sql`COALESCE(${table.productVariantId}, 0)`,
+    )
+    .where(sql`${table.isActive} = 1 AND ${table.isPreferred} = 1`),
+  check(
+    "vendor_products_pricing_basis_chk",
+    sql`${table.pricingBasis} IN ('legacy_unknown', 'per_piece', 'per_purchase_uom')`,
+  ),
+  check(
+    "vendor_products_moq_positive_chk",
+    sql`${table.moq} IS NULL OR ${table.moq} > 0`,
+  ),
+  check(
+    "vendor_products_explicit_pricing_consistency_chk",
+    sql`(
+      ${table.pricingBasis} = 'legacy_unknown'
+      AND ${table.purchaseUom} IS NULL
+      AND ${table.quotedUnitCostMills} IS NULL
+      AND ${table.piecesPerPurchaseUom} IS NULL
+      AND ${table.quoteReference} IS NULL
+      AND ${table.quotedAt} IS NULL
+      AND ${table.quoteValidUntil} IS NULL
+    ) OR (
+      ${table.unitCostMills} IS NOT NULL
+      AND ${table.unitCostMills} >= 0
+      AND ${table.unitCostCents} IS NOT NULL
+      AND ${table.unitCostCents} >= 0
+      AND ${table.quotedUnitCostMills} IS NOT NULL
+      AND ${table.quotedUnitCostMills} >= 0
+      AND ${table.quotedAt} IS NOT NULL
+      AND (
+        ${table.quoteValidUntil} IS NULL
+        OR ${table.quoteValidUntil} >= ${table.quotedAt}::date
+      )
+      AND ${table.unitCostCents}::numeric = floor((${table.unitCostMills}::numeric + 50) / 100)
+      AND (
+        (
+          ${table.pricingBasis} = 'per_piece'
+          AND ${table.purchaseUom} IS NULL
+          AND ${table.piecesPerPurchaseUom} IS NULL
+          AND ${table.unitCostMills} = ${table.quotedUnitCostMills}
+        ) OR (
+          ${table.pricingBasis} = 'per_purchase_uom'
+          AND ${table.purchaseUom} IS NOT NULL
+          AND btrim(${table.purchaseUom}) <> ''
+          AND ${table.piecesPerPurchaseUom} IS NOT NULL
+          AND ${table.piecesPerPurchaseUom} > 0
+          AND ${table.unitCostMills}::numeric = floor(
+            ${table.quotedUnitCostMills}::numeric / NULLIF(${table.piecesPerPurchaseUom}, 0)::numeric + 0.5
+          )
+        )
+      )
+    )`,
+  ),
 ]);
 
 export const insertVendorProductSchema = createInsertSchema(vendorProducts).omit({
@@ -483,6 +585,23 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   totalProductCostCents: bigint("total_product_cost_cents", { mode: "number" }).notNull().default(0),
   packagingCostCents: bigint("packaging_cost_cents", { mode: "number" }).notNull().default(0),
 
+  // Vendor quote provenance. These fields preserve how the vendor priced the
+  // line while unit_cost_mills and totals provide normalized system values.
+  // Legacy rows are deliberately labeled, not reinterpreted or recalculated.
+  pricingBasis: varchar("pricing_basis", { length: 30 }).notNull().default("legacy_unknown"),
+  pricingSource: varchar("pricing_source", { length: 30 }).notNull().default("legacy"),
+  purchaseUom: varchar("purchase_uom", { length: 50 }),
+  purchaseUomQuantity: integer("purchase_uom_quantity"),
+  piecesPerPurchaseUom: integer("pieces_per_purchase_uom"),
+  quotedUnitCostMills: bigint("quoted_unit_cost_mills", { mode: "number" }),
+  quotedTotalCents: bigint("quoted_total_cents", { mode: "number" }),
+  // Signed so exact quote totals can retain a deterministic division/rounding
+  // residual when normalized to per-piece mills.
+  pricingRemainderMills: bigint("pricing_remainder_mills", { mode: "number" }).notNull().default(0),
+  quoteReference: varchar("quote_reference", { length: 255 }),
+  quotedAt: timestamp("quoted_at"),
+  quoteValidUntil: date("quote_valid_until"),
+
   // Dates
   expectedDeliveryDate: timestamp("expected_delivery_date"), // Per-line override
   promisedDate: timestamp("promised_date"), // Vendor's per-line promise
@@ -491,7 +610,7 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   lastReceivedAt: timestamp("last_received_at"), // Most recent receipt
 
   // Status
-  status: varchar("status", { length: 20 }).default("open"), // open, partially_received, received, closed, cancelled
+  status: varchar("status", { length: 20 }).notNull().default("open"), // open, partially_received, received, closed, cancelled
   closeShortReason: text("close_short_reason"), // Why closed before fully received
 
   // Meta
@@ -511,6 +630,149 @@ export const purchaseOrderLines = procurementSchema.table("purchase_order_lines"
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("purchase_order_lines_po_id_line_id_uidx").on(table.purchaseOrderId, table.id),
+  uniqueIndex("purchase_order_lines_po_id_line_number_active_uidx")
+    .on(table.purchaseOrderId, table.lineNumber)
+    .where(sql`${table.status} <> 'cancelled'`),
+  check(
+    "po_lines_pricing_basis_chk",
+    sql`${table.pricingBasis} IN ('legacy_unknown', 'not_applicable', 'per_piece', 'per_purchase_uom', 'extended_total')`,
+  ),
+  check(
+    "po_lines_pricing_source_chk",
+    sql`${table.pricingSource} IN ('legacy', 'manual', 'vendor_catalog', 'recommendation')`,
+  ),
+  check(
+    "po_lines_pricing_source_basis_consistency_chk",
+    sql`(
+      ${table.pricingBasis} = 'legacy_unknown'
+      AND ${table.pricingSource} = 'legacy'
+    ) OR (
+      ${table.pricingBasis} = 'not_applicable'
+      AND ${table.pricingSource} IN ('legacy', 'manual')
+    ) OR (
+      ${table.pricingBasis} IN ('per_piece', 'per_purchase_uom', 'extended_total')
+      AND ${table.pricingSource} = 'manual'
+    ) OR (
+      ${table.pricingBasis} IN ('per_piece', 'per_purchase_uom')
+      AND ${table.pricingSource} IN ('vendor_catalog', 'recommendation')
+      AND ${table.vendorProductId} IS NOT NULL
+      AND ${table.quotedAt} IS NOT NULL
+    )`,
+  ),
+  check(
+    "po_lines_quote_quantities_positive_chk",
+    sql`(${table.purchaseUomQuantity} IS NULL OR ${table.purchaseUomQuantity} > 0)
+      AND (${table.piecesPerPurchaseUom} IS NULL OR ${table.piecesPerPurchaseUom} > 0)`,
+  ),
+  check(
+    "po_lines_quoted_amounts_nonnegative_chk",
+    sql`(${table.quotedUnitCostMills} IS NULL OR ${table.quotedUnitCostMills} >= 0)
+      AND (${table.quotedTotalCents} IS NULL OR ${table.quotedTotalCents} >= 0)`,
+  ),
+  check(
+    "po_lines_quote_dates_consistency_chk",
+    sql`${table.quotedAt} IS NULL
+      OR ${table.quoteValidUntil} IS NULL
+      OR ${table.quoteValidUntil} >= ${table.quotedAt}::date`,
+  ),
+  check(
+    "po_lines_explicit_pricing_consistency_chk",
+    sql`(
+      ${table.pricingBasis} = 'legacy_unknown'
+      AND ${table.lineType} = 'product'
+      AND ${table.purchaseUom} IS NULL
+      AND ${table.purchaseUomQuantity} IS NULL
+      AND ${table.piecesPerPurchaseUom} IS NULL
+      AND ${table.quotedUnitCostMills} IS NULL
+      AND ${table.quotedTotalCents} IS NULL
+      AND ${table.pricingRemainderMills} = 0
+      AND ${table.quoteReference} IS NULL
+      AND ${table.quotedAt} IS NULL
+      AND ${table.quoteValidUntil} IS NULL
+    ) OR (
+      ${table.pricingBasis} = 'not_applicable'
+      AND ${table.lineType} <> 'product'
+      AND ${table.purchaseUom} IS NULL
+      AND ${table.purchaseUomQuantity} IS NULL
+      AND ${table.piecesPerPurchaseUom} IS NULL
+      AND ${table.quotedUnitCostMills} IS NULL
+      AND ${table.quotedTotalCents} IS NULL
+      AND ${table.pricingRemainderMills} = 0
+      AND ${table.quoteReference} IS NULL
+      AND ${table.quotedAt} IS NULL
+      AND ${table.quoteValidUntil} IS NULL
+    ) OR (
+      ${table.lineType} = 'product'
+      AND ${table.orderQty} > 0
+      AND ${table.unitCostMills} IS NOT NULL
+      AND ${table.unitCostMills} >= 0
+      AND ${table.unitCostCents} >= 0
+      AND ${table.totalProductCostCents} >= 0
+      AND ${table.packagingCostCents} >= 0
+      AND ${table.discountCents} IS NOT NULL
+      AND ${table.discountCents} >= 0
+      AND ${table.taxCents} IS NOT NULL
+      AND ${table.taxCents} >= 0
+      AND ${table.lineTotalCents} IS NOT NULL
+      AND (
+        (
+          ${table.pricingBasis} = 'per_piece'
+          AND ${table.purchaseUom} IS NULL
+          AND ${table.purchaseUomQuantity} IS NULL
+          AND ${table.piecesPerPurchaseUom} IS NULL
+          AND ${table.quotedUnitCostMills} IS NOT NULL
+          AND ${table.quotedTotalCents} IS NULL
+        ) OR (
+          ${table.pricingBasis} = 'per_purchase_uom'
+          AND ${table.purchaseUom} IS NOT NULL
+          AND btrim(${table.purchaseUom}) <> ''
+          AND ${table.purchaseUomQuantity} IS NOT NULL
+          AND ${table.purchaseUomQuantity} > 0
+          AND ${table.piecesPerPurchaseUom} IS NOT NULL
+          AND ${table.piecesPerPurchaseUom} > 0
+          AND ${table.quotedUnitCostMills} IS NOT NULL
+          AND ${table.quotedTotalCents} IS NULL
+          AND ${table.orderQty}::bigint =
+            ${table.purchaseUomQuantity}::bigint * ${table.piecesPerPurchaseUom}::bigint
+        ) OR (
+          ${table.pricingBasis} = 'extended_total'
+          AND ${table.purchaseUom} IS NULL
+          AND ${table.purchaseUomQuantity} IS NULL
+          AND ${table.piecesPerPurchaseUom} IS NULL
+          AND ${table.quotedUnitCostMills} IS NULL
+          AND ${table.quotedTotalCents} IS NOT NULL
+        )
+      )
+      AND ${table.unitCostMills}::numeric = floor((
+        CASE ${table.pricingBasis}
+          WHEN 'per_piece' THEN ${table.quotedUnitCostMills}::numeric * ${table.orderQty}::numeric
+          WHEN 'per_purchase_uom' THEN ${table.quotedUnitCostMills}::numeric * ${table.purchaseUomQuantity}::numeric
+          WHEN 'extended_total' THEN ${table.quotedTotalCents}::numeric * 100
+        END
+      ) / NULLIF(${table.orderQty}, 0)::numeric + 0.5)
+      AND (
+        CASE ${table.pricingBasis}
+          WHEN 'per_piece' THEN ${table.quotedUnitCostMills}::numeric * ${table.orderQty}::numeric
+          WHEN 'per_purchase_uom' THEN ${table.quotedUnitCostMills}::numeric * ${table.purchaseUomQuantity}::numeric
+          WHEN 'extended_total' THEN ${table.quotedTotalCents}::numeric * 100
+        END
+      ) = ${table.unitCostMills}::numeric * ${table.orderQty}::numeric
+        + ${table.pricingRemainderMills}::numeric
+      AND ${table.totalProductCostCents}::numeric = floor(((
+        CASE ${table.pricingBasis}
+          WHEN 'per_piece' THEN ${table.quotedUnitCostMills}::numeric * ${table.orderQty}::numeric
+          WHEN 'per_purchase_uom' THEN ${table.quotedUnitCostMills}::numeric * ${table.purchaseUomQuantity}::numeric
+          WHEN 'extended_total' THEN ${table.quotedTotalCents}::numeric * 100
+        END
+      ) + 50) / 100)
+      AND ${table.unitCostCents}::numeric = floor((${table.unitCostMills}::numeric + 50) / 100)
+      AND ${table.lineTotalCents}::numeric =
+        ${table.totalProductCostCents}::numeric
+        + ${table.packagingCostCents}::numeric
+        - ${table.discountCents}::numeric
+        + ${table.taxCents}::numeric
+    )`,
+  ),
 ]);
 
 // ---------------------------------------------------------------------------
