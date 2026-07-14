@@ -4,10 +4,9 @@ name: CI
 # GitHub repo settings → Branches → require "Typecheck + unit tests"
 # status check to pass before merge.
 #
-# Integration tests are NOT included here. They need a fully-bootstrapped
-# Postgres with all named schemas (channels, catalog, warehouse, inventory,
-# oms, wms, etc.) and 168+ migration files applied. Run them locally against
-# the dev database: ECHELON_TEST_DATABASE_URL=... npm run test:integration
+# The focused PostgreSQL hardening job below covers self-contained financial
+# command and PO-email outbox guarantees. Broader integration suites still need
+# a fully bootstrapped application database with all named schemas.
 
 on:
   pull_request:
@@ -33,3 +32,39 @@ jobs:
         run: npm run check
       - name: Unit tests
         run: npm run test:unit
+
+  postgres-hardening:
+    name: PostgreSQL hardening tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: echelon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d echelon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ECHELON_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/echelon_test
+      ECHELON_TEST_DATABASE_DISPOSABLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Financial command PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/platform/__tests__/integration/financial-command-results.integration.test.ts
+      - name: PO email outbox PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/po-email-outbox.integration.test.ts
