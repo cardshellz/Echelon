@@ -7,19 +7,20 @@ This continues:
 
 The July 13 quote-pricing work is merged in PR #914. PR #917 subsequently
 merged durable transactional command results for ordinary PO-line mutations,
-and PR #918 made optional PO/catalog capture atomic. This document now also
-records the next local slice: durable purchase-order email delivery.
+PR #918 made optional PO/catalog capture atomic, and PR #921 added durable
+purchase-order email delivery. This document now also records the next local
+slice: disposable PostgreSQL hardening gates in CI.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/purchasing-email-outbox-2026-07-14`
-- Base and current `origin/main`: `e34895c8` (includes unrelated shipping PR #919)
-- Base hardening slice: merged PR #918 at `6e1bcb33`
-- Deployment status: PR #918 is live on Heroku release v2379; this new slice is not deployed
+- Branch: `codex/purchasing-postgres-ci-2026-07-14`
+- Base and current `origin/main`: `46edf8cc`
+- Base hardening slice: merged PR #921
+- Deployment status: PR #921 is live on Heroku release v2381
 - Migration 136 status: applied and verified in production
-- Migration 138 status: local only; not applied in production
-- Commit/PR status: pushed in draft PR #921; CI was queued at handoff update time
+- Migration 138 status: applied and verified in production
+- Commit/PR status: pushed in draft PR #922; the latest-main PostgreSQL and standard CI jobs passed
 
 Do not deploy this branch without owner approval.
 
@@ -291,12 +292,46 @@ Migration constraints, real concurrent claims, lease recovery, and SMTP commit
 ambiguity still need a disposable PostgreSQL/SMTP test environment before this is
 described as production-proven.
 
+## Disposable PostgreSQL CI slice
+
+The normal CI job still runs typecheck and unit tests. A second focused job now
+starts PostgreSQL 16 and executes the self-contained hardening suites that do not
+require a fully bootstrapped application database:
+
+- the seven migration, transaction, rollback, exact-replay, lease, concurrency,
+  fifth-attempt, and stale-owner tests for `financial_command_results`; and
+- three real-PostgreSQL tests for migration 138 covering database idempotency and
+  snapshot guards, concurrent `SKIP LOCKED` claims, stable Message-ID delivery, and
+  atomic outbox completion plus PO history.
+
+The outbox suite requires both `ECHELON_TEST_DATABASE_URL` and the explicit
+`ECHELON_TEST_DATABASE_DISPOSABLE=true` acknowledgment. It refuses a URL matching
+`DATABASE_URL` or `EXTERNAL_DATABASE_URL`, creates only minimal dependency schemas
+inside the disposable CI database, and removes them afterward. This prevents the
+test from silently running against production or a shared developer database.
+
+The three older channel/inventory integration suites remain outside this focused job.
+Their shared bootstrap builds obsolete unqualified public tables while current
+Drizzle schemas use named schemas, so adding them would create a misleading red gate
+rather than prove the purchasing invariants in this slice.
+
+### PostgreSQL CI evidence
+
+GitHub Actions run `29358756510`, on the branch after merging current `main`, passed:
+
+- `PostgreSQL hardening tests` in 48 seconds, including both the financial-command
+  and PO-email outbox steps; and
+- `Typecheck + unit tests` in 2 minutes 25 seconds.
+
+This is the first recorded execution of these purchasing guarantees against real
+PostgreSQL 16 rather than injected repositories or skipped local integration tests.
+
 ## Recommended next implementation order
 
-1. Review and merge the durable PO-email outbox slice; rehearse migration 138 first.
-2. Execute the still-outstanding real-PostgreSQL command-ledger and outbox gates.
-3. Migrate the next financial commands to the ledger in small reviewed groups.
-4. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
+1. Review the PostgreSQL CI results and merge the focused disposable-database gate.
+2. Migrate the next financial commands to the ledger in small reviewed groups.
+3. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
+4. Repair the broader named-schema integration harness before enabling its old suites.
 5. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
 
 Keep manual quote pricing marked `manual` even when the same quote is optionally
@@ -307,6 +342,6 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. Migration 136 is live, but never infer that the disposable
-> PostgreSQL integration suite passed from local unit/build evidence. Do not mutate
+> unverified item. Migrations 136 and 138 are live, but verify the focused disposable
+> PostgreSQL CI result before describing the database guarantees as exercised. Do not mutate
 > production without explicit owner approval.
