@@ -346,6 +346,35 @@ Repair decision tree:
   before/after rows, and prefer changing the duplicate shipment lifecycle
   status over clearing ShipStation evidence.
 
+### Adopt A ShipStation Package As A Reship
+
+Use this when Control Tower reports `UNMAPPED_ENGINE_SPLIT` or the durable rule
+`shipstation_unmapped_physical_shipment`.
+
+- Do not infer intent from fulfilled quantity. A package created after all
+  customer lines were fulfilled can be a legitimate replacement for a lost or
+  damaged package.
+- Open the exact evidence row and choose **Adopt as reship**. The dialog loads
+  the current ShipStation package and WMS shipment history before it enables a
+  mutation.
+- Adoption requires the original shipped package, a reason, and an
+  exact SKU-to-order-line mapping. It deducts inventory for the replacement but
+  does not increment customer fulfilled quantity or send another channel
+  fulfillment.
+- The mapped replacement quantity cannot exceed the quantity on the selected
+  original package. Every ShipStation item must have an exact SKU match and a
+  provable WMS inventory variant and location.
+- If the package is not a verified customer replacement, close the dialog and
+  leave the exception open. This workflow does not classify split shipments,
+  unused labels, or duplicate callbacks.
+
+Do not bulk-resolve this bucket. ShipStation proves that a package and label
+exist, but it does not encode whether the merchant intended a split shipment,
+a customer replacement, or an unused label. That business intent must come
+from an operator. The supported workflow in this release is ShipStation-first:
+the package is created in ShipStation and then adopted as a reship in Control
+Tower.
+
 Emergency duplicate shipment quarantine:
 
 ```sql

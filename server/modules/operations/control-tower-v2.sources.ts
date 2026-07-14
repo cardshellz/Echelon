@@ -464,7 +464,9 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
           : `Exception ${id}`;
     const summary = rule === "ship_notify_no_match"
       ? `${provider} shipment ${providerShipmentRef ?? "unknown"} did not match a WMS shipment${orderNumber ? ` for order ${orderNumber}` : ""}.`
-      : String(row.summary ?? humanizeControlTowerCode(rule)).trim();
+      : rule === "shipstation_unmapped_physical_shipment"
+        ? `${provider} shipment ${providerShipmentRef ?? "unknown"} is a distinct package without proof of remaining WMS line authority${orderNumber ? ` for order ${orderNumber}` : ""}.`
+        : String(row.summary ?? humanizeControlTowerCode(rule)).trim();
     const actualState = rule === "ship_notify_no_match"
       ? [
           `${provider} reported a shipment that could not be linked to WMS when the callback was processed.`,
@@ -503,7 +505,9 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       ownerTeam: "Warehouse",
       recommendedAction: rule === "ship_notify_no_match"
         ? `Open ${orderNumber ? `order ${orderNumber}` : "the WMS order list"}, verify whether this exact provider shipment is now linked, and replay the provider callback only if fulfillment is still missing.`
-        : "Review the reconciliation evidence and resolve the underlying source workflow. Do not overwrite fulfillment state manually.",
+        : rule === "shipstation_unmapped_physical_shipment"
+          ? "Use the physical-package evidence and merchant intent to classify it. Adopt an actual replacement as a reship; ignore it only with proof that the label was duplicate, voided, or unused."
+          : "Review the reconciliation evidence and resolve the underlying source workflow. Do not overwrite fulfillment state manually.",
       responseDueAt: null,
       firstSeenAt,
       lastSeenAt,

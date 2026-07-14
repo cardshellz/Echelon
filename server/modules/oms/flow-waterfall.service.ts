@@ -30,6 +30,10 @@ import {
   heldLineAgingCountQuery,
   heldLineAgingSampleQuery,
 } from "./line-item-hold-monitoring";
+import {
+  SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
+  SHIPSTATION_UNMAPPED_PHYSICAL_RULE,
+} from "./shipstation-unmapped-physical";
 
 const DEFAULT_WINDOW_DAYS = 30;
 const MAX_WINDOW_DAYS = 365;
@@ -352,10 +356,110 @@ const BASE_ISSUES: FlowIssueDef[] = [
   {
     code: "UNMAPPED_ENGINE_SPLIT", kind: "duplicate", stage: "engine_push", severity: "warning",
     message: "Split shipments we couldn't match up",
-    why: "The shipping app split an order into pieces we couldn't match back to the original items, so stock and tracking might not line up. Review and match them by hand.",
+    why: "The shipping app reported another package, but WMS could not prove which remaining lines authorized it. Verify whether it is a replacement or reship; do not replay it or attach items when the original quantities are already fulfilled.",
     remediation: "MANUAL_REVIEW", replaySafe: false,
-    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.outbound_shipments WHERE review_reason LIKE '%split_items_unmapped%'`,
-    sample: () => sql`SELECT os.id AS shipment_id, wo.order_number, os.review_reason, os.created_at AS at FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id WHERE os.review_reason LIKE '%split_items_unmapped%' ORDER BY os.created_at DESC LIMIT 50`,
+    count: () => sql`
+      SELECT COUNT(*)::int AS count
+      FROM (
+        SELECT COALESCE(
+          NULLIF(BTRIM(os.external_fulfillment_id), ''),
+          'wms_shipment:' || os.id::text
+        ) AS entity_key
+        FROM wms.outbound_shipments os
+        WHERE COALESCE(os.requires_review, false) = true
+          AND os.review_reason = ${SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON}
+        UNION
+        SELECT COALESCE(
+          CASE
+            WHEN NULLIF(BTRIM(exception.external_shipment_ref), '') IS NOT NULL
+            THEN 'shipstation_shipment:' || BTRIM(exception.external_shipment_ref)
+          END,
+          CASE
+            WHEN exception.wms_shipment_id IS NOT NULL
+            THEN 'wms_shipment:' || exception.wms_shipment_id::text
+          END,
+          'reconciliation_exception:' || exception.id::text
+        ) AS entity_key
+        FROM wms.reconciliation_exceptions exception
+        WHERE exception.rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+          AND exception.status IN ('open', 'acknowledged')
+          AND exception.classification <> 'historical_ignore'
+      ) unresolved
+    `,
+    sample: () => sql`
+      WITH unresolved AS (
+        SELECT
+          COALESCE(
+            NULLIF(BTRIM(os.external_fulfillment_id), ''),
+            'wms_shipment:' || os.id::text
+          ) AS entity_key,
+          1 AS evidence_priority,
+          os.id AS shipment_id,
+          NULL::bigint AS exception_id,
+          wo.order_number,
+          os.review_reason,
+          NULLIF(substring(os.external_fulfillment_id FROM '^shipstation_shipment:([1-9][0-9]*)$'), '') AS external_shipment_ref,
+          os.tracking_number,
+          'legacy_shipment_flag'::text AS evidence_source,
+          NULL::text AS summary,
+          os.created_at AS at
+        FROM wms.outbound_shipments os
+        JOIN wms.orders wo ON wo.id = os.order_id
+        WHERE COALESCE(os.requires_review, false) = true
+          AND os.review_reason = ${SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON}
+        UNION ALL
+        SELECT
+          COALESCE(
+            CASE
+              WHEN NULLIF(BTRIM(exception.external_shipment_ref), '') IS NOT NULL
+              THEN 'shipstation_shipment:' || BTRIM(exception.external_shipment_ref)
+            END,
+            CASE
+              WHEN exception.wms_shipment_id IS NOT NULL
+              THEN 'wms_shipment:' || exception.wms_shipment_id::text
+            END,
+            'reconciliation_exception:' || exception.id::text
+          ) AS entity_key,
+          2 AS evidence_priority,
+          exception.wms_shipment_id AS shipment_id,
+          exception.id AS exception_id,
+          wo.order_number,
+          exception.rule AS review_reason,
+          exception.external_shipment_ref,
+          os.tracking_number,
+          'reconciliation_exception'::text AS evidence_source,
+          exception.summary,
+          exception.first_seen_at AS at
+        FROM wms.reconciliation_exceptions exception
+        LEFT JOIN wms.outbound_shipments os ON os.id = exception.wms_shipment_id
+        LEFT JOIN wms.orders wo ON wo.id = COALESCE(exception.wms_order_id, os.order_id)
+        WHERE exception.rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+          AND exception.status IN ('open', 'acknowledged')
+          AND exception.classification <> 'historical_ignore'
+      ), ranked AS (
+        SELECT
+          unresolved.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY unresolved.entity_key
+            ORDER BY unresolved.evidence_priority DESC, unresolved.at DESC
+          ) AS evidence_rank
+        FROM unresolved
+      )
+      SELECT
+        shipment_id,
+        exception_id,
+        order_number,
+        review_reason,
+        external_shipment_ref,
+        tracking_number,
+        evidence_source,
+        summary,
+        at
+      FROM ranked
+      WHERE evidence_rank = 1
+      ORDER BY at DESC
+      LIMIT 50
+    `,
   },
   // ---- shipped (contradictions kept verbatim from the plain-language rewrite + over-ship) ----
   {

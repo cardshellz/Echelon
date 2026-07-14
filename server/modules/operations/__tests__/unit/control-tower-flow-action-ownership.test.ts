@@ -14,6 +14,14 @@ const OMS_ROUTES_SOURCE = readFileSync(
   resolve(__dirname, "../../../../routes/oms.routes.ts"),
   "utf8",
 );
+const REPLACEMENT_MIGRATION_SOURCE = readFileSync(
+  resolve(__dirname, "../../../../../migrations/0587_shipment_replacement_authority.sql"),
+  "utf8",
+);
+const SHIPMENT_ROLLUP_SOURCE = readFileSync(
+  resolve(__dirname, "../../../orders/shipment-rollup.ts"),
+  "utf8",
+);
 
 describe("Control Tower flow action ownership", () => {
   it("keeps cross-system health off the OMS order-list request path", () => {
@@ -47,6 +55,39 @@ describe("Control Tower flow action ownership", () => {
     );
     expect(OMS_ROUTES_SOURCE).toMatch(
       /reconciliation\/remediate"[\s\S]{0,160}requirePermission\("operations", "triage"\)/,
+    );
+  });
+
+  it("offers only verified reship adoption for unmapped physical shipments", () => {
+    expect(FLOW_MONITOR_SOURCE).toContain('selectedIssue.code === "UNMAPPED_ENGINE_SPLIT"');
+    expect(FLOW_MONITOR_SOURCE).toContain("Adopt as reship");
+    expect(FLOW_MONITOR_SOURCE).not.toContain("Match remaining fulfillment");
+    expect(FLOW_MONITOR_SOURCE).not.toContain("Ignore duplicate or unused label");
+    expect(FLOW_MONITOR_SOURCE).not.toContain("Keep under review");
+    expect(FLOW_MONITOR_SOURCE).toContain('hasPermission("inventory", "adjust")');
+  });
+
+  it("guards physical-package mutations with triage and inventory permissions", () => {
+    expect(OMS_ROUTES_SOURCE).toMatch(
+      /shipstation-unmapped\/adopt-reship"[\s\S]{0,180}requirePermission\("operations", "triage"\)/,
+    );
+    expect(OMS_ROUTES_SOURCE).toContain('hasPermission(userId, "inventory", "adjust")');
+    expect(OMS_ROUTES_SOURCE).toContain('error: "Permission denied: inventory:adjust"');
+  });
+
+  it("keeps replacement inventory lineage outside customer fulfillment authority", () => {
+    expect(REPLACEMENT_MIGRATION_SOURCE).toContain("shipment_purpose");
+    expect(REPLACEMENT_MIGRATION_SOURCE).toContain("replaces_shipment_id");
+    expect(REPLACEMENT_MIGRATION_SOURCE).toContain("replacement_for_order_item_id");
+    expect(REPLACEMENT_MIGRATION_SOURCE).toContain("ON DELETE RESTRICT");
+    expect(REPLACEMENT_MIGRATION_SOURCE).toContain(
+      "shipment_purpose = 'customer_fulfillment'",
+    );
+    expect(REPLACEMENT_MIGRATION_SOURCE).toContain(
+      "CHECK (order_item_id IS NULL OR replacement_for_order_item_id IS NULL)",
+    );
+    expect(SHIPMENT_ROLLUP_SOURCE).toContain(
+      "COALESCE(shipment_purpose, 'customer_fulfillment') = 'customer_fulfillment'",
     );
   });
 });

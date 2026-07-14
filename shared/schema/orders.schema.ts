@@ -501,7 +501,17 @@ export const outboundShipments = wmsSchema.table("outbound_shipments", {
   onHoldReason: varchar("on_hold_reason", { length: 200 }),
   cancelledAt: timestamp("cancelled_at"),
   returnedAt: timestamp("returned_at"),
+  lostAt: timestamp("lost_at", { withTimezone: true }),
+  lostReason: varchar("lost_reason", { length: 200 }),
   lastReconciledAt: timestamp("last_reconciled_at"),
+
+  // Physical-shipment purpose is orthogonal to customer fulfillment. A
+  // replacement consumes inventory but does not fulfill the order line again.
+  shipmentPurpose: varchar("shipment_purpose", { length: 30 }).notNull().default("customer_fulfillment"),
+  replacesShipmentId: integer("replaces_shipment_id"),
+  replacementReason: varchar("replacement_reason", { length: 100 }),
+  replacementAuthorizedAt: timestamp("replacement_authorized_at", { withTimezone: true }),
+  replacementAuthorizedBy: varchar("replacement_authorized_by", { length: 120 }),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -521,6 +531,9 @@ export const outboundShipmentItems = wmsSchema.table("outbound_shipment_items", 
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   shipmentId: integer("shipment_id").notNull().references(() => outboundShipments.id, { onDelete: "cascade" }),
   orderItemId: integer("order_item_id").references(() => orderItems.id),
+  // Replacement lineage deliberately does not use order_item_id, because that
+  // column feeds customer-fulfillment projections throughout OMS/WMS.
+  replacementForOrderItemId: integer("replacement_for_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
   qty: integer("qty").notNull().default(1),
   fromLocationId: integer("from_location_id").references(() => warehouseLocations.id), // which bin it was picked from
