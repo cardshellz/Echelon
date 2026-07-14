@@ -45,6 +45,22 @@ interface RemediationContext {
   trackingNumber: string | null;
 }
 
+export interface ShipStationProviderIdentityRepair {
+  supersededCandidateShipmentId: number;
+  supersededProviderShipmentId: number;
+  supersededTrackingNumber: string | null;
+  supersededVoidDate: string;
+  activeCandidateShipmentId: number;
+  activeProviderShipmentId: number;
+  activeTrackingNumber: string;
+}
+
+interface ResolvedProviderShipment {
+  context: RemediationContext;
+  shipment: ShipStationShipment;
+  identityRepair: ShipStationProviderIdentityRepair | null;
+}
+
 interface PreviewOrderItem {
   id: number;
   sku: string;
@@ -74,6 +90,7 @@ export interface ShipStationUnmappedPreview {
   candidateShipmentId: number | null;
   externalShipmentRef: string;
   providerShipment: ShipStationShipment;
+  providerIdentityRepair: ShipStationProviderIdentityRepair | null;
   orderItems: PreviewOrderItem[];
   shipments: PreviewShipment[];
 }
@@ -240,10 +257,31 @@ async function loadContext(
   };
 }
 
-async function loadProviderShipment(
+function normalizedTrackingNumber(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function shipmentItemSignature(shipment: ShipStationShipment): string | null {
+  const quantities = new Map<string, number>();
+  const items = shipment.shipmentItems ?? [];
+  if (items.length === 0) return null;
+  for (const item of items) {
+    const sku = normalizeSku(item.sku);
+    const quantity = Number(item.quantity);
+    if (!sku || !Number.isSafeInteger(quantity) || quantity <= 0) return null;
+    quantities.set(sku, (quantities.get(sku) ?? 0) + quantity);
+  }
+  return [...quantities.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([sku, quantity]) => `${sku}:${quantity}`)
+    .join("|");
+}
+
+async function resolveProviderShipment(
+  db: any,
   shipStation: ShipStationService,
   context: RemediationContext,
-): Promise<ShipStationShipment> {
+): Promise<ResolvedProviderShipment> {
   let providerOrderId = context.providerOrderId;
   if (providerOrderId === null) {
     const providerOrder = await shipStation.getOrderByNumber(context.orderNumber);
@@ -263,7 +301,76 @@ async function loadProviderShipment(
       `ShipStation physical shipment ${context.externalShipmentRef} was not found`,
     );
   }
-  return providerShipment;
+  if (!providerShipment.voidDate || context.candidateShipmentId === null) {
+    return { context, shipment: providerShipment, identityRepair: null };
+  }
+
+  const trackingNumber = normalizedTrackingNumber(context.trackingNumber);
+  const supersededSignature = shipmentItemSignature(providerShipment);
+  const supersededVoidAt = new Date(providerShipment.voidDate);
+  if (
+    !trackingNumber
+    || !supersededSignature
+    || Number.isNaN(supersededVoidAt.getTime())
+  ) {
+    return { context, shipment: providerShipment, identityRepair: null };
+  }
+  const activeMatches = shipments.filter((shipment) => (
+    !shipment.voidDate
+    && Boolean(String(shipment.shipDate ?? "").trim())
+    && normalizedTrackingNumber(shipment.trackingNumber) === trackingNumber
+    && shipmentItemSignature(shipment) === supersededSignature
+  ));
+  if (activeMatches.length !== 1) {
+    return { context, shipment: providerShipment, identityRepair: null };
+  }
+  const activeShipment = activeMatches[0];
+  if (activeShipment.shipmentId === providerShipment.shipmentId) {
+    return { context, shipment: providerShipment, identityRepair: null };
+  }
+
+  const activeExternalShipmentRef = String(activeShipment.shipmentId);
+  const activeCandidateResult: any = await db.execute(sql`
+    SELECT id, order_id, status, tracking_number
+    FROM wms.outbound_shipments
+    WHERE external_fulfillment_id = ${`shipstation_shipment:${activeExternalShipmentRef}`}
+    LIMIT 2
+  `);
+  const activeCandidates = resultRows(activeCandidateResult);
+  if (activeCandidates.length !== 1) {
+    return { context, shipment: providerShipment, identityRepair: null };
+  }
+  const activeCandidate = activeCandidates[0];
+  const activeCandidateShipmentId = optionalPositiveInteger(activeCandidate.id);
+  if (
+    activeCandidateShipmentId === null
+    || activeCandidateShipmentId === context.candidateShipmentId
+    || Number(activeCandidate.order_id) !== context.wmsOrderId
+    || String(activeCandidate.status) !== "voided"
+    || normalizedTrackingNumber(activeCandidate.tracking_number) !== trackingNumber
+  ) {
+    return { context, shipment: providerShipment, identityRepair: null };
+  }
+
+  const identityRepair: ShipStationProviderIdentityRepair = {
+    supersededCandidateShipmentId: context.candidateShipmentId,
+    supersededProviderShipmentId: providerShipment.shipmentId,
+    supersededTrackingNumber: providerShipment.trackingNumber || null,
+    supersededVoidDate: supersededVoidAt.toISOString(),
+    activeCandidateShipmentId,
+    activeProviderShipmentId: activeShipment.shipmentId,
+    activeTrackingNumber: activeShipment.trackingNumber,
+  };
+  return {
+    context: {
+      ...context,
+      candidateShipmentId: activeCandidateShipmentId,
+      externalShipmentRef: activeExternalShipmentRef,
+      trackingNumber: activeShipment.trackingNumber,
+    },
+    shipment: activeShipment,
+    identityRepair,
+  };
 }
 
 async function loadOrderItems(db: any, wmsOrderId: number): Promise<PreviewOrderItem[]> {
@@ -344,12 +451,13 @@ export async function getShipStationUnmappedPhysicalPreview(
   shipStation: ShipStationService,
   input: ShipStationUnmappedLocator,
 ): Promise<ShipStationUnmappedPreview> {
-  const context = await loadContext(db, input);
-  const [providerShipment, orderItems, shipments] = await Promise.all([
-    loadProviderShipment(shipStation, context),
-    loadOrderItems(db, context.wmsOrderId),
-    loadShipments(db, context.wmsOrderId),
+  const initialContext = await loadContext(db, input);
+  const [resolvedProvider, orderItems, shipments] = await Promise.all([
+    resolveProviderShipment(db, shipStation, initialContext),
+    loadOrderItems(db, initialContext.wmsOrderId),
+    loadShipments(db, initialContext.wmsOrderId),
   ]);
+  const { context, shipment: providerShipment, identityRepair } = resolvedProvider;
   return {
     exceptionId: context.exceptionId,
     wmsOrderId: context.wmsOrderId,
@@ -358,6 +466,7 @@ export async function getShipStationUnmappedPhysicalPreview(
     candidateShipmentId: context.candidateShipmentId,
     externalShipmentRef: context.externalShipmentRef,
     providerShipment,
+    providerIdentityRepair: identityRepair,
     orderItems,
     shipments,
   };
@@ -539,6 +648,64 @@ function aggregatePreparedLines(lines: PreparedLine[]): PreparedLine[] {
   return [...byOrderItem.values()];
 }
 
+async function loadShipmentAuthorityCounts(
+  db: any,
+  shipmentId: number,
+): Promise<{ itemCount: number; inventoryShipCount: number }> {
+  const result: any = await db.execute(sql`
+    SELECT
+      (SELECT COUNT(*) FROM wms.outbound_shipment_items item
+       WHERE item.shipment_id = ${shipmentId})::int AS count,
+      (SELECT COUNT(*) FROM inventory.inventory_transactions inventory_tx
+       WHERE inventory_tx.shipment_id = ${shipmentId}
+         AND inventory_tx.transaction_type = 'ship')::int AS inventory_ship_count
+  `);
+  const row = resultRows(result)[0];
+  return {
+    itemCount: Number(row?.count ?? 0),
+    inventoryShipCount: Number(row?.inventory_ship_count ?? 0),
+  };
+}
+
+async function retireSupersededCandidate(
+  tx: any,
+  context: RemediationContext,
+  identityRepair: ShipStationProviderIdentityRepair,
+): Promise<void> {
+  const staleResult: any = await tx.execute(sql`
+    SELECT id, order_id, external_fulfillment_id, tracking_number
+    FROM wms.outbound_shipments
+    WHERE id = ${identityRepair.supersededCandidateShipmentId}
+    FOR UPDATE
+  `);
+  const stale = resultRows(staleResult)[0];
+  if (
+    !stale
+    || Number(stale.order_id) !== context.wmsOrderId
+    || String(stale.external_fulfillment_id) !== `shipstation_shipment:${identityRepair.supersededProviderShipmentId}`
+    || normalizedTrackingNumber(stale.tracking_number) !== normalizedTrackingNumber(identityRepair.activeTrackingNumber)
+  ) {
+    throw new Error("the crossed ShipStation identity changed before it could be repaired");
+  }
+  const staleAuthority = await loadShipmentAuthorityCounts(
+    tx,
+    identityRepair.supersededCandidateShipmentId,
+  );
+  if (staleAuthority.itemCount > 0 || staleAuthority.inventoryShipCount > 0) {
+    throw new Error("the superseded shipment already owns WMS or inventory authority");
+  }
+  await tx.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET status = 'voided',
+        tracking_number = ${identityRepair.supersededTrackingNumber},
+        voided_at = COALESCE(voided_at, ${new Date(identityRepair.supersededVoidDate)}),
+        requires_review = false,
+        review_reason = 'shipstation_superseded_label_reconciled',
+        updated_at = NOW()
+    WHERE id = ${identityRepair.supersededCandidateShipmentId}
+  `);
+}
+
 async function prepareMappedShipment(
   db: any,
   context: RemediationContext,
@@ -546,6 +713,7 @@ async function prepareMappedShipment(
   shipment: ShipStationShipment,
   lines: PreparedLine[],
   input: ShipStationUnmappedReshipAdoptionInput,
+  identityRepair: ShipStationProviderIdentityRepair | null,
 ): Promise<number> {
   const operator = requiredOperator(input.operator);
   const originalShipmentId = positiveInteger(input.originalShipmentId, "originalShipmentId");
@@ -613,8 +781,8 @@ async function prepareMappedShipment(
     if (candidate && Number(candidate.order_id) !== context.wmsOrderId) {
       throw new Error("provider shipment is already attached to a different WMS order");
     }
-    if (candidate && ["cancelled", "voided", "returned", "lost"].includes(String(candidate.status))) {
-      throw new Error(`candidate shipment is ${candidate.status} and cannot be reclassified`);
+    if (identityRepair && Number(candidate?.id) !== identityRepair.activeCandidateShipmentId) {
+      throw new Error("the active ShipStation package no longer matches its WMS candidate");
     }
 
     if (!candidate) {
@@ -647,33 +815,59 @@ async function prepareMappedShipment(
       candidate = resultRows(inserted)[0];
       if (!candidate) throw new Error("failed to create classified WMS shipment");
     } else {
-      const itemCountResult: any = await tx.execute(sql`
-        SELECT
-          (SELECT COUNT(*) FROM wms.outbound_shipment_items item
-           WHERE item.shipment_id = ${candidate.id})::int AS count,
-          (SELECT COUNT(*) FROM inventory.inventory_transactions inventory_tx
-           WHERE inventory_tx.shipment_id = ${candidate.id}
-             AND inventory_tx.transaction_type = 'ship')::int AS inventory_ship_count
-      `);
-      const candidateCounts = resultRows(itemCountResult)[0];
-      const itemCount = Number(candidateCounts?.count ?? 0);
-      const inventoryShipCount = Number(candidateCounts?.inventory_ship_count ?? 0);
+      const { itemCount, inventoryShipCount } = await loadShipmentAuthorityCounts(
+        tx,
+        positiveInteger(candidate.id, "candidateShipmentId"),
+      );
+      const repairsCrossedVoid = Boolean(
+        identityRepair
+        && Number(candidate.id) === identityRepair.activeCandidateShipmentId
+        && String(candidate.status) === "voided"
+        && itemCount === 0
+        && inventoryShipCount === 0,
+      );
+      if (
+        ["cancelled", "voided", "returned", "lost"].includes(String(candidate.status))
+        && !repairsCrossedVoid
+      ) {
+        throw new Error(`candidate shipment is ${candidate.status} and cannot be reclassified`);
+      }
       if ((itemCount > 0 || inventoryShipCount > 0) && String(candidate.shipment_purpose) !== "replacement") {
         throw new Error("candidate shipment already has a different authority classification");
       }
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET source = 'shipstation_reship_adopted',
-            shipment_purpose = 'replacement',
-            replaces_shipment_id = ${originalShipmentId},
-            replacement_reason = ${reason},
-            replacement_authorized_at = ${new Date()},
-            replacement_authorized_by = ${operator},
-            requires_review = true,
-            review_reason = 'shipstation_reship_adoption_pending',
-            updated_at = NOW()
-        WHERE id = ${candidate.id}
-      `);
+      if (identityRepair) {
+        await retireSupersededCandidate(tx, context, identityRepair);
+        await tx.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET status = 'queued',
+              tracking_number = ${shipment.trackingNumber},
+              voided_at = NULL,
+              source = 'shipstation_reship_adopted',
+              shipment_purpose = 'replacement',
+              replaces_shipment_id = ${originalShipmentId},
+              replacement_reason = ${reason},
+              replacement_authorized_at = ${new Date()},
+              replacement_authorized_by = ${operator},
+              requires_review = true,
+              review_reason = 'shipstation_reship_adoption_pending',
+              updated_at = NOW()
+          WHERE id = ${candidate.id}
+        `);
+      } else {
+        await tx.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET source = 'shipstation_reship_adopted',
+              shipment_purpose = 'replacement',
+              replaces_shipment_id = ${originalShipmentId},
+              replacement_reason = ${reason},
+              replacement_authorized_at = ${new Date()},
+              replacement_authorized_by = ${operator},
+              requires_review = true,
+              review_reason = 'shipstation_reship_adoption_pending',
+              updated_at = NOW()
+          WHERE id = ${candidate.id}
+        `);
+      }
     }
 
     const candidateShipmentId = positiveInteger(candidate.id, "candidateShipmentId");
@@ -719,6 +913,7 @@ async function finishMappedShipment(
   input: ShipStationUnmappedReshipAdoptionInput,
   shipment: ShipStationShipment,
   lines: PreparedLine[],
+  identityRepair: ShipStationProviderIdentityRepair | null,
 ): Promise<void> {
   const operator = requiredOperator(input.operator);
   const resolution = "Operator authorized the provider package as a replacement shipment. Inventory moved; customer fulfillment and channel fulfillment were not repeated.";
@@ -729,6 +924,7 @@ async function finishMappedShipment(
     originalShipmentId: input.originalShipmentId ?? null,
     candidateShipmentId,
     providerShipmentId: shipment.shipmentId,
+    providerIdentityRepair: identityRepair,
     lineMappings: lines.map((line) => ({
       providerItemIndex: line.providerItemIndex,
       orderItemId: line.orderItemId,
@@ -768,8 +964,9 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
   shipStation: ShipStationService,
   input: ShipStationUnmappedReshipAdoptionInput,
 ): Promise<Record<string, unknown>> {
-  const context = await loadContext(db, input);
-  const shipment = await loadProviderShipment(shipStation, context);
+  const initialContext = await loadContext(db, input);
+  const resolvedProvider = await resolveProviderShipment(db, shipStation, initialContext);
+  const { context, shipment, identityRepair } = resolvedProvider;
   if (shipment.voidDate) {
     throw new Error("a voided ShipStation shipment cannot be adopted as a reship");
   }
@@ -788,6 +985,7 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     shipment,
     lines,
     input,
+    identityRepair,
   );
 
   const processed = await shipStation.processShipmentNotification(shipment);
@@ -801,11 +999,13 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     input,
     shipment,
     lines,
+    identityRepair,
   );
   return {
     changed: true,
     exceptionId,
     candidateShipmentId,
     operator,
+    providerIdentityRepaired: identityRepair !== null,
   };
 }
