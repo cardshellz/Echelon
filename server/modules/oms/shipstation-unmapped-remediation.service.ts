@@ -19,9 +19,10 @@ export interface ShipStationUnmappedLocator {
 }
 
 export interface ShipStationUnmappedLineMapping {
-  providerItemIndex: number;
+  providerItemIndex?: number;
   orderItemId: number;
   quantity: number;
+  evidenceSource?: "shipstation" | "original_wms";
 }
 
 export interface ShipStationUnmappedReshipAdoptionInput
@@ -80,6 +81,12 @@ interface PreviewShipment {
   externalShipmentRef: string | null;
   itemCount: number;
   createdAt: string | null;
+  items: Array<{
+    orderItemId: number;
+    sku: string;
+    name: string;
+    quantity: number;
+  }>;
 }
 
 export interface ShipStationUnmappedPreview {
@@ -96,7 +103,8 @@ export interface ShipStationUnmappedPreview {
 }
 
 interface PreparedLine {
-  providerItemIndex: number;
+  providerItemIndex: number | null;
+  evidenceSource: "shipstation" | "original_wms";
   orderItemId: number;
   sku: string;
   quantity: number;
@@ -422,28 +430,51 @@ async function loadShipments(db: any, wmsOrderId: number): Promise<PreviewShipme
       shipment.tracking_number,
       shipment.external_fulfillment_id,
       shipment.created_at,
-      COUNT(shipment_item.id)::int AS item_count
+      COUNT(shipment_item.id)::int AS item_count,
+      COALESCE(
+        jsonb_agg(
+          jsonb_build_object(
+            'orderItemId', order_item.id,
+            'sku', order_item.sku,
+            'name', order_item.name,
+            'quantity', shipment_item.qty
+          )
+          ORDER BY shipment_item.id
+        ) FILTER (WHERE order_item.id IS NOT NULL),
+        '[]'::jsonb
+      ) AS items
     FROM wms.outbound_shipments shipment
     LEFT JOIN wms.outbound_shipment_items shipment_item
       ON shipment_item.shipment_id = shipment.id
+    LEFT JOIN wms.order_items order_item
+      ON order_item.id = shipment_item.order_item_id
     WHERE shipment.order_id = ${wmsOrderId}
     GROUP BY shipment.id
     ORDER BY COALESCE(shipment.shipped_at, shipment.created_at), shipment.id
   `);
-  return resultRows(result).map((row) => ({
-    id: Number(row.id),
-    status: String(row.status),
-    source: String(row.source),
-    shipmentPurpose: String(row.shipment_purpose ?? "customer_fulfillment"),
-    trackingNumber: row.tracking_number == null ? null : String(row.tracking_number),
-    externalShipmentRef: shipStationShipmentRefFromExternalFulfillmentId(
-      row.external_fulfillment_id,
-    ),
-    itemCount: Number(row.item_count ?? 0),
-    createdAt: row.created_at == null
-      ? null
-      : new Date(row.created_at).toISOString(),
-  }));
+  return resultRows(result).map((row) => {
+    const items = Array.isArray(row.items) ? row.items : [];
+    return {
+      id: Number(row.id),
+      status: String(row.status),
+      source: String(row.source),
+      shipmentPurpose: String(row.shipment_purpose ?? "customer_fulfillment"),
+      trackingNumber: row.tracking_number == null ? null : String(row.tracking_number),
+      externalShipmentRef: shipStationShipmentRefFromExternalFulfillmentId(
+        row.external_fulfillment_id,
+      ),
+      itemCount: Number(row.item_count ?? 0),
+      createdAt: row.created_at == null
+        ? null
+        : new Date(row.created_at).toISOString(),
+      items: items.map((item: any) => ({
+        orderItemId: Number(item.orderItemId),
+        sku: String(item.sku),
+        name: String(item.name),
+        quantity: Number(item.quantity),
+      })),
+    };
+  });
 }
 
 export async function getShipStationUnmappedPhysicalPreview(
@@ -476,10 +507,38 @@ function resolveLineMappings(
   shipment: ShipStationShipment,
   orderItems: PreviewOrderItem[],
   requested: ShipStationUnmappedLineMapping[] | undefined,
-): Array<{ providerItemIndex: number; orderItemId: number; sku: string; quantity: number }> {
+): Array<{
+  providerItemIndex: number | null;
+  evidenceSource: "shipstation" | "original_wms";
+  orderItemId: number;
+  sku: string;
+  quantity: number;
+}> {
   const items: ShipStationShipmentItem[] = shipment.shipmentItems ?? [];
   if (items.length === 0) {
-    throw new Error("ShipStation shipment has no positive item evidence");
+    if (!Array.isArray(requested) || requested.length === 0) {
+      throw new Error("confirm at least one item from the original WMS package");
+    }
+    const seenOrderItems = new Set<number>();
+    return requested.map((mapping) => {
+      if (mapping.evidenceSource !== "original_wms") {
+        throw new Error("empty ShipStation packages require original WMS item confirmation");
+      }
+      const orderItemId = positiveInteger(mapping.orderItemId, "orderItemId");
+      if (seenOrderItems.has(orderItemId)) {
+        throw new Error("each original WMS item can be confirmed only once");
+      }
+      seenOrderItems.add(orderItemId);
+      const orderItem = orderItems.find((item) => item.id === orderItemId);
+      if (!orderItem) throw new Error(`WMS order item ${orderItemId} is not on this order`);
+      return {
+        providerItemIndex: null,
+        evidenceSource: "original_wms" as const,
+        orderItemId,
+        sku: orderItem.sku,
+        quantity: positiveInteger(mapping.quantity, "quantity"),
+      };
+    });
   }
   if (items.some((item) => (
     normalizeSku(item.sku).length === 0 ||
@@ -498,6 +557,9 @@ function resolveLineMappings(
   }
   const seenProviderItems = new Set<number>();
   return mappings.map((mapping) => {
+    if (mapping.evidenceSource && mapping.evidenceSource !== "shipstation") {
+      throw new Error("provider package lines require ShipStation item evidence");
+    }
     const providerItemIndex = Number(mapping.providerItemIndex);
     if (
       !Number.isInteger(providerItemIndex) ||
@@ -519,7 +581,13 @@ function resolveLineMappings(
     if (quantity !== Number(providerItem.quantity)) {
       throw new Error(`mapped quantity for SKU ${providerItem.sku} must equal provider quantity`);
     }
-    return { providerItemIndex, orderItemId, sku: orderItem.sku, quantity };
+    return {
+      providerItemIndex,
+      evidenceSource: "shipstation" as const,
+      orderItemId,
+      sku: orderItem.sku,
+      quantity,
+    };
   });
 }
 
@@ -927,6 +995,7 @@ async function finishMappedShipment(
     providerIdentityRepair: identityRepair,
     lineMappings: lines.map((line) => ({
       providerItemIndex: line.providerItemIndex,
+      evidenceSource: line.evidenceSource,
       orderItemId: line.orderItemId,
       sku: line.sku,
       quantity: line.quantity,
@@ -972,6 +1041,9 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
   }
   if (!String(shipment.shipDate ?? "").trim()) {
     throw new Error("ShipStation shipment has no shipped date");
+  }
+  if ((shipment.shipmentItems ?? []).length === 0 && optionalNotes(input.notes) === null) {
+    throw new Error("operator notes are required when ShipStation omitted package lines");
   }
   const exceptionId = await ensureException(db, context, shipment);
   const operator = requiredOperator(input.operator);
