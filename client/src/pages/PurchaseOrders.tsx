@@ -440,6 +440,11 @@ export default function PurchaseOrders() {
             pricingSource: line.pricingSource,
             pricing: line.pricing,
             ...populatedPoLineQuoteMetadata(line.quoteMetadata),
+            ...(line.saveToVendorCatalog &&
+              line.pricingSource === "manual" &&
+              line.pricing.basis !== "extended_total"
+              ? { catalogWrite: { mode: "upsert" as const } }
+              : {}),
           })),
           advance_to_sent: sendToVendor,
         }),
@@ -451,51 +456,10 @@ export default function PurchaseOrders() {
       const result = await res.json();
       const po = result?.po ?? result;
 
-      // Catalog persistence is a separate idempotent batch: the PO remains
-      // authoritative even if this convenience step needs operator retry.
-      let catalogSaveError: string | undefined;
-      const catalogEntries = lines
-        .filter((line) => line.saveToVendorCatalog && line.pricing.basis !== "extended_total")
-        .map((line) => ({
-          productId: line.productId,
-          productVariantId: line.expectedReceiveVariantId,
-          vendorSku: line.vendorSku || null,
-          pricing: line.pricing,
-          ...populatedPoLineQuoteMetadata(line.quoteMetadata),
-          packSize: line.pricing.basis === "per_purchase_uom"
-            ? line.pricing.piecesPerUom
-            : 1,
-          isPreferred: false,
-        }));
-      if (catalogEntries.length > 0 && poData.vendorId) {
-        try {
-          const catalogResponse = await fetch(
-            `/api/vendors/${poData.vendorId}/catalog/bulk-upsert`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Idempotency-Key": genPoCreateIdempotencyKey(),
-              },
-              body: JSON.stringify({ entries: catalogEntries }),
-            },
-          );
-          if (!catalogResponse.ok) {
-            const errorBody = await catalogResponse.json().catch(() => ({}));
-            catalogSaveError = errorBody?.error || "Vendor catalog update failed";
-          }
-        } catch (error) {
-          catalogSaveError = error instanceof Error
-            ? error.message
-            : "Vendor catalog update failed";
-        }
-      }
-
       return {
         ...po,
         wasSent: sendToVendor && (result?.status === "sent" || po?.status === "sent"),
         sendError: result?.sendError,
-        catalogSaveError,
       };
 
     },
@@ -506,12 +470,6 @@ export default function PurchaseOrders() {
       setInlineLines([]);
       if (po.sendError) {
         toast({ title: "PO created (send failed)", description: po.sendError, variant: "destructive" });
-      } else if (po.catalogSaveError) {
-        toast({
-          title: po.wasSent ? "PO created and sent" : "Purchase order created",
-          description: `The PO succeeded, but the vendor catalog was not updated: ${po.catalogSaveError}`,
-          variant: "destructive",
-        });
       } else if (po.wasSent) {
         toast({ title: "PO created & sent", description: `${po.poNumber} sent to vendor` });
       } else {

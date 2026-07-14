@@ -93,6 +93,11 @@ const quoteMetadataFields = {
   quoteValidUntil,
 };
 
+const catalogWriteSchema = z.object({
+  mode: z.literal("upsert"),
+  setPreferred: z.boolean().optional(),
+}).strict();
+
 function validateQuoteDateOrder(
   input: { quotedAt?: Date | null; quoteValidUntil?: string | null },
   context: z.RefinementCtx,
@@ -120,6 +125,45 @@ function validateQuoteDateOrder(
   }
 }
 
+function validateCatalogWrite(
+  input: {
+    pricing?: PoLinePricingInput;
+    pricingSource?: "manual" | "vendor_catalog";
+    quotedAt?: Date | null;
+    catalogWrite?: { mode: "upsert"; setPreferred?: boolean };
+  },
+  context: z.RefinementCtx,
+): void {
+  if (!input.catalogWrite) return;
+  if ((input.pricingSource ?? "manual") !== "manual") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["catalogWrite"],
+      message: "is only valid when this PO consumes a manual quote",
+    });
+  }
+  if (!input.pricing) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["catalogWrite"],
+      message: "requires explicit quote pricing",
+    });
+  } else if (input.pricing.basis === "extended_total") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["catalogWrite"],
+      message: "cannot reuse a quantity-specific extended total",
+    });
+  }
+  if (!input.quotedAt) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["quotedAt"],
+      message: "is required when saving reusable catalog pricing",
+    });
+  }
+}
+
 const addLineFields = {
   productId: positivePgInteger,
   expectedReceiveVariantId: positivePgInteger.nullable().optional(),
@@ -130,15 +174,22 @@ const addLineFields = {
   notes: nullableText(20_000),
   pricing: poLinePricingInputSchema,
   packagingCostCents: nonnegativeMoney.optional(),
+  catalogWrite: catalogWriteSchema.optional(),
   ...quoteMetadataFields,
 };
 
 const addLineBodySchema = z.object({
   expectedPoUpdatedAt: versionDate,
   ...addLineFields,
-}).strict().superRefine(validateQuoteDateOrder);
+}).strict().superRefine((input, context) => {
+  validateQuoteDateOrder(input, context);
+  validateCatalogWrite(input, context);
+});
 
-const addLineValueSchema = z.object(addLineFields).strict().superRefine(validateQuoteDateOrder);
+const addLineValueSchema = z.object(addLineFields).strict().superRefine((input, context) => {
+  validateQuoteDateOrder(input, context);
+  validateCatalogWrite(input, context);
+});
 
 const addBulkLinesBodySchema = z.object({
   expectedPoUpdatedAt: versionDate,
@@ -219,6 +270,14 @@ type CommandDb = {
 };
 
 type AddLineValue = z.infer<typeof addLineValueSchema>;
+type PurchaseOrderLineCommandOptions = {
+  persistCatalogWrites?: (
+    tx: any,
+    vendorId: number,
+    lines: AddLineValue[],
+    userId?: string,
+  ) => Promise<Array<number | null>>;
+};
 type LineContextInput = {
   productId: number;
   expectedReceiveVariantId?: number | null;
@@ -837,7 +896,10 @@ async function emitEvent(
   });
 }
 
-export function createPurchaseOrderLineCommands(db: CommandDb) {
+export function createPurchaseOrderLineCommands(
+  db: CommandDb,
+  options: PurchaseOrderLineCommandOptions = {},
+) {
   const commandRepository = createDrizzleFinancialCommandRepository(db as any);
 
   async function addLineInTransaction(
@@ -851,8 +913,28 @@ export function createPurchaseOrderLineCommands(db: CommandDb) {
     assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
     await assertNoRecommendationOwnership(tx, purchaseOrderId);
 
-    const context = await resolveLineContext(tx, header, input);
-    const normalized = normalizePricing(input.pricing as PoLinePricingInput);
+    let effectiveInput: AddLineValue = input;
+    if (input.catalogWrite) {
+      if (!options.persistCatalogWrites) {
+        throw new PurchaseOrderLineCommandError("Catalog persistence is unavailable", 500, {
+          code: "PO_LINE_CATALOG_WRITE_UNAVAILABLE",
+        });
+      }
+      const [vendorProductId] = await options.persistCatalogWrites(
+        tx,
+        Number(header.vendorId),
+        [input],
+        userId,
+      );
+      if (!vendorProductId) {
+        throw new PurchaseOrderLineCommandError("Catalog persistence did not return a mapping", 500, {
+          code: "PO_LINE_CATALOG_WRITE_RESULT_MISSING",
+        });
+      }
+      effectiveInput = { ...input, vendorProductId };
+    }
+    const context = await resolveLineContext(tx, header, effectiveInput);
+    const normalized = normalizePricing(effectiveInput.pricing as PoLinePricingInput);
     const maxRows = await tx
       .select({ maximum: sql<number>`COALESCE(MAX(${purchaseOrderLines.lineNumber}), 0)::int` })
       .from(purchaseOrderLines)
@@ -860,7 +942,7 @@ export function createPurchaseOrderLineCommands(db: CommandDb) {
     const values = lineValues(
       purchaseOrderId,
       Number(maxRows[0]?.maximum ?? 0) + 1,
-      input,
+      effectiveInput,
       normalized,
       context,
     );
@@ -897,8 +979,26 @@ export function createPurchaseOrderLineCommands(db: CommandDb) {
       .from(purchaseOrderLines)
       .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
     let lineNumber = Number(maxRows[0]?.maximum ?? 0) + 1;
+    let effectiveLines: AddLineValue[] = input.lines;
+    if (input.lines.some((line) => line.catalogWrite)) {
+      if (!options.persistCatalogWrites) {
+        throw new PurchaseOrderLineCommandError("Catalog persistence is unavailable", 500, {
+          code: "PO_LINE_CATALOG_WRITE_UNAVAILABLE",
+        });
+      }
+      const vendorProductIds = await options.persistCatalogWrites(
+        tx,
+        Number(header.vendorId),
+        input.lines,
+        userId,
+      );
+      effectiveLines = input.lines.map((line, index) => ({
+        ...line,
+        ...(vendorProductIds[index] ? { vendorProductId: vendorProductIds[index] } : {}),
+      }));
+    }
     const values = [];
-    for (const lineInput of input.lines) {
+    for (const lineInput of effectiveLines) {
       const context = await resolveLineContext(tx, header, lineInput);
       const normalized = normalizePricing(lineInput.pricing as PoLinePricingInput);
       values.push(lineValues(purchaseOrderId, lineNumber++, lineInput, normalized, context));

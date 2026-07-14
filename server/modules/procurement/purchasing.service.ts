@@ -241,6 +241,10 @@ export type PurchaseOrderLineInput = {
   quoteReference?: string | null;
   quotedAt?: Date | null;
   quoteValidUntil?: string | null;
+  catalogWrite?: {
+    mode: "upsert";
+    setPreferred?: boolean;
+  };
 };
 
 export type CreatePurchaseOrderWithLinesInput = {
@@ -331,7 +335,22 @@ export function createPurchasingService(
   options: { now?: () => Date } = {},
 ) {
   const now = options.now ?? (() => new Date());
-  const lineCommands = createPurchaseOrderLineCommands(db);
+  const lineCommands = createPurchaseOrderLineCommands(db, {
+    persistCatalogWrites: async (tx, vendorId, lines, userId) => {
+      try {
+        return await persistPurchaseOrderCatalogWritesTx(tx, vendorId, lines, userId);
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          throw new PurchaseOrderLineCommandError(
+            error.message,
+            error.statusCode,
+            error.details,
+          );
+        }
+        throw error;
+      }
+    },
+  });
 
   async function runLineCommand<T>(command: () => Promise<T>): Promise<T> {
     try {
@@ -4712,6 +4731,53 @@ export function createPurchasingService(
           { code: "PO_LINE_QUOTE_DATE_INVALID", lineIndex: idx },
         );
       }
+      if (line.catalogWrite !== undefined) {
+        if (
+          !line.catalogWrite ||
+          typeof line.catalogWrite !== "object" ||
+          line.catalogWrite.mode !== "upsert" ||
+          Object.keys(line.catalogWrite).some(
+            (key) => key !== "mode" && key !== "setPreferred",
+          ) ||
+          (
+            line.catalogWrite.setPreferred !== undefined &&
+            typeof line.catalogWrite.setPreferred !== "boolean"
+          )
+        ) {
+          throw new PurchasingError(`${label}.catalog_write is invalid`, 400, {
+            code: "PO_LINE_CATALOG_WRITE_INVALID",
+            lineIndex: idx,
+          });
+        }
+        if (lineType !== "product" || !normalizedQuotePricing) {
+          throw new PurchasingError(
+            `${label}.catalog_write requires explicit product quote pricing`,
+            400,
+            { code: "PO_LINE_CATALOG_WRITE_PRICING_REQUIRED", lineIndex: idx },
+          );
+        }
+        if (normalizedQuotePricing.pricingBasis === "extended_total") {
+          throw new PurchasingError(
+            `${label}.catalog_write cannot reuse a quantity-specific extended total`,
+            400,
+            { code: "PO_LINE_CATALOG_WRITE_EXTENDED_TOTAL", lineIndex: idx },
+          );
+        }
+        if ((line.pricingSource ?? "manual") !== "manual") {
+          throw new PurchasingError(
+            `${label}.catalog_write is only valid when the PO line consumes a manual quote`,
+            400,
+            { code: "PO_LINE_CATALOG_WRITE_SOURCE_INVALID", lineIndex: idx },
+          );
+        }
+        if (!(line.quotedAt instanceof Date)) {
+          throw new PurchasingError(
+            `${label}.quoted_at is required when saving reusable catalog pricing`,
+            400,
+            { code: "PO_LINE_CATALOG_WRITE_QUOTED_AT_REQUIRED", lineIndex: idx },
+          );
+        }
+      }
 
       // Qty rule.
       if (!Number.isSafeInteger(line.orderQty) || line.orderQty > PG_INTEGER_MAX) {
@@ -5490,6 +5556,12 @@ export function createPurchasingService(
     // is the arbiter; a conflict rolls back the whole attempt and retries with
     // a freshly generated number.
     const createAttempt = async (poNumber: string) => db.transaction(async (tx: any) => {
+      await persistPurchaseOrderCatalogWritesTx(
+        tx,
+        input.vendorId,
+        resolvedLines.map((resolved) => resolved.line),
+        userId,
+      );
       // Close the catalog-price TOCTOU window before any PO rows are written.
       const lockedVendor = await lockAndValidatePurchaseOrderReferences(
         tx,
@@ -5726,6 +5798,12 @@ export function createPurchasingService(
       await assertNoDraftLineDownstreamLinks(
         tx,
         activeExistingLines.map((line: any) => Number(line.id)),
+      );
+      await persistPurchaseOrderCatalogWritesTx(
+        tx,
+        input.vendorId,
+        resolvedLines.map((resolved) => resolved.line),
+        userId,
       );
       const lockedVendor = await lockAndValidatePurchaseOrderReferences(
         tx,
@@ -6435,6 +6513,89 @@ export function createPurchasingService(
     }>;
   };
 
+  type CatalogWritablePoLine = Pick<
+    PurchaseOrderLineInput,
+    | "productId"
+    | "expectedReceiveVariantId"
+    | "productVariantId"
+    | "vendorProductId"
+    | "vendorSku"
+    | "pricing"
+    | "quoteReference"
+    | "quotedAt"
+    | "quoteValidUntil"
+    | "catalogWrite"
+  >;
+
+  async function persistPurchaseOrderCatalogWritesTx(
+    tx: any,
+    vendorId: number,
+    lines: CatalogWritablePoLine[],
+    userId?: string | null,
+  ): Promise<Array<number | null>> {
+    const targets = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.catalogWrite?.mode === "upsert");
+    if (targets.length === 0) return lines.map(() => null);
+
+    const entries: BulkCatalogEntry[] = targets.map(({ line, index }) => {
+      if (!line.pricing || line.pricing.basis === "extended_total") {
+        throw new PurchasingError(
+          `lines[${index}].catalog_write requires reusable per-piece or purchase-UOM pricing`,
+          400,
+          { code: "PO_LINE_CATALOG_WRITE_PRICING_REQUIRED", lineIndex: index },
+        );
+      }
+      if (!(line.quotedAt instanceof Date) || Number.isNaN(line.quotedAt.getTime())) {
+        throw new PurchasingError(
+          `lines[${index}].quoted_at is required when saving reusable catalog pricing`,
+          400,
+          { code: "PO_LINE_CATALOG_WRITE_QUOTED_AT_REQUIRED", lineIndex: index },
+        );
+      }
+      const productId = Number(line.productId);
+      assertPositivePgInteger(productId, `lines[${index}].productId`);
+      return {
+        productId,
+        productVariantId: line.expectedReceiveVariantId ?? line.productVariantId ?? null,
+        vendorSku: line.vendorSku,
+        pricing: line.pricing,
+        quoteReference: line.quoteReference,
+        quotedAt: line.quotedAt,
+        quoteValidUntil: line.quoteValidUntil,
+        packSize: line.pricing.basis === "per_purchase_uom"
+          ? line.pricing.piecesPerUom
+          : 1,
+        ...(line.catalogWrite?.setPreferred === undefined
+          ? {}
+          : { isPreferred: line.catalogWrite.setPreferred }),
+      };
+    });
+
+    const result = await bulkUpsertVendorCatalog(vendorId, entries, userId, tx);
+    const persisted = [...result.created, ...result.updated];
+    const idByKey = new Map(
+      persisted.map((row) => [
+        bulkCatalogKey(row.productId, row.productVariantId),
+        row.vendorProductId,
+      ]),
+    );
+    const ids = lines.map(() => null as number | null);
+    targets.forEach(({ line, index }) => {
+      const variantId = line.expectedReceiveVariantId ?? line.productVariantId ?? null;
+      const vendorProductId = idByKey.get(bulkCatalogKey(Number(line.productId), variantId));
+      if (!vendorProductId) {
+        throw new PurchasingError("Vendor catalog mapping was not returned after upsert", 409, {
+          code: "PO_LINE_CATALOG_WRITE_RESULT_MISSING",
+          lineIndex: index,
+        });
+      }
+      line.vendorProductId = vendorProductId;
+      ids[index] = vendorProductId;
+    });
+    return ids;
+  }
+
   type ValidatedBulkCatalogEntry = {
     entry: BulkCatalogEntry;
     index: number;
@@ -6969,6 +7130,7 @@ export function createPurchasingService(
     vendorId: number,
     entries: BulkCatalogEntry[],
     userId: string | null | undefined,
+    existingTransaction?: any,
   ): Promise<BulkCatalogResult> {
     assertPositivePgInteger(vendorId, "vendorId");
     if (!Array.isArray(entries) || entries.length === 0) {
@@ -7150,8 +7312,7 @@ export function createPurchasingService(
     const { actorType, actorId } = resolveActor(userId);
     const result: BulkCatalogResult = { created: [], updated: [], skipped: [] };
 
-    try {
-      await db.transaction(async (tx: any) => {
+    const execute = async (tx: any) => {
       // Lock references in a stable order. This makes validation current at
       // commit time and serializes overlapping batches for one vendor.
       const vendorLock = await tx.execute(sql`
@@ -7449,7 +7610,14 @@ export function createPurchasingService(
       if (auditRows.length > 0) {
         await tx.insert(auditEventsTable).values(auditRows);
       }
-      });
+    };
+
+    try {
+      if (existingTransaction) {
+        await execute(existingTransaction);
+      } else {
+        await db.transaction(execute);
+      }
     } catch (error: any) {
       if (
         error?.code === "23505" &&

@@ -46,7 +46,6 @@ import {
 } from "@/features/po-edit/PoLinePricingEditor";
 import {
   createStoredPoLinePricingDraft,
-  vendorCatalogPackSizeForPricing,
 } from "@/features/po-edit/stored-po-line-pricing";
 import {
   PoLineQuoteMetadataEditor,
@@ -899,6 +898,10 @@ type AddPoLineRequestBody = {
   quoteReference?: string;
   quotedAt?: string;
   quoteValidUntil?: string;
+  catalogWrite?: {
+    mode: "upsert";
+    setPreferred?: boolean;
+  };
 };
 
 type CancelPoLineRequestBody = {
@@ -1905,37 +1908,6 @@ export default function PurchaseOrderDetail() {
     },
   });
 
-  const catalogUpsertMutation = useMutation({
-    mutationFn: async (data: {
-      vendorId: number; productId: number; productVariantId: number;
-      vendorSku: string; pricing: PoLinePricingInput;
-      packSize: number; isPreferred: boolean;
-      quoteReference?: string;
-      quotedAt?: string;
-      quoteValidUntil?: string;
-    }) => {
-      const res = await fetch("/api/vendor-products/upsert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
-      return res.json();
-    },
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/vendor-products"] });
-      toast({
-        title: result.created ? "Added to catalog" : "Catalog updated",
-        description: result.created
-          ? "Vendor catalog entry created for this product."
-          : "Vendor catalog entry updated with latest cost.",
-      });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Catalog save failed", description: err.message, variant: "destructive" });
-    },
-  });
-
   const addLineMutation = useMutation({
     mutationFn: ({ idempotencyKey, requestUrl, body }: PoLineHttpCommand<AddPoLineRequestBody>) =>
       financialCommandFetchJson(requestUrl, {
@@ -1950,25 +1922,10 @@ export default function PurchaseOrderDetail() {
     retryDelay: financialCommandRetryDelay,
     onSuccess: (_result, command) => {
       addLineIntent.complete(command.idempotencyKey);
-      const commandBody = command.body;
-      const catalogData = saveToVendorCatalog && commandBody.pricing.basis !== "extended_total" && po?.vendorId && commandBody.expectedReceiveVariantId ? {
-        vendorId: po.vendorId,
-        productId: commandBody.productId,
-        productVariantId: commandBody.expectedReceiveVariantId,
-        vendorSku: commandBody.vendorSku || "",
-        pricing: commandBody.pricing,
-        ...populatedPoLineQuoteMetadata({
-          quoteReference: commandBody.quoteReference ?? null,
-          quotedAt: commandBody.quotedAt ?? null,
-          quoteValidUntil: commandBody.quoteValidUntil ?? null,
-        }),
-        // Catalog pack size describes the supplier's purchase UOM. Receiving
-        // configuration is intentionally independent.
-        packSize: vendorCatalogPackSizeForPricing(commandBody.pricing),
-        isPreferred: setAsPreferred,
-      } : null;
-
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      if (command.body.catalogWrite) {
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor-products"] });
+      }
       setShowAddLineDialog(false);
       setNewLine(createEmptyNewLine());
       setProductSearch("");
@@ -1981,8 +1938,6 @@ export default function PurchaseOrderDetail() {
       setSelectedCatalogEntry(null);
       setCatalogPricingUntouched(false);
       toast({ title: "Line added" });
-
-      if (catalogData) catalogUpsertMutation.mutate(catalogData);
     },
     onError: (err: Error, command) => {
       addLineIntent.fail(command.idempotencyKey, err);
@@ -4382,6 +4337,9 @@ export default function PurchaseOrderDetail() {
                   const quoteMetadata = lineQuoteMetadataEvaluation.metadata;
                   if (!pricing || !quoteMetadata || !po.updatedAt || catalogQuoteDateMissing) return;
                   const requestUrl = `/api/purchase-orders/${poId}/lines`;
+                  const pricingSource = selectedCatalogEntry && catalogPricingUntouched
+                    ? "vendor_catalog" as const
+                    : "manual" as const;
                   const body: AddPoLineRequestBody = {
                     productId: newLine.productId,
                     expectedReceiveVariantId: selectedReceiveVariantId,
@@ -4389,11 +4347,19 @@ export default function PurchaseOrderDetail() {
                     vendorProductId: selectedCatalogEntry?.id,
                     vendorSku: newLine.vendorSku || undefined,
                     description: newLine.description || undefined,
-                    pricingSource: selectedCatalogEntry && catalogPricingUntouched
-                      ? "vendor_catalog"
-                      : "manual",
+                    pricingSource,
                     pricing,
                     ...populatedPoLineQuoteMetadata(quoteMetadata),
+                    ...(saveToVendorCatalog &&
+                      pricingSource === "manual" &&
+                      pricing.basis !== "extended_total"
+                      ? {
+                          catalogWrite: {
+                            mode: "upsert" as const,
+                            setPreferred: setAsPreferred,
+                          },
+                        }
+                      : {}),
                     expectedPoUpdatedAt: po.updatedAt,
                   };
                   const idempotencyKey = addLineIntent.acquire({
@@ -4403,7 +4369,7 @@ export default function PurchaseOrderDetail() {
                   });
                   addLineMutation.mutate({ idempotencyKey, requestUrl, body });
                 }}
-                disabled={!selectedReceiveVariantId || !linePricingEvaluation.pricing || !lineQuoteMetadataEvaluation.metadata || catalogQuoteDateMissing || !po.updatedAt || addLineMutation.isPending || catalogUpsertMutation.isPending}
+                disabled={!selectedReceiveVariantId || !linePricingEvaluation.pricing || !lineQuoteMetadataEvaluation.metadata || catalogQuoteDateMissing || !po.updatedAt || addLineMutation.isPending}
               >
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
               </Button>

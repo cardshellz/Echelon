@@ -99,6 +99,46 @@ function mapPoLinePricingInput(line: any): PoLinePricingInput | undefined {
   return pricing as PoLinePricingInput;
 }
 
+function mapCatalogWriteDirective(line: any): PurchaseOrderLineInput["catalogWrite"] {
+  const raw = line?.catalog_write ?? line?.catalogWrite;
+  if (raw === undefined || raw === null) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new PurchasingError("catalog_write must be an object", 400, {
+      code: "PO_LINE_CATALOG_WRITE_INVALID",
+    });
+  }
+  const keys = Object.keys(raw);
+  if (keys.some((key) => key !== "mode" && key !== "set_preferred" && key !== "setPreferred")) {
+    throw new PurchasingError("catalog_write contains unsupported fields", 400, {
+      code: "PO_LINE_CATALOG_WRITE_INVALID",
+    });
+  }
+  if (raw.mode !== "upsert") {
+    throw new PurchasingError("catalog_write.mode must be 'upsert'", 400, {
+      code: "PO_LINE_CATALOG_WRITE_INVALID",
+    });
+  }
+  const setPreferred = raw.set_preferred ?? raw.setPreferred;
+  if (
+    raw.set_preferred !== undefined &&
+    raw.setPreferred !== undefined &&
+    raw.set_preferred !== raw.setPreferred
+  ) {
+    throw new PurchasingError("catalog_write preferred flags conflict", 400, {
+      code: "PO_LINE_CATALOG_WRITE_INVALID",
+    });
+  }
+  if (setPreferred !== undefined && typeof setPreferred !== "boolean") {
+    throw new PurchasingError("catalog_write.set_preferred must be a boolean", 400, {
+      code: "PO_LINE_CATALOG_WRITE_INVALID",
+    });
+  }
+  return {
+    mode: "upsert",
+    ...(setPreferred === undefined ? {} : { setPreferred }),
+  };
+}
+
 function mapPurchaseOrderLineInput(line: any, includeLineId: boolean): PurchaseOrderLineInput {
   const rawCents = line?.unit_cost_cents ?? line?.unitCostCents;
   const rawMills = line?.unit_cost_mills ?? line?.unitCostMills;
@@ -153,6 +193,7 @@ function mapPurchaseOrderLineInput(line: any, includeLineId: boolean): PurchaseO
       "quotedAt",
     ) ?? null,
     quoteValidUntil: line?.quote_valid_until ?? line?.quoteValidUntil ?? null,
+    catalogWrite: mapCatalogWriteDirective(line),
   };
 
   if (includeLineId) {
