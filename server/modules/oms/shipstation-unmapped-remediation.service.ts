@@ -44,6 +44,8 @@ interface RemediationContext {
   providerOrderId: number | null;
   providerOrderKey: string | null;
   trackingNumber: string | null;
+  authorityExternalShipmentRef: string | null;
+  authorityTrackingNumber: string | null;
 }
 
 export interface ShipStationProviderIdentityRepair {
@@ -56,10 +58,21 @@ export interface ShipStationProviderIdentityRepair {
   activeTrackingNumber: string;
 }
 
+export interface ShipStationOriginalPackageIdentityRepair {
+  wmsShipmentId: number;
+  providerShipmentId: number;
+  providerOrderId: number;
+  providerOrderKey: string;
+  currentTrackingNumber: string;
+  originalTrackingNumber: string;
+}
+
 interface ResolvedProviderShipment {
   context: RemediationContext;
   shipment: ShipStationShipment;
   identityRepair: ShipStationProviderIdentityRepair | null;
+  originalPackageIdentityRepair: ShipStationOriginalPackageIdentityRepair | null;
+  originalProviderShipment: ShipStationShipment | null;
 }
 
 interface PreviewOrderItem {
@@ -98,6 +111,7 @@ export interface ShipStationUnmappedPreview {
   externalShipmentRef: string;
   providerShipment: ShipStationShipment;
   providerIdentityRepair: ShipStationProviderIdentityRepair | null;
+  originalPackageIdentityRepair: ShipStationOriginalPackageIdentityRepair | null;
   orderItems: PreviewOrderItem[];
   shipments: PreviewShipment[];
 }
@@ -199,7 +213,9 @@ async function loadContext(
           END
         ) AS provider_order_id,
         COALESCE(candidate.shipstation_order_key, authority.shipstation_order_key, exception.external_order_key) AS provider_order_key,
-        COALESCE(candidate.tracking_number, exception.details->>'trackingNumber') AS tracking_number
+        COALESCE(candidate.tracking_number, exception.details->>'trackingNumber') AS tracking_number,
+        authority.external_fulfillment_id AS authority_external_fulfillment_id,
+        authority.tracking_number AS authority_tracking_number
       FROM wms.reconciliation_exceptions exception
       LEFT JOIN wms.outbound_shipments authority
         ON authority.id = exception.wms_shipment_id
@@ -225,6 +241,12 @@ async function loadContext(
       providerOrderId: optionalPositiveInteger(row.provider_order_id),
       providerOrderKey: row.provider_order_key == null ? null : String(row.provider_order_key),
       trackingNumber: row.tracking_number == null ? null : String(row.tracking_number),
+      authorityExternalShipmentRef: shipStationShipmentRefFromExternalFulfillmentId(
+        row.authority_external_fulfillment_id,
+      ),
+      authorityTrackingNumber: row.authority_tracking_number == null
+        ? null
+        : String(row.authority_tracking_number),
     };
   }
 
@@ -240,7 +262,9 @@ async function loadContext(
       ) AS external_shipment_ref,
       shipment.shipstation_order_id AS provider_order_id,
       shipment.shipstation_order_key AS provider_order_key,
-      shipment.tracking_number
+      shipment.tracking_number,
+      shipment.external_fulfillment_id AS authority_external_fulfillment_id,
+      shipment.tracking_number AS authority_tracking_number
     FROM wms.outbound_shipments shipment
     JOIN wms.orders wms_order ON wms_order.id = shipment.order_id
     WHERE shipment.id = ${target.shipmentId}
@@ -262,6 +286,12 @@ async function loadContext(
     providerOrderId: optionalPositiveInteger(row.provider_order_id),
     providerOrderKey: row.provider_order_key == null ? null : String(row.provider_order_key),
     trackingNumber: row.tracking_number == null ? null : String(row.tracking_number),
+    authorityExternalShipmentRef: shipStationShipmentRefFromExternalFulfillmentId(
+      row.authority_external_fulfillment_id,
+    ),
+    authorityTrackingNumber: row.authority_tracking_number == null
+      ? null
+      : String(row.authority_tracking_number),
   };
 }
 
@@ -283,6 +313,90 @@ function shipmentItemSignature(shipment: ShipStationShipment): string | null {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([sku, quantity]) => `${sku}:${quantity}`)
     .join("|");
+}
+
+function providerWmsItemSignature(shipment: ShipStationShipment): string | null {
+  const quantities = new Map<number, number>();
+  const items = shipment.shipmentItems ?? [];
+  if (items.length === 0) return null;
+  for (const item of items) {
+    const match = /^wms-item-([1-9][0-9]*)$/.exec(String(item.lineItemKey ?? ""));
+    const shipmentItemId = match ? Number(match[1]) : 0;
+    const quantity = Number(item.quantity);
+    if (
+      !Number.isSafeInteger(shipmentItemId)
+      || shipmentItemId <= 0
+      || !Number.isSafeInteger(quantity)
+      || quantity <= 0
+    ) {
+      return null;
+    }
+    quantities.set(shipmentItemId, (quantities.get(shipmentItemId) ?? 0) + quantity);
+  }
+  return [...quantities.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([shipmentItemId, quantity]) => `${shipmentItemId}:${quantity}`)
+    .join("|");
+}
+
+function resolveOriginalPackageIdentityRepair(
+  shipments: ShipStationShipment[],
+  providerShipment: ShipStationShipment,
+  context: RemediationContext,
+): {
+  repair: ShipStationOriginalPackageIdentityRepair;
+  providerShipment: ShipStationShipment;
+} | null {
+  if (
+    providerShipment.voidDate
+    || !String(providerShipment.shipDate ?? "").trim()
+    || (providerShipment.shipmentItems ?? []).length !== 0
+    || context.authorityExternalShipmentRef === null
+    || context.authorityExternalShipmentRef === String(providerShipment.shipmentId)
+  ) {
+    return null;
+  }
+  const currentTrackingNumber = normalizedTrackingNumber(
+    context.authorityTrackingNumber,
+  );
+  if (
+    !currentTrackingNumber
+    || currentTrackingNumber !== normalizedTrackingNumber(providerShipment.trackingNumber)
+  ) {
+    return null;
+  }
+  const originalProviderShipment = shipments.find(
+    (candidate) => String(candidate.shipmentId) === context.authorityExternalShipmentRef,
+  );
+  const originalTrackingNumber = normalizedTrackingNumber(
+    originalProviderShipment?.trackingNumber,
+  );
+  if (
+    !originalProviderShipment
+    || originalProviderShipment.voidDate
+    || !String(originalProviderShipment.shipDate ?? "").trim()
+    || !originalTrackingNumber
+    || originalTrackingNumber === currentTrackingNumber
+    || originalProviderShipment.orderKey !== providerShipment.orderKey
+    || providerWmsItemSignature(originalProviderShipment) === null
+  ) {
+    return null;
+  }
+  const providerOrderId = optionalPositiveInteger(originalProviderShipment.orderId);
+  if (providerOrderId === null || !String(originalProviderShipment.orderKey ?? "").trim()) {
+    return null;
+  }
+  return {
+    repair: {
+      wmsShipmentId: context.authorityShipmentId,
+      providerShipmentId: originalProviderShipment.shipmentId,
+      providerOrderId,
+      providerOrderKey: originalProviderShipment.orderKey,
+      currentTrackingNumber: providerShipment.trackingNumber,
+      originalTrackingNumber: originalProviderShipment.trackingNumber,
+    },
+    providerShipment: originalProviderShipment,
+  };
 }
 
 async function resolveProviderShipment(
@@ -309,8 +423,20 @@ async function resolveProviderShipment(
       `ShipStation physical shipment ${context.externalShipmentRef} was not found`,
     );
   }
+  const originalPackageResolution = resolveOriginalPackageIdentityRepair(
+    shipments,
+    providerShipment,
+    context,
+  );
+  const baseResolution: ResolvedProviderShipment = {
+    context,
+    shipment: providerShipment,
+    identityRepair: null,
+    originalPackageIdentityRepair: originalPackageResolution?.repair ?? null,
+    originalProviderShipment: originalPackageResolution?.providerShipment ?? null,
+  };
   if (!providerShipment.voidDate || context.candidateShipmentId === null) {
-    return { context, shipment: providerShipment, identityRepair: null };
+    return baseResolution;
   }
 
   const trackingNumber = normalizedTrackingNumber(context.trackingNumber);
@@ -321,7 +447,7 @@ async function resolveProviderShipment(
     || !supersededSignature
     || Number.isNaN(supersededVoidAt.getTime())
   ) {
-    return { context, shipment: providerShipment, identityRepair: null };
+    return baseResolution;
   }
   const activeMatches = shipments.filter((shipment) => (
     !shipment.voidDate
@@ -330,11 +456,11 @@ async function resolveProviderShipment(
     && shipmentItemSignature(shipment) === supersededSignature
   ));
   if (activeMatches.length !== 1) {
-    return { context, shipment: providerShipment, identityRepair: null };
+    return baseResolution;
   }
   const activeShipment = activeMatches[0];
   if (activeShipment.shipmentId === providerShipment.shipmentId) {
-    return { context, shipment: providerShipment, identityRepair: null };
+    return baseResolution;
   }
 
   const activeExternalShipmentRef = String(activeShipment.shipmentId);
@@ -346,7 +472,7 @@ async function resolveProviderShipment(
   `);
   const activeCandidates = resultRows(activeCandidateResult);
   if (activeCandidates.length !== 1) {
-    return { context, shipment: providerShipment, identityRepair: null };
+    return baseResolution;
   }
   const activeCandidate = activeCandidates[0];
   const activeCandidateShipmentId = optionalPositiveInteger(activeCandidate.id);
@@ -357,7 +483,7 @@ async function resolveProviderShipment(
     || String(activeCandidate.status) !== "voided"
     || normalizedTrackingNumber(activeCandidate.tracking_number) !== trackingNumber
   ) {
-    return { context, shipment: providerShipment, identityRepair: null };
+    return baseResolution;
   }
 
   const identityRepair: ShipStationProviderIdentityRepair = {
@@ -378,6 +504,8 @@ async function resolveProviderShipment(
     },
     shipment: activeShipment,
     identityRepair,
+    originalPackageIdentityRepair: null,
+    originalProviderShipment: null,
   };
 }
 
@@ -488,7 +616,12 @@ export async function getShipStationUnmappedPhysicalPreview(
     loadOrderItems(db, initialContext.wmsOrderId),
     loadShipments(db, initialContext.wmsOrderId),
   ]);
-  const { context, shipment: providerShipment, identityRepair } = resolvedProvider;
+  const {
+    context,
+    shipment: providerShipment,
+    identityRepair,
+    originalPackageIdentityRepair,
+  } = resolvedProvider;
   return {
     exceptionId: context.exceptionId,
     wmsOrderId: context.wmsOrderId,
@@ -498,6 +631,7 @@ export async function getShipStationUnmappedPhysicalPreview(
     externalShipmentRef: context.externalShipmentRef,
     providerShipment,
     providerIdentityRepair: identityRepair,
+    originalPackageIdentityRepair,
     orderItems,
     shipments,
   };
@@ -774,6 +908,50 @@ async function retireSupersededCandidate(
   `);
 }
 
+async function restoreOriginalPackageIdentity(
+  tx: any,
+  original: any,
+  identityRepair: ShipStationOriginalPackageIdentityRepair,
+  providerShipment: ShipStationShipment,
+): Promise<void> {
+  if (
+    Number(original.id) !== identityRepair.wmsShipmentId
+    || String(original.external_fulfillment_id) !== `shipstation_shipment:${identityRepair.providerShipmentId}`
+    || normalizedTrackingNumber(original.tracking_number) !== normalizedTrackingNumber(identityRepair.currentTrackingNumber)
+    || providerShipment.shipmentId !== identityRepair.providerShipmentId
+    || providerShipment.orderId !== identityRepair.providerOrderId
+    || providerShipment.orderKey !== identityRepair.providerOrderKey
+    || normalizedTrackingNumber(providerShipment.trackingNumber) !== normalizedTrackingNumber(identityRepair.originalTrackingNumber)
+  ) {
+    throw new Error("the original ShipStation package identity changed before it could be restored");
+  }
+  const providerSignature = providerWmsItemSignature(providerShipment);
+  const itemResult: any = await tx.execute(sql`
+    SELECT id, qty
+    FROM wms.outbound_shipment_items
+    WHERE shipment_id = ${identityRepair.wmsShipmentId}
+    ORDER BY id
+  `);
+  const wmsSignature = resultRows(itemResult)
+    .map((row) => `${Number(row.id)}:${Number(row.qty)}`)
+    .join("|");
+  if (!providerSignature || providerSignature !== wmsSignature) {
+    throw new Error("the original ShipStation package items no longer match WMS authority");
+  }
+  await tx.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET tracking_number = ${identityRepair.originalTrackingNumber},
+        shipstation_order_id = ${identityRepair.providerOrderId},
+        shipstation_order_key = ${identityRepair.providerOrderKey},
+        engine_order_ref = ${String(identityRepair.providerOrderId)},
+        engine_shipment_ref = ${identityRepair.providerOrderKey},
+        requires_review = false,
+        review_reason = 'shipstation_original_identity_restored',
+        updated_at = NOW()
+    WHERE id = ${identityRepair.wmsShipmentId}
+  `);
+}
+
 async function prepareMappedShipment(
   db: any,
   context: RemediationContext,
@@ -782,6 +960,8 @@ async function prepareMappedShipment(
   lines: PreparedLine[],
   input: ShipStationUnmappedReshipAdoptionInput,
   identityRepair: ShipStationProviderIdentityRepair | null,
+  originalPackageIdentityRepair: ShipStationOriginalPackageIdentityRepair | null,
+  originalProviderShipment: ShipStationShipment | null,
 ): Promise<number> {
   const operator = requiredOperator(input.operator);
   const originalShipmentId = positiveInteger(input.originalShipmentId, "originalShipmentId");
@@ -804,6 +984,8 @@ async function prepareMappedShipment(
 
     const originalResult: any = await tx.execute(sql`
       SELECT id, status, order_id, shipment_purpose,
+             external_fulfillment_id, tracking_number,
+             shipstation_order_id, shipstation_order_key,
              EXISTS (
                SELECT 1
                FROM wms.outbound_shipment_items original_item
@@ -826,6 +1008,17 @@ async function prepareMappedShipment(
     }
     if (!["shipped", "returned", "lost"].includes(String(original.status))) {
       throw new Error("original shipment must already have physically shipped");
+    }
+    if (originalPackageIdentityRepair) {
+      if (!originalProviderShipment) {
+        throw new Error("original ShipStation package evidence is unavailable");
+      }
+      await restoreOriginalPackageIdentity(
+        tx,
+        original,
+        originalPackageIdentityRepair,
+        originalProviderShipment,
+      );
     }
     if (reason === "lost" && String(original.status) !== "lost") {
       await tx.execute(sql`
@@ -982,6 +1175,7 @@ async function finishMappedShipment(
   shipment: ShipStationShipment,
   lines: PreparedLine[],
   identityRepair: ShipStationProviderIdentityRepair | null,
+  originalPackageIdentityRepair: ShipStationOriginalPackageIdentityRepair | null,
 ): Promise<void> {
   const operator = requiredOperator(input.operator);
   const resolution = "Operator authorized the provider package as a replacement shipment. Inventory moved; customer fulfillment and channel fulfillment were not repeated.";
@@ -993,6 +1187,7 @@ async function finishMappedShipment(
     candidateShipmentId,
     providerShipmentId: shipment.shipmentId,
     providerIdentityRepair: identityRepair,
+    originalPackageIdentityRepair,
     lineMappings: lines.map((line) => ({
       providerItemIndex: line.providerItemIndex,
       evidenceSource: line.evidenceSource,
@@ -1035,7 +1230,13 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
 ): Promise<Record<string, unknown>> {
   const initialContext = await loadContext(db, input);
   const resolvedProvider = await resolveProviderShipment(db, shipStation, initialContext);
-  const { context, shipment, identityRepair } = resolvedProvider;
+  const {
+    context,
+    shipment,
+    identityRepair,
+    originalPackageIdentityRepair,
+    originalProviderShipment,
+  } = resolvedProvider;
   if (shipment.voidDate) {
     throw new Error("a voided ShipStation shipment cannot be adopted as a reship");
   }
@@ -1058,6 +1259,8 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     lines,
     input,
     identityRepair,
+    originalPackageIdentityRepair,
+    originalProviderShipment,
   );
 
   const processed = await shipStation.processShipmentNotification(shipment);
@@ -1072,6 +1275,7 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     shipment,
     lines,
     identityRepair,
+    originalPackageIdentityRepair,
   );
   return {
     changed: true,
@@ -1079,5 +1283,6 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     candidateShipmentId,
     operator,
     providerIdentityRepaired: identityRepair !== null,
+    originalPackageIdentityRepaired: originalPackageIdentityRepair !== null,
   };
 }
