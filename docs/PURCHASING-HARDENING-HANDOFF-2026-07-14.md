@@ -20,7 +20,7 @@ slice: disposable PostgreSQL hardening gates in CI.
 - Deployment status: PR #921 is live on Heroku release v2381
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
-- Commit/PR status: disposable PostgreSQL CI slice is under local validation and has no PR yet
+- Commit/PR status: pushed in draft PR #922; both CI jobs were running at handoff update time
 
 Do not deploy this branch without owner approval.
 
