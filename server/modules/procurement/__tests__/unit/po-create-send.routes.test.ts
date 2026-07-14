@@ -207,6 +207,62 @@ describe("POST /api/purchase-orders (dual-mode)", () => {
     expect(body.po.id).toBe(7);
   });
 
+  it("maps the catalog directive without accepting duplicate catalog economics", async () => {
+    purchasing.createPurchaseOrderWithLines.mockResolvedValue({ id: 8, poNumber: "PO-2" });
+    const { status } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
+      vendor_id: 3,
+      lines: [{
+        product_id: 101,
+        expected_receive_variant_id: 202,
+        pricing_source: "manual",
+        pricing: {
+          basis: "per_purchase_uom",
+          purchase_uom: "case",
+          uom_quantity: 2,
+          pieces_per_uom: 12,
+          quoted_cost_mills_per_uom: 125_500,
+        },
+        quoted_at: "2026-07-14T00:00:00.000Z",
+        catalog_write: { mode: "upsert", set_preferred: true },
+      }],
+    });
+
+    expect(status).toBe(201);
+    const input = purchasing.createPurchaseOrderWithLines.mock.calls[0][0];
+    expect(input.lines[0]).toMatchObject({
+      productId: 101,
+      expectedReceiveVariantId: 202,
+      pricingSource: "manual",
+      catalogWrite: { mode: "upsert", setPreferred: true },
+      pricing: {
+        basis: "per_purchase_uom",
+        purchaseUom: "case",
+        uomQuantity: 2,
+        piecesPerUom: 12,
+        quotedCostMillsPerUom: 125_500,
+      },
+    });
+    expect(input.lines[0].quotedAt).toEqual(new Date("2026-07-14T00:00:00.000Z"));
+    expect(input.lines[0]).not.toHaveProperty("unitCostMills");
+    expect(input.lines[0]).not.toHaveProperty("packSize");
+  });
+
+  it("rejects conflicting catalog directive flags before service execution", async () => {
+    const { status, body } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
+      vendor_id: 3,
+      lines: [{
+        product_id: 101,
+        pricing: { basis: "per_piece", quantity_pieces: 2, unit_cost_mills: 1_000 },
+        quoted_at: "2026-07-14T00:00:00.000Z",
+        catalog_write: { mode: "upsert", set_preferred: true, setPreferred: false },
+      }],
+    });
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("PO_LINE_CATALOG_WRITE_INVALID");
+    expect(purchasing.createPurchaseOrderWithLines).not.toHaveBeenCalled();
+  });
+
   it("advance_to_sent=true also calls sendPurchaseOrder", async () => {
     purchasing.createPurchaseOrderWithLines.mockResolvedValue({ id: 7, poNumber: "PO-1" });
     purchasing.sendPurchaseOrder.mockResolvedValue({

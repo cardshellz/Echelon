@@ -5,23 +5,94 @@ This continues:
 - `docs/PURCHASING-HARDENING-HANDOFF-2026-07-12.md`
 - `docs/PURCHASING-HARDENING-HANDOFF-2026-07-13.md`
 
-The July 13 quote-pricing work is merged in PR #914. This document records the
-next local slice: durable transactional command results for ordinary PO-line
-mutations and browser retries that preserve one key per user intent.
+The July 13 quote-pricing work is merged in PR #914. PR #917 subsequently
+merged durable transactional command results for ordinary PO-line mutations
+and browser retries that preserve one key per user intent. This document now
+also records the next local slice: atomic PO plus optional vendor-catalog
+persistence.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/purchasing-command-idempotency-2026-07-14`
-- Base and current `origin/main`: `e7a389a7`
-- Base release fix: PR #913, Heroku `binpackingjs` startup recovery
-- Deployment status: not deployed
-- Migration 136 status: not applied
-- Commit/PR status: local changes; not committed, pushed, or opened as a PR
+- Branch: `codex/purchasing-po-catalog-atomic-2026-07-14`
+- Base and current `origin/main`: `60e67587`
+- Base hardening slice: merged PR #917
+- Deployment status: PR #917 is live on Heroku release v2377; this new slice is not deployed
+- Migration 136 status: applied and verified in production
+- Commit/PR status: pushed in draft PR #918; CI passed on the initial PR head
 
-Do not apply migration 136 or deploy this branch without owner approval. The
-application code depends on the new table, so the release-phase migration must
-succeed before new web dynos boot.
+Do not deploy this branch without owner approval.
+
+## PR #917 production verification
+
+Read-only checks after merge confirmed:
+
+- Heroku release v2377 runs commit `60e67587`.
+- The live application returned HTTP 200.
+- `_migrations` records `136_financial_command_results.sql`.
+- `public.financial_command_results` exists.
+- the immutable-row trigger `financial_command_results_update_guard` exists.
+- the ledger was empty at verification time, which is expected until a covered
+  command is used.
+
+No production data or configuration was intentionally changed during these
+checks.
+
+## Atomic PO plus vendor-catalog slice
+
+The three split browser flows are now one server command:
+
+- quick PO creation no longer creates the PO and then separately bulk-upserts
+  the catalog;
+- the full PO editor no longer writes the catalog before attempting the PO;
+- PO Detail no longer adds the line and then fire-and-forgets a catalog upsert.
+
+Each selected product line now sends only this directive:
+
+```json
+{ "catalogWrite": { "mode": "upsert", "setPreferred": false } }
+```
+
+The client does not duplicate catalog pricing, pack economics, product identity,
+or quote metadata in a second payload. The server derives all reusable catalog
+economics from the validated authoritative PO line and commits the catalog row,
+catalog audit event, PO header/line changes, PO event, and—on hardened direct-line
+routes—the durable command result inside one database transaction.
+
+Safety rules enforced at both HTTP and service boundaries:
+
+- catalog capture requires explicit reusable quote pricing;
+- quantity-specific `extended_total` quotes cannot be saved as catalog economics;
+- a real `quotedAt` value is required;
+- the directive is strict and accepts only `mode` plus optional `setPreferred`;
+- catalog capture is valid only when the current PO consumes the quote as
+  `manual`;
+- saving the quote for future automation never relabels the current PO line as
+  `vendor_catalog`;
+- the persisted catalog row id is linked back to the PO line without changing
+  that provenance;
+- deterministic catalog failures on durable direct-line commands are translated
+  into replayable rejected command results rather than transient retries.
+
+The existing catalog batch writer now accepts an internal caller transaction.
+Standalone catalog administration still opens its own transaction, while PO
+commands pass their existing transaction so there is no nested or split commit.
+
+### Validation evidence for the atomic slice
+
+Local results on July 14:
+
+- `npm.cmd run check`: passed
+- production build: passed; 3,595 client modules transformed and server bundle built
+- focused atomic gate: 5 files, 88 tests passed
+- procurement plus PO-editor regression gate: 77 files, 725 tests passed; 14 skipped
+- repository-wide gate: 397 files and 4,070 tests passed; 29 skipped; 8 todo
+- `git diff --check`: passed, with Windows line-ending notices only
+
+The unfiltered repository command still has the same four unrelated/environmental
+failures documented below: three PostgreSQL integration suites require
+`ECHELON_TEST_DATABASE_URL`, and the unchanged fulfillment-reconciliation test
+expects `on_hold` while unchanged production logic returns `partially_shipped`.
 
 ## Production recovery verified before this slice
 
@@ -36,7 +107,7 @@ Read-only checks on July 14 confirmed:
 This verifies recovery from the startup incident; it does not verify the local
 command-results implementation.
 
-## Implemented locally
+## PR #917 implementation (merged)
 
 ### Durable command-results ledger
 
@@ -153,37 +224,33 @@ with `DATABASE_URL` or `EXTERNAL_DATABASE_URL`, and cleans only its random probe
 actor-owned rows. This laptop has no Docker, `psql`, or configured test database, so
 all seven tests currently skip cleanly. They have not yet executed against PostgreSQL.
 
-## Rollout and observability requirements
+## Outstanding PR #917 operational follow-up
 
-Before production:
+Although PR #917 is live, these hardening follow-ups remain:
 
 1. Run the seven command-result integration tests against a disposable PostgreSQL 16
    database.
-2. Review the migration lock/DDL plan and confirm the Heroku release phase applies
-   migration 136 before web startup.
-3. Deploy during a monitored window and smoke-test fresh success, exact success
+2. Smoke-test fresh success, exact success
    replay, exact rejected replay, payload conflict, and active-lease retry.
-4. Monitor `claimed`, `retryable`, and `dead` rows plus lease age and attempt count.
-5. Add a scheduled retention purge for rows past `expires_at`; the schema has the
+3. Monitor `claimed`, `retryable`, and `dead` rows plus lease age and attempt count.
+4. Add a scheduled retention purge for rows past `expires_at`; the schema has the
    retention timestamp/index, but no purge worker exists yet.
-6. Add an operator view/replay procedure for dead commands before migrating more
+5. Add an operator view/replay procedure for dead commands before migrating more
    financial routes.
 
 Do not run the new integration suite against production.
 
 ## Recommended next implementation order
 
-1. Review and publish this command-results slice as one focused PR.
-2. Execute its real-PostgreSQL integration gate and deployment rehearsal.
-3. Make PO creation/update plus optional vendor-catalog save one server transaction.
-   The client should send one catalog directive, and the server should derive catalog
-   economics from the authoritative PO line rather than accept a duplicate payload.
-4. Add a durable PO-email outbox with immutable content snapshots, deduplication,
+1. Review and merge draft PR #918 for the atomic PO/catalog slice.
+2. Execute the still-outstanding real-PostgreSQL command-ledger integration gate.
+3. Add a durable PO-email outbox with immutable content snapshots, deduplication,
    leased workers, retry/backoff, provider message identity, dead-letter visibility,
    and operator replay. Current lifecycle `send` does not itself deliver email, while
    the separate email route performs a synchronous SMTP call and records history
    afterward.
-5. Migrate the next financial commands to the ledger in small reviewed groups.
+4. Migrate the next financial commands to the ledger in small reviewed groups.
+5. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
 6. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
 
 Keep manual quote pricing marked `manual` even when the same quote is optionally
@@ -194,6 +261,6 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. Never infer that migration 136 ran or that the PostgreSQL suite
-> passed from the local unit/build evidence. Do not mutate production without explicit
-> owner approval.
+> unverified item. Migration 136 is live, but never infer that the disposable
+> PostgreSQL integration suite passed from local unit/build evidence. Do not mutate
+> production without explicit owner approval.

@@ -165,6 +165,41 @@ describe("purchase-order line command validation boundary", () => {
   });
 
   it.each([
+    [
+      "an extended total",
+      {
+        ...addInput,
+        pricing: { basis: "extended_total", quantityPieces: 12, quotedTotalCents: 3_158 },
+        quotedAt: VERSION,
+        catalogWrite: { mode: "upsert" },
+      },
+      "catalogWrite",
+    ],
+    [
+      "an undated reusable quote",
+      {
+        ...addInput,
+        catalogWrite: { mode: "upsert" },
+      },
+      "quotedAt",
+    ],
+    [
+      "catalog provenance instead of a manual quote",
+      {
+        ...addInput,
+        pricingSource: "vendor_catalog",
+        vendorProductId: 91,
+        quotedAt: VERSION,
+        catalogWrite: { mode: "upsert" },
+      },
+      "catalogWrite",
+    ],
+  ])("rejects catalog capture with %s before DB access", async (_label, input, path) => {
+    const { db, commands } = commandBoundary();
+    await expectInvalidBeforeDb(() => commands.addLine(44, input), db, path);
+  });
+
+  it.each([
     ["productId", { ...addInput, productId: PG_INTEGER_MAX + 1 }, "productId"],
     [
       "piece quantity",
@@ -584,6 +619,17 @@ describe("purchase-order line command transaction invariants", () => {
       expect(totalsPosition).toBeGreaterThanOrEqual(0);
       expect(eventPosition).toBeGreaterThan(totalsPosition);
     }
+  });
+
+  it("persists requested catalog pricing inside the line transaction before the PO line write", () => {
+    for (const commandSource of [addLineSource, addBulkLinesSource]) {
+      const catalogPosition = commandSource.indexOf("await options.persistCatalogWrites(");
+      const lineWritePosition = commandSource.indexOf("tx.insert(purchaseOrderLines)");
+      expect(catalogPosition).toBeGreaterThanOrEqual(0);
+      expect(lineWritePosition).toBeGreaterThan(catalogPosition);
+    }
+    expect(addLineSource).toContain("effectiveInput = { ...input, vendorProductId }");
+    expect(addLineSource).toContain("normalizePricing(effectiveInput.pricing");
   });
 
   it("advances OCC timestamps monotonically at millisecond precision", () => {

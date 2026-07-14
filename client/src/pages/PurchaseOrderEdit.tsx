@@ -195,6 +195,10 @@ type LineDraft = {
   // modal on PO save. `null` for lines whose origin we don't know (e.g.
   // preloaded draft rows, legacy edit-mode rows).
   catalogOriginallyAbsent?: boolean | null;
+  catalogWrite?: {
+    mode: "upsert";
+    setPreferred?: boolean;
+  };
 };
 
 // Spec A follow-up: vendor-scoped catalog-search response.
@@ -762,47 +766,6 @@ export function resolvePreloadCatalogPricingIdentity(line: {
   };
 }
 
-export function applyCatalogUpsertMatchesToLines(
-  sourceLines: LineDraft[],
-  candidates: CatalogCandidate[],
-  upsertedCandidates: CatalogCandidate[],
-  result: { created?: any[]; updated?: any[] } | null | undefined,
-): LineDraft[] {
-  const upsertedClientIds = new Set(upsertedCandidates.map((candidate) => candidate.clientId));
-  const returnedRows = [
-    ...(Array.isArray(result?.created) ? result.created : []),
-    ...(Array.isArray(result?.updated) ? result.updated : []),
-  ];
-  return sourceLines.map((line) => {
-    if (!upsertedClientIds.has(line.clientId)) return line;
-    const candidate = candidates.find((item) => item.clientId === line.clientId);
-    const match = returnedRows.find(
-      (row: any) =>
-        Number(row?.productId) === Number(candidate?.productId ?? line.productId) &&
-        (row?.productVariantId ?? null) ===
-          (candidate?.productVariantId ?? line.expectedReceiveVariantId ?? line.productVariantId ?? null),
-    );
-    const vendorProductId = Number(match?.vendorProductId);
-    if (!Number.isSafeInteger(vendorProductId) || vendorProductId <= 0) {
-      // A successful bulk response must identify the reusable catalog row.
-      // Keep the line manual if an older/incomplete server omits that id; this
-      // avoids asserting vendor_catalog provenance without a verifiable link.
-      return {
-        ...line,
-        catalogOriginallyAbsent: false,
-        vendorProductId: null,
-        pricingSource: "manual",
-      };
-    }
-    return {
-      ...line,
-      catalogOriginallyAbsent: false,
-      vendorProductId,
-      pricingSource: "vendor_catalog",
-    };
-  });
-}
-
 function normalizedPricingPatch(
   pricingDraft: PoLinePricingEditorDraft,
   pricingSource?: PricingSource,
@@ -922,8 +885,6 @@ export default function PurchaseOrderEdit() {
   // back to the originating save handler via a ref-held Promise.
   const [catalogDialogOpen, setCatalogDialogOpen] = useState(false);
   const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
-  const [catalogSubmitting, setCatalogSubmitting] = useState(false);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
   const catalogResolverRef = useRef<((resolvedLines: LineDraft[]) => void) | null>(null);
 
   // Remember the initial snapshot so we only flip dirty on real changes.
@@ -1510,9 +1471,9 @@ export default function PurchaseOrderEdit() {
   // bucket that have a valid productVariantId and a non-negative cost). If
   // none: resolves true immediately so the caller proceeds to save. If any:
   // opens the dialog and waits for the user's decision. On "Add all" or
-  // "Add N selected" we POST to the bulk-upsert endpoint BEFORE returning;
-  // a failure there leaves the dialog open with an error and returns false,
-  // so the caller does NOT attempt the PO save.
+  // "Add N selected" we attach a catalog directive to the same PO command.
+  // The server derives reusable economics from the validated line quote and
+  // commits the catalog mapping and PO together.
   function computeCatalogCandidates(): CatalogCandidate[] {
     if (!selectedVendor) return [];
     const out: CatalogCandidate[] = [];
@@ -1549,21 +1510,19 @@ export default function PurchaseOrderEdit() {
     const candidates = computeCatalogCandidates();
     if (candidates.length === 0) return lines;
     setCatalogCandidates(candidates);
-    setCatalogError(null);
-    setCatalogSubmitting(false);
     setCatalogDialogOpen(true);
     return new Promise<LineDraft[]>((resolve) => {
       catalogResolverRef.current = resolve;
     });
   }
 
-  async function handleCatalogDecision(decision: AddToCatalogDecision) {
+  function handleCatalogDecision(decision: AddToCatalogDecision) {
     if (!selectedVendor) return;
     const resolver = catalogResolverRef.current;
     if (decision.action === "add-none") {
       const resolvedLines = lines.map((line) =>
         catalogCandidates.some((candidate) => candidate.clientId === line.clientId)
-          ? { ...line, catalogOriginallyAbsent: false }
+          ? { ...line, catalogOriginallyAbsent: false, catalogWrite: undefined }
           : line,
       );
       setLines(resolvedLines);
@@ -1581,7 +1540,7 @@ export default function PurchaseOrderEdit() {
     if (toSend.length === 0) {
       const resolvedLines = lines.map((line) =>
         catalogCandidates.some((candidate) => candidate.clientId === line.clientId)
-          ? { ...line, catalogOriginallyAbsent: false }
+          ? { ...line, catalogOriginallyAbsent: false, catalogWrite: undefined }
           : line,
       );
       setLines(resolvedLines);
@@ -1590,63 +1549,19 @@ export default function PurchaseOrderEdit() {
       resolver?.(resolvedLines);
       return;
     }
-    setCatalogSubmitting(true);
-    setCatalogError(null);
-    try {
-      const body = {
-        entries: toSend.map((c) => {
-          const sourceLine = lines.find((line) => line.clientId === c.clientId);
-          const pricingEvaluation = sourceLine?.pricingDraft
-            ? evaluatePoLinePricingDraft(sourceLine.pricingDraft)
-            : null;
-          if (
-            !pricingEvaluation?.pricing ||
-            pricingEvaluation.pricing.basis === "extended_total"
-          ) {
-            throw new Error(`${c.productName}: enter a reusable item or case/pack price.`);
-          }
-          return {
-            productId: c.productId,
-            productVariantId: c.productVariantId,
-            pricing: pricingEvaluation.pricing,
-            quoteReference: sourceLine?.quoteReference ?? null,
-            quotedAt: sourceLine?.quotedAt ?? null,
-            quoteValidUntil: sourceLine?.quoteValidUntil ?? null,
-          };
-        }),
-      };
-      const res = await fetch(
-        `/api/vendors/${selectedVendor.id}/catalog/bulk-upsert`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Idempotency-Key": genIdempotencyKey(),
-          },
-          body: JSON.stringify(body),
-        },
-      );
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error || "Catalog upsert failed");
+    const selectedIds = new Set(toSend.map((candidate) => candidate.clientId));
+    const candidateIds = new Set(catalogCandidates.map((candidate) => candidate.clientId));
+    const resolvedLines = lines.map((line) => {
+      if (!candidateIds.has(line.clientId)) return line;
+      if (selectedIds.has(line.clientId)) {
+        return { ...line, catalogWrite: { mode: "upsert" as const } };
       }
-      const resolvedLines = applyCatalogUpsertMatchesToLines(
-        lines,
-        catalogCandidates,
-        toSend,
-        data,
-      );
-      setLines(resolvedLines);
-      setCatalogDialogOpen(false);
-      setCatalogSubmitting(false);
-      catalogResolverRef.current = null;
-      resolver?.(resolvedLines);
-    } catch (e: any) {
-      setCatalogError(e?.message || "Catalog upsert failed");
-      setCatalogSubmitting(false);
-      // Leave the dialog open. The user can retry, pick "Add none", or cancel.
-      // Do NOT resolve the pending save promise yet — the caller is still awaiting.
-    }
+      return { ...line, catalogOriginallyAbsent: false, catalogWrite: undefined };
+    });
+    setLines(resolvedLines);
+    setCatalogDialogOpen(false);
+    catalogResolverRef.current = null;
+    resolver?.(resolvedLines);
   }
 
   // ── Save ──────────────────────────────────────────────────────────────
@@ -1723,6 +1638,7 @@ export default function PurchaseOrderEdit() {
               quoteReference: l.quoteReference,
               quotedAt: l.quotedAt,
               quoteValidUntil: l.quoteValidUntil,
+              ...(l.catalogWrite ? { catalogWrite: l.catalogWrite } : {}),
               // Packaging is an additive exact-cent amount and is not part of
               // the supplier's product quote normalization.
               packaging_cost_cents: l.packagingCostCents ?? 0,
@@ -1793,10 +1709,22 @@ export default function PurchaseOrderEdit() {
             serverLineIdByClientId.set(savedLine.clientId, lineId);
           }
         }
-        savedLines = linesToSave.map((line) => ({
-          ...line,
-          serverLineId: serverLineIdByClientId.get(line.clientId) ?? line.serverLineId,
-        }));
+        const savedLineByClientId = new Map<string, any>();
+        for (const savedLine of Array.isArray(result?.lines) ? result.lines : []) {
+          if (typeof savedLine?.clientId === "string") {
+            savedLineByClientId.set(savedLine.clientId, savedLine);
+          }
+        }
+        savedLines = linesToSave.map((line) => {
+          const savedLine = savedLineByClientId.get(line.clientId);
+          return {
+            ...line,
+            serverLineId: serverLineIdByClientId.get(line.clientId) ?? line.serverLineId,
+            vendorProductId: savedLine?.vendorProductId ?? line.vendorProductId,
+            catalogOriginallyAbsent: line.catalogWrite ? false : line.catalogOriginallyAbsent,
+            catalogWrite: undefined,
+          };
+        });
         loadedVersionRef.current = po?.updatedAt ? String(po.updatedAt) : null;
         setLines(savedLines);
       }
@@ -2481,8 +2409,8 @@ export default function PurchaseOrderEdit() {
         open={catalogDialogOpen}
         vendorName={selectedVendor?.name ?? ""}
         candidates={catalogCandidates}
-        submitting={catalogSubmitting}
-        error={catalogError}
+        submitting={false}
+        error={null}
         onDecide={handleCatalogDecision}
       />
     </div>

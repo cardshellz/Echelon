@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyCatalogUpsertMatchesToLines,
   catalogReceiveConfiguration,
   isExplicitVendorQuoteBasis,
   poLineQuoteMetadataError,
@@ -9,46 +8,6 @@ import {
   quoteMetadataOnlyLinePatch,
   resolvePreloadCatalogPricingIdentity,
 } from "../../../pages/PurchaseOrderEdit";
-
-function line(overrides: Record<string, unknown> = {}) {
-  return {
-    serverLineId: null,
-    clientId: "line-1",
-    lineType: "product",
-    description: "",
-    parentClientId: null,
-    productVariantId: null,
-    expectedReceiveVariantId: 22,
-    expectedReceiveUnitsPerVariant: 6,
-    productId: 11,
-    productName: "Widget",
-    sku: "W-1",
-    orderQty: 24,
-    pricingDraft: null,
-    hasExplicitPricing: true,
-    preserveLegacyPricing: false,
-    pricingSource: "manual",
-    quoteReference: null,
-    quotedAt: null,
-    quoteValidUntil: null,
-    unitCostMills: 1_000,
-    totalProductCostCents: 240,
-    packagingCostCents: 0,
-    vendorProductId: null,
-    catalogOriginallyAbsent: true,
-    ...overrides,
-  } as any;
-}
-
-const candidate = {
-  clientId: "line-1",
-  productId: 11,
-  productVariantId: 22,
-  productName: "Widget",
-  sku: "W-1",
-  unitCostCents: 10,
-  unitCostMills: 1_000,
-} as any;
 
 describe("PurchaseOrderEdit catalog identity", () => {
   it("keeps legacy preload economics unconfirmed", () => {
@@ -163,33 +122,4 @@ describe("PurchaseOrderEdit catalog identity", () => {
     });
   });
 
-  it("returns updated line data for the same save attempt after catalog upsert", () => {
-    const result = applyCatalogUpsertMatchesToLines(
-      [line()],
-      [candidate],
-      [candidate],
-      { created: [{ vendorProductId: 91, productId: 11, productVariantId: 22 }] },
-    );
-
-    expect(result[0]).toMatchObject({
-      vendorProductId: 91,
-      pricingSource: "vendor_catalog",
-      catalogOriginallyAbsent: false,
-    });
-  });
-
-  it("never asserts catalog provenance if the upsert response omits its row id", () => {
-    const result = applyCatalogUpsertMatchesToLines(
-      [line()],
-      [candidate],
-      [candidate],
-      { updated: [{ productId: 11, productVariantId: 22 }] },
-    );
-
-    expect(result[0]).toMatchObject({
-      vendorProductId: null,
-      pricingSource: "manual",
-      catalogOriginallyAbsent: false,
-    });
-  });
 });

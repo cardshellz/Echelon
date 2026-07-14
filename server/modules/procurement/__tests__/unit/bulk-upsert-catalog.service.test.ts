@@ -184,6 +184,39 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog validation", () => {
 });
 
 describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog flow", () => {
+  it("reuses a caller transaction so PO and catalog writes share one commit boundary", async () => {
+    const db = buildMockDb({
+      executeRows: [
+        [{ id: 42, active: 1 }],
+        [{ id: 1, is_active: true }],
+        [{ id: 11, product_id: 1, is_active: true }],
+        [{
+          id: 100,
+          product_id: 1,
+          product_variant_id: 11,
+          unit_cost_cents: 1299,
+          unit_cost_mills: 129900,
+          pricing_basis: "legacy_unknown",
+          pack_size: 12,
+          moq: 1,
+          is_preferred: 0,
+          is_active: 1,
+        }],
+      ],
+    });
+    const svc = createPurchasingService(db as any, buildMockStorage());
+
+    const result = await (svc.bulkUpsertVendorCatalog as any)(42, [
+      { productId: 1, productVariantId: 11, unitCostCents: 1299 },
+    ], "u1", db._tx);
+
+    expect(result.created).toEqual([
+      { vendorProductId: 100, productId: 1, productVariantId: 11 },
+    ]);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(db._tx.insert).toHaveBeenCalledTimes(1);
+  });
+
   it("inserts a new row when none exists and skips the update path", async () => {
     const db = buildMockDb({
       executeRows: [
