@@ -1005,19 +1005,25 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     // fetch by orderNumber too. Split children can exist while the parent
     // query still returns one shipment, so fallback-only misses real child
     // shipments.
-    const byOrderId = await apiRequest<{ shipments: ShipStationShipment[] }>(
-      "GET",
-      `/shipments?orderId=${orderId}&includeShipmentItems=true`,
-    );
-    const idResults = byOrderId.shipments || [];
     if (!opts?.orderNumber) {
-      return idResults;
+      const byOrderId = await apiRequest<{ shipments: ShipStationShipment[] }>(
+        "GET",
+        `/shipments?orderId=${orderId}&includeShipmentItems=true`,
+      );
+      return byOrderId.shipments || [];
     }
 
-    const byOrderNumber = await apiRequest<{ shipments: ShipStationShipment[] }>(
-      "GET",
-      `/shipments?orderNumber=${encodeURIComponent(opts.orderNumber)}&includeShipmentItems=true`,
-    );
+    const [byOrderId, byOrderNumber] = await Promise.all([
+      apiRequest<{ shipments: ShipStationShipment[] }>(
+        "GET",
+        `/shipments?orderId=${orderId}&includeShipmentItems=true`,
+      ),
+      apiRequest<{ shipments: ShipStationShipment[] }>(
+        "GET",
+        `/shipments?orderNumber=${encodeURIComponent(opts.orderNumber)}&includeShipmentItems=true`,
+      ),
+    ]);
+    const idResults = byOrderId.shipments || [];
     const merged = new Map<number, ShipStationShipment>();
     for (const shipment of idResults) {
       if (Number.isInteger(shipment.shipmentId)) {
