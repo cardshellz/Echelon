@@ -1,8 +1,5 @@
 import type { ShippingParcelSpec } from "../domain/shipment";
-import type {
-  ShippingRatePurpose,
-  ShippingSalesChannel,
-} from "../domain/shipping-channel";
+import type { ShippingRateContext } from "../domain/shipping-channel";
 import {
   quoteParcels,
   RATE_QUOTE_ENGINE,
@@ -11,10 +8,7 @@ import {
 
 export interface ShippingRateProviderRequest {
   /** Selects a rate book; it does not imply that channels share prices. */
-  rateContext: {
-    pricingChannel: ShippingSalesChannel;
-    purpose: ShippingRatePurpose;
-  };
+  rateContext: ShippingRateContext;
   originWarehouseId: number;
   destination: {
     country: string;
@@ -38,6 +32,7 @@ export const localRateTableShippingRateProvider: ShippingRateProvider = {
   provider: RATE_QUOTE_ENGINE,
   quote(input) {
     return quoteParcels({
+      rateContext: input.rateContext,
       originWarehouseId: input.originWarehouseId,
       destCountry: input.destination.country,
       destPostal: input.destination.postalCode,

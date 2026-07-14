@@ -118,6 +118,13 @@ interface WarehouseType {
   code: string;
 }
 
+interface RateBookSummary {
+  id: number;
+  code: string;
+  name: string;
+  status: string;
+}
+
 interface RateTableSummary {
   id: number;
   carrier: string;
@@ -126,6 +133,7 @@ interface RateTableSummary {
   status: string;
   effectiveFrom: string;
   effectiveTo: string | null;
+  rateBook: RateBookSummary | null;
   rowCount: number;
   zoneCount: number;
   minWeightGrams: number | null;
@@ -1594,6 +1602,7 @@ function rateTableStatusBadge(status: string) {
 const RATE_PREVIEW_ROW_LIMIT = 50;
 
 interface RateImportFormState {
+  rateBookCode: string;
   carrier: string;
   serviceCode: string;
   csv: string;
@@ -1601,7 +1610,13 @@ interface RateImportFormState {
 }
 
 function emptyRateImportForm(): RateImportFormState {
-  return { carrier: "usps", serviceCode: "", csv: "", replaceExisting: true };
+  return {
+    rateBookCode: "shopify-retail-default",
+    carrier: "usps",
+    serviceCode: "",
+    csv: "",
+    replaceExisting: true,
+  };
 }
 
 function RateTablesTab() {
@@ -1613,10 +1628,17 @@ function RateTablesTab() {
   const [preview, setPreview] = useState<ParseCsvResponse | null>(null);
   const [importWarnings, setImportWarnings] = useState<string[] | null>(null);
 
-  const { data: tablesData, isLoading } = useQuery<{ rateTables: RateTableSummary[] }>({
+  const { data: tablesData, isLoading } = useQuery<{
+    rateBooks: RateBookSummary[];
+    rateTables: RateTableSummary[];
+  }>({
     queryKey: ["/api/shipping/admin/rate-tables"],
-    queryFn: () => fetchJson<{ rateTables: RateTableSummary[] }>("/api/shipping/admin/rate-tables"),
+    queryFn: () => fetchJson<{
+      rateBooks: RateBookSummary[];
+      rateTables: RateTableSummary[];
+    }>("/api/shipping/admin/rate-tables"),
   });
+  const rateBooks = tablesData?.rateBooks || [];
   const tables = tablesData?.rateTables || [];
 
   const parseMutation = useMutation({
@@ -1630,6 +1652,7 @@ function RateTablesTab() {
 
   const importMutation = useMutation({
     mutationFn: (body: {
+      rateBookCode: string;
       carrier: string;
       serviceCode: string;
       replaceExisting: boolean;
@@ -1681,11 +1704,16 @@ function RateTablesTab() {
   const previewHasErrors =
     preview !== null && (preview.errors.length > 0 || preview.bandErrors.length > 0);
   const canImport =
-    preview !== null && !previewHasErrors && preview.rows.length > 0 && form.serviceCode.trim().length > 0;
+    preview !== null
+    && !previewHasErrors
+    && preview.rows.length > 0
+    && form.rateBookCode.length > 0
+    && form.serviceCode.trim().length > 0;
 
   const handleImport = () => {
     if (!preview || !canImport) return;
     importMutation.mutate({
+      rateBookCode: form.rateBookCode,
       carrier: form.carrier,
       serviceCode: form.serviceCode.trim(),
       replaceExisting: form.replaceExisting,
@@ -1726,6 +1754,7 @@ function RateTablesTab() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead>Rate book</TableHead>
                   <TableHead>Carrier</TableHead>
                   <TableHead>Service</TableHead>
                   <TableHead>Status</TableHead>
@@ -1738,6 +1767,12 @@ function RateTablesTab() {
               <TableBody>
                 {tables.map((table) => (
                   <TableRow key={table.id} className={table.status !== "active" ? "opacity-60" : undefined}>
+                    <TableCell>
+                      <div className="text-sm font-medium">{table.rateBook?.name ?? "Unassigned"}</div>
+                      <div className="font-mono text-[10px] text-muted-foreground">
+                        {table.rateBook?.code ?? "legacy"}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-sm uppercase font-medium">{table.carrier}</TableCell>
                     <TableCell className="font-mono text-xs">{table.serviceCode}</TableCell>
                     <TableCell>{rateTableStatusBadge(table.status)}</TableCell>
@@ -1783,6 +1818,24 @@ function RateTablesTab() {
             </div>
           ) : (
             <div className="space-y-4 py-2">
+              <div className="space-y-1.5">
+                <Label>Rate book</Label>
+                <Select
+                  value={form.rateBookCode}
+                  onValueChange={(value) => setForm((prev) => ({ ...prev, rateBookCode: value }))}
+                >
+                  <SelectTrigger className="h-10">
+                    <SelectValue placeholder="Select a rate book" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {rateBooks.map((book) => (
+                      <SelectItem key={book.id} value={book.code}>
+                        {book.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label>Carrier</Label>

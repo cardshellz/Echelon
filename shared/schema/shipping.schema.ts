@@ -22,8 +22,8 @@ import { warehouses } from "./warehouse.schema";
 // First-party shipping engine (quote plane). Design: docs/SHIPPING-ENGINE-DESIGN.md.
 // The fulfillment plane (wms.fulfillment_plans → shipment_requests → physical_shipments)
 // lives in fulfillment.schema.ts; pack plans here attach to shipment_requests rather
-// than duplicating that chain. The dropship module keeps its own vendor-scoped stack
-// (dropship.schema.ts) until it converges on these tables.
+// than duplicating that chain. Channel pricing converges here through independently
+// assigned rate books; channel billing policy remains outside.
 
 export const shippingSchema = pgSchema("shipping");
 
@@ -135,8 +135,55 @@ export const shippingVariantAttrs = shippingSchema.table("variant_shipping_attrs
 // with these rows as the timeout fallback — decided 2026-07-02)
 // ---------------------------------------------------------------------------
 
+export const shippingZoneSets = shippingSchema.table("zone_sets", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 80 }).notNull(),
+  name: varchar("name", { length: 160 }).notNull(),
+  status: varchar("status", { length: 30 }).notNull().default("draft"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_zone_set_code_idx").on(table.code),
+  check("shipping_zone_set_status_chk", sql`${table.status} IN ('draft', 'active', 'retired')`),
+]);
+
+export const shippingRateBooks = shippingSchema.table("rate_books", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 80 }).notNull(),
+  name: varchar("name", { length: 160 }).notNull(),
+  zoneSetId: integer("zone_set_id").notNull().references(() => shippingZoneSets.id, { onDelete: "restrict" }),
+  status: varchar("status", { length: 30 }).notNull().default("draft"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_rate_book_code_idx").on(table.code),
+  check("shipping_rate_book_status_chk", sql`${table.status} IN ('draft', 'active', 'retired')`),
+]);
+
+export const shippingRateBookAssignments = shippingSchema.table("rate_book_assignments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  rateBookId: integer("rate_book_id").notNull().references(() => shippingRateBooks.id, { onDelete: "restrict" }),
+  pricingChannel: varchar("pricing_channel", { length: 40 }).notNull(),
+  ratePurpose: varchar("rate_purpose", { length: 60 }).notNull(),
+  originWarehouseId: integer("origin_warehouse_id").references(() => warehouses.id, { onDelete: "cascade" }),
+  isActive: boolean("is_active").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_rate_book_assignment_global_idx")
+    .on(table.pricingChannel, table.ratePurpose)
+    .where(sql`${table.isActive} = true AND ${table.originWarehouseId} IS NULL`),
+  uniqueIndex("shipping_rate_book_assignment_warehouse_idx")
+    .on(table.pricingChannel, table.ratePurpose, table.originWarehouseId)
+    .where(sql`${table.isActive} = true AND ${table.originWarehouseId} IS NOT NULL`),
+]);
+
 export const shippingZoneRules = shippingSchema.table("zone_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  // Nullable during the expand phase so pre-deploy writers remain compatible.
+  zoneSetId: integer("zone_set_id").references(() => shippingZoneSets.id, { onDelete: "cascade" }),
   originWarehouseId: integer("origin_warehouse_id").notNull().references(() => warehouses.id, { onDelete: "cascade" }),
   destinationCountry: varchar("destination_country", { length: 2 }).notNull().default("US"),
   destinationRegion: varchar("destination_region", { length: 100 }),
@@ -147,11 +194,13 @@ export const shippingZoneRules = shippingSchema.table("zone_rules", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  index("shipping_zone_rules_lookup_idx").on(table.originWarehouseId, table.destinationCountry, table.postalPrefix, table.isActive),
+  index("shipping_zone_rules_lookup_idx").on(table.zoneSetId, table.originWarehouseId, table.destinationCountry, table.postalPrefix, table.isActive),
 ]);
 
 export const shippingRateTables = shippingSchema.table("rate_tables", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  // Nullable during the expand phase; all new writers provide a book explicitly.
+  rateBookId: integer("rate_book_id").references(() => shippingRateBooks.id, { onDelete: "restrict" }),
   carrier: varchar("carrier", { length: 50 }).notNull(),
   serviceCode: varchar("service_code", { length: 80 }).notNull(),
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
@@ -162,7 +211,7 @@ export const shippingRateTables = shippingSchema.table("rate_tables", {
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  index("shipping_rate_table_carrier_service_idx").on(table.carrier, table.serviceCode, table.status),
+  index("shipping_rate_table_carrier_service_idx").on(table.rateBookId, table.carrier, table.serviceCode, table.status),
 ]);
 
 export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {

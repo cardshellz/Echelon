@@ -64,7 +64,12 @@ function fakeDeps(input: {
     resolveVariantIdsBySku: async () => input.variantIdBySku ?? new Map(),
     loadPackingInputs: async () => input.packingInputs ?? new Map(),
     loadActiveBoxes: async () => input.boxes ?? [],
-    quoteParcels: async () => input.quotes ?? { zone: null, quotes: [], warnings: ["no rate tables"] },
+    quoteParcels: async () => input.quotes ?? {
+      rateBook: null,
+      zone: null,
+      quotes: [],
+      warnings: ["no rate tables"],
+    },
     persistSnapshot: async (row) => {
       snapshots.push(row as Record<string, unknown>);
     },
@@ -107,6 +112,7 @@ describe("runShadow", () => {
       packingInputs: new Map([[101, packingInput()]]),
       boxes: [BOX],
       quotes: {
+        rateBook: { id: 1, code: "shopify-retail-default" },
         zone: "Z4",
         quotes: [{ carrier: "USPS", serviceCode: "ga", totalCents: 899, currency: "USD", perParcelCents: [899] }],
         warnings: [],
@@ -200,7 +206,7 @@ describe("runShadow", () => {
       variantIdBySku: new Map([["SLV-100", 101]]),
       packingInputs: new Map([[101, packingInput()]]),
       boxes: [BOX],
-      quotes: { zone: "Z4", quotes: [{ carrier: "USPS", serviceCode: "ga", totalCents: 899, currency: "USD", perParcelCents: [899] }], warnings: [] },
+      quotes: { rateBook: { id: 1, code: "shopify-retail-default" }, zone: "Z4", quotes: [{ carrier: "USPS", serviceCode: "ga", totalCents: 899, currency: "USD", perParcelCents: [899] }], warnings: [] },
     });
     let calls = 0;
     const deps: Partial<ShadowDeps> = {
@@ -208,7 +214,7 @@ describe("runShadow", () => {
       quoteParcels: async () => {
         calls++;
         if (calls === 1) throw new Error("boom");
-        return { zone: "Z4", quotes: [{ carrier: "USPS", serviceCode: "ga", totalCents: 899, currency: "USD", perParcelCents: [899] }], warnings: [] };
+        return { rateBook: { id: 1, code: "shopify-retail-default" }, zone: "Z4", quotes: [{ carrier: "USPS", serviceCode: "ga", totalCents: 899, currency: "USD", perParcelCents: [899] }], warnings: [] };
       },
     };
 
