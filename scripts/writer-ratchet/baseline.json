@@ -373,18 +373,6 @@
   "membership.subscription_events": [
     "modules/subscriptions"
   ],
-  "operations.control_tower_flow_snapshots": [
-    "modules/operations"
-  ],
-  "operations.control_tower_observations": [
-    "modules/operations"
-  ],
-  "operations.control_tower_source_runs": [
-    "modules/operations"
-  ],
-  "operations.control_tower_work_items": [
-    "modules/operations"
-  ],
   "oms.fulfillment_routing_rules": [
     "modules/warehouse"
   ],
@@ -426,6 +414,18 @@
   "oms.webhook_retry_queue": [
     "modules/oms",
     "server/routes/shopify.routes.ts"
+  ],
+  "operations.control_tower_flow_snapshots": [
+    "modules/operations"
+  ],
+  "operations.control_tower_observations": [
+    "modules/operations"
+  ],
+  "operations.control_tower_source_runs": [
+    "modules/operations"
+  ],
+  "operations.control_tower_work_items": [
+    "modules/operations"
   ],
   "procurement.ap_payment_allocations": [
     "modules/procurement"
@@ -544,12 +544,14 @@
     "modules/shipping-engine"
   ],
   "shipping.pack_plan_parcel_items": [
-    "modules/shipping-engine"
+    "modules/cartonization"
   ],
   "shipping.pack_plan_parcels": [
+    "modules/cartonization",
     "modules/shipping-engine"
   ],
   "shipping.pack_plans": [
+    "modules/cartonization",
     "modules/shipping-engine"
   ],
   "shipping.quote_snapshots": [

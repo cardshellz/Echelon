@@ -1,7 +1,7 @@
 /**
  * Packing station (v2) — application layer.
  *
- * Closes the calibration loop opened by pack-plan.service (v1 pushed the
+ * Closes the calibration loop opened by the WMS cartonization adapter (v1 pushed the
  * predicted box into ShipStation notes): the pack station shows the pack
  * plan per order and the packer confirms the ACTUAL box + weight used per
  * parcel (migration 121 columns on shipping.pack_plan_parcels). When every
@@ -23,6 +23,7 @@ import {
   shippingPackPlanParcelItems,
   shippingPackPlanParcels,
   shippingPackPlans,
+  type ShippingCartonPlacement,
   type ShippingPackPlan,
   type ShippingPackPlanParcel,
 } from "@shared/schema";
@@ -89,6 +90,7 @@ export interface PackingParcelView {
   siocSku: string | null;
   estWeightGrams: number;
   billableWeightGrams: number;
+  placements: ShippingCartonPlacement[];
   actualBoxId: number | null;
   actualWeightGrams: number | null;
   weightDeltaGrams: number | null;
@@ -298,6 +300,7 @@ async function loadParcelViews(planIds: number[]): Promise<Map<number, PackingPa
       siocSku: parcel.siocProductVariantId != null ? row.siocSku : null,
       estWeightGrams: parcel.estWeightGrams,
       billableWeightGrams: parcel.billableWeightGrams,
+      placements: parcel.placements,
       actualBoxId: parcel.actualBoxId,
       actualWeightGrams: parcel.actualWeightGrams,
       weightDeltaGrams: weightDeltaGrams(parcel.estWeightGrams, parcel.actualWeightGrams),

@@ -28,7 +28,7 @@ describe("BasicDropshipCartonizationProvider", () => {
 
     const result = await provider.cartonize(makeRequest());
 
-    expect(result.engine).toEqual({ name: "cardshellz-cartonizer", version: "3.0.0" });
+    expect(result.engine).toEqual({ name: "cardshellz-cartonizer", version: "3.1.0" });
     expect(result.packages).toEqual([expect.objectContaining({
       productVariantId: 101,
       quantity: 1,

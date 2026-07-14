@@ -21,7 +21,7 @@ import {
 } from "../orders/shipment-rollup";
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-status";
-import { maybeGetPackInstruction } from "../shipping-engine/application/pack-plan.service";
+import { maybeGetPackInstruction } from "../cartonization/application/wms-pack-plan.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
 import { parseProviderAmountCents } from "../shipping/types";
 

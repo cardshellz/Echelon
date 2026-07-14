@@ -1,3 +1,4 @@
+// Contract tests live with the standalone cartonization module.
 import { describe, expect, it } from "vitest";
 import {
   cartonize,

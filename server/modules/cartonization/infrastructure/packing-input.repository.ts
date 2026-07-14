@@ -1,4 +1,6 @@
 /**
+ * Catalog and box-suite adapter for standalone cartonization.
+ *
  * Packing-input loaders — read-only application-layer repository.
  *
  * Bridges the catalog/shipping schemas to the pure cartonizer: variant
