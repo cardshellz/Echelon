@@ -8,19 +8,20 @@ This continues:
 The July 13 quote-pricing work is merged in PR #914. PR #917 subsequently
 merged durable transactional command results for ordinary PO-line mutations,
 PR #918 made optional PO/catalog capture atomic, and PR #921 added durable
-purchase-order email delivery. This document now also records the next local
-slice: disposable PostgreSQL hardening gates in CI.
+purchase-order email delivery, and PR #922 put the disposable PostgreSQL
+hardening suites in CI. The next local slice migrates cash-moving AP payment
+commands to the durable transactional command ledger.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/purchasing-postgres-ci-2026-07-14`
-- Base and current `origin/main`: `46edf8cc`
-- Base hardening slice: merged PR #921
+- Branch: `codex/purchasing-financial-commands-2026-07-14`
+- Base and current `origin/main`: `1c378717`
+- Base hardening slice: merged PR #922
 - Deployment status: PR #921 is live on Heroku release v2381
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
-- Commit/PR status: pushed in draft PR #922; the latest-main PostgreSQL and standard CI jobs passed
+- Commit/PR status: AP payment ledger slice is local and not yet published
 
 Do not deploy this branch without owner approval.
 
@@ -326,10 +327,51 @@ GitHub Actions run `29358756510`, on the branch after merging current `main`, pa
 This is the first recorded execution of these purchasing guarantees against real
 PostgreSQL 16 rather than injected repositories or skipped local integration tests.
 
+## AP payment transactional-command slice
+
+The cash-moving AP commands are the next small ledger group:
+
+- `POST /api/ap-payments`
+- `POST /api/ap-payments/:id/void`
+
+They no longer use the legacy response-cache idempotency middleware. Each route
+now creates the same actor/route/resource/payload command descriptor used by the
+PO-line commands and returns the durable `Idempotency-Replayed` contract.
+
+For a payment record, one caller-owned transaction now includes:
+
+- row locks for every allocated invoice, acquired in deterministic ID order;
+- vendor, invoice state, open-balance, duplicate-allocation, integer-money, and
+  allocation-total validation;
+- a transaction-scoped advisory lock around `PAY-YYYYMMDD-###` assignment;
+- the payment and allocation rows;
+- invoice balance/status and linked PO financial aggregate recomputation;
+- the required AP command audit event; and
+- the succeeded durable HTTP command result.
+
+Voiding similarly commits the payment reversal, invoice/PO recomputation, AP
+audit, and durable result together. Deterministic business failures become exact
+replayable 4xx results; unknown infrastructure failures remain retryable without
+persisting sensitive exception text.
+
+All three browser payment entry points now use the shared financial-command
+transport and intent store. An unchanged effective request retains one key across
+network ambiguity, unreadable responses, active-command conflicts, HTTP 5xx/429,
+and automatic retries. This corrects the previous pattern that generated a new
+key inside each mutation invocation.
+
+Current local evidence:
+
+- `npm.cmd run check`: passed
+- focused AP command, route, and atomic-side-effect gate: 20 tests passed
+- repository unit gate: 352 files and 3,392 tests passed; 14 skipped; 8 todo
+- production build: passed; 3,595 client modules transformed and server bundle built
+- `git diff --check`: passed, with Windows line-ending notices only
+
 ## Recommended next implementation order
 
-1. Review the PostgreSQL CI results and merge the focused disposable-database gate.
-2. Migrate the next financial commands to the ledger in small reviewed groups.
+1. Review and merge the AP payment transactional-command slice.
+2. Migrate invoice approve/dispute/void commands as the next reviewed ledger group.
 3. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
 4. Repair the broader named-schema integration harness before enabling its old suites.
 5. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
