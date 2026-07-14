@@ -7,8 +7,8 @@
  * offered when EVERY parcel priced under it — a parcel with no matching band
  * adds a warning and drops the combo (caller decides how to fall back).
  *
- * Design: docs/SHIPPING-ENGINE-DESIGN.md ("Rates Engine"). Not wired into
- * checkout yet — this is the rates core consumed by the callback/shadow PRs.
+ * Design: docs/SHIPPING-ENGINE-DESIGN.md ("Rates Engine"). This is the local
+ * deterministic rates core behind the runtime rate-provider adapter and shadow runs.
  *
  * Contract: never throws for data problems (no zone, no bands, bad postal) —
  * those degrade to { quotes: [], warnings }. Infrastructure failures (DB down)
