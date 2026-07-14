@@ -8,7 +8,7 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 
 > **Rate-book foundation — migration 137:** `shipping.zone_sets`, `shipping.rate_books`, and deterministic channel/warehouse assignments now own rate selection. Existing `shipping.*` zones and tables backfill into the active `shopify-retail-default` book. The live dropship `$8.00` provider/table is deliberately unchanged until a later import + dual-run proves identical vendor charges.
 
-> **Operator geography decision — migration 138:** rates are configured by US state and weight, with an optional 1-5 digit ZIP-prefix override. Operators never create or assign zones. The engine generates internal pricing-area keys and routing rules so rate selection and transit contracts remain reusable. ZIP overrides win over the matching state default; the longest ZIP prefix wins between overrides.
+> **Operator geography decision — migration 139:** rates are configured by US state and weight, with an optional 1-5 digit ZIP-prefix override. Operators never create or assign zones. The engine generates internal pricing-area keys and routing rules so rate selection and transit contracts remain reusable. ZIP overrides win over the matching state default; the longest ZIP prefix wins between overrides.
 
 ## Verified current state (all claims checked in-file or against prod 2026-07-02)
 

@@ -3,7 +3,7 @@ import { resolve } from "path";
 import { describe, expect, it } from "vitest";
 
 const migration = readFileSync(
-  resolve(process.cwd(), "migrations/138_shipping_state_zip_pricing.sql"),
+  resolve(process.cwd(), "migrations/139_shipping_state_zip_pricing.sql"),
   "utf8",
 );
 
