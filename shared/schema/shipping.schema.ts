@@ -35,6 +35,29 @@ export type ShippingBoxKind = (typeof SHIPPING_BOX_KINDS)[number];
 export const SHIPPING_SERVICE_LEVEL_CODES = ["standard", "expedited", "express"] as const;
 export type ShippingServiceLevelCode = (typeof SHIPPING_SERVICE_LEVEL_CODES)[number];
 
+export const SHIPPING_CARTON_ORIENTATIONS = [
+  "LWH",
+  "WLH",
+  "WHL",
+  "HWL",
+  "HLW",
+  "LHW",
+] as const;
+export type ShippingCartonOrientation = (typeof SHIPPING_CARTON_ORIENTATIONS)[number];
+
+export interface ShippingCartonPlacement {
+  productVariantId: number;
+  sku: string | null;
+  unitSequence: number;
+  orientation: ShippingCartonOrientation;
+  xMm: number;
+  yMm: number;
+  zMm: number;
+  lengthMm: number;
+  widthMm: number;
+  heightMm: number;
+}
+
 // ---------------------------------------------------------------------------
 // Box suite
 // ---------------------------------------------------------------------------
@@ -239,6 +262,11 @@ export const shippingPackPlanParcels = shippingSchema.table("pack_plan_parcels",
   lengthMm: integer("length_mm").notNull(),
   widthMm: integer("width_mm").notNull(),
   heightMm: integer("height_mm").notNull(),
+  // Verified per-unit positions and rotations produced by the cartonizer.
+  placements: jsonb("placements")
+    .$type<ShippingCartonPlacement[]>()
+    .notNull()
+    .default(sql`'[]'::jsonb`),
   // Pack-station confirmation (migration 121): the ACTUAL box + weight used.
   // Predicted vs actual on the same row is the cartonizer calibration dataset.
   actualBoxId: integer("actual_box_id").references(() => shippingBoxCatalog.id, { onDelete: "set null" }),
@@ -253,6 +281,7 @@ export const shippingPackPlanParcels = shippingSchema.table("pack_plan_parcels",
     OR (${table.boxId} IS NULL AND ${table.siocProductVariantId} IS NOT NULL)
   `),
   check("shipping_parcel_weights_chk", sql`${table.estWeightGrams} > 0 AND ${table.billableWeightGrams} > 0`),
+  check("shipping_parcel_placements_array_chk", sql`jsonb_typeof(${table.placements}) = 'array'`),
   check("shipping_parcel_actual_weight_chk", sql`${table.actualWeightGrams} IS NULL OR ${table.actualWeightGrams} > 0`),
 ]);
 
