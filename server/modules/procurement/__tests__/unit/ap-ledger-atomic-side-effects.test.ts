@@ -91,6 +91,7 @@ function makeSelectChain(result: unknown[]) {
   chain.innerJoin = vi.fn(() => chain);
   chain.leftJoin = vi.fn(() => chain);
   chain.where = vi.fn(() => chain);
+  chain.for = vi.fn(() => chain);
   chain.orderBy = vi.fn(() => chain);
   chain.limit = vi.fn(() => Promise.resolve(result));
   chain.offset = vi.fn(() => chain);
@@ -109,6 +110,7 @@ function makeUpdateChain() {
 function buildTx(selectResults: unknown[][]) {
   const tx: any = {
     select: vi.fn(() => makeSelectChain(selectResults.shift() ?? [])),
+    execute: vi.fn(() => Promise.resolve()),
     insert: vi.fn((table) => ({
       values: vi.fn(() => {
         if (table === tables.apPayments) {
@@ -136,6 +138,8 @@ describe("AP ledger atomic side effects", () => {
   it("records payment, allocations, invoice balance, and PO aggregate inside one transaction", async () => {
     const { recordPayment } = await import("../../ap-ledger.service");
     const tx = buildTx([
+      [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
+      [],
       [{ total: 2500 }],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ purchaseOrderId: 7 }],
@@ -156,6 +160,7 @@ describe("AP ledger atomic side effects", () => {
     expect(payment).toEqual({ id: 21, paymentNumber: "PAY-20260518-001" });
     expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
     expect(tx.insert).toHaveBeenCalledWith(tables.apPayments);
+    expect(tx.execute).toHaveBeenCalledOnce();
     expect(tx.insert).toHaveBeenCalledWith(tables.apPaymentAllocations);
     expect(tx.update).toHaveBeenCalledWith(tables.vendorInvoices);
     expect(tx.update).toHaveBeenCalledWith(tables.purchaseOrders);
@@ -163,9 +168,69 @@ describe("AP ledger atomic side effects", () => {
     expect(mocks.detectPastDue).toHaveBeenCalledWith(7);
   });
 
+  it("locks allocated invoices and rejects cross-vendor payments before inserting cash movement", async () => {
+    const { recordPayment } = await import("../../ap-ledger.service");
+    const tx = buildTx([
+      [{ id: 12, vendorId: 99, status: "approved", balanceCents: 2500 }],
+    ]);
+    mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
+
+    await expect(recordPayment({
+      vendorId: 4,
+      paymentDate: new Date("2026-05-18T12:00:00Z"),
+      paymentMethod: "ach",
+      totalAmountCents: 2500,
+      allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+      createdBy: "ops-user",
+    })).rejects.toMatchObject({
+      name: "ApLedgerError",
+      statusCode: 422,
+      details: { code: "AP_PAYMENT_ALLOCATION_VENDOR_MISMATCH" },
+    });
+
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
+
+  it("requires AP command audit persistence inside the caller-owned payment transaction", async () => {
+    const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
+    const tx = buildTx([
+      [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
+      [],
+      [{ total: 2500 }],
+      [{ invoicedAmountCents: 2500, status: "approved" }],
+      [{ purchaseOrderId: 7 }],
+      [{ invoicedAmountCents: 2500, paidAmountCents: 2500 }],
+      [{ financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null }],
+    ]);
+    const originalInsert = tx.insert;
+    tx.insert = vi.fn((table) => {
+      if (table === tables.auditEvents) {
+        return { values: vi.fn(() => Promise.reject(new Error("audit unavailable"))) };
+      }
+      return originalInsert(table);
+    });
+
+    await expect(executeApPaymentCommandInTransaction("record_payment", {
+      payment: {
+        vendorId: 4,
+        paymentDate: new Date("2026-05-18T12:00:00Z"),
+        paymentMethod: "ach",
+        totalAmountCents: 2500,
+        allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+        createdBy: "ops-user",
+      },
+    }, tx)).rejects.toThrow("audit unavailable");
+
+    expect(tx.insert).toHaveBeenCalledWith(tables.apPayments);
+    expect(tx.execute).toHaveBeenCalledOnce();
+    expect(tx.insert).toHaveBeenCalledWith(tables.auditEvents);
+  });
+
   it("returns operator-visible AP command outcome metadata", async () => {
     const { executeApLedgerCommand } = await import("../../ap-ledger.service");
     const tx = buildTx([
+      [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
+      [],
       [{ total: 2500 }],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ purchaseOrderId: 7 }],
@@ -173,9 +238,7 @@ describe("AP ledger atomic side effects", () => {
       [{ financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null }],
     ]);
     mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
-    mocks.db.select
-      .mockReturnValueOnce(makeSelectChain([]))
-      .mockReturnValueOnce(makeSelectChain([{ purchaseOrderId: 7 }]));
+    mocks.db.select.mockReturnValueOnce(makeSelectChain([{ purchaseOrderId: 7 }]));
 
     const result = await executeApLedgerCommand("record_payment", {
       payment: {
@@ -203,6 +266,8 @@ describe("AP ledger atomic side effects", () => {
     const { executeApLedgerCommand } = await import("../../ap-ledger.service");
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const tx = buildTx([
+      [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
+      [],
       [{ total: 2500 }],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ purchaseOrderId: 7 }],
@@ -210,9 +275,7 @@ describe("AP ledger atomic side effects", () => {
       [{ financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null }],
     ]);
     mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
-    mocks.db.select
-      .mockReturnValueOnce(makeSelectChain([]))
-      .mockReturnValueOnce(makeSelectChain([{ purchaseOrderId: 7 }]));
+    mocks.db.select.mockReturnValueOnce(makeSelectChain([{ purchaseOrderId: 7 }]));
     mocks.db.insert.mockReturnValueOnce({
       values: vi.fn(() => Promise.reject(new Error('relation "audit_events" does not exist'))),
     });
