@@ -19,7 +19,7 @@ records the next local slice: durable purchase-order email delivery.
 - Deployment status: PR #918 is live on Heroku release v2379; this new slice is not deployed
 - Migration 136 status: applied and verified in production
 - Migration 138 status: local only; not applied in production
-- Commit/PR status: durable PO-email outbox is under local validation and has no PR yet
+- Commit/PR status: pushed in draft PR #921; CI was queued at handoff update time
 
 Do not deploy this branch without owner approval.
 
