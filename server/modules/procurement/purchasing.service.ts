@@ -89,6 +89,7 @@ import {
   vendorCatalogQuoteUsability,
 } from "./purchase-order-line-commands";
 import { assessSupplierQuoteValidity } from "./supplier-quote-validity";
+import type { FinancialCommandDescriptor } from "../../platform/commands/transactional-command.service";
 
 const PG_INTEGER_MAX = 2_147_483_647;
 const MAX_INLINE_PO_LINES = 2_000;
@@ -366,6 +367,44 @@ export function createPurchasingService(
     input: unknown,
     userId?: string,
   ) => runLineCommand(() => lineCommands.cancelLine(lineId, input, userId));
+
+  const hardenedAddLineCommand = (
+    purchaseOrderId: number,
+    input: unknown,
+    userId: string | undefined,
+    descriptor: FinancialCommandDescriptor,
+  ) => runLineCommand(() => lineCommands.addLineCommand(
+    purchaseOrderId,
+    input,
+    userId,
+    descriptor,
+  ));
+
+  const hardenedAddBulkLinesCommand = (
+    purchaseOrderId: number,
+    input: unknown,
+    userId: string | undefined,
+    descriptor: FinancialCommandDescriptor,
+  ) => runLineCommand(() => lineCommands.addBulkLinesCommand(
+    purchaseOrderId,
+    input,
+    userId,
+    descriptor,
+  ));
+
+  const hardenedUpdateLineCommand = (
+    lineId: number,
+    input: unknown,
+    userId: string | undefined,
+    descriptor: FinancialCommandDescriptor,
+  ) => runLineCommand(() => lineCommands.updateLineCommand(lineId, input, userId, descriptor));
+
+  const hardenedCancelLineCommand = (
+    lineId: number,
+    input: unknown,
+    userId: string | undefined,
+    descriptor: FinancialCommandDescriptor,
+  ) => runLineCommand(() => lineCommands.cancelLineCommand(lineId, input, userId, descriptor));
 
   // ── Helpers ─────────────────────────────────────────────────────
 
@@ -7698,10 +7737,14 @@ export function createPurchasingService(
 
     // Lines
     addLine: hardenedAddLine,
+    addLineCommand: hardenedAddLineCommand,
     updateIncotermsAndCharges,
     addBulkLines: hardenedAddBulkLines,
+    addBulkLinesCommand: hardenedAddBulkLinesCommand,
     updateLine: hardenedUpdateLine,
+    updateLineCommand: hardenedUpdateLineCommand,
     deleteLine: hardenedCancelLine,
+    cancelLineCommand: hardenedCancelLineCommand,
     getPurchaseOrderLines: (poId: number) => storage.getPurchaseOrderLines(poId),
     getPurchaseOrderLineById: (id: number) => storage.getPurchaseOrderLineById(id),
 

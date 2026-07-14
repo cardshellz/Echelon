@@ -27,6 +27,26 @@ import {
 } from "./purchase-order-lifecycle.service";
 import { purchaseOrderDraftHeaderPatchSchema } from "./purchase-order-draft-header";
 import type { PoLinePricingInput } from "@shared/utils/po-line-pricing";
+import { financialCommandFromRequest } from "../../platform/commands/http-command";
+import {
+  FinancialCommandError,
+  type FinancialCommandResult,
+} from "../../platform/commands/transactional-command.service";
+
+function sendFinancialCommandResult(res: any, result: FinancialCommandResult): any {
+  res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+  return res.status(result.httpStatus).json(result.body);
+}
+
+function sendFinancialCommandError(res: any, error: FinancialCommandError): any {
+  for (const [name, value] of Object.entries(error.responseHeaders ?? {})) {
+    res.setHeader(name, value);
+  }
+  return res.status(error.statusCode).json({
+    error: error.message,
+    details: { code: error.code, ...(error.details ?? {}) },
+  });
+}
 
 function parseNullableDateInput(value: unknown, fieldLabel: string): Date | null | undefined {
   if (value === undefined) return undefined;
@@ -761,41 +781,93 @@ export function registerPurchaseOrderRoutes(app: Express) {
 
   app.post("/api/purchase-orders/:id/lines", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const line = await purchasing.addLine(Number(req.params.id), req.body, req.session.user?.id);
-      res.status(201).json(line);
+      const purchaseOrderId = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: req.session.user?.id,
+        routeTemplate: "/api/purchase-orders/:id/lines",
+        resourceKey: `purchase_order:${purchaseOrderId}`,
+        commandName: "purchase_order.line.add",
+      });
+      const result = await purchasing.addLineCommand(
+        purchaseOrderId,
+        req.body,
+        req.session.user?.id,
+        descriptor,
+      );
+      return sendFinancialCommandResult(res, result);
     } catch (error: any) {
+      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
-      res.status(500).json({ error: error.message });
+      return res.status(500).json({ error: error.message });
     }
   });
 
   app.post("/api/purchase-orders/:id/lines/bulk", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const lines = await purchasing.addBulkLines(Number(req.params.id), req.body, req.session.user?.id);
-      res.status(201).json({ lines });
+      const purchaseOrderId = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: req.session.user?.id,
+        routeTemplate: "/api/purchase-orders/:id/lines/bulk",
+        resourceKey: `purchase_order:${purchaseOrderId}`,
+        commandName: "purchase_order.line.bulk_add",
+      });
+      const result = await purchasing.addBulkLinesCommand(
+        purchaseOrderId,
+        req.body,
+        req.session.user?.id,
+        descriptor,
+      );
+      return sendFinancialCommandResult(res, result);
     } catch (error: any) {
+      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
-      res.status(500).json({ error: error.message });
+      return res.status(500).json({ error: error.message });
     }
   });
 
   app.patch("/api/purchase-orders/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const line = await purchasing.updateLine(Number(req.params.lineId), req.body, req.session.user?.id);
-      res.json(line);
+      const lineId = Number(req.params.lineId);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: req.session.user?.id,
+        routeTemplate: "/api/purchase-orders/lines/:lineId",
+        resourceKey: `purchase_order_line:${lineId}`,
+        commandName: "purchase_order.line.update",
+      });
+      const result = await purchasing.updateLineCommand(
+        lineId,
+        req.body,
+        req.session.user?.id,
+        descriptor,
+      );
+      return sendFinancialCommandResult(res, result);
     } catch (error: any) {
+      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
-      res.status(500).json({ error: error.message });
+      return res.status(500).json({ error: error.message });
     }
   });
 
   app.delete("/api/purchase-orders/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const line = await purchasing.deleteLine(Number(req.params.lineId), req.body, req.session.user?.id);
-      res.json({ success: true, line });
+      const lineId = Number(req.params.lineId);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: req.session.user?.id,
+        routeTemplate: "/api/purchase-orders/lines/:lineId",
+        resourceKey: `purchase_order_line:${lineId}`,
+        commandName: "purchase_order.line.cancel",
+      });
+      const result = await purchasing.cancelLineCommand(
+        lineId,
+        req.body,
+        req.session.user?.id,
+        descriptor,
+      );
+      return sendFinancialCommandResult(res, result);
     } catch (error: any) {
+      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
-      res.status(500).json({ error: error.message });
+      return res.status(500).json({ error: error.message });
     }
   });
 

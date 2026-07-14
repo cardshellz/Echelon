@@ -14,6 +14,12 @@ import {
   type NormalizedPoLinePricing,
   type PoLinePricingInput,
 } from "@shared/utils/po-line-pricing";
+import { createDrizzleFinancialCommandRepository } from "../../platform/commands/command-results.repository";
+import {
+  runTransactionalFinancialCommand,
+  type FinancialCommandDescriptor,
+  type FinancialCommandFailureDisposition,
+} from "../../platform/commands/transactional-command.service";
 
 const PG_INTEGER_MAX = 2_147_483_647;
 const MAX_QUOTE_CLOCK_SKEW_MS = 5 * 60 * 1_000;
@@ -186,6 +192,27 @@ export class PurchaseOrderLineCommandError extends Error {
   }
 }
 
+function classifyLineCommandFailure(error: unknown): FinancialCommandFailureDisposition {
+  if (
+    error instanceof PurchaseOrderLineCommandError
+    && error.statusCode >= 400
+    && error.statusCode <= 499
+  ) {
+    return {
+      kind: "rejected",
+      httpStatus: error.statusCode,
+      body: { error: error.message, details: error.details },
+      errorCode: String(error.details?.code ?? "PO_LINE_COMMAND_REJECTED"),
+      errorMessage: error.message,
+    };
+  }
+  return {
+    kind: "retryable",
+    errorCode: "PO_LINE_COMMAND_TRANSIENT_FAILURE",
+    errorMessage: "Purchase-order line command failed before its transaction committed.",
+  };
+}
+
 type CommandDb = {
   transaction<T>(callback: (tx: any) => Promise<T>): Promise<T>;
   select: (...args: any[]) => any;
@@ -218,6 +245,20 @@ function parseCommand<Schema extends z.ZodTypeAny>(
   const parsed = schema.safeParse(input);
   if (!parsed.success) throw validationError(parsed.error);
   return parsed.data as z.output<Schema>;
+}
+
+function parsePurchaseOrderId(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > PG_INTEGER_MAX) {
+    throw new PurchaseOrderLineCommandError("Purchase order id must be a positive integer", 400);
+  }
+  return value;
+}
+
+function parsePurchaseOrderLineId(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > PG_INTEGER_MAX) {
+    throw new PurchaseOrderLineCommandError("Purchase-order line id must be a positive integer", 400);
+  }
+  return value;
 }
 
 function sameInstant(actual: unknown, expected: Date): boolean {
@@ -797,84 +838,96 @@ async function emitEvent(
 }
 
 export function createPurchaseOrderLineCommands(db: CommandDb) {
-  async function addLine(purchaseOrderId: number, rawInput: unknown, userId?: string) {
-    if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0 || purchaseOrderId > PG_INTEGER_MAX) {
-      throw new PurchaseOrderLineCommandError("Purchase order id must be a positive integer", 400);
-    }
-    const input = parseCommand(addLineBodySchema, rawInput);
-    return db.transaction(async (tx) => {
-      const header = await lockHeader(tx, purchaseOrderId);
-      assertDraftHeader(header);
-      assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
-      await assertNoRecommendationOwnership(tx, purchaseOrderId);
+  const commandRepository = createDrizzleFinancialCommandRepository(db as any);
 
-      const context = await resolveLineContext(tx, header, input);
-      const normalized = normalizePricing(input.pricing as PoLinePricingInput);
-      const maxRows = await tx
-        .select({ maximum: sql<number>`COALESCE(MAX(${purchaseOrderLines.lineNumber}), 0)::int` })
-        .from(purchaseOrderLines)
-        .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
-      const values = lineValues(
-        purchaseOrderId,
-        Number(maxRows[0]?.maximum ?? 0) + 1,
-        input,
-        normalized,
-        context,
-      );
-      const insertedRows = await tx.insert(purchaseOrderLines).values(values).returning();
-      const line = insertedRows[0];
-      if (!line) throw new PurchaseOrderLineCommandError("Failed to insert PO line", 500);
-      const updatedPo = await updateHeaderTotals(tx, header, userId);
-      await emitEvent(tx, purchaseOrderId, "line_added", userId, {
-        expected_po_updated_at: input.expectedPoUpdatedAt.toISOString(),
-        after: snapshotLine(line),
-        resulting_po_updated_at: auditDate(updatedPo.updatedAt),
-      });
-      return line;
+  async function addLineInTransaction(
+    tx: any,
+    purchaseOrderId: number,
+    input: AddPurchaseOrderLineCommand,
+    userId?: string,
+  ) {
+    const header = await lockHeader(tx, purchaseOrderId);
+    assertDraftHeader(header);
+    assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
+    await assertNoRecommendationOwnership(tx, purchaseOrderId);
+
+    const context = await resolveLineContext(tx, header, input);
+    const normalized = normalizePricing(input.pricing as PoLinePricingInput);
+    const maxRows = await tx
+      .select({ maximum: sql<number>`COALESCE(MAX(${purchaseOrderLines.lineNumber}), 0)::int` })
+      .from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+    const values = lineValues(
+      purchaseOrderId,
+      Number(maxRows[0]?.maximum ?? 0) + 1,
+      input,
+      normalized,
+      context,
+    );
+    const insertedRows = await tx.insert(purchaseOrderLines).values(values).returning();
+    const line = insertedRows[0];
+    if (!line) throw new PurchaseOrderLineCommandError("Failed to insert PO line", 500);
+    const updatedPo = await updateHeaderTotals(tx, header, userId);
+    await emitEvent(tx, purchaseOrderId, "line_added", userId, {
+      expected_po_updated_at: input.expectedPoUpdatedAt.toISOString(),
+      after: snapshotLine(line),
+      resulting_po_updated_at: auditDate(updatedPo.updatedAt),
     });
+    return line;
+  }
+
+  async function addLine(purchaseOrderId: number, rawInput: unknown, userId?: string) {
+    const parsedPurchaseOrderId = parsePurchaseOrderId(purchaseOrderId);
+    const input = parseCommand(addLineBodySchema, rawInput);
+    return db.transaction((tx) => addLineInTransaction(tx, parsedPurchaseOrderId, input, userId));
+  }
+
+  async function addBulkLinesInTransaction(
+    tx: any,
+    purchaseOrderId: number,
+    input: AddBulkPurchaseOrderLinesCommand,
+    userId?: string,
+  ) {
+    const header = await lockHeader(tx, purchaseOrderId);
+    assertDraftHeader(header);
+    assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
+    await assertNoRecommendationOwnership(tx, purchaseOrderId);
+    const maxRows = await tx
+      .select({ maximum: sql<number>`COALESCE(MAX(${purchaseOrderLines.lineNumber}), 0)::int` })
+      .from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+    let lineNumber = Number(maxRows[0]?.maximum ?? 0) + 1;
+    const values = [];
+    for (const lineInput of input.lines) {
+      const context = await resolveLineContext(tx, header, lineInput);
+      const normalized = normalizePricing(lineInput.pricing as PoLinePricingInput);
+      values.push(lineValues(purchaseOrderId, lineNumber++, lineInput, normalized, context));
+    }
+    const lines = await tx.insert(purchaseOrderLines).values(values).returning();
+    if (lines.length !== values.length) {
+      throw new PurchaseOrderLineCommandError("Failed to insert every PO line", 500);
+    }
+    const updatedPo = await updateHeaderTotals(tx, header, userId);
+    await emitEvent(tx, purchaseOrderId, "lines_added", userId, {
+      expected_po_updated_at: input.expectedPoUpdatedAt.toISOString(),
+      after: lines.map(snapshotLine),
+      resulting_po_updated_at: auditDate(updatedPo.updatedAt),
+    });
+    return lines;
   }
 
   async function addBulkLines(purchaseOrderId: number, rawInput: unknown, userId?: string) {
-    if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0 || purchaseOrderId > PG_INTEGER_MAX) {
-      throw new PurchaseOrderLineCommandError("Purchase order id must be a positive integer", 400);
-    }
+    const parsedPurchaseOrderId = parsePurchaseOrderId(purchaseOrderId);
     const input = parseCommand(addBulkLinesBodySchema, rawInput);
-    return db.transaction(async (tx) => {
-      const header = await lockHeader(tx, purchaseOrderId);
-      assertDraftHeader(header);
-      assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
-      await assertNoRecommendationOwnership(tx, purchaseOrderId);
-      const maxRows = await tx
-        .select({ maximum: sql<number>`COALESCE(MAX(${purchaseOrderLines.lineNumber}), 0)::int` })
-        .from(purchaseOrderLines)
-        .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
-      let lineNumber = Number(maxRows[0]?.maximum ?? 0) + 1;
-      const values = [];
-      for (const lineInput of input.lines) {
-        const context = await resolveLineContext(tx, header, lineInput);
-        const normalized = normalizePricing(lineInput.pricing as PoLinePricingInput);
-        values.push(lineValues(purchaseOrderId, lineNumber++, lineInput, normalized, context));
-      }
-      const lines = await tx.insert(purchaseOrderLines).values(values).returning();
-      if (lines.length !== values.length) {
-        throw new PurchaseOrderLineCommandError("Failed to insert every PO line", 500);
-      }
-      const updatedPo = await updateHeaderTotals(tx, header, userId);
-      await emitEvent(tx, purchaseOrderId, "lines_added", userId, {
-        expected_po_updated_at: input.expectedPoUpdatedAt.toISOString(),
-        after: lines.map(snapshotLine),
-        resulting_po_updated_at: auditDate(updatedPo.updatedAt),
-      });
-      return lines;
-    });
+    return db.transaction((tx) => addBulkLinesInTransaction(tx, parsedPurchaseOrderId, input, userId));
   }
 
-  async function updateLine(lineId: number, rawInput: unknown, userId?: string) {
-    if (!Number.isSafeInteger(lineId) || lineId <= 0 || lineId > PG_INTEGER_MAX) {
-      throw new PurchaseOrderLineCommandError("Purchase-order line id must be a positive integer", 400);
-    }
-    const input = parseCommand(updateLineBodySchema, rawInput);
-    return db.transaction(async (tx) => {
+  async function updateLineInTransaction(
+    tx: any,
+    lineId: number,
+    input: UpdatePurchaseOrderLineCommand,
+    userId?: string,
+  ) {
       const parentRows = await tx
         .select({ purchaseOrderId: purchaseOrderLines.purchaseOrderId })
         .from(purchaseOrderLines)
@@ -1038,15 +1091,20 @@ export function createPurchaseOrderLineCommands(db: CommandDb) {
         resulting_po_updated_at: auditDate(updatedPo.updatedAt),
       });
       return updatedLine;
-    });
   }
 
-  async function cancelLine(lineId: number, rawInput: unknown, userId?: string) {
-    if (!Number.isSafeInteger(lineId) || lineId <= 0 || lineId > PG_INTEGER_MAX) {
-      throw new PurchaseOrderLineCommandError("Purchase-order line id must be a positive integer", 400);
-    }
-    const input = parseCommand(cancelLineBodySchema, rawInput);
-    return db.transaction(async (tx) => {
+  async function updateLine(lineId: number, rawInput: unknown, userId?: string) {
+    const parsedLineId = parsePurchaseOrderLineId(lineId);
+    const input = parseCommand(updateLineBodySchema, rawInput);
+    return db.transaction((tx) => updateLineInTransaction(tx, parsedLineId, input, userId));
+  }
+
+  async function cancelLineInTransaction(
+    tx: any,
+    lineId: number,
+    input: CancelPurchaseOrderLineCommand,
+    userId?: string,
+  ) {
       const parentRows = await tx
         .select({ purchaseOrderId: purchaseOrderLines.purchaseOrderId })
         .from(purchaseOrderLines)
@@ -1109,8 +1167,118 @@ export function createPurchaseOrderLineCommands(db: CommandDb) {
         resulting_po_updated_at: auditDate(updatedPo.updatedAt),
       });
       return cancelledLine;
+  }
+
+  async function cancelLine(lineId: number, rawInput: unknown, userId?: string) {
+    const parsedLineId = parsePurchaseOrderLineId(lineId);
+    const input = parseCommand(cancelLineBodySchema, rawInput);
+    return db.transaction((tx) => cancelLineInTransaction(tx, parsedLineId, input, userId));
+  }
+
+  async function addLineCommand(
+    purchaseOrderId: number,
+    rawInput: unknown,
+    userId: string | undefined,
+    descriptor: FinancialCommandDescriptor,
+  ) {
+    return runTransactionalFinancialCommand({
+      repository: commandRepository,
+      descriptor,
+      classifyFailure: classifyLineCommandFailure,
+      work: async (tx) => {
+        const parsedPurchaseOrderId = parsePurchaseOrderId(purchaseOrderId);
+        const input = parseCommand(addLineBodySchema, rawInput);
+        const line = await addLineInTransaction(tx, parsedPurchaseOrderId, input, userId);
+        return {
+          httpStatus: 201,
+          body: line,
+          resultType: "purchase_order_line",
+          resultId: line.id,
+        };
+      },
     });
   }
 
-  return { addLine, addBulkLines, updateLine, cancelLine };
+  async function addBulkLinesCommand(
+    purchaseOrderId: number,
+    rawInput: unknown,
+    userId: string | undefined,
+    descriptor: FinancialCommandDescriptor,
+  ) {
+    return runTransactionalFinancialCommand({
+      repository: commandRepository,
+      descriptor,
+      classifyFailure: classifyLineCommandFailure,
+      work: async (tx) => {
+        const parsedPurchaseOrderId = parsePurchaseOrderId(purchaseOrderId);
+        const input = parseCommand(addBulkLinesBodySchema, rawInput);
+        const lines = await addBulkLinesInTransaction(tx, parsedPurchaseOrderId, input, userId);
+        return {
+          httpStatus: 201,
+          body: { lines },
+          resultType: "purchase_order",
+          resultId: purchaseOrderId,
+        };
+      },
+    });
+  }
+
+  async function updateLineCommand(
+    lineId: number,
+    rawInput: unknown,
+    userId: string | undefined,
+    descriptor: FinancialCommandDescriptor,
+  ) {
+    return runTransactionalFinancialCommand({
+      repository: commandRepository,
+      descriptor,
+      classifyFailure: classifyLineCommandFailure,
+      work: async (tx) => {
+        const parsedLineId = parsePurchaseOrderLineId(lineId);
+        const input = parseCommand(updateLineBodySchema, rawInput);
+        const line = await updateLineInTransaction(tx, parsedLineId, input, userId);
+        return {
+          httpStatus: 200,
+          body: line,
+          resultType: "purchase_order_line",
+          resultId: line.id,
+        };
+      },
+    });
+  }
+
+  async function cancelLineCommand(
+    lineId: number,
+    rawInput: unknown,
+    userId: string | undefined,
+    descriptor: FinancialCommandDescriptor,
+  ) {
+    return runTransactionalFinancialCommand({
+      repository: commandRepository,
+      descriptor,
+      classifyFailure: classifyLineCommandFailure,
+      work: async (tx) => {
+        const parsedLineId = parsePurchaseOrderLineId(lineId);
+        const input = parseCommand(cancelLineBodySchema, rawInput);
+        const line = await cancelLineInTransaction(tx, parsedLineId, input, userId);
+        return {
+          httpStatus: 200,
+          body: { success: true, line },
+          resultType: "purchase_order_line",
+          resultId: line.id,
+        };
+      },
+    });
+  }
+
+  return {
+    addLine,
+    addBulkLines,
+    updateLine,
+    cancelLine,
+    addLineCommand,
+    addBulkLinesCommand,
+    updateLineCommand,
+    cancelLineCommand,
+  };
 }

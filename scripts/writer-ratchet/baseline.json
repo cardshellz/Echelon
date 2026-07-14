@@ -525,6 +525,9 @@
   "public.auto_draft_runs": [
     "modules/procurement"
   ],
+  "public.financial_command_results": [
+    "server/platform/commands/command-results.repository.ts"
+  ],
   "public.idempotency_keys": [
     "server/middleware/idempotency.ts"
   ],
