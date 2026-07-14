@@ -1,4 +1,4 @@
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, index, date, check, foreignKey } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, boolean, numeric, uniqueIndex, index, date, check, foreignKey, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -832,6 +832,43 @@ export const insertPoStatusHistorySchema = createInsertSchema(poStatusHistory).o
 
 export type InsertPoStatusHistory = z.infer<typeof insertPoStatusHistorySchema>;
 export type PoStatusHistory = typeof poStatusHistory.$inferSelect;
+
+// ===== PO EMAIL OUTBOX (durable vendor delivery) =====
+
+export const poEmailOutbox = procurementSchema.table("po_email_outbox", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "restrict" }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  status: varchar("status", { length: 24 }).default("queued").notNull(),
+  toEmail: varchar("to_email", { length: 320 }).notNull(),
+  ccEmail: varchar("cc_email", { length: 320 }),
+  subject: varchar("subject", { length: 500 }).notNull(),
+  htmlBody: text("html_body").notNull(),
+  textBody: text("text_body"),
+  messageId: varchar("message_id", { length: 255 }).notNull(),
+  attemptCount: integer("attempt_count").default(0).notNull(),
+  maxAttempts: integer("max_attempts").default(10).notNull(),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).defaultNow().notNull(),
+  leaseToken: varchar("lease_token", { length: 64 }),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  providerMessageId: varchar("provider_message_id", { length: 500 }),
+  providerResponse: varchar("provider_response", { length: 1000 }),
+  lastErrorCode: varchar("last_error_code", { length: 100 }),
+  lastErrorMessage: varchar("last_error_message", { length: 1000 }),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  deadLetteredAt: timestamp("dead_lettered_at", { withTimezone: true }),
+  createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+  replayOfId: integer("replay_of_id").references((): AnyPgColumn => poEmailOutbox.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("po_email_outbox_idempotency_idx").on(table.purchaseOrderId, table.idempotencyKey),
+  uniqueIndex("po_email_outbox_message_id_idx").on(table.messageId),
+  index("po_email_outbox_po_created_idx").on(table.purchaseOrderId, table.createdAt, table.id),
+]);
+
+export type PoEmailOutbox = typeof poEmailOutbox.$inferSelect;
 
 // ===== PO REVISIONS (field-level change audit) =====
 

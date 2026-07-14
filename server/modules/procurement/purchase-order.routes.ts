@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, Request, Response } from "express";
 import { procurementStorage } from "../procurement";
 import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
@@ -16,9 +16,9 @@ import * as poExceptionsService from "./po-exceptions.service";
 import { PoExceptionError } from "./po-exceptions.service";
 import * as apLedger from "./ap-ledger.service";
 import { renderPoHtml } from "./po-document";
-import * as emailService from "../notifications/email.service";
 import { inArray } from "drizzle-orm";
 import { db } from "../../db";
+import { z } from "zod";
 import { users as identityUsers } from "../../storage/base";
 import {
   buildPoAutoDraftActionPlan,
@@ -32,6 +32,49 @@ import {
   FinancialCommandError,
   type FinancialCommandResult,
 } from "../../platform/commands/transactional-command.service";
+import {
+  enqueuePurchaseOrderEmail,
+  listPurchaseOrderEmailDeliveries,
+  PoEmailOutboxError,
+  replayDeadLetterPurchaseOrderEmail,
+} from "./po-email-outbox.service";
+
+const poEmailRequestSchema = z.object({
+  toEmail: z.string().trim().email().max(320),
+  ccEmail: z.string().trim().email().max(320).optional(),
+  message: z.string().trim().max(10_000).optional(),
+}).strict();
+
+function getRequiredIdempotencyKey(req: Request): string {
+  const value = req.get("Idempotency-Key");
+  if (!value || value.length < 8 || value.length > 200) {
+    throw new PoEmailOutboxError(
+      "Idempotency-Key header must be between 8 and 200 characters",
+      400,
+      "INVALID_IDEMPOTENCY_KEY",
+    );
+  }
+  return value;
+}
+
+function parsePositivePoEmailId(value: unknown, label: string): number {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new PoEmailOutboxError(`${label} must be a positive integer`, 400, "INVALID_ID");
+  }
+  return id;
+}
+
+function sendPoEmailOutboxError(res: Response, error: unknown): Response {
+  if (error instanceof PoEmailOutboxError) {
+    return res.status(error.statusCode).json({
+      error: error.message,
+      details: { code: error.code },
+    });
+  }
+  const message = error instanceof Error ? error.message : "Email delivery request failed";
+  return res.status(500).json({ error: message });
+}
 
 function sendFinancialCommandResult(res: any, result: FinancialCommandResult): any {
   res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
@@ -1217,31 +1260,78 @@ export function registerPurchaseOrderRoutes(app: Express) {
     }
   });
 
-  app.post("/api/purchase-orders/:id/send-email", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      if (!emailService.isSmtpConfigured()) {
-        return res.status(503).json({
-          error: "Email is not configured. Add SMTP_HOST, SMTP_USER, SMTP_PASS, and SMTP_FROM to your .env file.",
-        });
+  app.get(
+    "/api/purchase-orders/:id/email-deliveries",
+    requirePermission("purchasing", "view"),
+    async (req, res) => {
+      try {
+        const poId = parsePositivePoEmailId(req.params.id, "Purchase order id");
+        const deliveries = await listPurchaseOrderEmailDeliveries(poId);
+        res.json({ deliveries });
+      } catch (error) {
+        sendPoEmailOutboxError(res, error);
       }
-      const { toEmail, ccEmail, message } = req.body;
-      if (!toEmail) return res.status(400).json({ error: "toEmail is required" });
+    },
+  );
 
-      const poId = Number(req.params.id);
-      await emailService.sendPurchaseOrder({ poId, toEmail, ccEmail, message });
+  app.post(
+    "/api/purchase-orders/:id/send-email",
+    requirePermission("purchasing", "edit"),
+    async (req, res) => {
+      try {
+        const poId = parsePositivePoEmailId(req.params.id, "Purchase order id");
+        const parsed = poEmailRequestSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: "Invalid email delivery request",
+            details: {
+              code: "INVALID_EMAIL_REQUEST",
+              fields: parsed.error.flatten().fieldErrors,
+            },
+          });
+        }
+        const result = await enqueuePurchaseOrderEmail({
+          purchaseOrderId: poId,
+          toEmail: parsed.data.toEmail,
+          ccEmail: parsed.data.ccEmail,
+          message: parsed.data.message,
+          idempotencyKey: getRequiredIdempotencyKey(req),
+          createdBy: req.session.user?.id ?? null,
+        });
+        res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+        res.status(202).json({
+          ok: true,
+          delivery: result.delivery,
+          replayed: result.replayed,
+        });
+      } catch (error) {
+        sendPoEmailOutboxError(res, error);
+      }
+    },
+  );
 
-      // Record in PO history
-      await storage.createPoStatusHistory({
-        purchaseOrderId: poId,
-        fromStatus: null,
-        toStatus: "email_sent",
-        changedBy: (req as any).user?.id ?? null,
-        notes: `Email sent to ${toEmail}${ccEmail ? `, cc: ${ccEmail}` : ""}`,
-      });
-
-      res.json({ ok: true });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post(
+    "/api/purchase-orders/:id/email-deliveries/:deliveryId/replay",
+    requirePermission("purchasing", "edit"),
+    async (req, res) => {
+      try {
+        const poId = parsePositivePoEmailId(req.params.id, "Purchase order id");
+        const deliveryId = parsePositivePoEmailId(req.params.deliveryId, "Delivery id");
+        const result = await replayDeadLetterPurchaseOrderEmail({
+          purchaseOrderId: poId,
+          deliveryId,
+          idempotencyKey: getRequiredIdempotencyKey(req),
+          createdBy: req.session.user?.id ?? null,
+        });
+        res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+        res.status(202).json({
+          ok: true,
+          delivery: result.delivery,
+          replayed: result.replayed,
+        });
+      } catch (error) {
+        sendPoEmailOutboxError(res, error);
+      }
+    },
+  );
 }
