@@ -2,13 +2,13 @@
 
 *Updated July 14, 2026 · rating core deployed and dormant; shipping-first channel convergence is in progress. Full design: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md).*
 
-> **July 14 shipping-first decision:** launch the shipping engine independently of cartonization. Shopify and future first-party websites consume runtime weight-based quotes. Echelon catalog variant weight is canonical; Shopify weight is a warned transition fallback. eBay continues to use eBay fulfillment policies for shopper checkout. Dropship calls the same shared base-rate service to calculate the vendor fulfillment charge, then applies dropship markup/insurance/wallet policy. Cartonization remains a standalone optional provider and a WMS test path until separately approved.
+> **July 14 shipping-first decision:** launch the shipping engine independently of cartonization. Shopify, future first-party websites, and dropship vendor fulfillment use one runtime rating engine with separately assigned rate books. Echelon catalog variant weight is canonical; Shopify weight is a warned transition fallback. eBay continues to use eBay fulfillment policies for shopper checkout. Dropship selects its own vendor rate book, then applies insurance/handling/wallet policy. Cartonization remains a standalone optional provider and a WMS test path until separately approved.
 
 > **July 13 update (PR #909 + follow-up):** standalone cartonizer v3.1 replaces aggregate volume feasibility with real non-overlapping 3D unit placement, all six rotations, persisted placement coordinates, geometry-driven splitting, and an automatic under-50-lb handling ceiling. Dropship and WMS test adapters can delegate to the same core. WMS enforcement is not active: manual plan generation and opt-in shadow execution are the only rollout paths, and neither may block or change fulfillment status.
 
 ## 0 · TL;DR
 
-The local zone/rate-table core, service levels, ETA data, callback shell, and snapshots are deployed but dormant. The engine is **not cutover-ready yet**: Shopify is being moved onto a channel-neutral runtime quote service, active rate/service configuration is still absent, comparison testing against Parcelify remains, and the existing dropship-specific rate provider still needs migration to the shared service. Variant dimensions are not a checkout requirement. Echelon catalog weights win; Shopify weights fill temporary gaps; a line missing both is excluded with warnings so checkout can continue at a deliberately low estimate.
+The local zone/rate-table core, service levels, ETA data, callback shell, and snapshots are deployed but dormant. The engine is **not cutover-ready yet**: Shopify is being moved onto a channel-neutral runtime quote service, active rate/service configuration is still absent, comparison testing against Parcelify remains, and shared rate books/assignments must be added before dropship's distinct vendor rates migrate into `shipping.*`. Variant dimensions are not a checkout requirement. Echelon catalog weights win; Shopify weights fill temporary gaps; a line missing both is excluded with warnings so checkout can continue at a deliberately low estimate.
 
 ## 1 · Vision & model
 
@@ -42,9 +42,11 @@ Shopify checkout ──POST──▶ /api/shipping/rates-callback/:token   (Carr
 | Shopify | Runtime quote | Shared shipping engine; member discount remains the Shopify Function |
 | First-party/internal website | Runtime quote | Shared shipping engine, including first-party benefit policy |
 | eBay | External marketplace policy | eBay channel adapter selects eBay fulfillment policies |
-| Dropship | Runtime base quote for vendor charge | Shared engine calculates base shipping; dropship applies markup/insurance and charges the vendor wallet |
+| Dropship | Runtime vendor-fulfillment quote | Shared engine selects the dropship rate book; dropship applies insurance/handling and charges the vendor wallet |
 
-**Current-state exception:** dropship still calls `DropshipShippingRateProvider` backed by dropship-specific tables. That is duplicate rating logic and must be migrated onto `shipment-quote.service.ts`; only the dropship charge-policy and wallet steps remain dropship-owned.
+**Rate-book rule:** sharing the engine does not mean sharing prices. Shopify retail and dropship vendor fulfillment resolve independently assigned books. A dropship order sourced from eBay still selects the dropship vendor book; eBay's policy controls only the buyer-facing charge.
+
+**Current-state exception:** dropship still calls `DropshipShippingRateProvider` backed by `dropship.dropship_rate_*` and duplicate zone tables. Migrate those distinct prices into a dropship-assigned book in `shipping.*`, delegate calculation to `shipment-quote.service.ts`, and retain dropship's configuration UI plus insurance/handling/wallet steps.
 
 ### Fulfillment plane (warehouse-facing)
 
@@ -67,7 +69,7 @@ Everything lives in `server/modules/shipping-engine/` (hexagonal layout), regist
 | domain | `domain/eta.ts` | Delivery window = warehouse cutoff/timezone + transit_matrix business days |
 | domain | `domain/rate-table-import.ts` | CSV grid import parsing/validation |
 | domain | `domain/shipping-channel.ts`, `domain/shipment.ts` | Channel ownership/modes plus canonical shipment-line and parcel contracts |
-| application | `application/shipment-quote.service.ts` | Runtime quote orchestration over injected parcel and rate providers; rejects external-policy channels such as eBay checkout |
+| application | `application/shipment-quote.service.ts` | Runtime quote orchestration over injected parcel and rate providers; sends pricing channel + rate purpose for future rate-book selection and rejects external-policy channels such as eBay checkout |
 | application | `application/shipment-weight.service.ts` | Resolves canonical Echelon weight, warned channel fallback, or missing-weight undercharge |
 | infrastructure | `infrastructure/catalog-weight.repository.ts` | One-query exact-SKU lookup of `catalog.product_variants.weight_grams` |
 | application | `application/weight-only-parcel.provider.ts` | One shipment from resolved weights, no boxes or dimensions |
@@ -119,7 +121,7 @@ Variant fulfillment data lives on the catalog (`ProductDetail → Fulfillment ch
 
 Each step is independently reversible; nothing reaches customers until step 5.
 
-1. **IN PROGRESS — Separate shipping from packing:** land the shared shipment, Echelon-weight resolver, parcel-provider, rate-provider, and channel-mode contracts. Shopify and dropship can consume runtime base quotes; eBay shopper checkout remains policy-owned.
+1. **IN PROGRESS — Separate shipping from packing:** land the shared shipment, Echelon-weight resolver, parcel-provider, rate-provider, and pricing-context contracts. Shopify and dropship can consume runtime quotes from independently assigned books; eBay shopper checkout remains policy-owned.
 2. **NEXT — Improve Echelon weight coverage:** resolve active variants with no `catalog.product_variants.weight_grams` and verify representative carts. Shopify weight is a warned fallback during transition; missing both sources is recorded and underquoted by policy, not blocked.
 3. **NEXT — Finish base-rate configuration:** validate the draft US-48/HIPRAK rows, service-method mappings, and the exact Parcelify rules that must be preserved. Keep tables and service levels inactive.
 4. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
@@ -130,7 +132,7 @@ Each step is independently reversible; nothing reaches customers until step 5.
    - Attach the new carrier service to the US zones in the delivery profiles alongside Parcelify; verify rate parity in a real checkout; then remove Parcelify from the zones.
    - **Open item before uninstalling Parcelify entirely:** confirm how CarrierService (third-party calculated rates) is enabled on the current Shopify plan — Parcelify being installed may be what grants it today.
 6. **Decommission Parcelify** once the engine has served checkout cleanly for an agreed soak period.
-7. **After checkout is stable:** expose the runtime service to first-party websites, migrate the dropship vendor-charge calculation from its duplicate rate provider to the shared service, keep eBay fulfillment-policy selection in its adapter, and advance cartonization through its separate test/shadow program.
+7. **After checkout is stable:** add `shipping.*` rate books/assignments, expose the runtime service to first-party websites, migrate dropship's distinct vendor rates from its duplicate provider/schema into its assigned book, keep eBay fulfillment-policy selection in its adapter, and advance cartonization through its separate test/shadow program.
 
 > **Rollback at any point:** deactivate service levels (response becomes `{rates: []}`) or unset `SHIPPING_CALLBACK_TOKEN` (endpoint 404s) and re-attach Parcelify to the zones.
 
@@ -138,7 +140,7 @@ Each step is independently reversible; nothing reaches customers until step 5.
 
 - **Fail-empty, never fail-wrong:** the callback returns `{rates: []}` on any parse/zone/band/timeout failure. An empty response blocks checkout for that address rather than mispricing it. Keep that property.
 - **Sale over perfect weight data:** every positive physical-line weight contributes `unitWeight × quantity`; SKU-less lines are retained. Missing weights contribute zero, produce snapshot warnings, and never block checkout by themselves. An all-missing cart uses a 1g rate-band floor.
-- **One base-rate calculation:** Shopify checkout, first-party websites, and the dropship vendor fulfillment charge use the shared runtime service. eBay shopper checkout remains external-policy managed. Dropship owns only post-quote markup/insurance/wallet behavior.
+- **One rating engine, separate books:** Shopify checkout, first-party websites, and dropship vendor fulfillment use the shared runtime service but may resolve different prices. eBay shopper checkout remains external-policy managed. Dropship retains vendor-rate configuration plus post-quote insurance/handling/wallet behavior.
 - **Canonical weight order:** Echelon `catalog.product_variants.weight_grams` wins. Shopify request weight is a warned transition fallback. Missing both contributes zero and never blocks checkout by itself.
 - **Cartonization is replaceable and optional:** no Shopify callback or WMS status transition may require dimensions, a box, or a verified carton plan during the shipping-first rollout.
 - **When cartonization is invoked, fit means placement:** every non-SIOC packed unit must have an in-bounds, non-overlapping placement. It still uses no arbitrary unit cap, and the ordinary-carton handling ceiling remains 22,679 g.
@@ -166,7 +168,7 @@ Each step is independently reversible; nothing reaches customers until step 5.
 1. **Expedited/Express service levels** — attach methods + rate tables, activate per level.
 2. **Calibration loop** — with the v2 key: scheduled quoted-vs-actual + live-rate comparison; adjust bands from `quote_snapshots`.
 3. **First-party quote API and benefit policy** — reuse the runtime service with authenticated Shellz Club benefit context.
-4. **Dropship shared-rate migration** — replace `DropshipShippingRateProvider`/duplicate tables with the shared base-rate service, then apply dropship markup, insurance, snapshot, and wallet policy to that result.
+4. **Dropship shared-engine migration** — add rate books/assignments in `shipping.*`, import the existing dropship vendor rates as a separate book, replace `DropshipShippingRateProvider`/duplicate tables with the shared engine, then apply dropship insurance, handling, snapshot, and wallet policy.
 5. **Pack-station/cartonization rollout** — run explicit plans first, then opt-in shadow observation; capture actual box, weight, and cost before proposing enforcement.
 6. **Multi-origin routing** — schema supports per-warehouse zone rules and rate rows; the callback currently prices from one origin (env-selected).
 7. **Member Express benefit** — express for all, discounted per plan via the Function (member-exclusive rates are impossible: CarrierService sees no customer; Functions can only reduce existing rates).

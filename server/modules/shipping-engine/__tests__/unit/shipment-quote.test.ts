@@ -169,6 +169,10 @@ describe("quoteShipment", () => {
 
     expect(result.ok).toBe(true);
     expect(observe).toHaveBeenCalledWith(expect.objectContaining({
+      rateContext: {
+        pricingChannel: "shopify",
+        purpose: "customer_checkout",
+      },
       originWarehouseId: 1,
       destination: { country: "US", postalCode: "16066" },
       parcels: [expect.objectContaining({ billableWeightGrams: 400 })],
@@ -197,7 +201,7 @@ describe("quoteShipment", () => {
     }));
   });
 
-  it("allows dropship to reuse base rates for the vendor fulfillment charge", async () => {
+  it("selects the dropship vendor-fulfillment rate context", async () => {
     const observe = vi.fn();
     const result = await quoteShipment({
       channel: "dropship",
@@ -210,7 +214,12 @@ describe("quoteShipment", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(observe).toHaveBeenCalledOnce();
+    expect(observe).toHaveBeenCalledWith(expect.objectContaining({
+      rateContext: {
+        pricingChannel: "dropship",
+        purpose: "vendor_fulfillment_charge",
+      },
+    }));
   });
 
   it("refuses runtime rating for eBay's external checkout policy", async () => {

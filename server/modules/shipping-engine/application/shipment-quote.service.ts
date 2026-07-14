@@ -47,8 +47,8 @@ export async function quoteShipment(
   request: ShipmentQuoteRequest,
   deps: ShipmentQuoteDependencies,
 ): Promise<ShipmentQuoteResult> {
+  const profile = getShippingChannelProfile(request.channel);
   if (!usesRuntimeShippingQuotes(request.channel)) {
-    const profile = getShippingChannelProfile(request.channel);
     return {
       ok: false,
       code: "CHANNEL_POLICY_MANAGED",
@@ -64,6 +64,10 @@ export async function quoteShipment(
   }
 
   const rates = await deps.rateProvider.quote({
+    rateContext: {
+      pricingChannel: request.channel,
+      purpose: profile.ratePurpose,
+    },
     originWarehouseId: request.originWarehouseId,
     destination: request.destination,
     parcels: parcelResult.plan.parcels,

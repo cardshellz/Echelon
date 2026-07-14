@@ -28,6 +28,8 @@ export const SHIPPING_CHANNEL_PROFILES = {
 export type ShippingSalesChannel = keyof typeof SHIPPING_CHANNEL_PROFILES;
 export type ShippingQuoteMode =
   (typeof SHIPPING_CHANNEL_PROFILES)[ShippingSalesChannel]["quoteMode"];
+export type ShippingRatePurpose =
+  (typeof SHIPPING_CHANNEL_PROFILES)[ShippingSalesChannel]["ratePurpose"];
 
 export function getShippingChannelProfile(channel: ShippingSalesChannel) {
   return SHIPPING_CHANNEL_PROFILES[channel];

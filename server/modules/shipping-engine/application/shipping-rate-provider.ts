@@ -1,4 +1,8 @@
 import type { ShippingParcelSpec } from "../domain/shipment";
+import type {
+  ShippingRatePurpose,
+  ShippingSalesChannel,
+} from "../domain/shipping-channel";
 import {
   quoteParcels,
   RATE_QUOTE_ENGINE,
@@ -6,6 +10,11 @@ import {
 } from "./rate-quote.service";
 
 export interface ShippingRateProviderRequest {
+  /** Selects a rate book; it does not imply that channels share prices. */
+  rateContext: {
+    pricingChannel: ShippingSalesChannel;
+    purpose: ShippingRatePurpose;
+  };
   originWarehouseId: number;
   destination: {
     country: string;
