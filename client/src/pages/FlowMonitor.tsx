@@ -344,6 +344,14 @@ interface ShipStationUnmappedPreview {
     activeProviderShipmentId: number;
     activeTrackingNumber: string;
   } | null;
+  originalPackageIdentityRepair: {
+    wmsShipmentId: number;
+    providerShipmentId: number;
+    providerOrderId: number;
+    providerOrderKey: string;
+    currentTrackingNumber: string;
+    originalTrackingNumber: string;
+  } | null;
   orderItems: Array<{
     id: number;
     sku: string;
@@ -382,6 +390,7 @@ interface ShipStationReshipAdoptionResponse {
   exceptionId: number;
   candidateShipmentId?: number | null;
   providerIdentityRepaired?: boolean;
+  originalPackageIdentityRepaired?: boolean;
 }
 
 const DOMAIN_LABEL: Record<Domain, string> = {
@@ -768,13 +777,28 @@ function ShipStationReshipAdoptionDialog(props: {
               </section>
             )}
 
+            {preview.originalPackageIdentityRepair && (
+              <section className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+                <div>
+                  <div className="font-medium">Original package identity will be restored</div>
+                  <p className="mt-1 text-xs">A duplicate-order callback overwrote WMS shipment {preview.originalPackageIdentityRepair.wmsShipmentId} with the replacement tracking number. Adoption will restore its original tracking {preview.originalPackageIdentityRepair.originalTrackingNumber} before recording this replacement.</p>
+                </div>
+              </section>
+            )}
+
             <section className="flex gap-3 border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
               <PackagePlus className="mt-0.5 h-5 w-5 shrink-0" />
               <div><div className="font-medium">Verified replacement only</div><p className="mt-1 text-xs">This records another physical inventory shipment without increasing customer fulfilled quantity or creating another channel fulfillment.</p></div>
             </section>
 
             <section className="grid gap-4 border-t pt-4 sm:grid-cols-2">
-              <div className="space-y-2"><Label>Original package</Label><Select value={originalShipmentId} onValueChange={setOriginalShipmentId}><SelectTrigger><SelectValue placeholder="Select package being replaced" /></SelectTrigger><SelectContent>{validOriginalShipments.map((shipment) => <SelectItem key={shipment.id} value={String(shipment.id)}>Shipment {shipment.id} - {shipment.trackingNumber || humanize(shipment.status)}</SelectItem>)}</SelectContent></Select></div>
+              <div className="space-y-2"><Label>Original package</Label><Select value={originalShipmentId} onValueChange={setOriginalShipmentId}><SelectTrigger><SelectValue placeholder="Select package being replaced" /></SelectTrigger><SelectContent>{validOriginalShipments.map((shipment) => {
+                const restoredTracking = preview.originalPackageIdentityRepair?.wmsShipmentId === shipment.id
+                  ? preview.originalPackageIdentityRepair.originalTrackingNumber
+                  : shipment.trackingNumber;
+                return <SelectItem key={shipment.id} value={String(shipment.id)}>Shipment {shipment.id} - {restoredTracking || humanize(shipment.status)}</SelectItem>;
+              })}</SelectContent></Select></div>
               <div className="space-y-2"><Label>Replacement reason</Label><Select value={reason} onValueChange={setReason}><SelectTrigger><SelectValue placeholder="Select reason" /></SelectTrigger><SelectContent><SelectItem value="lost">Lost package</SelectItem><SelectItem value="damaged">Damaged package</SelectItem><SelectItem value="misdelivery">Misdelivery</SelectItem><SelectItem value="carrier_replacement">Carrier replacement</SelectItem><SelectItem value="other">Other verified replacement</SelectItem></SelectContent></Select></div>
             </section>
             {validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No previously shipped WMS package is available to authorize this replacement.</p>}
