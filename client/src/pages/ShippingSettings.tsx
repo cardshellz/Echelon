@@ -143,6 +143,8 @@ interface RateTableSummary {
 interface RateTableImportRow {
   originWarehouseId: number | null;
   destinationZone: string;
+  destinationRegion: string | null;
+  postalPrefix: string | null;
   minWeightGrams: number;
   maxWeightGrams: number;
   rateCents: number;
@@ -150,9 +152,11 @@ interface RateTableImportRow {
 
 interface ParseCsvResponse {
   dialect: "pounds" | "grams" | null;
+  pricingMode: "state_zip" | "legacy_zone" | null;
   rows: RateTableImportRow[];
   errors: Array<{ line: number; message: string }>;
   bandErrors: string[];
+  geographyErrors: string[];
 }
 
 interface ImportResponse {
@@ -1652,6 +1656,7 @@ function RateTablesTab() {
 
   const importMutation = useMutation({
     mutationFn: (body: {
+      pricingMode: "state_zip" | "legacy_zone";
       rateBookCode: string;
       carrier: string;
       serviceCode: string;
@@ -1662,7 +1667,7 @@ function RateTablesTab() {
       invalidateShippingAdmin(queryClient);
       toast({ title: `Rate table imported (${data.rowCount.toLocaleString()} rows)` });
       if (data.warnings.length > 0) {
-        // Keep the dialog open so the zone warnings are read, not lost in a toast.
+        // Keep the dialog open so import warnings are read, not lost in a toast.
         setImportWarnings(data.warnings);
       } else {
         closeDialog();
@@ -1702,7 +1707,10 @@ function RateTablesTab() {
   };
 
   const previewHasErrors =
-    preview !== null && (preview.errors.length > 0 || preview.bandErrors.length > 0);
+    preview !== null
+    && (preview.errors.length > 0
+      || preview.bandErrors.length > 0
+      || preview.geographyErrors.length > 0);
   const canImport =
     preview !== null
     && !previewHasErrors
@@ -1713,6 +1721,7 @@ function RateTablesTab() {
   const handleImport = () => {
     if (!preview || !canImport) return;
     importMutation.mutate({
+      pricingMode: preview.pricingMode ?? "state_zip",
       rateBookCode: form.rateBookCode,
       carrier: form.carrier,
       serviceCode: form.serviceCode.trim(),
@@ -1730,8 +1739,8 @@ function RateTablesTab() {
             Rate tables
           </CardTitle>
           <CardDescription className="text-xs md:text-sm">
-            Weight-band × zone prices the rates engine quotes from. Import hand-transcribed carrier
-            grids here; calibration jobs write tables through the same path.
+            Set prices by destination state and weight. Add a ZIP-prefix row only when a local
+            override is needed.
           </CardDescription>
         </div>
         <Button size="sm" onClick={() => setDialogOpen(true)} className="min-h-[36px]">
@@ -1747,7 +1756,7 @@ function RateTablesTab() {
         ) : tables.length === 0 ? (
           <div className="text-center p-8 text-muted-foreground">
             <FileSpreadsheet className="w-12 h-12 mx-auto mb-2 opacity-50" />
-            <p>No rate tables yet. Import a carrier's weight-band × zone grid to start quoting.</p>
+            <p>No rate tables yet. Import state and weight-band prices to start quoting.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -1760,7 +1769,7 @@ function RateTablesTab() {
                   <TableHead>Status</TableHead>
                   <TableHead>Effective</TableHead>
                   <TableHead className="text-right">Rows</TableHead>
-                  <TableHead className="text-right">Zones</TableHead>
+                  <TableHead className="text-right">Destinations</TableHead>
                   <TableHead>Weight bands</TableHead>
                 </TableRow>
               </TableHeader>
@@ -1799,8 +1808,9 @@ function RateTablesTab() {
           <DialogHeader>
             <DialogTitle>Import rate table</DialogTitle>
             <DialogDescription>
-              CSV columns: zone,min_lb,max_lb,rate_usd or zone,min_g,max_g,rate_cents (optional
-              warehouse_id). Header row required.
+              Use state defaults with optional ZIP-prefix overrides. Columns: state,zip_prefix,
+              min_lb,max_lb,rate_usd (optional warehouse_id). Leave zip_prefix blank for the
+              statewide price.
             </DialogDescription>
           </DialogHeader>
 
@@ -1876,7 +1886,7 @@ function RateTablesTab() {
                   }}
                   rows={8}
                   className="font-mono text-xs"
-                  placeholder={"zone,min_lb,max_lb,rate_usd\nUS-48,0,1,8.99"}
+                  placeholder={"state,zip_prefix,min_lb,max_lb,rate_usd\nPA,,0,1,8.99\nPA,16066,0,1,7.99"}
                 />
                 <div className="flex items-center gap-2">
                   <Input
@@ -1904,7 +1914,9 @@ function RateTablesTab() {
 
               {preview && (
                 <div className="space-y-3">
-                  {(preview.errors.length > 0 || preview.bandErrors.length > 0) && (
+                  {(preview.errors.length > 0
+                    || preview.bandErrors.length > 0
+                    || preview.geographyErrors.length > 0) && (
                     <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3 space-y-1">
                       <div className="flex items-center gap-2 text-sm font-medium text-destructive">
                         <AlertTriangle className="w-4 h-4" />
@@ -1918,6 +1930,9 @@ function RateTablesTab() {
                         ))}
                         {preview.bandErrors.map((err, idx) => (
                           <li key={`band-${idx}`}>{err}</li>
+                        ))}
+                        {preview.geographyErrors.map((err, idx) => (
+                          <li key={`geography-${idx}`}>{err}</li>
                         ))}
                       </ul>
                     </div>
@@ -1935,7 +1950,8 @@ function RateTablesTab() {
                         <Table>
                           <TableHeader>
                             <TableRow>
-                              <TableHead>Zone</TableHead>
+                              <TableHead>State</TableHead>
+                              <TableHead>ZIP override</TableHead>
                               <TableHead>Warehouse</TableHead>
                               <TableHead>Band</TableHead>
                               <TableHead className="text-right">Rate</TableHead>
@@ -1944,7 +1960,12 @@ function RateTablesTab() {
                           <TableBody>
                             {preview.rows.slice(0, RATE_PREVIEW_ROW_LIMIT).map((row, idx) => (
                               <TableRow key={idx}>
-                                <TableCell className="font-mono text-xs">{row.destinationZone}</TableCell>
+                                <TableCell className="font-medium text-xs">
+                                  {row.destinationRegion ?? "Legacy"}
+                                </TableCell>
+                                <TableCell className="font-mono text-xs text-muted-foreground">
+                                  {row.postalPrefix ?? "Statewide"}
+                                </TableCell>
                                 <TableCell className="text-xs text-muted-foreground">
                                   {row.originWarehouseId ?? "any"}
                                 </TableCell>
