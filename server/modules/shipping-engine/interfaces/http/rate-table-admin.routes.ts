@@ -21,26 +21,34 @@ import {
   shippingRateTableRows,
   shippingRateTables,
   shippingZoneRules,
+  warehouses,
 } from "@shared/schema";
 import { db } from "../../../../db";
 import { requirePermission } from "../../../../routes/middleware";
 import {
   MAX_IMPORT_ROWS,
   findBandOverlaps,
+  findMissingStateDefaults,
   findUnknownZones,
   parseRateTableCsv,
+  stateZipPricingAreaKey,
+  type RatePricingMode,
   type RateTableImportRow,
 } from "../../domain/rate-table-import";
+import { normalizeUsPostalRegion } from "../../domain/us-geography";
 
 const importRowSchema = z.object({
   originWarehouseId: z.number().int().positive().nullable().optional(),
-  destinationZone: z.string().trim().min(1).max(40),
+  destinationZone: z.string().trim().min(1).max(40).optional(),
+  destinationRegion: z.string().trim().length(2).nullable().optional(),
+  postalPrefix: z.string().trim().max(5).nullable().optional(),
   minWeightGrams: z.number().int().min(0),
   maxWeightGrams: z.number().int().min(0),
   rateCents: z.number().int().min(0),
 });
 
 const importSchema = z.object({
+  pricingMode: z.enum(["state_zip", "legacy_zone"]).default("state_zip"),
   rateBookCode: z.string().trim().min(1).max(80).default("shopify-retail-default"),
   carrier: z.string().trim().min(1).max(50),
   serviceCode: z.string().trim().min(1).max(80),
@@ -122,11 +130,16 @@ export function registerRateTableAdminRoutes(app: Express): void {
         // Preview surfaces band overlaps too, so the operator fixes the CSV
         // before hitting the import endpoint (which re-validates regardless).
         const bandErrors = result.errors.length === 0 ? findBandOverlaps(result.rows) : [];
+        const geographyErrors = result.errors.length === 0 && result.pricingMode === "state_zip"
+          ? findMissingStateDefaults(result.rows)
+          : [];
         return res.json({
           dialect: result.dialect,
+          pricingMode: result.pricingMode,
           rows: result.rows,
           errors: result.errors,
           bandErrors,
+          geographyErrors,
         });
       } catch (error) {
         return sendRateTableAdminError(res, error, "parse rate table CSV");
@@ -143,15 +156,17 @@ export function registerRateTableAdminRoutes(app: Express): void {
         if (!parsed.success) {
           return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
         }
-        const { carrier, rateBookCode, serviceCode, replaceExisting } = parsed.data;
+        const { carrier, pricingMode, rateBookCode, serviceCode, replaceExisting } = parsed.data;
         const currency = parsed.data.currency.toUpperCase();
-        const rows: RateTableImportRow[] = parsed.data.rows.map((row) => ({
-          ...row,
-          originWarehouseId: row.originWarehouseId ?? null,
-        }));
+        const rows = normalizeImportRows(parsed.data.rows, pricingMode);
+        if (!rows.ok) {
+          return res.status(400).json({
+            error: { code: "SHIPPING_ADMIN_INVALID_GEOGRAPHY", message: rows.message },
+          });
+        }
 
         // All validation BEFORE any write.
-        const bandErrors = findBandOverlaps(rows);
+        const bandErrors = findBandOverlaps(rows.rows);
         if (bandErrors.length > 0) {
           return res.status(400).json({
             error: { code: "SHIPPING_ADMIN_RATE_BANDS_INVALID", message: "Weight bands overlap.", details: bandErrors },
@@ -175,19 +190,90 @@ export function registerRateTableAdminRoutes(app: Express): void {
             },
           });
         }
-        const knownZones = await db
-          .selectDistinct({ zone: shippingZoneRules.zone })
-          .from(shippingZoneRules)
-          .where(and(
-            eq(shippingZoneRules.zoneSetId, rateBook.zoneSetId),
-            eq(shippingZoneRules.isActive, true),
-          ));
-        const warnings = findUnknownZones(rows, knownZones.map((z) => z.zone));
+        if (pricingMode === "state_zip") {
+          const geographyErrors = findMissingStateDefaults(rows.rows);
+          if (geographyErrors.length > 0) {
+            return res.status(400).json({
+              error: {
+                code: "SHIPPING_ADMIN_STATE_FALLBACK_REQUIRED",
+                message: "Every ZIP override requires a statewide fallback rate.",
+                details: geographyErrors,
+              },
+            });
+          }
+        }
+        if (pricingMode === "state_zip" && rateBook.zoneSetId === null) {
+          return res.status(400).json({
+            error: {
+              code: "SHIPPING_ADMIN_RATE_BOOK_INVALID",
+              message: `Rate book ${rateBookCode} does not have a geography set.`,
+            },
+          });
+        }
+        const knownZones = pricingMode === "legacy_zone"
+          ? await db
+              .selectDistinct({ zone: shippingZoneRules.zone })
+              .from(shippingZoneRules)
+              .where(and(
+                eq(shippingZoneRules.zoneSetId, rateBook.zoneSetId),
+                eq(shippingZoneRules.isActive, true),
+              ))
+          : [];
+        const warnings = pricingMode === "legacy_zone"
+          ? findUnknownZones(rows.rows, knownZones.map((z) => z.zone))
+          : [];
 
         const now = new Date();
         const effectiveFrom = parsed.data.effectiveFrom ?? now;
 
         const rateTable = await db.transaction(async (tx) => {
+          if (pricingMode === "state_zip") {
+            const activeWarehouses = await tx
+              .select({ id: warehouses.id })
+              .from(warehouses)
+              .where(eq(warehouses.isActive, 1));
+            const warehouseIds = new Set(activeWarehouses.map((warehouse) => warehouse.id));
+            const invalidWarehouse = rows.rows.find(
+              (row) => row.originWarehouseId !== null && !warehouseIds.has(row.originWarehouseId),
+            );
+            if (invalidWarehouse?.originWarehouseId) {
+              throw new Error(`Warehouse ${invalidWarehouse.originWarehouseId} is missing or inactive.`);
+            }
+            if (activeWarehouses.length === 0) {
+              throw new Error("At least one active warehouse is required for state pricing.");
+            }
+
+            const ruleByKey = new Map<string, typeof shippingZoneRules.$inferInsert>();
+            for (const row of rows.rows) {
+              const targetWarehouseIds = row.originWarehouseId === null
+                ? activeWarehouses.map((warehouse) => warehouse.id)
+                : [row.originWarehouseId];
+              for (const warehouseId of targetWarehouseIds) {
+                for (const postalPrefix of [null, row.postalPrefix].filter(
+                  (value, index, values) => index === 0 || value !== values[0],
+                )) {
+                  const zone = stateZipPricingAreaKey(row.destinationRegion!, postalPrefix);
+                  const key = `${warehouseId}|${row.destinationRegion}|${postalPrefix ?? ""}`;
+                  ruleByKey.set(key, {
+                    zoneSetId: rateBook.zoneSetId,
+                    originWarehouseId: warehouseId,
+                    destinationCountry: "US",
+                    destinationRegion: row.destinationRegion,
+                    postalPrefix,
+                    zone,
+                    priority: postalPrefix ? postalPrefix.length : 0,
+                    isActive: true,
+                  });
+                }
+              }
+            }
+            if (ruleByKey.size > 0) {
+              await tx.insert(shippingZoneRules)
+                .values([...ruleByKey.values()])
+                .onConflictDoNothing();
+            }
+          }
+
           if (replaceExisting) {
             await tx.update(shippingRateTables)
               .set({ status: "superseded", effectiveTo: now })
@@ -205,23 +291,85 @@ export function registerRateTableAdminRoutes(app: Express): void {
             currency,
             status: "active",
             effectiveFrom,
-            metadata: { source: "admin-import", importedAt: now.toISOString(), rowCount: rows.length },
+            metadata: {
+              source: "admin-import",
+              pricingMode,
+              importedAt: now.toISOString(),
+              rowCount: rows.rows.length,
+            },
           }).returning();
 
-          for (let i = 0; i < rows.length; i += INSERT_CHUNK_SIZE) {
+          for (let i = 0; i < rows.rows.length; i += INSERT_CHUNK_SIZE) {
             await tx.insert(shippingRateTableRows).values(
-              rows.slice(i, i + INSERT_CHUNK_SIZE).map((row) => ({ ...row, rateTableId: table.id })),
+              rows.rows.slice(i, i + INSERT_CHUNK_SIZE).map((row) => ({
+                rateTableId: table.id,
+                originWarehouseId: row.originWarehouseId,
+                destinationZone: row.destinationZone,
+                minWeightGrams: row.minWeightGrams,
+                maxWeightGrams: row.maxWeightGrams,
+                rateCents: row.rateCents,
+              })),
             );
           }
           return table;
         });
 
-        return res.json({ rateTable, rowCount: rows.length, warnings });
+        return res.json({ rateTable, rowCount: rows.rows.length, warnings });
       } catch (error) {
         return sendRateTableAdminError(res, error, "import rate table");
       }
     },
   );
+}
+
+type ImportRowInput = z.infer<typeof importRowSchema>;
+
+function normalizeImportRows(
+  inputRows: readonly ImportRowInput[],
+  pricingMode: RatePricingMode,
+): { ok: true; rows: RateTableImportRow[] } | { ok: false; message: string } {
+  const rows: RateTableImportRow[] = [];
+  for (const input of inputRows) {
+    const originWarehouseId = input.originWarehouseId ?? null;
+    if (pricingMode === "legacy_zone") {
+      const destinationZone = input.destinationZone?.trim();
+      if (!destinationZone) {
+        return { ok: false, message: "Every legacy row requires a destination zone." };
+      }
+      rows.push({
+        originWarehouseId,
+        destinationZone,
+        destinationRegion: null,
+        postalPrefix: null,
+        minWeightGrams: input.minWeightGrams,
+        maxWeightGrams: input.maxWeightGrams,
+        rateCents: input.rateCents,
+      });
+      continue;
+    }
+
+    const destinationRegion = normalizeUsPostalRegion(input.destinationRegion);
+    if (destinationRegion === null) {
+      return {
+        ok: false,
+        message: `${JSON.stringify(input.destinationRegion)} is not a valid US state or territory.`,
+      };
+    }
+    const postalPrefix = input.postalPrefix?.trim() || null;
+    if (postalPrefix !== null && !/^\d{1,5}$/.test(postalPrefix)) {
+      return { ok: false, message: "ZIP prefixes must contain 1 to 5 digits." };
+    }
+    rows.push({
+      originWarehouseId,
+      destinationZone: stateZipPricingAreaKey(destinationRegion, postalPrefix),
+      destinationRegion,
+      postalPrefix,
+      minWeightGrams: input.minWeightGrams,
+      maxWeightGrams: input.maxWeightGrams,
+      rateCents: input.rateCents,
+    });
+  }
+  return { ok: true, rows };
 }
 
 function sendRateTableAdminError(res: Response, error: unknown, action: string): Response {

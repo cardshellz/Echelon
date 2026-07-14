@@ -88,12 +88,37 @@ describe("resolveZone", () => {
     expect(resolveZone(rules, "US", "96789")).toBe("D49");
   });
 
-  it("skips region-scoped rules (no region input in v1)", () => {
+  it("matches a state default when the destination state matches", () => {
     const rules = [
-      rule({ zone: "REGIONAL", postalPrefix: "967", destinationRegion: "HI" }),
+      rule({ zone: "HI", destinationRegion: "HI" }),
       rule({ zone: "D49" }),
     ];
-    expect(resolveZone(rules, "US", "96789")).toBe("D49");
+    expect(resolveZone(rules, "US", "96789", "HI")).toBe("HI");
+  });
+
+  it("does not apply a state rate to a different state", () => {
+    const rules = [
+      rule({ zone: "HI", destinationRegion: "HI" }),
+      rule({ zone: "D49" }),
+    ];
+    expect(resolveZone(rules, "US", "90210", "CA")).toBe("D49");
+  });
+
+  it("prefers a state default over a country default", () => {
+    const rules = [
+      rule({ zone: "US", priority: 100 }),
+      rule({ zone: "PA", destinationRegion: "PA" }),
+    ];
+    expect(resolveZone(rules, "US", "16066", "PA")).toBe("PA");
+  });
+
+  it("prefers a ZIP override over its state default", () => {
+    const rules = [
+      rule({ zone: "PA", destinationRegion: "PA" }),
+      rule({ zone: "PA-160", destinationRegion: "PA", postalPrefix: "160" }),
+    ];
+    expect(resolveZone(rules, "US", "16066", "PA")).toBe("PA-160");
+    expect(resolveZone(rules, "US", "17046", "PA")).toBe("PA");
   });
 
   it("matches country and postal prefix case-insensitively with trimming", () => {

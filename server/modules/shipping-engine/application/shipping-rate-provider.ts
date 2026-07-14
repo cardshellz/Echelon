@@ -12,6 +12,7 @@ export interface ShippingRateProviderRequest {
   originWarehouseId: number;
   destination: {
     country: string;
+    region?: string | null;
     postalCode: string;
   };
   parcels: readonly ShippingParcelSpec[];
@@ -35,6 +36,7 @@ export const localRateTableShippingRateProvider: ShippingRateProvider = {
       rateContext: input.rateContext,
       originWarehouseId: input.originWarehouseId,
       destCountry: input.destination.country,
+      destRegion: input.destination.region,
       destPostal: input.destination.postalCode,
       parcels: input.parcels.map((parcel) => ({
         billableWeightGrams: parcel.billableWeightGrams,

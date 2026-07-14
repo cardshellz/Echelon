@@ -3,8 +3,10 @@ import {
   CENTS_PER_USD,
   GRAMS_PER_POUND,
   findBandOverlaps,
+  findMissingStateDefaults,
   findUnknownZones,
   parseRateTableCsv,
+  stateZipPricingAreaKey,
   type RateTableImportRow,
 } from "../../domain/rate-table-import";
 
@@ -12,6 +14,8 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
   return {
     originWarehouseId: null,
     destinationZone: "US-48",
+    destinationRegion: null,
+    postalPrefix: null,
     minWeightGrams: 0,
     maxWeightGrams: 1000,
     rateCents: 899,
@@ -20,6 +24,47 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
 }
 
 describe("parseRateTableCsv", () => {
+  describe("state and ZIP pricing", () => {
+    it("creates internal state areas without asking for a zone", () => {
+      const result = parseRateTableCsv(
+        "state,zip_prefix,min_lb,max_lb,rate_usd\nPA,,0,1,8.99\nPA,160,0,1,7.99\n",
+      );
+      expect(result.pricingMode).toBe("state_zip");
+      expect(result.errors).toEqual([]);
+      expect(result.rows).toEqual([
+        {
+          originWarehouseId: null,
+          destinationZone: stateZipPricingAreaKey("PA"),
+          destinationRegion: "PA",
+          postalPrefix: null,
+          minWeightGrams: 0,
+          maxWeightGrams: 454,
+          rateCents: 899,
+        },
+        {
+          originWarehouseId: null,
+          destinationZone: stateZipPricingAreaKey("PA", "160"),
+          destinationRegion: "PA",
+          postalPrefix: "160",
+          minWeightGrams: 0,
+          maxWeightGrams: 454,
+          rateCents: 799,
+        },
+      ]);
+    });
+
+    it("rejects invalid state abbreviations and ZIP prefixes", () => {
+      const result = parseRateTableCsv(
+        "state,zip_prefix,min_lb,max_lb,rate_usd\nAtlantis,,0,1,8.99\nPA,16A,0,1,7.99\n",
+      );
+      expect(result.rows).toEqual([]);
+      expect(result.errors.map((error) => error.message)).toEqual([
+        'invalid US state or territory "Atlantis"',
+        "zip_prefix must contain 1 to 5 digits",
+      ]);
+    });
+  });
+
   describe("pounds/USD dialect", () => {
     it("parses rows and converts lb→grams and usd→cents with rounding", () => {
       const result = parseRateTableCsv(
@@ -31,6 +76,8 @@ describe("parseRateTableCsv", () => {
         {
           originWarehouseId: null,
           destinationZone: "US-48",
+          destinationRegion: null,
+          postalPrefix: null,
           minWeightGrams: 0,
           maxWeightGrams: 454, // 453.59237 rounds to 454
           rateCents: 899,
@@ -38,6 +85,8 @@ describe("parseRateTableCsv", () => {
         {
           originWarehouseId: null,
           destinationZone: "US-48",
+          destinationRegion: null,
+          postalPrefix: null,
           minWeightGrams: 454, // 1.001 lb = 454.045... rounds to 454
           maxWeightGrams: 2268, // 2267.96... rounds to 2268
           rateCents: 1250,
@@ -69,6 +118,8 @@ describe("parseRateTableCsv", () => {
         {
           originWarehouseId: null,
           destinationZone: "US-HIPRAK",
+          destinationRegion: null,
+          postalPrefix: null,
           minWeightGrams: 0,
           maxWeightGrams: 1000,
           rateCents: 1599,
@@ -212,6 +263,30 @@ describe("findBandOverlaps", () => {
     const errors = findBandOverlaps(rows);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("(warehouse 7)");
+  });
+});
+
+describe("findMissingStateDefaults", () => {
+  it("accepts ZIP overrides when the state fallback is present", () => {
+    expect(findMissingStateDefaults([
+      row({ destinationRegion: "PA", destinationZone: "US-PA" }),
+      row({
+        destinationRegion: "PA",
+        postalPrefix: "160",
+        destinationZone: "US-PA-ZIP-160",
+      }),
+    ])).toEqual([]);
+  });
+
+  it("rejects an override without a statewide fallback in the same warehouse scope", () => {
+    expect(findMissingStateDefaults([
+      row({
+        originWarehouseId: 1,
+        destinationRegion: "PA",
+        postalPrefix: "160",
+        destinationZone: "US-PA-ZIP-160",
+      }),
+    ])).toEqual(["PA at warehouse 1 has a ZIP override but no statewide fallback rate"]);
   });
 });
 
