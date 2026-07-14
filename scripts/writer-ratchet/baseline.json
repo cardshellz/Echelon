@@ -464,6 +464,9 @@
   "procurement.po_approval_tiers": [
     "modules/procurement"
   ],
+  "procurement.po_email_outbox": [
+    "modules/procurement"
+  ],
   "procurement.po_events": [
     "modules/procurement"
   ],

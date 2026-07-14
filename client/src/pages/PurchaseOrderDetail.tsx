@@ -879,6 +879,27 @@ function genPoLineIdempotencyKey(): string {
   return `po-line-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function genPoEmailIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return (crypto as any).randomUUID();
+  }
+  return `po-email-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+type PoEmailDelivery = {
+  id: number;
+  status: "queued" | "processing" | "sent" | "partially_sent" | "dead_letter";
+  toEmail: string;
+  ccEmail: string | null;
+  attemptCount: number;
+  maxAttempts: number;
+  nextAttemptAt: string;
+  sentAt: string | null;
+  lastErrorMessage: string | null;
+  replayOfId: number | null;
+  createdAt: string;
+};
+
 type PoLineHttpCommand<TBody> = {
   idempotencyKey: string;
   requestUrl: string;
@@ -964,6 +985,9 @@ export default function PurchaseOrderDetail() {
   const [docLoading, setDocLoading] = useState(false);
   const [emailForm, setEmailForm] = useState({ toEmail: "", ccEmail: "", message: "" });
   const [emailSending, setEmailSending] = useState(false);
+  const [emailIdempotencyKey, setEmailIdempotencyKey] = useState(genPoEmailIdempotencyKey);
+  const [emailReplayKeys, setEmailReplayKeys] = useState<Record<number, string>>({});
+  const [emailReplayingId, setEmailReplayingId] = useState<number | null>(null);
   const [cancelReason, setCancelReason] = useState("");
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
   const [scheduleData, setScheduleData] = useState({
@@ -1944,6 +1968,53 @@ export default function PurchaseOrderDetail() {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  const { data: emailDeliveriesData } = useQuery<{ deliveries: PoEmailDelivery[] }>({
+    queryKey: [`/api/purchase-orders/${poId}/email-deliveries`],
+    enabled: !!poId && showEmailDialog,
+    refetchInterval: showEmailDialog ? 5_000 : false,
+  });
+
+  const replayEmailDelivery = async (deliveryId: number) => {
+    const idempotencyKey = emailReplayKeys[deliveryId] ?? genPoEmailIdempotencyKey();
+    setEmailReplayKeys((keys) => ({ ...keys, [deliveryId]: idempotencyKey }));
+    setEmailReplayingId(deliveryId);
+    try {
+      const res = await fetch(
+        `/api/purchase-orders/${poId}/email-deliveries/${deliveryId}/replay`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: "{}",
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to replay email delivery");
+      setEmailReplayKeys((keys) => {
+        const next = { ...keys };
+        delete next[deliveryId];
+        return next;
+      });
+      await queryClient.invalidateQueries({
+        queryKey: [`/api/purchase-orders/${poId}/email-deliveries`],
+      });
+      toast({
+        title: data.replayed ? "Replay already queued" : "Replay queued",
+        description: `A new delivery attempt was queued from delivery #${deliveryId}`,
+      });
+    } catch (error) {
+      toast({
+        title: "Failed to replay delivery",
+        description: error instanceof Error ? error.message : String(error),
+        variant: "destructive",
+      });
+    } finally {
+      setEmailReplayingId(null);
+    }
+  };
 
   const deleteLineMutation = useMutation({
     mutationFn: ({ idempotencyKey, requestUrl, body }: PoLineHttpCommand<CancelPoLineRequestBody>) =>
@@ -4550,11 +4621,11 @@ export default function PurchaseOrderDetail() {
 
       {/* ── Email to Vendor Dialog ── */}
       <Dialog open={showEmailDialog} onOpenChange={setShowEmailDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Email PO to Vendor</DialogTitle>
             <DialogDescription>
-              Send <span className="font-mono font-medium">{po?.poNumber}</span> to the vendor. The full PO document will be included in the email body.
+              Queue <span className="font-mono font-medium">{po?.poNumber}</span> for reliable delivery. The full PO document is snapshotted in the email body and retries happen automatically.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -4564,7 +4635,10 @@ export default function PurchaseOrderDetail() {
                 type="email"
                 placeholder="vendor@example.com"
                 value={emailForm.toEmail}
-                onChange={(e) => setEmailForm(f => ({ ...f, toEmail: e.target.value }))}
+                onChange={(e) => {
+                  setEmailForm(f => ({ ...f, toEmail: e.target.value }));
+                  setEmailIdempotencyKey(genPoEmailIdempotencyKey());
+                }}
               />
             </div>
             <div className="space-y-2">
@@ -4573,7 +4647,10 @@ export default function PurchaseOrderDetail() {
                 type="email"
                 placeholder="cc@example.com"
                 value={emailForm.ccEmail}
-                onChange={(e) => setEmailForm(f => ({ ...f, ccEmail: e.target.value }))}
+                onChange={(e) => {
+                  setEmailForm(f => ({ ...f, ccEmail: e.target.value }));
+                  setEmailIdempotencyKey(genPoEmailIdempotencyKey());
+                }}
               />
             </div>
             <div className="space-y-2">
@@ -4582,9 +4659,68 @@ export default function PurchaseOrderDetail() {
                 placeholder="Add a personal note to the vendor..."
                 rows={3}
                 value={emailForm.message}
-                onChange={(e) => setEmailForm(f => ({ ...f, message: e.target.value }))}
+                onChange={(e) => {
+                  setEmailForm(f => ({ ...f, message: e.target.value }));
+                  setEmailIdempotencyKey(genPoEmailIdempotencyKey());
+                }}
               />
             </div>
+            {(emailDeliveriesData?.deliveries?.length ?? 0) > 0 && (
+              <div className="space-y-2 border-t pt-3">
+                <Label>Recent deliveries</Label>
+                <div className="max-h-36 space-y-2 overflow-y-auto">
+                  {emailDeliveriesData!.deliveries.slice(0, 5).map((delivery) => {
+                    const statusLabel = {
+                      queued: "Queued",
+                      processing: "Sending",
+                      sent: "Delivered",
+                      partially_sent: "Partial delivery",
+                      dead_letter: "Needs attention",
+                    }[delivery.status];
+                    const hasActiveReplay = emailDeliveriesData!.deliveries.some(
+                      (candidate) => candidate.replayOfId === delivery.id
+                        && ["queued", "processing", "sent", "partially_sent"].includes(candidate.status),
+                    );
+                    return (
+                      <div key={delivery.id} className="rounded-md border p-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate font-medium">{delivery.toEmail}</span>
+                          <Badge
+                            variant={delivery.status === "dead_letter" ? "destructive" : delivery.status === "sent" ? "default" : "secondary"}
+                            className={`shrink-0 text-[10px] ${delivery.status === "partially_sent" ? "border-amber-300 bg-amber-50 text-amber-800" : ""}`}
+                          >
+                            {statusLabel}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 text-muted-foreground">
+                          {format(new Date(delivery.sentAt || delivery.createdAt), "MMM d, h:mm a")}
+                          {delivery.attemptCount > 0 ? ` · attempt ${delivery.attemptCount}/${delivery.maxAttempts}` : ""}
+                        </div>
+                        {delivery.status === "dead_letter" && delivery.lastErrorMessage ? (
+                          <div className="mt-1 text-destructive">{delivery.lastErrorMessage}</div>
+                        ) : null}
+                        {delivery.status === "partially_sent" && delivery.lastErrorMessage ? (
+                          <div className="mt-1 text-amber-700">{delivery.lastErrorMessage}</div>
+                        ) : null}
+                        {delivery.status === "dead_letter" && !hasActiveReplay ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="mt-2 h-7 text-xs"
+                            disabled={emailReplayingId === delivery.id}
+                            onClick={() => void replayEmailDelivery(delivery.id)}
+                          >
+                            <RotateCcw className="mr-1 h-3 w-3" />
+                            {emailReplayingId === delivery.id ? "Queueing replay..." : "Replay delivery"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowEmailDialog(false)}>Cancel</Button>
               <Button
@@ -4594,7 +4730,10 @@ export default function PurchaseOrderDetail() {
                   try {
                     const res = await fetch(`/api/purchase-orders/${poId}/send-email`, {
                       method: "POST",
-                      headers: { "Content-Type": "application/json" },
+                      headers: {
+                        "Content-Type": "application/json",
+                        "Idempotency-Key": emailIdempotencyKey,
+                      },
                       body: JSON.stringify({
                         toEmail: emailForm.toEmail,
                         ccEmail: emailForm.ccEmail || undefined,
@@ -4603,17 +4742,21 @@ export default function PurchaseOrderDetail() {
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.error);
-                    toast({ title: "Email sent", description: `PO sent to ${emailForm.toEmail}` });
+                    toast({
+                      title: data.replayed ? "Email already queued" : "Email queued",
+                      description: `Reliable delivery to ${emailForm.toEmail} is now being processed`,
+                    });
+                    setEmailIdempotencyKey(genPoEmailIdempotencyKey());
                     setShowEmailDialog(false);
-                    queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/history`] });
+                    queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/email-deliveries`] });
                   } catch (err: any) {
-                    toast({ title: "Failed to send", description: err.message, variant: "destructive" });
+                    toast({ title: "Failed to queue email", description: err.message, variant: "destructive" });
                   } finally {
                     setEmailSending(false);
                   }
                 }}
               >
-                {emailSending ? "Sending..." : "Send Email"}
+                {emailSending ? "Queueing..." : "Queue Email"}
               </Button>
             </div>
           </div>

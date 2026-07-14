@@ -24,6 +24,7 @@ import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-free
 import { startOmsFlowReconciliationScheduler, setOmsFlowReconciliationServices } from "./modules/oms/oms-flow-reconciliation.service";
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
+import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
 import {
   startWebhookRetryWorker,
   enqueueShipStationRetry,
@@ -791,6 +792,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startWebhookRetryWorker();
       } else {
         logSchedulerDisabled("scheduler", "Webhook retry worker", "WEBHOOK_RETRY_WORKER_DISABLED");
+      }
+
+      if (!schedulersDisabled("PO_EMAIL_OUTBOX_WORKER_DISABLED")) {
+        startPoEmailOutboxWorker();
+      } else {
+        logSchedulerDisabled("scheduler", "PO email outbox worker", "PO_EMAIL_OUTBOX_WORKER_DISABLED");
       }
 
       if (!schedulersDisabled("FULFILLMENT_SWEEPER_DISABLED")) {
