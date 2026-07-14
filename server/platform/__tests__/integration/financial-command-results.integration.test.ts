@@ -10,6 +10,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import * as schema from "@shared/schema";
 import {
+  purgeExpiredFinancialCommandResults,
+  rearmDeadFinancialCommand,
+} from "../../commands/financial-command-operations.service";
+import {
   runTransactionalFinancialCommand,
   type FinancialCommandDescriptor,
   type FinancialCommandRepository,
@@ -22,10 +26,11 @@ config({ path: resolve(process.cwd(), ".env.test") });
 // database explicitly opted into integration testing under this test-only key.
 const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const describeWithDb = TEST_DB_URL ? describe : describe.skip;
-const migrationSql = readFileSync(
-  resolve(process.cwd(), "migrations/136_financial_command_results.sql"),
-  "utf8",
-);
+const migrationSql = [
+  "136_financial_command_results.sql",
+  "140_financial_command_operations.sql",
+].map((fileName) => readFileSync(resolve(process.cwd(), "migrations", fileName), "utf8"))
+  .join("\n");
 
 type CommandTransaction = {
   execute(query: unknown): Promise<unknown>;
@@ -572,6 +577,167 @@ describeWithDb.sequential("financial command PostgreSQL transactions", () => {
     expect(stored.rows).toEqual([
       { resource_key: active.resourceKey, status: "claimed", attempt_count: 5 },
       { resource_key: expired.resourceKey, status: "dead", attempt_count: 5 },
+    ]);
+  });
+
+  it("requires an audit record to re-arm a dead command and grants exactly one exact retry", async () => {
+    const command = descriptor("operator-rearm");
+    await seedFifthClaim(pool, command, true);
+    await expect(repository.reserve(command)).rejects.toMatchObject({
+      code: "FINANCIAL_COMMAND_DEAD",
+    });
+    const stored = await pool.query<{ id: number }>(
+      `SELECT id FROM public.financial_command_results
+       WHERE actor_id = $1 AND resource_key = $2`,
+      [actorId, command.resourceKey],
+    );
+    const commandId = stored.rows[0].id;
+
+    await expect(pool.query(
+      `UPDATE public.financial_command_results
+       SET status = 'retryable',
+           attempt_limit = attempt_limit + 1,
+           recovery_count = recovery_count + 1,
+           next_attempt_at = transaction_timestamp(),
+           completed_at = NULL,
+           updated_at = transaction_timestamp()
+       WHERE id = $1`,
+      [commandId],
+    )).rejects.toMatchObject({
+      code: "23514",
+      message: expect.stringContaining("Terminal financial command results are immutable"),
+    });
+
+    const recovery = await rearmDeadFinancialCommand(pool, {
+      commandId,
+      operatorId: `operator-${runId}`,
+      reason: "Provider outage was resolved and the original caller is ready to retry.",
+    });
+    expect(recovery.command).toMatchObject({
+      id: commandId,
+      status: "retryable",
+      attemptCount: 5,
+      attemptLimit: 6,
+      recoveryCount: 1,
+    });
+
+    const result = await runCommand(command, async (tx) => {
+      await insertProbe(tx, "operator-rearm", { recovered: true });
+      return { httpStatus: 200, body: { recovered: true } };
+    });
+    expect(result).toMatchObject({
+      commandId,
+      replayed: false,
+      terminalState: "succeeded",
+      body: { recovered: true },
+    });
+
+    const evidence = await pool.query<{
+      status: string;
+      attempt_count: number;
+      attempt_limit: number;
+      recovery_count: number;
+      recovery_number: number;
+      prior_error_code: string;
+    }>(
+      `SELECT command.status,
+              command.attempt_count,
+              command.attempt_limit,
+              command.recovery_count,
+              recovery.recovery_number,
+              recovery.prior_error_code
+       FROM public.financial_command_results command
+       JOIN public.financial_command_recoveries recovery
+         ON recovery.command_result_id = command.id
+       WHERE command.id = $1`,
+      [commandId],
+    );
+    expect(evidence.rows).toEqual([{
+      status: "succeeded",
+      attempt_count: 6,
+      attempt_limit: 6,
+      recovery_count: 1,
+      recovery_number: 1,
+      prior_error_code: "FINANCIAL_COMMAND_MAX_ATTEMPTS",
+    }]);
+  });
+
+  it("serializes concurrent operator recovery so only one additional attempt is granted", async () => {
+    const command = descriptor("concurrent-rearm");
+    await seedFifthClaim(pool, command, true);
+    await expect(repository.reserve(command)).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_DEAD" });
+    const stored = await pool.query<{ id: number }>(
+      `SELECT id FROM public.financial_command_results
+       WHERE actor_id = $1 AND resource_key = $2`,
+      [actorId, command.resourceKey],
+    );
+    const input = {
+      commandId: stored.rows[0].id,
+      operatorId: `operator-${runId}`,
+      reason: "Concurrent recovery probe with an intentionally sufficient audit explanation.",
+    };
+    const settled = await Promise.allSettled([
+      rearmDeadFinancialCommand(pool, input),
+      rearmDeadFinancialCommand(pool, input),
+    ]);
+    expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const failure = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    expect(failure?.reason).toMatchObject({ code: "FINANCIAL_COMMAND_NOT_DEAD" });
+
+    const evidence = await pool.query<{
+      attempt_limit: number;
+      recovery_count: number;
+      recovery_rows: string;
+    }>(
+      `SELECT command.attempt_limit,
+              command.recovery_count,
+              COUNT(recovery.id)::text AS recovery_rows
+       FROM public.financial_command_results command
+       LEFT JOIN public.financial_command_recoveries recovery
+         ON recovery.command_result_id = command.id
+       WHERE command.id = $1
+       GROUP BY command.id`,
+      [input.commandId],
+    );
+    expect(evidence.rows).toEqual([{ attempt_limit: 6, recovery_count: 1, recovery_rows: "1" }]);
+  });
+
+  it("purges only expired replayable terminal results and retains dead evidence", async () => {
+    const seeded = await pool.query<{ id: number; status: string }>(
+      `INSERT INTO public.financial_command_results (
+         actor_type, actor_id, method, route_template, resource_key,
+         idempotency_key, request_hash, command_name, contract_version,
+         status, attempt_count, http_status, response_body,
+         last_error_code, last_error_message, completed_at,
+         created_at, updated_at, expires_at
+       ) VALUES
+       ('service', $1, 'POST', '/__tests__/retention/:id', 'retention:succeeded',
+        $2, $3, 'test.financial_command.retention_succeeded', 1,
+        'succeeded', 1, 200, '{"ok":true}'::jsonb,
+        NULL, NULL, transaction_timestamp() - interval '2 days',
+        transaction_timestamp() - interval '3 days', transaction_timestamp() - interval '2 days', transaction_timestamp() - interval '1 day'),
+       ('service', $1, 'POST', '/__tests__/retention/:id', 'retention:dead',
+        $4, $5, 'test.financial_command.retention_dead', 1,
+        'dead', 5, NULL, NULL,
+        'TEST_DEAD', 'Dead evidence must survive automatic cleanup.', transaction_timestamp() - interval '2 days',
+        transaction_timestamp() - interval '3 days', transaction_timestamp() - interval '2 days', transaction_timestamp() - interval '1 day')
+       RETURNING id, status`,
+      [
+        actorId,
+        `${runId}-retention-succeeded`,
+        requestHash("retention-succeeded"),
+        `${runId}-retention-dead`,
+        requestHash("retention-dead"),
+      ],
+    );
+    expect(await purgeExpiredFinancialCommandResults(pool, 10)).toBe(1);
+    const remaining = await pool.query<{ id: number; status: string }>(
+      `SELECT id, status FROM public.financial_command_results
+       WHERE id = ANY($1::bigint[]) ORDER BY id`,
+      [seeded.rows.map((row) => row.id)],
+    );
+    expect(remaining.rows).toEqual([
+      expect.objectContaining({ status: "dead" }),
     ]);
   });
 });

@@ -35,6 +35,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { FinancialCommandOperations } from "@/components/operations/FinancialCommandOperations";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -1149,6 +1150,7 @@ export default function FlowMonitor() {
           flow={flowQuery.data}
           loading={sourcesQuery.isLoading}
           error={sourcesQuery.error}
+          canTriage={hasPermission("operations", "triage")}
         />
       ) : (
         <>
@@ -2044,10 +2046,12 @@ function SystemHealthView(props: {
   flow: FlowOverviewResponse | undefined;
   loading: boolean;
   error: Error | null;
+  canTriage: boolean;
 }) {
   return (
     <main className="flex-1 p-4 lg:p-6">
       <div className="mx-auto max-w-6xl">
+        <FinancialCommandOperations canTriage={props.canTriage} />
         <section className="mb-7">
           <div className="mb-3 flex items-end justify-between gap-3">
             <div>

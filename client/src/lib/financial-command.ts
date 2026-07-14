@@ -156,6 +156,10 @@ export async function financialCommandFetchJson<T>(
   if (!response.ok) {
     const structured = structuredError(body);
     const retryable = retryableHttpFailure(response.status, structured.code);
+    // A dead command must not loop automatically, but its outcome is still
+    // unresolved. Retain the exact intent key so an operator can re-arm the
+    // ledger row and the originating screen can resend the same request.
+    const operatorRecoverable = structured.code === "FINANCIAL_COMMAND_DEAD";
     throw new FinancialCommandRequestError(
       structured.message ?? `Financial command failed with HTTP ${response.status}`,
       {
@@ -165,7 +169,7 @@ export async function financialCommandFetchJson<T>(
         responseBody: body,
         retryAfterMs: parseRetryAfterMs(response.headers.get("retry-after")),
         retryable,
-        ambiguous: retryable,
+        ambiguous: retryable || operatorRecoverable,
       },
     );
   }

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   bigserial,
   check,
   index,
@@ -46,6 +47,8 @@ export const financialCommandResults = pgTable("financial_command_results", {
   leaseToken: varchar("lease_token", { length: 100 }),
   leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
   attemptCount: integer("attempt_count").notNull().default(1),
+  attemptLimit: integer("attempt_limit").notNull().default(5),
+  recoveryCount: integer("recovery_count").notNull().default(0),
   httpStatus: integer("http_status"),
   responseBody: jsonb("response_body"),
   resultType: varchar("result_type", { length: 100 }),
@@ -122,6 +125,15 @@ export const financialCommandResults = pgTable("financial_command_results", {
   attemptCountCheck: check(
     "financial_command_results_attempt_count_chk",
     sql`${table.attemptCount} > 0`,
+  ),
+  attemptLimitCheck: check(
+    "financial_command_results_attempt_limit_chk",
+    sql`${table.attemptLimit} BETWEEN 1 AND 100
+      AND ${table.attemptCount} <= ${table.attemptLimit}`,
+  ),
+  recoveryCountCheck: check(
+    "financial_command_results_recovery_count_chk",
+    sql`${table.recoveryCount} BETWEEN 0 AND 95`,
   ),
   resultIdentityCheck: check(
     "financial_command_results_result_identity_chk",
@@ -224,3 +236,56 @@ export const financialCommandResults = pgTable("financial_command_results", {
 
 export type FinancialCommandResult = typeof financialCommandResults.$inferSelect;
 export type InsertFinancialCommandResult = typeof financialCommandResults.$inferInsert;
+
+export const financialCommandRecoveries = pgTable("financial_command_recoveries", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  commandResultId: bigint("command_result_id", { mode: "number" })
+    .notNull()
+    .references(() => financialCommandResults.id, { onDelete: "cascade" }),
+  recoveryNumber: integer("recovery_number").notNull(),
+  operatorId: varchar("operator_id", { length: 200 }).notNull(),
+  reason: varchar("reason", { length: 1000 }).notNull(),
+  priorAttemptCount: integer("prior_attempt_count").notNull(),
+  priorAttemptLimit: integer("prior_attempt_limit").notNull(),
+  priorErrorCode: varchar("prior_error_code", { length: 100 }).notNull(),
+  priorErrorMessage: varchar("prior_error_message", { length: 1000 }).notNull(),
+  priorCompletedAt: timestamp("prior_completed_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  commandNumberUq: uniqueIndex("financial_command_recoveries_command_number_uidx").on(
+    table.commandResultId,
+    table.recoveryNumber,
+  ),
+  createdIdx: index("financial_command_recoveries_created_idx").on(
+    table.createdAt,
+    table.id,
+  ),
+  recoveryNumberCheck: check(
+    "financial_command_recoveries_number_chk",
+    sql`${table.recoveryNumber} > 0`,
+  ),
+  operatorCheck: check(
+    "financial_command_recoveries_operator_chk",
+    sql`${table.operatorId} = btrim(${table.operatorId}) AND ${table.operatorId} <> ''`,
+  ),
+  reasonCheck: check(
+    "financial_command_recoveries_reason_chk",
+    sql`${table.reason} = btrim(${table.reason})
+      AND length(${table.reason}) BETWEEN 10 AND 1000`,
+  ),
+  attemptsCheck: check(
+    "financial_command_recoveries_attempts_chk",
+    sql`${table.priorAttemptCount} > 0
+      AND ${table.priorAttemptLimit} >= ${table.priorAttemptCount}`,
+  ),
+  errorCheck: check(
+    "financial_command_recoveries_error_chk",
+    sql`${table.priorErrorCode} = btrim(${table.priorErrorCode})
+      AND ${table.priorErrorCode} <> ''
+      AND ${table.priorErrorMessage} = btrim(${table.priorErrorMessage})
+      AND ${table.priorErrorMessage} <> ''`,
+  ),
+}));
+
+export type FinancialCommandRecovery = typeof financialCommandRecoveries.$inferSelect;
+export type InsertFinancialCommandRecovery = typeof financialCommandRecoveries.$inferInsert;

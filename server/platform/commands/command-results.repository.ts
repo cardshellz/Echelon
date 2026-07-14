@@ -19,7 +19,7 @@ type Transaction = Parameters<Parameters<typeof defaultDatabase.transaction>[0]>
 
 const LEASE_SECONDS = 120;
 const RESULT_RETENTION_DAYS = 400;
-const MAX_ATTEMPTS = 5;
+const DEFAULT_ATTEMPT_LIMIT = 5;
 
 function scopeWhere(descriptor: FinancialCommandDescriptor) {
   return and(
@@ -153,6 +153,7 @@ export function createDrizzleFinancialCommandRepository(
               leaseToken,
               leaseExpiresAt: sql`transaction_timestamp() + (${LEASE_SECONDS} * interval '1 second')`,
               attemptCount: 1,
+              attemptLimit: DEFAULT_ATTEMPT_LIMIT,
               expiresAt: sql`transaction_timestamp() + (${RESULT_RETENTION_DAYS} * interval '1 day')`,
             })
             .onConflictDoNothing({
@@ -206,7 +207,7 @@ export function createDrizzleFinancialCommandRepository(
             ? lte(financialCommandResults.leaseExpiresAt, sql`transaction_timestamp()`)
             : lte(financialCommandResults.nextAttemptAt, sql`transaction_timestamp()`);
 
-          if (existing.attemptCount >= MAX_ATTEMPTS) {
+          if (existing.attemptCount >= existing.attemptLimit) {
             const deadRows = await tx
               .update(financialCommandResults)
               .set({
@@ -403,7 +404,7 @@ export function createDrizzleFinancialCommandRepository(
           .for("update");
         const owned = ownedRows[0];
         assertOwnedRow(owned, claim, descriptor);
-        const terminal = owned.attemptCount >= MAX_ATTEMPTS;
+        const terminal = owned.attemptCount >= owned.attemptLimit;
         const updatedRows = await tx
           .update(financialCommandResults)
           .set({
