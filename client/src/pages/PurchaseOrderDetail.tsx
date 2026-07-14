@@ -1874,15 +1874,20 @@ export default function PurchaseOrderDetail() {
         }],
       };
       const idempotencyKey = paymentIntent.acquire({ method: "POST", url: "/api/ap-payments", body });
-      const result = await financialCommandFetchJson<any>("/api/ap-payments", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify(body),
-      });
-      return { result, idempotencyKey };
+      try {
+        const result = await financialCommandFetchJson<any>("/api/ap-payments", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: JSON.stringify(body),
+        });
+        return { result, idempotencyKey };
+      } catch (error) {
+        paymentIntent.fail(idempotencyKey, error);
+        throw error;
+      }
     },
     retry: shouldRetryFinancialCommand,
     retryDelay: financialCommandRetryDelay,

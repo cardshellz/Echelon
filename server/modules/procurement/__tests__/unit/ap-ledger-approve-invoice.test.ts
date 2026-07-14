@@ -16,7 +16,9 @@ vi.mock("../../../../db", () => ({
       const tx = {
         select: vi.fn(() => ({
           from: vi.fn(() => ({
-            where: vi.fn(async () => mockInvoiceRows.rows),
+            where: vi.fn(() => ({
+              for: vi.fn(async () => mockInvoiceRows.rows),
+            })),
           })),
         })),
         update: mockTxUpdate,

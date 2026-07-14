@@ -8,6 +8,7 @@ import {
   type FinancialCommandResult,
 } from "../../platform/commands/transactional-command.service";
 import { apPaymentCommands } from "./ap-payment-commands";
+import { apInvoiceCommands } from "./ap-invoice-commands";
 
 function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
   if (err?.name === "ApLedgerError") {
@@ -109,42 +110,63 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoices/:id/approve", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
-      const invoice = await apLedger.executeApLedgerCommand("approve_invoice", {
-        invoiceId: Number(req.params.id),
-        userId: getUserId(req),
+      const invoiceId = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: getUserId(req),
+        routeTemplate: "/api/vendor-invoices/:id/approve",
+        resourceKey: `vendor_invoice:${invoiceId}`,
+        commandName: "ap.invoice.approve",
       });
-      res.json(invoice);
+      const result = await apInvoiceCommands.approveInvoice(invoiceId, {
+        userId: getUserId(req),
+      }, descriptor);
+      return sendFinancialCommandResult(res, result);
     } catch (err: any) {
+      if (err instanceof FinancialCommandError) return sendFinancialCommandError(res, err);
       handleApLedgerError(res, err);
     }
   });
 
-  app.post("/api/vendor-invoices/:id/dispute", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/dispute", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const { reason } = req.body;
-      const invoice = await apLedger.executeApLedgerCommand("dispute_invoice", {
-        invoiceId: Number(req.params.id),
+      const invoiceId = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: getUserId(req),
+        routeTemplate: "/api/vendor-invoices/:id/dispute",
+        resourceKey: `vendor_invoice:${invoiceId}`,
+        commandName: "ap.invoice.dispute",
+      });
+      const result = await apInvoiceCommands.disputeInvoice(invoiceId, {
         reason,
         userId: getUserId(req),
-      });
-      res.json(invoice);
+      }, descriptor);
+      return sendFinancialCommandResult(res, result);
     } catch (err: any) {
+      if (err instanceof FinancialCommandError) return sendFinancialCommandError(res, err);
       handleApLedgerError(res, err);
     }
   });
 
-  app.post("/api/vendor-invoices/:id/void", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
+  app.post("/api/vendor-invoices/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
       const { reason } = req.body;
-      const invoice = await apLedger.executeApLedgerCommand("void_invoice", {
-        invoiceId: Number(req.params.id),
+      const invoiceId = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: getUserId(req),
+        routeTemplate: "/api/vendor-invoices/:id/void",
+        resourceKey: `vendor_invoice:${invoiceId}`,
+        commandName: "ap.invoice.void",
+      });
+      const result = await apInvoiceCommands.voidInvoice(invoiceId, {
         reason,
         userId: getUserId(req),
-      });
-      res.json(invoice);
+      }, descriptor);
+      return sendFinancialCommandResult(res, result);
     } catch (err: any) {
+      if (err instanceof FinancialCommandError) return sendFinancialCommandError(res, err);
       handleApLedgerError(res, err);
     }
   });

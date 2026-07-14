@@ -8,20 +8,21 @@ This continues:
 The July 13 quote-pricing work is merged in PR #914. PR #917 subsequently
 merged durable transactional command results for ordinary PO-line mutations,
 PR #918 made optional PO/catalog capture atomic, and PR #921 added durable
-purchase-order email delivery, and PR #922 put the disposable PostgreSQL
-hardening suites in CI. The next local slice migrates cash-moving AP payment
-commands to the durable transactional command ledger.
+purchase-order email delivery, PR #922 put the disposable PostgreSQL hardening
+suites in CI, and PR #924 migrated cash-moving AP payment commands to the
+durable transactional command ledger. The next local slice covers invoice
+approve, dispute, and void transitions.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/purchasing-financial-commands-2026-07-14`
-- Base and current `origin/main`: `1c378717`
-- Base hardening slice: merged PR #922
+- Branch: `codex/ap-invoice-financial-commands-2026-07-14`
+- Base and current `origin/main`: `5bf413c5`
+- Base hardening slice: merged PR #924
 - Deployment status: PR #921 is live on Heroku release v2381
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
-- Commit/PR status: AP payment ledger slice is local and not yet published
+- Commit/PR status: AP invoice lifecycle ledger slice is local and not yet published
 
 Do not deploy this branch without owner approval.
 
@@ -368,13 +369,53 @@ Current local evidence:
 - production build: passed; 3,595 client modules transformed and server bundle built
 - `git diff --check`: passed, with Windows line-ending notices only
 
+PR #924 merged as `5bf413c5`. Its final merge-candidate CI run `29361866465`
+passed both `Typecheck + unit tests` and `PostgreSQL hardening tests`.
+
+## AP invoice lifecycle transactional-command slice
+
+The next reviewed command group is:
+
+- `POST /api/vendor-invoices/:id/approve`
+- `POST /api/vendor-invoices/:id/dispute`
+- `POST /api/vendor-invoices/:id/void`
+
+Each route now uses a scoped durable financial-command descriptor and returns
+the exact stored status/body with `Idempotency-Replayed`. The legacy response
+cache is no longer stacked on these routes.
+
+The caller-owned transaction now locks the invoice row before transition
+validation and commits the invoice status, linked PO financial aggregates,
+required AP audit event, and durable success result together. Missing invoices,
+invalid states, missing reasons, already-voided invoices, and void attempts with
+applied payments become durable replayable 4xx results. Unknown infrastructure
+failures remain retryable without persisting raw exception details.
+
+The obsolete `executeApLedgerCommand` orchestration path was removed after all
+five AP invoice/payment commands moved to the durable wrappers. This prevents a
+future caller from accidentally restoring the old split-commit audit behavior.
+
+Invoice approval's variance-to-lot-to-COGS reconciliation remains an explicit
+non-blocking post-commit hook. Exact command replay does not rerun it. The browser
+uses the shared financial-command transport and intent store for approve,
+dispute, and void, including retry classification and `Retry-After` handling.
+Payment callers now also notify their intent stores on failure so definitive 4xx
+responses clear retained keys while ambiguous outcomes keep them.
+
+Current local evidence:
+
+- `npm.cmd run check`: passed
+- focused invoice/payment command, route, lock, atomic-audit, and replay gate: 30 tests passed
+- repository unit gate: 355 files and 3,413 tests passed; 14 skipped; 8 todo
+- production build: passed; 3,595 client modules transformed and server bundle built
+- `git diff --check`: passed, with Windows line-ending notices only
+
 ## Recommended next implementation order
 
-1. Review and merge the AP payment transactional-command slice.
-2. Migrate invoice approve/dispute/void commands as the next reviewed ledger group.
-3. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
-4. Repair the broader named-schema integration harness before enabling its old suites.
-5. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
+1. Review and merge the AP invoice lifecycle transactional-command slice.
+2. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
+3. Repair the broader named-schema integration harness before enabling its old suites.
+4. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
 
 Keep manual quote pricing marked `manual` even when the same quote is optionally
 saved to the vendor catalog. Extended-total quotes remain PO-specific and must not be
