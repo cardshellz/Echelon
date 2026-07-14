@@ -15,7 +15,7 @@ const OMS_ROUTES_SOURCE = readFileSync(
   "utf8",
 );
 const REPLACEMENT_MIGRATION_SOURCE = readFileSync(
-  resolve(__dirname, "../../../../../migrations/137_shipment_replacement_authority.sql"),
+  resolve(__dirname, "../../../../../migrations/0587_shipment_replacement_authority.sql"),
   "utf8",
 );
 const SHIPMENT_ROLLUP_SOURCE = readFileSync(
