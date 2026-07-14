@@ -495,15 +495,25 @@ function count(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
-const addLineSource = section("async function addLine(", "async function addBulkLines(");
-const addBulkLinesSource = section("async function addBulkLines(", "async function updateLine(");
-const updateLineSource = section("async function updateLine(", "async function cancelLine(");
-const cancelLineSource = section("async function cancelLine(", "return { addLine, addBulkLines, updateLine, cancelLine }");
+const addLineSource = section("async function addLineInTransaction(", "async function addLine(");
+const addLineWrapperSource = section("async function addLine(", "async function addBulkLinesInTransaction(");
+const addBulkLinesSource = section("async function addBulkLinesInTransaction(", "async function addBulkLines(");
+const addBulkLinesWrapperSource = section("async function addBulkLines(", "async function updateLineInTransaction(");
+const updateLineSource = section("async function updateLineInTransaction(", "async function updateLine(");
+const updateLineWrapperSource = section("async function updateLine(", "async function cancelLineInTransaction(");
+const cancelLineSource = section("async function cancelLineInTransaction(", "async function cancelLine(");
+const cancelLineWrapperSource = section("async function cancelLine(", "async function addLineCommand(");
 const commandSections = [addLineSource, addBulkLinesSource, updateLineSource, cancelLineSource];
+const transactionWrapperSections = [
+  addLineWrapperSource,
+  addBulkLinesWrapperSource,
+  updateLineWrapperSource,
+  cancelLineWrapperSource,
+];
 
 describe("purchase-order line command transaction invariants", () => {
   it("enters exactly one transaction before any command DB access", () => {
-    for (const commandSource of commandSections) {
+    for (const commandSource of transactionWrapperSections) {
       expect(count(commandSource, "db.transaction(")).toBe(1);
       const transactionPosition = commandSource.indexOf("db.transaction(");
       const beforeTransaction = commandSource.slice(0, transactionPosition);
@@ -569,10 +579,9 @@ describe("purchase-order line command transaction invariants", () => {
     expect(eventSource).toContain("tx.insert(poEvents)");
 
     for (const commandSource of commandSections) {
-      const transactionPosition = commandSource.indexOf("db.transaction(");
       const totalsPosition = commandSource.indexOf("await updateHeaderTotals(");
       const eventPosition = commandSource.indexOf("await emitEvent(");
-      expect(totalsPosition).toBeGreaterThan(transactionPosition);
+      expect(totalsPosition).toBeGreaterThanOrEqual(0);
       expect(eventPosition).toBeGreaterThan(totalsPosition);
     }
   });

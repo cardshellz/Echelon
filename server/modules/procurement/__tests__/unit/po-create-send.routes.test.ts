@@ -45,6 +45,7 @@ vi.mock("../../../notifications/notifications.service", () => ({}));
 
 // Now import the router registrar after mocks are in place.
 import { registerPurchasingRoutes } from "../../procurement.routes";
+import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 
 function buildPurchasingMock(overrides: Record<string, any> = {}) {
   return {
@@ -60,6 +61,10 @@ function buildPurchasingMock(overrides: Record<string, any> = {}) {
     getNewPoPreload: vi.fn(),
     getProcurementSettings: vi.fn(),
     updateProcurementSetting: vi.fn(),
+    addLineCommand: vi.fn(),
+    addBulkLinesCommand: vi.fn(),
+    updateLineCommand: vi.fn(),
+    cancelLineCommand: vi.fn(),
     ...overrides,
   } as any;
 }
@@ -98,13 +103,13 @@ async function jsonRequest(
   method: string,
   path: string,
   body?: any,
-): Promise<{ status: number; body: any }> {
+  idempotencyKey: string | null = "test-key-" + Math.random().toString(36).slice(2),
+): Promise<{ status: number; body: any; headers: Headers }> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (idempotencyKey !== null) headers["idempotency-key"] = idempotencyKey;
   const res = await fetch(`${baseUrl}${path}`, {
     method,
-    headers: {
-      "content-type": "application/json",
-      "idempotency-key": "test-key-" + Math.random().toString(36).slice(2),
-    },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -114,7 +119,7 @@ async function jsonRequest(
   } catch {
     parsed = text;
   }
-  return { status: res.status, body: parsed };
+  return { status: res.status, body: parsed, headers: res.headers };
 }
 
 describe("GET /api/purchase-orders/new-preload", () => {
@@ -513,6 +518,152 @@ describe("Settings endpoints", () => {
     const { status, body } = await jsonRequest(server.url, "PATCH", "/api/settings/procurement", {});
     expect(status).toBe(400);
     expect(body.error).toMatch(/key, value.*updates/);
+  });
+});
+
+describe("purchase-order line transactional idempotency routes", () => {
+  let server: { url: string; close: () => Promise<void> };
+  let purchasing: ReturnType<typeof buildPurchasingMock>;
+
+  beforeEach(async () => {
+    purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it.each([
+    {
+      method: "POST",
+      path: "/api/purchase-orders/42/lines",
+      service: "addLineCommand",
+      resourceKey: "purchase_order:42",
+      routeTemplate: "/api/purchase-orders/:id/lines",
+      commandName: "purchase_order.line.add",
+      id: 42,
+    },
+    {
+      method: "POST",
+      path: "/api/purchase-orders/42/lines/bulk",
+      service: "addBulkLinesCommand",
+      resourceKey: "purchase_order:42",
+      routeTemplate: "/api/purchase-orders/:id/lines/bulk",
+      commandName: "purchase_order.line.bulk_add",
+      id: 42,
+    },
+    {
+      method: "PATCH",
+      path: "/api/purchase-orders/lines/77",
+      service: "updateLineCommand",
+      resourceKey: "purchase_order_line:77",
+      routeTemplate: "/api/purchase-orders/lines/:lineId",
+      commandName: "purchase_order.line.update",
+      id: 77,
+    },
+    {
+      method: "DELETE",
+      path: "/api/purchase-orders/lines/77",
+      service: "cancelLineCommand",
+      resourceKey: "purchase_order_line:77",
+      routeTemplate: "/api/purchase-orders/lines/:lineId",
+      commandName: "purchase_order.line.cancel",
+      id: 77,
+    },
+  ])("wires $method $path to a scoped command descriptor", async (testCase) => {
+    const responseBody = { id: testCase.id, ok: true };
+    purchasing[testCase.service].mockResolvedValue({
+      commandId: 901,
+      replayed: false,
+      httpStatus: 201,
+      body: responseBody,
+      terminalState: "succeeded",
+    });
+    const requestBody = { expectedPoUpdatedAt: "2026-07-14T12:00:00.000Z" };
+    const { status, body, headers } = await jsonRequest(
+      server.url,
+      testCase.method,
+      testCase.path,
+      requestBody,
+      "intent-key-12345678",
+    );
+
+    expect(status).toBe(201);
+    expect(body).toEqual(responseBody);
+    expect(headers.get("idempotency-replayed")).toBe("false");
+    expect(purchasing[testCase.service]).toHaveBeenCalledTimes(1);
+    const [id, forwardedBody, actorId, descriptor] = purchasing[testCase.service].mock.calls[0];
+    expect(id).toBe(testCase.id);
+    expect(forwardedBody).toEqual(requestBody);
+    expect(actorId).toBe("test-user");
+    expect(descriptor).toMatchObject({
+      actorType: "user",
+      actorId: "test-user",
+      method: testCase.method,
+      routeTemplate: testCase.routeTemplate,
+      resourceKey: testCase.resourceKey,
+      idempotencyKey: "intent-key-12345678",
+      commandName: testCase.commandName,
+      contractVersion: 1,
+    });
+    expect(descriptor.requestHash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("rejects a missing key before invoking the line service", async () => {
+    const { status, body } = await jsonRequest(
+      server.url,
+      "POST",
+      "/api/purchase-orders/42/lines",
+      {},
+      null,
+    );
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REQUIRED");
+    expect(purchasing.addLineCommand).not.toHaveBeenCalled();
+  });
+
+  it("replays the stored status and body without reshaping them", async () => {
+    purchasing.addLineCommand.mockResolvedValue({
+      commandId: 902,
+      replayed: true,
+      httpStatus: 409,
+      body: { error: "Purchase order changed", details: { code: "PO_LINE_COMMAND_PO_CONFLICT" } },
+      terminalState: "rejected",
+    });
+    const { status, body, headers } = await jsonRequest(
+      server.url,
+      "POST",
+      "/api/purchase-orders/42/lines",
+      {},
+      "intent-key-replay-123",
+    );
+    expect(status).toBe(409);
+    expect(body).toEqual({
+      error: "Purchase order changed",
+      details: { code: "PO_LINE_COMMAND_PO_CONFLICT" },
+    });
+    expect(headers.get("idempotency-replayed")).toBe("true");
+  });
+
+  it("maps active command leases to a retryable HTTP conflict", async () => {
+    purchasing.addLineCommand.mockRejectedValue(new FinancialCommandError(
+      "An identical financial command is already being processed",
+      409,
+      "FINANCIAL_COMMAND_IN_PROGRESS",
+      { commandId: 903, retryAfterSeconds: 7 },
+      { "Retry-After": "7" },
+    ));
+    const { status, body, headers } = await jsonRequest(
+      server.url,
+      "POST",
+      "/api/purchase-orders/42/lines",
+      {},
+      "intent-key-active-123",
+    );
+    expect(status).toBe(409);
+    expect(body.details.code).toBe("FINANCIAL_COMMAND_IN_PROGRESS");
+    expect(headers.get("retry-after")).toBe("7");
   });
 });
 

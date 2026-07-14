@@ -60,6 +60,12 @@ import {
 } from "@/features/po-edit/PoLineQuoteMetadataEditor";
 import { isImmutableRecommendationPurchaseOrder } from "@/features/po-edit/purchase-order-editability";
 import {
+  createFinancialCommandIntentStore,
+  financialCommandFetchJson,
+  financialCommandRetryDelay,
+  shouldRetryFinancialCommand,
+} from "@/lib/financial-command";
+import {
   ShipmentReceiptPackResolutionDialog,
   type ShipmentReceiptPackResolution,
   type ShipmentReceiptPackResolutionLine,
@@ -874,6 +880,38 @@ function genPoLineIdempotencyKey(): string {
   return `po-line-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+type PoLineHttpCommand<TBody> = {
+  idempotencyKey: string;
+  requestUrl: string;
+  body: TBody;
+};
+
+type AddPoLineRequestBody = {
+  productId: number;
+  expectedReceiveVariantId: number;
+  expectedReceiveUnitsPerVariant: number;
+  vendorProductId?: number;
+  vendorSku?: string;
+  description?: string;
+  pricingSource: "manual" | "vendor_catalog";
+  pricing: PoLinePricingInput;
+  expectedPoUpdatedAt: string;
+  quoteReference?: string;
+  quotedAt?: string;
+  quoteValidUntil?: string;
+};
+
+type CancelPoLineRequestBody = {
+  expectedPoUpdatedAt: string;
+  expectedLineUpdatedAt: string;
+  reason: string;
+};
+
+type UpdatePoLineRequestBody = Record<string, unknown> & {
+  expectedPoUpdatedAt: string;
+  expectedLineUpdatedAt: string;
+};
+
 function parsePositiveInt(value: string | null): number | null {
   if (!value) return null;
   const parsed = Number(value);
@@ -900,6 +938,15 @@ export default function PurchaseOrderDetail() {
   const searchStr = useSearch();
   const [, params] = useRoute("/purchase-orders/:id");
   const poId = params?.id ? Number(params.id) : null;
+  const [addLineIntent] = useState(() =>
+    createFinancialCommandIntentStore(genPoLineIdempotencyKey),
+  );
+  const [updateLineIntent] = useState(() =>
+    createFinancialCommandIntentStore(genPoLineIdempotencyKey),
+  );
+  const [cancelLineIntent] = useState(() =>
+    createFinancialCommandIntentStore(genPoLineIdempotencyKey),
+  );
 
   const [activeTab, setActiveTab] = useState("lines");
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
@@ -1890,49 +1937,34 @@ export default function PurchaseOrderDetail() {
   });
 
   const addLineMutation = useMutation({
-    mutationFn: async (data: {
-      productId: number;
-      expectedReceiveVariantId: number;
-      expectedReceiveUnitsPerVariant: number;
-      vendorProductId?: number;
-      vendorSku?: string;
-      description?: string;
-      pricingSource: "manual" | "vendor_catalog";
-      pricing: PoLinePricingInput;
-      expectedPoUpdatedAt: string;
-      quoteReference?: string;
-      quotedAt?: string;
-      quoteValidUntil?: string;
-    }) => {
-      const res = await fetch(`/api/purchase-orders/${poId}/lines`, {
+    mutationFn: ({ idempotencyKey, requestUrl, body }: PoLineHttpCommand<AddPoLineRequestBody>) =>
+      financialCommandFetchJson(requestUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": genPoLineIdempotencyKey(),
+          "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify(data),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to add line");
-      }
-      return res.json();
-    },
+        body: JSON.stringify(body),
+      }),
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
     onSuccess: (_result, command) => {
-      const catalogData = saveToVendorCatalog && command.pricing.basis !== "extended_total" && po?.vendorId && command.expectedReceiveVariantId ? {
+      addLineIntent.complete(command.idempotencyKey);
+      const commandBody = command.body;
+      const catalogData = saveToVendorCatalog && commandBody.pricing.basis !== "extended_total" && po?.vendorId && commandBody.expectedReceiveVariantId ? {
         vendorId: po.vendorId,
-        productId: command.productId,
-        productVariantId: command.expectedReceiveVariantId,
-        vendorSku: command.vendorSku || "",
-        pricing: command.pricing,
+        productId: commandBody.productId,
+        productVariantId: commandBody.expectedReceiveVariantId,
+        vendorSku: commandBody.vendorSku || "",
+        pricing: commandBody.pricing,
         ...populatedPoLineQuoteMetadata({
-          quoteReference: command.quoteReference ?? null,
-          quotedAt: command.quotedAt ?? null,
-          quoteValidUntil: command.quoteValidUntil ?? null,
+          quoteReference: commandBody.quoteReference ?? null,
+          quotedAt: commandBody.quotedAt ?? null,
+          quoteValidUntil: commandBody.quoteValidUntil ?? null,
         }),
         // Catalog pack size describes the supplier's purchase UOM. Receiving
         // configuration is intentionally independent.
-        packSize: vendorCatalogPackSizeForPricing(command.pricing),
+        packSize: vendorCatalogPackSizeForPricing(commandBody.pricing),
         isPreferred: setAsPreferred,
       } : null;
 
@@ -1952,67 +1984,49 @@ export default function PurchaseOrderDetail() {
 
       if (catalogData) catalogUpsertMutation.mutate(catalogData);
     },
-    onError: (err: Error) => {
+    onError: (err: Error, command) => {
+      addLineIntent.fail(command.idempotencyKey, err);
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
 
   const deleteLineMutation = useMutation({
-    mutationFn: async (line: any) => {
-      if (!po?.updatedAt || !line?.updatedAt) {
-        throw new Error("The PO or line version is unavailable. Reload before removing this line.");
-      }
-      const res = await fetch(`/api/purchase-orders/lines/${line.id}`, {
+    mutationFn: ({ idempotencyKey, requestUrl, body }: PoLineHttpCommand<CancelPoLineRequestBody>) =>
+      financialCommandFetchJson(requestUrl, {
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": genPoLineIdempotencyKey(),
+          "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({
-          expectedPoUpdatedAt: po.updatedAt,
-          expectedLineUpdatedAt: line.updatedAt,
-          reason: "Removed from draft purchase order",
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to remove line");
-      }
-      return res.json();
-    },
-    onSuccess: () => {
+        body: JSON.stringify(body),
+      }),
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: (_result, command) => {
+      cancelLineIntent.complete(command.idempotencyKey);
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       toast({ title: "Line removed" });
     },
-    onError: (err: Error) => {
+    onError: (err: Error, command) => {
+      cancelLineIntent.fail(command.idempotencyKey, err);
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
 
   const updateLineMutation = useMutation({
-    mutationFn: async ({ line, updates }: { line: any; updates: Record<string, any> }) => {
-      if (!po?.updatedAt || !line?.updatedAt) {
-        throw new Error("The PO or line version is unavailable. Reload before editing this line.");
-      }
-      const res = await fetch(`/api/purchase-orders/lines/${line.id}`, {
+    mutationFn: ({ idempotencyKey, requestUrl, body }: PoLineHttpCommand<UpdatePoLineRequestBody>) =>
+      financialCommandFetchJson(requestUrl, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": genPoLineIdempotencyKey(),
+          "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({
-          ...updates,
-          expectedPoUpdatedAt: po.updatedAt,
-          expectedLineUpdatedAt: line.updatedAt,
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to update line");
-      }
-      return res.json();
-    },
-    onSuccess: () => {
+        body: JSON.stringify(body),
+      }),
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: (_result, command) => {
+      updateLineIntent.complete(command.idempotencyKey);
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       setEditingLineId(null);
       setEditingLineField(null);
@@ -2024,10 +2038,49 @@ export default function PurchaseOrderDetail() {
       setLegacyPricingConfirmed(false);
       toast({ title: "Line updated" });
     },
-    onError: (err: Error) => {
+    onError: (err: Error, command) => {
+      updateLineIntent.fail(command.idempotencyKey, err);
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  function submitLineUpdate(line: any, updates: Record<string, unknown>) {
+    if (!po?.updatedAt || !line?.updatedAt) {
+      toast({
+        title: "Error",
+        description: "The PO or line version is unavailable. Reload before editing this line.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const requestUrl = `/api/purchase-orders/lines/${line.id}`;
+    const body: UpdatePoLineRequestBody = {
+      ...updates,
+      expectedPoUpdatedAt: po.updatedAt,
+      expectedLineUpdatedAt: line.updatedAt,
+    };
+    const idempotencyKey = updateLineIntent.acquire({ method: "PATCH", requestUrl, body });
+    updateLineMutation.mutate({ idempotencyKey, requestUrl, body });
+  }
+
+  function submitLineCancellation(line: any) {
+    if (!po?.updatedAt || !line?.updatedAt) {
+      toast({
+        title: "Error",
+        description: "The PO or line version is unavailable. Reload before removing this line.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const requestUrl = `/api/purchase-orders/lines/${line.id}`;
+    const body: CancelPoLineRequestBody = {
+      expectedPoUpdatedAt: po.updatedAt,
+      expectedLineUpdatedAt: line.updatedAt,
+      reason: "Removed from draft purchase order",
+    };
+    const idempotencyKey = cancelLineIntent.acquire({ method: "DELETE", requestUrl, body });
+    deleteLineMutation.mutate({ idempotencyKey, requestUrl, body });
+  }
 
   function startPricingEdit(line: any) {
     if (!canEditLine(line)) return;
@@ -2056,12 +2109,9 @@ export default function PurchaseOrderDetail() {
 
   function saveSkuEdit(line: any, variant: { id: number; sku: string; unitsPerVariant: number }) {
     if (!canEditLine(line)) return;
-    updateLineMutation.mutate({
-      line,
-      updates: {
-        expectedReceiveVariantId: variant.id,
-        expectedReceiveUnitsPerVariant: variant.unitsPerVariant || 1,
-      },
+    submitLineUpdate(line, {
+      expectedReceiveVariantId: variant.id,
+      expectedReceiveUnitsPerVariant: variant.unitsPerVariant || 1,
     });
   }
 
@@ -2093,22 +2143,19 @@ export default function PurchaseOrderDetail() {
       });
       return;
     }
-    updateLineMutation.mutate({
-      line: editingPricingLine,
+    submitLineUpdate(editingPricingLine, {
       // A human changed or confirmed this line. Keep its quote metadata, but
       // mark the pricing source as manual rather than claiming an untouched
       // catalog or recommendation value.
-      updates: {
-        pricing: evaluation.pricing,
-        pricingSource: "manual",
-        // Omit untouched metadata so editing economics never truncates an
-        // existing quote timestamp to its date-only input representation.
-        ...changedPoLineQuoteMetadata(
-          originalEditLineQuoteMetadata,
-          editLineQuoteMetadata,
-          metadataEvaluation.metadata,
-        ),
-      },
+      pricing: evaluation.pricing,
+      pricingSource: "manual",
+      // Omit untouched metadata so editing economics never truncates an
+      // existing quote timestamp to its date-only input representation.
+      ...changedPoLineQuoteMetadata(
+        originalEditLineQuoteMetadata,
+        editLineQuoteMetadata,
+        metadataEvaluation.metadata,
+      ),
     });
   }
 
@@ -3029,7 +3076,12 @@ export default function PurchaseOrderDetail() {
                           variant="ghost"
                           size="sm"
                           className="min-h-[44px] min-w-[44px] p-0"
-                          onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line); }}
+                          onClick={() => {
+                            if (confirm("Remove this line?")) {
+                              submitLineCancellation(line);
+                            }
+                          }}
+                          disabled={deleteLineMutation.isPending}
                         >
                           <Trash2 className="h-4 w-4 text-red-500" />
                         </Button>
@@ -3148,7 +3200,11 @@ export default function PurchaseOrderDetail() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line); }}
+                            onClick={() => {
+                              if (confirm("Remove this line?")) {
+                                submitLineCancellation(line);
+                              }
+                            }}
                             disabled={deleteLineMutation.isPending}
                           >
                             <Trash2 className="h-4 w-4 text-red-500" />
@@ -4325,7 +4381,8 @@ export default function PurchaseOrderDetail() {
                   const pricing = linePricingEvaluation.pricing;
                   const quoteMetadata = lineQuoteMetadataEvaluation.metadata;
                   if (!pricing || !quoteMetadata || !po.updatedAt || catalogQuoteDateMissing) return;
-                  addLineMutation.mutate({
+                  const requestUrl = `/api/purchase-orders/${poId}/lines`;
+                  const body: AddPoLineRequestBody = {
                     productId: newLine.productId,
                     expectedReceiveVariantId: selectedReceiveVariantId,
                     expectedReceiveUnitsPerVariant: receiveUnitsPerVariant,
@@ -4338,7 +4395,13 @@ export default function PurchaseOrderDetail() {
                     pricing,
                     ...populatedPoLineQuoteMetadata(quoteMetadata),
                     expectedPoUpdatedAt: po.updatedAt,
+                  };
+                  const idempotencyKey = addLineIntent.acquire({
+                    method: "POST",
+                    requestUrl,
+                    body,
                   });
+                  addLineMutation.mutate({ idempotencyKey, requestUrl, body });
                 }}
                 disabled={!selectedReceiveVariantId || !linePricingEvaluation.pricing || !lineQuoteMetadataEvaluation.metadata || catalogQuoteDateMissing || !po.updatedAt || addLineMutation.isPending || catalogUpsertMutation.isPending}
               >
