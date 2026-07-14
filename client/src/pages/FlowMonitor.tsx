@@ -22,6 +22,7 @@ import {
   Inbox,
   Loader2,
   PackageCheck,
+  PackagePlus,
   RadioTower,
   RefreshCw,
   Search,
@@ -308,6 +309,63 @@ interface UserOption {
   displayName: string | null;
 }
 
+interface ShipStationUnmappedPreview {
+  exceptionId: number | null;
+  wmsOrderId: number;
+  orderNumber: string;
+  authorityShipmentId: number;
+  candidateShipmentId: number | null;
+  externalShipmentRef: string;
+  providerShipment: {
+    shipmentId: number;
+    orderId: number;
+    orderKey: string;
+    orderNumber: string;
+    trackingNumber: string;
+    carrierCode: string;
+    serviceCode: string;
+    shipDate: string;
+    voidDate: string | null;
+    shipmentItems?: Array<{
+      sku: string;
+      name?: string;
+      quantity: number;
+      lineItemKey?: string | null;
+    }>;
+  };
+  orderItems: Array<{
+    id: number;
+    sku: string;
+    name: string;
+    quantity: number;
+    fulfilledQuantity: number;
+    customerShippedQuantity: number;
+    remainingQuantity: number;
+  }>;
+  shipments: Array<{
+    id: number;
+    status: string;
+    source: string;
+    shipmentPurpose: string;
+    trackingNumber: string | null;
+    externalShipmentRef: string | null;
+    itemCount: number;
+    createdAt: string | null;
+  }>;
+}
+
+interface ShipStationUnmappedTarget {
+  exceptionId?: number;
+  shipmentId?: number;
+  label: string;
+}
+
+interface ShipStationReshipAdoptionResponse {
+  changed: boolean;
+  exceptionId: number;
+  candidateShipmentId?: number | null;
+}
+
 const DOMAIN_LABEL: Record<Domain, string> = {
   oms: "OMS",
   wms: "WMS",
@@ -484,6 +542,210 @@ async function fetchJson<T>(url: string): Promise<T> {
     throw new Error(body.error || `Request failed (${response.status})`);
   }
   return response.json();
+}
+
+function positiveFlowId(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function shipStationUnmappedTarget(
+  row: Record<string, unknown>,
+  index: number,
+): ShipStationUnmappedTarget | null {
+  const exceptionId = positiveFlowId(row.exception_id);
+  if (exceptionId) return { exceptionId, label: flowRecordTitle(row, index) };
+  const shipmentId = positiveFlowId(row.shipment_id);
+  if (shipmentId) return { shipmentId, label: flowRecordTitle(row, index) };
+  return null;
+}
+
+function ShipStationReshipAdoptionDialog(props: {
+  target: ShipStationUnmappedTarget | null;
+  canAdjustInventory: boolean;
+  onClose: () => void;
+  onCompleted: () => Promise<void>;
+}) {
+  const { toast } = useToast();
+  const [reason, setReason] = useState("");
+  const [notes, setNotes] = useState("");
+  const [originalShipmentId, setOriginalShipmentId] = useState("");
+  const [lineMappings, setLineMappings] = useState<Record<number, string>>({});
+  const locatorQuery = useMemo(() => {
+    if (!props.target) return "";
+    const params = new URLSearchParams();
+    if (props.target.exceptionId) params.set("exceptionId", String(props.target.exceptionId));
+    if (props.target.shipmentId) params.set("shipmentId", String(props.target.shipmentId));
+    return params.toString();
+  }, [props.target]);
+  const previewQuery = useQuery({
+    queryKey: ["shipstation-unmapped-preview", locatorQuery],
+    queryFn: () => fetchJson<ShipStationUnmappedPreview>(
+      `/api/oms/ops/shipstation-unmapped/preview?${locatorQuery}`,
+    ),
+    enabled: Boolean(props.target && locatorQuery),
+    staleTime: 0,
+    retry: false,
+  });
+  const preview = previewQuery.data;
+  const rawProviderItems = useMemo(
+    () => preview?.providerShipment.shipmentItems ?? [],
+    [preview],
+  );
+  const providerItems = useMemo(() => rawProviderItems.filter((item) => (
+    String(item.sku ?? "").trim().length > 0 && Number.isSafeInteger(Number(item.quantity)) && Number(item.quantity) > 0
+  )), [rawProviderItems]);
+  const providerEvidenceValid = providerItems.length > 0
+    && providerItems.length === rawProviderItems.length
+    && Boolean(preview?.providerShipment.shipDate)
+    && !preview?.providerShipment.voidDate;
+
+  useEffect(() => {
+    setReason("");
+    setNotes("");
+    setOriginalShipmentId("");
+    setLineMappings({});
+  }, [locatorQuery]);
+
+  useEffect(() => {
+    if (!preview) return;
+    const defaults: Record<number, string> = {};
+    providerItems.forEach((item, index) => {
+      const matches = preview.orderItems.filter(
+        (orderItem) => orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase(),
+      );
+      defaults[index] = matches.length === 1 ? String(matches[0].id) : "";
+    });
+    setLineMappings(defaults);
+  }, [preview, providerItems]);
+
+  const validOriginalShipments = useMemo(() => (preview?.shipments ?? []).filter((shipment) => (
+    shipment.id !== preview?.candidateShipmentId
+    && ["shipped", "returned", "lost"].includes(shipment.status)
+    && shipment.shipmentPurpose === "customer_fulfillment"
+    && shipment.itemCount > 0
+  )), [preview]);
+  const mappingsComplete = providerItems.length > 0 && providerItems.every((item, index) => {
+    const orderItemId = positiveFlowId(lineMappings[index]);
+    return orderItemId !== null && preview?.orderItems.some((orderItem) => (
+      orderItem.id === orderItemId
+      && orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase()
+    ));
+  });
+  const actionValid = props.canAdjustInventory
+    && providerEvidenceValid
+    && mappingsComplete
+    && positiveFlowId(originalShipmentId) !== null
+    && reason.length > 0;
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      if (!props.target || !preview) throw new Error("Reship evidence is unavailable");
+      const body: Record<string, unknown> = {
+        ...("exceptionId" in props.target ? { exceptionId: props.target.exceptionId } : {}),
+        ...("shipmentId" in props.target ? { shipmentId: props.target.shipmentId } : {}),
+        originalShipmentId: Number(originalShipmentId),
+        reason,
+        notes: notes.trim() || undefined,
+        lineMappings: providerItems.map((item, providerItemIndex) => ({
+          providerItemIndex,
+          orderItemId: Number(lineMappings[providerItemIndex]),
+          quantity: Number(item.quantity),
+        })),
+      };
+      const response = await apiRequest("POST", "/api/oms/ops/shipstation-unmapped/adopt-reship", body);
+      return response.json() as Promise<ShipStationReshipAdoptionResponse>;
+    },
+    onSuccess: async (result) => {
+      toast({
+        title: "Replacement shipment adopted",
+        description: `Exception ${result.exceptionId} was resolved and replacement inventory was recorded.`,
+      });
+      await props.onCompleted();
+      props.onClose();
+    },
+    onError: (error: Error) => {
+      toast({ title: "Reship adoption failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Dialog open={props.target !== null} onOpenChange={(open) => { if (!open) props.onClose(); }}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader className="text-left">
+          <DialogTitle>Adopt ShipStation reship</DialogTitle>
+          <DialogDescription>
+            {props.target?.label}: link this physical replacement to its original package before inventory is deducted.
+          </DialogDescription>
+        </DialogHeader>
+
+        {previewQuery.isLoading ? (
+          <div className="space-y-3 py-4"><Skeleton className="h-20 w-full" /><Skeleton className="h-40 w-full" /></div>
+        ) : previewQuery.isError ? (
+          <div className="border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+            <div>{previewQuery.error instanceof Error ? previewQuery.error.message : "Evidence failed to load"}</div>
+            <Button className="mt-3" size="sm" variant="outline" onClick={() => previewQuery.refetch()}>Retry live evidence</Button>
+          </div>
+        ) : preview ? (
+          <div className="space-y-5">
+            <section className="grid gap-3 border-y py-4 text-sm sm:grid-cols-3">
+              <div><div className="text-xs font-medium uppercase text-muted-foreground">Order</div><div className="mt-1 font-medium">{preview.orderNumber}</div></div>
+              <div><div className="text-xs font-medium uppercase text-muted-foreground">Tracking</div><div className="mt-1 break-all font-medium">{preview.providerShipment.trackingNumber || "Not available"}</div></div>
+              <div><div className="text-xs font-medium uppercase text-muted-foreground">ShipStation shipment</div><div className="mt-1 font-medium">{preview.externalShipmentRef}</div></div>
+              <div><div className="text-xs font-medium uppercase text-muted-foreground">Carrier service</div><div className="mt-1">{[preview.providerShipment.carrierCode, preview.providerShipment.serviceCode].filter(Boolean).join(" / ") || "Not available"}</div></div>
+              <div><div className="text-xs font-medium uppercase text-muted-foreground">Shipped</div><div className="mt-1">{formatTimestamp(preview.providerShipment.shipDate)}</div></div>
+              <div><div className="text-xs font-medium uppercase text-muted-foreground">Provider state</div><div className="mt-1">{preview.providerShipment.voidDate ? `Voided ${formatTimestamp(preview.providerShipment.voidDate)}` : "Active package"}</div></div>
+            </section>
+
+            <section className="flex gap-3 border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
+              <PackagePlus className="mt-0.5 h-5 w-5 shrink-0" />
+              <div><div className="font-medium">Verified replacement only</div><p className="mt-1 text-xs">This records another physical inventory shipment without increasing customer fulfilled quantity or creating another channel fulfillment.</p></div>
+            </section>
+
+            <section className="border-t pt-4">
+              <div className="text-xs font-semibold uppercase text-muted-foreground">Package line mapping</div>
+              <div className="mt-3 divide-y border-y">
+                {providerItems.map((item, index) => {
+                  const matchingLines = preview.orderItems.filter(
+                    (orderItem) => orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase(),
+                  );
+                  return (
+                    <div key={`${item.sku}-${index}`} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(260px,1fr)] sm:items-center">
+                      <div className="min-w-0 text-sm"><div className="font-medium">{item.sku} <span className="text-muted-foreground">x {item.quantity}</span></div><div className="mt-1 truncate text-xs text-muted-foreground">{item.name || "ShipStation package item"}</div></div>
+                      <Select value={lineMappings[index] || ""} onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}>
+                        <SelectTrigger><SelectValue placeholder="Select matching original order line" /></SelectTrigger>
+                        <SelectContent>
+                          {matchingLines.map((orderItem) => <SelectItem key={orderItem.id} value={String(orderItem.id)}>{orderItem.sku} - {orderItem.quantity} originally shipped</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  );
+                })}
+              </div>
+              {!providerEvidenceValid && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because ShipStation reports a voided, unshipped, or invalid package line.</p>}
+            </section>
+
+            <section className="grid gap-4 border-t pt-4 sm:grid-cols-2">
+              <div className="space-y-2"><Label>Original package</Label><Select value={originalShipmentId} onValueChange={setOriginalShipmentId}><SelectTrigger><SelectValue placeholder="Select package being replaced" /></SelectTrigger><SelectContent>{validOriginalShipments.map((shipment) => <SelectItem key={shipment.id} value={String(shipment.id)}>Shipment {shipment.id} - {shipment.trackingNumber || humanize(shipment.status)}</SelectItem>)}</SelectContent></Select></div>
+              <div className="space-y-2"><Label>Replacement reason</Label><Select value={reason} onValueChange={setReason}><SelectTrigger><SelectValue placeholder="Select reason" /></SelectTrigger><SelectContent><SelectItem value="lost">Lost package</SelectItem><SelectItem value="damaged">Damaged package</SelectItem><SelectItem value="misdelivery">Misdelivery</SelectItem><SelectItem value="carrier_replacement">Carrier replacement</SelectItem><SelectItem value="other">Other verified replacement</SelectItem></SelectContent></Select></div>
+            </section>
+            {validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No previously shipped WMS package is available to authorize this replacement.</p>}
+
+            <section className="border-t pt-4"><div className="space-y-2"><Label htmlFor="shipstation-remediation-notes">Operator notes</Label><Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder="Record the evidence confirming this is a replacement" /></div></section>
+            {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to adopt this reship.</p>}
+          </div>
+        ) : null}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={props.onClose}>Cancel</Button>
+          <Button disabled={!preview || !actionValid || mutation.isPending} onClick={() => mutation.mutate()}>
+            {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Adopt reship and deduct inventory
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function buildGroupUrl(params: {
@@ -870,6 +1132,7 @@ export default function FlowMonitor() {
             loading={flowQuery.isLoading}
             error={flowQuery.error}
             canReplay={hasPermission("operations", "triage")}
+            canAdjustInventory={hasPermission("inventory", "adjust")}
           />
           <div className="border-b px-4 lg:px-6">
             <div className="grid grid-cols-2 gap-1 py-2 sm:grid-cols-4">
@@ -1086,11 +1349,13 @@ function FlowOverview(props: {
   loading: boolean;
   error: Error | null;
   canReplay: boolean;
+  canAdjustInventory: boolean;
 }) {
   const { toast } = useToast();
   const snapshot = props.data?.snapshot ?? null;
   const [selectedStageKey, setSelectedStageKey] = useState<string | null>(null);
   const [selectedIssueCode, setSelectedIssueCode] = useState<string | null>(null);
+  const [unmappedTarget, setUnmappedTarget] = useState<ShipStationUnmappedTarget | null>(null);
   const stages = useMemo(() => {
     if (!snapshot) return [];
     return [
@@ -1178,6 +1443,7 @@ function FlowOverview(props: {
   };
 
   const closeStage = () => {
+    setUnmappedTarget(null);
     setSelectedStageKey(null);
     setSelectedIssueCode(null);
   };
@@ -1377,7 +1643,10 @@ function FlowOverview(props: {
                           const replayStatus = replayActivityByOrderId.get(
                             replayActivityKey(row.oms_order_id) ?? "",
                           ) ?? null;
-                          const replayAction = props.canReplay
+                          const classificationTarget = selectedIssue.code === "UNMAPPED_ENGINE_SPLIT"
+                            ? shipStationUnmappedTarget(row, index)
+                            : null;
+                          const replayAction = props.canReplay && selectedIssue.code !== "UNMAPPED_ENGINE_SPLIT"
                             ? resolveFlowReplayAction(selectedIssue, replayStatus
                               ? {
                                   ...row,
@@ -1405,6 +1674,16 @@ function FlowOverview(props: {
                                       {replayOutcomeIcon(replayStatus.outcome)}
                                       {replayOutcomeLabel(replayStatus.outcome)}
                                     </Badge>
+                                  )}
+                                  {props.canReplay && classificationTarget && (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => setUnmappedTarget(classificationTarget)}
+                                    >
+                                      <PackagePlus className="mr-2 h-3.5 w-3.5" />
+                                      Adopt as reship
+                                    </Button>
                                   )}
                                   {replayAction && (
                                     <Button
@@ -1453,6 +1732,12 @@ function FlowOverview(props: {
           </div>
         </DialogContent>
       </Dialog>
+      <ShipStationReshipAdoptionDialog
+        target={unmappedTarget}
+        canAdjustInventory={props.canAdjustInventory}
+        onClose={() => setUnmappedTarget(null)}
+        onCompleted={async () => { await bucketQuery.refetch(); }}
+      />
     </section>
   );
 }
