@@ -8,7 +8,7 @@
 
 ## 0 · TL;DR
 
-The local zone/rate-table core, service levels, ETA data, callback shell, and snapshots are deployed but dormant. The engine is **not cutover-ready yet**: Shopify is being moved onto a channel-neutral runtime quote service, channel ownership is being made explicit, active rate/service configuration is still absent, and comparison testing against Parcelify remains. Variant dimensions are not a checkout requirement. Shopify item weights are required for the initial weight-based strategy, and any missing weight fails the quote closed rather than being ignored.
+The local zone/rate-table core, service levels, ETA data, callback shell, and snapshots are deployed but dormant. The engine is **not cutover-ready yet**: Shopify is being moved onto a channel-neutral runtime quote service, channel ownership is being made explicit, active rate/service configuration is still absent, and comparison testing against Parcelify remains. Variant dimensions are not a checkout requirement. The initial strategy uses Shopify item weights when present; missing weights are excluded with snapshot warnings so checkout can continue at a deliberately low estimate.
 
 ## 1 · Vision & model
 
@@ -31,7 +31,7 @@ Shopify checkout ──POST──▶ /api/shipping/rates-callback/:token   (Carr
 ```
 
 - No external calls in the hot path — DB reads only; hard 2s response deadline; every failure degrades to `{ rates: [] }` (never a wrong/free rate, never a 5xx).
-- Every Shopify line contributes to total shipment weight even when it has no SKU. A missing or non-positive line weight returns no rate; partial-cart quotes are forbidden.
+- Every Shopify line remains in the request even when it has no SKU. Positive weights contribute to the shipment total; missing/non-positive weights contribute zero and create warnings. An all-missing cart uses a 1g floor to reach the cheapest available rate band.
 - Member free shipping stays in the club app's Shopify Function (separate repo, §8) — engine quotes are member-agnostic because Shopify's CarrierService payload carries no customer identity.
 - HI/AK/PR: local `US-HIPRAK` zone with conservative table rates now; live ShipStation v2 rating as a later enhancement (blocked on the v2 API key).
 
@@ -99,7 +99,7 @@ Variant fulfillment data lives on the catalog (`ProductDetail → Fulfillment ch
 | Metric | State |
 |---|---|
 | Shipping engine | Core deployed and dormant; channel-neutral runtime quote contracts are the current slice |
-| Active variant weights | **251/305**; missing weights are the Shopify checkout data gate |
+| Active variant weights | **251/305**; missing weights reduce quote accuracy but do not block checkout |
 | Active variant dimensions | **1/305**; required for later cartonization, not shipping-engine launch |
 | Boxes | 14 seeded from shipment history |
 | Rate tables | 2 draft tables / 11 rows; inactive and awaiting weight-only comparison testing |
@@ -116,7 +116,7 @@ Variant fulfillment data lives on the catalog (`ProductDetail → Fulfillment ch
 Each step is independently reversible; nothing reaches customers until step 5.
 
 1. **IN PROGRESS — Separate shipping from packing:** land the shared shipment, parcel-provider, rate-provider, and channel-mode contracts. Shopify uses complete channel weights. eBay and dropship remain in their policy-owned paths.
-2. **NEXT — Complete active Shopify weights:** resolve the 54 active variants with no catalog weight and verify Shopify sends a positive per-unit weight for every physical line. Dimensions and box data are not part of this gate.
+2. **NEXT — Improve Shopify weight coverage:** resolve the active variants with no Shopify weight and verify representative carts. Missing weight is recorded and underquoted by policy; it is not a launch blocker. Dimensions and box data are unrelated to this work.
 3. **NEXT — Finish base-rate configuration:** validate the draft US-48/HIPRAK rows, service-method mappings, and the exact Parcelify rules that must be preserved. Keep tables and service levels inactive.
 4. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
 5. **Go live (Standard only):**
@@ -133,7 +133,7 @@ Each step is independently reversible; nothing reaches customers until step 5.
 ## 7 · Key mechanics & invariants (do not break)
 
 - **Fail-empty, never fail-wrong:** the callback returns `{rates: []}` on any parse/zone/band/timeout failure. An empty response blocks checkout for that address rather than mispricing it. Keep that property.
-- **Complete-cart weight:** every physical line contributes `unitWeight × quantity`; SKU-less lines are retained. One missing/non-positive weight blocks the quote instead of producing a partial rate.
+- **Sale over perfect weight data:** every positive physical-line weight contributes `unitWeight × quantity`; SKU-less lines are retained. Missing weights contribute zero, produce snapshot warnings, and never block checkout by themselves. An all-missing cart uses a 1g rate-band floor.
 - **Channel ownership is explicit:** only Shopify and first-party/internal sites use runtime quotes. eBay is external-policy managed; dropship is portal-policy managed until an approved adapter says otherwise.
 - **Cartonization is replaceable and optional:** no Shopify callback or WMS status transition may require dimensions, a box, or a verified carton plan during the shipping-first rollout.
 - **When cartonization is invoked, fit means placement:** every non-SIOC packed unit must have an in-bounds, non-overlapping placement. It still uses no arbitrary unit cap, and the ordinary-carton handling ceiling remains 22,679 g.

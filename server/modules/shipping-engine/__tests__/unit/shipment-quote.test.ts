@@ -53,16 +53,32 @@ describe("weight-only parcel provider", () => {
     }]);
   });
 
-  it("fails closed when any line lacks a usable weight", () => {
+  it("rates known weight and warns when another line lacks weight", () => {
     const result = buildWeightOnlyParcelPlan([
       { sku: "KNOWN", quantity: 1, unitWeightGrams: 100 },
       { sku: "MISSING", quantity: 2, unitWeightGrams: null },
     ]);
 
-    expect(result).toEqual({
-      ok: false,
-      errors: ["MISSING: positive unit weight is required for weight-based rating"],
-    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.parcels[0].billableWeightGrams).toBe(100);
+    expect(result.plan.warnings).toEqual([
+      "MISSING: missing weight excluded from rated shipment weight",
+    ]);
+  });
+
+  it("uses the minimum rate-band weight when every line lacks weight", () => {
+    const result = buildWeightOnlyParcelPlan([
+      { sku: "MISSING", quantity: 2, unitWeightGrams: null },
+    ]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.parcels[0].billableWeightGrams).toBe(1);
+    expect(result.plan.warnings).toEqual([
+      "MISSING: missing weight excluded from rated shipment weight",
+      "no usable item weights; applied 1g minimum rating weight",
+    ]);
   });
 });
 
@@ -107,7 +123,7 @@ describe("quoteShipment", () => {
     }));
   });
 
-  it("does not call the rate provider when a shipment line has no weight", async () => {
+  it("still calls the rate provider when a shipment line has no weight", async () => {
     const observe = vi.fn();
     const result = await quoteShipment({
       channel: "shopify",
@@ -119,8 +135,14 @@ describe("quoteShipment", () => {
       rateProvider: fakeRateProvider(observe),
     });
 
-    expect(result).toMatchObject({ ok: false, code: "INVALID_SHIPMENT" });
-    expect(observe).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.parcelPlan.warnings).toContain(
+      "SKU-1: missing weight excluded from rated shipment weight",
+    );
+    expect(observe).toHaveBeenCalledWith(expect.objectContaining({
+      parcels: [expect.objectContaining({ billableWeightGrams: 1 })],
+    }));
   });
 
   it.each(["ebay", "dropship"] as const)(

@@ -9,6 +9,8 @@ export const WEIGHT_ONLY_PARCEL_PROVIDER = {
   version: "1.0.0",
 } as const;
 
+const MINIMUM_RATING_WEIGHT_GRAMS = 1;
+
 /**
  * Initial checkout strategy: rate one shipment from channel-provided item
  * weights. It deliberately does not guess dimensions, boxes, or carton count.
@@ -21,6 +23,7 @@ export function buildWeightOnlyParcelPlan(
   }
 
   const errors: string[] = [];
+  const warnings: string[] = [];
   let totalWeightGrams = 0;
 
   lines.forEach((line, index) => {
@@ -34,7 +37,7 @@ export function buildWeightOnlyParcelPlan(
       || !Number.isFinite(line.unitWeightGrams)
       || line.unitWeightGrams <= 0
     ) {
-      errors.push(`${label}: positive unit weight is required for weight-based rating`);
+      warnings.push(`${label}: missing weight excluded from rated shipment weight`);
       return;
     }
     totalWeightGrams += line.unitWeightGrams * line.quantity;
@@ -42,9 +45,15 @@ export function buildWeightOnlyParcelPlan(
 
   if (errors.length > 0) return { ok: false, errors };
 
-  const roundedWeightGrams = Math.ceil(totalWeightGrams);
-  if (!Number.isSafeInteger(roundedWeightGrams) || roundedWeightGrams <= 0) {
+  const roundedWeightGrams = Math.max(
+    MINIMUM_RATING_WEIGHT_GRAMS,
+    Math.ceil(totalWeightGrams),
+  );
+  if (!Number.isSafeInteger(roundedWeightGrams)) {
     return { ok: false, errors: ["shipment weight is outside the supported range"] };
+  }
+  if (totalWeightGrams === 0) {
+    warnings.push("no usable item weights; applied 1g minimum rating weight");
   }
 
   return {
@@ -60,7 +69,7 @@ export function buildWeightOnlyParcelPlan(
         dimensions: null,
         shippingGroupCode: null,
       }],
-      warnings: [],
+      warnings,
     },
   };
 }
