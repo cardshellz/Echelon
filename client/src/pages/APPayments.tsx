@@ -148,15 +148,20 @@ export default function APPayments() {
         url: "/api/ap-payments",
         body,
       });
-      const result = await financialCommandFetchJson<any>("/api/ap-payments", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify(body),
-      });
-      return { result, idempotencyKey };
+      try {
+        const result = await financialCommandFetchJson<any>("/api/ap-payments", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: JSON.stringify(body),
+        });
+        return { result, idempotencyKey };
+      } catch (error) {
+        recordPaymentIntent.fail(idempotencyKey, error);
+        throw error;
+      }
     },
     retry: shouldRetryFinancialCommand,
     retryDelay: financialCommandRetryDelay,
@@ -179,15 +184,20 @@ export default function APPayments() {
       const url = `/api/ap-payments/${id}/void`;
       const body = { reason: voidReason };
       const idempotencyKey = voidPaymentIntent.acquire({ method: "POST", url, body });
-      const result = await financialCommandFetchJson<any>(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify(body),
-      });
-      return { result, idempotencyKey };
+      try {
+        const result = await financialCommandFetchJson<any>(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: JSON.stringify(body),
+        });
+        return { result, idempotencyKey };
+      } catch (error) {
+        voidPaymentIntent.fail(idempotencyKey, error);
+        throw error;
+      }
     },
     retry: shouldRetryFinancialCommand,
     retryDelay: financialCommandRetryDelay,

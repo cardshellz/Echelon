@@ -180,6 +180,9 @@ export default function APInvoiceDetail() {
   const [paymentIntent] = useState(() =>
     createFinancialCommandIntentStore(() => createApCommandIdempotencyKey("ap-payment")),
   );
+  const [invoiceLifecycleIntent] = useState(() =>
+    createFinancialCommandIntentStore(() => createApCommandIdempotencyKey("ap-invoice")),
+  );
   const [, navigate] = useLocation();
   const [, params] = useRoute("/ap-invoices/:id");
   const invoiceId = params?.id ? Number(params.id) : null;
@@ -231,38 +234,69 @@ export default function APInvoiceDetail() {
     queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
   };
 
-  function action(endpoint: string, body?: any) {
-    const idempotencyKey = createApCommandIdempotencyKey(`ap-invoice-${endpoint}`);
-    return fetch(`/api/vendor-invoices/${invoiceId}/${endpoint}`, {
+  async function action(endpoint: string, body?: any) {
+    const url = `/api/vendor-invoices/${invoiceId}/${endpoint}`;
+    const effectiveBody = body ?? null;
+    const idempotencyKey = invoiceLifecycleIntent.acquire({
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": idempotencyKey,
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.json()).error);
-      return r.json();
+      url,
+      body: effectiveBody,
     });
+    try {
+      const result = await financialCommandFetchJson<any>(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      return { result, idempotencyKey };
+    } catch (error) {
+      invoiceLifecycleIntent.fail(idempotencyKey, error);
+      throw error;
+    }
   }
 
   // ── Mutations ──
 
   const approveMutation = useMutation({
     mutationFn: () => action("approve"),
-    onSuccess: (result) => { invalidate(); toast({ title: "Invoice approved", description: apLedgerOutcomeDescription(result) }); },
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: ({ result, idempotencyKey }) => {
+      invoiceLifecycleIntent.complete(idempotencyKey);
+      invalidate();
+      toast({ title: "Invoice approved", description: apLedgerOutcomeDescription(result) });
+    },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
   const disputeMutation = useMutation({
     mutationFn: () => action("dispute", { reason }),
-    onSuccess: (result) => { invalidate(); setShowDisputeDialog(false); setReason(""); toast({ title: "Invoice disputed", description: apLedgerOutcomeDescription(result) }); },
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: ({ result, idempotencyKey }) => {
+      invoiceLifecycleIntent.complete(idempotencyKey);
+      invalidate();
+      setShowDisputeDialog(false);
+      setReason("");
+      toast({ title: "Invoice disputed", description: apLedgerOutcomeDescription(result) });
+    },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
   const voidMutation = useMutation({
     mutationFn: () => action("void", { reason }),
-    onSuccess: (result) => { invalidate(); setShowVoidDialog(false); setReason(""); toast({ title: "Invoice voided", description: apLedgerOutcomeDescription(result) }); },
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: ({ result, idempotencyKey }) => {
+      invoiceLifecycleIntent.complete(idempotencyKey);
+      invalidate();
+      setShowVoidDialog(false);
+      setReason("");
+      toast({ title: "Invoice voided", description: apLedgerOutcomeDescription(result) });
+    },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
@@ -327,15 +361,20 @@ export default function APInvoiceDetail() {
         }],
       };
       const idempotencyKey = paymentIntent.acquire({ method: "POST", url: "/api/ap-payments", body });
-      const result = await financialCommandFetchJson<any>("/api/ap-payments", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify(body),
-      });
-      return { result, idempotencyKey };
+      try {
+        const result = await financialCommandFetchJson<any>("/api/ap-payments", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: JSON.stringify(body),
+        });
+        return { result, idempotencyKey };
+      } catch (error) {
+        paymentIntent.fail(idempotencyKey, error);
+        throw error;
+      }
     },
     retry: shouldRetryFinancialCommand,
     retryDelay: financialCommandRetryDelay,

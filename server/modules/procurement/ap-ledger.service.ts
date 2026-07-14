@@ -136,19 +136,6 @@ function uniqueNumbers(values: Iterable<number | null | undefined>): number[] {
   return [...new Set([...values].filter((value): value is number => Number.isFinite(value)))];
 }
 
-async function getPoIdsForInvoices(
-  invoiceIds: Iterable<number>,
-  client: ApLedgerDbClient = db,
-): Promise<number[]> {
-  const affectedPoIds = new Set<number>();
-  for (const invoiceId of uniqueNumbers(invoiceIds)) {
-    for (const poId of await getPoIdsForInvoice(invoiceId, client)) {
-      affectedPoIds.add(poId);
-    }
-  }
-  return [...affectedPoIds];
-}
-
 function attachApLedgerOutcome<T extends object>(data: T, outcome: ApLedgerCommandOutcome): T & { apLedgerOutcome: ApLedgerCommandOutcome } {
   return { ...data, apLedgerOutcome: outcome };
 }
@@ -181,27 +168,19 @@ function buildApLedgerOutcome(input: {
 
 async function appendApLedgerCommandAudit(
   outcome: ApLedgerCommandOutcome,
-  actor?: string,
-  options: { client?: ApLedgerDbClient; required?: boolean } = {},
+  actor: string | undefined,
+  client: ApLedgerDbClient,
 ): Promise<void> {
-  const client = options.client ?? db;
-  try {
-    await client.insert(auditEvents).values({
-      level: "AUDIT",
-      actor: actor ?? "system",
-      action: `ap_ledger.${outcome.command}`,
-      target: `${outcome.entityType}:${outcome.entityId ?? "unknown"}`,
-      changes: null,
-      context: {
-        ...outcome,
-      },
-    });
-  } catch (auditErr: any) {
-    if (options.required) throw auditErr;
-    console.error(
-      `[AP Ledger Audit] Failed to persist audit event for ${outcome.command}: ${auditErr?.message ?? auditErr}`,
-    );
-  }
+  await client.insert(auditEvents).values({
+    level: "AUDIT",
+    actor: actor ?? "system",
+    action: `ap_ledger.${outcome.command}`,
+    target: `${outcome.entityType}:${outcome.entityId ?? "unknown"}`,
+    changes: null,
+    context: {
+      ...outcome,
+    },
+  });
 }
 
 async function runPoFinancialDetectionHooks(poId: number): Promise<void> {
@@ -659,35 +638,45 @@ export async function updateInvoice(
 
 // ─── Invoice Status Transitions ───────────────────────────────────────────────
 
-export async function approveInvoice(id: number, userId?: string) {
-  const affectedPoIds: number[] = [];
-  const updated = await db.transaction(async (tx: ApLedgerDbClient) => {
-    const [inv] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
-    if (!inv) {
-      throw new Error("Invoice not found");
-    }
-    if (["approved", "partially_paid", "paid"].includes(inv.status)) {
-      return inv;
-    }
-    if (!["received", "disputed"].includes(inv.status)) {
-      throw new Error("Invoice must be in received or disputed status to approve");
-    }
+type InvoiceMutationResult = {
+  value: any;
+  affectedPoIds: number[];
+  changed: boolean;
+};
 
-    const [invoice] = await tx
-      .update(vendorInvoices)
-      .set({ status: "approved", approvedAt: new Date(), approvedBy: userId, updatedBy: userId, updatedAt: new Date() })
-      .where(eq(vendorInvoices.id, id))
-      .returning();
+async function approveInvoiceInTransaction(
+  tx: ApLedgerDbClient,
+  id: number,
+  userId?: string,
+): Promise<InvoiceMutationResult> {
+  const [inv] = await tx
+    .select()
+    .from(vendorInvoices)
+    .where(eq(vendorInvoices.id, id))
+    .for("update");
+  if (!inv) {
+    throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
+  }
+  if (["approved", "partially_paid", "paid"].includes(inv.status)) {
+    return { value: inv, affectedPoIds: [], changed: false };
+  }
+  if (!["received", "disputed"].includes(inv.status)) {
+    throw new ApLedgerError("Invoice must be in received or disputed status to approve", 409, {
+      code: "AP_INVOICE_APPROVAL_STATUS_INVALID",
+    });
+  }
 
-    const poIds = await getPoIdsForInvoice(id, tx);
-    affectedPoIds.push(...poIds);
-    await recomputePoFinancialAggregatesForMany(poIds, tx);
+  const [invoice] = await tx
+    .update(vendorInvoices)
+    .set({ status: "approved", approvedAt: new Date(), approvedBy: userId, updatedBy: userId, updatedAt: new Date() })
+    .where(eq(vendorInvoices.id, id))
+    .returning();
+  const affectedPoIds = await getPoIdsForInvoice(id, tx);
+  await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
+  return { value: invoice, affectedPoIds, changed: true };
+}
 
-    return invoice;
-  });
-
-  await runPoFinancialDetectionHooksForMany(affectedPoIds);
-
+async function reconcileApprovedInvoiceVariance(id: number): Promise<void> {
   // Reconcile invoice variance → lot cost → COGS cascade.
   // Non-blocking: if reconciliation fails, the approval still stands.
   try {
@@ -725,58 +714,100 @@ export async function approveInvoice(id: number, userId?: string) {
   } catch (err: any) {
     console.warn(`[ApLedger] Invoice variance→lot reconciliation failed (non-fatal): ${err.message}`);
   }
+}
 
-  return updated;
+export async function approveInvoice(id: number, userId?: string) {
+  const mutation = await db.transaction((tx: ApLedgerDbClient) =>
+    approveInvoiceInTransaction(tx, id, userId),
+  );
+
+  await runPoFinancialDetectionHooksForMany(mutation.affectedPoIds);
+  await reconcileApprovedInvoiceVariance(id);
+
+  return mutation.value;
+}
+
+async function disputeInvoiceInTransaction(
+  tx: ApLedgerDbClient,
+  id: number,
+  reason: string,
+  userId?: string,
+): Promise<InvoiceMutationResult> {
+  const [inv] = await tx
+    .select()
+    .from(vendorInvoices)
+    .where(eq(vendorInvoices.id, id))
+    .for("update");
+  if (!inv) {
+    throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
+  }
+  if (!["received", "approved", "partially_paid"].includes(inv.status)) {
+    throw new ApLedgerError("Cannot dispute invoice in its current status", 409, {
+      code: "AP_INVOICE_DISPUTE_STATUS_INVALID",
+    });
+  }
+
+  const [invoice] = await tx
+    .update(vendorInvoices)
+    .set({ status: "disputed", disputeReason: reason, updatedBy: userId, updatedAt: new Date() })
+    .where(eq(vendorInvoices.id, id))
+    .returning();
+  const affectedPoIds = await getPoIdsForInvoice(id, tx);
+  await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
+  return { value: invoice, affectedPoIds, changed: true };
 }
 
 export async function disputeInvoice(id: number, reason: string, userId?: string) {
-  const affectedPoIds: number[] = [];
-  const updated = await db.transaction(async (tx: ApLedgerDbClient) => {
-    const [inv] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
-    if (!inv || !["received", "approved", "partially_paid"].includes(inv.status)) {
-      throw new Error("Cannot dispute invoice in its current status");
-    }
+  const mutation = await db.transaction((tx: ApLedgerDbClient) =>
+    disputeInvoiceInTransaction(tx, id, reason, userId),
+  );
+  await runPoFinancialDetectionHooksForMany(mutation.affectedPoIds);
+  return mutation.value;
+}
 
-    const [invoice] = await tx
-      .update(vendorInvoices)
-      .set({ status: "disputed", disputeReason: reason, updatedBy: userId, updatedAt: new Date() })
-      .where(eq(vendorInvoices.id, id))
-      .returning();
-    const poIds = await getPoIdsForInvoice(id, tx);
-    affectedPoIds.push(...poIds);
-    await recomputePoFinancialAggregatesForMany(poIds, tx);
+async function voidInvoiceInTransaction(
+  tx: ApLedgerDbClient,
+  id: number,
+  reason: string,
+  userId?: string,
+): Promise<InvoiceMutationResult> {
+  const [inv] = await tx
+    .select()
+    .from(vendorInvoices)
+    .where(eq(vendorInvoices.id, id))
+    .for("update");
+  if (!inv) {
+    throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
+  }
+  if (inv.status === "voided") {
+    throw new ApLedgerError("Invoice is already voided", 409, {
+      code: "AP_INVOICE_ALREADY_VOIDED",
+    });
+  }
+  if (inv.paidAmountCents > 0) {
+    throw new ApLedgerError(
+      "Cannot void an invoice with payments applied — void the payments first",
+      409,
+      { code: "AP_INVOICE_VOID_HAS_PAYMENTS" },
+    );
+  }
 
-    return invoice;
-  });
-
-  await runPoFinancialDetectionHooksForMany(affectedPoIds);
-
-  return updated;
+  const affectedPoIds = await getPoIdsForInvoice(id, tx);
+  const [invoice] = await tx
+    .update(vendorInvoices)
+    .set({ status: "voided", internalNotes: `${inv.internalNotes ? inv.internalNotes + "\n" : ""}VOIDED: ${reason}`, updatedBy: userId, updatedAt: new Date() })
+    .where(eq(vendorInvoices.id, id))
+    .returning();
+  await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
+  return { value: invoice, affectedPoIds, changed: true };
 }
 
 export async function voidInvoice(id: number, reason: string, userId?: string) {
-  const affectedPoIds: number[] = [];
-  const updated = await db.transaction(async (tx: ApLedgerDbClient) => {
-    const [inv] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
-    if (!inv || inv.status === "voided") throw new Error("Invoice is already voided");
-    if (inv.paidAmountCents > 0) throw new Error("Cannot void an invoice with payments applied — void the payments first");
-
-    const linkedPoIds = await getPoIdsForInvoice(id, tx);
-
-    const [invoice] = await tx
-      .update(vendorInvoices)
-      .set({ status: "voided", internalNotes: `${inv.internalNotes ? inv.internalNotes + "\n" : ""}VOIDED: ${reason}`, updatedBy: userId, updatedAt: new Date() })
-      .where(eq(vendorInvoices.id, id))
-      .returning();
-    affectedPoIds.push(...linkedPoIds);
-    await recomputePoFinancialAggregatesForMany(linkedPoIds, tx);
-
-    return invoice;
-  });
-
-  await runPoFinancialDetectionHooksForMany(affectedPoIds);
-
-  return updated;
+  const mutation = await db.transaction((tx: ApLedgerDbClient) =>
+    voidInvoiceInTransaction(tx, id, reason, userId),
+  );
+  await runPoFinancialDetectionHooksForMany(mutation.affectedPoIds);
+  return mutation.value;
 }
 
 // ─── PO Links ─────────────────────────────────────────────────────────────────
@@ -1187,8 +1218,10 @@ export async function voidPayment(id: number, reason: string, userId?: string) {
 // ─── AP Summary / Aging ───────────────────────────────────────────────────────
 
 function requireCommandId(value: number | undefined, field: string): number {
-  if (!Number.isFinite(value)) {
-    throw new ApLedgerError(`${field} is required`);
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) {
+    throw new ApLedgerError(`${field} must be a positive integer`, 400, {
+      code: "AP_COMMAND_ID_INVALID",
+    });
   }
   return value as number;
 }
@@ -1198,6 +1231,59 @@ function requireCommandReason(reason: string | undefined): string {
     throw new ApLedgerError("reason is required");
   }
   return reason;
+}
+
+export type ApInvoiceFinancialCommand =
+  | "approve_invoice"
+  | "dispute_invoice"
+  | "void_invoice";
+
+export async function executeApInvoiceCommandInTransaction(
+  command: ApInvoiceFinancialCommand,
+  input: ApLedgerCommandInput,
+  tx: ApLedgerDbClient,
+) {
+  const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
+  let mutation: InvoiceMutationResult;
+  if (command === "approve_invoice") {
+    mutation = await approveInvoiceInTransaction(tx, invoiceId, input.userId);
+  } else if (command === "dispute_invoice") {
+    mutation = await disputeInvoiceInTransaction(
+      tx,
+      invoiceId,
+      requireCommandReason(input.reason),
+      input.userId,
+    );
+  } else {
+    mutation = await voidInvoiceInTransaction(
+      tx,
+      invoiceId,
+      requireCommandReason(input.reason),
+      input.userId,
+    );
+  }
+
+  const affectedPurchaseOrderIds = mutation.affectedPoIds.length
+    ? mutation.affectedPoIds
+    : await getPoIdsForInvoice(invoiceId, tx);
+  const outcome = buildApLedgerOutcome({
+    command,
+    entityType: "invoice",
+    entityId: invoiceId,
+    affectedInvoiceIds: [invoiceId],
+    affectedPurchaseOrderIds,
+  });
+  await appendApLedgerCommandAudit(outcome, input.userId, tx);
+  return attachApLedgerOutcome(mutation.value, outcome);
+}
+
+export async function runApInvoiceCommandPostCommit(
+  outcome: ApLedgerCommandOutcome,
+): Promise<void> {
+  await runPoFinancialDetectionHooksForMany(outcome.affectedPurchaseOrderIds);
+  if (outcome.command === "approve_invoice" && outcome.entityId) {
+    await reconcileApprovedInvoiceVariance(outcome.entityId);
+  }
 }
 
 export type ApPaymentFinancialCommand = "record_payment" | "void_payment";
@@ -1228,7 +1314,7 @@ export async function executeApPaymentCommandInTransaction(
       affectedPaymentIds: [mutation.value.id],
       affectedPurchaseOrderIds: mutation.affectedPoIds,
     });
-    await appendApLedgerCommandAudit(outcome, actor, { client: tx, required: true });
+    await appendApLedgerCommandAudit(outcome, actor, tx);
     return attachApLedgerOutcome(mutation.value, outcome);
   }
 
@@ -1248,7 +1334,7 @@ export async function executeApPaymentCommandInTransaction(
     affectedPaymentIds: [paymentId],
     affectedPurchaseOrderIds: mutation.affectedPoIds,
   });
-  await appendApLedgerCommandAudit(outcome, actor, { client: tx, required: true });
+  await appendApLedgerCommandAudit(outcome, actor, tx);
   return { ok: true, apLedgerOutcome: outcome };
 }
 
@@ -1256,108 +1342,6 @@ export async function runApPaymentCommandPostCommit(
   outcome: ApLedgerCommandOutcome,
 ): Promise<void> {
   await runPoFinancialDetectionHooksForMany(outcome.affectedPurchaseOrderIds);
-}
-
-export async function executeApLedgerCommand(command: ApLedgerCommand, input: ApLedgerCommandInput = {}) {
-  const actor = input.userId ?? input.payment?.createdBy;
-  switch (command) {
-    case "approve_invoice": {
-      const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
-      const invoice = await approveInvoice(invoiceId, input.userId);
-      const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
-      const outcome = buildApLedgerOutcome({
-        command,
-        entityType: "invoice",
-        entityId: invoiceId,
-        affectedInvoiceIds: [invoiceId],
-        affectedPurchaseOrderIds,
-      });
-      await appendApLedgerCommandAudit(outcome, actor);
-      return attachApLedgerOutcome(invoice, outcome);
-    }
-    case "dispute_invoice": {
-      const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
-      const invoice = await disputeInvoice(
-        invoiceId,
-        requireCommandReason(input.reason),
-        input.userId,
-      );
-      const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
-      const outcome = buildApLedgerOutcome({
-        command,
-        entityType: "invoice",
-        entityId: invoiceId,
-        affectedInvoiceIds: [invoiceId],
-        affectedPurchaseOrderIds,
-      });
-      await appendApLedgerCommandAudit(outcome, actor);
-      return attachApLedgerOutcome(invoice, outcome);
-    }
-    case "void_invoice": {
-      const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
-      const invoice = await voidInvoice(
-        invoiceId,
-        requireCommandReason(input.reason),
-        input.userId,
-      );
-      const affectedPurchaseOrderIds = await getPoIdsForInvoice(invoiceId);
-      const outcome = buildApLedgerOutcome({
-        command,
-        entityType: "invoice",
-        entityId: invoiceId,
-        affectedInvoiceIds: [invoiceId],
-        affectedPurchaseOrderIds,
-      });
-      await appendApLedgerCommandAudit(outcome, actor);
-      return attachApLedgerOutcome(invoice, outcome);
-    }
-    case "record_payment":
-      if (!input.payment) {
-        throw new ApLedgerError("payment is required");
-      }
-      {
-        const payment = await recordPayment(input.payment);
-        const affectedInvoiceIds = uniqueNumbers(input.payment.allocations.map((allocation) => allocation.vendorInvoiceId));
-        const affectedPurchaseOrderIds = await getPoIdsForInvoices(affectedInvoiceIds);
-        const outcome = buildApLedgerOutcome({
-          command,
-          entityType: "payment",
-          entityId: payment.id,
-          affectedInvoiceIds,
-          affectedPaymentIds: [payment.id],
-          affectedPurchaseOrderIds,
-        });
-        await appendApLedgerCommandAudit(outcome, actor);
-        return attachApLedgerOutcome(payment, outcome);
-      }
-    case "void_payment": {
-      const paymentId = requireCommandId(input.paymentId, "paymentId");
-      const affectedInvoiceIds = await getInvoiceIdsForPayment(paymentId);
-      await voidPayment(
-        paymentId,
-        requireCommandReason(input.reason),
-        input.userId,
-      );
-      const affectedPurchaseOrderIds = await getPoIdsForInvoices(affectedInvoiceIds);
-      const outcome = buildApLedgerOutcome({
-        command,
-        entityType: "payment",
-        entityId: paymentId,
-        affectedInvoiceIds,
-        affectedPaymentIds: [paymentId],
-        affectedPurchaseOrderIds,
-      });
-      await appendApLedgerCommandAudit(outcome, actor);
-      return {
-        ok: true,
-        apLedgerOutcome: outcome,
-      };
-    }
-    default: {
-      const exhaustive: never = command;
-      throw new ApLedgerError(`Unsupported AP ledger command: ${exhaustive}`);
-    }
-  }
 }
 
 export async function getApSummary() {

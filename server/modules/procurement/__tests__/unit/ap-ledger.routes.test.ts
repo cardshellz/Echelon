@@ -34,13 +34,17 @@ const mocks = vi.hoisted(() => {
       recordPayment: vi.fn(),
       getPaymentById: vi.fn(),
       voidPayment: vi.fn(),
-      executeApLedgerCommand: vi.fn(),
       getApSummary: vi.fn(),
       listApLedgerCommandAudit: vi.fn(),
     },
     apPaymentCommands: {
       recordPayment: vi.fn(),
       voidPayment: vi.fn(),
+    },
+    apInvoiceCommands: {
+      approveInvoice: vi.fn(),
+      disputeInvoice: vi.fn(),
+      voidInvoice: vi.fn(),
     },
   };
 });
@@ -69,6 +73,10 @@ vi.mock("../../ap-ledger.service", () => ({
 
 vi.mock("../../ap-payment-commands", () => ({
   apPaymentCommands: mocks.apPaymentCommands,
+}));
+
+vi.mock("../../ap-invoice-commands", () => ({
+  apInvoiceCommands: mocks.apInvoiceCommands,
 }));
 
 import { registerApLedgerRoutes } from "../../ap-ledger.routes";
@@ -121,7 +129,7 @@ describe("AP ledger routes", () => {
   it("keeps legacy idempotency only on AP writes not yet using the transactional ledger", () => {
     buildApp();
 
-    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(7);
+    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(4);
   });
 
   it("lists vendor invoices with parsed filters", async () => {
@@ -190,34 +198,80 @@ describe("AP ledger routes", () => {
       affectedPurchaseOrderIds: [55],
       message: "approve invoice completed. Updated 1 linked PO.",
     };
-    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ id: 12, status: "approved", apLedgerOutcome });
+    mocks.apInvoiceCommands.approveInvoice.mockResolvedValue({
+      commandId: 81,
+      replayed: false,
+      httpStatus: 200,
+      body: { id: 12, status: "approved", apLedgerOutcome },
+      terminalState: "succeeded",
+    });
     server = await startServer(buildApp());
 
-    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-invoices/12/approve");
+    const { status, body, idempotencyReplayed } = await requestJson(server.url, "POST", "/api/vendor-invoices/12/approve");
 
     expect(status).toBe(200);
-    expect(mocks.apLedger.executeApLedgerCommand).toHaveBeenCalledWith("approve_invoice", {
-      invoiceId: 12,
+    expect(idempotencyReplayed).toBe("false");
+    expect(mocks.apInvoiceCommands.approveInvoice).toHaveBeenCalledWith(12, {
       userId: "test-user",
-    });
+    }, expect.objectContaining({
+      commandName: "ap.invoice.approve",
+      resourceKey: "vendor_invoice:12",
+      routeTemplate: "/api/vendor-invoices/:id/approve",
+    }));
     expect(body).toEqual({ id: 12, status: "approved", apLedgerOutcome });
   });
 
   it("dispatches invoice disputes through the AP command boundary", async () => {
-    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ id: 12, status: "disputed" });
+    mocks.apInvoiceCommands.disputeInvoice.mockResolvedValue({
+      commandId: 82,
+      replayed: true,
+      httpStatus: 200,
+      body: { id: 12, status: "disputed" },
+      terminalState: "succeeded",
+    });
     server = await startServer(buildApp());
 
-    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-invoices/12/dispute", {
+    const { status, body, idempotencyReplayed } = await requestJson(server.url, "POST", "/api/vendor-invoices/12/dispute", {
       reason: "price mismatch",
     });
 
     expect(status).toBe(200);
-    expect(mocks.apLedger.executeApLedgerCommand).toHaveBeenCalledWith("dispute_invoice", {
-      invoiceId: 12,
+    expect(idempotencyReplayed).toBe("true");
+    expect(mocks.apInvoiceCommands.disputeInvoice).toHaveBeenCalledWith(12, {
       reason: "price mismatch",
       userId: "test-user",
-    });
+    }, expect.objectContaining({
+      commandName: "ap.invoice.dispute",
+      resourceKey: "vendor_invoice:12",
+      routeTemplate: "/api/vendor-invoices/:id/dispute",
+    }));
     expect(body).toEqual({ id: 12, status: "disputed" });
+  });
+
+  it("dispatches invoice voids through the durable AP command boundary", async () => {
+    mocks.apInvoiceCommands.voidInvoice.mockResolvedValue({
+      commandId: 83,
+      replayed: false,
+      httpStatus: 200,
+      body: { id: 12, status: "voided" },
+      terminalState: "succeeded",
+    });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/vendor-invoices/12/void", {
+      reason: "duplicate invoice",
+    });
+
+    expect(status).toBe(200);
+    expect(mocks.apInvoiceCommands.voidInvoice).toHaveBeenCalledWith(12, {
+      reason: "duplicate invoice",
+      userId: "test-user",
+    }, expect.objectContaining({
+      commandName: "ap.invoice.void",
+      resourceKey: "vendor_invoice:12",
+      routeTemplate: "/api/vendor-invoices/:id/void",
+    }));
+    expect(body).toEqual({ id: 12, status: "voided" });
   });
 
   it("records AP payments with normalized date, allocations, and creator", async () => {
