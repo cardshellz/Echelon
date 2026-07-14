@@ -333,6 +333,15 @@ interface ShipStationUnmappedPreview {
       lineItemKey?: string | null;
     }>;
   };
+  providerIdentityRepair: {
+    supersededCandidateShipmentId: number;
+    supersededProviderShipmentId: number;
+    supersededTrackingNumber: string | null;
+    supersededVoidDate: string;
+    activeCandidateShipmentId: number;
+    activeProviderShipmentId: number;
+    activeTrackingNumber: string;
+  } | null;
   orderItems: Array<{
     id: number;
     sku: string;
@@ -364,6 +373,7 @@ interface ShipStationReshipAdoptionResponse {
   changed: boolean;
   exceptionId: number;
   candidateShipmentId?: number | null;
+  providerIdentityRepaired?: boolean;
 }
 
 const DOMAIN_LABEL: Record<Domain, string> = {
@@ -680,7 +690,10 @@ function ShipStationReshipAdoptionDialog(props: {
         </DialogHeader>
 
         {previewQuery.isLoading ? (
-          <div className="space-y-3 py-4"><Skeleton className="h-20 w-full" /><Skeleton className="h-40 w-full" /></div>
+          <div className="space-y-3 py-4">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading live ShipStation package evidence...</div>
+            <Skeleton className="h-20 w-full" /><Skeleton className="h-40 w-full" />
+          </div>
         ) : previewQuery.isError ? (
           <div className="border border-red-200 bg-red-50 p-4 text-sm text-red-800">
             <div>{previewQuery.error instanceof Error ? previewQuery.error.message : "Evidence failed to load"}</div>
@@ -696,6 +709,18 @@ function ShipStationReshipAdoptionDialog(props: {
               <div><div className="text-xs font-medium uppercase text-muted-foreground">Shipped</div><div className="mt-1">{formatTimestamp(preview.providerShipment.shipDate)}</div></div>
               <div><div className="text-xs font-medium uppercase text-muted-foreground">Provider state</div><div className="mt-1">{preview.providerShipment.voidDate ? `Voided ${formatTimestamp(preview.providerShipment.voidDate)}` : "Active package"}</div></div>
             </section>
+
+            {preview.providerIdentityRepair && (
+              <section className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+                <div>
+                  <div className="font-medium">Active package identity recovered</div>
+                  <p className="mt-1 text-xs">
+                    A legacy WMS row crossed superseded ShipStation shipment {preview.providerIdentityRepair.supersededProviderShipmentId} with the active tracking number. Tracking {preview.providerIdentityRepair.activeTrackingNumber} uniquely matches active shipment {preview.providerIdentityRepair.activeProviderShipmentId}; adoption will retire the stale row before inventory is deducted.
+                  </p>
+                </div>
+              </section>
+            )}
 
             <section className="flex gap-3 border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
               <PackagePlus className="mt-0.5 h-5 w-5 shrink-0" />

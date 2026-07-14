@@ -28,6 +28,19 @@ const providerShipment = {
   shipmentItems: [{ sku: "SKU-A", name: "Card", quantity: 1, lineItemKey: null }],
 };
 
+const supersededProviderShipment = {
+  ...providerShipment,
+  shipmentId: 900,
+  trackingNumber: "1Z-SUPERSEDED",
+  voidDate: "2026-07-13T12:05:00Z",
+};
+
+const activeProviderShipment = {
+  ...providerShipment,
+  shipmentId: 901,
+  trackingNumber: "1Z-ACTIVE-RESHIP",
+};
+
 const contextRow = {
   exception_id: 77,
   wms_order_id: 42,
@@ -38,6 +51,11 @@ const contextRow = {
   provider_order_id: 700,
   provider_order_key: "echelon-wms-shp-10",
   tracking_number: "1Z-RESHIP",
+};
+
+const crossedContextRow = {
+  ...contextRow,
+  tracking_number: "1Z-ACTIVE-RESHIP",
 };
 
 const orderItemRow = {
@@ -103,6 +121,93 @@ describe("ShipStation unmapped physical remediation", () => {
       id: 10,
       externalShipmentRef: "800",
     });
+  });
+
+  it("recovers a unique active package when legacy WMS rows crossed provider identity and tracking", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [crossedContextRow] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, tracking_number")
+          && text.includes("LIMIT 2")
+        ) {
+          return { rows: [{
+            id: 21,
+            order_id: 42,
+            status: "voided",
+            tracking_number: "1Z-ACTIVE-RESHIP",
+          }] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        if (text.includes("COUNT(shipment_item.id)::int AS item_count")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    const preview = await getShipStationUnmappedPhysicalPreview(
+      db,
+      shipStation({
+        getShipments: vi.fn(async () => [
+          supersededProviderShipment,
+          activeProviderShipment,
+        ]),
+      }),
+      { exceptionId: 77 },
+    );
+
+    expect(preview.providerShipment).toEqual(activeProviderShipment);
+    expect(preview.externalShipmentRef).toBe("901");
+    expect(preview.candidateShipmentId).toBe(21);
+    expect(preview.providerIdentityRepair).toEqual({
+      supersededCandidateShipmentId: 20,
+      supersededProviderShipmentId: 900,
+      supersededTrackingNumber: "1Z-SUPERSEDED",
+      supersededVoidDate: "2026-07-13T12:05:00.000Z",
+      activeCandidateShipmentId: 21,
+      activeProviderShipmentId: 901,
+      activeTrackingNumber: "1Z-ACTIVE-RESHIP",
+    });
+  });
+
+  it("does not recover an active package when provider evidence is ambiguous", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [crossedContextRow] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        if (text.includes("COUNT(shipment_item.id)::int AS item_count")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const duplicateActive = { ...activeProviderShipment, shipmentId: 902 };
+
+    const preview = await getShipStationUnmappedPhysicalPreview(
+      db,
+      shipStation({
+        getShipments: vi.fn(async () => [
+          supersededProviderShipment,
+          activeProviderShipment,
+          duplicateActive,
+        ]),
+      }),
+      { exceptionId: 77 },
+    );
+
+    expect(preview.providerShipment).toEqual(supersededProviderShipment);
+    expect(preview.providerIdentityRepair).toBeNull();
   });
 
   it("adopts a classified reship with replacement lineage and no direct fulfillment link", async () => {
@@ -193,6 +298,124 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(allSql).toContain("replacement_for_order_item_id");
     expect(allSql).toContain("order_item_id, replacement_for_order_item_id");
     expect(allSql).toContain("UPDATE wms.reconciliation_exceptions");
+  });
+
+  it("atomically repairs crossed legacy identities before adopting the active reship", async () => {
+    const calls: string[] = [];
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [crossedContextRow] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, tracking_number")
+          && text.includes("LIMIT 2")
+        ) {
+          return { rows: [{
+            id: 21,
+            order_id: 42,
+            status: "voided",
+            tracking_number: "1Z-ACTIVE-RESHIP",
+          }] };
+        }
+        if (text.includes("JOIN LATERAL")) {
+          return { rows: [{
+            order_item_id: 101,
+            sku: "SKU-A",
+            product_variant_id: 201,
+            from_location_id: 301,
+            source_quantity: 1,
+          }] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        if (
+          text.includes("FROM wms.reconciliation_exceptions")
+          && text.includes("FOR UPDATE")
+        ) {
+          return { rows: [{ id: 77 }] };
+        }
+        if (
+          text.includes("SELECT id, status, order_id")
+          && text.includes("FROM wms.outbound_shipments")
+        ) {
+          return { rows: [{
+            id: 10,
+            status: "shipped",
+            order_id: 42,
+            shipment_purpose: "customer_fulfillment",
+            has_customer_items: true,
+          }] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, source, shipment_purpose")
+          && text.includes("external_fulfillment_id")
+        ) {
+          return { rows: [{
+            id: 21,
+            order_id: 42,
+            status: "voided",
+            source: "shipstation_split",
+            shipment_purpose: "customer_fulfillment",
+          }] };
+        }
+        if (text.includes("COUNT(*)") && text.includes("inventory_ship_count")) {
+          return { rows: [{ count: 0, inventory_ship_count: 0 }] };
+        }
+        if (
+          text.includes("SELECT id, order_id, external_fulfillment_id, tracking_number")
+          && text.includes("FOR UPDATE")
+        ) {
+          return { rows: [{
+            id: 20,
+            order_id: 42,
+            external_fulfillment_id: "shipstation_shipment:900",
+            tracking_number: "1Z-ACTIVE-RESHIP",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, order_item_id, replacement_for_order_item_id")
+          && text.includes("FROM wms.outbound_shipment_items")
+        ) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+    const service = shipStation({
+      getShipments: vi.fn(async () => [
+        supersededProviderShipment,
+        activeProviderShipment,
+      ]),
+    });
+
+    const result = await adoptShipStationUnmappedPhysicalAsReship(db, service, {
+      exceptionId: 77,
+      operator: "ops:test",
+      originalShipmentId: 10,
+      reason: "lost",
+      notes: "Confirmed active replacement package.",
+      lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 1 }],
+    });
+
+    expect(result).toMatchObject({
+      changed: true,
+      exceptionId: 77,
+      candidateShipmentId: 21,
+      providerIdentityRepaired: true,
+    });
+    expect(service.processShipmentNotification).toHaveBeenCalledWith(activeProviderShipment);
+    const allSql = calls.join("\n");
+    expect(allSql).toContain("shipstation_superseded_label_reconciled");
+    expect(allSql).toContain("status = 'queued'");
+    expect(allSql).toContain("voided_at = NULL");
+    expect(calls.filter((text) => (
+      text.includes("COUNT(*)") && text.includes("inventory_ship_count")
+    ))).toHaveLength(2);
   });
 
   it("refuses a replacement quantity beyond the original package quantity", async () => {
