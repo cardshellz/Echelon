@@ -19,7 +19,7 @@ persistence.
 - Base hardening slice: merged PR #917
 - Deployment status: PR #917 is live on Heroku release v2377; this new slice is not deployed
 - Migration 136 status: applied and verified in production
-- Commit/PR status: atomic PO/catalog changes are local; not committed, pushed, or opened as a PR
+- Commit/PR status: pushed in draft PR #918; CI passed on the initial PR head
 
 Do not deploy this branch without owner approval.
 
@@ -242,7 +242,7 @@ Do not run the new integration suite against production.
 
 ## Recommended next implementation order
 
-1. Review and publish the atomic PO/catalog slice as one focused PR.
+1. Review and merge draft PR #918 for the atomic PO/catalog slice.
 2. Execute the still-outstanding real-PostgreSQL command-ledger integration gate.
 3. Add a durable PO-email outbox with immutable content snapshots, deduplication,
    leased workers, retry/backoff, provider message identity, dead-letter visibility,
