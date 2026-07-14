@@ -43,6 +43,26 @@ vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
 vi.mock("../../../notifications/email.service", () => ({}));
 vi.mock("../../../notifications/notifications.service", () => ({}));
 
+const poEmailOutboxMocks = vi.hoisted(() => ({
+  enqueue: vi.fn(),
+  list: vi.fn(),
+  replay: vi.fn(),
+}));
+vi.mock("../../po-email-outbox.service", () => ({
+  enqueuePurchaseOrderEmail: poEmailOutboxMocks.enqueue,
+  listPurchaseOrderEmailDeliveries: poEmailOutboxMocks.list,
+  replayDeadLetterPurchaseOrderEmail: poEmailOutboxMocks.replay,
+  PoEmailOutboxError: class PoEmailOutboxError extends Error {
+    constructor(
+      message: string,
+      readonly statusCode: number,
+      readonly code: string,
+    ) {
+      super(message);
+    }
+  },
+}));
+
 // Now import the router registrar after mocks are in place.
 import { registerPurchasingRoutes } from "../../procurement.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
@@ -574,6 +594,104 @@ describe("Settings endpoints", () => {
     const { status, body } = await jsonRequest(server.url, "PATCH", "/api/settings/procurement", {});
     expect(status).toBe(400);
     expect(body.error).toMatch(/key, value.*updates/);
+  });
+});
+
+describe("purchase-order email outbox routes", () => {
+  let server: { url: string; close: () => Promise<void> };
+
+  beforeEach(async () => {
+    poEmailOutboxMocks.enqueue.mockReset();
+    poEmailOutboxMocks.list.mockReset();
+    poEmailOutboxMocks.replay.mockReset();
+    server = await startServer(buildApp(buildPurchasingMock()));
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it("queues an immutable delivery intent and returns 202", async () => {
+    poEmailOutboxMocks.enqueue.mockResolvedValue({
+      delivery: { id: 91, status: "queued", toEmail: "vendor@example.com" },
+      replayed: false,
+    });
+    const { status, body, headers } = await jsonRequest(
+      server.url,
+      "POST",
+      "/api/purchase-orders/42/send-email",
+      { toEmail: "vendor@example.com", message: "Please confirm" },
+      "po-email-intent-91",
+    );
+
+    expect(status).toBe(202);
+    expect(body.delivery).toMatchObject({ id: 91, status: "queued" });
+    expect(headers.get("idempotency-replayed")).toBe("false");
+    expect(poEmailOutboxMocks.enqueue).toHaveBeenCalledWith({
+      purchaseOrderId: 42,
+      toEmail: "vendor@example.com",
+      ccEmail: undefined,
+      message: "Please confirm",
+      idempotencyKey: "po-email-intent-91",
+      createdBy: "test-user",
+    });
+  });
+
+  it("requires a valid idempotency key and strict email input", async () => {
+    const missingKey = await jsonRequest(
+      server.url,
+      "POST",
+      "/api/purchase-orders/42/send-email",
+      { toEmail: "vendor@example.com" },
+      null,
+    );
+    expect(missingKey.status).toBe(400);
+    expect(missingKey.body.details.code).toBe("INVALID_IDEMPOTENCY_KEY");
+
+    const invalidEmail = await jsonRequest(
+      server.url,
+      "POST",
+      "/api/purchase-orders/42/send-email",
+      { toEmail: "not-an-email", unexpected: true },
+      "po-email-intent-92",
+    );
+    expect(invalidEmail.status).toBe(400);
+    expect(invalidEmail.body.details.code).toBe("INVALID_EMAIL_REQUEST");
+    expect(poEmailOutboxMocks.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("lists delivery state without returning immutable message bodies", async () => {
+    poEmailOutboxMocks.list.mockResolvedValue([{ id: 91, status: "sent" }]);
+    const { status, body } = await jsonRequest(
+      server.url,
+      "GET",
+      "/api/purchase-orders/42/email-deliveries",
+    );
+    expect(status).toBe(200);
+    expect(body).toEqual({ deliveries: [{ id: 91, status: "sent" }] });
+    expect(poEmailOutboxMocks.list).toHaveBeenCalledWith(42);
+  });
+
+  it("replays a dead letter through a separate idempotent operator intent", async () => {
+    poEmailOutboxMocks.replay.mockResolvedValue({
+      delivery: { id: 92, status: "queued", replayOfId: 91 },
+      replayed: true,
+    });
+    const { status, headers } = await jsonRequest(
+      server.url,
+      "POST",
+      "/api/purchase-orders/42/email-deliveries/91/replay",
+      {},
+      "po-email-replay-91",
+    );
+    expect(status).toBe(202);
+    expect(headers.get("idempotency-replayed")).toBe("true");
+    expect(poEmailOutboxMocks.replay).toHaveBeenCalledWith({
+      purchaseOrderId: 42,
+      deliveryId: 91,
+      idempotencyKey: "po-email-replay-91",
+      createdBy: "test-user",
+    });
   });
 });
 

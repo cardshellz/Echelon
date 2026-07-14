@@ -6,20 +6,20 @@ This continues:
 - `docs/PURCHASING-HARDENING-HANDOFF-2026-07-13.md`
 
 The July 13 quote-pricing work is merged in PR #914. PR #917 subsequently
-merged durable transactional command results for ordinary PO-line mutations
-and browser retries that preserve one key per user intent. This document now
-also records the next local slice: atomic PO plus optional vendor-catalog
-persistence.
+merged durable transactional command results for ordinary PO-line mutations,
+and PR #918 made optional PO/catalog capture atomic. This document now also
+records the next local slice: durable purchase-order email delivery.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/purchasing-po-catalog-atomic-2026-07-14`
-- Base and current `origin/main`: `60e67587`
-- Base hardening slice: merged PR #917
-- Deployment status: PR #917 is live on Heroku release v2377; this new slice is not deployed
+- Branch: `codex/purchasing-email-outbox-2026-07-14`
+- Base and current `origin/main`: `e34895c8` (includes unrelated shipping PR #919)
+- Base hardening slice: merged PR #918 at `6e1bcb33`
+- Deployment status: PR #918 is live on Heroku release v2379; this new slice is not deployed
 - Migration 136 status: applied and verified in production
-- Commit/PR status: pushed in draft PR #918; CI passed on the initial PR head
+- Migration 138 status: local only; not applied in production
+- Commit/PR status: pushed in draft PR #921; CI was queued at handoff update time
 
 Do not deploy this branch without owner approval.
 
@@ -240,18 +240,64 @@ Although PR #917 is live, these hardening follow-ups remain:
 
 Do not run the new integration suite against production.
 
+## Durable PO-email outbox slice
+
+The old `POST /api/purchase-orders/:id/send-email` path performed SMTP inline and
+then wrote `po_status_history` in a separate call. Provider acceptance followed by
+a database failure could therefore create a real but invisible vendor email, and a
+request retry could send it again.
+
+Migration 138 and the new procurement-owned outbox replace that split path with:
+
+- an immutable recipient, subject, HTML, text, and PO-document snapshot;
+- PO-scoped idempotency keys and canonical request hashes;
+- strict email/body validation and exact replay of the original queued delivery;
+- `queued`, leased `processing`, `sent`, `partially_sent`, and `dead_letter` states;
+- `FOR UPDATE SKIP LOCKED` claims that are safe across multiple web dynos;
+- bounded attempts, lease recovery, exponential backoff, and terminal diagnostics;
+- one stable RFC Message-ID reused for automatic retries;
+- SMTP timeouts and provider acceptance metadata;
+- atomic outbox completion plus `po_status_history` append after provider acceptance;
+- explicit partial-recipient handling that suppresses unsafe automatic duplicates;
+- delivery status polling in the PO email modal; and
+- idempotent operator replay that creates a new queued row from a dead letter without
+  mutating the terminal source snapshot.
+
+The web process starts the worker after listening, using the repository's existing
+scheduler-disable contract plus `PO_EMAIL_OUTBOX_WORKER_DISABLED`. Claim leases,
+not in-memory process state, are the cross-dyno concurrency authority.
+
+SMTP cannot provide mathematical exactly-once delivery across the provider/database
+commit boundary. If provider acceptance succeeds and the database completion
+transaction fails, the row is retried with the same Message-ID. This is honest
+at-least-once delivery with a provider deduplication aid, durable visibility, and
+operator recovery—not a false exactly-once claim.
+
+Local validation on July 14:
+
+- `npm.cmd run check`: passed
+- focused outbox/route tests: 4 files, 43 passed
+- procurement hardening gate: 78 files, 715 passed, 14 skipped
+- production build: passed; 3,595 client modules transformed and server bundle built
+- writer-ratchet: updated for the intended procurement-owned outbox writer
+- repository-wide gate: 402 files and 4,105 tests passed; 29 skipped; 8 todo
+
+The repository-wide command retains the same four unrelated/environmental failures:
+three existing integration suites require `ECHELON_TEST_DATABASE_URL`, and the
+unchanged fulfillment reconciliation fixture expects `on_hold` while unchanged
+production logic returns `partially_shipped`.
+
+Migration constraints, real concurrent claims, lease recovery, and SMTP commit
+ambiguity still need a disposable PostgreSQL/SMTP test environment before this is
+described as production-proven.
+
 ## Recommended next implementation order
 
-1. Review and merge draft PR #918 for the atomic PO/catalog slice.
-2. Execute the still-outstanding real-PostgreSQL command-ledger integration gate.
-3. Add a durable PO-email outbox with immutable content snapshots, deduplication,
-   leased workers, retry/backoff, provider message identity, dead-letter visibility,
-   and operator replay. Current lifecycle `send` does not itself deliver email, while
-   the separate email route performs a synchronous SMTP call and records history
-   afterward.
-4. Migrate the next financial commands to the ledger in small reviewed groups.
-5. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
-6. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
+1. Review and merge the durable PO-email outbox slice; rehearse migration 138 first.
+2. Execute the still-outstanding real-PostgreSQL command-ledger and outbox gates.
+3. Migrate the next financial commands to the ledger in small reviewed groups.
+4. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
+5. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
 
 Keep manual quote pricing marked `manual` even when the same quote is optionally
 saved to the vendor catalog. Extended-total quotes remain PO-specific and must not be
