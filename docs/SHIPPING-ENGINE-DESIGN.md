@@ -2,7 +2,9 @@
 
 Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedited/…), the engine finds the **cheapest carrier+method** satisfying the promise, and the WMS hands the pack station an **optimized box/split plan**. Replaces Parcelify.
 
-> **Implementation update — 2026-07-13:** standalone cartonizer v3.1 now performs real non-overlapping 3D placement with six rotations and emits unit coordinates/orientations. Dropship, checkout, and WMS test adapters use the same core. WMS enforcement is intentionally deferred: plans can be generated explicitly, and an opt-in shadow mode can observe packing handoffs without blocking or changing order status. The earlier volume-only/sorted-dimension cartonizer description below is superseded where noted.
+> **Implementation update — 2026-07-13:** standalone cartonizer v3.1 now performs real non-overlapping 3D placement with six rotations and emits unit coordinates/orientations. Dropship and WMS test adapters can use the same core. WMS enforcement is intentionally deferred: plans can be generated explicitly, and an opt-in shadow mode can observe packing handoffs without blocking or changing order status. The earlier volume-only/sorted-dimension cartonizer description below is superseded where noted.
+
+> **Architecture decision — 2026-07-14 (superseding): shipping launches before cartonization.** Shopify, future first-party websites, and dropship vendor fulfillment use one runtime rating engine with independently assigned rate books. Echelon catalog variant weight is canonical; Shopify request weight is a warned transition fallback. eBay shopper checkout keeps external fulfillment policies in its channel adapter. Dropship selects a vendor-fulfillment rate book, then applies insurance/handling/wallet policy. The cartonizer remains a replaceable parcel provider and standalone WMS test path.
 
 ## Verified current state (all claims checked in-file or against prod 2026-07-02)
 
@@ -12,7 +14,7 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
   - `dropship.dropship_package_profiles` (:815-834) — optional dropship overrides such as ship-alone, default box, and carrier/service preferences. Catalog variants own physical weight/dimensions. Legacy `max_units_per_package` is not a runtime cartonization input.
   - `dropship_rate_tables` + `_rows` (warehouse, zone, weight band, cents) + `dropship_zone_rules` (postal-prefix→zone, priority) (:836-878). Prod: 1 rate row, 1 zone rule.
   - Markup/insurance bps policies + `dropship_shipping_quote_snapshots` (idempotency_key, request_hash, quote_payload) (:880-939).
-  - **Standalone cartonizer v3.1** `server/modules/cartonization`: expands ordered quantities into physical units, tests all six rotations, rejects overlapping/out-of-bounds placements, returns per-unit coordinates, and splits on geometry or packed weight. WMS, dropship, checkout, and shadow quoting consume the same public module; no max-units cap is used.
+  - **Standalone cartonizer v3.1** `server/modules/cartonization`: expands ordered quantities into physical units, tests all six rotations, rejects overlapping/out-of-bounds placements, returns per-unit coordinates, and splits on geometry or packed weight. WMS test/shadow paths and dropship may consume this provider; Shopify checkout no longer requires it. No max-units cap is used.
   - Clean provider seams: `DropshipCartonizationProvider`, `DropshipShippingRateProvider` — plug-and-play interfaces already in the codebase's idiom.
 - **Membership policy plane — DONE & LIVE** (club app, PRs #171-183, ahead of the stale local clone): `plan_benefit_assignments` with `shipping_group_id` dimension → compact **523-byte** `cardshellz.shipping_thresholds` shop metafield (verified live, 6 plans, updated 6/23) → `cardshellz-shipping-discount` Function (ACTIVE DiscountAutomaticApp) → member free shipping rendering $0 on live orders. The proven pattern for all member shipping benefits.
 - **C9 ShippingEngine port** (server/modules/shipping/engine.ts:26-106): push/hold/cancel/markShipped via ShipStation V1 with hardened 429 backoff; carrier normalization stamps_com→USPS, ups_walleted→UPS. Fulfillment-side only, zero rating.
@@ -29,7 +31,7 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 - Carrier mix 90d: USPS 2,038 / UPS 1,354 / FedEx 381; ~43 shipments/day.
 
 **Hard Shopify constraints (verified):**
-1. CarrierService callback: gets origin/destination/items(grams, price, sku, properties) — **NO customer, NO metafields, NO dims**; ~10s/5s/3s dynamic timeout, no retry; responses cached ~15 min NOT keyed on customer. ⇒ Checkout rates must be **member-agnostic, precomputed, stateless**; dims joined engine-side by SKU. Member pricing must come from the Functions layer.
+1. CarrierService callback: gets origin/destination/items(grams, price, sku, properties) — **NO customer, NO metafields, NO dims**; ~10s/5s/3s dynamic timeout, no retry; responses cached ~15 min NOT keyed on customer. ⇒ Checkout rates must be **member-agnostic, precomputed, stateless**. SKU resolves canonical Echelon weight; Shopify grams are fallback only. Dimensions are not required. Member pricing must come from the Functions layer.
 2. Functions can only **reduce** an existing rate (100%/partial discount) — never create or raise one. ⇒ Base rates are the ceiling; "member-exclusive express" is structurally impossible — express must be offered to all, discounted per plan.
 3. Metafields >10KB arrive NULL in Functions (the 22KB plan_benefits incident) — compact projections only (523B pattern proven).
 4. Rate naming is load-bearing across delivery profiles: same-named rates SUM into one line; different names collapse to cheapest generic "Shipping."
@@ -39,28 +41,34 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 ```
 QUOTE PLANE (checkout, member-agnostic, <1s)
 Shopify checkout ──► CarrierService callback (Echelon, new)
-  cart items ──► sku→dims join ─► Split Planner ─► Cartonizer v3 ─► Rates (local tables)
+  every cart line ──► Echelon weight (Shopify fallback) ─► one shipment ─► Rates (local tables)
              ─► ETA (cutoff + transit table) ─► service-level offers (Standard/Expedited/Express + dates)
   member benefits: shipping-discount Function (club app — LIVE) discounts per plan on top
 
-FULFILLMENT PLANE (pack station, exact)
-order ingest ─► persist SHIP PLAN (re-cartonize with order-final items)
+OPTIONAL FULFILLMENT PLANE (pack station, exact; separately approved)
+order ingest ─► test/shadow SHIP PLAN (cartonize with order-final items)
   ─► pack instruction (v1 ShipStation customField "BOX: …"; v2 Echelon Packing page)
   ─► label buy (ShipStation, existing C9) ─► webhook captures actual cost/box/weight
   ─► CALIBRATION LOOP: quoted vs actual → rate-table corrections
 ```
 
-**Ownership:** physical cartonization = channel-neutral `server/modules/cartonization`; rates and carrier callbacks = `server/modules/shipping-engine`; persisted plans and box data = `shipping` Postgres schema; execution = WMS packing station. Callback endpoint is hosted by Echelon (Heroku), registered once via the club-app token (owns write_shipping). Member policy stays in club app + Function (proven). Dropship keeps its configuration tables short-term but delegates physical packing to the standalone cartonizer.
+**Ownership:** runtime quote contracts, canonical weight resolution, rate books, rates, service levels, and callbacks = `server/modules/shipping-engine` backed by the `shipping` Postgres schema; physical cartonization = optional channel-neutral `server/modules/cartonization`. Member policy stays in the club app + Function for Shopify. eBay policy selection stays in the eBay adapter. Dropship owns its vendor rate-book configuration surface plus insurance/handling/wallet policy, but delegates rating to the shared engine. Its current duplicate provider and `dropship.dropship_rate_*`/zone tables are migration debt; distinct dropship prices are not.
+
+### Rate books and pricing context
+
+The engine receives a pricing context separately from the physical shipment: `pricingChannel` identifies the program selecting prices and `purpose` distinguishes customer checkout from vendor fulfillment. Shopify retail and dropship vendor fulfillment therefore share weight, zone, effective-date, band-selection, quote, and audit behavior while resolving different rate books. A dropship order sourced from eBay still uses the dropship vendor rate book; eBay's fulfillment policy controls only what the marketplace buyer sees.
+
+Target storage is `shipping.rate_books` plus deterministic `shipping.rate_book_assignments`, with existing `shipping.rate_tables` attached to a book. Reusable zone sets may be shared by books when their geography matches. Assignment resolution starts with purpose + pricing channel and may later add store, vendor, or warehouse specificity; overlapping active assignments at the same specificity must be rejected instead of settled by an opaque priority number.
 
 ## Modules & contracts
 
-1. **Box Catalog** `shipping.box_catalog` — generalize dropship shape + add `kind` (box|mailer|envelope|own_container) + `cost_cents` (materials) + `carrier_dim_class` (e.g. USPS cubic tier). Admin CRUD (copy dropship routes).
-2. **Item Shipping Attributes** — populate `catalog.product_variants` dims/weight (canonical physical truth, per sellable variant now; UoM base-unit roll-up later) + `shipping.variant_shipping_attrs` (ship_alone/own_container, packing_class, fragility). Admin write path + CSV/measure-station bulk entry (none exists today). Shopify-weight backfill as seed.
-3. **Cartonizer v3.1** `cartonize(items, boxes) → candidatePackings[]` — standalone pure-domain engine with multi-SKU packing, physical units for every ordered quantity, all six orthogonal rotations, non-overlap and box-boundary enforcement, per-unit placement output, own-container passthrough, fill-factor clearance, and geometry/weight-driven multi-carton splits. Every ordinary carton is capped at 22,679 g (under 50 lb); a box may set a lower structural maximum. Missing dimensions or no-fit conditions produce an explicit fallback warning for diagnostics. Customer quotes may fail closed when cartonization is required to price them, but WMS fulfillment does not: pack plans are currently generated through the explicit test endpoint or optional shadow execution and never gate order status. Verified unit placements persist on `shipping.pack_plan_parcels` (migration 135). The provider seam remains available for later A/B comparison.
+1. **Runtime quote contracts** — `shipping-channel.ts` declares runtime vs channel-policy ownership; `shipment.ts` defines channel-neutral lines and parcels; injected parcel/rate providers keep channel parsing, rating, and packing independent.
+2. **Weight resolution + weight-only parcel provider** — exact SKU first loads `catalog.product_variants.weight_grams`. A positive channel weight is a warned fallback only when Echelon is missing. Missing both contributes zero; an all-missing shipment uses a 1g floor. The same normalized input serves Shopify, first-party sites, and dropship vendor charges without dimensions or boxes.
+3. **Cartonizer v3.1** `cartonize(items, boxes) → candidatePackings[]` — optional standalone pure-domain engine with multi-SKU packing, physical units for every ordered quantity, all six orthogonal rotations, non-overlap and box-boundary enforcement, per-unit placement output, own-container passthrough, fill-factor clearance, and geometry/weight-driven multi-carton splits. Every ordinary carton is capped at 22,679 g (under 50 lb); a box may set a lower structural maximum. It is not part of the initial Shopify quote path and cannot gate WMS status. Verified unit placements persist on `shipping.pack_plan_parcels` (migration 135).
    **DECIDED 2026-07-02 (user confirmed): co-mingling = RIDER/VOID model, not group×group rules.** Shipping groups stay the default partition (storage boxes ship flat, separately). Rider consolidation now defaults off because cubic void alone cannot prove physical placement. Re-enable it only after void regions have real dimensions and can use the same non-overlap checks. Policy/physics separation remains: free-shipping thresholds key on shipping-group spend; rates key on parcels.
-4. **Split Planner** `plan(order) → shipments[]` — v1: single origin, split = cartonizer output grouping; deliberate rate-naming strategy for multi-profile carts. Split-across-origins deferred (99%+ single-origin).
-5. **Rates Engine** `rate(packing, dest, serviceLevel) → quotes[]` — local deterministic tables (`shipping.rate_tables/_rows/zone_rules`, generalized from dropship incl. effective dating + cheapest-wins) serving the callback in <100ms for LOWER-48. **DECIDED 2026-07-02 (user): hybrid** — HI/AK/PR destinations make a LIVE ShipStation v2 rate call inside the callback (~0.75% of orders; hard 2s timeout, fallback to padded HIPRAK table row — the callback must ALWAYS return a rate). Matches Parcelify's existing Domestic-49 + HIPRAK zone split. **Cart display DECIDED: stays STATIC** (62.5% of orders sub-$69 but lower-48 paid rates cluster $5-$14; HI/AK only 0.75%) — sourced from the rate table's typical lower-48 band instead of the hardcoded 899/1099 cents in main-cart-shellz.liquid:557, with copy "Estimated for continental US — final rate at checkout." No zip-entry UX in cart.
-6. **Carrier Adapters** — NEW rating port (separate from C9 fulfillment port, same conventions): `getRates(packing, dest) → carrier quotes`, `getTransit(...)`. v1 adapter: **ShipStation API v2 (ShipEngine)** — quotes the same stamps_com/ups_walleted wallet accounts labels are bought on ⇒ quote = actual label cost. Used OFFLINE to build/refresh rate tables + spot-calibrate, not at checkout.
+4. **Split Planner** `plan(order) → shipments[]` — deferred until cartonization/multi-origin work. The initial quote path deliberately treats the cart as one weight-based shipment.
+5. **Rates Engine** `quote(shipment, destination, rateContext) → quotes[]` — a rate-book resolver selects independently priced local tables from `shipping.*`; the same deterministic zone, weight-band, effective-date, and cheapest-wins core serves Shopify retail and dropship vendor fulfillment. The rate-provider port retains full parcel fields so live/dimensional providers can be added later without changing channel adapters.
+6. **Carrier Adapters** — rating port is separate from the C9 fulfillment port. The local table provider is first. ShipStation API v2/direct-carrier providers remain offline calibration or later special-destination implementations; they do not block the initial Shopify launch.
 7. **Service Levels** `shipping.service_levels` — e.g. Standard (3–7d), Expedited (2–3d), Express (1–2d); each maps to eligible carrier services + transit windows per zone. Checkout offers levels; fulfillment re-solves cheapest carrier meeting the promised date (Amazon decoupling).
 8. **ETA** — ship date (existing cutoff/SLA) + `shipping.transit_matrix` (zone × service → business days, seeded from carrier standards, corrected by actuals) → `min/max_delivery_date` on every rate (checkout shows dates for the first time).
 9. **Membership Policy** (club app — mostly DONE) — extend BenefitKind with `express_discount` / per-group express pricing; project into the compact metafield; Function discounts express/standard per plan. Base = full price for guests.
@@ -68,24 +76,26 @@ order ingest ─► persist SHIP PLAN (re-cartonize with order-final items)
 
 ## Phasing
 
-- **P0 — Data (gating, parallel with all code):** catalog the physical box suite; dims capture for ~300 active variants (form-factor templates: measure one toploader model, apply to family); Shopify weight backfill; build the dims-entry admin + CSV path first so the capture program has a tool.
-- **P1 — Engine core (shadow):** `shipping` schema; generalize box/rate/zone/cartonizer; ShipStation v2 adapter; nightly rate-table build. WMS cartonization defaults off and is exercised first through `POST /api/shipping/packing/orders/:wmsOrderId/generate-plan`; opt-in `SHIPPING_WMS_CARTONIZATION_SHADOW_ENABLED=true` observes real packing handoffs and persists diagnostics without blocking or changing status. Compare predictions to actual cartons, weights, and label cost before any cutover.
-- **P2 — Checkout cutover (Standard only):** register CarrierService (club-app token → Echelon URL); serve Standard w/ ETA dates gated to cardshellz-test; verify member Function discounts stack correctly on our rates; progressive rollout; transcribe Parcelify rules + resolve CCS-enablement question; decommission Parcelify.
-- **P3 — Service levels:** Expedited/Express w/ dates; pick-priority hookup (priority.shipping_base already has standard/expedited/overnight vocabulary).
-- **P4 — Pack station:** v1 customField instruction → v2 Packing page + actuals capture → calibration dashboards (quoted vs actual).
-- **P5 — Member express benefits:** BenefitKind extension + projection + Function update; plan-tier express pricing.
+- **P0 — Shipping contracts:** channel-neutral shipment/rate ports; canonical Echelon weight resolution; explicit pricing channel + rate purpose; Shopify/internal/dropship runtime quotes; eBay external-policy checkout. No activation.
+- **P1 — Shopify weight audit + shadow comparison:** improve active-variant weight coverage, validate local tables and mappings, replay representative carts through the same runtime service, quantify intentional undercharges from missing weights, and compare against Parcelify. Missing weight is an accuracy issue, not a checkout gate.
+- **P2 — Checkout cutover (Standard only):** register CarrierService (club-app token → Echelon URL); serve Standard with ETA dates alongside Parcelify; verify member Function discounts; soak, roll back cleanly if needed, then decommission Parcelify.
+- **P3 — Channel expansion:** introduce shared `shipping.*` rate books/assignments; migrate dropship's distinct vendor rates from its duplicate provider/schema into a dropship-assigned book; add the first-party authenticated quote API and Shellz Club benefit-policy adapter; retain eBay fulfillment-policy selection in its adapter.
+- **P4 — Service levels and providers:** Expedited/Express, live/direct carrier providers where they add value, and multi-origin routing when required.
+- **P5 — Optional cartonization:** dimensions/box capture, explicit plan tests, non-blocking shadow, pack-station actuals, calibration, and only then a separately approved enforcement proposal.
 
-## Walkthrough decisions LOCKED 2026-07-02
+## Walkthrough decisions from 2026-07-02
+
+These remain useful design inputs except where the July 14 shipping-first decision supersedes their launch order. Cartonization, multi-origin splitting, and a ShipStation v2 key are no longer v1 checkout gates.
 1. **Cart display**: static, rate-table-sourced, "Estimated for continental US" copy. No zip-entry UX.
 2. **Checkout rating**: hybrid — local tables lower-48, LIVE ShipStation v2 call for HI/AK/PR (2s timeout → padded table fallback; callback always returns a rate).
 3. **Co-mingling**: rider/void model (see Cartonizer v3). Groups = default partition. Rider absorption remains disabled until void regions have physical dimensions and can pass the same placement checks.
 4. **Fill math**: flat ~85% volume clearance plus real 3D placement; items are rectangular bricks that may use any of six rotations. Per-SKU constraints are added only when fragility, nesting, or orientation rules are known, not as arbitrary max-unit limits.
-5. **Multi-warehouse**: FULL multi-origin in v1 (user explicitly chose over model-only) — inventory-aware origin selection, split-across-origins, combined quotes. ⚠️ Implication: OMS must support one order → multiple warehouse-scoped shipments (today wms.orders has a single warehouse_id; routing-at-ingestion is single-origin). This is the largest v1 work item.
+5. **Multi-warehouse**: retain the eventual inventory-aware, split-across-origin design, but defer it until after the single-origin Shopify engine is stable. OMS still needs one order → multiple warehouse-scoped shipments before this can be activated.
 6. **SIOC**: manual `ships_in_own_container` checkbox per variant in Echelon; system pre-suggests sealed case-level variants from the pack hierarchy; user approves.
 7. **Carrier accounts (verified via V1 API 7/2)**: FedEx = OWN account; USPS (stamps_com), UPS (ups_walleted), DHL Express, GlobalPost = ShipStation wallet. v2 quotes = real negotiated costs.
 
 ## Pending user action
-- Generate a ShipStation **v2 API key** (Settings → Account → API Settings) → `heroku config:set SHIPSTATION_V2_API_KEY=<key> -a cardshellz-echelon`. If no v2 section exists on the plan, adapter falls back to EasyPost/direct-carrier — architecture unchanged.
+- No ShipStation v2 credential is required for the initial local-table Shopify launch. Generate one later when live-rate calibration or a live provider is ready to be tested.
 
 ## Original design questions (superseded by the locked list above)
 

@@ -12,7 +12,7 @@
  *     pointing Shopify at it) sells nothing by accident.
  *
  * HARD RULES (checkout is latency- and failure-sensitive):
- *   - No external calls — cartonizer + rate tables only (DB reads).
+ *   - No external calls — Echelon catalog weights + local rate tables only.
  *   - Responds within ~RESPONSE_DEADLINE_MS; a slow quote returns { rates: [] }
  *     while the pipeline finishes in the background for the snapshot.
  *   - NEVER throws / never 5xxs a valid token: any failure degrades to
@@ -37,23 +37,14 @@ import {
   warehouses,
 } from "@shared/schema";
 import { db } from "../../../../db";
-import {
-  cartonize,
-  isCartonizeCandidateVerified,
-  type CartonizeItem,
-} from "../../../cartonization/domain/cartonize";
 import { deliveryWindow, type DeliveryWindow } from "../../domain/eta";
 import { rateComboKey } from "../../domain/rate-selection";
-import {
-  quoteParcels,
-  type RateQuoteLine,
-  type RateQuoteResult,
-} from "../../application/rate-quote.service";
-import {
-  loadActiveBoxes,
-  loadPackingInputs,
-  resolveVariantIdsBySku,
-} from "../../../cartonization/infrastructure/packing-input.repository";
+import type { RateQuoteLine, RateQuoteResult } from "../../application/rate-quote.service";
+import { quoteShipment } from "../../application/shipment-quote.service";
+import { localRateTableShippingRateProvider } from "../../application/shipping-rate-provider";
+import { resolveShipmentLineWeights } from "../../application/shipment-weight.service";
+import { weightOnlyParcelProvider } from "../../application/weight-only-parcel.provider";
+import { loadCatalogWeightsBySku } from "../../infrastructure/catalog-weight.repository";
 
 /** Respond by this deadline even if the quote pipeline is still running. */
 const RESPONSE_DEADLINE_MS = 2000;
@@ -110,9 +101,7 @@ const shopifyRateRequestSchema = z.object({
 export interface ParsedRateRequest {
   destPostal: string;
   destCountry: string;
-  items: Array<{ sku: string; quantity: number; grams: number | null }>;
-  /** Lines dropped because they carried no SKU — surfaces as a warning. */
-  skippedNoSkuCount: number;
+  items: Array<{ sku: string | null; quantity: number; grams: number | null }>;
 }
 
 export type ParseRateRequestResult =
@@ -120,9 +109,9 @@ export type ParseRateRequestResult =
   | { ok: false; error: string };
 
 /**
- * Parse Shopify's rate request body. Items without a SKU cannot be resolved
- * against the catalog: they are skipped (with the whole request rejected when
- * NO item carries a SKU — an unpriceable cart must not get a partial quote).
+ * Parse Shopify's rate request body. SKU resolves canonical Echelon weight;
+ * Shopify grams are a transition fallback. SKU remains optional and no line is
+ * silently skipped from weight resolution.
  */
 export function parseShopifyRateRequest(body: unknown): ParseRateRequestResult {
   const parsed = shopifyRateRequestSchema.safeParse(body);
@@ -130,23 +119,19 @@ export function parseShopifyRateRequest(body: unknown): ParseRateRequestResult {
     return { ok: false, error: `invalid CarrierService payload: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` };
   }
   const rate = parsed.data.rate;
-  const items = rate.items
-    .filter((item) => typeof item.sku === "string" && item.sku.trim() !== "")
-    .map((item) => ({
-      sku: (item.sku as string).trim(),
-      quantity: item.quantity,
-      grams: typeof item.grams === "number" && item.grams > 0 ? item.grams : null,
-    }));
-  if (items.length === 0) {
-    return { ok: false, error: "no items with a SKU in rate request" };
-  }
+  const items = rate.items.map((item) => ({
+    sku: typeof item.sku === "string" && item.sku.trim() !== ""
+      ? item.sku.trim()
+      : null,
+    quantity: item.quantity,
+    grams: typeof item.grams === "number" && item.grams > 0 ? item.grams : null,
+  }));
   return {
     ok: true,
     request: {
       destPostal: rate.destination.postal_code.trim(),
       destCountry: rate.destination.country.trim().toUpperCase(),
       items,
-      skippedNoSkuCount: rate.items.length - items.length,
     },
   };
 }
@@ -269,59 +254,54 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
   if (!parsed.ok) {
     console.error(`[CarrierCallback] ${parsed.error}`);
     await persistCheckoutSnapshot({
-      body, request: null, packing: null, rates: null,
+      body, request: null, parcelPlan: null, rates: null,
       shopifyRates: [], warnings: [parsed.error],
     });
     return [];
   }
   const request = parsed.request;
   const warnings: string[] = [];
-  if (request.skippedNoSkuCount > 0) {
-    warnings.push(`${request.skippedNoSkuCount} line(s) without a SKU skipped; quote may under-pack`);
-  }
 
   try {
-    const variantIdBySku = await resolveVariantIdsBySku(request.items.map((i) => i.sku));
-    const packingInputs = await loadPackingInputs([...variantIdBySku.values()]);
-
-    let syntheticId = -1;
-    const items: CartonizeItem[] = request.items.map((line) => {
-      const variantId = variantIdBySku.get(line.sku);
-      const input = variantId !== undefined ? packingInputs.get(variantId) : undefined;
-      if (input) return { ...input, quantity: line.quantity };
-      warnings.push(`sku ${line.sku} not found in catalog; used stub item`);
-      return {
-        productVariantId: syntheticId--,
+    const originWarehouseId = callbackOriginWarehouseId();
+    let catalogWeightBySku = new Map<string, number | null>();
+    try {
+      catalogWeightBySku = await loadCatalogWeightsBySku(
+        request.items.flatMap((line) => line.sku ? [line.sku] : []),
+      );
+    } catch (error) {
+      console.error("[CarrierCallback] catalog weight lookup failed; using channel weights:", error);
+      warnings.push("Echelon catalog weight lookup failed; used channel weights");
+    }
+    const weightedLines = resolveShipmentLineWeights(
+      request.items.map((line) => ({
         sku: line.sku,
         quantity: line.quantity,
-        // Shopify's per-unit grams keeps the fallback parcel honest.
-        weightGrams: line.grams,
-        lengthMm: null,
-        widthMm: null,
-        heightMm: null,
-        shippingGroupCode: null,
-        shipsInOwnContainer: false,
-        riderEligible: false,
-        riderVoidCm3: null,
-        riderVoidMaxWeightGrams: null,
-        riderVoidMaxItems: null,
-      };
-    });
-
-    const originWarehouseId = callbackOriginWarehouseId();
-    const boxes = await loadActiveBoxes(originWarehouseId);
-    const packing = cartonize(items, boxes);
-    const candidate = packing.candidates[0];
-    if (!isCartonizeCandidateVerified(candidate)) {
-      throw new Error("Cartonizer could not verify physical placement for every ordered unit.");
-    }
-
-    const rates = await quoteParcels({
+        channelWeightGrams: line.grams,
+      })),
+      catalogWeightBySku,
+    );
+    const shipmentQuote = await quoteShipment({
+      channel: "shopify",
       originWarehouseId,
-      destCountry: request.destCountry,
-      destPostal: request.destPostal,
-      parcels: candidate.parcels.map((p) => ({ billableWeightGrams: p.billableWeightGrams })),
+      destination: {
+        country: request.destCountry,
+        postalCode: request.destPostal,
+      },
+      lines: weightedLines,
+    }, {
+      parcelProvider: weightOnlyParcelProvider,
+      rateProvider: localRateTableShippingRateProvider,
     });
+    if (!shipmentQuote.ok) {
+      warnings.push(...shipmentQuote.errors);
+      await persistCheckoutSnapshot({
+        body, request, parcelPlan: null, rates: null,
+        shopifyRates: [], warnings,
+      });
+      return [];
+    }
+    const { parcelPlan, rates } = shipmentQuote;
 
     // Delivery dates are best-effort decoration: a transit lookup failure (or
     // simply no matching transit rows) must never block or degrade the rates.
@@ -335,11 +315,11 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
 
     const activeMethods = await loadActiveServiceLevelMethods();
     const shopifyRates = mapQuotesToShopifyRates(rates.quotes, activeMethods, deliveryEstimates);
-    warnings.push(...candidate.warnings, ...rates.warnings);
+    warnings.push(...parcelPlan.warnings, ...rates.warnings);
 
     await persistCheckoutSnapshot({
       body, request,
-      packing: { engine: packing.engine, strategy: candidate.strategy, parcels: candidate.parcels, warnings: candidate.warnings },
+      parcelPlan,
       rates,
       shopifyRates, warnings,
     });
@@ -348,7 +328,7 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
     console.error("[CarrierCallback] quote pipeline failed:", error);
     warnings.push(`quote pipeline failed: ${error instanceof Error ? error.message : String(error)}`);
     await persistCheckoutSnapshot({
-      body, request, packing: null, rates: null, shopifyRates: [], warnings,
+      body, request, parcelPlan: null, rates: null, shopifyRates: [], warnings,
     });
     return [];
   }
@@ -420,7 +400,7 @@ async function loadActiveServiceLevelMethods(): Promise<ActiveServiceLevelMethod
 async function persistCheckoutSnapshot(input: {
   body: unknown;
   request: ParsedRateRequest | null;
-  packing: unknown | null;
+  parcelPlan: unknown | null;
   rates: RateQuoteResult | null;
   shopifyRates: ShopifyRate[];
   warnings: string[];
@@ -436,7 +416,7 @@ async function persistCheckoutSnapshot(input: {
       resolvedZone: input.rates?.zone ?? null,
       requestHash: createHash("sha256").update(JSON.stringify(requestPayload)).digest("hex"),
       requestPayload,
-      packing: input.packing,
+      packing: input.parcelPlan,
       rates: input.rates
         ? { zone: input.rates.zone, quotes: input.rates.quotes, warnings: input.rates.warnings }
         : null,
