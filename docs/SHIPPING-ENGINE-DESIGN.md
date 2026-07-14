@@ -6,6 +6,8 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 
 > **Architecture decision — 2026-07-14 (superseding): shipping launches before cartonization.** Shopify, future first-party websites, and dropship vendor fulfillment use one runtime rating engine with independently assigned rate books. Echelon catalog variant weight is canonical; Shopify request weight is a warned transition fallback. eBay shopper checkout keeps external fulfillment policies in its channel adapter. Dropship selects a vendor-fulfillment rate book, then applies insurance/handling/wallet policy. The cartonizer remains a replaceable parcel provider and standalone WMS test path.
 
+> **Rate-book foundation — migration 137:** `shipping.zone_sets`, `shipping.rate_books`, and deterministic channel/warehouse assignments now own rate selection. Existing `shipping.*` zones and tables backfill into the active `shopify-retail-default` book. The live dropship `$8.00` provider/table is deliberately unchanged until a later import + dual-run proves identical vendor charges.
+
 ## Verified current state (all claims checked in-file or against prod 2026-07-02)
 
 **Exists and reusable:**
@@ -58,7 +60,7 @@ order ingest ─► test/shadow SHIP PLAN (cartonize with order-final items)
 
 The engine receives a pricing context separately from the physical shipment: `pricingChannel` identifies the program selecting prices and `purpose` distinguishes customer checkout from vendor fulfillment. Shopify retail and dropship vendor fulfillment therefore share weight, zone, effective-date, band-selection, quote, and audit behavior while resolving different rate books. A dropship order sourced from eBay still uses the dropship vendor rate book; eBay's fulfillment policy controls only what the marketplace buyer sees.
 
-Target storage is `shipping.rate_books` plus deterministic `shipping.rate_book_assignments`, with existing `shipping.rate_tables` attached to a book. Reusable zone sets may be shared by books when their geography matches. Assignment resolution starts with purpose + pricing channel and may later add store, vendor, or warehouse specificity; overlapping active assignments at the same specificity must be rejected instead of settled by an opaque priority number.
+Storage is `shipping.rate_books` plus deterministic `shipping.rate_book_assignments`, with `shipping.rate_tables` attached to a book and reusable `shipping.zone_sets` shared when geography matches. Assignment resolution uses an exact warehouse assignment first, then the channel-wide assignment. Partial unique indexes prevent overlapping active assignments at either scope instead of settling ambiguity with an operator-entered priority. Store/vendor-specific mappings can later reference a book explicitly without changing the rating core.
 
 ## Modules & contracts
 
@@ -79,7 +81,7 @@ Target storage is `shipping.rate_books` plus deterministic `shipping.rate_book_a
 - **P0 — Shipping contracts:** channel-neutral shipment/rate ports; canonical Echelon weight resolution; explicit pricing channel + rate purpose; Shopify/internal/dropship runtime quotes; eBay external-policy checkout. No activation.
 - **P1 — Shopify weight audit + shadow comparison:** improve active-variant weight coverage, validate local tables and mappings, replay representative carts through the same runtime service, quantify intentional undercharges from missing weights, and compare against Parcelify. Missing weight is an accuracy issue, not a checkout gate.
 - **P2 — Checkout cutover (Standard only):** register CarrierService (club-app token → Echelon URL); serve Standard with ETA dates alongside Parcelify; verify member Function discounts; soak, roll back cleanly if needed, then decommission Parcelify.
-- **P3 — Channel expansion:** introduce shared `shipping.*` rate books/assignments; migrate dropship's distinct vendor rates from its duplicate provider/schema into a dropship-assigned book; add the first-party authenticated quote API and Shellz Club benefit-policy adapter; retain eBay fulfillment-policy selection in its adapter.
+- **P3 — Channel expansion:** import dropship's distinct vendor rates into a dropship-assigned `shipping.*` book, dual-run old/new providers, then switch only after parity; add the first-party authenticated quote API and Shellz Club benefit-policy adapter; retain eBay fulfillment-policy selection in its adapter.
 - **P4 — Service levels and providers:** Expedited/Express, live/direct carrier providers where they add value, and multi-origin routing when required.
 - **P5 — Optional cartonization:** dimensions/box capture, explicit plan tests, non-blocking shadow, pack-station actuals, calibration, and only then a separately approved enforcement proposal.
 

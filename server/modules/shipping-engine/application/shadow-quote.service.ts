@@ -191,6 +191,10 @@ async function runShadowForOrder(
   const candidate = packing.candidates[0];
 
   const rates: RateQuoteResult = await ctx.quote({
+    rateContext: {
+      pricingChannel: "shopify",
+      purpose: "customer_checkout",
+    },
     originWarehouseId,
     destCountry: "US",
     destPostal: order.shippingPostalCode,
@@ -227,6 +231,7 @@ async function runShadowForOrder(
       },
       rates: {
         engine: RATE_QUOTE_ENGINE,
+        rateBook: rates.rateBook,
         zone: rates.zone,
         quotes: rates.quotes,
         warnings: rates.warnings,

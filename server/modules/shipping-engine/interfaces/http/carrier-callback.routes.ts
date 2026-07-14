@@ -418,7 +418,12 @@ async function persistCheckoutSnapshot(input: {
       requestPayload,
       packing: input.parcelPlan,
       rates: input.rates
-        ? { zone: input.rates.zone, quotes: input.rates.quotes, warnings: input.rates.warnings }
+        ? {
+            rateBook: input.rates.rateBook,
+            zone: input.rates.zone,
+            quotes: input.rates.quotes,
+            warnings: input.rates.warnings,
+          }
         : null,
       metadata: {
         shopifyRates: input.shopifyRates,

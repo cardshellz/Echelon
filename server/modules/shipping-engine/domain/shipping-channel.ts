@@ -31,6 +31,12 @@ export type ShippingQuoteMode =
 export type ShippingRatePurpose =
   (typeof SHIPPING_CHANNEL_PROFILES)[ShippingSalesChannel]["ratePurpose"];
 
+export interface ShippingRateContext {
+  /** Selects independently configured prices; this may differ from order source. */
+  pricingChannel: ShippingSalesChannel;
+  purpose: ShippingRatePurpose;
+}
+
 export function getShippingChannelProfile(channel: ShippingSalesChannel) {
   return SHIPPING_CHANNEL_PROFILES[channel];
 }
