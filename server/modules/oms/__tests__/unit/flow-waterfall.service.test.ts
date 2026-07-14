@@ -107,6 +107,21 @@ describe("getFlowWaterfall", () => {
     expect(staleBlock).not.toContain("DISTINCT ON (e.order_id)");
   });
 
+  it("counts only unresolved unmapped physical shipments and deduplicates legacy flags", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "UNMAPPED_ENGINE_SPLIT"');
+    const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("COALESCE(os.requires_review, false) = true");
+    expect(issueBlock).toContain("SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON");
+    expect(issueBlock).toContain("SHIPSTATION_UNMAPPED_PHYSICAL_RULE");
+    expect(issueBlock).toContain("exception.status IN ('open', 'acknowledged')");
+    expect(issueBlock).toContain("exception.classification <> 'historical_ignore'");
+    expect(issueBlock).toContain("UNION");
+    expect(issueBlock).toContain("PARTITION BY unresolved.entity_key");
+    expect(issueBlock).not.toContain("review_reason LIKE '%split_items_unmapped%'");
+  });
+
   it("classifies known production dead-letter signatures without depending on legacy topic names", () => {
     const taxonomyBlock = FLOW_WATERFALL_SRC.slice(
       FLOW_WATERFALL_SRC.indexOf("const DEAD_LETTER_REASON_CODE"),

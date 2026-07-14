@@ -850,6 +850,7 @@ export async function recomputeOrderStatusFromShipments(
     SELECT status
     FROM wms.outbound_shipments
     WHERE order_id = ${wmsOrderId}
+      AND COALESCE(shipment_purpose, 'customer_fulfillment') = 'customer_fulfillment'
   `);
   const shipmentRows: Array<{ status: string }> = shipmentsResult?.rows ?? [];
   const statuses = shipmentRows.map((r) => r.status as ShipmentStatus);

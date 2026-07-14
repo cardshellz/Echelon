@@ -502,6 +502,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(sqlText).not.toMatch(/UPDATE wms\.order_items/);
     expect(sqlText).not.toMatch(/UPDATE wms\.orders/);
     expect(sqlText).not.toMatch(/INSERT INTO wms\.outbound_shipment_items/);
+    expect(sqlText).not.toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
   });
 
   it("applies shipped split quantities to WMS order_items without completing the remaining quantity", async () => {
@@ -723,6 +724,103 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     }));
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
     expect(sqlText).not.toMatch(/shipstation_split_items_unmapped/);
+  });
+
+  it("records replacement inventory without repeating OMS or channel fulfillment", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7004,
+      orderId: 555004,
+      orderKey: "echelon-wms-reship-9004",
+      trackingNumber: "1Z-REPLACEMENT",
+      shipmentItems: [
+        { lineItemKey: null, sku: "SKU-A", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordShipment: vi.fn(async () => undefined),
+    };
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9004,
+          order_id: 42,
+          source: "shipstation_reship_adopted",
+          status: "shipped",
+          shipment_purpose: "replacement",
+          replaces_shipment_id: 501,
+          replacement_reason: "lost",
+          external_fulfillment_id: "shipstation_shipment:7004",
+          tracking_number: "1Z-REPLACEMENT",
+        }],
+      },
+      {
+        rows: [{
+          id: 91004,
+          order_item_id: null,
+          replacement_for_order_item_id: 30001,
+          sku: "SKU-A",
+          qty: 1,
+          shipment_purpose: "replacement",
+        }],
+      },
+      {
+        rows: [{
+          id: 91004,
+          order_item_id: null,
+          product_variant_id: 40001,
+          from_location_id: 50001,
+          box_id: null,
+          weight_oz: 4,
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 91004,
+          order_item_id: null,
+          replacement_for_order_item_id: 30001,
+          inventory_order_item_id: 30001,
+          product_variant_id: 40001,
+          qty: 1,
+          pick_location_id: 50001,
+          shipment_purpose: "replacement",
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 9004,
+          order_id: 42,
+          status: "shipped",
+          tracking_number: "1Z-REPLACEMENT",
+          carrier: "UPS",
+          service_code: "ups_ground",
+          carrier_cost_cents: 0,
+        }],
+      },
+      { rows: [{ id: 42, warehouse_status: "shipped", completed_at: SHIP_DATE }] },
+      { rows: [{ status: "lost" }, { status: "shipped" }] },
+      { rows: [] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+    const processed = await createShipStationService(mock.db, inventoryCore)
+      .processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
+      orderItemId: 30001,
+      qty: 1,
+      shipmentId: "9004",
+      deductFromOnHandOnly: true,
+    }));
+    const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+    expect(sqlText).toContain("replacement_for_order_item_id");
+    expect(sqlText).not.toMatch(/UPDATE oms\.oms_orders/);
+    expect(sqlText).not.toMatch(/UPDATE oms\.oms_order_lines/);
+    expect(mock.calls.filter((call) => call.tag === "update")).toHaveLength(0);
+    expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
   });
 
   it("fallback: shipment NOT found by shipstation_order_id → legacy path runs", async () => {
@@ -1537,6 +1635,93 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     expect(allSql).toMatch(/ship_notify_unresolved/);
   });
 
+  it("quarantines a distinct package after terminal fulfillment without mutating WMS", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7002,
+      orderId: 555002,
+      orderKey: "echelon-wms-shp-501",
+      trackingNumber: "1Z-REPLACEMENT",
+      shipmentItems: [
+        { lineItemKey: null, sku: "SKU-A", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordShipment: vi.fn(async () => undefined),
+    };
+    const mock = makeDb([
+      // The incoming physical shipment has not been mapped before.
+      { rows: [] },
+      // Its orderKey points at a different, already-shipped package.
+      {
+        rows: [{
+          id: 501,
+          order_id: 42,
+          channel_id: 7,
+          source: "oms",
+          status: "shipped",
+          shipstation_order_id: 555001,
+          shipstation_order_key: "echelon-wms-shp-501",
+          external_fulfillment_id: "shipstation_shipment:7001",
+          tracking_number: "1Z-ORIGINAL",
+          requires_review: false,
+          review_reason: null,
+        }],
+      },
+      // Durable, specific reconciliation exception.
+      { rows: [] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+    const processed = await createShipStationService(mock.db, inventoryCore)
+      .processShipNotify("/foo");
+
+    expect(processed).toBe(0);
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+    const executeSql = mock.calls
+      .filter((call) => call.tag === "execute")
+      .map((call) => call.sqlText);
+    expect(executeSql.filter((text) => text.includes("INSERT INTO wms.reconciliation_exceptions"))).toHaveLength(1);
+    expect(executeSql.join("\n")).not.toMatch(/INSERT INTO wms\.outbound_shipments/);
+    expect(executeSql.join("\n")).not.toMatch(/UPDATE wms\.outbound_shipments/);
+    expect(executeSql.join("\n")).not.toMatch(/UPDATE wms\.order_items/);
+  });
+
+  it.each(["returned", "lost"])(
+    "does not reopen an exact physical replay after the shipment is %s",
+    async (status) => {
+      const shipmentPayload = makeShipmentPayload({
+        shipmentId: 7003,
+        trackingNumber: "1Z-TERMINAL",
+      });
+      const inventoryCore = { recordShipment: vi.fn(async () => undefined) };
+      const mock = makeDb([{
+        rows: [{
+          id: 9003,
+          order_id: 42,
+          source: "oms",
+          status,
+          external_fulfillment_id: "shipstation_shipment:7003",
+          tracking_number: "1Z-TERMINAL",
+          requires_review: false,
+          review_reason: null,
+        }],
+      }]);
+
+      globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+      const processed = await createShipStationService(mock.db, inventoryCore)
+        .processShipNotify("/foo");
+
+      expect(processed).toBe(0);
+      expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+      const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+      expect(sqlText).not.toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
+      expect(sqlText).not.toMatch(/UPDATE wms\.outbound_shipments/);
+      expect(sqlText).not.toMatch(/UPDATE wms\.order_items/);
+    },
+  );
+
   it("shipment creation is unreachable for terminal or unknown parents (source invariants)", async () => {
     const src = readFileSync(
       resolve(__dirname, "../../shipstation.service.ts"),
@@ -1549,9 +1734,14 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     // null) must appear BEFORE the split INSERT — terminal/unknown parents
     // can never reach creation (order 59301 class).
     const terminalGuardPos = fnBlock.indexOf("ship_notify_unresolved");
+    const fulfilledTerminalGuardPos = fnBlock.indexOf(
+      "distinct_physical_shipment_after_terminal_fulfillment",
+    );
     const splitInsertPos = fnBlock.indexOf("INSERT INTO wms.outbound_shipments");
     expect(terminalGuardPos).toBeGreaterThan(-1);
+    expect(fulfilledTerminalGuardPos).toBeGreaterThan(terminalGuardPos);
     expect(splitInsertPos).toBeGreaterThan(terminalGuardPos);
+    expect(splitInsertPos).toBeGreaterThan(fulfilledTerminalGuardPos);
 
     // Full/duplicate packages REPAIR the parent mapping instead of creating
     // a second row.
@@ -1587,9 +1777,7 @@ describe("processShipNotify V2 :: combined/merged shipment recovery (source inva
     const recoveryPos = fnBlock.indexOf(
       "resolveCombinedShipmentGroupsFromShipStationItems(null",
     );
-    const giveUpPos = fnBlock.indexOf(
-      "return { processed: false, fallback: resolved.fallback }",
-    );
+    const giveUpPos = fnBlock.indexOf("fallback: resolved.fallback");
     expect(recoveryPos).toBeGreaterThan(-1);
     expect(giveUpPos).toBeGreaterThan(-1);
     expect(recoveryPos).toBeLessThan(giveUpPos);
@@ -1597,6 +1785,7 @@ describe("processShipNotify V2 :: combined/merged shipment recovery (source inva
     // Recovery is gated to shipped notifies on the orderKey path (fallback ===
     // false); genuine pre-cutover misses still use the legacy fallback.
     expect(fnBlock).toMatch(/event\.kind === "shipped" && !resolved\.fallback/);
+    expect(fnBlock).toContain("!resolved.handled");
     // Each recovered order-shipment gets the shared tracking applied.
     expect(fnBlock).toContain("applyShipNotifyV2EventToResolvedShipment(");
   });

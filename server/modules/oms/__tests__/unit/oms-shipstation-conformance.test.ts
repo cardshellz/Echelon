@@ -76,8 +76,9 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(duplicateRepairBlock).toContain("shipstation_duplicate_order_key_repaired");
     expect(duplicateRepairBlock).toContain("Repair/adopt the mapping");
     expect(duplicateRepairBlock).toContain(
-      "return { ...parent, shipstation_order_id: adoptedSsOrderId }",
+      "row: { ...parent, shipstation_order_id: adoptedSsOrderId }",
     );
+    expect(duplicateRepairBlock).toContain("handled: false");
   });
 
   it("allows legitimate shipped splits only when WMS item evidence is present", () => {
