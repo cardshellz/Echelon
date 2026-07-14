@@ -61,30 +61,34 @@ describe("parseShopifyRateRequest", () => {
       { sku: "SLV-100", quantity: 2, grams: 120 },
       { sku: "CASE-9", quantity: 1, grams: 2500 },
     ]);
-    expect(result.request.skippedNoSkuCount).toBe(0);
   });
 
-  it("skips SKU-less lines and counts them", () => {
+  it("preserves SKU-less lines so their weight cannot be omitted", () => {
     const result = parseShopifyRateRequest(shopifyBody({
       items: [
         { sku: "SLV-100", quantity: 1, grams: 100 },
         { sku: null, quantity: 3, grams: 50 },
-        { quantity: 2 },
+        { quantity: 2, grams: 25 },
       ],
     }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.request.items).toHaveLength(1);
-    expect(result.request.skippedNoSkuCount).toBe(2);
+    expect(result.request.items).toEqual([
+      { sku: "SLV-100", quantity: 1, grams: 100 },
+      { sku: null, quantity: 3, grams: 50 },
+      { sku: null, quantity: 2, grams: 25 },
+    ]);
   });
 
-  it("rejects when no line has a SKU", () => {
+  it("accepts a SKU-less line when Shopify supplies its weight", () => {
     const result = parseShopifyRateRequest(shopifyBody({
       items: [{ quantity: 1, grams: 100 }],
     }));
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error).toContain("no items with a SKU");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request.items).toEqual([
+      { sku: null, quantity: 1, grams: 100 },
+    ]);
   });
 
   it("rejects malformed bodies without throwing", () => {
