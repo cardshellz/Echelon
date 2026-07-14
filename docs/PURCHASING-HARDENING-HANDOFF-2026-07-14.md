@@ -20,7 +20,7 @@ slice: disposable PostgreSQL hardening gates in CI.
 - Deployment status: PR #921 is live on Heroku release v2381
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
-- Commit/PR status: pushed in draft PR #922; both CI jobs were running at handoff update time
+- Commit/PR status: pushed in draft PR #922; the latest-main PostgreSQL and standard CI jobs passed
 
 Do not deploy this branch without owner approval.
 
@@ -314,6 +314,17 @@ The three older channel/inventory integration suites remain outside this focused
 Their shared bootstrap builds obsolete unqualified public tables while current
 Drizzle schemas use named schemas, so adding them would create a misleading red gate
 rather than prove the purchasing invariants in this slice.
+
+### PostgreSQL CI evidence
+
+GitHub Actions run `29358756510`, on the branch after merging current `main`, passed:
+
+- `PostgreSQL hardening tests` in 48 seconds, including both the financial-command
+  and PO-email outbox steps; and
+- `Typecheck + unit tests` in 2 minutes 25 seconds.
+
+This is the first recorded execution of these purchasing guarantees against real
+PostgreSQL 16 rather than injected repositories or skipped local integration tests.
 
 ## Recommended next implementation order
 
