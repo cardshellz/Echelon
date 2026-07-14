@@ -8,7 +8,7 @@
 
 ## 0 · TL;DR
 
-The local zone/rate-table core, service levels, ETA data, callback shell, and snapshots are deployed but dormant. The engine is **not cutover-ready yet**: Shopify is being moved onto a channel-neutral runtime quote service, active rate/service configuration is still absent, comparison testing against Parcelify remains, and shared rate books/assignments must be added before dropship's distinct vendor rates migrate into `shipping.*`. Variant dimensions are not a checkout requirement. Echelon catalog weights win; Shopify weights fill temporary gaps; a line missing both is excluded with warnings so checkout can continue at a deliberately low estimate.
+The local zone/rate-table core, service levels, ETA data, callback shell, and snapshots are deployed but dormant. Migration 137 adds shared zone sets, rate books, and deterministic channel/warehouse assignments; existing retail data backfills into `shopify-retail-default`. The engine is **not cutover-ready yet**: active rate/service configuration is still absent, comparison testing against Parcelify remains, and dropship's distinct vendor rates still need import + dual-run before their provider can switch. Variant dimensions are not a checkout requirement. Echelon catalog weights win; Shopify weights fill temporary gaps; a line missing both is excluded with warnings so checkout can continue at a deliberately low estimate.
 
 ## 1 · Vision & model
 
@@ -69,7 +69,9 @@ Everything lives in `server/modules/shipping-engine/` (hexagonal layout), regist
 | domain | `domain/eta.ts` | Delivery window = warehouse cutoff/timezone + transit_matrix business days |
 | domain | `domain/rate-table-import.ts` | CSV grid import parsing/validation |
 | domain | `domain/shipping-channel.ts`, `domain/shipment.ts` | Channel ownership/modes plus canonical shipment-line and parcel contracts |
-| application | `application/shipment-quote.service.ts` | Runtime quote orchestration over injected parcel and rate providers; sends pricing channel + rate purpose for future rate-book selection and rejects external-policy channels such as eBay checkout |
+| application | `application/shipment-quote.service.ts` | Runtime quote orchestration over injected parcel and rate providers; sends pricing channel + rate purpose for rate-book selection and rejects external-policy channels such as eBay checkout |
+| domain | `domain/rate-book.ts` | Deterministic warehouse-specific then channel-wide assignment selection; ambiguity fails closed |
+| infrastructure | `infrastructure/rate-book.repository.ts` | Loads active assignments and their active books for one pricing context |
 | application | `application/shipment-weight.service.ts` | Resolves canonical Echelon weight, warned channel fallback, or missing-weight undercharge |
 | infrastructure | `infrastructure/catalog-weight.repository.ts` | One-query exact-SKU lookup of `catalog.product_variants.weight_grams` |
 | application | `application/weight-only-parcel.provider.ts` | One shipment from resolved weights, no boxes or dimensions |
@@ -92,6 +94,7 @@ Schema: `shipping.*` in the shared Postgres (Echelon owns it; the club app owns 
 |---|---|---|
 | `zone_rules` | country + postal-prefix → zone | 48 active US rules → `US-48` / `US-HIPRAK`; region labels NULLed by mig 124 (they made resolveZone skip HIPRAK rules) |
 | `rate_tables` + `rate_table_rows` | carrier/service, status, effective dating; zone × weight-band cents | ids 1 (US-48, 6 bands $4.99–$10.99) & 2 (US-HIPRAK, 5 bands $7.99–$29.94), **status=draft** — derived from 2,183 real orders; **91.2% of a 924-order backtest within $1** (56.2% exact); provenance in metadata |
+| `zone_sets` + `rate_books` + `rate_book_assignments` | reusable geography, independently priced books, deterministic channel/warehouse selection | migration 137 backfills all current shipping zones/tables to `shopify-retail-default`; dropship is not imported or activated |
 | `box_catalog` | boxes: inner dims, tare, optional lower max weight, cost, fill factor | **14 seeded Jul 9** from 4,259 real ShipStation shipments (top 14 dim combos ≈ 85% of volume, incl. 2 storage-box flats); dimensions/tare/cost still require review in admin. NULL max weight uses the automatic 22,679 g handling ceiling. |
 | `service_levels` + `service_level_methods` | sellable levels → carrier/method attachments | standard / expedited / express seeded, **all inactive** — the checkout kill-switch |
 | `transit_matrix` | zone × carrier/service business-day windows | 24 rows seeded (mig 120) — feeds ETA dates on rates |
@@ -121,7 +124,7 @@ Variant fulfillment data lives on the catalog (`ProductDetail → Fulfillment ch
 
 Each step is independently reversible; nothing reaches customers until step 5.
 
-1. **IN PROGRESS — Separate shipping from packing:** land the shared shipment, Echelon-weight resolver, parcel-provider, rate-provider, and pricing-context contracts. Shopify and dropship can consume runtime quotes from independently assigned books; eBay shopper checkout remains policy-owned.
+1. **DONE — Separate shipping from packing and prices:** shared shipment, Echelon-weight resolver, parcel/rate providers, pricing context, zone sets, and independently assigned rate books are in place. eBay shopper checkout remains policy-owned.
 2. **NEXT — Improve Echelon weight coverage:** resolve active variants with no `catalog.product_variants.weight_grams` and verify representative carts. Shopify weight is a warned fallback during transition; missing both sources is recorded and underquoted by policy, not blocked.
 3. **NEXT — Finish base-rate configuration:** validate the draft US-48/HIPRAK rows, service-method mappings, and the exact Parcelify rules that must be preserved. Keep tables and service levels inactive.
 4. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
@@ -132,7 +135,7 @@ Each step is independently reversible; nothing reaches customers until step 5.
    - Attach the new carrier service to the US zones in the delivery profiles alongside Parcelify; verify rate parity in a real checkout; then remove Parcelify from the zones.
    - **Open item before uninstalling Parcelify entirely:** confirm how CarrierService (third-party calculated rates) is enabled on the current Shopify plan — Parcelify being installed may be what grants it today.
 6. **Decommission Parcelify** once the engine has served checkout cleanly for an agreed soak period.
-7. **After checkout is stable:** add `shipping.*` rate books/assignments, expose the runtime service to first-party websites, migrate dropship's distinct vendor rates from its duplicate provider/schema into its assigned book, keep eBay fulfillment-policy selection in its adapter, and advance cartonization through its separate test/shadow program.
+7. **After checkout is stable:** expose the runtime service to first-party websites, import dropship's distinct vendor rates into its own book, dual-run old/new dropship quotes before switching providers, keep eBay fulfillment-policy selection in its adapter, and advance cartonization through its separate test/shadow program.
 
 > **Rollback at any point:** deactivate service levels (response becomes `{rates: []}`) or unset `SHIPPING_CALLBACK_TOKEN` (endpoint 404s) and re-attach Parcelify to the zones.
 
@@ -168,7 +171,7 @@ Each step is independently reversible; nothing reaches customers until step 5.
 1. **Expedited/Express service levels** — attach methods + rate tables, activate per level.
 2. **Calibration loop** — with the v2 key: scheduled quoted-vs-actual + live-rate comparison; adjust bands from `quote_snapshots`.
 3. **First-party quote API and benefit policy** — reuse the runtime service with authenticated Shellz Club benefit context.
-4. **Dropship shared-engine migration** — add rate books/assignments in `shipping.*`, import the existing dropship vendor rates as a separate book, replace `DropshipShippingRateProvider`/duplicate tables with the shared engine, then apply dropship insurance, handling, snapshot, and wallet policy.
+4. **Dropship shared-engine migration** — import the existing vendor rates as a separate `shipping.*` book, compare the shared engine against `DropshipShippingRateProvider`, switch only at parity, then retire duplicate tables while retaining dropship insurance, handling, snapshot, and wallet policy.
 5. **Pack-station/cartonization rollout** — run explicit plans first, then opt-in shadow observation; capture actual box, weight, and cost before proposing enforcement.
 6. **Multi-origin routing** — schema supports per-warehouse zone rules and rate rows; the callback currently prices from one origin (env-selected).
 7. **Member Express benefit** — express for all, discounted per plan via the Function (member-exclusive rates are impossible: CarrierService sees no customer; Functions can only reduce existing rates).

@@ -16,7 +16,12 @@
 import type { Express, Response } from "express";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { shippingRateTableRows, shippingRateTables, shippingZoneRules } from "@shared/schema";
+import {
+  shippingRateBooks,
+  shippingRateTableRows,
+  shippingRateTables,
+  shippingZoneRules,
+} from "@shared/schema";
 import { db } from "../../../../db";
 import { requirePermission } from "../../../../routes/middleware";
 import {
@@ -36,6 +41,7 @@ const importRowSchema = z.object({
 });
 
 const importSchema = z.object({
+  rateBookCode: z.string().trim().min(1).max(80).default("shopify-retail-default"),
   carrier: z.string().trim().min(1).max(50),
   serviceCode: z.string().trim().min(1).max(80),
   currency: z.string().trim().length(3).default("USD"),
@@ -61,7 +67,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "view"),
     async (_req, res) => {
       try {
-        const [tables, coverage] = await Promise.all([
+        const [tables, coverage, books] = await Promise.all([
           db.select().from(shippingRateTables)
             .orderBy(desc(shippingRateTables.effectiveFrom), desc(shippingRateTables.id)),
           db.select({
@@ -73,14 +79,23 @@ export function registerRateTableAdminRoutes(app: Express): void {
           })
             .from(shippingRateTableRows)
             .groupBy(shippingRateTableRows.rateTableId),
+          db.select({
+            id: shippingRateBooks.id,
+            code: shippingRateBooks.code,
+            name: shippingRateBooks.name,
+            status: shippingRateBooks.status,
+          }).from(shippingRateBooks),
         ]);
 
         const coverageByTable = new Map(coverage.map((c) => [c.rateTableId, c]));
+        const bookById = new Map(books.map((book) => [book.id, book]));
         return res.json({
+          rateBooks: books,
           rateTables: tables.map((table) => {
             const c = coverageByTable.get(table.id);
             return {
               ...table,
+              rateBook: table.rateBookId ? bookById.get(table.rateBookId) ?? null : null,
               rowCount: c?.rowCount ?? 0,
               zoneCount: c?.zoneCount ?? 0,
               minWeightGrams: c?.minWeightGrams ?? null,
@@ -128,7 +143,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
         if (!parsed.success) {
           return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
         }
-        const { carrier, serviceCode, replaceExisting } = parsed.data;
+        const { carrier, rateBookCode, serviceCode, replaceExisting } = parsed.data;
         const currency = parsed.data.currency.toUpperCase();
         const rows: RateTableImportRow[] = parsed.data.rows.map((row) => ({
           ...row,
@@ -142,10 +157,31 @@ export function registerRateTableAdminRoutes(app: Express): void {
             error: { code: "SHIPPING_ADMIN_RATE_BANDS_INVALID", message: "Weight bands overlap.", details: bandErrors },
           });
         }
+        const [rateBook] = await db
+          .select({
+            id: shippingRateBooks.id,
+            code: shippingRateBooks.code,
+            status: shippingRateBooks.status,
+            zoneSetId: shippingRateBooks.zoneSetId,
+          })
+          .from(shippingRateBooks)
+          .where(eq(shippingRateBooks.code, rateBookCode))
+          .limit(1);
+        if (!rateBook || rateBook.status === "retired") {
+          return res.status(400).json({
+            error: {
+              code: "SHIPPING_ADMIN_RATE_BOOK_INVALID",
+              message: `Rate book ${rateBookCode} is missing or retired.`,
+            },
+          });
+        }
         const knownZones = await db
           .selectDistinct({ zone: shippingZoneRules.zone })
           .from(shippingZoneRules)
-          .where(eq(shippingZoneRules.isActive, true));
+          .where(and(
+            eq(shippingZoneRules.zoneSetId, rateBook.zoneSetId),
+            eq(shippingZoneRules.isActive, true),
+          ));
         const warnings = findUnknownZones(rows, knownZones.map((z) => z.zone));
 
         const now = new Date();
@@ -156,12 +192,14 @@ export function registerRateTableAdminRoutes(app: Express): void {
             await tx.update(shippingRateTables)
               .set({ status: "superseded", effectiveTo: now })
               .where(and(
+                eq(shippingRateTables.rateBookId, rateBook.id),
                 eq(shippingRateTables.carrier, carrier),
                 eq(shippingRateTables.serviceCode, serviceCode),
                 eq(shippingRateTables.status, "active"),
               ));
           }
           const [table] = await tx.insert(shippingRateTables).values({
+            rateBookId: rateBook.id,
             carrier,
             serviceCode,
             currency,

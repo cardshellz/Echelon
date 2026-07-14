@@ -141,6 +141,7 @@ describe("quoteShipment", () => {
       async quote(input) {
         onQuote?.(input);
         return {
+          rateBook: { id: 1, code: "test-book" },
           zone: "US-48",
           quotes: [{
             carrier: "USPS",

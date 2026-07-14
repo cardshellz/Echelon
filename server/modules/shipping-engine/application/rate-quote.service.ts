@@ -30,15 +30,19 @@ import {
   type RateCandidateRow,
   type SelectedRateQuote,
 } from "../domain/rate-selection";
+import { selectRateBookAssignment } from "../domain/rate-book";
+import type { ShippingRateContext } from "../domain/shipping-channel";
 import { resolveZone, type ZoneRule } from "../domain/zones";
+import { loadActiveRateBookAssignments } from "../infrastructure/rate-book.repository";
 
-export const RATE_QUOTE_ENGINE = { name: "cardshellz-rates", version: "1.0.0" } as const;
+export const RATE_QUOTE_ENGINE = { name: "cardshellz-rates", version: "1.1.0" } as const;
 
 export interface RateQuoteParcel {
   billableWeightGrams: number;
 }
 
 export interface RateQuoteRequest {
+  rateContext: ShippingRateContext;
   originWarehouseId: number;
   destCountry: string;
   destPostal: string;
@@ -62,6 +66,7 @@ export interface RateQuoteLine {
 }
 
 export interface RateQuoteResult {
+  rateBook: { id: number; code: string } | null;
   zone: string | null;
   quotes: RateQuoteLine[];
   warnings: string[];
@@ -78,31 +83,65 @@ export async function quoteParcels(
   const destPostal = request.destPostal.trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(destCountry)) {
     warnings.push(`destination country ${JSON.stringify(request.destCountry)} is not a 2-letter ISO code`);
-    return { zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings };
   }
   if (destPostal === "") {
     warnings.push("destination postal code is required to resolve a zone");
-    return { zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings };
   }
   if (request.parcels.length === 0) {
     warnings.push("no parcels to rate");
-    return { zone: null, quotes: [], warnings };
+    return { rateBook: null, zone: null, quotes: [], warnings };
   }
 
-  const zone = await resolveZoneForOrigin(request.originWarehouseId, destCountry, destPostal);
+  const candidates = await loadActiveRateBookAssignments(
+    request.rateContext,
+    request.originWarehouseId,
+  );
+  const selection = selectRateBookAssignment(candidates, {
+    ...request.rateContext,
+    originWarehouseId: request.originWarehouseId,
+  });
+  if (!selection.ok) {
+    warnings.push(selection.message);
+    await maybePersistSnapshot({
+      request, destCountry, destPostal, rateBook: null, zone: null,
+      quotes: [], quotedAt, warnings, opts,
+    });
+    return { rateBook: null, zone: null, quotes: [], warnings };
+  }
+  const rateBook = {
+    id: selection.assignment.rateBookId,
+    code: selection.assignment.rateBookCode,
+  };
+
+  const zone = await resolveZoneForOrigin(
+    selection.assignment.zoneSetId,
+    request.originWarehouseId,
+    destCountry,
+    destPostal,
+  );
   if (zone === null) {
     warnings.push(
-      `no active zone rule matches ${destCountry} ${destPostal} for warehouse ${request.originWarehouseId}`,
+      `no active zone rule in ${rateBook.code} matches ${destCountry} ${destPostal} for warehouse ${request.originWarehouseId}`,
     );
-    await maybePersistSnapshot({ request, destCountry, destPostal, zone: null, quotes: [], quotedAt, warnings, opts });
-    return { zone: null, quotes: [], warnings };
+    await maybePersistSnapshot({
+      request, destCountry, destPostal, rateBook, zone: null,
+      quotes: [], quotedAt, warnings, opts,
+    });
+    return { rateBook, zone: null, quotes: [], warnings };
   }
 
-  const candidateRows = await loadCandidateRows(request.originWarehouseId, zone, quotedAt);
+  const candidateRows = await loadCandidateRows(
+    rateBook.id,
+    request.originWarehouseId,
+    zone,
+    quotedAt,
+  );
   const quotes = rateAllParcels(request, zone, candidateRows, warnings);
 
-  await maybePersistSnapshot({ request, destCountry, destPostal, zone, quotes, quotedAt, warnings, opts });
-  return { zone, quotes, warnings };
+  await maybePersistSnapshot({ request, destCountry, destPostal, rateBook, zone, quotes, quotedAt, warnings, opts });
+  return { rateBook, zone, quotes, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +149,7 @@ export async function quoteParcels(
 // ---------------------------------------------------------------------------
 
 async function resolveZoneForOrigin(
+  zoneSetId: number,
   originWarehouseId: number,
   destCountry: string,
   destPostal: string,
@@ -126,6 +166,7 @@ async function resolveZoneForOrigin(
     })
     .from(shippingZoneRules)
     .where(and(
+      eq(shippingZoneRules.zoneSetId, zoneSetId),
       eq(shippingZoneRules.originWarehouseId, originWarehouseId),
       eq(shippingZoneRules.isActive, true),
     ));
@@ -133,6 +174,7 @@ async function resolveZoneForOrigin(
 }
 
 async function loadCandidateRows(
+  rateBookId: number,
   originWarehouseId: number,
   zone: string,
   quotedAt: Date,
@@ -152,6 +194,7 @@ async function loadCandidateRows(
     .from(shippingRateTableRows)
     .innerJoin(shippingRateTables, eq(shippingRateTableRows.rateTableId, shippingRateTables.id))
     .where(and(
+      eq(shippingRateTables.rateBookId, rateBookId),
       eq(shippingRateTables.status, "active"),
       lte(shippingRateTables.effectiveFrom, quotedAt),
       or(isNull(shippingRateTables.effectiveTo), gt(shippingRateTables.effectiveTo, quotedAt)),
@@ -254,6 +297,7 @@ async function maybePersistSnapshot(input: {
   request: RateQuoteRequest;
   destCountry: string;
   destPostal: string;
+  rateBook: { id: number; code: string } | null;
   zone: string | null;
   quotes: RateQuoteLine[];
   quotedAt: Date;
@@ -263,6 +307,7 @@ async function maybePersistSnapshot(input: {
   if (!input.opts.persistSnapshot) return;
 
   const normalizedRequest = {
+    rateContext: input.request.rateContext,
     originWarehouseId: input.request.originWarehouseId,
     destCountry: input.destCountry,
     destPostal: input.destPostal,
@@ -277,9 +322,13 @@ async function maybePersistSnapshot(input: {
       resolvedZone: input.zone,
       requestHash: createHash("sha256").update(JSON.stringify(normalizedRequest)).digest("hex"),
       requestPayload: normalizedRequest,
-      rates: input.quotes,
+      rates: {
+        rateBook: input.rateBook,
+        quotes: input.quotes,
+      },
       metadata: {
         engine: RATE_QUOTE_ENGINE,
+        rateBook: input.rateBook,
         quotedAt: input.quotedAt.toISOString(),
         warnings: input.warnings,
       },
