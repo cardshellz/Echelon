@@ -45,6 +45,7 @@ export interface RateQuoteRequest {
   rateContext: ShippingRateContext;
   originWarehouseId: number;
   destCountry: string;
+  destRegion?: string | null;
   destPostal: string;
   parcels: RateQuoteParcel[];
 }
@@ -80,6 +81,7 @@ export async function quoteParcels(
   const warnings: string[] = [];
 
   const destCountry = request.destCountry.trim().toUpperCase();
+  const destRegion = request.destRegion?.trim().toUpperCase() || null;
   const destPostal = request.destPostal.trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(destCountry)) {
     warnings.push(`destination country ${JSON.stringify(request.destCountry)} is not a 2-letter ISO code`);
@@ -120,10 +122,11 @@ export async function quoteParcels(
     request.originWarehouseId,
     destCountry,
     destPostal,
+    destRegion,
   );
   if (zone === null) {
     warnings.push(
-      `no active zone rule in ${rateBook.code} matches ${destCountry} ${destPostal} for warehouse ${request.originWarehouseId}`,
+      `no active pricing area in ${rateBook.code} matches ${destCountry} ${destRegion ?? "unknown-state"} ${destPostal} for warehouse ${request.originWarehouseId}`,
     );
     await maybePersistSnapshot({
       request, destCountry, destPostal, rateBook, zone: null,
@@ -153,6 +156,7 @@ async function resolveZoneForOrigin(
   originWarehouseId: number,
   destCountry: string,
   destPostal: string,
+  destRegion: string | null,
 ): Promise<string | null> {
   const rules: ZoneRule[] = await db
     .select({
@@ -170,7 +174,7 @@ async function resolveZoneForOrigin(
       eq(shippingZoneRules.originWarehouseId, originWarehouseId),
       eq(shippingZoneRules.isActive, true),
     ));
-  return resolveZone(rules, destCountry, destPostal);
+  return resolveZone(rules, destCountry, destPostal, destRegion);
 }
 
 async function loadCandidateRows(
@@ -310,6 +314,7 @@ async function maybePersistSnapshot(input: {
     rateContext: input.request.rateContext,
     originWarehouseId: input.request.originWarehouseId,
     destCountry: input.destCountry,
+    destRegion: input.request.destRegion?.trim().toUpperCase() || null,
     destPostal: input.destPostal,
     parcels: input.request.parcels.map((p) => ({ billableWeightGrams: p.billableWeightGrams })),
   };

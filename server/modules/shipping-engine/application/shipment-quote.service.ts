@@ -16,6 +16,7 @@ export interface ShipmentQuoteRequest {
   originWarehouseId: number;
   destination: {
     country: string;
+    region?: string | null;
     postalCode: string;
   };
   lines: readonly ShipmentLineInput[];
