@@ -38,6 +38,10 @@ const mocks = vi.hoisted(() => {
       getApSummary: vi.fn(),
       listApLedgerCommandAudit: vi.fn(),
     },
+    apPaymentCommands: {
+      recordPayment: vi.fn(),
+      voidPayment: vi.fn(),
+    },
   };
 });
 
@@ -61,6 +65,10 @@ vi.mock("../../../../middleware/idempotency", () => ({
 
 vi.mock("../../ap-ledger.service", () => ({
   ...mocks.apLedger,
+}));
+
+vi.mock("../../ap-payment-commands", () => ({
+  apPaymentCommands: mocks.apPaymentCommands,
 }));
 
 import { registerApLedgerRoutes } from "../../ap-ledger.routes";
@@ -91,7 +99,11 @@ async function requestJson(baseUrl: string, method: string, path: string, body?:
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null };
+  return {
+    status: res.status,
+    body: text ? JSON.parse(text) : null,
+    idempotencyReplayed: res.headers.get("idempotency-replayed"),
+  };
 }
 
 describe("AP ledger routes", () => {
@@ -106,10 +118,10 @@ describe("AP ledger routes", () => {
     server = undefined;
   });
 
-  it("requires idempotency for duplicate-prone AP invoice and payment writes", () => {
+  it("keeps legacy idempotency only on AP writes not yet using the transactional ledger", () => {
     buildApp();
 
-    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(9);
+    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(7);
   });
 
   it("lists vendor invoices with parsed filters", async () => {
@@ -209,10 +221,16 @@ describe("AP ledger routes", () => {
   });
 
   it("records AP payments with normalized date, allocations, and creator", async () => {
-    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ id: 21, paymentNumber: "PAY-21" });
+    mocks.apPaymentCommands.recordPayment.mockResolvedValue({
+      commandId: 91,
+      replayed: false,
+      httpStatus: 201,
+      body: { id: 21, paymentNumber: "PAY-21" },
+      terminalState: "succeeded",
+    });
     server = await startServer(buildApp());
 
-    const { status, body } = await requestJson(server.url, "POST", "/api/ap-payments", {
+    const { status, body, idempotencyReplayed } = await requestJson(server.url, "POST", "/api/ap-payments", {
       vendorId: 4,
       paymentDate: "2026-05-16T12:00:00.000Z",
       paymentMethod: "ach",
@@ -221,7 +239,8 @@ describe("AP ledger routes", () => {
     });
 
     expect(status).toBe(201);
-    expect(mocks.apLedger.executeApLedgerCommand).toHaveBeenCalledWith("record_payment", {
+    expect(idempotencyReplayed).toBe("false");
+    expect(mocks.apPaymentCommands.recordPayment).toHaveBeenCalledWith({
       payment: {
         vendorId: 4,
         paymentDate: new Date("2026-05-16T12:00:00.000Z"),
@@ -230,7 +249,12 @@ describe("AP ledger routes", () => {
         allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
         createdBy: "test-user",
       },
-    });
+    }, expect.objectContaining({
+      actorId: "test-user",
+      commandName: "ap.payment.record",
+      resourceKey: "vendor:4",
+      routeTemplate: "/api/ap-payments",
+    }));
     expect(body).toEqual({ id: 21, paymentNumber: "PAY-21" });
   });
 
@@ -244,19 +268,30 @@ describe("AP ledger routes", () => {
       affectedPurchaseOrderIds: [55],
       message: "void payment completed. Updated 1 linked PO.",
     };
-    mocks.apLedger.executeApLedgerCommand.mockResolvedValue({ ok: true, apLedgerOutcome });
+    mocks.apPaymentCommands.voidPayment.mockResolvedValue({
+      commandId: 92,
+      replayed: true,
+      httpStatus: 200,
+      body: { ok: true, apLedgerOutcome },
+      terminalState: "succeeded",
+    });
     server = await startServer(buildApp());
 
-    const { status, body } = await requestJson(server.url, "POST", "/api/ap-payments/21/void", {
+    const { status, body, idempotencyReplayed } = await requestJson(server.url, "POST", "/api/ap-payments/21/void", {
       reason: "duplicate",
     });
 
     expect(status).toBe(200);
-    expect(mocks.apLedger.executeApLedgerCommand).toHaveBeenCalledWith("void_payment", {
-      paymentId: 21,
+    expect(idempotencyReplayed).toBe("true");
+    expect(mocks.apPaymentCommands.voidPayment).toHaveBeenCalledWith(21, {
       reason: "duplicate",
       userId: "test-user",
-    });
+    }, expect.objectContaining({
+      actorId: "test-user",
+      commandName: "ap.payment.void",
+      resourceKey: "ap_payment:21",
+      routeTemplate: "/api/ap-payments/:id/void",
+    }));
     expect(body).toEqual({ ok: true, apLedgerOutcome });
   });
 

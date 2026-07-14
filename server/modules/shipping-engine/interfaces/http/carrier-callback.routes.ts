@@ -44,6 +44,7 @@ import { quoteShipment } from "../../application/shipment-quote.service";
 import { localRateTableShippingRateProvider } from "../../application/shipping-rate-provider";
 import { resolveShipmentLineWeights } from "../../application/shipment-weight.service";
 import { weightOnlyParcelProvider } from "../../application/weight-only-parcel.provider";
+import { normalizeUsPostalRegion } from "../../domain/us-geography";
 import { loadCatalogWeightsBySku } from "../../infrastructure/catalog-weight.repository";
 
 /** Respond by this deadline even if the quote pipeline is still running. */
@@ -88,6 +89,8 @@ const shopifyRateRequestSchema = z.object({
     destination: z.object({
       postal_code: z.string().min(1),
       country: z.string().min(1),
+      province: z.string().nullish(),
+      province_code: z.string().nullish(),
     }).passthrough(),
     items: z.array(z.object({
       sku: z.string().nullish(),
@@ -101,6 +104,7 @@ const shopifyRateRequestSchema = z.object({
 export interface ParsedRateRequest {
   destPostal: string;
   destCountry: string;
+  destRegion: string | null;
   items: Array<{ sku: string | null; quantity: number; grams: number | null }>;
 }
 
@@ -131,6 +135,9 @@ export function parseShopifyRateRequest(body: unknown): ParseRateRequestResult {
     request: {
       destPostal: rate.destination.postal_code.trim(),
       destCountry: rate.destination.country.trim().toUpperCase(),
+      destRegion: normalizeUsPostalRegion(
+        rate.destination.province_code ?? rate.destination.province,
+      ),
       items,
     },
   };
@@ -286,6 +293,7 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
       originWarehouseId,
       destination: {
         country: request.destCountry,
+        region: request.destRegion,
         postalCode: request.destPostal,
       },
       lines: weightedLines,

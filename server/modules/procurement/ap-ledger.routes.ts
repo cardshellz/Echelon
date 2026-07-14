@@ -2,6 +2,12 @@
 import { requirePermission, upload } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import * as apLedger from "./ap-ledger.service";
+import { financialCommandFromRequest } from "../../platform/commands/http-command";
+import {
+  FinancialCommandError,
+  type FinancialCommandResult,
+} from "../../platform/commands/transactional-command.service";
+import { apPaymentCommands } from "./ap-payment-commands";
 
 function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
   if (err?.name === "ApLedgerError") {
@@ -12,6 +18,21 @@ function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
 
 function getUserId(req: any): string | undefined {
   return req.user?.id ?? req.session?.user?.id;
+}
+
+function sendFinancialCommandResult(res: any, result: FinancialCommandResult): any {
+  res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+  return res.status(result.httpStatus).json(result.body);
+}
+
+function sendFinancialCommandError(res: any, error: FinancialCommandError): any {
+  for (const [name, value] of Object.entries(error.responseHeaders ?? {})) {
+    res.setHeader(name, value);
+  }
+  return res.status(error.statusCode).json({
+    error: error.message,
+    details: { code: error.code, ...(error.details ?? {}) },
+  });
 }
 
 export function registerApLedgerRoutes(app: Express) {
@@ -297,22 +318,29 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/ap-payments", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
+  app.post("/api/ap-payments", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
       const body = req.body;
       if (!body.vendorId || !body.paymentDate || !body.paymentMethod || body.totalAmountCents == null) {
         return res.status(400).json({ error: "vendorId, paymentDate, paymentMethod, and totalAmountCents are required" });
       }
-      const payment = await apLedger.executeApLedgerCommand("record_payment", {
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: getUserId(req),
+        routeTemplate: "/api/ap-payments",
+        resourceKey: `vendor:${body.vendorId}`,
+        commandName: "ap.payment.record",
+      });
+      const result = await apPaymentCommands.recordPayment({
         payment: {
           ...body,
           paymentDate: new Date(body.paymentDate),
           allocations: body.allocations ?? [],
           createdBy: getUserId(req),
         },
-      });
-      res.status(201).json(payment);
+      }, descriptor);
+      return sendFinancialCommandResult(res, result);
     } catch (err: any) {
+      if (err instanceof FinancialCommandError) return sendFinancialCommandError(res, err);
       handleApLedgerError(res, err);
     }
   });
@@ -327,16 +355,23 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/ap-payments/:id/void", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
+  app.post("/api/ap-payments/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
       const { reason } = req.body;
-      const result = await apLedger.executeApLedgerCommand("void_payment", {
-        paymentId: Number(req.params.id),
+      const paymentId = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: getUserId(req),
+        routeTemplate: "/api/ap-payments/:id/void",
+        resourceKey: `ap_payment:${paymentId}`,
+        commandName: "ap.payment.void",
+      });
+      const result = await apPaymentCommands.voidPayment(paymentId, {
         reason,
         userId: getUserId(req),
-      });
-      res.json(result);
+      }, descriptor);
+      return sendFinancialCommandResult(res, result);
     } catch (err: any) {
+      if (err instanceof FinancialCommandError) return sendFinancialCommandError(res, err);
       handleApLedgerError(res, err);
     }
   });

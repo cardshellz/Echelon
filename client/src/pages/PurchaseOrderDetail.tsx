@@ -971,6 +971,9 @@ export default function PurchaseOrderDetail() {
   const [cancelLineIntent] = useState(() =>
     createFinancialCommandIntentStore(genPoLineIdempotencyKey),
   );
+  const [paymentIntent] = useState(() =>
+    createFinancialCommandIntentStore(genPoLineIdempotencyKey),
+  );
 
   const [activeTab, setActiveTab] = useState("lines");
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
@@ -1851,44 +1854,40 @@ export default function PurchaseOrderDetail() {
   });
 
   // Inline payment mutation — posts directly to /api/ap-payments so
-  // the user never has to navigate away from PO detail (Rule #6: fresh
-  // Idempotency-Key per attempt prevents double-posts on retry).
+  // the user never has to navigate away from PO detail. The financial-command
+  // intent store retains one Idempotency-Key across ambiguous retries.
   const paymentMutation = useMutation({
     mutationFn: async () => {
       if (!payment.invoiceId) throw new Error("No invoice selected");
-      const idempotencyKey = (
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? (crypto as any).randomUUID()
-          : `po-pay-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      ) as string;
-      const res = await fetch("/api/ap-payments", {
+      const body = {
+        vendorId: po?.vendorId,
+        paymentDate: payment.paymentDate,
+        paymentMethod: payment.paymentMethod,
+        referenceNumber: payment.referenceNumber || undefined,
+        checkNumber: payment.checkNumber || undefined,
+        bankAccountLabel: payment.bankAccountLabel || undefined,
+        totalAmountCents: dollarsToCents(payment.amountDollars || "0"),
+        notes: payment.notes || undefined,
+        allocations: [{
+          vendorInvoiceId: payment.invoiceId,
+          appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
+        }],
+      };
+      const idempotencyKey = paymentIntent.acquire({ method: "POST", url: "/api/ap-payments", body });
+      const result = await financialCommandFetchJson<any>("/api/ap-payments", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({
-          vendorId: po?.vendorId,
-          paymentDate: payment.paymentDate,
-          paymentMethod: payment.paymentMethod,
-          referenceNumber: payment.referenceNumber || undefined,
-          checkNumber: payment.checkNumber || undefined,
-          bankAccountLabel: payment.bankAccountLabel || undefined,
-          totalAmountCents: dollarsToCents(payment.amountDollars || "0"),
-          notes: payment.notes || undefined,
-          allocations: [{
-            vendorInvoiceId: payment.invoiceId,
-            appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
-          }],
-        }),
+        body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `Payment failed (${res.status})`);
-      }
-      return res.json();
+      return { result, idempotencyKey };
     },
-    onSuccess: (result) => {
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: ({ result, idempotencyKey }) => {
+      paymentIntent.complete(idempotencyKey);
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/payments`] });
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/invoices`] });

@@ -25,6 +25,18 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { Plus, Search, CreditCard, XCircle } from "lucide-react";
 import { format, parseISO } from "date-fns";
+import {
+  createFinancialCommandIntentStore,
+  financialCommandFetchJson,
+  financialCommandRetryDelay,
+  shouldRetryFinancialCommand,
+} from "@/lib/financial-command";
+
+function createApPaymentIdempotencyKey(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? (crypto as any).randomUUID()
+    : `ap-payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 function formatCents(cents: number | null | undefined): string {
   if (!cents && cents !== 0) return "$0.00";
@@ -68,6 +80,12 @@ const COMMAND_LABELS: Record<string, string> = {
 export default function APPayments() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [recordPaymentIntent] = useState(() =>
+    createFinancialCommandIntentStore(createApPaymentIdempotencyKey),
+  );
+  const [voidPaymentIntent] = useState(() =>
+    createFinancialCommandIntentStore(createApPaymentIdempotencyKey),
+  );
   const [, navigate] = useLocation();
   const [search, setSearch] = useState("");
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
@@ -123,15 +141,14 @@ export default function APPayments() {
           })),
       };
       // Server requires Idempotency-Key on payment writes (Rule #6 — payments
-      // must never double-apply on retry). Generate a fresh UUID per attempt;
-      // a real retry of THIS attempt re-uses this same key client-side via
-      // react-query's automatic retry semantics.
-      const idempotencyKey = (
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? (crypto as any).randomUUID()
-          : `ap-pay-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      ) as string;
-      const res = await fetch("/api/ap-payments", {
+      // must never double-apply on retry). The intent store retains one key for
+      // this exact payload across transport failures and automatic retries.
+      const idempotencyKey = recordPaymentIntent.acquire({
+        method: "POST",
+        url: "/api/ap-payments",
+        body,
+      });
+      const result = await financialCommandFetchJson<any>("/api/ap-payments", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -139,10 +156,12 @@ export default function APPayments() {
         },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error((await res.json()).error);
-      return res.json();
+      return { result, idempotencyKey };
     },
-    onSuccess: (result) => {
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: ({ result, idempotencyKey }) => {
+      recordPaymentIntent.complete(idempotencyKey);
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
@@ -156,25 +175,24 @@ export default function APPayments() {
   });
 
   const voidMutation = useMutation({
-    mutationFn: (id: number) => {
-      const idempotencyKey = (
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? (crypto as any).randomUUID()
-          : `ap-pay-void-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      ) as string;
-      return fetch(`/api/ap-payments/${id}/void`, {
+    mutationFn: async (id: number) => {
+      const url = `/api/ap-payments/${id}/void`;
+      const body = { reason: voidReason };
+      const idempotencyKey = voidPaymentIntent.acquire({ method: "POST", url, body });
+      const result = await financialCommandFetchJson<any>(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({ reason: voidReason }),
-      }).then(async (r) => {
-        if (!r.ok) throw new Error((await r.json()).error);
-        return r.json();
+        body: JSON.stringify(body),
       });
+      return { result, idempotencyKey };
     },
-    onSuccess: (result) => {
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: ({ result, idempotencyKey }) => {
+      voidPaymentIntent.complete(idempotencyKey);
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });

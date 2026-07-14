@@ -93,7 +93,7 @@ export type ApLedgerCommandOutcome = {
   message: string;
 };
 
-type ApLedgerDbClient = Pick<typeof db, "select" | "insert" | "update">;
+export type ApLedgerDbClient = Pick<typeof db, "select" | "insert" | "update" | "execute">;
 
 type RecomputePoFinancialAggregatesOptions = {
   client?: ApLedgerDbClient;
@@ -121,7 +121,10 @@ async function getPoIdsForInvoice(invoiceId: number, client: ApLedgerDbClient = 
   return rows.map((r: { purchaseOrderId: number }) => r.purchaseOrderId);
 }
 
-async function getInvoiceIdsForPayment(paymentId: number, client: ApLedgerDbClient = db): Promise<number[]> {
+async function getInvoiceIdsForPayment(
+  paymentId: number,
+  client: ApLedgerDbClient = db,
+): Promise<number[]> {
   const rows = await client
     .select({ vendorInvoiceId: apPaymentAllocations.vendorInvoiceId })
     .from(apPaymentAllocations)
@@ -133,10 +136,13 @@ function uniqueNumbers(values: Iterable<number | null | undefined>): number[] {
   return [...new Set([...values].filter((value): value is number => Number.isFinite(value)))];
 }
 
-async function getPoIdsForInvoices(invoiceIds: Iterable<number>): Promise<number[]> {
+async function getPoIdsForInvoices(
+  invoiceIds: Iterable<number>,
+  client: ApLedgerDbClient = db,
+): Promise<number[]> {
   const affectedPoIds = new Set<number>();
   for (const invoiceId of uniqueNumbers(invoiceIds)) {
-    for (const poId of await getPoIdsForInvoice(invoiceId)) {
+    for (const poId of await getPoIdsForInvoice(invoiceId, client)) {
       affectedPoIds.add(poId);
     }
   }
@@ -173,9 +179,14 @@ function buildApLedgerOutcome(input: {
   };
 }
 
-async function appendApLedgerCommandAudit(outcome: ApLedgerCommandOutcome, actor?: string): Promise<void> {
+async function appendApLedgerCommandAudit(
+  outcome: ApLedgerCommandOutcome,
+  actor?: string,
+  options: { client?: ApLedgerDbClient; required?: boolean } = {},
+): Promise<void> {
+  const client = options.client ?? db;
   try {
-    await db.insert(auditEvents).values({
+    await client.insert(auditEvents).values({
       level: "AUDIT",
       actor: actor ?? "system",
       action: `ap_ledger.${outcome.command}`,
@@ -186,6 +197,7 @@ async function appendApLedgerCommandAudit(outcome: ApLedgerCommandOutcome, actor
       },
     });
   } catch (auditErr: any) {
+    if (options.required) throw auditErr;
     console.error(
       `[AP Ledger Audit] Failed to persist audit event for ${outcome.command}: ${auditErr?.message ?? auditErr}`,
     );
@@ -335,11 +347,11 @@ export function canTransitionInvoice(from: string, to: string): boolean {
 
 // ─── Payment Number Generation ────────────────────────────────────────────────
 
-async function generatePaymentNumber(): Promise<string> {
+async function generatePaymentNumber(client: ApLedgerDbClient = db): Promise<string> {
   const dateStr = format(new Date(), "yyyyMMdd");
   const prefix = `PAY-${dateStr}-`;
 
-  const result = await db
+  const result = await client
     .select({ paymentNumber: apPayments.paymentNumber })
     .from(apPayments)
     .where(sql`${apPayments.paymentNumber} LIKE ${prefix + "%"}`)
@@ -889,61 +901,167 @@ export async function getPaymentsForPo(purchaseOrderId: number) {
 
 // ─── Payments ─────────────────────────────────────────────────────────────────
 
-export async function recordPayment(data: RecordApPaymentInput) {
-  const paymentNumber = await generatePaymentNumber();
-  const affectedPoIds = new Set<number>();
+type PaymentMutationResult<T> = {
+  value: T;
+  affectedPoIds: number[];
+};
 
-  // Validate allocations sum <= total
-  const allocTotal = data.allocations.reduce((s, a) => s + a.appliedAmountCents, 0);
-  if (allocTotal > data.totalAmountCents) {
-    throw new Error(`Allocation total (${allocTotal}) exceeds payment total (${data.totalAmountCents})`);
+function validateRecordPaymentInput(data: RecordApPaymentInput): void {
+  if (!Number.isSafeInteger(data.vendorId) || data.vendorId <= 0) {
+    throw new ApLedgerError("vendorId must be a positive integer", 400, {
+      code: "AP_PAYMENT_VENDOR_INVALID",
+    });
+  }
+  if (!(data.paymentDate instanceof Date) || !Number.isFinite(data.paymentDate.getTime())) {
+    throw new ApLedgerError("paymentDate must be a valid date", 400, {
+      code: "AP_PAYMENT_DATE_INVALID",
+    });
+  }
+  if (!data.paymentMethod?.trim() || data.paymentMethod.length > 20) {
+    throw new ApLedgerError("paymentMethod must be between 1 and 20 characters", 400, {
+      code: "AP_PAYMENT_METHOD_INVALID",
+    });
+  }
+  if (!Number.isSafeInteger(data.totalAmountCents) || data.totalAmountCents <= 0) {
+    throw new ApLedgerError("totalAmountCents must be a positive integer", 400, {
+      code: "AP_PAYMENT_TOTAL_INVALID",
+    });
   }
 
-  let payment;
+  const seenInvoiceIds = new Set<number>();
+  for (const allocation of data.allocations) {
+    if (!Number.isSafeInteger(allocation.vendorInvoiceId) || allocation.vendorInvoiceId <= 0) {
+      throw new ApLedgerError("Each allocation must reference a valid vendor invoice", 400, {
+        code: "AP_PAYMENT_ALLOCATION_INVOICE_INVALID",
+      });
+    }
+    if (!Number.isSafeInteger(allocation.appliedAmountCents) || allocation.appliedAmountCents <= 0) {
+      throw new ApLedgerError("Each allocation amount must be a positive integer", 400, {
+        code: "AP_PAYMENT_ALLOCATION_AMOUNT_INVALID",
+      });
+    }
+    if (seenInvoiceIds.has(allocation.vendorInvoiceId)) {
+      throw new ApLedgerError("A payment may allocate to each invoice only once", 422, {
+        code: "AP_PAYMENT_ALLOCATION_DUPLICATE_INVOICE",
+      });
+    }
+    seenInvoiceIds.add(allocation.vendorInvoiceId);
+  }
+
+  const allocTotal = data.allocations.reduce((sum, allocation) =>
+    sum + allocation.appliedAmountCents, 0);
+  if (!Number.isSafeInteger(allocTotal) || allocTotal > data.totalAmountCents) {
+    throw new ApLedgerError(
+      `Allocation total (${allocTotal}) exceeds payment total (${data.totalAmountCents})`,
+      422,
+      { code: "AP_PAYMENT_ALLOCATION_EXCEEDS_TOTAL" },
+    );
+  }
+}
+
+async function lockAndValidatePaymentInvoices(
+  tx: ApLedgerDbClient,
+  data: RecordApPaymentInput,
+): Promise<void> {
+  if (data.allocations.length === 0) return;
+  const invoiceIds = data.allocations.map((allocation) => allocation.vendorInvoiceId);
+  const invoices = await tx
+    .select({
+      id: vendorInvoices.id,
+      vendorId: vendorInvoices.vendorId,
+      status: vendorInvoices.status,
+      balanceCents: vendorInvoices.balanceCents,
+    })
+    .from(vendorInvoices)
+    .where(inArray(vendorInvoices.id, invoiceIds))
+    .orderBy(asc(vendorInvoices.id))
+    .for("update");
+
+  const invoicesById = new Map(invoices.map((invoice: any) => [invoice.id, invoice]));
+  for (const allocation of data.allocations) {
+    const invoice: any = invoicesById.get(allocation.vendorInvoiceId);
+    if (!invoice) {
+      throw new ApLedgerError("A payment allocation references an invoice that does not exist", 422, {
+        code: "AP_PAYMENT_ALLOCATION_INVOICE_NOT_FOUND",
+      });
+    }
+    if (invoice.vendorId !== data.vendorId) {
+      throw new ApLedgerError("Payment vendor must match every allocated invoice vendor", 422, {
+        code: "AP_PAYMENT_ALLOCATION_VENDOR_MISMATCH",
+      });
+    }
+    if (!["approved", "partially_paid"].includes(invoice.status)) {
+      throw new ApLedgerError("Payments may only be allocated to approved open invoices", 409, {
+        code: "AP_PAYMENT_ALLOCATION_INVOICE_NOT_PAYABLE",
+      });
+    }
+    if (allocation.appliedAmountCents > Number(invoice.balanceCents)) {
+      throw new ApLedgerError("Payment allocation exceeds the invoice's open balance", 409, {
+        code: "AP_PAYMENT_ALLOCATION_EXCEEDS_BALANCE",
+      });
+    }
+  }
+}
+
+async function recordPaymentInTransaction(
+  tx: ApLedgerDbClient,
+  data: RecordApPaymentInput,
+): Promise<PaymentMutationResult<any>> {
+  validateRecordPaymentInput(data);
+  await lockAndValidatePaymentInvoices(tx, data);
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('ap_payment_number'))`);
+  const paymentNumber = await generatePaymentNumber(tx);
+  const affectedPoIds = new Set<number>();
+
   try {
-    payment = await db.transaction(async (tx: ApLedgerDbClient) => {
-      const [inserted] = await tx
-        .insert(apPayments)
-        .values({
-          paymentNumber,
-          vendorId: data.vendorId,
-          paymentDate: data.paymentDate,
-          paymentMethod: data.paymentMethod,
-          referenceNumber: data.referenceNumber,
-          checkNumber: data.checkNumber,
-          bankAccountLabel: data.bankAccountLabel,
-          totalAmountCents: data.totalAmountCents,
-          currency: data.currency ?? "USD",
-          status: data.status ?? "completed",
-          notes: data.notes,
-          createdBy: data.createdBy,
-          updatedBy: data.createdBy,
-        })
-        .returning();
+    const [inserted] = await tx
+      .insert(apPayments)
+      .values({
+        paymentNumber,
+        vendorId: data.vendorId,
+        paymentDate: data.paymentDate,
+        paymentMethod: data.paymentMethod,
+        referenceNumber: data.referenceNumber,
+        checkNumber: data.checkNumber,
+        bankAccountLabel: data.bankAccountLabel,
+        totalAmountCents: data.totalAmountCents,
+        currency: data.currency ?? "USD",
+        status: data.status ?? "completed",
+        notes: data.notes,
+        createdBy: data.createdBy,
+        updatedBy: data.createdBy,
+      })
+      .returning();
 
-      if (data.allocations.length > 0) {
-        await tx.insert(apPaymentAllocations).values(
-          data.allocations.map((a) => ({
-            apPaymentId: inserted.id,
-            vendorInvoiceId: a.vendorInvoiceId,
-            appliedAmountCents: a.appliedAmountCents,
-            notes: a.notes,
-          }))
-        );
+    if (data.allocations.length > 0) {
+      await tx.insert(apPaymentAllocations).values(
+        data.allocations.map((a) => ({
+          apPaymentId: inserted.id,
+          vendorInvoiceId: a.vendorInvoiceId,
+          appliedAmountCents: a.appliedAmountCents,
+          notes: a.notes,
+        }))
+      );
 
-        for (const alloc of data.allocations) {
-          await recalculateInvoiceBalance(alloc.vendorInvoiceId, tx);
-          const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId, tx);
-          for (const poId of poIds) affectedPoIds.add(poId);
-        }
-
-        await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
+      for (const alloc of data.allocations) {
+        await recalculateInvoiceBalance(alloc.vendorInvoiceId, tx);
+        const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId, tx);
+        for (const poId of poIds) affectedPoIds.add(poId);
       }
 
-      return inserted;
-    });
+      await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
+    }
+
+    return { value: inserted, affectedPoIds: [...affectedPoIds] };
   } catch (error: any) {
     if (error?.code === "23505") {
+      if (error?.constraint === "ap_payment_allocations_pay_inv_idx") {
+        throw new ApLedgerError(
+          "A payment may allocate to each invoice only once.",
+          422,
+          { code: "AP_PAYMENT_ALLOCATION_DUPLICATE_INVOICE" },
+        );
+      }
       throw new ApLedgerError(
         `Payment number '${paymentNumber}' already in use by an active record.`,
         409,
@@ -951,10 +1069,16 @@ export async function recordPayment(data: RecordApPaymentInput) {
     }
     throw error;
   }
+}
 
-  await runPoFinancialDetectionHooksForMany(affectedPoIds);
+export async function recordPayment(data: RecordApPaymentInput) {
+  const result = await db.transaction((tx: ApLedgerDbClient) =>
+    recordPaymentInTransaction(tx, data),
+  );
 
-  return payment;
+  await runPoFinancialDetectionHooksForMany(result.affectedPoIds);
+
+  return result.value;
 }
 
 export async function getPaymentById(id: number) {
@@ -1022,30 +1146,42 @@ export async function listPayments(filters: {
     .offset(filters.offset ?? 0);
 }
 
-export async function voidPayment(id: number, reason: string, userId?: string) {
+async function voidPaymentInTransaction(
+  tx: ApLedgerDbClient,
+  id: number,
+  reason: string,
+  userId?: string,
+): Promise<PaymentMutationResult<{ ok: true }>> {
   const affectedPoIds = new Set<number>();
-  await db.transaction(async (tx: ApLedgerDbClient) => {
-    const [payment] = await tx.select().from(apPayments).where(eq(apPayments.id, id));
-    if (!payment || payment.status === "voided") throw new Error("Payment is already voided");
+  const [payment] = await tx.select().from(apPayments).where(eq(apPayments.id, id));
+  if (!payment) throw new ApLedgerError("Payment not found", 404);
+  if (payment.status === "voided") throw new ApLedgerError("Payment is already voided", 409);
 
-    await tx
-      .update(apPayments)
-      .set({ status: "voided", voidedAt: new Date(), voidedBy: userId, voidReason: reason, updatedBy: userId, updatedAt: new Date() })
-      .where(eq(apPayments.id, id));
-    const affectedAllocs = await tx
-      .select({ vendorInvoiceId: apPaymentAllocations.vendorInvoiceId })
-      .from(apPaymentAllocations)
-      .where(eq(apPaymentAllocations.apPaymentId, id));
+  await tx
+    .update(apPayments)
+    .set({ status: "voided", voidedAt: new Date(), voidedBy: userId, voidReason: reason, updatedBy: userId, updatedAt: new Date() })
+    .where(eq(apPayments.id, id));
+  const affectedAllocs = await tx
+    .select({ vendorInvoiceId: apPaymentAllocations.vendorInvoiceId })
+    .from(apPaymentAllocations)
+    .where(eq(apPaymentAllocations.apPaymentId, id));
 
-    for (const alloc of affectedAllocs) {
-      await recalculateInvoiceBalance(alloc.vendorInvoiceId, tx);
-      const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId, tx);
-      for (const poId of poIds) affectedPoIds.add(poId);
-    }
-    await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
-  });
+  for (const alloc of affectedAllocs) {
+    await recalculateInvoiceBalance(alloc.vendorInvoiceId, tx);
+    const poIds = await getPoIdsForInvoice(alloc.vendorInvoiceId, tx);
+    for (const poId of poIds) affectedPoIds.add(poId);
+  }
+  await recomputePoFinancialAggregatesForMany(affectedPoIds, tx);
 
-  await runPoFinancialDetectionHooksForMany(affectedPoIds);
+  return { value: { ok: true }, affectedPoIds: [...affectedPoIds] };
+}
+
+export async function voidPayment(id: number, reason: string, userId?: string) {
+  const result = await db.transaction((tx: ApLedgerDbClient) =>
+    voidPaymentInTransaction(tx, id, reason, userId),
+  );
+
+  await runPoFinancialDetectionHooksForMany(result.affectedPoIds);
 }
 
 // ─── AP Summary / Aging ───────────────────────────────────────────────────────
@@ -1062,6 +1198,64 @@ function requireCommandReason(reason: string | undefined): string {
     throw new ApLedgerError("reason is required");
   }
   return reason;
+}
+
+export type ApPaymentFinancialCommand = "record_payment" | "void_payment";
+
+/**
+ * Apply a cash-moving AP command using the caller's transaction. The payment,
+ * allocations, invoice/PO balances, command audit, and durable HTTP result can
+ * therefore commit or roll back as one unit under the financial command ledger.
+ */
+export async function executeApPaymentCommandInTransaction(
+  command: ApPaymentFinancialCommand,
+  input: ApLedgerCommandInput,
+  tx: ApLedgerDbClient,
+) {
+  const actor = input.userId ?? input.payment?.createdBy;
+
+  if (command === "record_payment") {
+    if (!input.payment) throw new ApLedgerError("payment is required");
+    const mutation = await recordPaymentInTransaction(tx, input.payment);
+    const affectedInvoiceIds = uniqueNumbers(
+      input.payment.allocations.map((allocation) => allocation.vendorInvoiceId),
+    );
+    const outcome = buildApLedgerOutcome({
+      command,
+      entityType: "payment",
+      entityId: mutation.value.id,
+      affectedInvoiceIds,
+      affectedPaymentIds: [mutation.value.id],
+      affectedPurchaseOrderIds: mutation.affectedPoIds,
+    });
+    await appendApLedgerCommandAudit(outcome, actor, { client: tx, required: true });
+    return attachApLedgerOutcome(mutation.value, outcome);
+  }
+
+  const paymentId = requireCommandId(input.paymentId, "paymentId");
+  const affectedInvoiceIds = await getInvoiceIdsForPayment(paymentId, tx);
+  const mutation = await voidPaymentInTransaction(
+    tx,
+    paymentId,
+    requireCommandReason(input.reason),
+    input.userId,
+  );
+  const outcome = buildApLedgerOutcome({
+    command,
+    entityType: "payment",
+    entityId: paymentId,
+    affectedInvoiceIds,
+    affectedPaymentIds: [paymentId],
+    affectedPurchaseOrderIds: mutation.affectedPoIds,
+  });
+  await appendApLedgerCommandAudit(outcome, actor, { client: tx, required: true });
+  return { ok: true, apLedgerOutcome: outcome };
+}
+
+export async function runApPaymentCommandPostCommit(
+  outcome: ApLedgerCommandOutcome,
+): Promise<void> {
+  await runPoFinancialDetectionHooksForMany(outcome.affectedPurchaseOrderIds);
 }
 
 export async function executeApLedgerCommand(command: ApLedgerCommand, input: ApLedgerCommandInput = {}) {
