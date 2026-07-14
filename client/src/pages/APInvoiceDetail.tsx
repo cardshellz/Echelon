@@ -42,6 +42,12 @@ import {
   Ship,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
+import {
+  createFinancialCommandIntentStore,
+  financialCommandFetchJson,
+  financialCommandRetryDelay,
+  shouldRetryFinancialCommand,
+} from "@/lib/financial-command";
 
 function formatCents(cents: number | null | undefined): string {
   if (!cents && cents !== 0) return "$0.00";
@@ -171,6 +177,9 @@ function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkPoMutation, o
 export default function APInvoiceDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [paymentIntent] = useState(() =>
+    createFinancialCommandIntentStore(() => createApCommandIdempotencyKey("ap-payment")),
+  );
   const [, navigate] = useLocation();
   const [, params] = useRoute("/ap-invoices/:id");
   const invoiceId = params?.id ? Number(params.id) : null;
@@ -302,20 +311,8 @@ export default function APInvoiceDetail() {
   });
 
   const paymentMutation = useMutation({
-    mutationFn: () => {
-      // Server requires Idempotency-Key on payment writes (Rule #6).
-      const idempotencyKey = (
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? (crypto as any).randomUUID()
-          : `ap-pay-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      ) as string;
-      return fetch("/api/ap-payments", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": idempotencyKey,
-      },
-      body: JSON.stringify({
+    mutationFn: async () => {
+      const body = {
         vendorId: invoice?.vendorId,
         paymentDate: payment.paymentDate,
         paymentMethod: payment.paymentMethod,
@@ -328,10 +325,22 @@ export default function APInvoiceDetail() {
           vendorInvoiceId: invoiceId,
           appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
         }],
-      }),
-    }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
+      };
+      const idempotencyKey = paymentIntent.acquire({ method: "POST", url: "/api/ap-payments", body });
+      const result = await financialCommandFetchJson<any>("/api/ap-payments", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(body),
+      });
+      return { result, idempotencyKey };
     },
-    onSuccess: (result) => {
+    retry: shouldRetryFinancialCommand,
+    retryDelay: financialCommandRetryDelay,
+    onSuccess: ({ result, idempotencyKey }) => {
+      paymentIntent.complete(idempotencyKey);
       invalidate();
       queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
       setShowPaymentDialog(false);

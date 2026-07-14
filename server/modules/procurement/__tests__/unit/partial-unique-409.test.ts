@@ -166,6 +166,7 @@ describe("recordPayment — 409 on duplicate payment number", () => {
               returning: vi.fn().mockRejectedValue({ code: "23505", constraint: "ap_payments_payment_number_active_uidx" }),
             };
             return fn({
+              execute: vi.fn().mockResolvedValue(undefined),
               insert: vi.fn().mockReturnValue(txInsertChain),
               select: vi.fn().mockImplementation(() => makeSelectChain()),
               update: vi.fn().mockReturnValue({

@@ -11,16 +11,14 @@
  * the HTTP route stays thin and everything here is unit-testable without a DB.
  * Design: docs/SHIPPING-ENGINE-DESIGN.md ("Rates Engine").
  *
- * CSV dialects (header row required, case-insensitive, comma-separated —
- * quoted fields are NOT supported because zone names never contain commas):
- *   zone,min_lb,max_lb,rate_usd    → pounds/USD, converted to grams/cents
- *   zone,min_g,max_g,rate_cents    → already storage units
- * Either dialect may add an optional warehouse_id column (blank = table-wide
- * row, i.e. origin_warehouse_id NULL).
+ * Operator CSVs use state plus an optional ZIP prefix. Legacy zone headers
+ * remain readable for old calibration files, but are not exposed in the UI.
  *
  * Contract: never throws for bad input — every problem comes back as a
  * row-level error with the 1-based physical line number.
  */
+
+import { normalizeUsPostalRegion } from "./us-geography";
 
 /** Same constant the client UI uses (ShippingSettings.tsx) — keep in sync. */
 export const GRAMS_PER_POUND = 453.59237;
@@ -29,10 +27,23 @@ export const CENTS_PER_USD = 100;
 /** Hard cap on rows per import — matches the import route's zod limit. */
 export const MAX_IMPORT_ROWS = 5000;
 
+export type RatePricingMode = "state_zip" | "legacy_zone";
+
+export function stateZipPricingAreaKey(state: string, postalPrefix?: string | null): string {
+  const normalizedState = state.trim().toUpperCase();
+  const normalizedPrefix = postalPrefix?.trim() || "";
+  return normalizedPrefix
+    ? `US-${normalizedState}-ZIP-${normalizedPrefix}`
+    : `US-${normalizedState}`;
+}
+
 export interface RateTableImportRow {
   /** NULL = row applies to any origin warehouse. */
   originWarehouseId: number | null;
+  /** Internal routing key. Operators supply state and optional ZIP prefix. */
   destinationZone: string;
+  destinationRegion: string | null;
+  postalPrefix: string | null;
   minWeightGrams: number;
   maxWeightGrams: number;
   rateCents: number;
@@ -49,13 +60,16 @@ export type RateCsvDialect = "pounds" | "grams";
 export interface ParseRateCsvResult {
   /** Null when the header could not be recognized (see errors). */
   dialect: RateCsvDialect | null;
+  pricingMode: RatePricingMode | null;
   rows: RateTableImportRow[];
   errors: CsvRowError[];
 }
 
 interface HeaderLayout {
   dialect: RateCsvDialect;
-  zoneIdx: number;
+  pricingMode: RatePricingMode;
+  destinationIdx: number;
+  postalPrefixIdx: number;
   minIdx: number;
   maxIdx: number;
   rateIdx: number;
@@ -71,17 +85,21 @@ function detectHeader(cells: string[]): HeaderLayout | null {
   const lowered = cells.map((c) => c.toLowerCase());
   const idx = (name: string) => lowered.indexOf(name);
 
+  const stateIdx = idx("state");
   const zoneIdx = idx("zone");
-  if (zoneIdx === -1) return null;
+  if (stateIdx === -1 && zoneIdx === -1) return null;
+  const pricingMode: RatePricingMode = stateIdx !== -1 ? "state_zip" : "legacy_zone";
+  const destinationIdx = stateIdx !== -1 ? stateIdx : zoneIdx;
+  const postalPrefixIdx = idx("zip_prefix");
   const warehouseIdx = idx("warehouse_id");
 
   const poundsCols = { minIdx: idx("min_lb"), maxIdx: idx("max_lb"), rateIdx: idx("rate_usd") };
   if (poundsCols.minIdx !== -1 && poundsCols.maxIdx !== -1 && poundsCols.rateIdx !== -1) {
-    return { dialect: "pounds", zoneIdx, warehouseIdx, ...poundsCols };
+    return { dialect: "pounds", pricingMode, destinationIdx, postalPrefixIdx, warehouseIdx, ...poundsCols };
   }
   const gramsCols = { minIdx: idx("min_g"), maxIdx: idx("max_g"), rateIdx: idx("rate_cents") };
   if (gramsCols.minIdx !== -1 && gramsCols.maxIdx !== -1 && gramsCols.rateIdx !== -1) {
-    return { dialect: "grams", zoneIdx, warehouseIdx, ...gramsCols };
+    return { dialect: "grams", pricingMode, destinationIdx, postalPrefixIdx, warehouseIdx, ...gramsCols };
   }
   return null;
 }
@@ -120,10 +138,10 @@ export function parseRateTableCsv(
         errors.push({
           line: lineNo,
           message:
-            "unrecognized header — expected columns zone,min_lb,max_lb,rate_usd or " +
-            "zone,min_g,max_g,rate_cents (optional warehouse_id)",
+            "unrecognized header - expected columns state,zip_prefix,min_lb,max_lb,rate_usd or " +
+            "state,zip_prefix,min_g,max_g,rate_cents (zip_prefix and warehouse_id are optional)",
         });
-        return { dialect: null, rows: [], errors };
+        return { dialect: null, pricingMode: null, rows: [], errors };
       }
       continue;
     }
@@ -132,15 +150,15 @@ export function parseRateTableCsv(
     if (row !== null) rows.push(row);
     if (rows.length > maxRows) {
       errors.push({ line: lineNo, message: `too many rows — the import limit is ${maxRows}` });
-      return { dialect: layout!.dialect, rows: [], errors };
+      return { dialect: layout!.dialect, pricingMode: layout!.pricingMode, rows: [], errors };
     }
   }
 
   if (!headerSeen) {
     errors.push({ line: 1, message: "CSV is empty — a header row is required" });
-    return { dialect: null, rows: [], errors };
+    return { dialect: null, pricingMode: null, rows: [], errors };
   }
-  return { dialect: layout!.dialect, rows, errors };
+  return { dialect: layout!.dialect, pricingMode: layout!.pricingMode, rows, errors };
 }
 
 function parseDataLine(
@@ -154,9 +172,28 @@ function parseDataLine(
     return null;
   };
 
-  const zone = (cells[layout.zoneIdx] ?? "").trim();
-  if (zone === "") return fail("zone is required");
-  if (zone.length > 40) return fail("zone must be 40 characters or fewer");
+  const destination = (cells[layout.destinationIdx] ?? "").trim();
+  let destinationRegion: string | null = null;
+  let postalPrefix: string | null = null;
+  let destinationZone: string;
+  if (layout.pricingMode === "state_zip") {
+    destinationRegion = normalizeUsPostalRegion(destination);
+    if (destinationRegion === null) {
+      return fail(`invalid US state or territory ${JSON.stringify(destination)}`);
+    }
+    const prefix = layout.postalPrefixIdx === -1
+      ? ""
+      : (cells[layout.postalPrefixIdx] ?? "").trim();
+    if (prefix !== "" && !/^\d{1,5}$/.test(prefix)) {
+      return fail("zip_prefix must contain 1 to 5 digits");
+    }
+    postalPrefix = prefix || null;
+    destinationZone = stateZipPricingAreaKey(destinationRegion, postalPrefix);
+  } else {
+    if (destination === "") return fail("zone is required");
+    if (destination.length > 40) return fail("zone must be 40 characters or fewer");
+    destinationZone = destination;
+  }
 
   const minRaw = parseFiniteNumber(cells[layout.minIdx] ?? "");
   const maxRaw = parseFiniteNumber(cells[layout.maxIdx] ?? "");
@@ -197,7 +234,15 @@ function parseDataLine(
     }
   }
 
-  return { originWarehouseId, destinationZone: zone, minWeightGrams, maxWeightGrams, rateCents };
+  return {
+    originWarehouseId,
+    destinationZone,
+    destinationRegion,
+    postalPrefix,
+    minWeightGrams,
+    maxWeightGrams,
+    rateCents,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +286,28 @@ export function findBandOverlaps(rows: readonly RateTableImportRow[]): string[] 
     }
   }
   return errors;
+}
+
+/** Every ZIP override needs a statewide fallback in the same imported table. */
+export function findMissingStateDefaults(rows: readonly RateTableImportRow[]): string[] {
+  const statewide = new Set(
+    rows
+      .filter((row) => row.destinationRegion !== null && row.postalPrefix === null)
+      .map((row) => `${row.originWarehouseId ?? "any"}|${row.destinationRegion}`),
+  );
+  const missing = new Set<string>();
+  for (const row of rows) {
+    if (row.destinationRegion === null || row.postalPrefix === null) continue;
+    const scope = `${row.originWarehouseId ?? "any"}|${row.destinationRegion}`;
+    if (!statewide.has(scope)) {
+      missing.add(
+        `${row.destinationRegion}${row.originWarehouseId === null ? "" : ` at warehouse ${row.originWarehouseId}`}`,
+      );
+    }
+  }
+  return [...missing]
+    .sort()
+    .map((scope) => `${scope} has a ZIP override but no statewide fallback rate`);
 }
 
 // ---------------------------------------------------------------------------

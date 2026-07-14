@@ -39,7 +39,7 @@ function shopifyBody(overrides: Record<string, unknown> = {}): unknown {
   return {
     rate: {
       origin: { postal_code: "89101", country: "US" },
-      destination: { postal_code: "96813", country: "us" },
+      destination: { postal_code: "96813", country: "us", province: "hi" },
       items: [
         { name: "Sleeves", sku: "SLV-100", quantity: 2, grams: 120, price: 999 },
         { name: "Case", sku: " CASE-9 ", quantity: 1, grams: 2500, price: 4999 },
@@ -57,6 +57,7 @@ describe("parseShopifyRateRequest", () => {
     if (!result.ok) return;
     expect(result.request.destPostal).toBe("96813");
     expect(result.request.destCountry).toBe("US");
+    expect(result.request.destRegion).toBe("HI");
     expect(result.request.items).toEqual([
       { sku: "SLV-100", quantity: 2, grams: 120 },
       { sku: "CASE-9", quantity: 1, grams: 2500 },
@@ -78,6 +79,15 @@ describe("parseShopifyRateRequest", () => {
       { sku: null, quantity: 3, grams: 50 },
       { sku: null, quantity: 2, grams: 25 },
     ]);
+  });
+
+  it("normalizes a full Shopify province name to its postal abbreviation", () => {
+    const result = parseShopifyRateRequest(shopifyBody({
+      destination: { postal_code: "16066", country: "US", province: "Pennsylvania" },
+    }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request.destRegion).toBe("PA");
   });
 
   it("accepts a SKU-less line when Shopify supplies its weight", () => {
