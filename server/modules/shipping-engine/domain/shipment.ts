@@ -1,7 +1,13 @@
+export type ShipmentWeightSource =
+  | "echelon_catalog"
+  | "channel_fallback"
+  | "missing";
+
 export interface ShipmentLineInput {
   sku: string | null;
   quantity: number;
   unitWeightGrams: number | null;
+  weightSource?: ShipmentWeightSource;
   shippingGroupCode?: string | null;
 }
 

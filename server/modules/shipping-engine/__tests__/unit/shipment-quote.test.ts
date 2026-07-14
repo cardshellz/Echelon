@@ -8,28 +8,65 @@ import type {
   ShippingRateProvider,
   ShippingRateProviderRequest,
 } from "../../application/shipping-rate-provider";
+import { resolveShipmentLineWeights } from "../../application/shipment-weight.service";
 import {
   buildWeightOnlyParcelPlan,
   weightOnlyParcelProvider,
 } from "../../application/weight-only-parcel.provider";
 
 describe("shipping channel profiles", () => {
-  it("routes Shopify and internal websites through runtime quotes", () => {
+  it("routes Shopify, internal websites, and dropship charges through runtime quotes", () => {
     expect(usesRuntimeShippingQuotes("shopify")).toBe(true);
     expect(usesRuntimeShippingQuotes("internal")).toBe(true);
+    expect(usesRuntimeShippingQuotes("dropship")).toBe(true);
   });
 
-  it("keeps eBay and dropship shipping in their channel-owned policy paths", () => {
+  it("keeps eBay checkout external while dropship rates vendor fulfillment", () => {
     expect(getShippingChannelProfile("ebay")).toMatchObject({
       quoteMode: "external_policy",
       configurationOwner: "channel_adapter",
     });
     expect(getShippingChannelProfile("dropship")).toMatchObject({
-      quoteMode: "managed_policy",
+      quoteMode: "runtime_quote",
       configurationOwner: "dropship_portal",
+      ratePurpose: "vendor_fulfillment_charge",
     });
     expect(usesRuntimeShippingQuotes("ebay")).toBe(false);
-    expect(usesRuntimeShippingQuotes("dropship")).toBe(false);
+  });
+});
+
+describe("resolveShipmentLineWeights", () => {
+  it("prefers canonical Echelon catalog weight over Shopify weight", () => {
+    expect(resolveShipmentLineWeights([
+      { sku: "SKU-1", quantity: 2, channelWeightGrams: 90 },
+    ], new Map([["SKU-1", 125]]))).toEqual([{
+      sku: "SKU-1",
+      quantity: 2,
+      unitWeightGrams: 125,
+      weightSource: "echelon_catalog",
+    }]);
+  });
+
+  it("uses channel weight only while the Echelon weight is missing", () => {
+    expect(resolveShipmentLineWeights([
+      { sku: "SKU-1", quantity: 1, channelWeightGrams: 90 },
+    ], new Map())).toEqual([{
+      sku: "SKU-1",
+      quantity: 1,
+      unitWeightGrams: 90,
+      weightSource: "channel_fallback",
+    }]);
+  });
+
+  it("marks the line missing when neither source has weight", () => {
+    expect(resolveShipmentLineWeights([
+      { sku: null, quantity: 1, channelWeightGrams: null },
+    ], new Map())).toEqual([{
+      sku: null,
+      quantity: 1,
+      unitWeightGrams: null,
+      weightSource: "missing",
+    }]);
   });
 });
 
@@ -78,6 +115,21 @@ describe("weight-only parcel provider", () => {
     expect(result.plan.warnings).toEqual([
       "MISSING: missing weight excluded from rated shipment weight",
       "no usable item weights; applied 1g minimum rating weight",
+    ]);
+  });
+
+  it("records use of a transitional channel-weight fallback", () => {
+    const result = buildWeightOnlyParcelPlan([{
+      sku: "SHOPIFY-FALLBACK",
+      quantity: 1,
+      unitWeightGrams: 75,
+      weightSource: "channel_fallback",
+    }]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.warnings).toEqual([
+      "SHOPIFY-FALLBACK: used channel weight because Echelon catalog weight is missing",
     ]);
   });
 });
@@ -145,22 +197,35 @@ describe("quoteShipment", () => {
     }));
   });
 
-  it.each(["ebay", "dropship"] as const)(
-    "refuses runtime rating for the %s policy-managed channel",
-    async (channel) => {
-      const observe = vi.fn();
-      const result = await quoteShipment({
-        channel,
-        originWarehouseId: 1,
-        destination: { country: "US", postalCode: "16066" },
-        lines: [{ sku: "SKU-1", quantity: 1, unitWeightGrams: 100 }],
-      }, {
-        parcelProvider: weightOnlyParcelProvider,
-        rateProvider: fakeRateProvider(observe),
-      });
+  it("allows dropship to reuse base rates for the vendor fulfillment charge", async () => {
+    const observe = vi.fn();
+    const result = await quoteShipment({
+      channel: "dropship",
+      originWarehouseId: 1,
+      destination: { country: "US", postalCode: "16066" },
+      lines: [{ sku: "SKU-1", quantity: 1, unitWeightGrams: 100 }],
+    }, {
+      parcelProvider: weightOnlyParcelProvider,
+      rateProvider: fakeRateProvider(observe),
+    });
 
-      expect(result).toMatchObject({ ok: false, code: "CHANNEL_POLICY_MANAGED" });
-      expect(observe).not.toHaveBeenCalled();
-    },
-  );
+    expect(result.ok).toBe(true);
+    expect(observe).toHaveBeenCalledOnce();
+  });
+
+  it("refuses runtime rating for eBay's external checkout policy", async () => {
+    const observe = vi.fn();
+    const result = await quoteShipment({
+      channel: "ebay",
+      originWarehouseId: 1,
+      destination: { country: "US", postalCode: "16066" },
+      lines: [{ sku: "SKU-1", quantity: 1, unitWeightGrams: 100 }],
+    }, {
+      parcelProvider: weightOnlyParcelProvider,
+      rateProvider: fakeRateProvider(observe),
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "CHANNEL_POLICY_MANAGED" });
+    expect(observe).not.toHaveBeenCalled();
+  });
 });

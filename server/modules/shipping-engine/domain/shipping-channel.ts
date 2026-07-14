@@ -3,21 +3,25 @@ export const SHIPPING_CHANNEL_PROFILES = {
     quoteMode: "runtime_quote",
     configurationOwner: "shipping_engine",
     benefitOwner: "platform_discount",
+    ratePurpose: "customer_checkout",
   },
   internal: {
     quoteMode: "runtime_quote",
     configurationOwner: "shipping_engine",
     benefitOwner: "shipping_engine",
+    ratePurpose: "customer_checkout",
   },
   ebay: {
     quoteMode: "external_policy",
     configurationOwner: "channel_adapter",
     benefitOwner: "channel_policy",
+    ratePurpose: "customer_checkout",
   },
   dropship: {
-    quoteMode: "managed_policy",
+    quoteMode: "runtime_quote",
     configurationOwner: "dropship_portal",
     benefitOwner: "channel_policy",
+    ratePurpose: "vendor_fulfillment_charge",
   },
 } as const;
 

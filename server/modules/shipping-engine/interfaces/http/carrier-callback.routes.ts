@@ -12,7 +12,7 @@
  *     pointing Shopify at it) sells nothing by accident.
  *
  * HARD RULES (checkout is latency- and failure-sensitive):
- *   - No external calls — channel weights + local rate tables only.
+ *   - No external calls — Echelon catalog weights + local rate tables only.
  *   - Responds within ~RESPONSE_DEADLINE_MS; a slow quote returns { rates: [] }
  *     while the pipeline finishes in the background for the snapshot.
  *   - NEVER throws / never 5xxs a valid token: any failure degrades to
@@ -42,7 +42,9 @@ import { rateComboKey } from "../../domain/rate-selection";
 import type { RateQuoteLine, RateQuoteResult } from "../../application/rate-quote.service";
 import { quoteShipment } from "../../application/shipment-quote.service";
 import { localRateTableShippingRateProvider } from "../../application/shipping-rate-provider";
+import { resolveShipmentLineWeights } from "../../application/shipment-weight.service";
 import { weightOnlyParcelProvider } from "../../application/weight-only-parcel.provider";
+import { loadCatalogWeightsBySku } from "../../infrastructure/catalog-weight.repository";
 
 /** Respond by this deadline even if the quote pipeline is still running. */
 const RESPONSE_DEADLINE_MS = 2000;
@@ -107,9 +109,9 @@ export type ParseRateRequestResult =
   | { ok: false; error: string };
 
 /**
- * Parse Shopify's rate request body. The initial checkout strategy rates the
- * complete cart from Shopify-provided item weights, so SKU is optional. Missing
- * weights are rejected by the parcel provider; no line is silently skipped.
+ * Parse Shopify's rate request body. SKU resolves canonical Echelon weight;
+ * Shopify grams are a transition fallback. SKU remains optional and no line is
+ * silently skipped from weight resolution.
  */
 export function parseShopifyRateRequest(body: unknown): ParseRateRequestResult {
   const parsed = shopifyRateRequestSchema.safeParse(body);
@@ -262,6 +264,23 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
 
   try {
     const originWarehouseId = callbackOriginWarehouseId();
+    let catalogWeightBySku = new Map<string, number | null>();
+    try {
+      catalogWeightBySku = await loadCatalogWeightsBySku(
+        request.items.flatMap((line) => line.sku ? [line.sku] : []),
+      );
+    } catch (error) {
+      console.error("[CarrierCallback] catalog weight lookup failed; using channel weights:", error);
+      warnings.push("Echelon catalog weight lookup failed; used channel weights");
+    }
+    const weightedLines = resolveShipmentLineWeights(
+      request.items.map((line) => ({
+        sku: line.sku,
+        quantity: line.quantity,
+        channelWeightGrams: line.grams,
+      })),
+      catalogWeightBySku,
+    );
     const shipmentQuote = await quoteShipment({
       channel: "shopify",
       originWarehouseId,
@@ -269,11 +288,7 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
         country: request.destCountry,
         postalCode: request.destPostal,
       },
-      lines: request.items.map((line) => ({
-        sku: line.sku,
-        quantity: line.quantity,
-        unitWeightGrams: line.grams,
-      })),
+      lines: weightedLines,
     }, {
       parcelProvider: weightOnlyParcelProvider,
       rateProvider: localRateTableShippingRateProvider,

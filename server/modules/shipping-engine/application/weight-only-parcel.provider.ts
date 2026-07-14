@@ -12,8 +12,8 @@ export const WEIGHT_ONLY_PARCEL_PROVIDER = {
 const MINIMUM_RATING_WEIGHT_GRAMS = 1;
 
 /**
- * Initial checkout strategy: rate one shipment from channel-provided item
- * weights. It deliberately does not guess dimensions, boxes, or carton count.
+ * Initial strategy: rate one shipment from already-resolved item weights. It
+ * deliberately does not guess dimensions, boxes, or carton count.
  */
 export function buildWeightOnlyParcelPlan(
   lines: readonly ShipmentLineInput[],
@@ -39,6 +39,9 @@ export function buildWeightOnlyParcelPlan(
     ) {
       warnings.push(`${label}: missing weight excluded from rated shipment weight`);
       return;
+    }
+    if (line.weightSource === "channel_fallback") {
+      warnings.push(`${label}: used channel weight because Echelon catalog weight is missing`);
     }
     totalWeightGrams += line.unitWeightGrams * line.quantity;
   });

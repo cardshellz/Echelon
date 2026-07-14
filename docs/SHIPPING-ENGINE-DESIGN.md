@@ -4,7 +4,7 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 
 > **Implementation update — 2026-07-13:** standalone cartonizer v3.1 now performs real non-overlapping 3D placement with six rotations and emits unit coordinates/orientations. Dropship and WMS test adapters can use the same core. WMS enforcement is intentionally deferred: plans can be generated explicitly, and an opt-in shadow mode can observe packing handoffs without blocking or changing order status. The earlier volume-only/sorted-dimension cartonizer description below is superseded where noted.
 
-> **Architecture decision — 2026-07-14 (superseding): shipping launches before cartonization.** Shopify and future first-party websites use the shared runtime quote service with a weight-only parcel provider. eBay keeps external fulfillment policies in its channel adapter. Dropship surfaces managed shipping configuration in its portal. The cartonizer remains a replaceable parcel provider and standalone WMS test path; product dimensions, boxes, split planning, and verified carton placement do not gate shipping-engine launch.
+> **Architecture decision — 2026-07-14 (superseding): shipping launches before cartonization.** Shopify, future first-party websites, and the dropship vendor fulfillment charge use the shared runtime base-rate service. Echelon catalog variant weight is canonical; Shopify request weight is a warned transition fallback. eBay shopper checkout keeps external fulfillment policies in its channel adapter. Dropship applies markup/insurance/wallet policy after the shared quote. The cartonizer remains a replaceable parcel provider and standalone WMS test path.
 
 ## Verified current state (all claims checked in-file or against prod 2026-07-02)
 
@@ -31,7 +31,7 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 - Carrier mix 90d: USPS 2,038 / UPS 1,354 / FedEx 381; ~43 shipments/day.
 
 **Hard Shopify constraints (verified):**
-1. CarrierService callback: gets origin/destination/items(grams, price, sku, properties) — **NO customer, NO metafields, NO dims**; ~10s/5s/3s dynamic timeout, no retry; responses cached ~15 min NOT keyed on customer. ⇒ Checkout rates must be **member-agnostic, precomputed, stateless**. Initial shipping uses every line's channel-provided weight; dimensions are not joined or required. Member pricing must come from the Functions layer.
+1. CarrierService callback: gets origin/destination/items(grams, price, sku, properties) — **NO customer, NO metafields, NO dims**; ~10s/5s/3s dynamic timeout, no retry; responses cached ~15 min NOT keyed on customer. ⇒ Checkout rates must be **member-agnostic, precomputed, stateless**. SKU resolves canonical Echelon weight; Shopify grams are fallback only. Dimensions are not required. Member pricing must come from the Functions layer.
 2. Functions can only **reduce** an existing rate (100%/partial discount) — never create or raise one. ⇒ Base rates are the ceiling; "member-exclusive express" is structurally impossible — express must be offered to all, discounted per plan.
 3. Metafields >10KB arrive NULL in Functions (the 22KB plan_benefits incident) — compact projections only (523B pattern proven).
 4. Rate naming is load-bearing across delivery profiles: same-named rates SUM into one line; different names collapse to cheapest generic "Shipping."
@@ -41,7 +41,7 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 ```
 QUOTE PLANE (checkout, member-agnostic, <1s)
 Shopify checkout ──► CarrierService callback (Echelon, new)
-  every cart line ──► weight-only parcel provider ─► one shipment ─► Rates (local tables)
+  every cart line ──► Echelon weight (Shopify fallback) ─► one shipment ─► Rates (local tables)
              ─► ETA (cutoff + transit table) ─► service-level offers (Standard/Expedited/Express + dates)
   member benefits: shipping-discount Function (club app — LIVE) discounts per plan on top
 
@@ -52,12 +52,12 @@ order ingest ─► test/shadow SHIP PLAN (cartonize with order-final items)
   ─► CALIBRATION LOOP: quoted vs actual → rate-table corrections
 ```
 
-**Ownership:** runtime quote contracts, rates, service levels, and callbacks = `server/modules/shipping-engine`; physical cartonization = optional channel-neutral `server/modules/cartonization`; persisted plans and box data = `shipping` Postgres schema; execution = WMS packing station. Callback endpoint is hosted by Echelon (Heroku), registered once via the club-app token (owns write_shipping). Member policy stays in the club app + Function for Shopify. eBay policy selection stays in the eBay adapter. Dropship owns its portal-managed shipping configuration until an explicit adapter migration is approved.
+**Ownership:** runtime quote contracts, canonical weight resolution, rates, service levels, and callbacks = `server/modules/shipping-engine`; physical cartonization = optional channel-neutral `server/modules/cartonization`; persisted plans and box data = `shipping` Postgres schema. Member policy stays in the club app + Function for Shopify. eBay policy selection stays in the eBay adapter. Dropship consumes shared base rates for the vendor charge, then owns markup/insurance/snapshot/wallet policy. Its current duplicate rate provider is migration debt, not the target design.
 
 ## Modules & contracts
 
 1. **Runtime quote contracts** — `shipping-channel.ts` declares runtime vs channel-policy ownership; `shipment.ts` defines channel-neutral lines and parcels; injected parcel/rate providers keep channel parsing, rating, and packing independent.
-2. **Weight-only parcel provider** — initial Shopify/internal strategy produces one weight-based shipment. Positive channel weights are summed normally; missing weights contribute zero and generate snapshot warnings. When every weight is missing, a 1g floor selects the cheapest available band. It never blocks checkout merely for missing weight and never guesses dimensions or boxes.
+2. **Weight resolution + weight-only parcel provider** — exact SKU first loads `catalog.product_variants.weight_grams`. A positive channel weight is a warned fallback only when Echelon is missing. Missing both contributes zero; an all-missing shipment uses a 1g floor. The same normalized input serves Shopify, first-party sites, and dropship vendor charges without dimensions or boxes.
 3. **Cartonizer v3.1** `cartonize(items, boxes) → candidatePackings[]` — optional standalone pure-domain engine with multi-SKU packing, physical units for every ordered quantity, all six orthogonal rotations, non-overlap and box-boundary enforcement, per-unit placement output, own-container passthrough, fill-factor clearance, and geometry/weight-driven multi-carton splits. Every ordinary carton is capped at 22,679 g (under 50 lb); a box may set a lower structural maximum. It is not part of the initial Shopify quote path and cannot gate WMS status. Verified unit placements persist on `shipping.pack_plan_parcels` (migration 135).
    **DECIDED 2026-07-02 (user confirmed): co-mingling = RIDER/VOID model, not group×group rules.** Shipping groups stay the default partition (storage boxes ship flat, separately). Rider consolidation now defaults off because cubic void alone cannot prove physical placement. Re-enable it only after void regions have real dimensions and can use the same non-overlap checks. Policy/physics separation remains: free-shipping thresholds key on shipping-group spend; rates key on parcels.
 4. **Split Planner** `plan(order) → shipments[]` — deferred until cartonization/multi-origin work. The initial quote path deliberately treats the cart as one weight-based shipment.
@@ -70,10 +70,10 @@ order ingest ─► test/shadow SHIP PLAN (cartonize with order-final items)
 
 ## Phasing
 
-- **P0 — Shipping contracts:** channel-neutral shipment/rate ports; Shopify/internal runtime mode; eBay external-policy mode; dropship managed-policy mode. No activation.
+- **P0 — Shipping contracts:** channel-neutral shipment/rate ports; canonical Echelon weight resolution; Shopify/internal/dropship runtime base quotes; eBay external-policy checkout. No activation.
 - **P1 — Shopify weight audit + shadow comparison:** improve active-variant weight coverage, validate local tables and mappings, replay representative carts through the same runtime service, quantify intentional undercharges from missing weights, and compare against Parcelify. Missing weight is an accuracy issue, not a checkout gate.
 - **P2 — Checkout cutover (Standard only):** register CarrierService (club-app token → Echelon URL); serve Standard with ETA dates alongside Parcelify; verify member Function discounts; soak, roll back cleanly if needed, then decommission Parcelify.
-- **P3 — Channel expansion:** first-party authenticated quote API and Shellz Club benefit-policy adapter; dropship managed-policy UI; retain eBay fulfillment-policy selection in its adapter.
+- **P3 — Channel expansion:** first-party authenticated quote API and Shellz Club benefit-policy adapter; migrate dropship from its duplicate rate provider to shared base quotes plus dropship charge policy; retain eBay fulfillment-policy selection in its adapter.
 - **P4 — Service levels and providers:** Expedited/Express, live/direct carrier providers where they add value, and multi-origin routing when required.
 - **P5 — Optional cartonization:** dimensions/box capture, explicit plan tests, non-blocking shadow, pack-station actuals, calibration, and only then a separately approved enforcement proposal.
 
