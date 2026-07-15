@@ -11,20 +11,24 @@ PR #918 made optional PO/catalog capture atomic, and PR #921 added durable
 purchase-order email delivery, PR #922 put the disposable PostgreSQL hardening
 suites in CI, and PR #924 migrated cash-moving AP payment commands to the
 durable transactional command ledger. PR #926 then migrated invoice approve,
-dispute, and void transitions. The current local slice adds command-ledger
-monitoring, retention, and audited dead-command recovery.
+dispute, and void transitions. PR #927 added command-ledger monitoring,
+retention, and audited dead-command recovery; PR #929 repaired the named-schema
+integration harness; PR #931 added the controlled one-SKU automatic-purchasing
+pilot; and PR #933 fixed its production CLI dependency loading. The current local
+slice adds read-only automatic-purchasing candidate discovery and readiness ranking.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/financial-command-operations-2026-07-14`
-- Base and current `origin/main`: `061dbe51`
-- Base hardening slice: merged PR #926
-- Deployment status: PR #921 is live on Heroku release v2381
+- Branch: `codex/automatic-purchasing-readiness-2026-07-15`
+- Base and current `origin/main`: `9fe4860c`
+- Base hardening slice: merged PR #933
+- Deployment status: PR #933 is live on Heroku release v2395
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
-- Migration 140 status: local only; not applied in production
-- Commit/PR status: financial-command operations slice is local and not yet published
+- Migration 140 status: merged in PR #927; production state was not re-audited in
+  this July 15 readiness continuation
+- Commit/PR status: automatic-purchasing readiness slice is local and not yet published
 
 Do not deploy this branch without owner approval.
 
@@ -514,13 +518,101 @@ GitHub Actions run `29427512682` passed the final merge candidate:
   named-schema channel/inventory cases; and
 - `Typecheck + unit tests` passed in 1 minute 58 seconds.
 
+PR #929 merged as `2dd60733`. Both required checks passed on the final merge
+candidate, including all 30 named-schema PostgreSQL cases.
+
+## Controlled automatic-purchasing pilot controls
+
+The next slice adds a dedicated exact-SKU pilot path around the existing automatic
+handoff. It does not change the scheduler or the existing Purchasing UI trigger.
+
+The operator command is dry-run by default. Its preflight loads current production
+recommendation inputs and prints the exact recommendation, supplier/receive IDs,
+piece quantity, quote basis, quoted unit mills, normalized per-piece mills, cents
+mirror, exact extended mills, product-cost cents, pricing remainder,
+demand/candidate evidence, approval policy, and structured blockers without creating
+an auto-draft lifecycle row or any domain mutation.
+
+Execution requires `--execute`, an attributable `--actor`, and a SKU that matches
+exactly one recommendation. Scheduler-triggered pilot calls, missing actors, zero or
+ambiguous SKU matches, review-only mode, policy rejection, and handoff-validation
+failure all fail closed. A successful pilot passes exactly one item to the existing
+atomic handoff, which bounds the result to one PO and one product line. The result
+returns durable accepted-decision, handoff-decision, PO, and PO-line IDs; stale
+recommendation snapshots are reported as skipped rather than drafted.
+
+The complete operating procedure and evidence queries are in
+`docs/AUTOMATIC-PURCHASING-PILOT-RUNBOOK.md`.
+
+Current local evidence:
+
+- `npm.cmd run check`: passed
+- focused pilot gate: 16 tests passed
+- expanded procurement/writer gate: 81 files and 738 tests passed; 1 file and 17
+  tests skipped
+- production build: passed; 3,596 client modules transformed and server bundle built
+- `git diff --check`: passed, with Windows line-ending notices only
+
+PR #931 merged as `50c6ef02`. PR #933 subsequently fixed production packaging by
+making local `dotenv` loading optional when the runtime already provides a database
+URL; it merged as `9fe4860c` and deployed on Heroku release v2395.
+
+## July 15 production verification and readiness continuation
+
+The deployed read-only exact-SKU command now runs successfully. A preflight for
+`QUAD-BOX-TOP` returned one current recommendation and made no writes. It was
+correctly ineligible under `high_confidence_only`: the recommendation had medium
+confidence, score 59, blocked band, no preferred vendor/vendor product/current quote,
+product-level lead-time fallback, and coupon-discounted demand in its evidence.
+
+Read-only durable-evidence checks immediately afterward found:
+
+- zero automatic-draft lifecycle runs;
+- zero automatic purchase orders; and
+- zero recommendation-to-PO handoffs.
+
+A broader read-only audit found 278 current recommendations and zero policy-eligible
+candidates. The dominant conditions were product lead-time fallback (278), missing
+vendor (248), no recent demand (154), and discounted/free demand mix (92). The 25
+strongest repair candidates had no vendor-product catalog rows. A hypothetical
+in-memory supplier-data simulation still produced no high-confidence candidate because
+demand-review blockers remained. No production data, configuration, policy, or PO was
+changed.
+
+The current readiness slice turns that one-off audit into a bounded reusable command:
+
+```text
+npm run procurement:automatic-purchasing-pilot -- --list --limit=25
+```
+
+It is read-only, performs no lifecycle or domain writes, excludes routine
+non-actionable inventory noise, ranks the useful candidates deterministically, and
+maps supplier/demand blockers to explicit next actions. It separately reports item
+approval-policy eligibility, execution eligibility, and global review-only mode so an
+operator cannot confuse an automation-mode decision with a bad recommendation.
+
+Current local evidence for the readiness slice:
+
+- `npm.cmd run check`: passed
+- focused readiness and CLI gate: 2 files and 24 tests passed
+- expanded procurement/writer gate: 81 files and 747 tests passed; 14 skipped
+- production build: passed; 3,596 client modules transformed and server bundle built
+- `git diff --check`: passed, with Windows line-ending notices only
+
 ## Recommended next implementation order
 
-1. Review and merge the named-schema integration harness slice after its PostgreSQL
-   16 CI run is green.
-2. Decide whether autonomous dead-command replay justifies encrypted request snapshots
-   and a versioned executor registry; the current exact-caller-retry model is safer.
-3. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
+1. Review and merge the read-only readiness report, deploy it, and save the first
+   production readiness artifact.
+2. Correct supplier catalog, lead-time, quote, receive-variant, and demand-evidence
+   gaps only from verified business evidence; do not weaken approval policy.
+3. When the readiness report identifies a genuinely eligible low-risk SKU, run and
+   save its exact-SKU preflight and obtain explicit owner approval.
+4. Execute the one-SKU pilot once and complete the verification/lifecycle runbook
+   before considering any wider unattended purchasing policy.
+
+Autonomous dead-command replay remains deferred. Encrypted request snapshots and a
+versioned executor registry do not currently justify replacing the safer exact-caller
+retry model.
 
 Keep manual quote pricing marked `manual` even when the same quote is optionally
 saved to the vendor catalog. Extended-total quotes remain PO-specific and must not be
@@ -530,7 +622,8 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. PR #927 merged as `5fd643c7`; verify migration 140's production
-> state separately. Verify the named-schema disposable PostgreSQL CI result before
-> describing those three suites as exercised. Do not mutate production without
-> explicit owner approval.
+> unverified item. PR #933 is deployed on Heroku release v2395 and the exact-SKU
+> preflight works in production, but current production evidence found zero eligible
+> candidates and no automatic-purchasing writes. Review the readiness-report branch
+> and pilot runbook; do not weaken policy or execute a production pilot without an
+> eligible exact-SKU preflight and explicit owner approval.
