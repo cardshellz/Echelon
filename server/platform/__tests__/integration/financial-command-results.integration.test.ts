@@ -591,7 +591,7 @@ describeWithDb.sequential("financial command PostgreSQL transactions", () => {
        WHERE actor_id = $1 AND resource_key = $2`,
       [actorId, command.resourceKey],
     );
-    const commandId = stored.rows[0].id;
+    const commandId = Number(stored.rows[0].id);
 
     await expect(pool.query(
       `UPDATE public.financial_command_results
@@ -672,7 +672,7 @@ describeWithDb.sequential("financial command PostgreSQL transactions", () => {
       [actorId, command.resourceKey],
     );
     const input = {
-      commandId: stored.rows[0].id,
+      commandId: Number(stored.rows[0].id),
       operatorId: `operator-${runId}`,
       reason: "Concurrent recovery probe with an intentionally sufficient audit explanation.",
     };
