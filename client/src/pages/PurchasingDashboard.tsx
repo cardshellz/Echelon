@@ -346,6 +346,7 @@ type SupplierSetupGaps = {
     skippedReason: string | null;
     preferredVendorId: number | null;
     preferredVendorName: string | null;
+    vendorProductId: number | null;
     suggestedOrderQty: number;
     orderUomLabel: string;
     blocksCurrentRecommendation: boolean;

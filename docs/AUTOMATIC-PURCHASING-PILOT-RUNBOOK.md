@@ -58,6 +58,14 @@ The readiness report is a discovery aid, not purchase approval. Never change sup
 master data merely to manufacture eligibility; verify every correction from real vendor
 and demand evidence.
 
+For supplier configuration blockers, use the item action in Purchasing Dashboard's
+Supplier Setup Gaps card. The action carries the exact recommendation, product, receive
+variant, known supplier, and known catalog row into Suppliers. Missing-vendor tasks let
+the operator choose the verified supplier and then lock the target product/variant in
+the mapping form. Existing cost or lead-time tasks reopen the exact known mapping.
+Enter only evidence from an actual supplier quote or agreement; the workflow never
+guesses supplier identity, quote economics, MOQ, UOM, or lead time.
+
 ## 2. Run exact-SKU read-only preflight
 
 Run this on an authenticated application dyno, replacing `EXACT-SKU`:
