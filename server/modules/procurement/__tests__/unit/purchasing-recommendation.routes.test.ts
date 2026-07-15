@@ -490,7 +490,7 @@ describe("purchasing recommendation routes", () => {
       action: {
         action: "assign_preferred_vendor",
         label: "Assign vendor",
-        href: "/suppliers",
+        href: expect.stringMatching(/^\/suppliers\?/),
       },
     });
     expect(body.items[0].gaps[0]).toMatchObject({
@@ -500,10 +500,19 @@ describe("purchasing recommendation routes", () => {
     expect(body.items[1]).toMatchObject({
       sku: "MISSING-COST",
       preferredVendorName: "Vendor A",
+      vendorProductId: null,
       action: {
         action: "update_supplier_cost",
         label: "Update cost",
       },
+    });
+    const missingCostUrl = new URL(body.items[1].action.href, "https://echelon.example");
+    expect(Object.fromEntries(missingCostUrl.searchParams)).toMatchObject({
+      setupProductId: "102",
+      setupVariantId: "1002",
+      vendorId: "77",
+      setupAction: "update_supplier_cost",
+      returnTo: "/purchasing",
     });
     expect(body.items[1].gaps[0]).toMatchObject({
       code: "missing_supplier_cost",
@@ -793,6 +802,16 @@ describe("purchasing recommendation routes", () => {
       "quality_review_required",
       "skipped",
     ]);
+    const skippedVendor = allQueue.body.items.find((item: any) => item.kind === "skipped");
+    const skippedVendorUrl = new URL(skippedVendor.action.href, "https://echelon.example");
+    expect(skippedVendor.action).toMatchObject({ action: "assign_vendor", label: "Assign vendor" });
+    expect(Object.fromEntries(skippedVendorUrl.searchParams)).toMatchObject({
+      setupProductId: "201",
+      setupVariantId: "2001",
+      setupAction: "assign_preferred_vendor",
+      recommendationId: "201:2001:30",
+      returnTo: "/purchasing",
+    });
 
     const heldQueue = await requestJson(
       server.url,

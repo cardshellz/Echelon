@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation, useSearch } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -60,6 +61,7 @@ import {
   Trash2,
   Building2,
   Package,
+  ArrowLeft,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -72,6 +74,10 @@ import {
   type VendorCatalogQuoteDraft,
   type VendorCatalogQuoteSnapshot,
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
+import {
+  parseSupplierSetupDeepLink,
+  type SupplierSetupDeepLink,
+} from "@/features/supplier-catalog/supplierSetupDeepLink";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -306,6 +312,7 @@ const EMPTY_VP_FORM = {
   moq: "",
   leadTimeDays: "",
   isPreferred: false,
+  isActive: true,
   notes: "",
 };
 
@@ -316,6 +323,13 @@ const EMPTY_VP_FORM = {
 export default function Suppliers() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [, setLocation] = useLocation();
+  const searchString = useSearch();
+  const setupTarget = useMemo(
+    () => parseSupplierSetupDeepLink(searchString),
+    [searchString],
+  );
+  const setupAutoOpenRef = useRef<string | null>(null);
 
   // Search
   const [search, setSearch] = useState("");
@@ -338,6 +352,7 @@ export default function Suppliers() {
   const [vpOriginalQuote, setVpOriginalQuote] = useState<VendorCatalogQuoteSnapshot | null>(null);
   const [productSearch, setProductSearch] = useState("");
   const [productPopoverOpen, setProductPopoverOpen] = useState(false);
+  const [vpSetupFlow, setVpSetupFlow] = useState(false);
 
   // Delete confirmation
   const [deleteVendorId, setDeleteVendorId] = useState<number | null>(null);
@@ -360,7 +375,7 @@ export default function Suppliers() {
   });
 
   // Vendor products for the currently expanded vendor
-  const { data: vendorProducts = [], isLoading: vpLoading } = useQuery<
+  const { data: vendorProducts = [], isLoading: vpLoading, isFetched: vpFetched } = useQuery<
     VendorProduct[]
   >({
     queryKey: ["/api/vendors", expandedVendorId, "products"],
@@ -423,6 +438,53 @@ export default function Suppliers() {
     if (!vpForm.productId) return [];
     return allVariants.filter((v) => v.productId === vpForm.productId);
   }, [allVariants, vpForm.productId]);
+
+  const setupProduct = setupTarget
+    ? products.find((product) => product.id === setupTarget.productId) ?? null
+    : null;
+  const setupVariant = setupTarget?.productVariantId
+    ? allVariants.find((variant) => variant.id === setupTarget.productVariantId) ?? null
+    : null;
+  const setupSku = setupVariant?.sku ?? setupProduct?.baseSku ?? `Product #${setupTarget?.productId ?? ""}`;
+
+  useEffect(() => {
+    if (!setupTarget?.vendorId) return;
+    const targetVendor = vendors.find((vendor) => vendor.id === setupTarget.vendorId);
+    if (!targetVendor) return;
+
+    setExpandedVendorId(setupTarget.vendorId);
+    const setupKey = [
+      setupTarget.productId,
+      setupTarget.productVariantId ?? "base",
+      setupTarget.vendorId,
+      setupTarget.vendorProductId ?? "new",
+    ].join(":");
+    if (setupAutoOpenRef.current === setupKey) return;
+
+    if (setupTarget.vendorProductId) {
+      if (!vpFetched) return;
+      const existingMapping = vendorProducts.find((mapping) =>
+        mapping.id === setupTarget.vendorProductId &&
+        mapping.vendorId === setupTarget.vendorId &&
+        mapping.productId === setupTarget.productId,
+      );
+      if (!existingMapping) {
+        setupAutoOpenRef.current = setupKey;
+        toast({
+          title: "Supplier mapping changed",
+          description: "The catalog row in this task no longer exists for the expected supplier. Return to Purchasing and refresh the readiness task.",
+          variant: "destructive",
+        });
+        return;
+      }
+      setupAutoOpenRef.current = setupKey;
+      openEditVP(existingMapping, true);
+      return;
+    }
+
+    setupAutoOpenRef.current = setupKey;
+    openCreateVP(setupTarget.vendorId, setupTarget);
+  }, [setupTarget, vendors, vendorProducts, vpFetched, toast]);
 
   // -----------------------------------------------------------------------
   // Vendor CRUD mutations
@@ -570,6 +632,7 @@ export default function Suppliers() {
         ...quoteWrite,
         ...operationalValues,
         isPreferred: form.isPreferred ? 1 : 0,
+        isActive: form.isActive ? 1 : 0,
         notes: form.notes || null,
       });
       return res.json();
@@ -578,8 +641,20 @@ export default function Suppliers() {
       queryClient.invalidateQueries({
         queryKey: ["/api/vendors", expandedVendorId, "products"],
       });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/supplier-setup-gaps"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
       setVpDialogOpen(false);
       setEditingVP(null);
+      if (vpSetupFlow && setupTarget) {
+        setVpSetupFlow(false);
+        toast({
+          title: "Supplier setup saved",
+          description: `${setupSku} will be re-evaluated against current purchasing policy.`,
+        });
+        setLocation(setupTarget.returnTo);
+        return;
+      }
       toast({ title: "Product mapping created" });
     },
     onError: (err: Error) => {
@@ -611,6 +686,7 @@ export default function Suppliers() {
         ...quoteWrite,
         ...operationalValues,
         isPreferred: form.isPreferred ? 1 : 0,
+        isActive: form.isActive ? 1 : 0,
         notes: form.notes || null,
       });
       return res.json();
@@ -619,8 +695,20 @@ export default function Suppliers() {
       queryClient.invalidateQueries({
         queryKey: ["/api/vendors", expandedVendorId, "products"],
       });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/supplier-setup-gaps"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
       setVpDialogOpen(false);
       setEditingVP(null);
+      if (vpSetupFlow && setupTarget) {
+        setVpSetupFlow(false);
+        toast({
+          title: "Supplier setup saved",
+          description: `${setupSku} will be re-evaluated against current purchasing policy.`,
+        });
+        setLocation(setupTarget.returnTo);
+        return;
+      }
       toast({ title: "Product mapping updated" });
     },
     onError: (err: Error) => {
@@ -663,6 +751,46 @@ export default function Suppliers() {
     setVendorDialogOpen(true);
   }
 
+  function openSupplierSetupVP(vendorId: number) {
+    if (!setupTarget) {
+      openCreateVP(vendorId);
+      return;
+    }
+    if (setupTarget.vendorId && setupTarget.vendorId !== vendorId) {
+      toast({
+        title: "Different supplier selected",
+        description: "This task points to an existing supplier mapping. Open that supplier to repair it.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (setupTarget.vendorProductId) {
+      const existingMapping = vendorProducts.find((mapping) => mapping.id === setupTarget.vendorProductId);
+      if (!existingMapping) {
+        toast({
+          title: vpFetched ? "Supplier mapping changed" : "Supplier mapping is still loading",
+          description: vpFetched
+            ? "Return to Purchasing and refresh the readiness task before editing supplier data."
+            : "Wait for the supplier catalog to load, then try again.",
+          variant: vpFetched ? "destructive" : "default",
+        });
+        return;
+      }
+      openEditVP(existingMapping, true);
+      return;
+    }
+    const existingTargetMapping = vendorProducts.find((mapping) =>
+      mapping.vendorId === vendorId &&
+      mapping.productId === setupTarget.productId &&
+      (mapping.productVariantId ?? null) === setupTarget.productVariantId,
+    );
+    if (existingTargetMapping) {
+      openEditVP(existingTargetMapping, true);
+      return;
+    }
+    openCreateVP(vendorId, setupTarget);
+  }
+
   function openEditVendor(v: Vendor) {
     setEditingVendor(v);
     setVendorForm({
@@ -690,17 +818,27 @@ export default function Suppliers() {
     setVendorDialogOpen(true);
   }
 
-  function openCreateVP(vendorId: number) {
+  function openCreateVP(vendorId: number, target: SupplierSetupDeepLink | null = null) {
+    setExpandedVendorId(vendorId);
     setEditingVP(null);
-    setVpForm({ ...EMPTY_VP_FORM });
+    setVpSetupFlow(Boolean(target));
+    setVpForm(target
+      ? {
+          ...EMPTY_VP_FORM,
+          productId: target.productId,
+          productVariantId: target.productVariantId,
+          isPreferred: true,
+        }
+      : { ...EMPTY_VP_FORM });
     setVpQuoteDraft(createNewVendorCatalogQuoteDraft());
     setVpOriginalQuote(null);
     setProductSearch("");
     setVpDialogOpen(true);
   }
 
-  function openEditVP(vp: VendorProduct) {
+  function openEditVP(vp: VendorProduct, fromSetup = false) {
     setEditingVP(vp);
+    setVpSetupFlow(fromSetup);
     setVpForm({
       productId: vp.productId,
       productVariantId: vp.productVariantId,
@@ -710,6 +848,7 @@ export default function Suppliers() {
       moq: vp.moq != null ? String(vp.moq) : "",
       leadTimeDays: vp.leadTimeDays != null ? String(vp.leadTimeDays) : "",
       isPreferred: vp.isPreferred === 1,
+      isActive: vp.isActive !== 0,
       notes: vp.notes || "",
     });
     setVpQuoteDraft(createVendorCatalogQuoteDraft(vp));
@@ -836,6 +975,36 @@ export default function Suppliers() {
           Add Supplier
         </Button>
       </div>
+
+      {setupTarget && (
+        <Card className="border-blue-300 bg-blue-50/40">
+          <CardContent className="p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge className="bg-blue-600">Purchasing setup task</Badge>
+                <span className="font-mono text-sm font-semibold text-blue-900">{setupSku}</span>
+                {setupTarget.recommendationId && (
+                  <span className="text-xs text-muted-foreground">
+                    recommendation {setupTarget.recommendationId}
+                  </span>
+                )}
+              </div>
+              <p className="text-sm font-medium">
+                Complete the verified supplier mapping for {setupProduct?.name ?? `product ${setupTarget.productId}`}.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {setupTarget.vendorId
+                  ? "The known supplier mapping is opening automatically. Confirm the quote basis, quote date, validity, lead time, MOQ, purchase UOM, and preferred status."
+                  : "Expand the verified supplier below and choose Map target SKU. The exact product and receive variant will be locked into the mapping form."}
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => setLocation(setupTarget.returnTo)}>
+              <ArrowLeft className="h-4 w-4 mr-1.5" />
+              Back to purchasing
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Summary Bar */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
@@ -1001,13 +1170,22 @@ export default function Suppliers() {
                         <Button
                           variant="outline"
                           size="sm"
+                          disabled={Boolean(setupTarget && (!setupTarget.vendorId || setupTarget.vendorId === v.id)) && v.active !== 1}
                           onClick={(e) => {
                             e.stopPropagation();
-                            openCreateVP(v.id);
+                            if (setupTarget && (!setupTarget.vendorId || setupTarget.vendorId === v.id)) {
+                              openSupplierSetupVP(v.id);
+                            } else {
+                              openCreateVP(v.id);
+                            }
                           }}
                         >
                           <Plus className="h-3 w-3 mr-1" />
-                          Add Product
+                          {setupTarget?.vendorProductId && setupTarget.vendorId === v.id
+                            ? "Edit target mapping"
+                            : setupTarget && (!setupTarget.vendorId || setupTarget.vendorId === v.id)
+                              ? "Map target SKU"
+                              : "Add Product"}
                         </Button>
                         <Button
                           variant="outline"
@@ -1248,10 +1426,21 @@ export default function Suppliers() {
                               </h3>
                               <Button
                                 size="sm"
-                                onClick={() => openCreateVP(v.id)}
+                                disabled={Boolean(setupTarget && (!setupTarget.vendorId || setupTarget.vendorId === v.id)) && v.active !== 1}
+                                onClick={() => {
+                                  if (setupTarget && (!setupTarget.vendorId || setupTarget.vendorId === v.id)) {
+                                    openSupplierSetupVP(v.id);
+                                  } else {
+                                    openCreateVP(v.id);
+                                  }
+                                }}
                               >
                                 <Plus className="h-3.5 w-3.5 mr-1" />
-                                Add Product
+                                {setupTarget?.vendorProductId && setupTarget.vendorId === v.id
+                                  ? `Edit ${setupSku}`
+                                  : setupTarget && (!setupTarget.vendorId || setupTarget.vendorId === v.id)
+                                    ? `Map ${setupSku}`
+                                    : "Add Product"}
                               </Button>
                             </div>
 
@@ -1709,7 +1898,13 @@ export default function Suppliers() {
       {/* ================================================================= */}
       {/* Add / Edit Vendor Product Dialog                                   */}
       {/* ================================================================= */}
-      <Dialog open={vpDialogOpen} onOpenChange={setVpDialogOpen}>
+      <Dialog
+        open={vpDialogOpen}
+        onOpenChange={(open) => {
+          setVpDialogOpen(open);
+          if (!open) setVpSetupFlow(false);
+        }}
+      >
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
@@ -1718,7 +1913,9 @@ export default function Suppliers() {
             <DialogDescription>
               {editingVP
                 ? "Update vendor product details."
-                : "Map an internal product to this vendor's catalog."}
+                : vpSetupFlow
+                  ? "Complete this purchasing readiness task with verified supplier evidence."
+                  : "Map an internal product to this vendor's catalog."}
             </DialogDescription>
           </DialogHeader>
 
@@ -1734,7 +1931,7 @@ export default function Suppliers() {
                   <Button
                     variant="outline"
                     role="combobox"
-                    disabled={!!editingVP}
+                    disabled={!!editingVP || vpSetupFlow}
                     className="w-full justify-between h-10 font-normal"
                   >
                     {vpForm.productId
@@ -1796,9 +1993,9 @@ export default function Suppliers() {
                   </Command>
                 </PopoverContent>
               </Popover>
-              {editingVP && (
+              {(editingVP || vpSetupFlow) && (
                 <p className="text-xs text-muted-foreground">
-                  Product and variant identify this historical catalog mapping and cannot be reassigned.
+                  Product and variant identify this purchasing task and cannot be reassigned here.
                 </p>
               )}
             </div>
@@ -1808,7 +2005,7 @@ export default function Suppliers() {
               <div className="space-y-2">
                 <Label>Variant</Label>
                 <Select
-                  disabled={!!editingVP}
+                  disabled={!!editingVP || vpSetupFlow}
                   value={
                     vpForm.productVariantId
                       ? String(vpForm.productVariantId)
@@ -1927,17 +2124,28 @@ export default function Suppliers() {
               </div>
             </div>
 
-            {/* Preferred toggle */}
-            <div className="flex items-center gap-3">
-              <Switch
-                checked={vpForm.isPreferred}
-                onCheckedChange={(checked) =>
-                  setVpForm((f) => ({ ...f, isPreferred: checked }))
-                }
-              />
-              <Label className="cursor-pointer">
-                Preferred supplier for this product
-              </Label>
+            {/* Active / preferred controls */}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="flex items-center gap-3">
+                <Switch
+                  checked={vpForm.isActive}
+                  onCheckedChange={(checked) =>
+                    setVpForm((f) => ({ ...f, isActive: checked }))
+                  }
+                />
+                <Label className="cursor-pointer">Active supplier mapping</Label>
+              </div>
+              <div className="flex items-center gap-3">
+                <Switch
+                  checked={vpForm.isPreferred}
+                  onCheckedChange={(checked) =>
+                    setVpForm((f) => ({ ...f, isPreferred: checked }))
+                  }
+                />
+                <Label className="cursor-pointer">
+                  Preferred supplier for this product
+                </Label>
+              </div>
             </div>
 
             {/* Notes */}
