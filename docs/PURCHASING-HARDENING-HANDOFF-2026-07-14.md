@@ -14,21 +14,23 @@ durable transactional command ledger. PR #926 then migrated invoice approve,
 dispute, and void transitions. PR #927 added command-ledger monitoring,
 retention, and audited dead-command recovery; PR #929 repaired the named-schema
 integration harness; PR #931 added the controlled one-SKU automatic-purchasing
-pilot; and PR #933 fixed its production CLI dependency loading. The current local
-slice adds read-only automatic-purchasing candidate discovery and readiness ranking.
+pilot; PR #933 fixed its production CLI dependency loading; and PR #935 added
+read-only automatic-purchasing candidate discovery and readiness ranking. The current
+local slice makes supplier-readiness blockers directly remediable without guessing
+supplier data.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/automatic-purchasing-readiness-2026-07-15`
-- Base and current `origin/main`: `9fe4860c`
-- Base hardening slice: merged PR #933
-- Deployment status: PR #933 is live on Heroku release v2395
+- Branch: `codex/automatic-purchasing-readiness-ui-2026-07-15`
+- Base and current `origin/main`: `77eee7e7`
+- Base hardening slice: merged PR #935
+- Deployment status: PR #935 is live on Heroku release v2397
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
 - Migration 140 status: merged in PR #927; production state was not re-audited in
   this July 15 readiness continuation
-- Commit/PR status: automatic-purchasing readiness slice is local and not yet published
+- Commit/PR status: exact supplier-remediation slice is local and not yet published
 
 Do not deploy this branch without owner approval.
 
@@ -579,7 +581,7 @@ in-memory supplier-data simulation still produced no high-confidence candidate b
 demand-review blockers remained. No production data, configuration, policy, or PO was
 changed.
 
-The current readiness slice turns that one-off audit into a bounded reusable command:
+PR #935 turned that one-off audit into a bounded reusable command:
 
 ```text
 npm run procurement:automatic-purchasing-pilot -- --list --limit=25
@@ -591,18 +593,36 @@ maps supplier/demand blockers to explicit next actions. It separately reports it
 approval-policy eligibility, execution eligibility, and global review-only mode so an
 operator cannot confuse an automation-mode decision with a bad recommendation.
 
-Current local evidence for the readiness slice:
+Its production run on Heroku release v2397 completed successfully and reported:
+
+- 278 recommendations analyzed;
+- 32 relevant readiness candidates and 25 returned by the display limit;
+- zero approval-policy or execution-eligible candidates;
+- all 32 classified as requiring both configuration and demand review;
+- all 32 missing a preferred vendor and using product-level lead-time fallback;
+- 20 with discounted/free demand mix, 16 with thin history, 4 with new demand,
+  and 1 with falling demand.
+
+The report performed no lifecycle or PO writes. The local supplier-remediation slice
+now changes the existing Supplier Setup Gaps actions from generic `/suppliers` links
+into exact task links carrying product, receive variant, recommendation, known vendor,
+and known vendor-product identity. Suppliers locks the task target, preselects
+preferred status for missing-vendor setup, opens a known mapping for quote/lead-time
+repair, invalidates purchasing diagnostics after save, and returns the operator to
+Purchasing. Supplier identity and commercial values still require verified human
+evidence; nothing is inferred or fabricated.
+
+Current local evidence for the supplier-remediation slice:
 
 - `npm.cmd run check`: passed
-- focused readiness and CLI gate: 2 files and 24 tests passed
-- expanded procurement/writer gate: 81 files and 747 tests passed; 14 skipped
-- production build: passed; 3,596 client modules transformed and server bundle built
+- focused server/client contract gate: 3 files and 31 tests passed
+- expanded procurement/supplier/writer gate: 83 files and 760 tests passed; 14 skipped
+- production build: passed; 3,597 client modules transformed and server bundle built
 - `git diff --check`: passed, with Windows line-ending notices only
 
 ## Recommended next implementation order
 
-1. Review and merge the read-only readiness report, deploy it, and save the first
-   production readiness artifact.
+1. Review and merge the exact supplier-remediation workflow.
 2. Correct supplier catalog, lead-time, quote, receive-variant, and demand-evidence
    gaps only from verified business evidence; do not weaken approval policy.
 3. When the readiness report identifies a genuinely eligible low-risk SKU, run and
@@ -622,8 +642,9 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. PR #933 is deployed on Heroku release v2395 and the exact-SKU
-> preflight works in production, but current production evidence found zero eligible
-> candidates and no automatic-purchasing writes. Review the readiness-report branch
-> and pilot runbook; do not weaken policy or execute a production pilot without an
-> eligible exact-SKU preflight and explicit owner approval.
+> unverified item. PR #935 is deployed on Heroku release v2397. Its production
+> readiness report found 32 candidates, zero eligible, and no automatic-purchasing
+> writes; all 32 require supplier configuration plus demand review. Review the exact
+> supplier-remediation branch and pilot runbook. Do not invent supplier data, weaken
+> policy, or execute a production pilot without an eligible exact-SKU preflight and
+> explicit owner approval.

@@ -30,7 +30,7 @@ import {
 } from "./forecast-input-gap-diagnostics.service";
 import { loadPurchasingRecommendationContext } from "./purchasing-recommendation-context.service";
 import { resolveRecommendationPoQuantity } from "./recommendation-po-quantity";
-import { buildSupplierSetupGaps } from "./supplier-setup-gaps.service";
+import { buildSupplierSetupGaps, buildSupplierSetupHref } from "./supplier-setup-gaps.service";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
 function parseRunHistoryLimit(value: unknown): number {
@@ -427,7 +427,11 @@ function reviewQueueAction(item: PurchasingRecommendationItem, kind: Recommendat
 
   switch (item.reviewSignal?.action) {
     case "assign_vendor":
-      return { action: "assign_vendor", label: "Assign vendor", href: "/suppliers" };
+      return {
+        action: "assign_vendor",
+        label: "Assign vendor",
+        href: buildSupplierSetupHref(item, "assign_preferred_vendor"),
+      };
     case "review_open_po":
       return { action: "review_open_po", label: "Review open PO", href: "/purchase-orders" };
     case "review_exclusion":

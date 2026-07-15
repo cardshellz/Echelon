@@ -14,15 +14,33 @@ const supplierSetupGapCodes = new Set([
   "product_lead_time_fallback",
 ]);
 
-const supplierSetupGapActions: Record<string, { action: string; label: string; href: string }> = {
-  missing_vendor: { action: "assign_preferred_vendor", label: "Assign vendor", href: "/suppliers" },
-  missing_supplier_cost: { action: "update_supplier_cost", label: "Update cost", href: "/suppliers" },
-  last_purchase_cost: { action: "verify_supplier_cost", label: "Verify cost", href: "/suppliers" },
-  stale_supplier_cost: { action: "verify_supplier_cost", label: "Verify cost", href: "/suppliers" },
-  unverified_supplier_cost: { action: "verify_supplier_cost", label: "Verify cost", href: "/suppliers" },
-  default_lead_time: { action: "set_vendor_lead_time", label: "Set lead time", href: "/suppliers" },
-  product_lead_time_fallback: { action: "set_vendor_lead_time", label: "Set lead time", href: "/suppliers" },
+const supplierSetupGapActions: Record<string, { action: string; label: string }> = {
+  missing_vendor: { action: "assign_preferred_vendor", label: "Assign vendor" },
+  missing_supplier_cost: { action: "update_supplier_cost", label: "Update cost" },
+  last_purchase_cost: { action: "verify_supplier_cost", label: "Verify cost" },
+  stale_supplier_cost: { action: "verify_supplier_cost", label: "Verify cost" },
+  unverified_supplier_cost: { action: "verify_supplier_cost", label: "Verify cost" },
+  default_lead_time: { action: "set_vendor_lead_time", label: "Set lead time" },
+  product_lead_time_fallback: { action: "set_vendor_lead_time", label: "Set lead time" },
 };
+
+export function buildSupplierSetupHref(
+  item: PurchasingRecommendationItem,
+  action: string,
+): string {
+  const params = new URLSearchParams({
+    setupProductId: String(item.productId),
+    setupAction: action,
+    recommendationId: item.recommendationId,
+    returnTo: "/purchasing",
+  });
+  if (item.productVariantId) params.set("setupVariantId", String(item.productVariantId));
+  if (item.preferredVendorId) params.set("vendorId", String(item.preferredVendorId));
+  if (item.supplierBasis.vendorProductId) {
+    params.set("vendorProductId", String(item.supplierBasis.vendorProductId));
+  }
+  return `/suppliers?${params.toString()}`;
+}
 
 function supplierSetupGapPriority(code: string): number {
   switch (code) {
@@ -102,10 +120,13 @@ export function buildSupplierSetupGaps(result: ReturnType<typeof generatePurchas
     }
 
     const primaryControl = controls[0];
-    const action = supplierSetupGapActions[primaryControl.code] ?? {
+    const actionDefinition = supplierSetupGapActions[primaryControl.code] ?? {
       action: "review_supplier_setup",
       label: "Review",
-      href: "/suppliers",
+    };
+    const action = {
+      ...actionDefinition,
+      href: buildSupplierSetupHref(item, actionDefinition.action),
     };
 
     return [{
@@ -119,6 +140,7 @@ export function buildSupplierSetupGaps(result: ReturnType<typeof generatePurchas
       skippedReason: item.skippedReason,
       preferredVendorId: item.preferredVendorId,
       preferredVendorName: item.preferredVendorName,
+      vendorProductId: item.supplierBasis.vendorProductId,
       suggestedOrderQty: item.suggestedOrderQty,
       orderUomLabel: item.orderUomLabel,
       blocksCurrentRecommendation,
