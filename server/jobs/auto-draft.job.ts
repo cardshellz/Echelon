@@ -99,6 +99,74 @@ export interface AutomaticPurchasingPilotPreview {
   };
 }
 
+export type AutomaticPurchasingReadinessStatus =
+  | "eligible"
+  | "automation_disabled"
+  | "configuration_required"
+  | "demand_review_required"
+  | "configuration_and_demand_review_required"
+  | "policy_review_required";
+
+export interface AutomaticPurchasingReadinessReport {
+  mode: "readiness";
+  generatedAt: string;
+  limit: number;
+  lookbackDays: number;
+  itemsAnalyzed: number;
+  autoDraftMode: "draft_po" | "review_only";
+  approvalPolicy: NonNullable<AutoDraftRecommendationSettings["approvalPolicy"]>;
+  recommendationSummary: ReturnType<typeof generatePurchasingRecommendations>["summary"];
+  summary: {
+    candidateCount: number;
+    returnedCandidateCount: number;
+    eligibleCount: number;
+    automationDisabledCount: number;
+    configurationRequiredCount: number;
+    demandReviewRequiredCount: number;
+    configurationAndDemandReviewRequiredCount: number;
+    policyReviewRequiredCount: number;
+  };
+  blockerCounts: Record<string, number>;
+  candidates: Array<{
+    readinessStatus: AutomaticPurchasingReadinessStatus;
+    approvalPolicyEligible: boolean;
+    executionEligible: boolean;
+    sku: string;
+    productName: string;
+    recommendationId: string;
+    productId: number;
+    productVariantId: number | null;
+    status: PurchasingRecommendationItem["status"];
+    skippedReason: PurchasingRecommendationItem["skippedReason"];
+    suggestedOrderPieces: number;
+    orderUomUnits: number;
+    orderUomLabel: string;
+    preferredVendorId: number | null;
+    preferredVendorName: string | null;
+    vendorProductId: number | null;
+    confidence: PurchasingRecommendationItem["confidence"];
+    candidateScore: number;
+    candidateBand: PurchasingRecommendationItem["recommendationCandidateScore"]["band"];
+    forecastTrust: PurchasingRecommendationItem["demandBasis"]["forecastTrust"];
+    demandOrderCount: number | null;
+    demandActiveDays: number | null;
+    latestDemandAt: string | Date | null;
+    pricingBasis: PurchasingRecommendationItem["supplierBasis"]["pricingBasis"];
+    purchaseUom: string | null;
+    piecesPerPurchaseUom: number | null;
+    minimumOrderPieces: number | null;
+    quotedUnitCostMills: number | null;
+    quoteReference: string | null;
+    quotedAt: string | Date | null;
+    quoteValidUntil: string | null;
+    blockers: PurchasingRecommendationItem["autopilotBlockers"];
+    nextActions: Array<{
+      code: string;
+      detail: string;
+    }>;
+  }>;
+}
+
 export class AutomaticPurchasingPilotError extends Error {
   readonly code = "AUTOMATIC_PURCHASING_PILOT_BLOCKED";
 
@@ -325,6 +393,117 @@ function buildPilotPreview(input: {
   return { preview, handoffItem };
 }
 
+const readinessActionByArea: Record<
+  PurchasingRecommendationItem["autopilotBlockers"][number]["area"],
+  { code: string; detail: string }
+> = {
+  demand: {
+    code: "review_demand_evidence",
+    detail: "Review demand provenance, promotion mix, sample depth, and trend; do not bypass the approval policy.",
+  },
+  lead_time: {
+    code: "configure_vendor_lead_time",
+    detail: "Set the supplier-specific lead time on the preferred vendor-product row.",
+  },
+  supplier_cost: {
+    code: "verify_supplier_quote",
+    detail: "Record a current verified supplier quote with its date and validity.",
+  },
+  vendor: {
+    code: "assign_preferred_vendor",
+    detail: "Create or select one active preferred vendor-product mapping.",
+  },
+  receive_configuration: {
+    code: "configure_receive_variant",
+    detail: "Assign an active receive variant with the correct units-per-variant.",
+  },
+  supplier_catalog: {
+    code: "complete_supplier_catalog",
+    detail: "Complete the supplier quote basis, purchase UOM, quantity multiple, and MOQ configuration.",
+  },
+};
+
+function buildReadinessCandidate(input: {
+  item: PurchasingRecommendationItem;
+  approvalPolicyEligible: boolean;
+  executionEnabled: boolean;
+}) {
+  const { item, approvalPolicyEligible, executionEnabled } = input;
+  const executionEligible = executionEnabled && approvalPolicyEligible;
+  const hasConfigurationBlocker = item.autopilotBlockers.some((blocker) => blocker.area !== "demand");
+  const hasDemandBlocker = item.autopilotBlockers.some((blocker) => blocker.area === "demand");
+  let readinessStatus: AutomaticPurchasingReadinessStatus = "policy_review_required";
+  if (executionEligible) readinessStatus = "eligible";
+  else if (approvalPolicyEligible) readinessStatus = "automation_disabled";
+  else if (hasConfigurationBlocker && hasDemandBlocker) {
+    readinessStatus = "configuration_and_demand_review_required";
+  } else if (hasConfigurationBlocker) readinessStatus = "configuration_required";
+  else if (hasDemandBlocker) readinessStatus = "demand_review_required";
+  const seenActions = new Set<string>();
+  const nextActions = item.autopilotBlockers.flatMap((blocker) => {
+    const action = readinessActionByArea[blocker.area];
+    if (seenActions.has(action.code)) return [];
+    seenActions.add(action.code);
+    return [action];
+  });
+  if (readinessStatus === "automation_disabled") {
+    nextActions.push({
+      code: "review_automatic_purchasing_mode",
+      detail: "Obtain the required operational approval before changing automatic purchasing from review-only mode.",
+    });
+  } else if (readinessStatus === "policy_review_required" && nextActions.length === 0) {
+    nextActions.push({
+      code: "review_candidate_score",
+      detail: "Review the recommendation evidence and candidate score; do not weaken the configured approval policy.",
+    });
+  }
+
+  return {
+    readinessStatus,
+    approvalPolicyEligible,
+    executionEligible,
+    sku: item.sku,
+    productName: item.productName,
+    recommendationId: item.recommendationId,
+    productId: item.productId,
+    productVariantId: item.productVariantId ?? null,
+    status: item.status,
+    skippedReason: item.skippedReason,
+    suggestedOrderPieces: item.suggestedOrderPieces,
+    orderUomUnits: item.orderUomUnits,
+    orderUomLabel: item.orderUomLabel,
+    preferredVendorId: item.preferredVendorId,
+    preferredVendorName: item.preferredVendorName,
+    vendorProductId: item.supplierBasis.vendorProductId,
+    confidence: item.confidence,
+    candidateScore: item.recommendationCandidateScore.score,
+    candidateBand: item.recommendationCandidateScore.band,
+    forecastTrust: item.demandBasis.forecastTrust,
+    demandOrderCount: item.demandBasis.demandOrderCount,
+    demandActiveDays: item.demandBasis.demandActiveDays,
+    latestDemandAt: item.demandBasis.latestDemandAt,
+    pricingBasis: item.supplierBasis.pricingBasis,
+    purchaseUom: item.supplierBasis.purchaseUom,
+    piecesPerPurchaseUom: item.supplierBasis.piecesPerPurchaseUom,
+    minimumOrderPieces: item.supplierBasis.minimumOrderPieces,
+    quotedUnitCostMills: item.supplierBasis.quotedUnitCostMills,
+    quoteReference: item.supplierBasis.quoteReference,
+    quotedAt: item.supplierBasis.quotedAt,
+    quoteValidUntil: item.supplierBasis.quoteValidUntil,
+    blockers: item.autopilotBlockers,
+    nextActions,
+  };
+}
+
+const readinessStatusRank: Record<AutomaticPurchasingReadinessStatus, number> = {
+  eligible: 0,
+  automation_disabled: 1,
+  configuration_required: 2,
+  configuration_and_demand_review_required: 3,
+  demand_review_required: 4,
+  policy_review_required: 5,
+};
+
 async function loadAutoDraftAnalysis() {
   const storage = { ...procurementMethods, ...inventoryStorage };
   const settings = await storage.getAutoDraftSettings() as AutoDraftJobSettings;
@@ -355,6 +534,63 @@ export async function previewAutomaticPurchasingPilot(
     settings: analysis.settings,
     items: analysis.recommendationResult.items,
   }).preview;
+}
+
+export async function reportAutomaticPurchasingReadiness(input: {
+  limit?: number;
+} = {}): Promise<AutomaticPurchasingReadinessReport> {
+  const limit = input.limit ?? 25;
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+    throw new RangeError("Automatic purchasing readiness limit must be between 1 and 100");
+  }
+  const analysis = await loadAutoDraftAnalysis();
+  const candidates = analysis.recommendationResult.items
+    .filter((item) =>
+      passesAutoDraftApprovalPolicy(item, analysis.settings) ||
+      item.actionable ||
+      item.skippedReason === "no_vendor",
+    )
+    .map((item) => buildReadinessCandidate({
+      item,
+      approvalPolicyEligible: passesAutoDraftApprovalPolicy(item, analysis.settings),
+      executionEnabled: shouldCreateDraftPos(analysis.settings),
+    }))
+    .sort((left, right) =>
+      readinessStatusRank[left.readinessStatus] - readinessStatusRank[right.readinessStatus] ||
+      left.blockers.length - right.blockers.length ||
+      right.candidateScore - left.candidateScore ||
+      left.sku.localeCompare(right.sku),
+    );
+  const blockerCounts = candidates.flatMap((candidate) => candidate.blockers)
+    .reduce<Record<string, number>>((counts, blocker) => {
+      counts[blocker.code] = (counts[blocker.code] ?? 0) + 1;
+      return counts;
+    }, {});
+  const countStatus = (status: AutomaticPurchasingReadinessStatus) =>
+    candidates.filter((candidate) => candidate.readinessStatus === status).length;
+
+  return {
+    mode: "readiness",
+    generatedAt: new Date().toISOString(),
+    limit,
+    lookbackDays: analysis.lookbackDays,
+    itemsAnalyzed: analysis.rawData.length,
+    autoDraftMode: analysis.settings.autoDraftMode ?? "draft_po",
+    approvalPolicy: analysis.settings.approvalPolicy ?? "high_confidence_only",
+    recommendationSummary: analysis.recommendationResult.summary,
+    summary: {
+      candidateCount: candidates.length,
+      returnedCandidateCount: Math.min(candidates.length, limit),
+      eligibleCount: countStatus("eligible"),
+      automationDisabledCount: countStatus("automation_disabled"),
+      configurationRequiredCount: countStatus("configuration_required"),
+      demandReviewRequiredCount: countStatus("demand_review_required"),
+      configurationAndDemandReviewRequiredCount: countStatus("configuration_and_demand_review_required"),
+      policyReviewRequiredCount: countStatus("policy_review_required"),
+    },
+    blockerCounts,
+    candidates: candidates.slice(0, limit),
+  };
 }
 
 async function executeAutoDraftJob(

@@ -64,6 +64,7 @@ vi.mock("../../../modules/procurement/auto-draft-po-escalation.service", () => (
 
 import {
   previewAutomaticPurchasingPilot,
+  reportAutomaticPurchasingReadiness,
   runAutoDraftJob,
 } from "../../auto-draft.job";
 
@@ -365,6 +366,152 @@ describe("auto-draft job", () => {
         },
       },
     });
+  });
+
+  it("reports ranked automatic-purchasing readiness without lifecycle or PO writes", async () => {
+    const report = await reportAutomaticPurchasingReadiness();
+
+    expect(mocks.lifecycle.startRun).not.toHaveBeenCalled();
+    expect(mocks.lifecycle.heartbeatRun).not.toHaveBeenCalled();
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+    expect(report).toMatchObject({
+      mode: "readiness",
+      lookbackDays: 90,
+      itemsAnalyzed: 1,
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_only",
+      summary: {
+        candidateCount: 1,
+        eligibleCount: 1,
+        automationDisabledCount: 0,
+        configurationRequiredCount: 0,
+        demandReviewRequiredCount: 0,
+        configurationAndDemandReviewRequiredCount: 0,
+        policyReviewRequiredCount: 0,
+      },
+      blockerCounts: {},
+      candidates: [{
+        readinessStatus: "eligible",
+        approvalPolicyEligible: true,
+        executionEligible: true,
+        sku: "HIGH-1",
+        recommendationId: "1:11:90",
+        suggestedOrderPieces: 4,
+        preferredVendorId: 7,
+        vendorProductId: 701,
+        confidence: "high",
+        blockers: [],
+        nextActions: [],
+      }],
+    });
+  });
+
+  it("turns supplier and demand blockers into explicit readiness actions", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([{
+      ...recommendationRows()[0],
+      preferred_vendor_id: null,
+      vendor_product_id: null,
+      estimated_cost_mills: null,
+      vendor_pricing_basis: null,
+      vendor_quoted_unit_cost_mills: null,
+      vendor_quote_reference: null,
+      vendor_quoted_at: null,
+      vendor_quote_valid_until: null,
+      paid_demand_pieces: 40,
+      coupon_discount_demand_pieces: 20,
+    }]);
+
+    const report = await reportAutomaticPurchasingReadiness({ limit: 5 });
+
+    expect(report.summary).toMatchObject({
+      candidateCount: 1,
+      eligibleCount: 0,
+      configurationAndDemandReviewRequiredCount: 1,
+    });
+    expect(report.blockerCounts).toMatchObject({
+      missing_vendor: 1,
+      discounted_or_free_demand_mix: 1,
+    });
+    expect(report.candidates[0]).toMatchObject({
+      readinessStatus: "configuration_and_demand_review_required",
+      approvalPolicyEligible: false,
+      executionEligible: false,
+      sku: "HIGH-1",
+      preferredVendorId: null,
+      vendorProductId: null,
+      nextActions: expect.arrayContaining([
+        expect.objectContaining({ code: "assign_preferred_vendor" }),
+        expect.objectContaining({ code: "review_demand_evidence" }),
+      ]),
+    });
+  });
+
+  it("distinguishes review-only mode from item-level policy readiness", async () => {
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "review_only",
+      approvalPolicy: "high_confidence_only",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+    });
+
+    const report = await reportAutomaticPurchasingReadiness();
+
+    expect(report.summary).toMatchObject({
+      candidateCount: 1,
+      eligibleCount: 0,
+      automationDisabledCount: 1,
+    });
+    expect(report.candidates[0]).toMatchObject({
+      readinessStatus: "automation_disabled",
+      approvalPolicyEligible: true,
+      executionEligible: false,
+      nextActions: [expect.objectContaining({ code: "review_automatic_purchasing_mode" })],
+    });
+  });
+
+  it("omits non-actionable inventory noise and validates readiness limits before analysis", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      {
+        ...recommendationRows()[0],
+        product_id: 3,
+        variant_id: 33,
+        base_sku: "CONFIG-3",
+        preferred_vendor_id: null,
+        vendor_product_id: null,
+        estimated_cost_mills: null,
+        vendor_pricing_basis: null,
+        vendor_quoted_unit_cost_mills: null,
+        vendor_quote_reference: null,
+        vendor_quoted_at: null,
+        vendor_quote_valid_until: null,
+      },
+      ...recommendationRows(),
+      {
+        ...recommendationRows()[0],
+        product_id: 2,
+        variant_id: 22,
+        base_sku: "NO-MOVEMENT-2",
+        total_outbound_pieces: 0,
+        previous_outbound_pieces: 0,
+        demand_order_count: 0,
+        demand_active_days: 0,
+        vendor_product_id: 702,
+      },
+    ]);
+
+    const report = await reportAutomaticPurchasingReadiness({ limit: 1 });
+    expect(report).toMatchObject({
+      limit: 1,
+      itemsAnalyzed: 3,
+      summary: { candidateCount: 2, returnedCandidateCount: 1 },
+      candidates: [{ sku: "HIGH-1" }],
+    });
+
+    vi.clearAllMocks();
+    await expect(reportAutomaticPurchasingReadiness({ limit: 0 })).rejects.toThrow("between 1 and 100");
+    await expect(reportAutomaticPurchasingReadiness({ limit: 101 })).rejects.toThrow("between 1 and 100");
+    expect(mocks.procurement.getAutoDraftSettings).not.toHaveBeenCalled();
   });
 
   it("executes a pilot with exactly one SKU even when other recommendations are eligible", async () => {
