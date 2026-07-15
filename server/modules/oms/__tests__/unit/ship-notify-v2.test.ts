@@ -823,6 +823,105 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
   });
 
+  it("deducts an off-order concession item without changing order fulfillment", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7005,
+      orderId: 555005,
+      orderKey: "echelon-wms-reship-9005",
+      trackingNumber: "1Z-CONCESSION",
+      shipmentItems: [
+        { lineItemKey: null, sku: "FREE-SKU", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordShipment: vi.fn(async () => undefined),
+    };
+    const mock = makeDb([
+      {
+        rows: [{
+          id: 9005,
+          order_id: 42,
+          source: "shipstation_reship_adopted",
+          status: "shipped",
+          shipment_purpose: "replacement",
+          replaces_shipment_id: 501,
+          replacement_reason: "concession",
+          external_fulfillment_id: "shipstation_shipment:7005",
+          tracking_number: "1Z-CONCESSION",
+        }],
+      },
+      {
+        rows: [{
+          id: 91005,
+          order_item_id: null,
+          replacement_for_order_item_id: null,
+          sku: "FREE-SKU",
+          qty: 1,
+          shipment_purpose: "replacement",
+        }],
+      },
+      {
+        rows: [{
+          id: 91005,
+          order_item_id: null,
+          product_variant_id: 40002,
+          from_location_id: 50001,
+          box_id: null,
+          weight_oz: 4,
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 91005,
+          order_item_id: null,
+          replacement_for_order_item_id: null,
+          shipment_item_purpose: "concession",
+          inventory_order_item_id: null,
+          product_variant_id: 40002,
+          qty: 1,
+          pick_location_id: 50001,
+          shipment_purpose: "replacement",
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 9005,
+          order_id: 42,
+          status: "shipped",
+          tracking_number: "1Z-CONCESSION",
+          carrier: "UPS",
+          service_code: "ups_ground",
+          carrier_cost_cents: 0,
+        }],
+      },
+      { rows: [{ id: 42, warehouse_status: "shipped", completed_at: SHIP_DATE }] },
+      { rows: [{ status: "shipped" }, { status: "shipped" }] },
+      { rows: [] },
+    ]);
+
+    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+    const processed = await createShipStationService(mock.db, inventoryCore)
+      .processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
+      orderItemId: null,
+      shipmentItemId: 91005,
+      qty: 1,
+      shipmentId: "9005",
+      deductFromOnHandOnly: true,
+      releaseReservation: false,
+    }));
+    const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+    expect(sqlText).not.toMatch(/UPDATE oms\.oms_orders/);
+    expect(sqlText).not.toMatch(/UPDATE oms\.oms_order_lines/);
+    expect(mock.calls.filter((call) => call.tag === "update")).toHaveLength(0);
+    expect(mock.calls.filter((call) => call.tag === "insert")).toHaveLength(0);
+  });
+
   it("fallback: shipment NOT found by shipstation_order_id → legacy path runs", async () => {
     // Pre-cutover order: orderKey is legacy echelon-oms-<id> AND no
     // shipstation_order_id is set on any outbound_shipments row.

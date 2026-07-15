@@ -353,23 +353,36 @@ export class InventoryUseCases {
     orderId: number;
     orderItemId?: number;
     shipmentId?: string;
+    shipmentItemId?: number;
     userId?: string;
     // SHIP-BEFORE-PICK FALLBACK (removable once pick-before-push is enforced):
     // when true, deduct entirely from on-hand and release the reservation
     // rather than drawing the location's shared picked pool — a never-picked
     // item has no picked qty of its own.
     deductFromOnHandOnly?: boolean;
+    // Concession items were never reserved for the order. They may consume only
+    // genuinely unreserved on-hand stock and must not release another order's
+    // shared reservation counter.
+    releaseReservation?: boolean;
   }): Promise<void> {
     if (params.qty <= 0) throw new Error("qty must be a positive integer");
 
     await this.db.transaction(async (tx) => {
-      if (params.shipmentId && params.orderItemId) {
+      if (params.shipmentId && (params.shipmentItemId || params.orderItemId)) {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            918407,
+            ${params.shipmentItemId ?? params.orderItemId}
+          )
+        `);
         const existingShipmentTx = await tx.execute(sql`
           SELECT id
           FROM inventory.inventory_transactions
           WHERE transaction_type = 'ship'
             AND reference_id = ${params.shipmentId}
-            AND order_item_id = ${params.orderItemId}
+            AND ${params.shipmentItemId
+              ? sql`shipment_item_id = ${params.shipmentItemId}`
+              : sql`order_item_id = ${params.orderItemId}`}
           LIMIT 1
         `);
         if (existingShipmentTx.rows.length > 0) {
@@ -397,13 +410,24 @@ export class InventoryUseCases {
           `Negative Inventory Guard: Cannot record shipment of ${params.qty}. Picked: ${fromPicked}, On-hand: ${level.variantQty}, Required from on-hand: ${fromOnHand}.`
         );
       }
+      if (
+        params.releaseReservation === false
+        && fromOnHand > level.variantQty - level.reservedQty
+      ) {
+        throw new IntegrityError(
+          `Insufficient unreserved inventory: Cannot record shipment of ${params.qty}. ` +
+          `On-hand: ${level.variantQty}, Reserved: ${level.reservedQty}, Required: ${fromOnHand}.`
+        );
+      }
 
       if (fromPicked > 0) {
         await this.storage.adjustInventoryLevel(level.id, { pickedQty: -fromPicked }, tx);
       }
 
       if (fromOnHand > 0) {
-        const reservedToRelease = Math.min(level.reservedQty, fromOnHand);
+        const reservedToRelease = params.releaseReservation === false
+          ? 0
+          : Math.min(level.reservedQty, fromOnHand);
         await this.storage.adjustInventoryLevel(level.id, {
           variantQty: -fromOnHand,
           ...(reservedToRelease > 0 ? { reservedQty: -reservedToRelease } : {}),
@@ -442,13 +466,17 @@ export class InventoryUseCases {
             params.shipmentId && Number.isInteger(Number(params.shipmentId))
               ? Number(params.shipmentId)
               : null,
+          shipmentItemId: params.shipmentItemId ?? null,
           referenceType: "order",
           referenceId: params.shipmentId ?? String(params.orderId),
           userId: params.userId ?? null,
           notes: fromOnHand > 0 ? `Shipped without pick: ${fromPicked} from picked, ${fromOnHand} from on-hand` : null,
         }, tx);
       } catch (err: any) {
-        if (err?.code === "23505" && String(err?.constraint ?? "").includes("ship_dedup")) {
+        if (
+          err?.code === "23505"
+          && ["ship_dedup", "ship_item_dedup"].some((name) => String(err?.constraint ?? "").includes(name))
+        ) {
           return;
         }
         throw err;

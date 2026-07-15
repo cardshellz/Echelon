@@ -1504,12 +1504,15 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
     const targetItems: any = await db.execute(sql`
       SELECT osi.id, osi.order_item_id, osi.replacement_for_order_item_id,
-             oi.sku, osi.qty, target_shipment.shipment_purpose
+             COALESCE(oi.sku, catalog_variant.sku) AS sku,
+             osi.qty, target_shipment.shipment_purpose
       FROM wms.outbound_shipment_items osi
       JOIN wms.outbound_shipments target_shipment
         ON target_shipment.id = osi.shipment_id
       LEFT JOIN wms.order_items oi
         ON oi.id = COALESCE(osi.order_item_id, osi.replacement_for_order_item_id)
+      LEFT JOIN catalog.product_variants catalog_variant
+        ON catalog_variant.id = osi.product_variant_id
       WHERE osi.shipment_id = ${targetShipmentId}
     `);
 
@@ -1897,6 +1900,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         osi.id,
         osi.order_item_id,
         osi.replacement_for_order_item_id,
+        osi.shipment_item_purpose,
         COALESCE(osi.order_item_id, osi.replacement_for_order_item_id) AS inventory_order_item_id,
         osi.product_variant_id,
         osi.qty,
@@ -2023,10 +2027,12 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           orderId: wmsOrderId,
           orderItemId: item.inventory_order_item_id ?? item.order_item_id,
           shipmentId: String(shipmentId),
+          shipmentItemId: item.id,
           userId: "system:shipstation:v2",
           // SHIP-BEFORE-PICK FALLBACK (removable): never-picked items have no
           // picked pool — deduct on-hand only and release the reservation.
           deductFromOnHandOnly: item.ship_before_pick === true,
+          releaseReservation: item.shipment_item_purpose !== "concession",
         });
         console.log(`[ShipStation Webhook V2] Recorded shipment for variant ${item.product_variant_id} qty ${item.qty} (wmsOrder ${wmsOrderId})`);
       }
