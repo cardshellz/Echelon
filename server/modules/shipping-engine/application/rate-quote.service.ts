@@ -1,8 +1,8 @@
 /**
  * Rate quote orchestration — application layer, thin over drizzle.
  *
- * Loads active zone rules + effective-dated rate tables/rows ONCE, resolves
- * the zone and rates each parcel with the pure domain functions, then sums
+ * Loads effective-dated rate tables/rows once, matches destination geography,
+ * rates each parcel with the pure domain functions, then sums
  * per (carrier, serviceCode) across parcels. A (carrier, serviceCode) is only
  * offered when EVERY parcel priced under it — a parcel with no matching band
  * adds a warning and drops the combo (caller decides how to fall back).
@@ -35,7 +35,7 @@ import type { ShippingRateContext } from "../domain/shipping-channel";
 import { resolveZone, type ZoneRule } from "../domain/zones";
 import { loadActiveRateBookAssignments } from "../infrastructure/rate-book.repository";
 
-export const RATE_QUOTE_ENGINE = { name: "cardshellz-rates", version: "1.1.0" } as const;
+export const RATE_QUOTE_ENGINE = { name: "cardshellz-rates", version: "1.2.0" } as const;
 
 export interface RateQuoteParcel {
   billableWeightGrams: number;
@@ -87,8 +87,8 @@ export async function quoteParcels(
     warnings.push(`destination country ${JSON.stringify(request.destCountry)} is not a 2-letter ISO code`);
     return { rateBook: null, zone: null, quotes: [], warnings };
   }
-  if (destPostal === "") {
-    warnings.push("destination postal code is required to resolve a zone");
+  if (destRegion === null || !/^[A-Z]{2}$/.test(destRegion)) {
+    warnings.push("destination state or region is required to select a rate table");
     return { rateBook: null, zone: null, quotes: [], warnings };
   }
   if (request.parcels.length === 0) {
@@ -117,6 +117,8 @@ export async function quoteParcels(
     code: selection.assignment.rateBookCode,
   };
 
+  // Zones remain useful for transit estimates and quote observability, but
+  // shared pricing no longer depends on them.
   const zone = await resolveZoneForOrigin(
     selection.assignment.zoneSetId,
     request.originWarehouseId,
@@ -124,24 +126,14 @@ export async function quoteParcels(
     destPostal,
     destRegion,
   );
-  if (zone === null) {
-    warnings.push(
-      `no active pricing area in ${rateBook.code} matches ${destCountry} ${destRegion ?? "unknown-state"} ${destPostal} for warehouse ${request.originWarehouseId}`,
-    );
-    await maybePersistSnapshot({
-      request, destCountry, destPostal, rateBook, zone: null,
-      quotes: [], quotedAt, warnings, opts,
-    });
-    return { rateBook, zone: null, quotes: [], warnings };
-  }
-
   const candidateRows = await loadCandidateRows(
     rateBook.id,
     request.originWarehouseId,
-    zone,
+    destCountry,
+    destRegion,
     quotedAt,
   );
-  const quotes = rateAllParcels(request, zone, candidateRows, warnings);
+  const quotes = rateAllParcels(request, destCountry, destRegion, destPostal, candidateRows, warnings);
 
   await maybePersistSnapshot({ request, destCountry, destPostal, rateBook, zone, quotes, quotedAt, warnings, opts });
   return { rateBook, zone, quotes, warnings };
@@ -180,7 +172,8 @@ async function resolveZoneForOrigin(
 async function loadCandidateRows(
   rateBookId: number,
   originWarehouseId: number,
-  zone: string,
+  destinationCountry: string,
+  destinationRegion: string,
   quotedAt: Date,
 ): Promise<RateCandidateRow[]> {
   return db
@@ -190,7 +183,9 @@ async function loadCandidateRows(
       serviceCode: shippingRateTables.serviceCode,
       currency: shippingRateTables.currency,
       originWarehouseId: shippingRateTableRows.originWarehouseId,
-      destinationZone: shippingRateTableRows.destinationZone,
+      destinationCountry: shippingRateTableRows.destinationCountry,
+      destinationRegion: shippingRateTableRows.destinationRegion,
+      postalPrefix: shippingRateTableRows.postalPrefix,
       minWeightGrams: shippingRateTableRows.minWeightGrams,
       maxWeightGrams: shippingRateTableRows.maxWeightGrams,
       rateCents: shippingRateTableRows.rateCents,
@@ -202,7 +197,8 @@ async function loadCandidateRows(
       eq(shippingRateTables.status, "active"),
       lte(shippingRateTables.effectiveFrom, quotedAt),
       or(isNull(shippingRateTables.effectiveTo), gt(shippingRateTables.effectiveTo, quotedAt)),
-      eq(shippingRateTableRows.destinationZone, zone),
+      eq(shippingRateTableRows.destinationCountry, destinationCountry),
+      eq(shippingRateTableRows.destinationRegion, destinationRegion),
       or(
         isNull(shippingRateTableRows.originWarehouseId),
         eq(shippingRateTableRows.originWarehouseId, originWarehouseId),
@@ -216,7 +212,9 @@ async function loadCandidateRows(
  */
 function rateAllParcels(
   request: RateQuoteRequest,
-  zone: string,
+  destinationCountry: string,
+  destinationRegion: string,
+  destinationPostal: string,
   candidateRows: RateCandidateRow[],
   warnings: string[],
 ): RateQuoteLine[] {
@@ -225,13 +223,15 @@ function rateAllParcels(
 
   request.parcels.forEach((parcel, index) => {
     const selected = selectParcelRates(candidateRows, {
-      zone,
+      destinationCountry,
+      destinationRegion,
+      destinationPostal,
       billableWeightGrams: parcel.billableWeightGrams,
       originWarehouseId: request.originWarehouseId,
     });
     if (selected === null) {
       warnings.push(
-        `parcel ${index + 1} (${parcel.billableWeightGrams}g): no rate band covers this weight in zone ${zone}`,
+        `parcel ${index + 1} (${parcel.billableWeightGrams}g): no rate band covers ${destinationCountry} ${destinationRegion} ${destinationPostal}`,
       );
       perParcel.push(new Map());
       return;

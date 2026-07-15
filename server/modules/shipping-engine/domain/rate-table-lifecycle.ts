@@ -1,4 +1,8 @@
-import { findMissingStateDefaults, type RateTableImportRow } from "./rate-table-import";
+import {
+  findMissingStateDefaults,
+  ratePricingAreaKey,
+  type RateTableImportRow,
+} from "./rate-table-import";
 import { US_POSTAL_REGIONS } from "./us-geography";
 
 export type RateTableStatus = "draft" | "active" | "superseded" | "retired";
@@ -19,7 +23,6 @@ export interface RateTableLifecycleAnalysis {
 
 export function analyzeRateTable(
   rows: readonly RateTableImportRow[],
-  pricingMode: "state_zip" | "legacy_zone",
 ): RateTableLifecycleAnalysis {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -30,24 +33,14 @@ export function analyzeRateTable(
 
   errors.push(...findWeightBandIssues(rows));
 
-  if (pricingMode === "state_zip") {
-    const unmappedRows = rows.filter((row) => row.destinationRegion === null);
-    if (unmappedRows.length > 0) {
-      errors.push(
-        `${unmappedRows.length} rate row${unmappedRows.length === 1 ? " is" : "s are"} not mapped to a state or ZIP area.`,
-      );
-    }
-    errors.push(...findMissingStateDefaults(rows));
-  }
+  errors.push(...findMissingStateDefaults(rows));
 
   const statewideRegions = new Set(
     rows
-      .filter((row) => row.destinationRegion !== null && row.postalPrefix === null)
-      .map((row) => row.destinationRegion!),
+      .filter((row) => row.destinationCountry === "US" && row.postalPrefix === null)
+      .map((row) => row.destinationRegion),
   );
-  const missingRegions = pricingMode === "state_zip"
-    ? US_POSTAL_REGIONS.filter((region) => !statewideRegions.has(region))
-    : [];
+  const missingRegions = US_POSTAL_REGIONS.filter((region) => !statewideRegions.has(region));
   if (missingRegions.length > 0) {
     warnings.push(`No statewide rates are configured for: ${missingRegions.join(", ")}.`);
   }
@@ -82,7 +75,7 @@ export function canRetireRateTable(status: string): boolean {
 function findWeightBandIssues(rows: readonly RateTableImportRow[]): string[] {
   const groups = new Map<string, RateTableImportRow[]>();
   for (const row of rows) {
-    const key = `${row.originWarehouseId ?? "any"}|${row.destinationZone.toUpperCase()}`;
+    const key = ratePricingAreaKey(row);
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
 
@@ -115,11 +108,9 @@ function findWeightBandIssues(rows: readonly RateTableImportRow[]): string[] {
 }
 
 function pricingAreaLabel(row: RateTableImportRow): string {
-  const geography = row.destinationRegion === null
-    ? row.destinationZone
-    : row.postalPrefix === null
-      ? `${row.destinationRegion} statewide`
-      : `${row.destinationRegion} ZIP ${row.postalPrefix}*`;
+  const geography = row.postalPrefix === null
+    ? `${row.destinationRegion} statewide`
+    : `${row.destinationRegion} ZIP ${row.postalPrefix}*`;
   return row.originWarehouseId === null
     ? geography
     : `${geography} at warehouse ${row.originWarehouseId}`;
