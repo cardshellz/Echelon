@@ -505,10 +505,14 @@ Current local evidence:
 - fixture/Drizzle contract: 18 tests passed
 - repository unit gate: 359 files and 3,446 tests passed; 14 skipped; 8 todo
 - the three database suites compile and skip without the explicit disposable
-  database; CI will run 30 cases serially against PostgreSQL 16
+  database; CI runs 30 cases serially against PostgreSQL 16
 - `git diff --check`: passed, with Windows line-ending notices only
 
-The PostgreSQL 16 result is still required before this slice is production-proven.
+GitHub Actions run `29427512682` passed the final merge candidate:
+
+- `PostgreSQL hardening tests` passed in 45 seconds, including all 30
+  named-schema channel/inventory cases; and
+- `Typecheck + unit tests` passed in 1 minute 58 seconds.
 
 ## Recommended next implementation order
 
