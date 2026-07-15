@@ -212,8 +212,10 @@ export async function rearmDeadFinancialCommand(
       );
     }
 
-    const recoveryNumber = Number(command.recovery_count) + 1;
-    await client.query(
+    // Copy terminal evidence inside PostgreSQL. Routing completed_at through a
+    // JavaScript Date truncates PostgreSQL microseconds, which would make the
+    // trigger's exact audit match fail even though the selected row is locked.
+    const insertedRecovery = await client.query(
       `INSERT INTO public.financial_command_recoveries (
          command_result_id,
          recovery_number,
@@ -224,19 +226,34 @@ export async function rearmDeadFinancialCommand(
          prior_error_code,
          prior_error_message,
          prior_completed_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       )
+       SELECT
+         command.id,
+         command.recovery_count + 1,
+         $2,
+         $3,
+         command.attempt_count,
+         command.attempt_limit,
+         command.last_error_code,
+         command.last_error_message,
+         command.completed_at
+       FROM public.financial_command_results command
+       WHERE command.id = $1
+         AND command.status = 'dead'
+       RETURNING id`,
       [
         input.commandId,
-        recoveryNumber,
         input.operatorId,
         input.reason,
-        command.attempt_count,
-        command.attempt_limit,
-        command.last_error_code,
-        command.last_error_message,
-        command.completed_at,
       ],
     );
+    if (insertedRecovery.rowCount !== 1) {
+      throw new FinancialCommandOperationsError(
+        "Dead financial command changed before recovery evidence could be recorded",
+        409,
+        "FINANCIAL_COMMAND_RECOVERY_CONFLICT",
+      );
+    }
     const updated = await client.query(
       `UPDATE public.financial_command_results
        SET status = 'retryable',

@@ -51,4 +51,15 @@ describe("financial command operations migration", () => {
     expect(service).toContain("LIMIT $1");
     expect(service).not.toMatch(/status IN \('succeeded', 'rejected', 'dead'\)/);
   });
+
+  it("copies recovery evidence inside PostgreSQL without timestamp round-tripping", () => {
+    const recoveryWriter = service.slice(
+      service.indexOf("INSERT INTO public.financial_command_recoveries"),
+      service.indexOf("const updated = await client.query"),
+    );
+    expect(recoveryWriter).toContain("SELECT");
+    expect(recoveryWriter).toContain("command.completed_at");
+    expect(recoveryWriter).toContain("FROM public.financial_command_results command");
+    expect(recoveryWriter).not.toContain("command.completed_at,");
+  });
 });
