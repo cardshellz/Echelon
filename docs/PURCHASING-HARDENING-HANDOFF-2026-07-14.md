@@ -514,13 +514,56 @@ GitHub Actions run `29427512682` passed the final merge candidate:
   named-schema channel/inventory cases; and
 - `Typecheck + unit tests` passed in 1 minute 58 seconds.
 
+PR #929 merged as `2dd60733`. Both required checks passed on the final merge
+candidate, including all 30 named-schema PostgreSQL cases.
+
+## Controlled automatic-purchasing pilot controls
+
+The next slice adds a dedicated exact-SKU pilot path around the existing automatic
+handoff. It does not change the scheduler or the existing Purchasing UI trigger.
+
+The operator command is dry-run by default. Its preflight loads current production
+recommendation inputs and prints the exact recommendation, supplier/receive IDs,
+piece quantity, quote basis, quoted unit mills, normalized per-piece mills, cents
+mirror, exact extended mills, product-cost cents, pricing remainder,
+demand/candidate evidence, approval policy, and structured blockers without creating
+an auto-draft lifecycle row or any domain mutation.
+
+Execution requires `--execute`, an attributable `--actor`, and a SKU that matches
+exactly one recommendation. Scheduler-triggered pilot calls, missing actors, zero or
+ambiguous SKU matches, review-only mode, policy rejection, and handoff-validation
+failure all fail closed. A successful pilot passes exactly one item to the existing
+atomic handoff, which bounds the result to one PO and one product line. The result
+returns durable accepted-decision, handoff-decision, PO, and PO-line IDs; stale
+recommendation snapshots are reported as skipped rather than drafted.
+
+The complete operating procedure and evidence queries are in
+`docs/AUTOMATIC-PURCHASING-PILOT-RUNBOOK.md`.
+
+Current local evidence:
+
+- `npm.cmd run check`: passed
+- focused pilot gate: 16 tests passed
+- expanded procurement/writer gate: 81 files and 738 tests passed; 1 file and 17
+  tests skipped
+- production build: passed; 3,596 client modules transformed and server bundle built
+- `git diff --check`: passed, with Windows line-ending notices only
+
+No production preflight or mutation was run in this implementation slice. The pilot
+remains unproven in production until this control is reviewed, merged, deployed, and
+the owner explicitly approves one SKU execution.
+
 ## Recommended next implementation order
 
-1. Review and merge the named-schema integration harness slice after its PostgreSQL
-   16 CI run is green.
-2. Decide whether autonomous dead-command replay justifies encrypted request snapshots
-   and a versioned executor registry; the current exact-caller-retry model is safer.
-3. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
+1. Review and merge the controlled automatic-purchasing pilot controls.
+2. Deploy them, run read-only preflight for one low-risk SKU, and obtain explicit
+   owner approval for the saved economics.
+3. Execute the one-SKU pilot and complete the verification/lifecycle runbook before
+   widening automatic purchasing policy.
+
+Autonomous dead-command replay remains deferred. Encrypted request snapshots and a
+versioned executor registry do not currently justify replacing the safer exact-caller
+retry model.
 
 Keep manual quote pricing marked `manual` even when the same quote is optionally
 saved to the vendor catalog. Extended-total quotes remain PO-specific and must not be
@@ -530,7 +573,7 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. PR #927 merged as `5fd643c7`; verify migration 140's production
-> state separately. Verify the named-schema disposable PostgreSQL CI result before
-> describing those three suites as exercised. Do not mutate production without
-> explicit owner approval.
+> unverified item. PR #929 merged as `2dd60733`, including the named-schema disposable
+> PostgreSQL harness. Review the automatic-purchasing pilot runbook and current branch;
+> do not execute a production pilot without an eligible preflight and explicit owner
+> approval. Verify migration 140's production state separately.
