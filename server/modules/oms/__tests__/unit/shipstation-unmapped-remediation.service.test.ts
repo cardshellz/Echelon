@@ -41,6 +41,26 @@ const activeProviderShipment = {
   trackingNumber: "1Z-ACTIVE-RESHIP",
 };
 
+const emptyProviderShipment = {
+  ...providerShipment,
+  shipmentId: 903,
+  orderId: 701,
+  trackingNumber: "1Z-EMPTY-RESHIP",
+  shipmentItems: [],
+};
+
+const originalProviderShipment = {
+  ...providerShipment,
+  shipmentId: 904,
+  trackingNumber: "1Z-ORIGINAL-PACKAGE",
+  shipmentItems: [{
+    sku: "SKU-A",
+    name: "Card",
+    quantity: 1,
+    lineItemKey: "wms-item-501",
+  }],
+};
+
 const contextRow = {
   exception_id: 77,
   wms_order_id: 42,
@@ -51,6 +71,8 @@ const contextRow = {
   provider_order_id: 700,
   provider_order_key: "echelon-wms-shp-10",
   tracking_number: "1Z-RESHIP",
+  authority_external_fulfillment_id: "shipstation_shipment:900",
+  authority_tracking_number: "1Z-RESHIP",
 };
 
 const crossedContextRow = {
@@ -98,6 +120,12 @@ describe("ShipStation unmapped physical remediation", () => {
               external_fulfillment_id: "shipstation_shipment:800",
               created_at: "2026-07-10T12:00:00Z",
               item_count: 1,
+              items: [{
+                orderItemId: 101,
+                sku: "SKU-A",
+                name: "Card",
+                quantity: 1,
+              }],
             }],
           };
         }
@@ -120,6 +148,7 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(preview.shipments[0]).toMatchObject({
       id: 10,
       externalShipmentRef: "800",
+      items: [{ orderItemId: 101, sku: "SKU-A", quantity: 1 }],
     });
   });
 
@@ -210,6 +239,50 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(preview.providerIdentityRepair).toBeNull();
   });
 
+  it("identifies an original package identity overwritten by an empty replacement callback", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [{
+            ...contextRow,
+            candidate_shipment_id: null,
+            external_shipment_ref: "903",
+            provider_order_id: 701,
+            tracking_number: "1Z-EMPTY-RESHIP",
+            authority_external_fulfillment_id: "shipstation_shipment:904",
+            authority_tracking_number: "1Z-EMPTY-RESHIP",
+          }] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        if (text.includes("COUNT(shipment_item.id)::int AS item_count")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    const preview = await getShipStationUnmappedPhysicalPreview(
+      db,
+      shipStation({
+        getShipments: vi.fn(async () => [originalProviderShipment, emptyProviderShipment]),
+      }),
+      { exceptionId: 77 },
+    );
+
+    expect(preview.providerShipment).toEqual(emptyProviderShipment);
+    expect(preview.originalPackageIdentityRepair).toEqual({
+      wmsShipmentId: 10,
+      providerShipmentId: 904,
+      providerOrderId: 700,
+      providerOrderKey: "echelon-wms-shp-10",
+      currentTrackingNumber: "1Z-EMPTY-RESHIP",
+      originalTrackingNumber: "1Z-ORIGINAL-PACKAGE",
+    });
+  });
+
   it("adopts a classified reship with replacement lineage and no direct fulfillment link", async () => {
     const calls: string[] = [];
     const db: any = {
@@ -298,6 +371,151 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(allSql).toContain("replacement_for_order_item_id");
     expect(allSql).toContain("order_item_id, replacement_for_order_item_id");
     expect(allSql).toContain("UPDATE wms.reconciliation_exceptions");
+  });
+
+  it("adopts an active empty ShipStation package from operator-confirmed original WMS items", async () => {
+    const calls: string[] = [];
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [{
+            ...contextRow,
+            candidate_shipment_id: null,
+            external_shipment_ref: "903",
+            provider_order_id: 701,
+            tracking_number: "1Z-EMPTY-RESHIP",
+            authority_external_fulfillment_id: "shipstation_shipment:904",
+            authority_tracking_number: "1Z-EMPTY-RESHIP",
+          }] };
+        }
+        if (text.includes("JOIN LATERAL")) {
+          return { rows: [{
+            order_item_id: 101,
+            sku: "SKU-A",
+            product_variant_id: 201,
+            from_location_id: 301,
+            source_quantity: 1,
+          }] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        if (
+          text.includes("FROM wms.reconciliation_exceptions")
+          && text.includes("FOR UPDATE")
+        ) {
+          return { rows: [{ id: 77 }] };
+        }
+        if (
+          text.includes("SELECT id, status, order_id")
+          && text.includes("FROM wms.outbound_shipments")
+        ) {
+          return { rows: [{
+            id: 10,
+            status: "shipped",
+            order_id: 42,
+            shipment_purpose: "customer_fulfillment",
+            has_customer_items: true,
+            external_fulfillment_id: "shipstation_shipment:904",
+            tracking_number: "1Z-EMPTY-RESHIP",
+            shipstation_order_id: 700,
+            shipstation_order_key: "echelon-wms-shp-10",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, qty")
+          && text.includes("ORDER BY id")
+        ) {
+          return { rows: [{ id: 501, qty: 1 }] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, source, shipment_purpose")
+          && text.includes("external_fulfillment_id")
+        ) {
+          return { rows: [] };
+        }
+        if (text.includes("INSERT INTO wms.outbound_shipments")) {
+          return { rows: [{
+            id: 22,
+            order_id: 42,
+            status: "queued",
+            source: "shipstation_reship_adopted",
+            shipment_purpose: "replacement",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, order_item_id, replacement_for_order_item_id")
+          && text.includes("FROM wms.outbound_shipment_items")
+        ) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+    const service = shipStation({
+      getShipments: vi.fn(async () => [originalProviderShipment, emptyProviderShipment]),
+    });
+
+    const result = await adoptShipStationUnmappedPhysicalAsReship(db, service, {
+      exceptionId: 77,
+      operator: "ops:test",
+      originalShipmentId: 10,
+      reason: "carrier_replacement",
+      notes: "Confirmed the carrier replacement contained SKU-A.",
+      lineMappings: [{
+        evidenceSource: "original_wms",
+        orderItemId: 101,
+        quantity: 1,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      changed: true,
+      exceptionId: 77,
+      candidateShipmentId: 22,
+      originalPackageIdentityRepaired: true,
+    });
+    expect(service.processShipmentNotification).toHaveBeenCalledWith(emptyProviderShipment);
+    const allSql = calls.join("\n");
+    expect(allSql).toContain("replacement_for_order_item_id");
+    expect(allSql).toContain("shipstation_original_identity_restored");
+  });
+
+  it("requires notes and original WMS evidence for an empty ShipStation package", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [{
+            ...contextRow,
+            candidate_shipment_id: null,
+            external_shipment_ref: "903",
+            provider_order_id: 701,
+            tracking_number: "1Z-EMPTY-RESHIP",
+          }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const service = shipStation({
+      getShipments: vi.fn(async () => [emptyProviderShipment]),
+    });
+
+    await expect(adoptShipStationUnmappedPhysicalAsReship(db, service, {
+      exceptionId: 77,
+      operator: "ops:test",
+      originalShipmentId: 10,
+      reason: "carrier_replacement",
+      lineMappings: [{
+        evidenceSource: "original_wms",
+        orderItemId: 101,
+        quantity: 1,
+      }],
+    })).rejects.toThrow("operator notes are required");
+    expect(db.execute).toHaveBeenCalledTimes(1);
   });
 
   it("atomically repairs crossed legacy identities before adopting the active reship", async () => {
