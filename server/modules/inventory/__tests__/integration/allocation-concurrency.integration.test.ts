@@ -7,7 +7,7 @@ import {
   describeWithDisposableDb,
 } from "../../../../../test/setup-integration";
 import { InventoryUseCases } from "../../application/inventory.use-cases";
-import { InventoryRepository } from "../../infrastructure/inventory.repository";
+import { createInventoryMethods } from "../../infrastructure/inventory.repository";
 import { 
   inventoryLevels, 
   products, 
@@ -26,7 +26,7 @@ describeWithDisposableDb("Allocation Concurrency (P0-c-3)", () => {
     db = getTestDb();
 
     // The repo and useCases point to the test db instance
-    const repo = new InventoryRepository(db as any);
+    const repo = createInventoryMethods(db as any);
     useCases = new InventoryUseCases(db as any, repo);
   });
 
