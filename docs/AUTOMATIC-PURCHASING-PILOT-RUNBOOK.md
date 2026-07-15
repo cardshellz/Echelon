@@ -9,6 +9,9 @@ explicitly approve execution.
 
 - Preflight is the default and is read-only. It does not create an auto-draft run,
   recommendation decision, PO, PO line, event, or handoff.
+- Readiness discovery (`--list`) has the same read-only contract. It ranks only
+  policy-eligible, actionable, or missing-vendor recommendations and excludes routine
+  non-actionable inventory noise.
 - Execution requires all three inputs: an exact SKU, `--execute`, and an attributable
   `--actor` value.
 - Pilot execution is manual-only. Scheduler-triggered or unattributed pilot requests
@@ -23,7 +26,7 @@ explicitly approve execution.
   recommendation is skipped rather than drafted from stale evidence.
 - The ordinary scheduler and existing Purchasing UI behavior are unchanged.
 
-## 1. Deploy and select the candidate
+## 1. Deploy and discover candidates
 
 Deploy the pilot-control change through the normal reviewed release process. Select a
 real, low-risk SKU whose demand can be trusted and whose preferred vendor, vendor
@@ -32,7 +35,30 @@ known. Do not use a placeholder, gift card, donation, or duplicate catalog artif
 
 Do not change the global approval policy to make a candidate pass.
 
-## 2. Run read-only preflight
+Run the bounded readiness report on an authenticated application dyno:
+
+```text
+heroku run --app cardshellz-echelon "npm run procurement:automatic-purchasing-pilot -- --list --limit=25"
+```
+
+`--limit` defaults to 25 and accepts 1 through 100. The report exits successfully even
+when no candidate is executable because zero eligible candidates is an operational
+state, not a command failure. It includes the total candidate count before the display
+limit, status counts, blocker counts, and deterministic candidate ranking.
+
+For each candidate, distinguish:
+
+- `approvalPolicyEligible`: the recommendation itself passes the configured policy;
+- `executionEligible`: the recommendation passes and automatic purchasing is enabled;
+- `automation_disabled`: the item passes, but global mode is `review_only`;
+- configuration and demand-review statuses: the printed `nextActions` identify the
+  evidence or master-data work required without authorizing a policy bypass.
+
+The readiness report is a discovery aid, not purchase approval. Never change supplier
+master data merely to manufacture eligibility; verify every correction from real vendor
+and demand evidence.
+
+## 2. Run exact-SKU read-only preflight
 
 Run this on an authenticated application dyno, replacing `EXACT-SKU`:
 
