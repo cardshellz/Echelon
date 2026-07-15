@@ -109,6 +109,8 @@ describe("financial command results migration", () => {
       "leaseToken",
       "leaseExpiresAt",
       "attemptCount",
+      "attemptLimit",
+      "recoveryCount",
       "httpStatus",
       "responseBody",
       "resultType",

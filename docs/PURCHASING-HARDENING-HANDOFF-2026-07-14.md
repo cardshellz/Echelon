@@ -10,19 +10,21 @@ merged durable transactional command results for ordinary PO-line mutations,
 PR #918 made optional PO/catalog capture atomic, and PR #921 added durable
 purchase-order email delivery, PR #922 put the disposable PostgreSQL hardening
 suites in CI, and PR #924 migrated cash-moving AP payment commands to the
-durable transactional command ledger. The next local slice covers invoice
-approve, dispute, and void transitions.
+durable transactional command ledger. PR #926 then migrated invoice approve,
+dispute, and void transitions. The current local slice adds command-ledger
+monitoring, retention, and audited dead-command recovery.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/ap-invoice-financial-commands-2026-07-14`
-- Base and current `origin/main`: `5bf413c5`
-- Base hardening slice: merged PR #924
+- Branch: `codex/financial-command-operations-2026-07-14`
+- Base and current `origin/main`: `061dbe51`
+- Base hardening slice: merged PR #926
 - Deployment status: PR #921 is live on Heroku release v2381
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
-- Commit/PR status: AP invoice lifecycle ledger slice is local and not yet published
+- Migration 140 status: local only; not applied in production
+- Commit/PR status: financial-command operations slice is local and not yet published
 
 Do not deploy this branch without owner approval.
 
@@ -410,11 +412,77 @@ Current local evidence:
 - production build: passed; 3,595 client modules transformed and server bundle built
 - `git diff --check`: passed, with Windows line-ending notices only
 
+PR #926 merged as `061dbe51`. Its final merge-candidate CI passed both
+`Typecheck + unit tests` and `PostgreSQL hardening tests`.
+
+## Financial-command operations slice
+
+Migration 140 and the platform command-operations module make the existing
+ledger operable without weakening its idempotency contract.
+
+The Operations Control Tower system-health view now shows:
+
+- counts for dead commands, expired claims, due retries, and retained terminal
+  results;
+- a filtered/searchable command list with attempt and recovery counts;
+- sanitized operator-safe failure diagnostics; and
+- a permission-gated `Re-arm once` action for dead commands.
+
+Monitoring requires `operations:view`. Technical detail requires
+`operations:view_technical`; operator recovery requires `operations:triage`.
+The monitoring API intentionally omits request hashes, idempotency keys, stored
+response bodies, and lease tokens.
+
+Dead-command recovery is not a server-side payload replay. The ledger stores a
+canonical payload hash, not the original request, so reconstructing a financial
+request would be unsafe. Instead, recovery:
+
+1. locks the dead command;
+2. writes immutable evidence containing the operator, reason, previous error,
+   completion time, and attempt budget;
+3. increments the per-command limit by exactly one; and
+4. transitions the same immutable command identity to retryable/due-now.
+
+The database trigger rejects `dead -> retryable` unless the exact matching audit
+row already exists in the same transaction. It still rejects every update to
+succeeded/rejected results and any command identity rewrite. Concurrent recovery
+requests serialize on the command row, so only one can grant the next attempt.
+
+The originating browser retains a dead command's exact intent key without
+automatically retrying. After recovery, that caller must resend the unchanged
+payload and key. A page reload still loses the in-memory key; durable encrypted
+request snapshots plus an executor registry would be required for autonomous
+operator replay and are intentionally outside this slice.
+
+The retention worker runs in bounded batches under the repository-wide scheduler
+disable contract. It deletes only expired `succeeded` and `rejected` results.
+Dead, claimed, and retryable rows are never automatically deleted. Recovered
+audit evidence follows its terminal result only when that result eventually
+qualifies for normal retention cleanup.
+
+Current local evidence:
+
+- `npm.cmd run check`: passed
+- focused recovery, permission, retention, migration, and client-intent gate:
+  37 tests passed
+- writer-ownership ratchet: passed with the platform operations writer registered
+- repository unit gate: 358 files and 3,426 tests passed; 14 skipped; 8 todo
+- production build: passed; 3,596 client modules transformed and server bundle built
+- expanded PostgreSQL suite: compiles locally and skips without the explicit
+  disposable database; CI will run 10 cases against PostgreSQL 16
+- `git diff --check`: passed, with Windows line-ending notices only
+
+The Control Tower component was not exercised in a live local browser because
+this laptop has no disposable application database and no local app server was
+already running. Starting the full app against an unknown configured database
+was intentionally avoided. The production client/server build passed.
+
 ## Recommended next implementation order
 
-1. Review and merge the AP invoice lifecycle transactional-command slice.
-2. Add command-ledger operator monitoring, retention, and dead-letter replay tooling.
-3. Repair the broader named-schema integration harness before enabling its old suites.
+1. Review and merge the financial-command operations slice, including migration 140.
+2. Repair the broader named-schema integration harness before enabling its old suites.
+3. Decide whether autonomous dead-command replay justifies encrypted request snapshots
+   and a versioned executor registry; the current exact-caller-retry model is safer.
 4. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
 
 Keep manual quote pricing marked `manual` even when the same quote is optionally
@@ -425,6 +493,6 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. Migrations 136 and 138 are live, but verify the focused disposable
+> unverified item. Migrations 136 and 138 are live; migration 140 is not. Verify the focused disposable
 > PostgreSQL CI result before describing the database guarantees as exercised. Do not mutate
 > production without explicit owner approval.

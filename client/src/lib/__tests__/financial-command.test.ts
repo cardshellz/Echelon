@@ -87,6 +87,30 @@ describe("financial command HTTP handling", () => {
     });
   });
 
+  it("retains a dead command intent for operator recovery without retrying automatically", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: "Financial command exhausted its retry policy and requires operator review",
+      details: { code: "FINANCIAL_COMMAND_DEAD", commandId: 93 },
+    }), { status: 409 })));
+
+    const error = await financialCommandFetchJson("/commands", { method: "POST" })
+      .catch((caught) => caught);
+    expect(error).toMatchObject({
+      status: 409,
+      code: "FINANCIAL_COMMAND_DEAD",
+      retryable: false,
+      ambiguous: true,
+    });
+    expect(shouldRetryFinancialCommand(0, error)).toBe(false);
+
+    let sequence = 0;
+    const store = createFinancialCommandIntentStore(() => `dead-intent-${++sequence}`);
+    const intent = { method: "POST", body: { invoiceId: 93 } };
+    const originalKey = store.acquire(intent);
+    store.fail(originalKey, error);
+    expect(store.acquire(intent)).toBe(originalKey);
+  });
+
   it("wraps transport failures as retryable ambiguous outcomes", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("connection reset")));
 

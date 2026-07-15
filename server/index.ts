@@ -25,6 +25,7 @@ import { startOmsFlowReconciliationScheduler, setOmsFlowReconciliationServices }
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
 import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
+import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
 import {
   startWebhookRetryWorker,
   enqueueShipStationRetry,
@@ -798,6 +799,16 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startPoEmailOutboxWorker();
       } else {
         logSchedulerDisabled("scheduler", "PO email outbox worker", "PO_EMAIL_OUTBOX_WORKER_DISABLED");
+      }
+
+      if (!schedulersDisabled("FINANCIAL_COMMAND_RETENTION_WORKER_DISABLED")) {
+        startFinancialCommandRetentionWorker();
+      } else {
+        logSchedulerDisabled(
+          "scheduler",
+          "Financial command retention worker",
+          "FINANCIAL_COMMAND_RETENTION_WORKER_DISABLED",
+        );
       }
 
       if (!schedulersDisabled("FULFILLMENT_SWEEPER_DISABLED")) {

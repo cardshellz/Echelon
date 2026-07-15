@@ -528,8 +528,12 @@
   "public.auto_draft_runs": [
     "modules/procurement"
   ],
+  "public.financial_command_recoveries": [
+    "server/platform/commands/financial-command-operations.service.ts"
+  ],
   "public.financial_command_results": [
-    "server/platform/commands/command-results.repository.ts"
+    "server/platform/commands/command-results.repository.ts",
+    "server/platform/commands/financial-command-operations.service.ts"
   ],
   "public.idempotency_keys": [
     "server/middleware/idempotency.ts"
