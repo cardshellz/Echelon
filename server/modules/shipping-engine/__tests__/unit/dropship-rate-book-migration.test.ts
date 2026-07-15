@@ -3,7 +3,7 @@ import { resolve } from "path";
 import { describe, expect, it } from "vitest";
 
 const migration = readFileSync(
-  resolve(process.cwd(), "migrations/143_dropship_vendor_rate_book.sql"),
+  resolve(process.cwd(), "migrations/0588_dropship_vendor_rate_book.sql"),
   "utf8",
 );
 

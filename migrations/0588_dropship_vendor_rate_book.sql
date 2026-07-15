@@ -14,7 +14,7 @@ SELECT
   'Dropship vendor fulfillment',
   retail_book.zone_set_id,
   'active',
-  '{"source":"dropship-shipping-setup","migration":143}'::jsonb
+  '{"source":"dropship-shipping-setup","migration":588}'::jsonb
 FROM shipping.rate_books retail_book
 WHERE retail_book.code = 'shopify-retail-default'
 ON CONFLICT (code) DO NOTHING;
