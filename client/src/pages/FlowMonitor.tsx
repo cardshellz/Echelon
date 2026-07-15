@@ -663,6 +663,30 @@ function ShipStationReshipAdoptionDialog(props: {
   ), [originalShipmentId, validOriginalShipments]);
 
   useEffect(() => {
+    if (!preview || positiveFlowId(originalShipmentId) !== null) return;
+    const restoredOriginalId = preview.originalPackageIdentityRepair?.wmsShipmentId ?? null;
+    const preferred = restoredOriginalId === null
+      ? null
+      : validOriginalShipments.find((shipment) => shipment.id === restoredOriginalId);
+    if (preferred) {
+      setOriginalShipmentId(String(preferred.id));
+    } else if (validOriginalShipments.length === 1) {
+      setOriginalShipmentId(String(validOriginalShipments[0].id));
+    }
+  }, [originalShipmentId, preview, validOriginalShipments]);
+
+  const selectedOriginalTracking = selectedOriginalShipment
+    ? (preview?.originalPackageIdentityRepair?.wmsShipmentId === selectedOriginalShipment.id
+      ? preview.originalPackageIdentityRepair.originalTrackingNumber
+      : selectedOriginalShipment.trackingNumber)
+    : preview?.originalPackageIdentityRepair?.originalTrackingNumber ?? null;
+  const replacementServiceLabel = preview
+    ? humanize(preview.providerShipment.serviceCode || preview.providerShipment.carrierCode)
+      .replace(/\bUsps\b/g, "USPS")
+      .replace(/\bUps\b/g, "UPS")
+    : "";
+
+  useEffect(() => {
     if (!providerItemsMissing) return;
     const quantities: Record<number, string> = {};
     for (const item of selectedOriginalShipment?.items ?? []) {
@@ -723,14 +747,14 @@ function ShipStationReshipAdoptionDialog(props: {
     },
     onSuccess: async (result) => {
       toast({
-        title: "Replacement shipment adopted",
-        description: `Exception ${result.exceptionId} was resolved and replacement inventory was recorded.`,
+        title: "Replacement recorded",
+        description: "Inventory was deducted for the confirmed replacement items.",
       });
       await props.onCompleted();
       props.onClose();
     },
     onError: (error: Error) => {
-      toast({ title: "Reship adoption failed", description: error.message, variant: "destructive" });
+      toast({ title: "Could not record replacement", description: error.message, variant: "destructive" });
     },
   });
 
@@ -738,15 +762,15 @@ function ShipStationReshipAdoptionDialog(props: {
     <Dialog open={props.target !== null} onOpenChange={(open) => { if (!open) props.onClose(); }}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader className="text-left">
-          <DialogTitle>Adopt ShipStation reship</DialogTitle>
+          <DialogTitle>Record replacement shipment</DialogTitle>
           <DialogDescription>
-            {props.target?.label}: link this physical replacement to its original package before inventory is deducted.
+            {props.target?.label}: confirm what was replaced and what was resent.
           </DialogDescription>
         </DialogHeader>
 
         {previewQuery.isLoading ? (
           <div className="space-y-3 py-4">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading live ShipStation package evidence...</div>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading shipment details...</div>
             <Skeleton className="h-20 w-full" /><Skeleton className="h-40 w-full" />
           </div>
         ) : previewQuery.isError ? (
@@ -756,61 +780,84 @@ function ShipStationReshipAdoptionDialog(props: {
           </div>
         ) : preview ? (
           <div className="space-y-5">
-            <section className="grid gap-3 border-y py-4 text-sm sm:grid-cols-3">
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Order</div><div className="mt-1 font-medium">{preview.orderNumber}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Tracking</div><div className="mt-1 break-all font-medium">{preview.providerShipment.trackingNumber || "Not available"}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">ShipStation shipment</div><div className="mt-1 font-medium">{preview.externalShipmentRef}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Carrier service</div><div className="mt-1">{[preview.providerShipment.carrierCode, preview.providerShipment.serviceCode].filter(Boolean).join(" / ") || "Not available"}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Shipped</div><div className="mt-1">{formatTimestamp(preview.providerShipment.shipDate)}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Provider state</div><div className="mt-1">{preview.providerShipment.voidDate ? `Voided ${formatTimestamp(preview.providerShipment.voidDate)}` : "Active package"}</div></div>
-            </section>
-
-            {preview.providerIdentityRepair && (
-              <section className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+            <section className="border-y py-4">
+              <div className="flex gap-3">
+                <PackageCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-700" />
                 <div>
-                  <div className="font-medium">Active package identity recovered</div>
-                  <p className="mt-1 text-xs">
-                    A legacy WMS row crossed superseded ShipStation shipment {preview.providerIdentityRepair.supersededProviderShipmentId} with the active tracking number. Tracking {preview.providerIdentityRepair.activeTrackingNumber} uniquely matches active shipment {preview.providerIdentityRepair.activeProviderShipmentId}; adoption will retire the stale row before inventory is deducted.
+                  <div className="font-medium">A replacement package was shipped</div>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {providerItemsMissing
+                      ? "ShipStation did not include the package contents. Confirm the reason and the items that were resent."
+                      : "Confirm which original package it replaces and why the replacement was sent."}
                   </p>
                 </div>
-              </section>
-            )}
+              </div>
 
-            {preview.originalPackageIdentityRepair && (
-              <section className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
-                <div>
-                  <div className="font-medium">Original package identity will be restored</div>
-                  <p className="mt-1 text-xs">A duplicate-order callback overwrote WMS shipment {preview.originalPackageIdentityRepair.wmsShipmentId} with the replacement tracking number. Adoption will restore its original tracking {preview.originalPackageIdentityRepair.originalTrackingNumber} before recording this replacement.</p>
+              <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
+                <div className="border-t pt-3">
+                  <div className="text-xs font-semibold uppercase text-muted-foreground">Original package</div>
+                  <div className="mt-1 break-all font-medium">{selectedOriginalTracking || "Select below"}</div>
+                  {selectedOriginalShipment && <div className="mt-1 text-xs text-muted-foreground">Shipment {selectedOriginalShipment.id}</div>}
                 </div>
-              </section>
-            )}
+                <div className="border-t pt-3">
+                  <div className="text-xs font-semibold uppercase text-muted-foreground">Replacement package</div>
+                  <div className="mt-1 break-all font-medium">{preview.providerShipment.trackingNumber || "Tracking unavailable"}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Shipped {formatTimestamp(preview.providerShipment.shipDate)}{replacementServiceLabel ? ` via ${replacementServiceLabel}` : ""}
+                  </div>
+                </div>
+              </div>
 
-            <section className="flex gap-3 border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
-              <PackagePlus className="mt-0.5 h-5 w-5 shrink-0" />
-              <div><div className="font-medium">Verified replacement only</div><p className="mt-1 text-xs">This records another physical inventory shipment without increasing customer fulfilled quantity or creating another channel fulfillment.</p></div>
+              <p className="mt-4 border-t pt-3 text-sm text-muted-foreground">
+                Echelon will keep these as two separate packages and deduct inventory only for the items confirmed below. The customer order will remain fulfilled once.
+              </p>
             </section>
 
             <section className="grid gap-4 border-t pt-4 sm:grid-cols-2">
-              <div className="space-y-2"><Label>Original package</Label><Select value={originalShipmentId} onValueChange={setOriginalShipmentId}><SelectTrigger><SelectValue placeholder="Select package being replaced" /></SelectTrigger><SelectContent>{validOriginalShipments.map((shipment) => {
-                const restoredTracking = preview.originalPackageIdentityRepair?.wmsShipmentId === shipment.id
-                  ? preview.originalPackageIdentityRepair.originalTrackingNumber
-                  : shipment.trackingNumber;
-                return <SelectItem key={shipment.id} value={String(shipment.id)}>Shipment {shipment.id} - {restoredTracking || humanize(shipment.status)}</SelectItem>;
-              })}</SelectContent></Select></div>
-              <div className="space-y-2"><Label>Replacement reason</Label><Select value={reason} onValueChange={setReason}><SelectTrigger><SelectValue placeholder="Select reason" /></SelectTrigger><SelectContent><SelectItem value="lost">Lost package</SelectItem><SelectItem value="damaged">Damaged package</SelectItem><SelectItem value="misdelivery">Misdelivery</SelectItem><SelectItem value="carrier_replacement">Carrier replacement</SelectItem><SelectItem value="other">Other verified replacement</SelectItem></SelectContent></Select></div>
+              <div className="space-y-2">
+                <Label>Which package was replaced?</Label>
+                {validOriginalShipments.length === 1 && selectedOriginalShipment ? (
+                  <div className="border-y py-3 text-sm">
+                    <div className="break-all font-medium">{selectedOriginalTracking || humanize(selectedOriginalShipment.status)}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">The only eligible original package</div>
+                  </div>
+                ) : (
+                  <Select value={originalShipmentId} onValueChange={setOriginalShipmentId}>
+                    <SelectTrigger><SelectValue placeholder="Select the original package" /></SelectTrigger>
+                    <SelectContent>{validOriginalShipments.map((shipment) => {
+                      const restoredTracking = preview.originalPackageIdentityRepair?.wmsShipmentId === shipment.id
+                        ? preview.originalPackageIdentityRepair.originalTrackingNumber
+                        : shipment.trackingNumber;
+                      return <SelectItem key={shipment.id} value={String(shipment.id)}>{restoredTracking || `Shipment ${shipment.id}`}</SelectItem>;
+                    })}</SelectContent>
+                  </Select>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label>Why was it replaced?</Label>
+                <Select value={reason} onValueChange={setReason}>
+                  <SelectTrigger><SelectValue placeholder="Select a reason" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="lost">Lost in transit</SelectItem>
+                    <SelectItem value="damaged">Arrived damaged</SelectItem>
+                    <SelectItem value="misdelivery">Delivered incorrectly</SelectItem>
+                    <SelectItem value="carrier_replacement">Carrier-issued replacement</SelectItem>
+                    <SelectItem value="other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </section>
-            {validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No previously shipped WMS package is available to authorize this replacement.</p>}
+            {validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No shipped original package is available for this replacement.</p>}
 
             <section className="border-t pt-4">
-              <div className="text-xs font-semibold uppercase text-muted-foreground">{providerItemsMissing ? "Confirm items resent" : "Package line mapping"}</div>
+              <div className="font-semibold">Which items were resent?</div>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {providerItemsMissing
+                  ? "Check each item that was physically sent in the replacement and confirm its quantity."
+                  : "Confirm that each replacement item matches the original order item."}
+              </p>
               {providerItemsMissing ? (
                 <div className="mt-3 space-y-3">
-                  <div className="border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-                    <div className="font-medium">ShipStation omitted package lines</div>
-                    <p className="mt-1 text-xs">Confirm the physical items resent from the selected original WMS package. Only checked quantities will be deducted.</p>
-                  </div>
                   {selectedOriginalShipment ? (
                     <div className="divide-y border-y">
                       {selectedOriginalShipment.items.map((item) => {
@@ -819,15 +866,18 @@ function ShipStationReshipAdoptionDialog(props: {
                           <div key={item.orderItemId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px] sm:items-center">
                             <label className="flex min-w-0 cursor-pointer items-start gap-3 text-sm">
                               <Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => setManualLineSelections((current) => ({ ...current, [item.orderItemId]: value === true }))} />
-                              <span className="min-w-0"><span className="font-medium">{item.sku} <span className="text-muted-foreground">x {item.quantity}</span></span><span className="mt-1 block truncate text-xs text-muted-foreground">{item.name}</span></span>
+                              <span className="min-w-0"><span className="font-medium">{item.name}</span><span className="mt-1 block truncate text-xs text-muted-foreground">{item.sku} · Up to {item.quantity}</span></span>
                             </label>
-                            <Input aria-label={`Quantity resent for ${item.sku}`} type="number" min={1} max={item.quantity} disabled={!checked} value={manualLineQuantities[item.orderItemId] ?? ""} onChange={(event) => setManualLineQuantities((current) => ({ ...current, [item.orderItemId]: event.target.value }))} />
+                            <div className="space-y-1">
+                              <Label className="text-xs text-muted-foreground">Quantity resent</Label>
+                              <Input aria-label={`Quantity resent for ${item.sku}`} type="number" min={1} max={item.quantity} disabled={!checked} value={manualLineQuantities[item.orderItemId] ?? ""} onChange={(event) => setManualLineQuantities((current) => ({ ...current, [item.orderItemId]: event.target.value }))} />
+                            </div>
                           </div>
                         );
                       })}
                     </div>
                   ) : (
-                    <p className="text-sm text-muted-foreground">Select the original package to load its WMS item authority.</p>
+                    <p className="text-sm text-muted-foreground">Select the original package above to see its items.</p>
                   )}
                 </div>
               ) : (
@@ -838,9 +888,9 @@ function ShipStationReshipAdoptionDialog(props: {
                     );
                     return (
                       <div key={`${item.sku}-${index}`} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(260px,1fr)] sm:items-center">
-                        <div className="min-w-0 text-sm"><div className="font-medium">{item.sku} <span className="text-muted-foreground">x {item.quantity}</span></div><div className="mt-1 truncate text-xs text-muted-foreground">{item.name || "ShipStation package item"}</div></div>
+                        <div className="min-w-0 text-sm"><div className="font-medium">{item.name || item.sku}</div><div className="mt-1 truncate text-xs text-muted-foreground">{item.sku} · Quantity {item.quantity}</div></div>
                         <Select value={lineMappings[index] || ""} onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}>
-                          <SelectTrigger><SelectValue placeholder="Select matching original order line" /></SelectTrigger>
+                          <SelectTrigger><SelectValue placeholder="Match to original item" /></SelectTrigger>
                           <SelectContent>
                             {matchingLines.map((orderItem) => <SelectItem key={orderItem.id} value={String(orderItem.id)}>{orderItem.sku} - {orderItem.quantity} originally shipped</SelectItem>)}
                           </SelectContent>
@@ -855,8 +905,22 @@ function ShipStationReshipAdoptionDialog(props: {
               {!providerItemsMissing && providerItems.length !== rawProviderItems.length && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because one or more ShipStation package lines are invalid.</p>}
             </section>
 
-            <section className="border-t pt-4"><div className="space-y-2"><Label htmlFor="shipstation-remediation-notes">Operator notes{providerItemsMissing ? " (required)" : ""}</Label><Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder="Record the evidence confirming this is a replacement" /></div></section>
-            {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to adopt this reship.</p>}
+            <section className="border-t pt-4">
+              <div className="font-semibold">What will happen</div>
+              <div className="mt-3 space-y-2 text-sm">
+                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The original package stays under tracking {selectedOriginalTracking || "shown above"}.</span></div>
+                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The replacement is recorded under tracking {preview.providerShipment.trackingNumber}.</span></div>
+                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>Only the checked quantities are deducted from inventory; customer fulfillment is not increased.</span></div>
+              </div>
+            </section>
+
+            <section className="border-t pt-4">
+              <div className="space-y-2">
+                <Label htmlFor="shipstation-remediation-notes">{providerItemsMissing ? "How do you know this was a replacement? (required)" : "Evidence or notes (optional)"}</Label>
+                <Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder="Example: Customer reported the original package lost; replacement created in ShipStation." />
+              </div>
+            </section>
+            {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to record this replacement.</p>}
           </div>
         ) : null}
 
@@ -864,7 +928,7 @@ function ShipStationReshipAdoptionDialog(props: {
           <Button variant="outline" onClick={props.onClose}>Cancel</Button>
           <Button disabled={!preview || !actionValid || mutation.isPending} onClick={() => mutation.mutate()}>
             {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Adopt reship and deduct inventory
+            Record replacement
           </Button>
         </DialogFooter>
       </DialogContent>
