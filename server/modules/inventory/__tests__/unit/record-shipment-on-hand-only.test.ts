@@ -91,4 +91,72 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
     );
     expect(touchedOnHand).toBe(false);
   });
+
+  it("deducts a concession only from unreserved on-hand inventory", async () => {
+    const { rootDb, storage, lotService, tx } = harness();
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+
+    await inventory.recordShipment({
+      productVariantId: 30,
+      warehouseLocationId: 20,
+      qty: 2,
+      orderId: 40,
+      shipmentId: "41",
+      shipmentItemId: 60,
+      userId: "tester",
+      deductFromOnHandOnly: true,
+      releaseReservation: false,
+    });
+
+    expect(storage.adjustInventoryLevel).toHaveBeenCalledWith(10, { variantQty: -2 }, tx);
+  });
+
+  it("refuses a concession that would consume another order's reserved stock", async () => {
+    const { rootDb, storage, lotService } = harness();
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+
+    await expect(inventory.recordShipment({
+      productVariantId: 30,
+      warehouseLocationId: 20,
+      qty: 3,
+      orderId: 40,
+      shipmentId: "41",
+      shipmentItemId: 60,
+      userId: "tester",
+      deductFromOnHandOnly: true,
+      releaseReservation: false,
+    })).rejects.toThrow("Insufficient unreserved inventory");
+
+    expect(storage.adjustInventoryLevel).not.toHaveBeenCalled();
+  });
+
+  it("uses the physical shipment item as the concession replay key", async () => {
+    const { rootDb, storage, lotService, tx } = harness();
+    tx.execute.mockImplementation(async (query: any) => {
+      const text = (query?.queryChunks ?? [])
+        .map((chunk: any) => Array.isArray(chunk?.value) ? chunk.value.join("") : "")
+        .join("");
+      return text.includes("FROM inventory.inventory_transactions")
+        ? { rows: [{ id: 999 }] }
+        : { rows: [] };
+    });
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(rootDb as any, storage, lotService as any, null as any);
+
+    await inventory.recordShipment({
+      productVariantId: 30,
+      warehouseLocationId: 20,
+      qty: 1,
+      orderId: 40,
+      shipmentId: "41",
+      shipmentItemId: 60,
+      deductFromOnHandOnly: true,
+      releaseReservation: false,
+    });
+
+    expect(storage.lockInventoryLevel).not.toHaveBeenCalled();
+    expect(tx.execute).toHaveBeenCalledTimes(2);
+  });
 });

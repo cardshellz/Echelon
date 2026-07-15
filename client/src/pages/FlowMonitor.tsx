@@ -53,6 +53,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
 import {
@@ -393,6 +394,19 @@ interface ShipStationReshipAdoptionResponse {
   originalPackageIdentityRepaired?: boolean;
 }
 
+interface ReplacementCatalogItem {
+  productVariantId: number;
+  sku: string;
+  name: string;
+  quantity: string;
+}
+
+interface ReplacementCatalogSearchResult {
+  productVariantId: number;
+  sku: string;
+  name: string;
+}
+
 const DOMAIN_LABEL: Record<Domain, string> = {
   oms: "OMS",
   wms: "WMS",
@@ -600,6 +614,10 @@ function ShipStationReshipAdoptionDialog(props: {
   const [lineMappings, setLineMappings] = useState<Record<number, string>>({});
   const [manualLineSelections, setManualLineSelections] = useState<Record<number, boolean>>({});
   const [manualLineQuantities, setManualLineQuantities] = useState<Record<number, string>>({});
+  const [itemMode, setItemMode] = useState<"ordered" | "catalog">("ordered");
+  const [catalogSearchInput, setCatalogSearchInput] = useState("");
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [catalogItems, setCatalogItems] = useState<ReplacementCatalogItem[]>([]);
   const locatorQuery = useMemo(() => {
     if (!props.target) return "";
     const params = new URLSearchParams();
@@ -617,6 +635,17 @@ function ShipStationReshipAdoptionDialog(props: {
     retry: false,
   });
   const preview = previewQuery.data;
+  const catalogSearchQuery = useQuery<ReplacementCatalogSearchResult[]>({
+    queryKey: ["replacement-concession-catalog", catalogSearch],
+    queryFn: async () => {
+      const response = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(catalogSearch)}&limit=12`, {
+        credentials: "include",
+      });
+      if (!response.ok) throw new Error("Could not search the catalog");
+      return response.json();
+    },
+    enabled: Boolean(props.target && itemMode === "catalog" && catalogSearch.length >= 2),
+  });
   const rawProviderItems = useMemo(
     () => preview?.providerShipment.shipmentItems ?? [],
     [preview],
@@ -638,6 +667,10 @@ function ShipStationReshipAdoptionDialog(props: {
     setLineMappings({});
     setManualLineSelections({});
     setManualLineQuantities({});
+    setItemMode("ordered");
+    setCatalogSearchInput("");
+    setCatalogSearch("");
+    setCatalogItems([]);
   }, [locatorQuery]);
 
   useEffect(() => {
@@ -661,6 +694,30 @@ function ShipStationReshipAdoptionDialog(props: {
   const selectedOriginalShipment = useMemo(() => (
     validOriginalShipments.find((shipment) => shipment.id === positiveFlowId(originalShipmentId)) ?? null
   ), [originalShipmentId, validOriginalShipments]);
+
+  useEffect(() => {
+    if (!preview || positiveFlowId(originalShipmentId) !== null) return;
+    const restoredOriginalId = preview.originalPackageIdentityRepair?.wmsShipmentId ?? null;
+    const preferred = restoredOriginalId === null
+      ? null
+      : validOriginalShipments.find((shipment) => shipment.id === restoredOriginalId);
+    if (preferred) {
+      setOriginalShipmentId(String(preferred.id));
+    } else if (validOriginalShipments.length === 1) {
+      setOriginalShipmentId(String(validOriginalShipments[0].id));
+    }
+  }, [originalShipmentId, preview, validOriginalShipments]);
+
+  const selectedOriginalTracking = selectedOriginalShipment
+    ? (preview?.originalPackageIdentityRepair?.wmsShipmentId === selectedOriginalShipment.id
+      ? preview.originalPackageIdentityRepair.originalTrackingNumber
+      : selectedOriginalShipment.trackingNumber)
+    : preview?.originalPackageIdentityRepair?.originalTrackingNumber ?? null;
+  const replacementServiceLabel = preview
+    ? humanize(preview.providerShipment.serviceCode || preview.providerShipment.carrierCode)
+      .replace(/\bUsps\b/g, "USPS")
+      .replace(/\bUps\b/g, "UPS")
+    : "";
 
   useEffect(() => {
     if (!providerItemsMissing) return;
@@ -688,12 +745,22 @@ function ShipStationReshipAdoptionDialog(props: {
     const quantity = Number(manualLineQuantities[item.orderItemId]);
     return Number.isSafeInteger(quantity) && quantity > 0 && quantity <= item.quantity;
   });
-  const mappingsComplete = providerItemsMissing ? manualMappingsComplete : providerMappingsComplete;
+  const catalogMappingsComplete = catalogItems.length > 0 && catalogItems.every((item) => {
+    const quantity = Number(item.quantity);
+    return Number.isSafeInteger(quantity) && quantity > 0;
+  });
+  const availableCatalogResults = (catalogSearchQuery.data ?? []).filter(
+    (result) => !catalogItems.some((item) => item.productVariantId === result.productVariantId),
+  );
+  const isCatalogConcession = providerItemsMissing && itemMode === "catalog";
+  const mappingsComplete = providerItemsMissing
+    ? (isCatalogConcession ? catalogMappingsComplete : manualMappingsComplete)
+    : providerMappingsComplete;
   const actionValid = props.canAdjustInventory
     && providerEvidenceValid
     && mappingsComplete
     && positiveFlowId(originalShipmentId) !== null
-    && reason.length > 0
+    && (isCatalogConcession || reason.length > 0)
     && (!providerItemsMissing || notes.trim().length > 0);
 
   const mutation = useMutation({
@@ -703,9 +770,15 @@ function ShipStationReshipAdoptionDialog(props: {
         ...("exceptionId" in props.target ? { exceptionId: props.target.exceptionId } : {}),
         ...("shipmentId" in props.target ? { shipmentId: props.target.shipmentId } : {}),
         originalShipmentId: Number(originalShipmentId),
-        reason,
+        reason: isCatalogConcession ? "concession" : reason,
         notes: notes.trim() || undefined,
-        lineMappings: providerItemsMissing
+        lineMappings: isCatalogConcession
+          ? catalogItems.map((item) => ({
+            evidenceSource: "catalog",
+            productVariantId: item.productVariantId,
+            quantity: Number(item.quantity),
+          }))
+          : providerItemsMissing
           ? selectedManualItems.map((item) => ({
             evidenceSource: "original_wms",
             orderItemId: item.orderItemId,
@@ -723,14 +796,16 @@ function ShipStationReshipAdoptionDialog(props: {
     },
     onSuccess: async (result) => {
       toast({
-        title: "Replacement shipment adopted",
-        description: `Exception ${result.exceptionId} was resolved and replacement inventory was recorded.`,
+        title: isCatalogConcession ? "Different or free item recorded" : "Replacement recorded",
+        description: isCatalogConcession
+          ? "Inventory was deducted without changing the customer order."
+          : "Inventory was deducted for the confirmed replacement items.",
       });
       await props.onCompleted();
       props.onClose();
     },
     onError: (error: Error) => {
-      toast({ title: "Reship adoption failed", description: error.message, variant: "destructive" });
+      toast({ title: "Could not record shipment", description: error.message, variant: "destructive" });
     },
   });
 
@@ -738,15 +813,15 @@ function ShipStationReshipAdoptionDialog(props: {
     <Dialog open={props.target !== null} onOpenChange={(open) => { if (!open) props.onClose(); }}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader className="text-left">
-          <DialogTitle>Adopt ShipStation reship</DialogTitle>
+          <DialogTitle>Record replacement shipment</DialogTitle>
           <DialogDescription>
-            {props.target?.label}: link this physical replacement to its original package before inventory is deducted.
+            {props.target?.label}: confirm what was replaced and what was resent.
           </DialogDescription>
         </DialogHeader>
 
         {previewQuery.isLoading ? (
           <div className="space-y-3 py-4">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading live ShipStation package evidence...</div>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading shipment details...</div>
             <Skeleton className="h-20 w-full" /><Skeleton className="h-40 w-full" />
           </div>
         ) : previewQuery.isError ? (
@@ -756,80 +831,237 @@ function ShipStationReshipAdoptionDialog(props: {
           </div>
         ) : preview ? (
           <div className="space-y-5">
-            <section className="grid gap-3 border-y py-4 text-sm sm:grid-cols-3">
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Order</div><div className="mt-1 font-medium">{preview.orderNumber}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Tracking</div><div className="mt-1 break-all font-medium">{preview.providerShipment.trackingNumber || "Not available"}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">ShipStation shipment</div><div className="mt-1 font-medium">{preview.externalShipmentRef}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Carrier service</div><div className="mt-1">{[preview.providerShipment.carrierCode, preview.providerShipment.serviceCode].filter(Boolean).join(" / ") || "Not available"}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Shipped</div><div className="mt-1">{formatTimestamp(preview.providerShipment.shipDate)}</div></div>
-              <div><div className="text-xs font-medium uppercase text-muted-foreground">Provider state</div><div className="mt-1">{preview.providerShipment.voidDate ? `Voided ${formatTimestamp(preview.providerShipment.voidDate)}` : "Active package"}</div></div>
-            </section>
-
-            {preview.providerIdentityRepair && (
-              <section className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+            <section className="border-y py-4">
+              <div className="flex gap-3">
+                <PackageCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-700" />
                 <div>
-                  <div className="font-medium">Active package identity recovered</div>
-                  <p className="mt-1 text-xs">
-                    A legacy WMS row crossed superseded ShipStation shipment {preview.providerIdentityRepair.supersededProviderShipmentId} with the active tracking number. Tracking {preview.providerIdentityRepair.activeTrackingNumber} uniquely matches active shipment {preview.providerIdentityRepair.activeProviderShipmentId}; adoption will retire the stale row before inventory is deducted.
+                  <div className="font-medium">A replacement package was shipped</div>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {providerItemsMissing
+                      ? "ShipStation did not list the package contents. Confirm whether ordered items or different/free items were sent."
+                      : "Confirm which original package it replaces and why the replacement was sent."}
                   </p>
                 </div>
-              </section>
-            )}
+              </div>
 
-            {preview.originalPackageIdentityRepair && (
-              <section className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
-                <div>
-                  <div className="font-medium">Original package identity will be restored</div>
-                  <p className="mt-1 text-xs">A duplicate-order callback overwrote WMS shipment {preview.originalPackageIdentityRepair.wmsShipmentId} with the replacement tracking number. Adoption will restore its original tracking {preview.originalPackageIdentityRepair.originalTrackingNumber} before recording this replacement.</p>
+              <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
+                <div className="border-t pt-3">
+                  <div className="text-xs font-semibold uppercase text-muted-foreground">Original package</div>
+                  <div className="mt-1 break-all font-medium">{selectedOriginalTracking || "Select below"}</div>
+                  {selectedOriginalShipment && <div className="mt-1 text-xs text-muted-foreground">Shipment {selectedOriginalShipment.id}</div>}
                 </div>
-              </section>
-            )}
+                <div className="border-t pt-3">
+                  <div className="text-xs font-semibold uppercase text-muted-foreground">Replacement package</div>
+                  <div className="mt-1 break-all font-medium">{preview.providerShipment.trackingNumber || "Tracking unavailable"}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Shipped {formatTimestamp(preview.providerShipment.shipDate)}{replacementServiceLabel ? ` via ${replacementServiceLabel}` : ""}
+                  </div>
+                </div>
+              </div>
 
-            <section className="flex gap-3 border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
-              <PackagePlus className="mt-0.5 h-5 w-5 shrink-0" />
-              <div><div className="font-medium">Verified replacement only</div><p className="mt-1 text-xs">This records another physical inventory shipment without increasing customer fulfilled quantity or creating another channel fulfillment.</p></div>
+              <p className="mt-4 border-t pt-3 text-sm text-muted-foreground">
+                Echelon will keep these as two separate packages and deduct inventory only for the items confirmed below. The customer order will remain fulfilled once.
+              </p>
             </section>
 
             <section className="grid gap-4 border-t pt-4 sm:grid-cols-2">
-              <div className="space-y-2"><Label>Original package</Label><Select value={originalShipmentId} onValueChange={setOriginalShipmentId}><SelectTrigger><SelectValue placeholder="Select package being replaced" /></SelectTrigger><SelectContent>{validOriginalShipments.map((shipment) => {
-                const restoredTracking = preview.originalPackageIdentityRepair?.wmsShipmentId === shipment.id
-                  ? preview.originalPackageIdentityRepair.originalTrackingNumber
-                  : shipment.trackingNumber;
-                return <SelectItem key={shipment.id} value={String(shipment.id)}>Shipment {shipment.id} - {restoredTracking || humanize(shipment.status)}</SelectItem>;
-              })}</SelectContent></Select></div>
-              <div className="space-y-2"><Label>Replacement reason</Label><Select value={reason} onValueChange={setReason}><SelectTrigger><SelectValue placeholder="Select reason" /></SelectTrigger><SelectContent><SelectItem value="lost">Lost package</SelectItem><SelectItem value="damaged">Damaged package</SelectItem><SelectItem value="misdelivery">Misdelivery</SelectItem><SelectItem value="carrier_replacement">Carrier replacement</SelectItem><SelectItem value="other">Other verified replacement</SelectItem></SelectContent></Select></div>
+              <div className="space-y-2">
+                <Label>Which package was replaced?</Label>
+                {validOriginalShipments.length === 1 && selectedOriginalShipment ? (
+                  <div className="border-y py-3 text-sm">
+                    <div className="break-all font-medium">{selectedOriginalTracking || humanize(selectedOriginalShipment.status)}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">The only eligible original package</div>
+                  </div>
+                ) : (
+                  <Select value={originalShipmentId} onValueChange={setOriginalShipmentId}>
+                    <SelectTrigger><SelectValue placeholder="Select the original package" /></SelectTrigger>
+                    <SelectContent>{validOriginalShipments.map((shipment) => {
+                      const restoredTracking = preview.originalPackageIdentityRepair?.wmsShipmentId === shipment.id
+                        ? preview.originalPackageIdentityRepair.originalTrackingNumber
+                        : shipment.trackingNumber;
+                      return <SelectItem key={shipment.id} value={String(shipment.id)}>{restoredTracking || `Shipment ${shipment.id}`}</SelectItem>;
+                    })}</SelectContent>
+                  </Select>
+                )}
+              </div>
+              <div className="space-y-2">
+                {isCatalogConcession ? (
+                  <>
+                    <Label>How it will be recorded</Label>
+                    <div className="border-y py-3 text-sm">
+                      <div className="font-medium">Different or free item</div>
+                      <div className="mt-1 text-xs text-muted-foreground">No item is added to the customer order.</div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <Label>Why was it replaced?</Label>
+                    <Select value={reason} onValueChange={setReason}>
+                      <SelectTrigger><SelectValue placeholder="Select a reason" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="lost">Lost in transit</SelectItem>
+                        <SelectItem value="damaged">Arrived damaged</SelectItem>
+                        <SelectItem value="misdelivery">Delivered incorrectly</SelectItem>
+                        <SelectItem value="carrier_replacement">Carrier-issued replacement</SelectItem>
+                        <SelectItem value="other">Other</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </>
+                )}
+              </div>
             </section>
-            {validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No previously shipped WMS package is available to authorize this replacement.</p>}
+            {validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No shipped original package is available for this replacement.</p>}
 
             <section className="border-t pt-4">
-              <div className="text-xs font-semibold uppercase text-muted-foreground">{providerItemsMissing ? "Confirm items resent" : "Package line mapping"}</div>
+              <div className="font-semibold">What was sent?</div>
+              {providerItemsMissing && (
+                <ToggleGroup
+                  type="single"
+                  value={itemMode}
+                  onValueChange={(value) => {
+                    if (value === "ordered" || value === "catalog") setItemMode(value);
+                  }}
+                  variant="outline"
+                  className="mt-3 grid w-full grid-cols-2"
+                  aria-label="Choose the type of items sent"
+                >
+                  <ToggleGroupItem value="ordered" className="h-auto min-h-10 px-3 py-2 text-center text-sm">
+                    Ordered items resent
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="catalog" className="h-auto min-h-10 px-3 py-2 text-center text-sm">
+                    Different or free items
+                  </ToggleGroupItem>
+                </ToggleGroup>
+              )}
+              <p className="mt-1 text-sm text-muted-foreground">
+                {isCatalogConcession
+                  ? "Select the actual catalog items and quantities that physically left inventory."
+                  : providerItemsMissing
+                    ? "Check each ordered item that was physically resent and confirm its quantity."
+                  : "Confirm that each replacement item matches the original order item."}
+              </p>
               {providerItemsMissing ? (
-                <div className="mt-3 space-y-3">
-                  <div className="border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-                    <div className="font-medium">ShipStation omitted package lines</div>
-                    <p className="mt-1 text-xs">Confirm the physical items resent from the selected original WMS package. Only checked quantities will be deducted.</p>
+                isCatalogConcession ? (
+                  <div className="mt-3 space-y-4">
+                    <form
+                      className="flex flex-col gap-2 sm:flex-row"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const nextSearch = catalogSearchInput.trim();
+                        if (nextSearch.length >= 2) setCatalogSearch(nextSearch);
+                      }}
+                    >
+                      <div className="relative min-w-0 flex-1">
+                        <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                        <Input
+                          className="pl-9"
+                          value={catalogSearchInput}
+                          onChange={(event) => setCatalogSearchInput(event.target.value)}
+                          placeholder="Search by SKU or item name"
+                          aria-label="Search catalog items"
+                        />
+                      </div>
+                      <Button type="submit" variant="outline" disabled={catalogSearchInput.trim().length < 2 || catalogSearchQuery.isFetching}>
+                        {catalogSearchQuery.isFetching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />}
+                        Search
+                      </Button>
+                    </form>
+
+                    {catalogSearchQuery.isError && (
+                      <p className="text-sm text-red-800">{catalogSearchQuery.error instanceof Error ? catalogSearchQuery.error.message : "Could not search the catalog"}</p>
+                    )}
+                    {catalogSearch && !catalogSearchQuery.isFetching && availableCatalogResults.length === 0 && catalogItems.length === 0 && (
+                      <p className="text-sm text-muted-foreground">No catalog items match "{catalogSearch}".</p>
+                    )}
+                    {availableCatalogResults.length > 0 && (
+                      <div className="divide-y border-y">
+                        {availableCatalogResults.map((result) => (
+                          <div key={result.productVariantId} className="flex items-center gap-3 py-3">
+                            <div className="min-w-0 flex-1 text-sm">
+                              <div className="truncate font-medium">{result.name}</div>
+                              <div className="mt-1 truncate text-xs text-muted-foreground">{result.sku}</div>
+                            </div>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setCatalogItems((current) => [...current, { ...result, quantity: "1" }])}
+                            >
+                              <PackagePlus className="mr-2 h-4 w-4" />
+                              Add
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div>
+                      <div className="text-sm font-medium">Items to deduct</div>
+                      {catalogItems.length === 0 ? (
+                        <p className="mt-2 text-sm text-muted-foreground">Search for and add each different or free item that was sent.</p>
+                      ) : (
+                        <div className="mt-2 divide-y border-y">
+                          {catalogItems.map((item) => (
+                            <div key={item.productVariantId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px_40px] sm:items-end">
+                              <div className="min-w-0 text-sm">
+                                <div className="truncate font-medium">{item.name}</div>
+                                <div className="mt-1 truncate text-xs text-muted-foreground">{item.sku}</div>
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-xs text-muted-foreground">Quantity sent</Label>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  value={item.quantity}
+                                  aria-label={`Quantity sent for ${item.sku}`}
+                                  onChange={(event) => setCatalogItems((current) => current.map((currentItem) => (
+                                    currentItem.productVariantId === item.productVariantId
+                                      ? { ...currentItem, quantity: event.target.value }
+                                      : currentItem
+                                  )))}
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                aria-label={`Remove ${item.sku}`}
+                                title={`Remove ${item.sku}`}
+                                onClick={() => setCatalogItems((current) => current.filter((currentItem) => currentItem.productVariantId !== item.productVariantId))}
+                              >
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  {selectedOriginalShipment ? (
-                    <div className="divide-y border-y">
-                      {selectedOriginalShipment.items.map((item) => {
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {selectedOriginalShipment ? (
+                      <div className="divide-y border-y">
+                        {selectedOriginalShipment.items.map((item) => {
                         const checked = manualLineSelections[item.orderItemId] === true;
                         return (
                           <div key={item.orderItemId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px] sm:items-center">
                             <label className="flex min-w-0 cursor-pointer items-start gap-3 text-sm">
                               <Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => setManualLineSelections((current) => ({ ...current, [item.orderItemId]: value === true }))} />
-                              <span className="min-w-0"><span className="font-medium">{item.sku} <span className="text-muted-foreground">x {item.quantity}</span></span><span className="mt-1 block truncate text-xs text-muted-foreground">{item.name}</span></span>
+                              <span className="min-w-0"><span className="font-medium">{item.name}</span><span className="mt-1 block truncate text-xs text-muted-foreground">{item.sku} - Up to {item.quantity}</span></span>
                             </label>
-                            <Input aria-label={`Quantity resent for ${item.sku}`} type="number" min={1} max={item.quantity} disabled={!checked} value={manualLineQuantities[item.orderItemId] ?? ""} onChange={(event) => setManualLineQuantities((current) => ({ ...current, [item.orderItemId]: event.target.value }))} />
+                            <div className="space-y-1">
+                              <Label className="text-xs text-muted-foreground">Quantity resent</Label>
+                              <Input aria-label={`Quantity resent for ${item.sku}`} type="number" min={1} max={item.quantity} disabled={!checked} value={manualLineQuantities[item.orderItemId] ?? ""} onChange={(event) => setManualLineQuantities((current) => ({ ...current, [item.orderItemId]: event.target.value }))} />
+                            </div>
                           </div>
                         );
-                      })}
-                    </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">Select the original package to load its WMS item authority.</p>
-                  )}
-                </div>
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Select the original package above to see its items.</p>
+                    )}
+                  </div>
+                )
               ) : (
                 <div className="mt-3 divide-y border-y">
                   {providerItems.map((item, index) => {
@@ -838,9 +1070,9 @@ function ShipStationReshipAdoptionDialog(props: {
                     );
                     return (
                       <div key={`${item.sku}-${index}`} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(260px,1fr)] sm:items-center">
-                        <div className="min-w-0 text-sm"><div className="font-medium">{item.sku} <span className="text-muted-foreground">x {item.quantity}</span></div><div className="mt-1 truncate text-xs text-muted-foreground">{item.name || "ShipStation package item"}</div></div>
+                        <div className="min-w-0 text-sm"><div className="font-medium">{item.name || item.sku}</div><div className="mt-1 truncate text-xs text-muted-foreground">{item.sku} - Quantity {item.quantity}</div></div>
                         <Select value={lineMappings[index] || ""} onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}>
-                          <SelectTrigger><SelectValue placeholder="Select matching original order line" /></SelectTrigger>
+                          <SelectTrigger><SelectValue placeholder="Match to original item" /></SelectTrigger>
                           <SelectContent>
                             {matchingLines.map((orderItem) => <SelectItem key={orderItem.id} value={String(orderItem.id)}>{orderItem.sku} - {orderItem.quantity} originally shipped</SelectItem>)}
                           </SelectContent>
@@ -855,8 +1087,22 @@ function ShipStationReshipAdoptionDialog(props: {
               {!providerItemsMissing && providerItems.length !== rawProviderItems.length && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because one or more ShipStation package lines are invalid.</p>}
             </section>
 
-            <section className="border-t pt-4"><div className="space-y-2"><Label htmlFor="shipstation-remediation-notes">Operator notes{providerItemsMissing ? " (required)" : ""}</Label><Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder="Record the evidence confirming this is a replacement" /></div></section>
-            {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to adopt this reship.</p>}
+            <section className="border-t pt-4">
+              <div className="font-semibold">What will happen</div>
+              <div className="mt-3 space-y-2 text-sm">
+                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The original package stays under tracking {selectedOriginalTracking || "shown above"}.</span></div>
+                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The {isCatalogConcession ? "different or free item shipment" : "replacement"} is recorded under tracking {preview.providerShipment.trackingNumber}.</span></div>
+                <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>{isCatalogConcession ? "Only the selected catalog quantities are deducted; no items are added to the order." : "Only the checked quantities are deducted from inventory; customer fulfillment is not increased."}</span></div>
+              </div>
+            </section>
+
+            <section className="border-t pt-4">
+              <div className="space-y-2">
+                <Label htmlFor="shipstation-remediation-notes">{providerItemsMissing ? (isCatalogConcession ? "What confirms these items were sent? (required)" : "How do you know this was a replacement? (required)") : "Evidence or notes (optional)"}</Label>
+                <Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder={isCatalogConcession ? "Example: Confirmed against the ShipStation shipment and packing record." : "Example: Customer reported the original package lost; replacement created in ShipStation."} />
+              </div>
+            </section>
+            {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to record this shipment.</p>}
           </div>
         ) : null}
 
@@ -864,7 +1110,7 @@ function ShipStationReshipAdoptionDialog(props: {
           <Button variant="outline" onClick={props.onClose}>Cancel</Button>
           <Button disabled={!preview || !actionValid || mutation.isPending} onClick={() => mutation.mutate()}>
             {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Adopt reship and deduct inventory
+            Record shipment
           </Button>
         </DialogFooter>
       </DialogContent>

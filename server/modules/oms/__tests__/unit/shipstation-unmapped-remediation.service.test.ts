@@ -484,6 +484,100 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(allSql).toContain("shipstation_original_identity_restored");
   });
 
+  it("records an off-order catalog item as a concession without order-line authority", async () => {
+    const calls: string[] = [];
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [{
+            ...contextRow,
+            candidate_shipment_id: 20,
+            external_shipment_ref: "903",
+            provider_order_id: 701,
+            provider_order_key: emptyProviderShipment.orderKey,
+            tracking_number: emptyProviderShipment.trackingNumber,
+            authority_external_fulfillment_id: "shipstation_shipment:903",
+            authority_tracking_number: emptyProviderShipment.trackingNumber,
+          }] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        if (text.includes("FROM catalog.product_variants catalog_variant")) {
+          return { rows: [{
+            product_variant_id: 222,
+            sku: "FREE-SKU",
+            from_location_id: 333,
+          }] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions") && text.includes("FOR UPDATE")) {
+          return { rows: [{ id: 77 }] };
+        }
+        if (text.includes("SELECT id, status, order_id") && text.includes("FROM wms.outbound_shipments")) {
+          return { rows: [{
+            id: 10,
+            status: "shipped",
+            order_id: 42,
+            shipment_purpose: "customer_fulfillment",
+            has_customer_items: true,
+          }] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, source, shipment_purpose")
+          && text.includes("external_fulfillment_id")
+        ) {
+          return { rows: [{
+            id: 20,
+            order_id: 42,
+            status: "shipped",
+            source: "shipstation_split",
+            shipment_purpose: "customer_fulfillment",
+          }] };
+        }
+        if (text.includes("inventory_ship_count")) {
+          return { rows: [{ count: 0, inventory_ship_count: 0 }] };
+        }
+        if (
+          text.includes("SELECT id, order_item_id, replacement_for_order_item_id, shipment_item_purpose")
+          && text.includes("FROM wms.outbound_shipment_items")
+        ) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+    const service = shipStation({
+      getShipments: vi.fn(async () => [emptyProviderShipment]),
+    });
+
+    const result = await adoptShipStationUnmappedPhysicalAsReship(db, service, {
+      exceptionId: 77,
+      operator: "ops:test",
+      originalShipmentId: 10,
+      reason: "concession",
+      notes: "Confirmed FREE-SKU was physically sent as a customer concession.",
+      lineMappings: [{
+        evidenceSource: "catalog",
+        productVariantId: 222,
+        quantity: 1,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      changed: true,
+      exceptionId: 77,
+      candidateShipmentId: 20,
+    });
+    expect(service.processShipmentNotification).toHaveBeenCalledWith(emptyProviderShipment);
+    const allSql = calls.join("\n");
+    expect(allSql).toContain('"shipmentItemPurpose":"concession"');
+    expect(allSql).toContain("shipment_item_purpose, product_variant_id");
+    expect(allSql).toContain("inventory_level.variant_qty - inventory_level.reserved_qty");
+  });
+
   it("requires notes and original WMS evidence for an empty ShipStation package", async () => {
     const db = {
       execute: vi.fn(async (query: any) => {
