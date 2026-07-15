@@ -8,7 +8,6 @@
  *   npm run procurement:automatic-purchasing-pilot -- --sku=EXAMPLE-SKU --execute --actor=USER-ID
  */
 
-import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -42,8 +41,19 @@ export function parseAutomaticPurchasingPilotArgs(args: string[]): CliOptions {
   return { sku, execute, actor };
 }
 
+export async function loadLocalEnvironmentIfNeeded(): Promise<void> {
+  if (process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL) return;
+  try {
+    const dotenv = await import("dotenv");
+    dotenv.config({ quiet: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND") throw error;
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseAutomaticPurchasingPilotArgs(process.argv.slice(2));
+  await loadLocalEnvironmentIfNeeded();
   const { pool } = await import("../server/db");
 
   try {
