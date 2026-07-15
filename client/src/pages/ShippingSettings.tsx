@@ -157,15 +157,16 @@ interface RateTableSummary {
   effectiveTo: string | null;
   rateBook: RateBookSummary | null;
   rowCount: number;
-  zoneCount: number;
+  stateCount: number;
+  zipOverrideCount: number;
   minWeightGrams: number | null;
   maxWeightGrams: number | null;
 }
 
 interface RateTableImportRow {
   originWarehouseId: number | null;
-  destinationZone: string;
-  destinationRegion: string | null;
+  destinationCountry: string;
+  destinationRegion: string;
   postalPrefix: string | null;
   minWeightGrams: number;
   maxWeightGrams: number;
@@ -174,7 +175,7 @@ interface RateTableImportRow {
 
 interface ParseCsvResponse {
   dialect: "pounds" | "grams" | null;
-  pricingMode: "state_zip" | "legacy_zone" | null;
+  pricingMode: "state_zip" | null;
   rows: RateTableImportRow[];
   errors: Array<{ line: number; message: string }>;
   bandErrors: string[];
@@ -207,7 +208,7 @@ interface RateTableDetail {
   rateBook: (RateBookSummary & {
     zoneSet: { id: number; code: string; name: string; status: string } | null;
   }) | null;
-  pricingMode: "state_zip" | "legacy_zone";
+  pricingMode: "state_zip";
   rows: RateTableDetailRow[];
   analysis: {
     canActivate: boolean;
@@ -1714,11 +1715,38 @@ function mutationErrorDescription(error: Error): string {
 
 const RATE_PREVIEW_ROW_LIMIT = 50;
 
+const US_POSTAL_REGIONS = [
+  ["AL", "Alabama"], ["AK", "Alaska"], ["AZ", "Arizona"], ["AR", "Arkansas"],
+  ["CA", "California"], ["CO", "Colorado"], ["CT", "Connecticut"], ["DE", "Delaware"],
+  ["FL", "Florida"], ["GA", "Georgia"], ["HI", "Hawaii"], ["ID", "Idaho"],
+  ["IL", "Illinois"], ["IN", "Indiana"], ["IA", "Iowa"], ["KS", "Kansas"],
+  ["KY", "Kentucky"], ["LA", "Louisiana"], ["ME", "Maine"], ["MD", "Maryland"],
+  ["MA", "Massachusetts"], ["MI", "Michigan"], ["MN", "Minnesota"], ["MS", "Mississippi"],
+  ["MO", "Missouri"], ["MT", "Montana"], ["NE", "Nebraska"], ["NV", "Nevada"],
+  ["NH", "New Hampshire"], ["NJ", "New Jersey"], ["NM", "New Mexico"], ["NY", "New York"],
+  ["NC", "North Carolina"], ["ND", "North Dakota"], ["OH", "Ohio"], ["OK", "Oklahoma"],
+  ["OR", "Oregon"], ["PA", "Pennsylvania"], ["RI", "Rhode Island"], ["SC", "South Carolina"],
+  ["SD", "South Dakota"], ["TN", "Tennessee"], ["TX", "Texas"], ["UT", "Utah"],
+  ["VT", "Vermont"], ["VA", "Virginia"], ["WA", "Washington"], ["WV", "West Virginia"],
+  ["WI", "Wisconsin"], ["WY", "Wyoming"], ["DC", "District of Columbia"],
+  ["AS", "American Samoa"], ["GU", "Guam"], ["MP", "Northern Mariana Islands"],
+  ["PR", "Puerto Rico"], ["VI", "U.S. Virgin Islands"],
+] as const;
+
 interface RateImportFormState {
   rateBookCode: string;
   carrier: string;
   serviceCode: string;
   csv: string;
+}
+
+interface RateRowFormState {
+  destinationRegion: string;
+  postalPrefix: string;
+  originWarehouseId: string;
+  minWeightLb: string;
+  maxWeightLb: string;
+  rateUsd: string;
 }
 
 function emptyRateImportForm(): RateImportFormState {
@@ -1730,6 +1758,17 @@ function emptyRateImportForm(): RateImportFormState {
   };
 }
 
+function emptyRateRowForm(): RateRowFormState {
+  return {
+    destinationRegion: "",
+    postalPrefix: "",
+    originWarehouseId: "any",
+    minWeightLb: "0",
+    maxWeightLb: "",
+    rateUsd: "",
+  };
+}
+
 function RateTablesTab() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1737,7 +1776,11 @@ function RateTablesTab() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [replaceDraftId, setReplaceDraftId] = useState<number | null>(null);
   const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
-  const [pendingAction, setPendingAction] = useState<"activate" | "retire" | "delete" | null>(null);
+  const [pendingAction, setPendingAction] = useState<"activate" | "retire" | "delete" | "delete-row" | null>(null);
+  const [pendingRowId, setPendingRowId] = useState<number | null>(null);
+  const [rowDialogOpen, setRowDialogOpen] = useState(false);
+  const [editingRowId, setEditingRowId] = useState<number | null>(null);
+  const [rowForm, setRowForm] = useState<RateRowFormState>(emptyRateRowForm());
   const [form, setForm] = useState<RateImportFormState>(emptyRateImportForm());
   const [preview, setPreview] = useState<ParseCsvResponse | null>(null);
 
@@ -1753,6 +1796,10 @@ function RateTablesTab() {
   });
   const rateBooks = tablesData?.rateBooks || [];
   const tables = tablesData?.rateTables || [];
+  const { data: rateWarehouses = [] } = useQuery<WarehouseType[]>({
+    queryKey: ["/api/warehouses"],
+    queryFn: () => fetchJson<WarehouseType[]>("/api/warehouses"),
+  });
   const detailUrl = selectedTableId === null
     ? "/api/shipping/admin/rate-tables/detail"
     : `/api/shipping/admin/rate-tables/${selectedTableId}`;
@@ -1773,7 +1820,7 @@ function RateTablesTab() {
 
   const importMutation = useMutation({
     mutationFn: (body: {
-      pricingMode: "state_zip" | "legacy_zone";
+      pricingMode: "state_zip";
       rateBookCode: string;
       carrier: string;
       serviceCode: string;
@@ -1834,6 +1881,60 @@ function RateTablesTab() {
     },
   });
 
+  const rowMutation = useMutation({
+    mutationFn: (input: { tableId: number; rowId: number | null; row: RateTableImportRow }) =>
+      input.rowId === null
+        ? postJson<{ row: RateTableDetailRow }>(
+            `/api/shipping/admin/rate-tables/${input.tableId}/rows`,
+            input.row,
+          )
+        : putJson<{ row: RateTableDetailRow }>(
+            `/api/shipping/admin/rate-tables/${input.tableId}/rows/${input.rowId}`,
+            input.row,
+          ),
+    onSuccess: () => {
+      invalidateShippingAdmin(queryClient);
+      setRowDialogOpen(false);
+      setEditingRowId(null);
+      setRowForm(emptyRateRowForm());
+      toast({ title: editingRowId === null ? "Rate row added" : "Rate row updated" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Could not save rate row", description: mutationErrorDescription(e), variant: "destructive" });
+    },
+  });
+
+  const deleteRowMutation = useMutation({
+    mutationFn: (input: { tableId: number; rowId: number }) =>
+      deleteJson(`/api/shipping/admin/rate-tables/${input.tableId}/rows/${input.rowId}`),
+    onSuccess: () => {
+      invalidateShippingAdmin(queryClient);
+      setPendingRowId(null);
+      toast({ title: "Rate row deleted" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Could not delete rate row", description: mutationErrorDescription(e), variant: "destructive" });
+    },
+  });
+
+  const cloneMutation = useMutation({
+    mutationFn: (id: number) => postJson<{ rateTable: RateTableSummary; rowCount: number }>(
+      `/api/shipping/admin/rate-tables/${id}/clone`,
+      {},
+    ),
+    onSuccess: (data) => {
+      invalidateShippingAdmin(queryClient);
+      setSelectedTableId(data.rateTable.id);
+      toast({
+        title: "Editable draft created",
+        description: `${data.rowCount.toLocaleString()} rate rows were copied from the selected version.`,
+      });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Could not create draft", description: mutationErrorDescription(e), variant: "destructive" });
+    },
+  });
+
   const closeDialog = () => {
     setDialogOpen(false);
     setReplaceDraftId(null);
@@ -1859,6 +1960,67 @@ function RateTablesTab() {
     setPreview(null);
     setSelectedTableId(null);
     setDialogOpen(true);
+  };
+
+  const closeRowDialog = () => {
+    setRowDialogOpen(false);
+    setEditingRowId(null);
+    setRowForm(emptyRateRowForm());
+  };
+
+  const openNewRow = () => {
+    setEditingRowId(null);
+    setRowForm(emptyRateRowForm());
+    setRowDialogOpen(true);
+  };
+
+  const openEditRow = (row: RateTableDetailRow) => {
+    setEditingRowId(row.id);
+    setRowForm({
+      destinationRegion: row.destinationRegion,
+      postalPrefix: row.postalPrefix ?? "",
+      originWarehouseId: row.originWarehouseId === null ? "any" : String(row.originWarehouseId),
+      minWeightLb: formatMeasurementInput(row.minWeightGrams, GRAMS_PER_POUND),
+      maxWeightLb: formatMeasurementInput(row.maxWeightGrams, GRAMS_PER_POUND),
+      rateUsd: (row.rateCents / 100).toFixed(2),
+    });
+    setRowDialogOpen(true);
+  };
+
+  const handleSaveRow = () => {
+    if (selectedTableId === null) return;
+    const minLb = Number(rowForm.minWeightLb);
+    const maxLb = Number(rowForm.maxWeightLb);
+    const rateUsd = Number(rowForm.rateUsd);
+    if (!rowForm.destinationRegion) {
+      toast({ title: "Select a state or territory", variant: "destructive" });
+      return;
+    }
+    if (rowForm.postalPrefix && !/^\d{1,5}$/.test(rowForm.postalPrefix)) {
+      toast({ title: "ZIP prefix must contain 1 to 5 digits", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(minLb) || minLb < 0 || !Number.isFinite(maxLb) || maxLb < minLb) {
+      toast({ title: "Enter a valid weight range", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(rateUsd) || rateUsd < 0) {
+      toast({ title: "Enter a valid rate", variant: "destructive" });
+      return;
+    }
+    rowMutation.mutate({
+      tableId: selectedTableId,
+      rowId: editingRowId,
+      row: {
+        originWarehouseId: rowForm.originWarehouseId === "any" ? null : Number(rowForm.originWarehouseId),
+        destinationCountry: "US",
+        destinationRegion: rowForm.destinationRegion,
+        postalPrefix: rowForm.postalPrefix || null,
+        minWeightGrams: Math.round(minLb * GRAMS_PER_POUND),
+        maxWeightGrams: Math.round(maxLb * GRAMS_PER_POUND),
+        rateCents: Math.round(rateUsd * 100),
+      },
+    });
   };
 
   const handleFileChange = (file: File | undefined) => {
@@ -1910,19 +2072,29 @@ function RateTablesTab() {
     if (pendingAction === "activate") activateMutation.mutate(detail.rateTable.id);
     if (pendingAction === "retire") retireMutation.mutate(detail.rateTable.id);
     if (pendingAction === "delete") deleteMutation.mutate(detail.rateTable.id);
+    if (pendingAction === "delete-row" && pendingRowId !== null) {
+      deleteRowMutation.mutate({ tableId: detail.rateTable.id, rowId: pendingRowId });
+    }
   };
 
-  const actionPending = activateMutation.isPending || retireMutation.isPending || deleteMutation.isPending;
+  const actionPending = activateMutation.isPending
+    || retireMutation.isPending
+    || deleteMutation.isPending
+    || deleteRowMutation.isPending;
   const actionDialogTitle = pendingAction === "activate"
     ? "Activate this rate table?"
     : pendingAction === "retire"
       ? "Retire this rate table?"
-      : "Delete this draft?";
+      : pendingAction === "delete-row"
+        ? "Delete this rate row?"
+        : "Delete this draft?";
   const actionDialogDescription = pendingAction === "activate"
     ? "This table will become live for its rate book. Any active table for the same carrier and service will be superseded."
     : pendingAction === "retire"
       ? "This table will no longer be eligible for new shipping quotes."
-      : "This permanently removes the draft and all of its rate rows.";
+      : pendingAction === "delete-row"
+        ? "This removes the row from the draft. You can add a corrected row afterward."
+        : "This permanently removes the draft and all of its rate rows.";
 
   return (
     <Card>
@@ -2032,8 +2204,8 @@ function RateTablesTab() {
             <DialogTitle>{replaceDraftId === null ? "Import rate-table draft" : "Replace rate-table draft"}</DialogTitle>
             <DialogDescription>
               Use state defaults with optional ZIP-prefix overrides. Columns: state,zip_prefix,
-              min_lb,max_lb,rate_usd (optional warehouse_id). Leave zip_prefix blank for the
-              statewide price.
+              min_lb,max_lb,rate_usd. Leave zip_prefix blank for the statewide price. Warehouse
+              overrides can be added from the draft editor after import.
             </DialogDescription>
           </DialogHeader>
 
@@ -2174,7 +2346,7 @@ function RateTablesTab() {
                             {preview.rows.slice(0, RATE_PREVIEW_ROW_LIMIT).map((row, idx) => (
                               <TableRow key={idx}>
                                 <TableCell className="font-medium text-xs">
-                                  {row.destinationRegion ?? "Legacy"}
+                                  {row.destinationRegion}
                                 </TableCell>
                                 <TableCell className="font-mono text-xs text-muted-foreground">
                                   {row.postalPrefix ?? "Statewide"}
@@ -2209,6 +2381,107 @@ function RateTablesTab() {
                 <Upload className="w-4 h-4 mr-2" />
               )}
               {replaceDraftId === null ? "Create draft" : "Replace draft"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={rowDialogOpen} onOpenChange={(open) => !open && closeRowDialog()}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{editingRowId === null ? "Add rate row" : "Edit rate row"}</DialogTitle>
+            <DialogDescription>
+              Set a statewide weight band, or enter a ZIP prefix for a more-specific override.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 py-2 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>State or territory</Label>
+              <Select
+                value={rowForm.destinationRegion}
+                onValueChange={(value) => setRowForm((current) => ({ ...current, destinationRegion: value }))}
+              >
+                <SelectTrigger><SelectValue placeholder="Select state" /></SelectTrigger>
+                <SelectContent>
+                  {US_POSTAL_REGIONS.map(([code, name]) => (
+                    <SelectItem key={code} value={code}>{name} ({code})</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="rate-zip-prefix">ZIP prefix</Label>
+              <Input
+                id="rate-zip-prefix"
+                inputMode="numeric"
+                maxLength={5}
+                value={rowForm.postalPrefix}
+                onChange={(event) => setRowForm((current) => ({
+                  ...current,
+                  postalPrefix: event.target.value.replace(/\D/g, "").slice(0, 5),
+                }))}
+                placeholder="Statewide"
+              />
+            </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label>Origin warehouse</Label>
+              <Select
+                value={rowForm.originWarehouseId}
+                onValueChange={(value) => setRowForm((current) => ({ ...current, originWarehouseId: value }))}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="any">Any warehouse</SelectItem>
+                  {rateWarehouses.map((warehouse) => (
+                    <SelectItem key={warehouse.id} value={String(warehouse.id)}>
+                      {warehouse.name} ({warehouse.code})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="rate-min-lb">Minimum weight (lb)</Label>
+              <Input
+                id="rate-min-lb"
+                type="number"
+                min="0"
+                step="0.001"
+                value={rowForm.minWeightLb}
+                onChange={(event) => setRowForm((current) => ({ ...current, minWeightLb: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="rate-max-lb">Maximum weight (lb)</Label>
+              <Input
+                id="rate-max-lb"
+                type="number"
+                min="0"
+                step="0.001"
+                value={rowForm.maxWeightLb}
+                onChange={(event) => setRowForm((current) => ({ ...current, maxWeightLb: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="rate-usd">Rate (USD)</Label>
+              <Input
+                id="rate-usd"
+                type="number"
+                min="0"
+                step="0.01"
+                value={rowForm.rateUsd}
+                onChange={(event) => setRowForm((current) => ({ ...current, rateUsd: event.target.value }))}
+                placeholder="8.99"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={closeRowDialog}>Cancel</Button>
+            <Button onClick={handleSaveRow} disabled={rowMutation.isPending}>
+              {rowMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              Save rate row
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2313,9 +2586,17 @@ function RateTablesTab() {
                         Statewide defaults and any more-specific ZIP overrides.
                       </p>
                     </div>
-                    {detail.rows.length > 250 && (
-                      <span className="text-xs text-muted-foreground">First 250 shown</span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {detail.rows.length > 250 && (
+                        <span className="text-xs text-muted-foreground">First 250 shown</span>
+                      )}
+                      {detail.rateTable.status === "draft" && (
+                        <Button size="sm" onClick={openNewRow}>
+                          <Plus className="mr-2 h-4 w-4" />
+                          Add row
+                        </Button>
+                      )}
+                    </div>
                   </div>
                   <div className="max-h-[420px] overflow-auto rounded-md border">
                     <Table>
@@ -2326,13 +2607,16 @@ function RateTablesTab() {
                           <TableHead>Warehouse</TableHead>
                           <TableHead>Weight</TableHead>
                           <TableHead className="text-right">Rate</TableHead>
+                          {detail.rateTable.status === "draft" && (
+                            <TableHead className="w-24"><span className="sr-only">Actions</span></TableHead>
+                          )}
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {detail.rows.slice(0, 250).map((row) => (
                           <TableRow key={row.id}>
                             <TableCell className="text-xs font-medium">
-                              {row.destinationRegion ?? "Unmapped"}
+                              {row.destinationRegion}
                             </TableCell>
                             <TableCell className="font-mono text-xs text-muted-foreground">
                               {row.postalPrefix ? `${row.postalPrefix}*` : "Statewide"}
@@ -2344,6 +2628,35 @@ function RateTablesTab() {
                               {formatWeight(row.minWeightGrams)} - {formatWeight(row.maxWeightGrams)}
                             </TableCell>
                             <TableCell className="text-right text-xs">{formatCostUsd(row.rateCents)}</TableCell>
+                            {detail.rateTable.status === "draft" && (
+                              <TableCell>
+                                <div className="flex justify-end gap-1">
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    title="Edit rate row"
+                                    aria-label="Edit rate row"
+                                    onClick={() => openEditRow(row)}
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    title="Delete rate row"
+                                    aria-label="Delete rate row"
+                                    onClick={() => {
+                                      setPendingRowId(row.id);
+                                      setPendingAction("delete-row");
+                                    }}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              </TableCell>
+                            )}
                           </TableRow>
                         ))}
                       </TableBody>
@@ -2356,7 +2669,7 @@ function RateTablesTab() {
                     <>
                       <Button variant="outline" onClick={() => openDraftReplacement(detail)}>
                         <Upload className="mr-2 h-4 w-4" />
-                        Replace draft
+                        Replace all from CSV
                       </Button>
                       <Button variant="outline" onClick={() => setPendingAction("delete")}>
                         <Trash2 className="mr-2 h-4 w-4" />
@@ -2371,11 +2684,24 @@ function RateTablesTab() {
                       </Button>
                     </>
                   )}
-                  {(detail.rateTable.status === "active" || detail.rateTable.status === "superseded") && (
-                    <Button variant="outline" onClick={() => setPendingAction("retire")}>
-                      <Archive className="mr-2 h-4 w-4" />
-                      Retire
-                    </Button>
+                  {detail.rateTable.status !== "draft" && (
+                    <>
+                      <Button
+                        onClick={() => cloneMutation.mutate(detail.rateTable.id)}
+                        disabled={cloneMutation.isPending}
+                      >
+                        {cloneMutation.isPending
+                          ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          : <Pencil className="mr-2 h-4 w-4" />}
+                        Create editable draft
+                      </Button>
+                      {(detail.rateTable.status === "active" || detail.rateTable.status === "superseded") && (
+                        <Button variant="outline" onClick={() => setPendingAction("retire")}>
+                          <Archive className="mr-2 h-4 w-4" />
+                          Retire
+                        </Button>
+                      )}
+                    </>
                   )}
                 </section>
               </div>
@@ -2384,7 +2710,15 @@ function RateTablesTab() {
         </SheetContent>
       </Sheet>
 
-      <AlertDialog open={pendingAction !== null} onOpenChange={(open) => !open && setPendingAction(null)}>
+      <AlertDialog
+        open={pendingAction !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingAction(null);
+            setPendingRowId(null);
+          }
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{actionDialogTitle}</AlertDialogTitle>
@@ -2399,7 +2733,13 @@ function RateTablesTab() {
             <AlertDialogCancel disabled={actionPending}>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={confirmPendingAction} disabled={actionPending}>
               {actionPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {pendingAction === "activate" ? "Activate" : pendingAction === "retire" ? "Retire" : "Delete draft"}
+              {pendingAction === "activate"
+                ? "Activate"
+                : pendingAction === "retire"
+                  ? "Retire"
+                  : pendingAction === "delete-row"
+                    ? "Delete row"
+                    : "Delete draft"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

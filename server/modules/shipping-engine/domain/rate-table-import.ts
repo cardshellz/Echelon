@@ -1,48 +1,24 @@
 /**
- * Rate-table import — pure domain functions, no I/O.
+ * Shared shipping rate-table CSV parsing and draft validation.
  *
- * Two producers feed shipping.rate_tables / rate_table_rows:
- *   1. Hand-transcribed Parcelify grids (CSV pasted/uploaded in the admin UI —
- *      Parcelify's tables are unexportable, so a human keys them in).
- *   2. The ShipStation-v2 calibration job (writes rows programmatically via
- *      the same import route).
- *
- * This module owns CSV parsing, unit conversion, and pre-write validation so
- * the HTTP route stays thin and everything here is unit-testable without a DB.
- * Design: docs/SHIPPING-ENGINE-DESIGN.md ("Rates Engine").
- *
- * Operator CSVs use state plus an optional ZIP prefix. Legacy zone headers
- * remain readable for old calibration files, but are not exposed in the UI.
- *
- * Contract: never throws for bad input — every problem comes back as a
- * row-level error with the 1-based physical line number.
+ * Operators price US destinations directly by state/territory, with an
+ * optional ZIP prefix override. Internal shipping zones are deliberately not
+ * part of this contract.
  */
 
 import { normalizeUsPostalRegion } from "./us-geography";
 
-/** Same constant the client UI uses (ShippingSettings.tsx) — keep in sync. */
 export const GRAMS_PER_POUND = 453.59237;
 export const CENTS_PER_USD = 100;
-
-/** Hard cap on rows per import — matches the import route's zod limit. */
 export const MAX_IMPORT_ROWS = 5000;
 
-export type RatePricingMode = "state_zip" | "legacy_zone";
-
-export function stateZipPricingAreaKey(state: string, postalPrefix?: string | null): string {
-  const normalizedState = state.trim().toUpperCase();
-  const normalizedPrefix = postalPrefix?.trim() || "";
-  return normalizedPrefix
-    ? `US-${normalizedState}-ZIP-${normalizedPrefix}`
-    : `US-${normalizedState}`;
-}
+export type RatePricingMode = "state_zip";
 
 export interface RateTableImportRow {
   /** NULL = row applies to any origin warehouse. */
   originWarehouseId: number | null;
-  /** Internal routing key. Operators supply state and optional ZIP prefix. */
-  destinationZone: string;
-  destinationRegion: string | null;
+  destinationCountry: string;
+  destinationRegion: string;
   postalPrefix: string | null;
   minWeightGrams: number;
   maxWeightGrams: number;
@@ -58,7 +34,6 @@ export interface CsvRowError {
 export type RateCsvDialect = "pounds" | "grams";
 
 export interface ParseRateCsvResult {
-  /** Null when the header could not be recognized (see errors). */
   dialect: RateCsvDialect | null;
   pricingMode: RatePricingMode | null;
   rows: RateTableImportRow[];
@@ -67,14 +42,11 @@ export interface ParseRateCsvResult {
 
 interface HeaderLayout {
   dialect: RateCsvDialect;
-  pricingMode: RatePricingMode;
-  destinationIdx: number;
+  stateIdx: number;
   postalPrefixIdx: number;
   minIdx: number;
   maxIdx: number;
   rateIdx: number;
-  /** -1 when the optional warehouse_id column is absent. */
-  warehouseIdx: number;
 }
 
 function splitCsvLine(line: string): string[] {
@@ -82,24 +54,19 @@ function splitCsvLine(line: string): string[] {
 }
 
 function detectHeader(cells: string[]): HeaderLayout | null {
-  const lowered = cells.map((c) => c.toLowerCase());
+  const lowered = cells.map((cell) => cell.toLowerCase());
   const idx = (name: string) => lowered.indexOf(name);
-
   const stateIdx = idx("state");
-  const zoneIdx = idx("zone");
-  if (stateIdx === -1 && zoneIdx === -1) return null;
-  const pricingMode: RatePricingMode = stateIdx !== -1 ? "state_zip" : "legacy_zone";
-  const destinationIdx = stateIdx !== -1 ? stateIdx : zoneIdx;
-  const postalPrefixIdx = idx("zip_prefix");
-  const warehouseIdx = idx("warehouse_id");
+  if (stateIdx === -1) return null;
 
-  const poundsCols = { minIdx: idx("min_lb"), maxIdx: idx("max_lb"), rateIdx: idx("rate_usd") };
-  if (poundsCols.minIdx !== -1 && poundsCols.maxIdx !== -1 && poundsCols.rateIdx !== -1) {
-    return { dialect: "pounds", pricingMode, destinationIdx, postalPrefixIdx, warehouseIdx, ...poundsCols };
+  const postalPrefixIdx = idx("zip_prefix");
+  const pounds = { minIdx: idx("min_lb"), maxIdx: idx("max_lb"), rateIdx: idx("rate_usd") };
+  if (pounds.minIdx !== -1 && pounds.maxIdx !== -1 && pounds.rateIdx !== -1) {
+    return { dialect: "pounds", stateIdx, postalPrefixIdx, ...pounds };
   }
-  const gramsCols = { minIdx: idx("min_g"), maxIdx: idx("max_g"), rateIdx: idx("rate_cents") };
-  if (gramsCols.minIdx !== -1 && gramsCols.maxIdx !== -1 && gramsCols.rateIdx !== -1) {
-    return { dialect: "grams", pricingMode, destinationIdx, postalPrefixIdx, warehouseIdx, ...gramsCols };
+  const grams = { minIdx: idx("min_g"), maxIdx: idx("max_g"), rateIdx: idx("rate_cents") };
+  if (grams.minIdx !== -1 && grams.maxIdx !== -1 && grams.rateIdx !== -1) {
+    return { dialect: "grams", stateIdx, postalPrefixIdx, ...grams };
   }
   return null;
 }
@@ -110,10 +77,6 @@ function parseFiniteNumber(raw: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-/**
- * Parse a rate-table CSV into storage-unit rows. Pounds→grams uses
- * GRAMS_PER_POUND with round-to-nearest; USD→cents rounds to the nearest cent.
- */
 export function parseRateTableCsv(
   csv: string,
   opts: { maxRows?: number } = {},
@@ -121,14 +84,13 @@ export function parseRateTableCsv(
   const maxRows = opts.maxRows ?? MAX_IMPORT_ROWS;
   const rows: RateTableImportRow[] = [];
   const errors: CsvRowError[] = [];
-
   const lines = csv.split(/\r\n|\r|\n/);
   let layout: HeaderLayout | null = null;
   let headerSeen = false;
 
-  for (let i = 0; i < lines.length; i++) {
-    const lineNo = i + 1;
-    const line = lines[i];
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineNo = index + 1;
+    const line = lines[index];
     if (line.trim() === "") continue;
 
     if (!headerSeen) {
@@ -138,8 +100,8 @@ export function parseRateTableCsv(
         errors.push({
           line: lineNo,
           message:
-            "unrecognized header - expected columns state,zip_prefix,min_lb,max_lb,rate_usd or " +
-            "state,zip_prefix,min_g,max_g,rate_cents (zip_prefix and warehouse_id are optional)",
+            "unrecognized header - expected state,zip_prefix,min_lb,max_lb,rate_usd or " +
+            "state,zip_prefix,min_g,max_g,rate_cents (zip_prefix is optional)",
         });
         return { dialect: null, pricingMode: null, rows: [], errors };
       }
@@ -149,16 +111,16 @@ export function parseRateTableCsv(
     const row = parseDataLine(splitCsvLine(line), layout!, lineNo, errors);
     if (row !== null) rows.push(row);
     if (rows.length > maxRows) {
-      errors.push({ line: lineNo, message: `too many rows — the import limit is ${maxRows}` });
-      return { dialect: layout!.dialect, pricingMode: layout!.pricingMode, rows: [], errors };
+      errors.push({ line: lineNo, message: `too many rows - the import limit is ${maxRows}` });
+      return { dialect: layout!.dialect, pricingMode: "state_zip", rows: [], errors };
     }
   }
 
   if (!headerSeen) {
-    errors.push({ line: 1, message: "CSV is empty — a header row is required" });
+    errors.push({ line: 1, message: "CSV is empty - a header row is required" });
     return { dialect: null, pricingMode: null, rows: [], errors };
   }
-  return { dialect: layout!.dialect, pricingMode: layout!.pricingMode, rows, errors };
+  return { dialect: layout!.dialect, pricingMode: "state_zip", rows, errors };
 }
 
 function parseDataLine(
@@ -172,27 +134,15 @@ function parseDataLine(
     return null;
   };
 
-  const destination = (cells[layout.destinationIdx] ?? "").trim();
-  let destinationRegion: string | null = null;
-  let postalPrefix: string | null = null;
-  let destinationZone: string;
-  if (layout.pricingMode === "state_zip") {
-    destinationRegion = normalizeUsPostalRegion(destination);
-    if (destinationRegion === null) {
-      return fail(`invalid US state or territory ${JSON.stringify(destination)}`);
-    }
-    const prefix = layout.postalPrefixIdx === -1
-      ? ""
-      : (cells[layout.postalPrefixIdx] ?? "").trim();
-    if (prefix !== "" && !/^\d{1,5}$/.test(prefix)) {
-      return fail("zip_prefix must contain 1 to 5 digits");
-    }
-    postalPrefix = prefix || null;
-    destinationZone = stateZipPricingAreaKey(destinationRegion, postalPrefix);
-  } else {
-    if (destination === "") return fail("zone is required");
-    if (destination.length > 40) return fail("zone must be 40 characters or fewer");
-    destinationZone = destination;
+  const destinationRegion = normalizeUsPostalRegion(cells[layout.stateIdx] ?? "");
+  if (destinationRegion === null) {
+    return fail(`invalid US state or territory ${JSON.stringify(cells[layout.stateIdx] ?? "")}`);
+  }
+  const prefix = layout.postalPrefixIdx === -1
+    ? ""
+    : (cells[layout.postalPrefixIdx] ?? "").trim();
+  if (prefix !== "" && !/^\d{1,5}$/.test(prefix)) {
+    return fail("zip_prefix must contain 1 to 5 digits");
   }
 
   const minRaw = parseFiniteNumber(cells[layout.minIdx] ?? "");
@@ -222,47 +172,32 @@ function parseDataLine(
   if (maxWeightGrams < minWeightGrams) return fail("max weight must be >= min weight");
   if (rateCents < 0) return fail("rate must be zero or greater");
 
-  let originWarehouseId: number | null = null;
-  if (layout.warehouseIdx !== -1) {
-    const warehouseRaw = (cells[layout.warehouseIdx] ?? "").trim();
-    if (warehouseRaw !== "") {
-      const parsed = Number(warehouseRaw);
-      if (!Number.isInteger(parsed) || parsed <= 0) {
-        return fail(`invalid warehouse_id ${JSON.stringify(warehouseRaw)}`);
-      }
-      originWarehouseId = parsed;
-    }
-  }
-
   return {
-    originWarehouseId,
-    destinationZone,
+    originWarehouseId: null,
+    destinationCountry: "US",
     destinationRegion,
-    postalPrefix,
+    postalPrefix: prefix || null,
     minWeightGrams,
     maxWeightGrams,
     rateCents,
   };
 }
 
-// ---------------------------------------------------------------------------
-// Band validation
-// ---------------------------------------------------------------------------
+export function ratePricingAreaKey(row: RateTableImportRow): string {
+  return [
+    row.originWarehouseId ?? "any",
+    row.destinationCountry.toUpperCase(),
+    row.destinationRegion.toUpperCase(),
+    row.postalPrefix ?? "",
+  ].join("|");
+}
 
-/**
- * Detect overlapping weight bands within the same (originWarehouseId,
- * destinationZone) scope. Bands are min/max INCLUSIVE (rate selection treats
- * them that way), so [0,1000] + [1000,2000] overlaps at 1000 while
- * [0,1000] + [1001,2000] is a clean adjacency. Exact duplicates are overlaps.
- * Returns human-readable error strings; empty array = valid.
- */
 export function findBandOverlaps(rows: readonly RateTableImportRow[]): string[] {
   const byScope = new Map<string, Array<{ row: RateTableImportRow; index: number }>>();
   rows.forEach((row, index) => {
-    const scope = `${row.originWarehouseId ?? "any"}|${row.destinationZone.toUpperCase()}`;
-    const list = byScope.get(scope) ?? [];
+    const list = byScope.get(ratePricingAreaKey(row)) ?? [];
     list.push({ row, index });
-    byScope.set(scope, list);
+    byScope.set(ratePricingAreaKey(row), list);
   });
 
   const errors: string[] = [];
@@ -270,17 +205,14 @@ export function findBandOverlaps(rows: readonly RateTableImportRow[]): string[] 
     const sorted = [...entries].sort(
       (a, b) => a.row.minWeightGrams - b.row.minWeightGrams || a.row.maxWeightGrams - b.row.maxWeightGrams,
     );
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[i - 1];
-      const curr = sorted[i];
-      if (curr.row.minWeightGrams <= prev.row.maxWeightGrams) {
-        const scopeLabel =
-          `zone ${curr.row.destinationZone}` +
-          (curr.row.originWarehouseId !== null ? ` (warehouse ${curr.row.originWarehouseId})` : "");
+    for (let index = 1; index < sorted.length; index += 1) {
+      const previous = sorted[index - 1];
+      const current = sorted[index];
+      if (current.row.minWeightGrams <= previous.row.maxWeightGrams) {
         errors.push(
-          `overlapping weight bands in ${scopeLabel}: ` +
-            `[${prev.row.minWeightGrams}, ${prev.row.maxWeightGrams}]g (row ${prev.index + 1}) and ` +
-            `[${curr.row.minWeightGrams}, ${curr.row.maxWeightGrams}]g (row ${curr.index + 1})`,
+          `overlapping weight bands in ${pricingAreaLabel(current.row)}: ` +
+          `[${previous.row.minWeightGrams}, ${previous.row.maxWeightGrams}]g (row ${previous.index + 1}) and ` +
+          `[${current.row.minWeightGrams}, ${current.row.maxWeightGrams}]g (row ${current.index + 1})`,
         );
       }
     }
@@ -288,17 +220,17 @@ export function findBandOverlaps(rows: readonly RateTableImportRow[]): string[] 
   return errors;
 }
 
-/** Every ZIP override needs a statewide fallback in the same imported table. */
+/** Every ZIP override needs a statewide fallback in the same warehouse scope. */
 export function findMissingStateDefaults(rows: readonly RateTableImportRow[]): string[] {
   const statewide = new Set(
     rows
-      .filter((row) => row.destinationRegion !== null && row.postalPrefix === null)
-      .map((row) => `${row.originWarehouseId ?? "any"}|${row.destinationRegion}`),
+      .filter((row) => row.postalPrefix === null)
+      .map((row) => `${row.originWarehouseId ?? "any"}|${row.destinationCountry}|${row.destinationRegion}`),
   );
   const missing = new Set<string>();
   for (const row of rows) {
-    if (row.destinationRegion === null || row.postalPrefix === null) continue;
-    const scope = `${row.originWarehouseId ?? "any"}|${row.destinationRegion}`;
+    if (row.postalPrefix === null) continue;
+    const scope = `${row.originWarehouseId ?? "any"}|${row.destinationCountry}|${row.destinationRegion}`;
     if (!statewide.has(scope)) {
       missing.add(
         `${row.destinationRegion}${row.originWarehouseId === null ? "" : ` at warehouse ${row.originWarehouseId}`}`,
@@ -310,28 +242,9 @@ export function findMissingStateDefaults(rows: readonly RateTableImportRow[]): s
     .map((scope) => `${scope} has a ZIP override but no statewide fallback rate`);
 }
 
-// ---------------------------------------------------------------------------
-// Zone-coverage warnings
-// ---------------------------------------------------------------------------
-
-/**
- * Zones referenced by the import that no shipping.zone_rules row can resolve
- * to. WARNINGS, not rejections — the operator may be importing rates ahead of
- * the zone rules. Comparison is case-insensitive.
- */
-export function findUnknownZones(
-  rows: readonly RateTableImportRow[],
-  knownZones: Iterable<string>,
-): string[] {
-  const known = new Set<string>();
-  for (const zone of knownZones) known.add(zone.trim().toUpperCase());
-
-  const unknown = new Set<string>();
-  for (const row of rows) {
-    const zone = row.destinationZone.trim();
-    if (!known.has(zone.toUpperCase())) unknown.add(zone);
-  }
-  return [...unknown]
-    .sort()
-    .map((zone) => `zone ${JSON.stringify(zone)} has no matching zone rule — rows for it will never be quoted until one exists`);
+function pricingAreaLabel(row: RateTableImportRow): string {
+  const geography = row.postalPrefix === null
+    ? `${row.destinationRegion} statewide`
+    : `${row.destinationRegion} ZIP ${row.postalPrefix}*`;
+  return row.originWarehouseId === null ? geography : `${geography} at warehouse ${row.originWarehouseId}`;
 }

@@ -582,9 +582,6 @@
   "shipping.variant_shipping_attrs": [
     "modules/shipping-engine"
   ],
-  "shipping.zone_rules": [
-    "modules/shipping-engine"
-  ],
   "warehouse.echelon_settings": [
     "modules/orders",
     "modules/warehouse",
