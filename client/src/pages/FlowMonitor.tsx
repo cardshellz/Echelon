@@ -37,6 +37,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { FinancialCommandOperations } from "@/components/operations/FinancialCommandOperations";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -343,6 +344,14 @@ interface ShipStationUnmappedPreview {
     activeProviderShipmentId: number;
     activeTrackingNumber: string;
   } | null;
+  originalPackageIdentityRepair: {
+    wmsShipmentId: number;
+    providerShipmentId: number;
+    providerOrderId: number;
+    providerOrderKey: string;
+    currentTrackingNumber: string;
+    originalTrackingNumber: string;
+  } | null;
   orderItems: Array<{
     id: number;
     sku: string;
@@ -361,6 +370,12 @@ interface ShipStationUnmappedPreview {
     externalShipmentRef: string | null;
     itemCount: number;
     createdAt: string | null;
+    items: Array<{
+      orderItemId: number;
+      sku: string;
+      name: string;
+      quantity: number;
+    }>;
   }>;
 }
 
@@ -375,6 +390,7 @@ interface ShipStationReshipAdoptionResponse {
   exceptionId: number;
   candidateShipmentId?: number | null;
   providerIdentityRepaired?: boolean;
+  originalPackageIdentityRepaired?: boolean;
 }
 
 const DOMAIN_LABEL: Record<Domain, string> = {
@@ -582,6 +598,8 @@ function ShipStationReshipAdoptionDialog(props: {
   const [notes, setNotes] = useState("");
   const [originalShipmentId, setOriginalShipmentId] = useState("");
   const [lineMappings, setLineMappings] = useState<Record<number, string>>({});
+  const [manualLineSelections, setManualLineSelections] = useState<Record<number, boolean>>({});
+  const [manualLineQuantities, setManualLineQuantities] = useState<Record<number, string>>({});
   const locatorQuery = useMemo(() => {
     if (!props.target) return "";
     const params = new URLSearchParams();
@@ -606,8 +624,10 @@ function ShipStationReshipAdoptionDialog(props: {
   const providerItems = useMemo(() => rawProviderItems.filter((item) => (
     String(item.sku ?? "").trim().length > 0 && Number.isSafeInteger(Number(item.quantity)) && Number(item.quantity) > 0
   )), [rawProviderItems]);
-  const providerEvidenceValid = providerItems.length > 0
-    && providerItems.length === rawProviderItems.length
+  const providerItemsMissing = rawProviderItems.length === 0;
+  const providerEvidenceValid = (providerItemsMissing || (
+    providerItems.length > 0 && providerItems.length === rawProviderItems.length
+  ))
     && Boolean(preview?.providerShipment.shipDate)
     && !preview?.providerShipment.voidDate;
 
@@ -616,6 +636,8 @@ function ShipStationReshipAdoptionDialog(props: {
     setNotes("");
     setOriginalShipmentId("");
     setLineMappings({});
+    setManualLineSelections({});
+    setManualLineQuantities({});
   }, [locatorQuery]);
 
   useEffect(() => {
@@ -636,18 +658,43 @@ function ShipStationReshipAdoptionDialog(props: {
     && shipment.shipmentPurpose === "customer_fulfillment"
     && shipment.itemCount > 0
   )), [preview]);
-  const mappingsComplete = providerItems.length > 0 && providerItems.every((item, index) => {
+  const selectedOriginalShipment = useMemo(() => (
+    validOriginalShipments.find((shipment) => shipment.id === positiveFlowId(originalShipmentId)) ?? null
+  ), [originalShipmentId, validOriginalShipments]);
+
+  useEffect(() => {
+    if (!providerItemsMissing) return;
+    const quantities: Record<number, string> = {};
+    for (const item of selectedOriginalShipment?.items ?? []) {
+      quantities[item.orderItemId] = String(item.quantity);
+    }
+    setManualLineSelections({});
+    setManualLineQuantities(quantities);
+  }, [providerItemsMissing, selectedOriginalShipment]);
+
+  const providerMappingsComplete = providerItems.length > 0 && providerItems.every((item, index) => {
     const orderItemId = positiveFlowId(lineMappings[index]);
     return orderItemId !== null && preview?.orderItems.some((orderItem) => (
       orderItem.id === orderItemId
       && orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase()
     ));
   });
+  const selectedManualItems = useMemo(() => (
+    (selectedOriginalShipment?.items ?? []).filter(
+      (item) => manualLineSelections[item.orderItemId] === true,
+    )
+  ), [manualLineSelections, selectedOriginalShipment]);
+  const manualMappingsComplete = selectedManualItems.length > 0 && selectedManualItems.every((item) => {
+    const quantity = Number(manualLineQuantities[item.orderItemId]);
+    return Number.isSafeInteger(quantity) && quantity > 0 && quantity <= item.quantity;
+  });
+  const mappingsComplete = providerItemsMissing ? manualMappingsComplete : providerMappingsComplete;
   const actionValid = props.canAdjustInventory
     && providerEvidenceValid
     && mappingsComplete
     && positiveFlowId(originalShipmentId) !== null
-    && reason.length > 0;
+    && reason.length > 0
+    && (!providerItemsMissing || notes.trim().length > 0);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -658,11 +705,18 @@ function ShipStationReshipAdoptionDialog(props: {
         originalShipmentId: Number(originalShipmentId),
         reason,
         notes: notes.trim() || undefined,
-        lineMappings: providerItems.map((item, providerItemIndex) => ({
-          providerItemIndex,
-          orderItemId: Number(lineMappings[providerItemIndex]),
-          quantity: Number(item.quantity),
-        })),
+        lineMappings: providerItemsMissing
+          ? selectedManualItems.map((item) => ({
+            evidenceSource: "original_wms",
+            orderItemId: item.orderItemId,
+            quantity: Number(manualLineQuantities[item.orderItemId]),
+          }))
+          : providerItems.map((item, providerItemIndex) => ({
+            evidenceSource: "shipstation",
+            providerItemIndex,
+            orderItemId: Number(lineMappings[providerItemIndex]),
+            quantity: Number(item.quantity),
+          })),
       };
       const response = await apiRequest("POST", "/api/oms/ops/shipstation-unmapped/adopt-reship", body);
       return response.json() as Promise<ShipStationReshipAdoptionResponse>;
@@ -723,41 +777,85 @@ function ShipStationReshipAdoptionDialog(props: {
               </section>
             )}
 
+            {preview.originalPackageIdentityRepair && (
+              <section className="flex gap-3 border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+                <div>
+                  <div className="font-medium">Original package identity will be restored</div>
+                  <p className="mt-1 text-xs">A duplicate-order callback overwrote WMS shipment {preview.originalPackageIdentityRepair.wmsShipmentId} with the replacement tracking number. Adoption will restore its original tracking {preview.originalPackageIdentityRepair.originalTrackingNumber} before recording this replacement.</p>
+                </div>
+              </section>
+            )}
+
             <section className="flex gap-3 border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
               <PackagePlus className="mt-0.5 h-5 w-5 shrink-0" />
               <div><div className="font-medium">Verified replacement only</div><p className="mt-1 text-xs">This records another physical inventory shipment without increasing customer fulfilled quantity or creating another channel fulfillment.</p></div>
             </section>
 
-            <section className="border-t pt-4">
-              <div className="text-xs font-semibold uppercase text-muted-foreground">Package line mapping</div>
-              <div className="mt-3 divide-y border-y">
-                {providerItems.map((item, index) => {
-                  const matchingLines = preview.orderItems.filter(
-                    (orderItem) => orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase(),
-                  );
-                  return (
-                    <div key={`${item.sku}-${index}`} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(260px,1fr)] sm:items-center">
-                      <div className="min-w-0 text-sm"><div className="font-medium">{item.sku} <span className="text-muted-foreground">x {item.quantity}</span></div><div className="mt-1 truncate text-xs text-muted-foreground">{item.name || "ShipStation package item"}</div></div>
-                      <Select value={lineMappings[index] || ""} onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}>
-                        <SelectTrigger><SelectValue placeholder="Select matching original order line" /></SelectTrigger>
-                        <SelectContent>
-                          {matchingLines.map((orderItem) => <SelectItem key={orderItem.id} value={String(orderItem.id)}>{orderItem.sku} - {orderItem.quantity} originally shipped</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  );
-                })}
-              </div>
-              {!providerEvidenceValid && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because ShipStation reports a voided, unshipped, or invalid package line.</p>}
-            </section>
-
             <section className="grid gap-4 border-t pt-4 sm:grid-cols-2">
-              <div className="space-y-2"><Label>Original package</Label><Select value={originalShipmentId} onValueChange={setOriginalShipmentId}><SelectTrigger><SelectValue placeholder="Select package being replaced" /></SelectTrigger><SelectContent>{validOriginalShipments.map((shipment) => <SelectItem key={shipment.id} value={String(shipment.id)}>Shipment {shipment.id} - {shipment.trackingNumber || humanize(shipment.status)}</SelectItem>)}</SelectContent></Select></div>
+              <div className="space-y-2"><Label>Original package</Label><Select value={originalShipmentId} onValueChange={setOriginalShipmentId}><SelectTrigger><SelectValue placeholder="Select package being replaced" /></SelectTrigger><SelectContent>{validOriginalShipments.map((shipment) => {
+                const restoredTracking = preview.originalPackageIdentityRepair?.wmsShipmentId === shipment.id
+                  ? preview.originalPackageIdentityRepair.originalTrackingNumber
+                  : shipment.trackingNumber;
+                return <SelectItem key={shipment.id} value={String(shipment.id)}>Shipment {shipment.id} - {restoredTracking || humanize(shipment.status)}</SelectItem>;
+              })}</SelectContent></Select></div>
               <div className="space-y-2"><Label>Replacement reason</Label><Select value={reason} onValueChange={setReason}><SelectTrigger><SelectValue placeholder="Select reason" /></SelectTrigger><SelectContent><SelectItem value="lost">Lost package</SelectItem><SelectItem value="damaged">Damaged package</SelectItem><SelectItem value="misdelivery">Misdelivery</SelectItem><SelectItem value="carrier_replacement">Carrier replacement</SelectItem><SelectItem value="other">Other verified replacement</SelectItem></SelectContent></Select></div>
             </section>
             {validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No previously shipped WMS package is available to authorize this replacement.</p>}
 
-            <section className="border-t pt-4"><div className="space-y-2"><Label htmlFor="shipstation-remediation-notes">Operator notes</Label><Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder="Record the evidence confirming this is a replacement" /></div></section>
+            <section className="border-t pt-4">
+              <div className="text-xs font-semibold uppercase text-muted-foreground">{providerItemsMissing ? "Confirm items resent" : "Package line mapping"}</div>
+              {providerItemsMissing ? (
+                <div className="mt-3 space-y-3">
+                  <div className="border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                    <div className="font-medium">ShipStation omitted package lines</div>
+                    <p className="mt-1 text-xs">Confirm the physical items resent from the selected original WMS package. Only checked quantities will be deducted.</p>
+                  </div>
+                  {selectedOriginalShipment ? (
+                    <div className="divide-y border-y">
+                      {selectedOriginalShipment.items.map((item) => {
+                        const checked = manualLineSelections[item.orderItemId] === true;
+                        return (
+                          <div key={item.orderItemId} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_120px] sm:items-center">
+                            <label className="flex min-w-0 cursor-pointer items-start gap-3 text-sm">
+                              <Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => setManualLineSelections((current) => ({ ...current, [item.orderItemId]: value === true }))} />
+                              <span className="min-w-0"><span className="font-medium">{item.sku} <span className="text-muted-foreground">x {item.quantity}</span></span><span className="mt-1 block truncate text-xs text-muted-foreground">{item.name}</span></span>
+                            </label>
+                            <Input aria-label={`Quantity resent for ${item.sku}`} type="number" min={1} max={item.quantity} disabled={!checked} value={manualLineQuantities[item.orderItemId] ?? ""} onChange={(event) => setManualLineQuantities((current) => ({ ...current, [item.orderItemId]: event.target.value }))} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Select the original package to load its WMS item authority.</p>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-3 divide-y border-y">
+                  {providerItems.map((item, index) => {
+                    const matchingLines = preview.orderItems.filter(
+                      (orderItem) => orderItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase(),
+                    );
+                    return (
+                      <div key={`${item.sku}-${index}`} className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(260px,1fr)] sm:items-center">
+                        <div className="min-w-0 text-sm"><div className="font-medium">{item.sku} <span className="text-muted-foreground">x {item.quantity}</span></div><div className="mt-1 truncate text-xs text-muted-foreground">{item.name || "ShipStation package item"}</div></div>
+                        <Select value={lineMappings[index] || ""} onValueChange={(value) => setLineMappings((current) => ({ ...current, [index]: value }))}>
+                          <SelectTrigger><SelectValue placeholder="Select matching original order line" /></SelectTrigger>
+                          <SelectContent>
+                            {matchingLines.map((orderItem) => <SelectItem key={orderItem.id} value={String(orderItem.id)}>{orderItem.sku} - {orderItem.quantity} originally shipped</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {preview.providerShipment.voidDate && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because ShipStation reports it as voided.</p>}
+              {!preview.providerShipment.shipDate && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because ShipStation has no shipped date.</p>}
+              {!providerItemsMissing && providerItems.length !== rawProviderItems.length && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because one or more ShipStation package lines are invalid.</p>}
+            </section>
+
+            <section className="border-t pt-4"><div className="space-y-2"><Label htmlFor="shipstation-remediation-notes">Operator notes{providerItemsMissing ? " (required)" : ""}</Label><Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder="Record the evidence confirming this is a replacement" /></div></section>
             {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to adopt this reship.</p>}
           </div>
         ) : null}
