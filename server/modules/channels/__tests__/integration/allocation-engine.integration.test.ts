@@ -15,6 +15,7 @@ import {
   runMigrations,
   truncateTestData,
   closeTestDb,
+  describeWithDisposableDb,
 } from "../../../../../test/setup-integration";
 import { createAllocationEngine } from "../../allocation-engine.service";
 import {
@@ -51,7 +52,7 @@ function createTestAtpService(atpData: {
   };
 }
 
-describe("Allocation Engine (Integration)", () => {
+describeWithDisposableDb("Allocation Engine (Integration)", () => {
   let db: ReturnType<typeof getTestDb>;
 
   beforeAll(async () => {

@@ -4,9 +4,9 @@ name: CI
 # GitHub repo settings → Branches → require "Typecheck + unit tests"
 # status check to pass before merge.
 #
-# The focused PostgreSQL hardening job below covers self-contained financial
-# command and PO-email outbox guarantees. Broader integration suites still need
-# a fully bootstrapped application database with all named schemas.
+# The PostgreSQL hardening job covers self-contained financial-command and
+# PO-email-outbox guarantees plus the disposable named-schema channel/inventory
+# harness.
 
 on:
   pull_request:
@@ -68,3 +68,9 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/po-email-outbox.integration.test.ts
+      - name: Named-schema channel and inventory guarantees
+        run: >-
+          npx vitest run --no-file-parallelism
+          server/modules/channels/__tests__/integration/allocation-engine.integration.test.ts
+          server/modules/channels/__tests__/integration/source-lock.integration.test.ts
+          server/modules/inventory/__tests__/integration/allocation-concurrency.integration.test.ts

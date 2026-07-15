@@ -17,11 +17,12 @@ import {
   runMigrations,
   truncateTestData,
   closeTestDb,
+  describeWithDisposableDb,
 } from "../../../../../test/setup-integration";
 import { createSourceLockService } from "../../source-lock.service";
 import { channels, sourceLockConfig } from "@shared/schema";
 
-describe("Source Lock System (Integration)", () => {
+describeWithDisposableDb("Source Lock System (Integration)", () => {
   let db: ReturnType<typeof getTestDb>;
   let service: ReturnType<typeof createSourceLockService>;
   let testChannelId: number;

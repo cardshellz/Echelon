@@ -1,5 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { getTestDb, runMigrations, truncateTestData, closeTestDb } from "../../../../../test/setup-integration";
+import { it, expect, beforeAll, afterAll } from "vitest";
+import {
+  getTestDb,
+  runMigrations,
+  truncateTestData,
+  closeTestDb,
+  describeWithDisposableDb,
+} from "../../../../../test/setup-integration";
 import { InventoryUseCases } from "../../application/inventory.use-cases";
 import { InventoryRepository } from "../../infrastructure/inventory.repository";
 import { 
@@ -11,7 +17,7 @@ import {
 } from "@shared/schema";
 import { sql } from "drizzle-orm";
 
-describe("Allocation Concurrency (P0-c-3)", () => {
+describeWithDisposableDb("Allocation Concurrency (P0-c-3)", () => {
   let db: any;
   let useCases: InventoryUseCases;
 
@@ -33,14 +39,15 @@ describe("Allocation Concurrency (P0-c-3)", () => {
 
     // 1. Setup seed data
     const [warehouse] = await db.insert(warehouses)
-      .values({ name: "Test Hub", status: "active", isFulfillmentHub: true })
+      .values({ code: "TEST-HUB", name: "Test Hub", isActive: 1 })
       .returning();
 
     const [location] = await db.insert(warehouseLocations)
       .values({ 
         warehouseId: warehouse.id, 
+        code: "A-1-1",
         name: "A-1-1", 
-        type: "pick", 
+        locationType: "pick",
         zone: "A" 
       })
       .returning();
@@ -70,36 +77,32 @@ describe("Allocation Concurrency (P0-c-3)", () => {
         backorderQty: 0
       });
 
+    const orderRows = await db.execute(sql`
+      INSERT INTO wms.orders (warehouse_status)
+      SELECT 'pending' FROM generate_series(1, 10)
+      RETURNING id
+    `);
+
     // 3. Dispatch 10 parallel overlapping asynchronous pick requests asking for 1 unit each
-    const promises = Array.from({ length: 10 }).map(async (_, idx) => {
-      try {
-        await useCases.pickItem({
-          warehouseLocationId: location.id,
-          productVariantId: variant.id,
-          qty: 1,
-          referenceId: `PICK-${idx}`,
-        });
-        return { success: true };
-      } catch (err: any) {
-        return { success: false, error: err.message };
-      }
-    });
+    const promises = Array.from({ length: 10 }).map((_, idx) =>
+      useCases.pickItem({
+        warehouseLocationId: location.id,
+        productVariantId: variant.id,
+        qty: 1,
+        orderId: Number(orderRows.rows[idx].id),
+      }),
+    );
 
     const results = await Promise.all(promises);
 
     // 4. Assert isolation invariants 
-    // Exact 5 successes, exact 5 errors from the quantity guard.
-    const successes = results.filter((r) => r.success);
-    const failures = results.filter((r) => !r.success);
+    // Exact 5 successes and 5 clean quantity-guard rejections.
+    const successes = results.filter(Boolean);
+    const failures = results.filter((picked) => !picked);
 
     expect(successes).toHaveLength(5);
     expect(failures).toHaveLength(5);
     
-    // Validate failures are because of guard failure ("Insufficient variant qty: needs X, has Y")
-    failures.forEach((f) => {
-      expect(f.error).toMatch(/Insufficient variant qty/i);
-    });
-
     // 5. Final constraint check
     const finalRowQuery = await db.execute(sql`
       SELECT variant_qty, picked_qty FROM inventory.inventory_levels 
