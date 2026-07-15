@@ -477,13 +477,50 @@ this laptop has no disposable application database and no local app server was
 already running. Starting the full app against an unknown configured database
 was intentionally avoided. The production client/server build passed.
 
+PR #927 merged as `5fd643c7`. Its final merge-candidate CI passed both
+`Typecheck + unit tests` and `PostgreSQL hardening tests`.
+
+## Named-schema integration harness slice
+
+The three older channel/inventory integration suites no longer build obsolete
+unqualified `public` tables. Their shared harness now requires both
+`ECHELON_TEST_DATABASE_URL` and the explicit
+`ECHELON_TEST_DATABASE_DISPOSABLE=true` acknowledgment, rejects a URL matching
+`DATABASE_URL` or `EXTERNAL_DATABASE_URL`, and rebuilds only its owned
+`catalog`, `warehouse`, `inventory`, `channels`, and `wms` fixture schemas.
+
+Cleanup is schema-qualified and the suites run without file parallelism so one
+suite cannot truncate another suite's fixture. When the disposable database is
+not configured, the suites skip instead of failing the repository-wide unit
+gate during import.
+
+The stale inventory concurrency test now uses the current warehouse/location
+fields and the current `pickItem` boolean rejection contract. A fast unit test
+compares every fixture table column with the corresponding Drizzle table, so
+future named-schema column drift fails CI before reaching PostgreSQL.
+
+Current local evidence:
+
+- `npm.cmd run check`: passed
+- fixture/Drizzle contract: 18 tests passed
+- repository unit gate: 359 files and 3,446 tests passed; 14 skipped; 8 todo
+- the three database suites compile and skip without the explicit disposable
+  database; CI runs 30 cases serially against PostgreSQL 16
+- `git diff --check`: passed, with Windows line-ending notices only
+
+GitHub Actions run `29427512682` passed the final merge candidate:
+
+- `PostgreSQL hardening tests` passed in 45 seconds, including all 30
+  named-schema channel/inventory cases; and
+- `Typecheck + unit tests` passed in 1 minute 58 seconds.
+
 ## Recommended next implementation order
 
-1. Review and merge the financial-command operations slice, including migration 140.
-2. Repair the broader named-schema integration harness before enabling its old suites.
-3. Decide whether autonomous dead-command replay justifies encrypted request snapshots
+1. Review and merge the named-schema integration harness slice after its PostgreSQL
+   16 CI run is green.
+2. Decide whether autonomous dead-command replay justifies encrypted request snapshots
    and a versioned executor registry; the current exact-caller-retry model is safer.
-4. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
+3. Run the controlled low-risk automatic-purchasing pilot from the earlier handoffs.
 
 Keep manual quote pricing marked `manual` even when the same quote is optionally
 saved to the vendor catalog. Extended-total quotes remain PO-specific and must not be
@@ -493,6 +530,7 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. Migrations 136 and 138 are live; migration 140 is not. Verify the focused disposable
-> PostgreSQL CI result before describing the database guarantees as exercised. Do not mutate
-> production without explicit owner approval.
+> unverified item. PR #927 merged as `5fd643c7`; verify migration 140's production
+> state separately. Verify the named-schema disposable PostgreSQL CI result before
+> describing those three suites as exercised. Do not mutate production without
+> explicit owner approval.

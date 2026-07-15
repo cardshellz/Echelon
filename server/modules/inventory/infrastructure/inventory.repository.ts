@@ -1,5 +1,5 @@
 import {
-  db, eq, and, or, sql, desc, asc, gte, lte, like,
+  db as defaultDb, eq, and, or, sql, desc, asc, gte, lte, like,
   type InventoryLevel, type InsertInventoryLevel,
   type InventoryTransaction, type InsertInventoryTransaction,
   type AdjustmentReason, type InsertAdjustmentReason,
@@ -89,7 +89,10 @@ export interface IInventoryStorage {
   getDebugSyncStatus(): Promise<{ missingCount: number; sampleOrders: Record<string, unknown>[] }>;
 }
 
-export const inventoryMethods: IInventoryStorage = {
+export function createInventoryMethods(
+  db: typeof defaultDb = defaultDb,
+): IInventoryStorage {
+  return {
   async getAllInventoryLevels(): Promise<InventoryLevel[]> {
     return await db.select().from(inventoryLevels);
   },
@@ -1008,4 +1011,7 @@ export const inventoryMethods: IInventoryStorage = {
       sampleOrders: sampleWithItems,
     };
   },
-};
+  };
+}
+
+export const inventoryMethods: IInventoryStorage = createInventoryMethods();
