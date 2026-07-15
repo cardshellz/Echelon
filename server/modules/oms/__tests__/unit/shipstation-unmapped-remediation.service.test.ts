@@ -558,7 +558,6 @@ describe("ShipStation unmapped physical remediation", () => {
       operator: "ops:test",
       originalShipmentId: 10,
       reason: "concession",
-      notes: "Confirmed FREE-SKU was physically sent as a customer concession.",
       lineMappings: [{
         evidenceSource: "catalog",
         productVariantId: 222,
@@ -576,9 +575,10 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(allSql).toContain('"shipmentItemPurpose":"concession"');
     expect(allSql).toContain("shipment_item_purpose, product_variant_id");
     expect(allSql).toContain("inventory_level.variant_qty - inventory_level.reserved_qty");
+    expect(allSql).toContain("product_location.is_primary = 1");
   });
 
-  it("requires notes and original WMS evidence for an empty ShipStation package", async () => {
+  it("requires structured item confirmation when ShipStation omitted package lines", async () => {
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
@@ -590,6 +590,9 @@ describe("ShipStation unmapped physical remediation", () => {
             provider_order_id: 701,
             tracking_number: "1Z-EMPTY-RESHIP",
           }] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
         }
         throw new Error(`Unexpected query: ${text}`);
       }),
@@ -603,13 +606,9 @@ describe("ShipStation unmapped physical remediation", () => {
       operator: "ops:test",
       originalShipmentId: 10,
       reason: "carrier_replacement",
-      lineMappings: [{
-        evidenceSource: "original_wms",
-        orderItemId: 101,
-        quantity: 1,
-      }],
-    })).rejects.toThrow("operator notes are required");
-    expect(db.execute).toHaveBeenCalledTimes(1);
+      lineMappings: [],
+    })).rejects.toThrow("confirm at least one item that was physically sent");
+    expect(db.execute).toHaveBeenCalledTimes(2);
   });
 
   it("atomically repairs crossed legacy identities before adopting the active reship", async () => {

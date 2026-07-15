@@ -674,6 +674,16 @@ function ShipStationReshipAdoptionDialog(props: {
   }, [locatorQuery]);
 
   useEffect(() => {
+    const nextSearch = catalogSearchInput.trim();
+    if (itemMode !== "catalog" || nextSearch.length < 2) {
+      setCatalogSearch("");
+      return;
+    }
+    const timeout = window.setTimeout(() => setCatalogSearch(nextSearch), 300);
+    return () => window.clearTimeout(timeout);
+  }, [catalogSearchInput, itemMode]);
+
+  useEffect(() => {
     if (!preview) return;
     const defaults: Record<number, string> = {};
     providerItems.forEach((item, index) => {
@@ -749,9 +759,12 @@ function ShipStationReshipAdoptionDialog(props: {
     const quantity = Number(item.quantity);
     return Number.isSafeInteger(quantity) && quantity > 0;
   });
-  const availableCatalogResults = (catalogSearchQuery.data ?? []).filter(
-    (result) => !catalogItems.some((item) => item.productVariantId === result.productVariantId),
-  );
+  const catalogSearchReady = catalogSearch.length >= 2 && catalogSearch === catalogSearchInput.trim();
+  const availableCatalogResults = catalogSearchReady
+    ? (catalogSearchQuery.data ?? []).filter(
+      (result) => !catalogItems.some((item) => item.productVariantId === result.productVariantId),
+    )
+    : [];
   const isCatalogConcession = providerItemsMissing && itemMode === "catalog";
   const mappingsComplete = providerItemsMissing
     ? (isCatalogConcession ? catalogMappingsComplete : manualMappingsComplete)
@@ -760,8 +773,7 @@ function ShipStationReshipAdoptionDialog(props: {
     && providerEvidenceValid
     && mappingsComplete
     && positiveFlowId(originalShipmentId) !== null
-    && (isCatalogConcession || reason.length > 0)
-    && (!providerItemsMissing || notes.trim().length > 0);
+    && (isCatalogConcession || reason.length > 0);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -943,34 +955,22 @@ function ShipStationReshipAdoptionDialog(props: {
               {providerItemsMissing ? (
                 isCatalogConcession ? (
                   <div className="mt-3 space-y-4">
-                    <form
-                      className="flex flex-col gap-2 sm:flex-row"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        const nextSearch = catalogSearchInput.trim();
-                        if (nextSearch.length >= 2) setCatalogSearch(nextSearch);
-                      }}
-                    >
-                      <div className="relative min-w-0 flex-1">
-                        <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                        <Input
-                          className="pl-9"
-                          value={catalogSearchInput}
-                          onChange={(event) => setCatalogSearchInput(event.target.value)}
-                          placeholder="Search by SKU or item name"
-                          aria-label="Search catalog items"
-                        />
-                      </div>
-                      <Button type="submit" variant="outline" disabled={catalogSearchInput.trim().length < 2 || catalogSearchQuery.isFetching}>
-                        {catalogSearchQuery.isFetching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />}
-                        Search
-                      </Button>
-                    </form>
+                    <div className="relative">
+                      <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                      <Input
+                        className="pl-9 pr-9"
+                        value={catalogSearchInput}
+                        onChange={(event) => setCatalogSearchInput(event.target.value)}
+                        placeholder="Type a SKU or item name"
+                        aria-label="Search catalog items"
+                      />
+                      {catalogSearchQuery.isFetching && <Loader2 className="absolute right-3 top-3 h-4 w-4 animate-spin text-muted-foreground" />}
+                    </div>
 
                     {catalogSearchQuery.isError && (
                       <p className="text-sm text-red-800">{catalogSearchQuery.error instanceof Error ? catalogSearchQuery.error.message : "Could not search the catalog"}</p>
                     )}
-                    {catalogSearch && !catalogSearchQuery.isFetching && availableCatalogResults.length === 0 && catalogItems.length === 0 && (
+                    {catalogSearchReady && !catalogSearchQuery.isFetching && (catalogSearchQuery.data ?? []).length === 0 && (
                       <p className="text-sm text-muted-foreground">No catalog items match "{catalogSearch}".</p>
                     )}
                     {availableCatalogResults.length > 0 && (
@@ -1098,8 +1098,8 @@ function ShipStationReshipAdoptionDialog(props: {
 
             <section className="border-t pt-4">
               <div className="space-y-2">
-                <Label htmlFor="shipstation-remediation-notes">{providerItemsMissing ? (isCatalogConcession ? "What confirms these items were sent? (required)" : "How do you know this was a replacement? (required)") : "Evidence or notes (optional)"}</Label>
-                <Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder={isCatalogConcession ? "Example: Confirmed against the ShipStation shipment and packing record." : "Example: Customer reported the original package lost; replacement created in ShipStation."} />
+                <Label htmlFor="shipstation-remediation-notes">Notes (optional)</Label>
+                <Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder="Add any useful context for the audit trail." />
               </div>
             </section>
             {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to record this shipment.</p>}
