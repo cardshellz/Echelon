@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import {
@@ -26,12 +26,22 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Table,
   TableBody,
@@ -51,7 +61,7 @@ interface DashboardKPIs {
 }
 
 interface RecommendationQualityControl {
-  area: "demand" | "lead_time" | "supplier_cost" | "vendor";
+  area: "demand" | "lead_time" | "supplier_cost" | "vendor" | "receive_configuration" | "supplier_catalog";
   severity: "review" | "block";
   code: string;
   label: string;
@@ -310,6 +320,30 @@ interface RecommendationReviewQueueItem {
   candidateScore?: ReorderItem["recommendationCandidateScore"];
   qualityGate?: ReorderItem["qualityGate"];
   qualityControls?: RecommendationQualityControl[];
+  demandEvidence?: {
+    lookbackDays: number;
+    periodUsagePieces: number;
+    priorPeriodUsagePieces: number | null;
+    avgDailyUsagePieces: number;
+    demandQuality: "no_recent_demand" | "thin_history" | "normal";
+    demandTrend: "not_available" | "no_recent_demand" | "new_demand" | "rising" | "stable" | "falling";
+    demandOrderCount: number | null;
+    demandActiveDays: number | null;
+    latestDemandAt: string | null;
+    paidDemandPieces: number | null;
+    zeroRevenueDemandPieces: number | null;
+    couponDiscountDemandPieces: number | null;
+    zeroRevenueDemandShare: number | null;
+    couponDiscountDemandShare: number | null;
+    demandMixSignal: string;
+    forecastTrust?: {
+      signal: string;
+      severity: string;
+      detail: string;
+      latestDemandAgeDays: number | null;
+    };
+    demandWindowDiagnostics?: Record<string, unknown>;
+  };
   latestDecision?: RecommendationDecision | null;
 }
 
@@ -540,6 +574,18 @@ export default function PurchasingView() {
     const params = new URLSearchParams(location.split("?")[1] ?? "");
     return params.get("forecastAction")?.trim() || "all";
   });
+  const [reviewQueueRecommendationId, setReviewQueueRecommendationId] = useState<string>(() => {
+    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    return params.get("recommendationId")?.trim() || "all";
+  });
+  const [decisionDialog, setDecisionDialog] = useState<{
+    item: RecommendationReviewQueueItem;
+    decision: Exclude<RecommendationDecisionValue, "po_handoff_created">;
+  } | null>(null);
+  const [decisionNote, setDecisionNote] = useState("");
+  const [reviewedControlCodes, setReviewedControlCodes] = useState<Set<string>>(new Set());
+  const [automationEligibilityAcknowledged, setAutomationEligibilityAcknowledged] = useState(false);
+  const [decisionConfirmed, setDecisionConfirmed] = useState(false);
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -568,12 +614,14 @@ export default function PurchasingView() {
       reviewQueueFilter,
       reviewQueueReasonFilter,
       reviewQueueForecastActionFilter,
+      reviewQueueRecommendationId,
     ],
     queryFn: async () => {
       const params = new URLSearchParams({ limit: "100" });
       if (reviewQueueFilter !== "all") params.set("kind", reviewQueueFilter);
       if (reviewQueueReasonFilter !== "all") params.set("reason", reviewQueueReasonFilter);
       if (reviewQueueForecastActionFilter !== "all") params.set("forecastAction", reviewQueueForecastActionFilter);
+      if (reviewQueueRecommendationId !== "all") params.set("recommendationId", reviewQueueRecommendationId);
       const res = await fetch(`/api/purchasing/recommendation-review-queue?${params.toString()}`);
       if (!res.ok) throw new Error("Failed to fetch recommendation review queue");
       return res.json();
@@ -629,9 +677,15 @@ export default function PurchasingView() {
     mutationFn: async ({
       item,
       decision,
+      note,
+      reviewedControlCodes: acknowledgedControlCodes,
+      acknowledgeAutomationEligibilityUnchanged,
     }: {
       item: RecommendationReviewQueueItem;
-      decision: RecommendationDecisionValue;
+      decision: Exclude<RecommendationDecisionValue, "po_handoff_created">;
+      note: string;
+      reviewedControlCodes: string[];
+      acknowledgeAutomationEligibilityUnchanged: boolean;
     }) => {
       const res = await fetch("/api/purchasing/recommendation-decisions", {
         method: "POST",
@@ -640,6 +694,10 @@ export default function PurchasingView() {
           recommendationId: item.recommendationId,
           kind: item.kind,
           decision,
+          note,
+          reviewedControlCodes: acknowledgedControlCodes,
+          acknowledgeAutomationEligibilityUnchanged,
+          confirmDecision: true,
         }),
       });
       if (!res.ok) {
@@ -652,6 +710,11 @@ export default function PurchasingView() {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-decisions"] });
+      setDecisionDialog(null);
+      setDecisionNote("");
+      setReviewedControlCodes(new Set());
+      setAutomationEligibilityAcknowledged(false);
+      setDecisionConfirmed(false);
       toast({
         title: "Recommendation Decision Recorded",
         description: `${variables.item.sku} marked ${formatRecommendationDecision(variables.decision).toLowerCase()}.`,
@@ -763,10 +826,16 @@ export default function PurchasingView() {
     .filter((item) => reviewQueueFilter === "all" || item.kind === reviewQueueFilter)
     .filter((item) => reviewQueueReasonFilter === "all" || item.reason.code === reviewQueueReasonFilter)
     .filter((item) => reviewQueueForecastActionFilter === "all" || item.forecastAction?.code === reviewQueueForecastActionFilter)
+    .filter((item) => reviewQueueRecommendationId === "all" || item.recommendationId === reviewQueueRecommendationId)
     .slice(0, 12);
   const acceptedQueueItems = (acceptedRecommendationQueue?.items ?? []).slice(0, 8);
   const recentRecommendationDecisions = (recommendationDecisionHistory?.decisions ?? []).slice(0, 8);
   const approvalPolicyImpact = analysis?.approvalPolicyImpact;
+
+  useEffect(() => {
+    if (reviewQueueRecommendationId === "all" || filteredReviewQueue.length !== 1) return;
+    document.getElementById("recommendation-review-target")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [reviewQueueRecommendationId, recommendationReviewQueue?.generatedAt]);
 
   const SortIcon = ({ field }: { field: string }) => {
     if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-muted-foreground ml-1" />;
@@ -883,6 +952,7 @@ export default function PurchasingView() {
       if (isReviewQueueKind(requestedQueue)) setReviewQueueFilter(requestedQueue);
       setReviewQueueReasonFilter(params.get("reason")?.trim() || "all");
       setReviewQueueForecastActionFilter(params.get("forecastAction")?.trim() || "all");
+      setReviewQueueRecommendationId(params.get("recommendationId")?.trim() || "all");
       return;
     }
     navigate(href);
@@ -890,6 +960,39 @@ export default function PurchasingView() {
 
   const handleReviewQueueAction = (item: RecommendationReviewQueueItem) => {
     handleRecommendationHref(item.action.href);
+  };
+
+  const openRecommendationDecision = (
+    item: RecommendationReviewQueueItem,
+    decision: Exclude<RecommendationDecisionValue, "po_handoff_created">,
+  ) => {
+    setDecisionDialog({ item, decision });
+    setDecisionNote("");
+    setReviewedControlCodes(new Set());
+    setAutomationEligibilityAcknowledged(false);
+    setDecisionConfirmed(false);
+  };
+
+  const decisionRequiresControlReview =
+    decisionDialog?.decision === "reviewed" || decisionDialog?.decision === "accepted_for_po";
+  const decisionControls = decisionDialog?.item.qualityControls ?? [];
+  const everyDecisionControlReviewed = decisionControls.every((control) => reviewedControlCodes.has(control.code));
+  const decisionCanSubmit = Boolean(
+    decisionDialog &&
+    decisionNote.trim().length >= 10 &&
+    decisionConfirmed &&
+    (!decisionRequiresControlReview || (everyDecisionControlReviewed && automationEligibilityAcknowledged)),
+  );
+
+  const submitRecommendationDecision = () => {
+    if (!decisionDialog || !decisionCanSubmit) return;
+    recommendationDecisionMutation.mutate({
+      item: decisionDialog.item,
+      decision: decisionDialog.decision,
+      note: decisionNote.trim(),
+      reviewedControlCodes: Array.from(reviewedControlCodes),
+      acknowledgeAutomationEligibilityUnchanged: automationEligibilityAcknowledged,
+    });
   };
 
   return (
@@ -1132,6 +1235,17 @@ export default function PurchasingView() {
                       <span className="rounded bg-white/60 px-1">Clear</span>
                     </Button>
                   )}
+                  {reviewQueueRecommendationId !== "all" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-[11px] gap-1 border-violet-200 bg-violet-50 text-violet-700"
+                      onClick={() => setReviewQueueRecommendationId("all")}
+                    >
+                      Exact recommendation
+                      <span className="rounded bg-white/60 px-1">Clear</span>
+                    </Button>
+                  )}
                 </div>
               </div>
             </CardHeader>
@@ -1143,7 +1257,15 @@ export default function PurchasingView() {
               ) : (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                   {filteredReviewQueue.map((item) => (
-                    <div key={`${item.recommendationId}-${item.kind}`} className="rounded-md border bg-white dark:bg-zinc-900 p-3">
+                    <div
+                      key={`${item.recommendationId}-${item.kind}`}
+                      id={item.recommendationId === reviewQueueRecommendationId ? "recommendation-review-target" : undefined}
+                      className={`rounded-md border bg-white dark:bg-zinc-900 p-3 ${
+                        item.recommendationId === reviewQueueRecommendationId
+                          ? "border-violet-400 ring-2 ring-violet-200"
+                          : ""
+                      }`}
+                    >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
@@ -1193,19 +1315,19 @@ export default function PurchasingView() {
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
-                              <DropdownMenuItem onClick={() => recommendationDecisionMutation.mutate({ item, decision: "reviewed" })}>
+                              <DropdownMenuItem onClick={() => openRecommendationDecision(item, "reviewed")}>
                                 <CheckCircle2 className="mr-2 h-3.5 w-3.5" />
                                 Mark reviewed
                               </DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => recommendationDecisionMutation.mutate({ item, decision: "accepted_for_po" })}>
+                              <DropdownMenuItem onClick={() => openRecommendationDecision(item, "accepted_for_po")}>
                                 <ShoppingCart className="mr-2 h-3.5 w-3.5" />
                                 Accept for PO review
                               </DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => recommendationDecisionMutation.mutate({ item, decision: "deferred" })}>
+                              <DropdownMenuItem onClick={() => openRecommendationDecision(item, "deferred")}>
                                 <Clock className="mr-2 h-3.5 w-3.5" />
                                 Defer
                               </DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => recommendationDecisionMutation.mutate({ item, decision: "dismissed" })}>
+                              <DropdownMenuItem onClick={() => openRecommendationDecision(item, "dismissed")}>
                                 <XCircle className="mr-2 h-3.5 w-3.5" />
                                 Dismiss
                               </DropdownMenuItem>
@@ -1551,6 +1673,128 @@ export default function PurchasingView() {
           </div>
         </Card>
       </div>
+
+      <Dialog
+        open={Boolean(decisionDialog)}
+        onOpenChange={(open) => {
+          if (!open && !recommendationDecisionMutation.isPending) setDecisionDialog(null);
+        }}
+      >
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+          {decisionDialog ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>
+                  {formatRecommendationDecision(decisionDialog.decision)}: {decisionDialog.item.sku}
+                </DialogTitle>
+                <DialogDescription>
+                  Record an attributable evidence review for {decisionDialog.item.productName}. This decision is audited but does not remove quality controls or make the recommendation eligible for automatic purchasing.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-4">
+                <div className="rounded-md border bg-zinc-50 p-3 dark:bg-zinc-900">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Current demand evidence</div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+                    <div><span className="block text-[11px] text-zinc-500">Lookback</span>{decisionDialog.item.demandEvidence?.lookbackDays ?? "-"} days</div>
+                    <div><span className="block text-[11px] text-zinc-500">Usage</span>{decisionDialog.item.demandEvidence?.periodUsagePieces?.toLocaleString() ?? "-"} pieces</div>
+                    <div><span className="block text-[11px] text-zinc-500">Paid demand</span>{decisionDialog.item.demandEvidence?.paidDemandPieces?.toLocaleString() ?? "-"} pieces</div>
+                    <div><span className="block text-[11px] text-zinc-500">Orders / active days</span>{decisionDialog.item.demandEvidence?.demandOrderCount ?? "-"} / {decisionDialog.item.demandEvidence?.demandActiveDays ?? "-"}</div>
+                    <div><span className="block text-[11px] text-zinc-500">Prior usage</span>{decisionDialog.item.demandEvidence?.priorPeriodUsagePieces?.toLocaleString() ?? "-"} pieces</div>
+                    <div><span className="block text-[11px] text-zinc-500">Daily velocity</span>{decisionDialog.item.demandEvidence?.avgDailyUsagePieces?.toLocaleString(undefined, { maximumFractionDigits: 2 }) ?? "-"}</div>
+                    <div><span className="block text-[11px] text-zinc-500">Zero-revenue</span>{decisionDialog.item.demandEvidence?.zeroRevenueDemandPieces?.toLocaleString() ?? "-"} pieces</div>
+                    <div><span className="block text-[11px] text-zinc-500">Coupon-discounted</span>{decisionDialog.item.demandEvidence?.couponDiscountDemandPieces?.toLocaleString() ?? "-"} pieces</div>
+                  </div>
+                  <div className="mt-3 space-y-1 text-xs text-zinc-600 dark:text-zinc-300">
+                    <p>Quality: {decisionDialog.item.demandEvidence?.demandQuality?.replace(/_/g, " ") ?? "unavailable"}; trend: {decisionDialog.item.demandEvidence?.demandTrend?.replace(/_/g, " ") ?? "unavailable"}; mix: {decisionDialog.item.demandEvidence?.demandMixSignal?.replace(/_/g, " ") ?? "unavailable"}.</p>
+                    {decisionDialog.item.demandEvidence?.forecastTrust?.detail ? (
+                      <p>{decisionDialog.item.demandEvidence.forecastTrust.detail}</p>
+                    ) : null}
+                  </div>
+                </div>
+
+                {decisionRequiresControlReview ? (
+                  <div className="space-y-2">
+                    <div>
+                      <Label>Current controls reviewed</Label>
+                      <p className="text-xs text-zinc-500">Acknowledge each live control. This records review; it does not clear the control.</p>
+                    </div>
+                    {decisionControls.length === 0 ? (
+                      <p className="rounded-md border border-dashed p-3 text-sm text-zinc-500">No recommendation quality controls are currently active.</p>
+                    ) : (
+                      decisionControls.map((control) => (
+                        <div key={control.code} className="flex items-start gap-2 rounded-md border p-3">
+                          <Checkbox
+                            id={`review-control-${control.code}`}
+                            checked={reviewedControlCodes.has(control.code)}
+                            onCheckedChange={(checked) => {
+                              setReviewedControlCodes((current) => {
+                                const next = new Set(current);
+                                if (checked) next.add(control.code);
+                                else next.delete(control.code);
+                                return next;
+                              });
+                            }}
+                          />
+                          <Label htmlFor={`review-control-${control.code}`} className="cursor-pointer font-normal">
+                            <span className="font-medium">{control.label}</span>
+                            <span className="mt-0.5 block text-xs text-zinc-500">{control.detail}</span>
+                          </Label>
+                        </div>
+                      ))
+                    )}
+                    <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3">
+                      <Checkbox
+                        id="acknowledge-automation-unchanged"
+                        checked={automationEligibilityAcknowledged}
+                        onCheckedChange={(checked) => setAutomationEligibilityAcknowledged(Boolean(checked))}
+                      />
+                      <Label htmlFor="acknowledge-automation-unchanged" className="cursor-pointer font-normal text-amber-900">
+                        I understand this decision does not change automatic-purchasing eligibility or bypass the active approval policy.
+                      </Label>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="space-y-2">
+                  <Label htmlFor="recommendation-decision-note">Evidence and rationale</Label>
+                  <Textarea
+                    id="recommendation-decision-note"
+                    value={decisionNote}
+                    onChange={(event) => setDecisionNote(event.target.value.slice(0, 2000))}
+                    placeholder="Describe the business evidence reviewed and why this disposition is appropriate."
+                    rows={4}
+                  />
+                  <div className="flex justify-between text-[11px] text-zinc-500">
+                    <span>At least 10 characters required.</span>
+                    <span>{decisionNote.length}/2000</span>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-2 rounded-md border p-3">
+                  <Checkbox
+                    id="confirm-recommendation-decision"
+                    checked={decisionConfirmed}
+                    onCheckedChange={(checked) => setDecisionConfirmed(Boolean(checked))}
+                  />
+                  <Label htmlFor="confirm-recommendation-decision" className="cursor-pointer font-normal">
+                    Confirm this {formatRecommendationDecision(decisionDialog.decision).toLowerCase()} decision and preserve the current recommendation evidence snapshot in the audit trail.
+                  </Label>
+                </div>
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" disabled={recommendationDecisionMutation.isPending} onClick={() => setDecisionDialog(null)}>
+                  Cancel
+                </Button>
+                <Button disabled={!decisionCanSubmit || recommendationDecisionMutation.isPending} onClick={submitRecommendationDecision}>
+                  {recommendationDecisionMutation.isPending ? "Recording..." : `Record ${formatRecommendationDecision(decisionDialog.decision)}`}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -666,7 +666,7 @@ describe("purchasing recommendation routes", () => {
       qualityGateReason: "forecast_trust_review",
       action: {
         code: "verify_recent_demand",
-        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand&recommendationId=211%3A2110%3A30",
       },
     });
     expect(body.samples[1]).toMatchObject({
@@ -676,7 +676,7 @@ describe("purchasing recommendation routes", () => {
       inputGaps: ["missing_latest_demand_at"],
       action: {
         code: "repair_order_velocity_source",
-        href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source&recommendationId=212%3A2120%3A30",
       },
     });
   });
@@ -831,6 +831,19 @@ describe("purchasing recommendation routes", () => {
       reason: {
         code: "held_by_approval_policy",
       },
+      demandEvidence: {
+        lookbackDays: 30,
+        periodUsagePieces: 90,
+        priorPeriodUsagePieces: 90,
+        demandOrderCount: 15,
+        demandActiveDays: 15,
+      },
+    });
+    const heldReviewUrl = new URL(heldQueue.body.items[0].action.href, "https://echelon.example");
+    expect(Object.fromEntries(heldReviewUrl.searchParams)).toMatchObject({
+      reviewQueue: "held_by_policy",
+      recommendationId: "202:2002:30",
+      candidateBand: "review_candidate",
     });
 
     const qualityReasonQueue = await requestJson(
@@ -852,6 +865,31 @@ describe("purchasing recommendation routes", () => {
         code: "medium_confidence_review",
       },
     });
+
+    const exactQueue = await requestJson(
+      server.url,
+      "GET",
+      "/api/purchasing/recommendation-review-queue?recommendationId=203%3A2003%3A30&limit=10",
+    );
+    expect(exactQueue.status).toBe(200);
+    expect(exactQueue.body.filters.recommendationId).toBe("203:2003:30");
+    expect(exactQueue.body.filteredCount).toBe(1);
+    expect(exactQueue.body.items[0].sku).toBe("QUEUE-MISSING-COST");
+
+    const currentControlCodes = exactQueue.body.items[0].qualityControls.map((control: any) => control.code);
+    expect(currentControlCodes.length).toBeGreaterThan(0);
+    const incompleteReview = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "203:2003:30",
+      kind: "quality_review_required",
+      decision: "reviewed",
+      note: "Reviewed the demand evidence but omitted active controls.",
+      reviewedControlCodes: [],
+      acknowledgeAutomationEligibilityUnchanged: true,
+      confirmDecision: true,
+    });
+    expect(incompleteReview.status).toBe(400);
+    expect(incompleteReview.body.error).toContain("must acknowledge every current control");
+    expect(mocks.recommendationPoHandoffService.recordDecision).not.toHaveBeenCalled();
   });
 
   it("filters recommendation review queue items by forecast action bucket", async () => {
@@ -978,7 +1016,7 @@ describe("purchasing recommendation routes", () => {
       },
       forecastAction: {
         code: "verify_recent_demand",
-        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand&recommendationId=211%3A2110%3A30",
       },
     });
 
@@ -994,7 +1032,7 @@ describe("purchasing recommendation routes", () => {
       sku: "MISSING-LATEST",
       forecastAction: {
         code: "repair_order_velocity_source",
-        href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source",
+        href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source&recommendationId=212%3A2120%3A30",
       },
     });
 
@@ -1138,6 +1176,9 @@ describe("purchasing recommendation routes", () => {
       kind: "held_by_policy",
       decision: "accepted_for_po",
       note: "Looks good for the next PO review.",
+      reviewedControlCodes: [],
+      acknowledgeAutomationEligibilityUnchanged: true,
+      confirmDecision: true,
     });
 
     expect(status).toBe(201);
@@ -1170,6 +1211,12 @@ describe("purchasing recommendation routes", () => {
           quotedUnitCostMills: 100000,
           piecesPerPurchaseUom: null,
         }),
+        reviewEvidence: expect.objectContaining({
+          contractVersion: 1,
+          reviewedControlCodes: [],
+          automationEligibilityAcknowledged: true,
+          decisionConfirmed: true,
+        }),
       }),
     }));
     expect(body.decision).toMatchObject({
@@ -1178,6 +1225,52 @@ describe("purchasing recommendation routes", () => {
       decision: "accepted_for_po",
       sku: "QUEUE-HELD",
     });
+
+    const unconfirmed = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "202:2002:30",
+      kind: "held_by_policy",
+      decision: "accepted_for_po",
+      note: "This has enough rationale but is not confirmed.",
+      reviewedControlCodes: [],
+      acknowledgeAutomationEligibilityUnchanged: true,
+    });
+    expect(unconfirmed.status).toBe(400);
+    expect(unconfirmed.body.error).toContain("confirmDecision must be true");
+
+    const automationNotAcknowledged = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "202:2002:30",
+      kind: "held_by_policy",
+      decision: "accepted_for_po",
+      note: "This has enough rationale and is explicitly confirmed.",
+      reviewedControlCodes: [],
+      confirmDecision: true,
+    });
+    expect(automationNotAcknowledged.status).toBe(400);
+    expect(automationNotAcknowledged.body.error).toContain("acknowledgeAutomationEligibilityUnchanged must be true");
+
+    const unknownControl = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "202:2002:30",
+      kind: "held_by_policy",
+      decision: "accepted_for_po",
+      note: "This tries to acknowledge a control that is not current.",
+      reviewedControlCodes: ["invented_control"],
+      acknowledgeAutomationEligibilityUnchanged: true,
+      confirmDecision: true,
+    });
+    expect(unknownControl.status).toBe(400);
+    expect(unknownControl.body.error).toContain("not current");
+
+    const duplicateControls = await requestJson(server.url, "POST", "/api/purchasing/recommendation-decisions", {
+      recommendationId: "202:2002:30",
+      kind: "held_by_policy",
+      decision: "deferred",
+      note: "This disposition includes a duplicate control acknowledgment.",
+      reviewedControlCodes: ["duplicate", "duplicate"],
+      confirmDecision: true,
+    });
+    expect(duplicateControls.status).toBe(400);
+    expect(duplicateControls.body.error).toContain("reviewedControlCodes must be an array of unique");
+    expect(mocks.recommendationPoHandoffService.recordDecision).toHaveBeenCalledTimes(1);
   });
 
   it("returns recent recommendation decision history with operator summary counts", async () => {
