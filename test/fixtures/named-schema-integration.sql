@@ -218,6 +218,7 @@ CREATE TABLE inventory.inventory_transactions (
   receiving_order_id integer,
   cycle_count_id integer,
   shipment_id integer,
+  shipment_item_id integer,
   reference_type varchar(30),
   reference_id varchar(100),
   notes text,

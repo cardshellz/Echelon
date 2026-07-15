@@ -18,7 +18,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
 import { warehouses, warehouseLocations } from "./warehouse.schema";
-import { orders, orderItems, outboundShipments } from "./orders.schema";
+import { orders, orderItems, outboundShipmentItems, outboundShipments } from "./orders.schema";
 import { receivingOrders, purchaseOrders, inboundShipments } from "./procurement.schema";
 
 // Inventory levels per location - all quantities in variant units (e.g., 5 cases, 10 packs)
@@ -171,6 +171,7 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
   receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id), // Link to receiving
   cycleCountId: integer("cycle_count_id").references(() => cycleCounts.id), // Link to cycle count
   shipmentId: integer("shipment_id").references(() => outboundShipments.id), // Link to shipment
+  shipmentItemId: integer("shipment_item_id").references(() => outboundShipmentItems.id, { onDelete: "set null" }),
 
   referenceType: varchar("reference_type", { length: 30 }), // "order", "receiving", "cycle_count", "manual"
   referenceId: varchar("reference_id", { length: 100 }), // External reference ID
