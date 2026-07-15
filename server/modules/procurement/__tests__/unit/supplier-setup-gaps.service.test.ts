@@ -74,6 +74,19 @@ describe("buildSupplierSetupGaps", () => {
       skippedReason: "no_vendor",
       blocksCurrentRecommendation: true,
       gaps: [expect.objectContaining({ code: "missing_vendor" })],
+      action: {
+        action: "assign_preferred_vendor",
+        label: "Assign vendor",
+        href: expect.stringMatching(/^\/suppliers\?/),
+      },
+    });
+    const setupUrl = new URL(gaps.items[0].action.href, "https://echelon.example");
+    expect(Object.fromEntries(setupUrl.searchParams)).toEqual({
+      setupProductId: "70",
+      setupAction: "assign_preferred_vendor",
+      recommendationId: "70:701:30",
+      returnTo: "/purchasing",
+      setupVariantId: "701",
     });
     expect(gaps.items[1]).toMatchObject({
       sku: "NO-VENDOR-NOT-CURRENT",
