@@ -534,6 +534,9 @@ export const outboundShipmentItems = wmsSchema.table("outbound_shipment_items", 
   // Replacement lineage deliberately does not use order_item_id, because that
   // column feeds customer-fulfillment projections throughout OMS/WMS.
   replacementForOrderItemId: integer("replacement_for_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
+  // Physical lines can fulfill an order, replace an ordered line, or record a
+  // different/free concession SKU that was never part of the customer order.
+  shipmentItemPurpose: varchar("shipment_item_purpose", { length: 30 }).notNull().default("customer_fulfillment"),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
   qty: integer("qty").notNull().default(1),
   fromLocationId: integer("from_location_id").references(() => warehouseLocations.id), // which bin it was picked from
