@@ -62,4 +62,12 @@ describe("financial command operations migration", () => {
     expect(recoveryWriter).toContain("FROM public.financial_command_results command");
     expect(recoveryWriter).not.toContain("command.completed_at,");
   });
+
+  it("normalizes raw PostgreSQL bigint identifiers at every operator API boundary", () => {
+    expect(service).toContain("commands: rowsResult.rows.map(normalizeRowId)");
+    expect(service).toContain("command: normalizeRowId(commandResult.rows[0])");
+    expect(service).toContain("recoveries: recoveriesResult.rows.map(normalizeRowId)");
+    expect(service).toContain("command: normalizeRowId(updated.rows[0])");
+    expect(service).toContain("Number.isSafeInteger(id)");
+  });
 });

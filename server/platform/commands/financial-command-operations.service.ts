@@ -116,7 +116,7 @@ export async function getFinancialCommandOperations(
 
   return {
     summary: summaryResult.rows[0],
-    commands: rowsResult.rows,
+    commands: rowsResult.rows.map(normalizeRowId),
     generatedAt: new Date().toISOString(),
   };
 }
@@ -172,7 +172,10 @@ export async function getFinancialCommandOperationsDetail(dbPool: Pool, commandI
      ORDER BY recovery_number DESC`,
     [commandId],
   );
-  return { command: commandResult.rows[0], recoveries: recoveriesResult.rows };
+  return {
+    command: normalizeRowId(commandResult.rows[0]),
+    recoveries: recoveriesResult.rows.map(normalizeRowId),
+  };
 }
 
 export async function rearmDeadFinancialCommand(
@@ -279,7 +282,7 @@ export async function rearmDeadFinancialCommand(
     );
     await client.query("COMMIT");
     return {
-      command: updated.rows[0],
+      command: normalizeRowId(updated.rows[0]),
       message: "Command re-armed for one exact caller retry with the original idempotency key and payload.",
     };
   } catch (error) {
@@ -315,4 +318,16 @@ export async function purgeExpiredFinancialCommandResults(
 
 function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (character) => `\\${character}`);
+}
+
+function normalizeRowId<T extends { id: unknown }>(row: T): Omit<T, "id"> & { id: number } {
+  const id = Number(row.id);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new FinancialCommandOperationsError(
+      "Financial command operations returned an invalid identifier",
+      500,
+      "FINANCIAL_COMMAND_ID_CORRUPT",
+    );
+  }
+  return { ...row, id };
 }
