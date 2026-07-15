@@ -204,7 +204,7 @@ export const shippingRateTables = shippingSchema.table("rate_tables", {
   carrier: varchar("carrier", { length: 50 }).notNull(),
   serviceCode: varchar("service_code", { length: 80 }).notNull(),
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
-  status: varchar("status", { length: 30 }).notNull().default("active"),
+  status: varchar("status", { length: 30 }).notNull().default("draft"),
   effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
   effectiveTo: timestamp("effective_to", { withTimezone: true }),
   // Provenance: how these rows were produced (e.g. shipstation-v2 calibration run id).
@@ -212,6 +212,7 @@ export const shippingRateTables = shippingSchema.table("rate_tables", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   index("shipping_rate_table_carrier_service_idx").on(table.rateBookId, table.carrier, table.serviceCode, table.status),
+  check("shipping_rate_table_status_chk", sql`${table.status} IN ('draft', 'active', 'superseded', 'retired')`),
 ]);
 
 export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {

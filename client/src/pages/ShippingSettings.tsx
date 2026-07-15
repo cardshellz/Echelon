@@ -19,14 +19,24 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import {
+  Archive,
+  ArrowRight,
   AlertTriangle,
   Box,
+  CircleCheck,
   FileSpreadsheet,
   Loader2,
   Package,
@@ -123,6 +133,18 @@ interface RateBookSummary {
   code: string;
   name: string;
   status: string;
+  zoneSetId: number | null;
+  metadata: unknown;
+  assignments: RateBookAssignment[];
+}
+
+interface RateBookAssignment {
+  id: number;
+  pricingChannel: string;
+  ratePurpose: string;
+  originWarehouseId: number | null;
+  originWarehouseName: string | null;
+  isActive: boolean;
 }
 
 interface RateTableSummary {
@@ -163,6 +185,43 @@ interface ImportResponse {
   rateTable: RateTableSummary;
   rowCount: number;
   warnings: string[];
+}
+
+interface RateTableDetailRow extends RateTableImportRow {
+  id: number;
+  originWarehouseName: string | null;
+}
+
+interface RateTableDetail {
+  rateTable: {
+    id: number;
+    carrier: string;
+    serviceCode: string;
+    currency: string;
+    status: string;
+    effectiveFrom: string;
+    effectiveTo: string | null;
+    rateBookId: number | null;
+    metadata: unknown;
+  };
+  rateBook: (RateBookSummary & {
+    zoneSet: { id: number; code: string; name: string; status: string } | null;
+  }) | null;
+  pricingMode: "state_zip" | "legacy_zone";
+  rows: RateTableDetailRow[];
+  analysis: {
+    canActivate: boolean;
+    errors: string[];
+    warnings: string[];
+    coverage: {
+      rowCount: number;
+      stateCount: number;
+      zipOverrideCount: number;
+      missingRegions: string[];
+      minWeightGrams: number | null;
+      maxWeightGrams: number | null;
+    };
+  };
 }
 
 // ===== Unit conversion helpers (copied from ProductDetail.tsx — keep in sync) =====
@@ -247,7 +306,7 @@ async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Request failed (${res.status})`);
+    throw apiErrorFromBody(body, res.status);
   }
   return res.json();
 }
@@ -261,7 +320,7 @@ async function putJson<T>(url: string, body: unknown): Promise<T> {
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error(errBody.error || `Request failed (${res.status})`);
+    throw apiErrorFromBody(errBody, res.status);
   }
   return res.json();
 }
@@ -275,13 +334,43 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    const message =
-      typeof errBody.error === "string"
-        ? errBody.error
-        : errBody.error?.message || `Request failed (${res.status})`;
-    throw new Error(message);
+    throw apiErrorFromBody(errBody, res.status);
   }
   return res.json();
+}
+
+async function deleteJson(url: string): Promise<void> {
+  const res = await fetch(url, { method: "DELETE", credentials: "include" });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw apiErrorFromBody(errBody, res.status);
+  }
+}
+
+class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null,
+    readonly details: string[],
+  ) {
+    super(message);
+  }
+}
+
+function apiErrorFromBody(body: unknown, status: number): ApiRequestError {
+  if (body && typeof body === "object" && "error" in body) {
+    const error = (body as { error?: unknown }).error;
+    if (typeof error === "string") return new ApiRequestError(error, null, []);
+    if (error && typeof error === "object") {
+      const typed = error as { code?: unknown; message?: unknown; details?: unknown };
+      return new ApiRequestError(
+        typeof typed.message === "string" ? typed.message : `Request failed (${status})`,
+        typeof typed.code === "string" ? typed.code : null,
+        Array.isArray(typed.details) ? typed.details.filter((item): item is string => typeof item === "string") : [],
+      );
+    }
+  }
+  return new ApiRequestError(`Request failed (${status})`, null, []);
 }
 
 // ===== Box catalog =====
@@ -1603,6 +1692,26 @@ function rateTableStatusBadge(status: string) {
   );
 }
 
+function titleCaseToken(value: string): string {
+  return value
+    .split("_")
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(" ");
+}
+
+function formatRateBookAssignment(assignment: RateBookAssignment): string {
+  const warehouse = assignment.originWarehouseName ? ` - ${assignment.originWarehouseName}` : "";
+  return `${titleCaseToken(assignment.pricingChannel)} / ${titleCaseToken(assignment.ratePurpose)}${warehouse}`;
+}
+
+function mutationErrorDescription(error: Error): string {
+  if (error instanceof ApiRequestError && error.details.length > 0) {
+    return `${error.message} ${error.details[0]}`;
+  }
+  return error.message;
+}
+
 const RATE_PREVIEW_ROW_LIMIT = 50;
 
 interface RateImportFormState {
@@ -1610,7 +1719,6 @@ interface RateImportFormState {
   carrier: string;
   serviceCode: string;
   csv: string;
-  replaceExisting: boolean;
 }
 
 function emptyRateImportForm(): RateImportFormState {
@@ -1619,7 +1727,6 @@ function emptyRateImportForm(): RateImportFormState {
     carrier: "usps",
     serviceCode: "",
     csv: "",
-    replaceExisting: true,
   };
 }
 
@@ -1628,9 +1735,11 @@ function RateTablesTab() {
   const queryClient = useQueryClient();
 
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [replaceDraftId, setReplaceDraftId] = useState<number | null>(null);
+  const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
+  const [pendingAction, setPendingAction] = useState<"activate" | "retire" | "delete" | null>(null);
   const [form, setForm] = useState<RateImportFormState>(emptyRateImportForm());
   const [preview, setPreview] = useState<ParseCsvResponse | null>(null);
-  const [importWarnings, setImportWarnings] = useState<string[] | null>(null);
 
   const { data: tablesData, isLoading } = useQuery<{
     rateBooks: RateBookSummary[];
@@ -1644,6 +1753,14 @@ function RateTablesTab() {
   });
   const rateBooks = tablesData?.rateBooks || [];
   const tables = tablesData?.rateTables || [];
+  const detailUrl = selectedTableId === null
+    ? "/api/shipping/admin/rate-tables/detail"
+    : `/api/shipping/admin/rate-tables/${selectedTableId}`;
+  const { data: detail, isLoading: detailLoading } = useQuery<RateTableDetail>({
+    queryKey: [detailUrl],
+    queryFn: () => fetchJson<RateTableDetail>(detailUrl),
+    enabled: selectedTableId !== null,
+  });
 
   const parseMutation = useMutation({
     mutationFn: (csv: string) =>
@@ -1660,29 +1777,88 @@ function RateTablesTab() {
       rateBookCode: string;
       carrier: string;
       serviceCode: string;
-      replaceExisting: boolean;
       rows: RateTableImportRow[];
-    }) => postJson<ImportResponse>("/api/shipping/admin/rate-tables/import", body),
+    }) => replaceDraftId === null
+      ? postJson<ImportResponse>("/api/shipping/admin/rate-tables/import", body)
+      : putJson<ImportResponse>(`/api/shipping/admin/rate-tables/${replaceDraftId}`, body),
     onSuccess: (data) => {
       invalidateShippingAdmin(queryClient);
-      toast({ title: `Rate table imported (${data.rowCount.toLocaleString()} rows)` });
-      if (data.warnings.length > 0) {
-        // Keep the dialog open so import warnings are read, not lost in a toast.
-        setImportWarnings(data.warnings);
-      } else {
-        closeDialog();
-      }
+      toast({
+        title: replaceDraftId === null ? "Rate-table draft created" : "Rate-table draft replaced",
+        description: `${data.rowCount.toLocaleString()} rate rows are ready for review.`,
+      });
+      closeDialog();
     },
     onError: (e: Error) => {
-      toast({ title: "Import failed", description: e.message, variant: "destructive" });
+      toast({ title: "Import failed", description: mutationErrorDescription(e), variant: "destructive" });
+    },
+  });
+
+  const activateMutation = useMutation({
+    mutationFn: (id: number) => postJson<{ rateTable: RateTableSummary; warnings: string[] }>(
+      `/api/shipping/admin/rate-tables/${id}/activate`,
+      { confirmWarnings: true },
+    ),
+    onSuccess: () => {
+      invalidateShippingAdmin(queryClient);
+      toast({ title: "Rate table activated" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Activation failed", description: mutationErrorDescription(e), variant: "destructive" });
+    },
+  });
+
+  const retireMutation = useMutation({
+    mutationFn: (id: number) => postJson<{ rateTable: RateTableSummary }>(
+      `/api/shipping/admin/rate-tables/${id}/retire`,
+      {},
+    ),
+    onSuccess: () => {
+      invalidateShippingAdmin(queryClient);
+      toast({ title: "Rate table retired" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Retirement failed", description: mutationErrorDescription(e), variant: "destructive" });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => deleteJson(`/api/shipping/admin/rate-tables/${id}`),
+    onSuccess: () => {
+      setSelectedTableId(null);
+      invalidateShippingAdmin(queryClient);
+      toast({ title: "Draft deleted" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Delete failed", description: mutationErrorDescription(e), variant: "destructive" });
     },
   });
 
   const closeDialog = () => {
     setDialogOpen(false);
+    setReplaceDraftId(null);
     setForm(emptyRateImportForm());
     setPreview(null);
-    setImportWarnings(null);
+  };
+
+  const openNewImport = () => {
+    setReplaceDraftId(null);
+    setForm(emptyRateImportForm());
+    setPreview(null);
+    setDialogOpen(true);
+  };
+
+  const openDraftReplacement = (rateTableDetail: RateTableDetail) => {
+    setReplaceDraftId(rateTableDetail.rateTable.id);
+    setForm({
+      rateBookCode: rateTableDetail.rateBook?.code ?? "shopify-retail-default",
+      carrier: rateTableDetail.rateTable.carrier,
+      serviceCode: rateTableDetail.rateTable.serviceCode,
+      csv: "",
+    });
+    setPreview(null);
+    setSelectedTableId(null);
+    setDialogOpen(true);
   };
 
   const handleFileChange = (file: File | undefined) => {
@@ -1725,10 +1901,28 @@ function RateTablesTab() {
       rateBookCode: form.rateBookCode,
       carrier: form.carrier,
       serviceCode: form.serviceCode.trim(),
-      replaceExisting: form.replaceExisting,
       rows: preview.rows,
     });
   };
+
+  const confirmPendingAction = () => {
+    if (!detail || !pendingAction) return;
+    if (pendingAction === "activate") activateMutation.mutate(detail.rateTable.id);
+    if (pendingAction === "retire") retireMutation.mutate(detail.rateTable.id);
+    if (pendingAction === "delete") deleteMutation.mutate(detail.rateTable.id);
+  };
+
+  const actionPending = activateMutation.isPending || retireMutation.isPending || deleteMutation.isPending;
+  const actionDialogTitle = pendingAction === "activate"
+    ? "Activate this rate table?"
+    : pendingAction === "retire"
+      ? "Retire this rate table?"
+      : "Delete this draft?";
+  const actionDialogDescription = pendingAction === "activate"
+    ? "This table will become live for its rate book. Any active table for the same carrier and service will be superseded."
+    : pendingAction === "retire"
+      ? "This table will no longer be eligible for new shipping quotes."
+      : "This permanently removes the draft and all of its rate rows.";
 
   return (
     <Card>
@@ -1743,9 +1937,9 @@ function RateTablesTab() {
             override is needed.
           </CardDescription>
         </div>
-        <Button size="sm" onClick={() => setDialogOpen(true)} className="min-h-[36px]">
+        <Button size="sm" onClick={openNewImport} className="min-h-[36px]">
           <Upload className="h-4 w-4 mr-1" />
-          Import table
+          Import draft
         </Button>
       </CardHeader>
       <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
@@ -1764,26 +1958,55 @@ function RateTablesTab() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Rate book</TableHead>
-                  <TableHead>Carrier</TableHead>
-                  <TableHead>Service</TableHead>
+                  <TableHead>Used by</TableHead>
+                  <TableHead>Carrier / service</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Effective</TableHead>
                   <TableHead className="text-right">Rows</TableHead>
-                  <TableHead className="text-right">Destinations</TableHead>
                   <TableHead>Weight bands</TableHead>
+                  <TableHead className="w-10"><span className="sr-only">Details</span></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {tables.map((table) => (
-                  <TableRow key={table.id} className={table.status !== "active" ? "opacity-60" : undefined}>
+                  <TableRow
+                    key={table.id}
+                    tabIndex={0}
+                    onClick={() => setSelectedTableId(table.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedTableId(table.id);
+                      }
+                    }}
+                    className="cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  >
                     <TableCell>
                       <div className="text-sm font-medium">{table.rateBook?.name ?? "Unassigned"}</div>
                       <div className="font-mono text-[10px] text-muted-foreground">
                         {table.rateBook?.code ?? "legacy"}
                       </div>
                     </TableCell>
-                    <TableCell className="text-sm uppercase font-medium">{table.carrier}</TableCell>
-                    <TableCell className="font-mono text-xs">{table.serviceCode}</TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        {(table.rateBook?.assignments ?? []).filter((assignment) => assignment.isActive).length === 0 ? (
+                          <span className="text-xs text-muted-foreground">Not assigned</span>
+                        ) : (
+                          (table.rateBook?.assignments ?? [])
+                            .filter((assignment) => assignment.isActive)
+                            .slice(0, 2)
+                            .map((assignment) => (
+                              <div key={assignment.id} className="text-xs whitespace-nowrap">
+                                {formatRateBookAssignment(assignment)}
+                              </div>
+                            ))
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="text-sm uppercase font-medium">{table.carrier}</div>
+                      <div className="font-mono text-xs text-muted-foreground">{table.serviceCode}</div>
+                    </TableCell>
                     <TableCell>{rateTableStatusBadge(table.status)}</TableCell>
                     <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
                       {formatEffectiveDate(table.effectiveFrom)}
@@ -1791,10 +2014,10 @@ function RateTablesTab() {
                       {table.effectiveTo ? formatEffectiveDate(table.effectiveTo) : "open"}
                     </TableCell>
                     <TableCell className="text-sm text-right">{table.rowCount.toLocaleString()}</TableCell>
-                    <TableCell className="text-sm text-right">{table.zoneCount.toLocaleString()}</TableCell>
                     <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
                       {formatBandRange(table.minWeightGrams, table.maxWeightGrams)}
                     </TableCell>
+                    <TableCell><ArrowRight className="h-4 w-4 text-muted-foreground" /></TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -1806,7 +2029,7 @@ function RateTablesTab() {
       <Dialog open={dialogOpen} onOpenChange={(open) => !open && closeDialog()}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Import rate table</DialogTitle>
+            <DialogTitle>{replaceDraftId === null ? "Import rate-table draft" : "Replace rate-table draft"}</DialogTitle>
             <DialogDescription>
               Use state defaults with optional ZIP-prefix overrides. Columns: state,zip_prefix,
               min_lb,max_lb,rate_usd (optional warehouse_id). Leave zip_prefix blank for the
@@ -1814,20 +2037,10 @@ function RateTablesTab() {
             </DialogDescription>
           </DialogHeader>
 
-          {importWarnings !== null ? (
-            <div className="space-y-3 py-2">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <AlertTriangle className="w-4 h-4 text-yellow-600" />
-                Imported with warnings
+          <div className="space-y-4 py-2">
+              <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                This saves a draft for review. It does not replace the active rates until you activate it.
               </div>
-              <ul className="space-y-1 text-xs text-muted-foreground list-disc pl-5">
-                {importWarnings.map((warning, idx) => (
-                  <li key={idx}>{warning}</li>
-                ))}
-              </ul>
-            </div>
-          ) : (
-            <div className="space-y-4 py-2">
               <div className="space-y-1.5">
                 <Label>Rate book</Label>
                 <Select
@@ -1983,48 +2196,214 @@ function RateTablesTab() {
                 </div>
               )}
 
-              <div className="flex items-start gap-3">
-                <Checkbox
-                  id="rate-replace-existing"
-                  checked={form.replaceExisting}
-                  onCheckedChange={(checked) =>
-                    setForm((prev) => ({ ...prev, replaceExisting: checked === true }))
-                  }
-                  className="mt-0.5"
-                />
-                <div>
-                  <label htmlFor="rate-replace-existing" className="text-sm font-medium cursor-pointer">
-                    Supersede current table for this carrier + service
-                  </label>
-                  <p className="text-xs text-muted-foreground">
-                    Marks the prior active table superseded so only the new one is quoted.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
+          </div>
 
           <DialogFooter className="gap-2">
-            {importWarnings !== null ? (
-              <Button onClick={closeDialog}>Done</Button>
-            ) : (
-              <>
-                <Button variant="outline" onClick={closeDialog}>
-                  Cancel
-                </Button>
-                <Button onClick={handleImport} disabled={!canImport || importMutation.isPending}>
-                  {importMutation.isPending ? (
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  ) : (
-                    <Upload className="w-4 h-4 mr-2" />
-                  )}
-                  Import
-                </Button>
-              </>
-            )}
+            <Button variant="outline" onClick={closeDialog}>
+              Cancel
+            </Button>
+            <Button onClick={handleImport} disabled={!canImport || importMutation.isPending}>
+              {importMutation.isPending ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <Upload className="w-4 h-4 mr-2" />
+              )}
+              {replaceDraftId === null ? "Create draft" : "Replace draft"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Sheet open={selectedTableId !== null} onOpenChange={(open) => !open && setSelectedTableId(null)}>
+        <SheetContent className="w-full sm:max-w-3xl p-0 overflow-y-auto">
+          {detailLoading || !detail ? (
+            <div className="flex h-full items-center justify-center">
+              <Loader2 className="h-6 w-6 animate-spin" />
+            </div>
+          ) : (
+            <>
+              <SheetHeader className="border-b p-6 pr-12">
+                <div className="flex items-center gap-2">
+                  <SheetTitle className="uppercase">{detail.rateTable.carrier}</SheetTitle>
+                  {rateTableStatusBadge(detail.rateTable.status)}
+                </div>
+                <SheetDescription className="font-mono">{detail.rateTable.serviceCode}</SheetDescription>
+              </SheetHeader>
+
+              <div className="space-y-6 p-6">
+                <section className="space-y-3">
+                  <div>
+                    <div className="text-xs font-medium uppercase text-muted-foreground">Rate book</div>
+                    <div className="text-base font-semibold">{detail.rateBook?.name ?? "Unassigned"}</div>
+                    <div className="font-mono text-xs text-muted-foreground">
+                      {detail.rateBook?.code ?? "legacy"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-1.5 text-xs font-medium uppercase text-muted-foreground">Used by</div>
+                    <div className="flex flex-wrap gap-2">
+                      {(detail.rateBook?.assignments ?? []).filter((assignment) => assignment.isActive).length === 0 ? (
+                        <span className="text-sm text-muted-foreground">No active channel assignment</span>
+                      ) : (
+                        (detail.rateBook?.assignments ?? [])
+                          .filter((assignment) => assignment.isActive)
+                          .map((assignment) => (
+                            <Badge key={assignment.id} variant="outline">
+                              {formatRateBookAssignment(assignment)}
+                            </Badge>
+                          ))
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                <section className="grid grid-cols-2 gap-x-6 gap-y-4 border-y py-4 sm:grid-cols-4">
+                  <div>
+                    <div className="text-xs text-muted-foreground">Rows</div>
+                    <div className="text-lg font-semibold">{detail.analysis.coverage.rowCount.toLocaleString()}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">Statewide rates</div>
+                    <div className="text-lg font-semibold">{detail.analysis.coverage.stateCount}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">ZIP overrides</div>
+                    <div className="text-lg font-semibold">{detail.analysis.coverage.zipOverrideCount}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">Weight coverage</div>
+                    <div className="text-sm font-semibold">
+                      {formatBandRange(
+                        detail.analysis.coverage.minWeightGrams,
+                        detail.analysis.coverage.maxWeightGrams,
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                {detail.analysis.errors.length > 0 && (
+                  <section className="rounded-md border border-destructive/50 bg-destructive/5 p-4">
+                    <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-destructive">
+                      <AlertTriangle className="h-4 w-4" />
+                      Activation blocked
+                    </div>
+                    <ul className="list-disc space-y-1 pl-5 text-xs text-destructive">
+                      {detail.analysis.errors.map((error, index) => <li key={index}>{error}</li>)}
+                    </ul>
+                  </section>
+                )}
+
+                {detail.analysis.warnings.length > 0 && (
+                  <section className="rounded-md border border-amber-300 bg-amber-50 p-4">
+                    <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-amber-900">
+                      <AlertTriangle className="h-4 w-4" />
+                      Review before activation
+                    </div>
+                    <ul className="list-disc space-y-1 pl-5 text-xs text-amber-900">
+                      {detail.analysis.warnings.map((warning, index) => <li key={index}>{warning}</li>)}
+                    </ul>
+                  </section>
+                )}
+
+                <section className="space-y-3">
+                  <div className="flex items-end justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">Rate rows</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Statewide defaults and any more-specific ZIP overrides.
+                      </p>
+                    </div>
+                    {detail.rows.length > 250 && (
+                      <span className="text-xs text-muted-foreground">First 250 shown</span>
+                    )}
+                  </div>
+                  <div className="max-h-[420px] overflow-auto rounded-md border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>State</TableHead>
+                          <TableHead>ZIP</TableHead>
+                          <TableHead>Warehouse</TableHead>
+                          <TableHead>Weight</TableHead>
+                          <TableHead className="text-right">Rate</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {detail.rows.slice(0, 250).map((row) => (
+                          <TableRow key={row.id}>
+                            <TableCell className="text-xs font-medium">
+                              {row.destinationRegion ?? "Unmapped"}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs text-muted-foreground">
+                              {row.postalPrefix ? `${row.postalPrefix}*` : "Statewide"}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {row.originWarehouseName ?? "Any warehouse"}
+                            </TableCell>
+                            <TableCell className="whitespace-nowrap text-xs">
+                              {formatWeight(row.minWeightGrams)} - {formatWeight(row.maxWeightGrams)}
+                            </TableCell>
+                            <TableCell className="text-right text-xs">{formatCostUsd(row.rateCents)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </section>
+
+                <section className="sticky bottom-0 -mx-6 flex flex-wrap justify-end gap-2 border-t bg-background px-6 py-4 shadow-[0_-6px_16px_-12px_rgba(0,0,0,0.35)]">
+                  {detail.rateTable.status === "draft" && (
+                    <>
+                      <Button variant="outline" onClick={() => openDraftReplacement(detail)}>
+                        <Upload className="mr-2 h-4 w-4" />
+                        Replace draft
+                      </Button>
+                      <Button variant="outline" onClick={() => setPendingAction("delete")}>
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Delete draft
+                      </Button>
+                      <Button
+                        onClick={() => setPendingAction("activate")}
+                        disabled={!detail.analysis.canActivate}
+                      >
+                        <CircleCheck className="mr-2 h-4 w-4" />
+                        Activate
+                      </Button>
+                    </>
+                  )}
+                  {(detail.rateTable.status === "active" || detail.rateTable.status === "superseded") && (
+                    <Button variant="outline" onClick={() => setPendingAction("retire")}>
+                      <Archive className="mr-2 h-4 w-4" />
+                      Retire
+                    </Button>
+                  )}
+                </section>
+              </div>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      <AlertDialog open={pendingAction !== null} onOpenChange={(open) => !open && setPendingAction(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{actionDialogTitle}</AlertDialogTitle>
+            <AlertDialogDescription>{actionDialogDescription}</AlertDialogDescription>
+          </AlertDialogHeader>
+          {pendingAction === "activate" && detail && detail.analysis.warnings.length > 0 && (
+            <ul className="max-h-40 list-disc space-y-1 overflow-y-auto pl-5 text-sm text-muted-foreground">
+              {detail.analysis.warnings.map((warning, index) => <li key={index}>{warning}</li>)}
+            </ul>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={actionPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmPendingAction} disabled={actionPending}>
+              {actionPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {pendingAction === "activate" ? "Activate" : pendingAction === "retire" ? "Retire" : "Delete draft"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }
