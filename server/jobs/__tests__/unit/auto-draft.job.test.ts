@@ -62,7 +62,10 @@ vi.mock("../../../modules/procurement/auto-draft-po-escalation.service", () => (
   runStaleAutoDraftPoEscalationCheck: mocks.stalePoEscalation.run,
 }));
 
-import { runAutoDraftJob } from "../../auto-draft.job";
+import {
+  previewAutomaticPurchasingPilot,
+  runAutoDraftJob,
+} from "../../auto-draft.job";
 
 function recommendationRows() {
   return [{
@@ -128,7 +131,16 @@ describe("auto-draft job", () => {
     mocks.handoff.createAutomaticHandoff.mockResolvedValue({
       pos: [{ id: 700, vendorId: 7, poNumber: "PO-20260711-001" }],
       decisions: [],
-      handedOff: [{ poId: 700, recommendationId: "1:11:90" }],
+      handedOff: [{
+        acceptedDecisionId: 800,
+        handoffDecisionId: 801,
+        recommendationId: "1:11:90",
+        kind: "auto_draft_eligible",
+        sku: "HIGH-1",
+        poId: 700,
+        poLineId: 701,
+        poIds: [700],
+      }],
       skipped: [],
     });
     mocks.stalePoEscalation.run.mockResolvedValue({
@@ -311,6 +323,211 @@ describe("auto-draft job", () => {
     expect(result.recommendationRun.detail).toMatchObject({
       poMutationSkips: [expect.objectContaining({ latestDecisionId: 900 })],
     });
+  });
+
+  it("preflights one exact SKU without starting a run or invoking a PO writer", async () => {
+    const preview = await previewAutomaticPurchasingPilot({ sku: " high-1 " });
+
+    expect(mocks.lifecycle.startRun).not.toHaveBeenCalled();
+    expect(mocks.lifecycle.heartbeatRun).not.toHaveBeenCalled();
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+    expect(preview).toMatchObject({
+      mode: "preflight",
+      sku: "HIGH-1",
+      itemsAnalyzed: 1,
+      matchCount: 1,
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_only",
+      eligible: true,
+      blockers: [],
+      limits: { maximumPurchaseOrders: 1, maximumPurchaseOrderLines: 1 },
+      recommendation: {
+        recommendationId: "1:11:90",
+        productId: 1,
+        productVariantId: 11,
+        preferredVendorId: 7,
+        vendorProductId: 701,
+        suggestedOrderPieces: 4,
+        pricingBasis: "per_piece",
+        quotedUnitCostMills: 50,
+        estimatedCostMills: 50,
+        estimatedCostCents: 1,
+        quoteReference: "QUOTE-701",
+        normalizedLinePricing: {
+          pricingBasis: "per_piece",
+          orderQty: 4,
+          quotedUnitCostMills: 50,
+          quotedExtendedMills: 200,
+          unitCostMills: 50,
+          unitCostCents: 1,
+          totalProductCostCents: 2,
+          pricingRemainderMills: 0,
+        },
+      },
+    });
+  });
+
+  it("executes a pilot with exactly one SKU even when other recommendations are eligible", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      ...recommendationRows(),
+      {
+        ...recommendationRows()[0],
+        product_id: 2,
+        variant_id: 22,
+        base_sku: "OTHER-2",
+        vendor_product_id: 702,
+      },
+    ]);
+
+    const result = await runAutoDraftJob({
+      triggeredBy: "manual",
+      triggeredByUser: "buyer-user-id",
+      pilot: { sku: "HIGH-1" },
+    });
+
+    const call = mocks.handoff.createAutomaticHandoff.mock.calls[0][0];
+    expect(call.actorId).toBe("buyer-user-id");
+    expect(call.items).toHaveLength(1);
+    expect(call.items[0]).toMatchObject({ sku: "HIGH-1", productId: 1, vendorProductId: 701 });
+    expect(result).toMatchObject({ count: 1, itemsDrafted: 1 });
+    expect(result.pilot).toMatchObject({
+      mode: "execute",
+      sku: "HIGH-1",
+      eligible: true,
+      outcome: "created",
+      mapping: {
+        acceptedDecisionId: 800,
+        handoffDecisionId: 801,
+        poId: 700,
+        poLineId: 701,
+      },
+      limits: { maximumPurchaseOrders: 1, maximumPurchaseOrderLines: 1 },
+    });
+  });
+
+  it("preflights purchase-UOM quotes as unit economics before deriving the line total", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([{
+      ...recommendationRows()[0],
+      estimated_cost_mills: 6_000,
+      vendor_pricing_basis: "per_purchase_uom",
+      vendor_purchase_uom: "case",
+      vendor_quoted_unit_cost_mills: 12_000,
+      vendor_pieces_per_purchase_uom: 2,
+    }]);
+
+    const preview = await previewAutomaticPurchasingPilot({ sku: "HIGH-1" });
+
+    expect(preview).toMatchObject({
+      eligible: true,
+      recommendation: {
+        suggestedOrderPieces: 4,
+        pricingBasis: "per_purchase_uom",
+        purchaseUom: "case",
+        piecesPerPurchaseUom: 2,
+        quotedUnitCostMills: 12_000,
+        normalizedLinePricing: {
+          orderQty: 4,
+          purchaseUom: "case",
+          purchaseUomQuantity: 2,
+          piecesPerPurchaseUom: 2,
+          quotedUnitCostMills: 12_000,
+          quotedExtendedMills: 24_000,
+          unitCostMills: 6_000,
+          unitCostCents: 60,
+          totalProductCostCents: 240,
+          pricingRemainderMills: 0,
+        },
+      },
+    });
+  });
+
+  it("fails a pilot closed when the exact SKU is absent", async () => {
+    await expect(runAutoDraftJob({
+      triggeredBy: "manual",
+      triggeredByUser: "buyer-user-id",
+      pilot: { sku: "MISSING-1" },
+    })).rejects.toMatchObject({
+      code: "AUTOMATIC_PURCHASING_PILOT_BLOCKED",
+      preview: {
+        eligible: false,
+        blockers: [expect.objectContaining({ code: "sku_not_found" })],
+      },
+    });
+
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+    expect(mocks.lifecycle.failRun).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 500,
+      errorMessage: expect.stringContaining("No purchasing recommendation matched SKU MISSING-1"),
+    }));
+  });
+
+  it("reports policy blockers during preflight and does not write", async () => {
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([{
+      ...recommendationRows()[0],
+      vendor_pricing_basis: "legacy_unknown",
+      vendor_quoted_unit_cost_mills: null,
+    }]);
+
+    const preview = await previewAutomaticPurchasingPilot({ sku: "HIGH-1" });
+
+    expect(preview).toMatchObject({
+      eligible: false,
+      blockers: [expect.objectContaining({ code: "approval_policy_rejected" })],
+      recommendation: {
+        pricingBasis: "legacy_unknown",
+        quotedUnitCostMills: null,
+      },
+    });
+    expect(mocks.lifecycle.startRun).not.toHaveBeenCalled();
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+  });
+
+  it("blocks review-only mode and ambiguous SKU matches during preflight", async () => {
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "review_only",
+      approvalPolicy: "high_confidence_only",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+    });
+    const reviewOnly = await previewAutomaticPurchasingPilot({ sku: "HIGH-1" });
+    expect(reviewOnly).toMatchObject({
+      eligible: false,
+      blockers: [expect.objectContaining({ code: "review_only_mode" })],
+    });
+
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      autoDraftMode: "draft_po",
+      approvalPolicy: "high_confidence_only",
+      includeOrderSoon: false,
+      skipOnOpenPo: true,
+      skipNoVendor: true,
+    });
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      ...recommendationRows(),
+      { ...recommendationRows()[0], product_id: 2, variant_id: 22 },
+    ]);
+    const ambiguous = await previewAutomaticPurchasingPilot({ sku: "HIGH-1" });
+    expect(ambiguous).toMatchObject({
+      eligible: false,
+      matchCount: 2,
+      blockers: [expect.objectContaining({ code: "sku_ambiguous" })],
+      recommendation: null,
+    });
+  });
+
+  it("rejects scheduler or unattributed pilot execution before starting a run", async () => {
+    await expect(runAutoDraftJob({
+      triggeredBy: "scheduler",
+      pilot: { sku: "HIGH-1" },
+    })).rejects.toThrow("must be triggered manually");
+    await expect(runAutoDraftJob({
+      triggeredBy: "manual",
+      pilot: { sku: "HIGH-1" },
+    })).rejects.toThrow("requires an operator actor ID");
+
+    expect(mocks.lifecycle.startRun).not.toHaveBeenCalled();
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
   });
 
   it("records analysis failure through compare-and-set lifecycle state", async () => {
