@@ -1887,7 +1887,7 @@ function FlowOverview(props: {
           <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm">
             <span><strong>{snapshot.crossSystem.wmsShippedOmsOpen.toLocaleString()}</strong> shipped orders still open upstream</span>
             <span><strong>{snapshot.crossSystem.omsNotUpdated.toLocaleString()}</strong> fulfillment writebacks incomplete</span>
-            <span><strong>{snapshot.sla.breached.toLocaleString()}</strong> SLA breaches</span>
+            <span><strong>{snapshot.sla.breached.toLocaleString()}</strong> orders past ship-by date</span>
             <span className="text-muted-foreground">
               {snapshot.channels.map((channel) => `${humanize(channel.provider)} ${channel.entered.toLocaleString()}`).join(" · ")}
             </span>

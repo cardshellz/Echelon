@@ -47,6 +47,12 @@ describe("getFlowWaterfall", () => {
     expect(result.windowDays).toBe(30);
   });
 
+  it("keeps ship-by performance outside the technical exception registry", () => {
+    expect(FLOW_WATERFALL_SRC).not.toContain('code: "SLA_BREACHED"');
+    expect(FLOW_WATERFALL_SRC).toContain("const slaBreached = num");
+    expect(FLOW_WATERFALL_SRC).toContain("sla: { breached: slaBreached, sample: [] }");
+  });
+
   it("exposes a canonical paid replay source for paid orders missing WMS", () => {
     const start = FLOW_WATERFALL_SRC.indexOf('code: "OMS_PAID_WITHOUT_WMS"');
     const end = FLOW_WATERFALL_SRC.indexOf('\n  },', start);

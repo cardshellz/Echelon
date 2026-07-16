@@ -334,15 +334,6 @@ const BASE_ISSUES: FlowIssueDef[] = [
     count: () => allLinesHeldCountQuery(),
     sample: () => allLinesHeldSampleQuery(50),
   },
-  {
-    // WHERE mirrors the canonical SLA monitor (sla-monitor.service.ts): overdue = non-terminal past due.
-    code: "SLA_BREACHED", kind: "sla", stage: "wms_fulfill", severity: "warning",
-    message: "Orders past their ship-by date",
-    why: "These orders are overdue to ship. Move them to the front of the pick-and-pack queue.",
-    remediation: "MANUAL_REVIEW", replaySafe: false,
-    count: () => sql`SELECT COUNT(*)::int AS count FROM wms.orders WHERE sla_due_at IS NOT NULL AND warehouse_status NOT IN ('shipped','completed','cancelled') AND sla_due_at < NOW()`,
-    sample: () => sql`SELECT wo.order_number, wo.warehouse_status, wo.sla_due_at AS at FROM wms.orders wo WHERE wo.sla_due_at IS NOT NULL AND wo.warehouse_status NOT IN ('shipped','completed','cancelled') AND wo.sla_due_at < NOW() ORDER BY wo.sla_due_at ASC LIMIT 50`,
-  },
   // ---- engine push ----
   {
     // WHERE mirrors ops-health.service.ts: only shipments carrying a shippable, positive-qty item.
@@ -1011,6 +1002,16 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     const volumePerDay = rows(await tx.execute(sql`SELECT to_char(date_trunc('day', ordered_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS orders FROM oms.oms_orders WHERE ordered_at > ${win} GROUP BY 1 ORDER BY 1`)).map((r) => ({ day: String(r.day), orders: Number(r.orders) || 0 }));
     const wmsBuckets = rows(await tx.execute(sql`SELECT warehouse_status AS status, COUNT(*)::int AS count FROM wms.orders WHERE created_at > ${win} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ status: String(r.status), count: Number(r.count) || 0 }));
     const eventSpine = rows(await tx.execute(sql`SELECT event_type AS "eventType", COUNT(*)::int AS count FROM oms.oms_order_events WHERE created_at > ${win} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`)).map((r) => ({ eventType: String(r.eventType), count: Number(r.count) || 0 }));
+    // Ship-by performance is an operational KPI, not evidence of a broken
+    // integration or invalid technical state. Keep it visible without turning
+    // warehouse backlog into an exception bucket or degraded system health.
+    const slaBreached = num(await tx.execute(sql`
+      SELECT COUNT(*)::int AS count
+      FROM wms.orders
+      WHERE sla_due_at IS NOT NULL
+        AND warehouse_status NOT IN ('shipped','completed','cancelled')
+        AND sla_due_at < NOW()
+    `));
 
     // ---- dead-letter reason counts in ONE grouped pass (one query feeds every
     // queue_failure bucket AND the sidebar breakdown — keeps the tiny pool happy) ----
@@ -1073,7 +1074,7 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       duplicates: { omsToPicking: bc.OMS_DOUBLE_PICKING ?? 0, overShippedItems: bc.ITEM_OVER_SHIPPED ?? 0, unmappedEngineSplits: bc.UNMAPPED_ENGINE_SPLIT ?? 0, blockedDupOrders: bc.BLOCKED_DUP_INGEST ?? 0, sample: [] },
       deadLetterCauses,
       crossSystem: { wmsShippedOmsOpen: bc.WMS_SHIPPED_OMS_OPEN ?? 0, omsNotUpdated: bc.ORDER_FULFILLED_OMS_NOT_UPDATED ?? 0, sample: [] },
-      sla: { breached: bc.SLA_BREACHED ?? 0, sample: [] },
+      sla: { breached: slaBreached, sample: [] },
       issues,
       health: { generatedAt: new Date().toISOString(), status: counts.critical > 0 ? "critical" : counts.warning > 0 ? "degraded" : "healthy", counts },
       channelWriteback,
