@@ -342,6 +342,10 @@ const recommendationDecisionValues: RecommendationDecision[] = [
   "dismissed",
 ];
 
+const RECOMMENDATION_DECISION_NOTE_MIN_LENGTH = 10;
+const RECOMMENDATION_DECISION_NOTE_MAX_LENGTH = 2000;
+const REVIEW_EVIDENCE_CONTRACT_VERSION = 1;
+
 const reviewQueueKindPriority: Record<RecommendationReviewQueueKind, number> = {
   skipped: 0,
   held_by_policy: 1,
@@ -368,6 +372,50 @@ function parseForecastInputGapActionCode(value: unknown): ForecastInputGapAction
 
 function parseRecommendationDecision(value: unknown): RecommendationDecision | null {
   return recommendationDecisionValues.includes(value as RecommendationDecision) ? value as RecommendationDecision : null;
+}
+
+function parseReviewedControlCodes(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 50) return null;
+  const codes = value.map((code) => typeof code === "string" ? code.trim() : "");
+  if (codes.some((code) => !code || code.length > 100)) return null;
+  const uniqueCodes = Array.from(new Set(codes));
+  return uniqueCodes.length === codes.length ? uniqueCodes : null;
+}
+
+function validateRecommendationDecisionEvidence(input: {
+  decision: RecommendationDecision;
+  note: string;
+  confirmDecision: unknown;
+  acknowledgeAutomationEligibilityUnchanged: unknown;
+  reviewedControlCodes: string[];
+  currentControls: PurchasingRecommendationQualityControl[];
+}): string | null {
+  if (input.note.length < RECOMMENDATION_DECISION_NOTE_MIN_LENGTH) {
+    return `note must contain at least ${RECOMMENDATION_DECISION_NOTE_MIN_LENGTH} characters`;
+  }
+  if (input.confirmDecision !== true) {
+    return "confirmDecision must be true";
+  }
+
+  const currentCodes = Array.from(new Set(input.currentControls.map((control) => control.code)));
+  const currentCodeSet = new Set(currentCodes);
+  const unknownCodes = input.reviewedControlCodes.filter((code) => !currentCodeSet.has(code));
+  if (unknownCodes.length > 0) {
+    return `reviewedControlCodes contains controls that are not current: ${unknownCodes.join(", ")}`;
+  }
+
+  if (input.decision === "reviewed" || input.decision === "accepted_for_po") {
+    if (input.acknowledgeAutomationEligibilityUnchanged !== true) {
+      return "acknowledgeAutomationEligibilityUnchanged must be true";
+    }
+    const reviewedCodeSet = new Set(input.reviewedControlCodes);
+    const missingCodes = currentCodes.filter((code) => !reviewedCodeSet.has(code));
+    if (missingCodes.length > 0) {
+      return `reviewedControlCodes must acknowledge every current control: ${missingCodes.join(", ")}`;
+    }
+  }
+
+  return null;
 }
 
 function recommendationDecisionKey(recommendationId: string, kind: string): string {
@@ -406,13 +454,26 @@ function reviewQueueSeverity(item: PurchasingRecommendationItem, kind: Recommend
   return item.autopilotBlockers?.some((control) => control.severity === "block") ? "critical" : "warning";
 }
 
+function buildRecommendationReviewHref(
+  item: PurchasingRecommendationItem,
+  kind: RecommendationReviewQueueKind,
+  params: Record<string, string> = {},
+): string {
+  const query = new URLSearchParams({
+    reviewQueue: kind,
+    recommendationId: item.recommendationId,
+    ...params,
+  });
+  return `/reorder-analysis?${query.toString()}`;
+}
+
 function reviewQueueAction(item: PurchasingRecommendationItem, kind: RecommendationReviewQueueKind) {
   if (kind === "held_by_policy") {
     const band = item.recommendationCandidateScore?.band ?? "review_candidate";
     return {
       action: "review_approval_policy",
       label: "Review policy hold",
-      href: `/reorder-analysis?candidateBand=${band}`,
+      href: buildRecommendationReviewHref(item, kind, { candidateBand: band }),
     };
   }
 
@@ -421,7 +482,10 @@ function reviewQueueAction(item: PurchasingRecommendationItem, kind: Recommendat
     return {
       action: "review_quality_gate",
       label: "Review signal",
-      href: `/reorder-analysis?candidateBand=${band}`,
+      href: buildRecommendationReviewHref(item, kind, {
+        candidateBand: band,
+        reason: item.qualityGate.reason,
+      }),
     };
   }
 
@@ -439,7 +503,11 @@ function reviewQueueAction(item: PurchasingRecommendationItem, kind: Recommendat
     case "create_po":
       return { action: "create_po", label: "Create PO", href: "/purchase-orders" };
     default:
-      return { action: "review_recommendation", label: "Review", href: "/reorder-analysis" };
+      return {
+        action: "review_recommendation",
+        label: "Review",
+        href: buildRecommendationReviewHref(item, kind),
+      };
   }
 }
 
@@ -476,7 +544,7 @@ function reviewQueueForecastAction(
   if (trust.severity === "ok" && trust.inputGaps.length === 0 && item.qualityGate.reason !== "forecast_trust_review") {
     return null;
   }
-  return forecastInputGapAction(item);
+  return forecastInputGapAction(item, { exact: true });
 }
 
 function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurchasingRecommendations>, settings: AutoDraftRecommendationSettings) {
@@ -511,6 +579,9 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
     quotedAt: string | Date | null;
     quoteValidUntil: string | null;
     supplierBasis: PurchasingRecommendationItem["supplierBasis"];
+    demandEvidence: PurchasingRecommendationItem["demandBasis"] & {
+      demandWindowDiagnostics: PurchasingRecommendationItem["forecastProvenance"]["demandWindowDiagnostics"];
+    };
     candidateScore: PurchasingRecommendationItem["recommendationCandidateScore"];
     qualityGate: PurchasingRecommendationItem["qualityGate"];
     qualityControls: PurchasingRecommendationQualityControl[];
@@ -549,6 +620,10 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
       quotedAt: item.supplierBasis.quotedAt,
       quoteValidUntil: item.supplierBasis.quoteValidUntil,
       supplierBasis: item.supplierBasis,
+      demandEvidence: {
+        ...item.demandBasis,
+        demandWindowDiagnostics: item.forecastProvenance.demandWindowDiagnostics,
+      },
       candidateScore: item.recommendationCandidateScore,
       qualityGate: item.qualityGate,
       qualityControls: item.autopilotBlockers?.length ? item.autopilotBlockers : item.qualityControls ?? [],
@@ -990,6 +1065,12 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const forecastAction = typeof req.query.forecastAction === "string" && req.query.forecastAction.trim()
         ? req.query.forecastAction.trim()
         : "all";
+      const recommendationId = typeof req.query.recommendationId === "string" && req.query.recommendationId.trim()
+        ? req.query.recommendationId.trim()
+        : "all";
+      if (recommendationId !== "all" && recommendationId.length > 160) {
+        return res.status(400).json({ error: "recommendationId cannot exceed 160 characters" });
+      }
       if (forecastAction !== "all" && !parseForecastInputGapActionCode(forecastAction)) {
         return res.status(400).json({
           error: `forecastAction must be one of: all, ${forecastInputGapActionCodes.join(", ")}`,
@@ -1001,6 +1082,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         .filter((item) => severity === "all" || item.severity === severity)
         .filter((item) => reason === "all" || item.reason.code === reason)
         .filter((item) => forecastAction === "all" || item.forecastAction?.code === forecastAction)
+        .filter((item) => recommendationId === "all" || item.recommendationId === recommendationId)
         .slice(0, limit);
       const latestDecisionRows = await storage.getLatestRecommendationDecisions(
         filteredItems.map((item) => item.recommendationId),
@@ -1024,7 +1106,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         lookbackDays: configuredLookback,
         autoDraftMode: settings.autoDraftMode ?? "draft_po",
         approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
-        filters: { kind, severity, reason, forecastAction, limit },
+        filters: { kind, severity, reason, forecastAction, recommendationId, limit },
         ...queue,
         filteredCount: filteredItems.length,
         decisionCounts,
@@ -1242,10 +1324,14 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const recommendationId = typeof req.body?.recommendationId === "string" ? req.body.recommendationId.trim() : "";
       const kind = parseReviewQueueKind(req.body?.kind);
       const decision = parseRecommendationDecision(req.body?.decision);
-      const note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 2000) : null;
+      const note = typeof req.body?.note === "string" ? req.body.note.trim() : "";
+      const reviewedControlCodes = parseReviewedControlCodes(req.body?.reviewedControlCodes);
 
       if (!recommendationId) {
         return res.status(400).json({ error: "recommendationId is required" });
+      }
+      if (recommendationId.length > 160) {
+        return res.status(400).json({ error: "recommendationId cannot exceed 160 characters" });
       }
       if (!kind) {
         return res.status(400).json({ error: "kind must be one of: skipped, held_by_policy, quality_review_required" });
@@ -1253,11 +1339,28 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       if (!decision) {
         return res.status(400).json({ error: `decision must be one of: ${recommendationDecisionValues.join(", ")}` });
       }
+      if (note.length > RECOMMENDATION_DECISION_NOTE_MAX_LENGTH) {
+        return res.status(400).json({ error: `note cannot exceed ${RECOMMENDATION_DECISION_NOTE_MAX_LENGTH} characters` });
+      }
+      if (!reviewedControlCodes) {
+        return res.status(400).json({ error: "reviewedControlCodes must be an array of unique current control codes" });
+      }
 
       const { configuredLookback, settings, queue } = await loadRecommendationReviewQueueData();
       const item = queue.items.find((entry) => entry.recommendationId === recommendationId && entry.kind === kind);
       if (!item) {
         return res.status(404).json({ error: "Recommendation is not currently in the review queue" });
+      }
+      const evidenceError = validateRecommendationDecisionEvidence({
+        decision,
+        note,
+        confirmDecision: req.body?.confirmDecision,
+        acknowledgeAutomationEligibilityUnchanged: req.body?.acknowledgeAutomationEligibilityUnchanged,
+        reviewedControlCodes,
+        currentControls: item.qualityControls,
+      });
+      if (evidenceError) {
+        return res.status(400).json({ error: evidenceError });
       }
 
       const userId = (req as any).user?.id ?? req.session?.user?.id ?? "SYSTEM";
@@ -1285,6 +1388,13 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           autoDraftMode: settings.autoDraftMode ?? "draft_po",
           approvalPolicy: normalizeApprovalPolicy(settings.approvalPolicy),
           item,
+          reviewEvidence: {
+            contractVersion: REVIEW_EVIDENCE_CONTRACT_VERSION,
+            reviewedControlCodes,
+            controlsAtDecision: item.qualityControls,
+            automationEligibilityAcknowledged: req.body?.acknowledgeAutomationEligibilityUnchanged === true,
+            decisionConfirmed: true,
+          },
         },
         decidedBy: userId,
       });

@@ -15,22 +15,24 @@ dispute, and void transitions. PR #927 added command-ledger monitoring,
 retention, and audited dead-command recovery; PR #929 repaired the named-schema
 integration harness; PR #931 added the controlled one-SKU automatic-purchasing
 pilot; PR #933 fixed its production CLI dependency loading; and PR #935 added
-read-only automatic-purchasing candidate discovery and readiness ranking. The current
-local slice makes supplier-readiness blockers directly remediable without guessing
-supplier data.
+read-only automatic-purchasing candidate discovery and readiness ranking. PR #936
+then made supplier-readiness blockers directly remediable without guessing supplier
+data. The current local slice hardens the existing recommendation review queue with
+exact demand-evidence review and fail-closed operator attestations.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/automatic-purchasing-readiness-ui-2026-07-15`
-- Base and current `origin/main`: `77eee7e7`
-- Base hardening slice: merged PR #935
-- Deployment status: PR #935 is live on Heroku release v2397
+- Branch: `codex/purchasing-demand-review-evidence-2026-07-15`
+- Base and current `origin/main`: `5e0b6685`
+- Base hardening slice: merged PR #936
+- Deployment status: PR #936 deployed on Heroku release v2399; current production
+  release v2400 contains subsequent merged PR #937
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
 - Migration 140 status: merged in PR #927; production state was not re-audited in
   this July 15 readiness continuation
-- Commit/PR status: exact supplier-remediation slice is local and not yet published
+- Commit/PR status: exact demand-review evidence slice is local and not yet published
 
 Do not deploy this branch without owner approval.
 
@@ -603,8 +605,8 @@ Its production run on Heroku release v2397 completed successfully and reported:
 - 20 with discounted/free demand mix, 16 with thin history, 4 with new demand,
   and 1 with falling demand.
 
-The report performed no lifecycle or PO writes. The local supplier-remediation slice
-now changes the existing Supplier Setup Gaps actions from generic `/suppliers` links
+The report performed no lifecycle or PO writes. PR #936 changes the existing Supplier
+Setup Gaps actions from generic `/suppliers` links
 into exact task links carrying product, receive variant, recommendation, known vendor,
 and known vendor-product identity. Suppliers locks the task target, preselects
 preferred status for missing-vendor setup, opens a known mapping for quote/lead-time
@@ -620,14 +622,58 @@ Current local evidence for the supplier-remediation slice:
 - production build: passed; 3,597 client modules transformed and server bundle built
 - `git diff --check`: passed, with Windows line-ending notices only
 
+PR #936 merged as `25e42129` and deployed on Heroku release v2399. Current
+production release v2400 contains subsequent merged PR #937. A post-deploy browser
+smoke reached the Echelon sign-in screen, but no authenticated production browser
+session was available; no credentials were guessed or entered and no production
+write was attempted. The authenticated Purchasing-to-Suppliers UI smoke remains
+outstanding.
+
+## Exact demand-evidence review slice
+
+The existing Recommendation Review Queue already records durable operator decisions,
+but the browser previously allowed `reviewed`, `accepted_for_po`, `deferred`, and
+`dismissed` decisions from a one-click menu with no rationale or confirmation. The
+current slice keeps that ledger and hardens its input contract:
+
+- review and forecast-gap links carry the exact recommendation id instead of opening
+  a broad candidate bucket;
+- the API can filter to one bounded recommendation and returns the demand window,
+  paid/discounted/free mix, order and active-day sample, trend, velocity, and forecast
+  trust evidence used by the engine;
+- the browser highlights and scrolls to the exact task and presents the evidence in a
+  decision dialog;
+- every operator disposition requires a substantive note and explicit confirmation;
+- `reviewed` and `accepted_for_po` additionally require acknowledgment of every live
+  quality control plus an explicit statement that the decision does not change
+  automatic-purchasing eligibility or bypass approval policy;
+- the server rejects missing, stale, duplicate, or invented control acknowledgments
+  and stores the reviewed controls and contract version with the recommendation
+  snapshot; and
+- accepting an item still means manual PO review only. It does not clear engine
+  blockers, raise confidence, or make the SKU eligible for automatic drafting.
+
+The Forecast Input Gaps dashboard now makes each displayed sample an exact action,
+while aggregate action buckets remain aggregate.
+
+Current local evidence:
+
+- `npm.cmd run check`: passed
+- procurement, supplier-catalog, and PO-editor regression gate: 84 files and 768
+  tests passed; 14 skipped
+- production build: passed; 3,604 client modules transformed and server bundle built
+- `git diff --check`: passed, with Windows line-ending notices only
+
 ## Recommended next implementation order
 
-1. Review and merge the exact supplier-remediation workflow.
-2. Correct supplier catalog, lead-time, quote, receive-variant, and demand-evidence
+1. Review and merge the exact demand-evidence review workflow.
+2. Complete an authenticated read-only smoke of Purchasing -> Supplier Setup Gaps ->
+   exact Suppliers task and Purchasing -> Forecast Input Gaps -> exact review task.
+3. Correct supplier catalog, lead-time, quote, receive-variant, and demand-evidence
    gaps only from verified business evidence; do not weaken approval policy.
-3. When the readiness report identifies a genuinely eligible low-risk SKU, run and
+4. When the readiness report identifies a genuinely eligible low-risk SKU, run and
    save its exact-SKU preflight and obtain explicit owner approval.
-4. Execute the one-SKU pilot once and complete the verification/lifecycle runbook
+5. Execute the one-SKU pilot once and complete the verification/lifecycle runbook
    before considering any wider unattended purchasing policy.
 
 Autonomous dead-command replay remains deferred. Encrypted request snapshots and a
@@ -642,9 +688,10 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. PR #935 is deployed on Heroku release v2397. Its production
-> readiness report found 32 candidates, zero eligible, and no automatic-purchasing
-> writes; all 32 require supplier configuration plus demand review. Review the exact
-> supplier-remediation branch and pilot runbook. Do not invent supplier data, weaken
-> policy, or execute a production pilot without an eligible exact-SKU preflight and
-> explicit owner approval.
+> unverified item. PR #936 is deployed in current production and its authenticated
+> UI smoke remains outstanding. The production readiness report found 32 candidates,
+> zero eligible, and no automatic-purchasing writes; all 32 require supplier
+> configuration plus demand review. Review the merged supplier-remediation flow,
+> current exact demand-evidence review branch, and pilot runbook. Do not invent
+> supplier data, weaken policy, or execute a production pilot without an eligible
+> exact-SKU preflight and explicit owner approval.
