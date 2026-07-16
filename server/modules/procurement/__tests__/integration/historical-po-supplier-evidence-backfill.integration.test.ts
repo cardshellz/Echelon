@@ -15,10 +15,12 @@ config({ path: resolve(process.cwd(), ".env.test") });
 const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const DISPOSABLE_DB = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeWithDisposableDb = TEST_DB_URL && DISPOSABLE_DB ? describe : describe.skip;
-const migrationSql = readFileSync(
-  resolve(process.cwd(), "migrations/144_vendor_product_last_cost_mills.sql"),
-  "utf8",
-);
+const migrationSql = [
+  "144_vendor_product_last_cost_mills.sql",
+  "146_po_vendor_product_identity_guard.sql",
+].map((fileName) =>
+  readFileSync(resolve(process.cwd(), "migrations", fileName), "utf8")
+).join("\n");
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -123,7 +125,7 @@ describeWithDisposableDb.sequential(
           lead_time_days INTEGER,
           is_preferred INTEGER NOT NULL DEFAULT 0,
           is_active INTEGER NOT NULL DEFAULT 1,
-          last_purchased_at TIMESTAMPTZ,
+          last_purchased_at TIMESTAMP WITHOUT TIME ZONE,
           last_cost_cents BIGINT,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp()
         );
@@ -140,8 +142,9 @@ describeWithDisposableDb.sequential(
           po_number TEXT NOT NULL,
           vendor_id INTEGER NOT NULL REFERENCES procurement.vendors(id),
           status TEXT NOT NULL,
-          closed_at TIMESTAMPTZ,
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp()
+          closed_at TIMESTAMP WITHOUT TIME ZONE,
+          updated_at TIMESTAMP WITHOUT TIME ZONE
+            NOT NULL DEFAULT transaction_timestamp()
         );
 
         CREATE TABLE procurement.purchase_order_lines (
@@ -156,24 +159,30 @@ describeWithDisposableDb.sequential(
           unit_cost_cents BIGINT NOT NULL,
           unit_cost_mills BIGINT,
           received_qty INTEGER NOT NULL,
-          fully_received_date TIMESTAMPTZ,
-          last_received_at TIMESTAMPTZ,
+          fully_received_date TIMESTAMP WITHOUT TIME ZONE,
+          last_received_at TIMESTAMP WITHOUT TIME ZONE,
           vendor_product_id INTEGER REFERENCES procurement.vendor_products(id),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp()
+          updated_at TIMESTAMP WITHOUT TIME ZONE
+            NOT NULL DEFAULT transaction_timestamp()
         );
       `);
 
       await pool.query(`
         INSERT INTO public.users (id) VALUES ('backfill-user');
         INSERT INTO procurement.vendors (id, name, active)
-        VALUES (2, 'Supplier', 1);
+        VALUES
+          (2, 'Supplier', 1),
+          (3, 'Other Supplier', 1);
         INSERT INTO catalog.products (id, name, sku, is_active)
         VALUES
           (36, 'Sub-cent sleeves', 'SLV', TRUE),
           (37, 'Zero placeholder', 'ZERO', TRUE),
-          (38, 'Existing evidence', 'EXISTING', TRUE);
+          (38, 'Existing evidence', 'EXISTING', TRUE),
+          (39, 'Other product', 'OTHER', TRUE);
         INSERT INTO catalog.product_variants (id, product_id, sku, is_active)
-        VALUES (73, 36, 'SLV-C10000', TRUE);
+        VALUES
+          (73, 36, 'SLV-C10000', TRUE),
+          (80, 39, 'OTHER-C10', TRUE);
         INSERT INTO procurement.vendor_products (
           vendor_id, product_id, last_cost_cents
         ) VALUES (2, 38, 125);
@@ -322,6 +331,65 @@ describeWithDisposableDb.sequential(
         linesToLink: 0,
         nonpositiveCostLinesExcluded: 1,
       });
+    });
+
+    it("rejects mismatched line links, PO vendor changes, and linked mapping reassignment", async () => {
+      const validMapping = await pool.query<{ id: number }>(`
+        SELECT id
+        FROM procurement.vendor_products
+        WHERE vendor_id = 2
+          AND product_id = 36
+          AND product_variant_id = 73
+      `);
+      const mismatchedMapping = await pool.query<{ id: number }>(`
+        INSERT INTO procurement.vendor_products (
+          vendor_id, product_id, product_variant_id
+        ) VALUES (3, 39, 80)
+        RETURNING id
+      `);
+      const validMappingId = validMapping.rows[0].id;
+      const mismatchedMappingId = mismatchedMapping.rows[0].id;
+
+      await expectDatabaseError(
+        () => pool.query(
+          `UPDATE procurement.purchase_order_lines
+           SET vendor_product_id = $2
+           WHERE id = $1`,
+          [167, mismatchedMappingId],
+        ),
+        "23514",
+      );
+      await expectDatabaseError(
+        () => pool.query(
+          "UPDATE procurement.purchase_orders SET vendor_id = 3 WHERE id = 115",
+        ),
+        "23514",
+      );
+      await expectDatabaseError(
+        () => pool.query(
+          `UPDATE procurement.vendor_products
+           SET product_id = 38, product_variant_id = NULL
+           WHERE id = $1`,
+          [validMappingId],
+        ),
+        "23514",
+      );
+      await expectDatabaseError(
+        () => pool.query(
+          `INSERT INTO procurement.purchase_order_lines (
+             id, purchase_order_id, line_type, status,
+             product_id, product_variant_id, expected_receive_variant_id,
+             unit_cost_cents, unit_cost_mills, received_qty,
+             vendor_product_id
+           ) VALUES (
+             169, 115, 'product', 'received',
+             36, NULL, NULL,
+             0, 48, 1, $1
+           )`,
+          [validMappingId],
+        ),
+        "23514",
+      );
     });
   },
 );

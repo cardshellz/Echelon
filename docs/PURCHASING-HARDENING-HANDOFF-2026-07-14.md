@@ -803,6 +803,35 @@ current `timestamp without time zone` values as canonical database wall-clock te
 Preview hashes and apply parameters are therefore deterministic across workstation
 and Heroku timezones, and no JavaScript timezone conversion occurs.
 
+After PR #944 deployed, the two remaining vendor/product conflicts were reviewed
+against their PO headers, line products, receive variants, receipts, invoices,
+receiving rows, landed-cost snapshots, and the newly created exact mappings. They
+were the only vendor/product mismatches in production. One locked transaction
+repointed:
+
+- PO line 153 from vendor-product 25 to 125; and
+- PO line 163 from vendor-product 11 to 124.
+
+Both changes were recorded as
+`purchase_order_line.vendor_product_link_repaired`. The old mappings remain in use
+by their correct products on other POs and were not changed. Post-repair verification
+reported zero vendor/product mismatches and a contract-v2 backfill preview with zero
+conflicts and zero pending writes.
+
+Migration 146 adds database enforcement matching the application command boundary:
+
+- a PO line may link only an active mapping for the PO vendor, line product, and
+  selected receive configuration;
+- changing a PO vendor cannot invalidate linked supplier provenance; and
+- a linked vendor-product mapping cannot be reassigned to another vendor, product,
+  or incompatible variant.
+
+Production also contains 11 separate legacy lines whose vendor and product are
+correct but whose product-level PO rows do not persist the variant-specific receive
+configuration carried by their vendor-product mappings. Migration 146 does not
+rewrite those historical rows. It prevents new writes from repeating that state;
+the 11-row receive-configuration remediation remains a separate reviewed slice.
+
 ### Validation evidence
 
 - `npm.cmd run check`: passed
