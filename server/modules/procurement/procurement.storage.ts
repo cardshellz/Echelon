@@ -92,6 +92,7 @@ export interface IProcurementStorage {
   deleteReceivingLine(id: number): Promise<boolean>;
   bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]>;
   getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]>;
+  getVendorProductsByProductIds(productIds: number[]): Promise<VendorProduct[]>;
   getVendorProductById(id: number): Promise<VendorProduct | undefined>;
   getPreferredVendorProduct(productId: number, productVariantId?: number): Promise<VendorProduct | undefined>;
   createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct>;
@@ -398,6 +399,18 @@ export const procurementMethods: IProcurementStorage = {
       query = query.where(and(...conditions)) as typeof query;
     }
     return await query;
+  },
+
+  async getVendorProductsByProductIds(productIds: number[]): Promise<VendorProduct[]> {
+    const uniqueIds = [...new Set(productIds)]
+      .filter((id) => Number.isSafeInteger(id) && id > 0)
+      .sort((a, b) => a - b);
+    if (uniqueIds.length === 0) return [];
+    return await db
+      .select()
+      .from(vendorProducts)
+      .where(inArray(vendorProducts.productId, uniqueIds))
+      .orderBy(vendorProducts.productId, desc(vendorProducts.isPreferred), asc(vendorProducts.vendorId));
   },
 
   async getVendorProductById(id: number): Promise<VendorProduct | undefined> {

@@ -62,6 +62,7 @@ import {
   Building2,
   Package,
   ArrowLeft,
+  FileSpreadsheet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -78,6 +79,7 @@ import {
   parseSupplierSetupDeepLink,
   type SupplierSetupDeepLink,
 } from "@/features/supplier-catalog/supplierSetupDeepLink";
+import { SupplierEvidenceImportDialog } from "@/features/supplier-catalog/SupplierEvidenceImportDialog";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -357,6 +359,7 @@ export default function Suppliers() {
   // Delete confirmation
   const [deleteVendorId, setDeleteVendorId] = useState<number | null>(null);
   const [deleteVPId, setDeleteVPId] = useState<number | null>(null);
+  const [evidenceImportOpen, setEvidenceImportOpen] = useState(false);
 
   // -----------------------------------------------------------------------
   // Queries
@@ -967,14 +970,37 @@ export default function Suppliers() {
             Manage vendors and their product catalogs
           </p>
         </div>
-        <Button
-          onClick={openCreateVendor}
-          className="min-h-[44px] w-full sm:w-auto"
-        >
-          <Plus className="h-4 w-4 mr-2" />
-          Add Supplier
-        </Button>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <Button
+            variant="outline"
+            onClick={() => setEvidenceImportOpen(true)}
+            className="min-h-[44px] w-full sm:w-auto"
+          >
+            <FileSpreadsheet className="h-4 w-4 mr-2" />
+            Import verified evidence
+          </Button>
+          <Button
+            onClick={openCreateVendor}
+            className="min-h-[44px] w-full sm:w-auto"
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            Add Supplier
+          </Button>
+        </div>
       </div>
+
+      <SupplierEvidenceImportDialog
+        open={evidenceImportOpen}
+        vendors={vendors}
+        initialVendorId={expandedVendorId}
+        onOpenChange={setEvidenceImportOpen}
+        onApplied={() => {
+          queryClient.invalidateQueries({ queryKey: ["/api/vendors"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/purchasing/supplier-setup-gaps"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
+        }}
+      />
 
       {setupTarget && (
         <Card className="border-blue-300 bg-blue-50/40">

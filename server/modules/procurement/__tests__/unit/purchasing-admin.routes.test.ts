@@ -7,6 +7,9 @@ import { AddressInfo } from "net";
 const mocks = vi.hoisted(() => ({
   storage: {
     getVendorById: vi.fn(),
+    getAllProducts: vi.fn(),
+    getAllProductVariants: vi.fn(),
+    getVendorProductsByProductIds: vi.fn(),
     searchVendorCatalog: vi.fn(),
   },
 }));
@@ -97,6 +100,19 @@ describe("purchasing admin routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.storage.getVendorById.mockResolvedValue({
+      id: 4,
+      code: "VEND-4",
+      name: "Vendor Four",
+      active: 1,
+    });
+    mocks.storage.getAllProducts.mockResolvedValue([
+      { id: 10, sku: "BASE-10", name: "Product Ten", isActive: true },
+    ]);
+    mocks.storage.getAllProductVariants.mockResolvedValue([
+      { id: 20, productId: 10, sku: "VAR-20", name: "Variant Twenty", isActive: true },
+    ]);
+    mocks.storage.getVendorProductsByProductIds.mockResolvedValue([]);
   });
 
   afterEach(async () => {
@@ -572,6 +588,152 @@ describe("purchasing admin routes", () => {
     });
     expect(Object.prototype.hasOwnProperty.call(normalizedEntry, "quoteReference")).toBe(true);
     expect(Object.prototype.hasOwnProperty.call(normalizedEntry, "quoteValidUntil")).toBe(true);
+  });
+
+  it("previews verified supplier evidence with exact SKU resolution and no writes", async () => {
+    const purchasing = buildPurchasingMock({
+      getVendorProducts: vi.fn().mockResolvedValue([]),
+    });
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/supplier-evidence-import/preview",
+      {
+        vendorId: 4,
+        rows: [{
+          sku: "VAR-20",
+          vendorSku: "V-20",
+          pricingBasis: "per_piece",
+          quotedUnitCost: "0.0075",
+          purchaseUom: null,
+          piecesPerPurchaseUom: null,
+          quoteReference: "QUOTE-20",
+          quotedAt: "2026-07-15",
+          quoteValidUntil: "2026-08-15",
+          moqPieces: 12,
+          leadTimeDays: 4,
+          isPreferred: true,
+        }],
+      },
+    );
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      contractVersion: 1,
+      vendor: { id: 4, code: "VEND-4", name: "Vendor Four" },
+      summary: { total: 1, creates: 1, updates: 0, reactivations: 0 },
+      items: [{
+        sku: "VAR-20",
+        productId: 10,
+        productVariantId: 20,
+        normalizedUnitCostMills: 75,
+        action: "create",
+      }],
+    });
+    expect(body.previewHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(body.catalogEntries).toBeUndefined();
+    expect(purchasing.bulkUpsertVendorCatalog).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed supplier evidence before SKU resolution", async () => {
+    const purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/supplier-evidence-import/preview",
+      {
+        vendorId: 4,
+        rows: [{
+          sku: "VAR-20",
+          pricingBasis: "per_piece",
+          quotedUnitCost: "1.23456",
+          quotedAt: "2026-07-15",
+          leadTimeDays: 4,
+          isPreferred: true,
+        }],
+      },
+    );
+
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("SUPPLIER_EVIDENCE_REQUEST_INVALID");
+    expect(mocks.storage.getVendorById).not.toHaveBeenCalled();
+    expect(purchasing.bulkUpsertVendorCatalog).not.toHaveBeenCalled();
+  });
+
+  it("requires the exact preview hash before atomically applying supplier evidence", async () => {
+    const purchasing = buildPurchasingMock({
+      getVendorProducts: vi.fn().mockResolvedValue([]),
+      bulkUpsertVendorCatalog: vi.fn().mockResolvedValue({
+        created: [{ vendorProductId: 91, productId: 10, productVariantId: 20 }],
+        updated: [],
+        skipped: [],
+      }),
+    });
+    server = await startServer(buildApp(purchasing));
+    const input = {
+      vendorId: 4,
+      rows: [{
+        sku: "VAR-20",
+        vendorSku: "V-20",
+        pricingBasis: "per_purchase_uom",
+        quotedUnitCost: "12.3456",
+        purchaseUom: "case",
+        piecesPerPurchaseUom: 24,
+        quoteReference: "QUOTE-20",
+        quotedAt: "2026-07-15",
+        quoteValidUntil: "2026-08-15",
+        moqPieces: 48,
+        leadTimeDays: 7,
+        isPreferred: true,
+      }],
+    };
+    const preview = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/supplier-evidence-import/preview",
+      input,
+    );
+
+    const stale = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/supplier-evidence-import/apply",
+      { ...input, previewHash: "0".repeat(64) },
+    );
+    expect(stale.status).toBe(409);
+    expect(stale.body.details.code).toBe("SUPPLIER_EVIDENCE_PREVIEW_STALE");
+    expect(purchasing.bulkUpsertVendorCatalog).not.toHaveBeenCalled();
+
+    const applied = await requestJson(
+      server.url,
+      "POST",
+      "/api/purchasing/supplier-evidence-import/apply",
+      { ...input, previewHash: preview.body.previewHash },
+    );
+    expect(applied.status).toBe(200);
+    expect(applied.body.result.created[0].vendorProductId).toBe(91);
+    expect(purchasing.bulkUpsertVendorCatalog).toHaveBeenCalledWith(
+      4,
+      [expect.objectContaining({
+        productId: 10,
+        productVariantId: 20,
+        packSize: 24,
+        moq: 48,
+        leadTimeDays: 7,
+        pricing: {
+          basis: "per_purchase_uom",
+          purchaseUom: "case",
+          uomQuantity: 1,
+          piecesPerUom: 24,
+          quotedCostMillsPerUom: 123456,
+        },
+      })],
+      "test-user",
+    );
   });
 
   it("serves approval tiers from the purchasing service", async () => {

@@ -14,6 +14,10 @@ import {
   normalizePoLinePricing,
   type PoLinePricingInput,
 } from "@shared/utils/po-line-pricing";
+import {
+  buildSupplierEvidenceImportPreview,
+  publicSupplierEvidenceImportPreview,
+} from "./supplier-evidence-import.service";
 
 const PG_INTEGER_MAX = 2_147_483_647;
 const MAX_QUOTE_CLOCK_SKEW_MS = 5 * 60 * 1_000;
@@ -48,6 +52,12 @@ const quotedAtValue = z.union([
 const quoteValidUntilValue = z.string().trim().refine(isValidIsoDateOnly, {
   message: "quoteValidUntil must be a real YYYY-MM-DD calendar date",
 }).nullable().optional();
+
+const supplierEvidenceQuotedAtValue = z.string().trim().refine(isValidQuoteTimestamp, {
+  message: "quotedAt must be a real YYYY-MM-DD date or ISO-8601 timestamp",
+}).transform((value) => new Date(
+  isValidIsoDateOnly(value) ? `${value}T00:00:00.000Z` : value,
+));
 
 const vendorCatalogPricingSchema = z.discriminatedUnion("basis", [
   z.object({
@@ -158,6 +168,34 @@ const bulkVendorProductBodySchema = z.object({
   entries: z.array(bulkVendorProductEntrySchema).min(1).max(2_000),
 }).strict();
 
+const supplierEvidenceImportRowSchema = z.object({
+  sku: z.string().trim().min(1).max(100),
+  vendorSku: nullableText(100),
+  pricingBasis: z.enum(["per_piece", "per_purchase_uom"]),
+  quotedUnitCost: z.string().trim().regex(/^\d+(?:\.\d{1,4})?$/, {
+    message: "quotedUnitCost must be a non-negative dollar amount with no more than four decimal places",
+  }),
+  purchaseUom: nullableText(50),
+  piecesPerPurchaseUom: nullablePositivePgInteger,
+  quoteReference: nullableText(255),
+  quotedAt: supplierEvidenceQuotedAtValue,
+  quoteValidUntil: quoteValidUntilValue,
+  moqPieces: nullablePositivePgInteger,
+  leadTimeDays: nonnegativePgInteger,
+  isPreferred: z.boolean(),
+}).strict();
+
+const supplierEvidenceImportPreviewSchema = z.object({
+  vendorId: positivePgInteger,
+  rows: z.array(supplierEvidenceImportRowSchema).min(1).max(200),
+}).strict();
+
+const supplierEvidenceImportApplySchema = supplierEvidenceImportPreviewSchema.extend({
+  previewHash: z.string().trim().regex(/^[a-f0-9]{64}$/, {
+    message: "previewHash must be a SHA-256 hex digest returned by preview",
+  }),
+}).strict();
+
 function vendorProductValidationError(error: z.ZodError): PurchasingError {
   return new PurchasingError("Invalid vendor-product request", 400, {
     code: "VENDOR_PRODUCT_REQUEST_INVALID",
@@ -171,6 +209,20 @@ function vendorProductValidationError(error: z.ZodError): PurchasingError {
 function parseVendorProductBody<T extends z.ZodTypeAny>(schema: T, body: unknown): z.output<T> {
   const parsed = schema.safeParse(body);
   if (!parsed.success) throw vendorProductValidationError(parsed.error);
+  return parsed.data;
+}
+
+function parseSupplierEvidenceBody<T extends z.ZodTypeAny>(schema: T, body: unknown): z.output<T> {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw new PurchasingError("Invalid supplier evidence import request", 400, {
+      code: "SUPPLIER_EVIDENCE_REQUEST_INVALID",
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      })),
+    });
+  }
   return parsed.data;
 }
 
@@ -377,6 +429,75 @@ function parseVendorProductId(rawId: string): number {
 export function registerPurchasingAdminRoutes(app: Express) {
   const { purchasing } = app.locals.services;
 
+  const supplierEvidenceDependencies = {
+    getVendorById: (vendorId: number) => storage.getVendorById(vendorId),
+    getAllProducts: (includeInactive?: boolean) => storage.getAllProducts(includeInactive),
+    getAllProductVariants: (includeInactive?: boolean) => storage.getAllProductVariants(includeInactive),
+    getVendorProductsByProductIds: (productIds: number[]) => storage.getVendorProductsByProductIds(productIds),
+  };
+
+  app.post(
+    "/api/purchasing/supplier-evidence-import/preview",
+    requirePermission("purchasing", "view"),
+    async (req, res) => {
+      try {
+        const body = parseSupplierEvidenceBody(supplierEvidenceImportPreviewSchema, req.body);
+        const preview = await buildSupplierEvidenceImportPreview({
+          vendorId: body.vendorId,
+          rows: body.rows,
+          dependencies: supplierEvidenceDependencies,
+        });
+        res.json(publicSupplierEvidenceImportPreview(preview));
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message, details: error.details });
+        }
+        console.error("[supplier evidence preview] error:", error);
+        res.status(500).json({ error: "Failed to preview supplier evidence import" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/purchasing/supplier-evidence-import/apply",
+    requirePermission("purchasing", "edit"),
+    requireIdempotency(),
+    async (req, res) => {
+      try {
+        const body = parseSupplierEvidenceBody(supplierEvidenceImportApplySchema, req.body);
+        const preview = await buildSupplierEvidenceImportPreview({
+          vendorId: body.vendorId,
+          rows: body.rows,
+          dependencies: supplierEvidenceDependencies,
+        });
+        if (preview.previewHash !== body.previewHash) {
+          return res.status(409).json({
+            error: "Supplier evidence changed after preview; preview the file again before applying it",
+            details: {
+              code: "SUPPLIER_EVIDENCE_PREVIEW_STALE",
+            },
+          });
+        }
+        const userId = req.session.user?.id;
+        const result = await purchasing.bulkUpsertVendorCatalog(
+          body.vendorId,
+          preview.catalogEntries,
+          userId,
+        );
+        res.json({
+          ...publicSupplierEvidenceImportPreview(preview),
+          appliedAt: new Date().toISOString(),
+          result,
+        });
+      } catch (error: any) {
+        if (error instanceof PurchasingError) {
+          return res.status(error.statusCode).json({ error: error.message, details: error.details });
+        }
+        console.error("[supplier evidence apply] error:", error);
+        res.status(500).json({ error: "Failed to apply supplier evidence import" });
+      }
+    },
+  );
 
   // Vendor Products
 

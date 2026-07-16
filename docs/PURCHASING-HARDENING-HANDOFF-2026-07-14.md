@@ -17,22 +17,23 @@ integration harness; PR #931 added the controlled one-SKU automatic-purchasing
 pilot; PR #933 fixed its production CLI dependency loading; and PR #935 added
 read-only automatic-purchasing candidate discovery and readiness ranking. PR #936
 then made supplier-readiness blockers directly remediable without guessing supplier
-data. The current local slice hardens the existing recommendation review queue with
-exact demand-evidence review and fail-closed operator attestations.
+data, and PR #939 hardened the recommendation review queue with exact demand evidence
+and fail-closed operator attestations. The current local slice adds dry-run-first bulk
+intake for verified supplier catalog evidence.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/purchasing-demand-review-evidence-2026-07-15`
-- Base and current `origin/main`: `5e0b6685`
-- Base hardening slice: merged PR #936
-- Deployment status: PR #936 deployed on Heroku release v2399; current production
-  release v2400 contains subsequent merged PR #937
+- Branch: `codex/purchasing-supplier-evidence-import-2026-07-16`
+- Base: `e6a51464`; current `origin/main`: `a6b6c159`
+- Base hardening slice: merged PR #939
+- Deployment status: PR #939 deployed as Heroku v2401; current production v2402
+  contains subsequent merged PR #938
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
 - Migration 140 status: merged in PR #927; production state was not re-audited in
   this July 15 readiness continuation
-- Commit/PR status: exact demand-review evidence slice is local and not yet published
+- Commit/PR status: supplier-evidence import slice is local and not yet published
 
 Do not deploy this branch without owner approval.
 
@@ -664,13 +665,61 @@ Current local evidence:
 - production build: passed; 3,604 client modules transformed and server bundle built
 - `git diff --check`: passed, with Windows line-ending notices only
 
+PR #939 merged as `e6a51464` on July 16 and deployed as Heroku v2401. Current
+production v2402 contains subsequent merged PR #938. The authenticated UI smoke
+remains outstanding.
+
+## Verified supplier-evidence import slice
+
+The readiness report found 32 useful candidates that all need supplier configuration,
+but verified vendor quotes still had to be entered one mapping at a time. The current
+slice adds a bounded CSV intake on Suppliers without guessing or sourcing commercial
+values:
+
+- one import file is explicitly scoped to one active supplier;
+- the template accepts exact Echelon SKU, vendor SKU, quote basis, exact dollar quote
+  with up to four decimal places, purchase UOM and pieces per UOM, quote reference and
+  dates, MOQ in base pieces, lead time, and preferred status;
+- CSV parsing is strict, supports quoted commas, rejects unknown/missing columns,
+  incoherent per-piece/UOM fields, invalid dates/integers/booleans, files over 1 MB,
+  and batches over 200 rows;
+- preview is read-only and resolves an exact active receive variant or an unambiguous
+  product-level SKU. Product SKUs with active variants fail closed and require the
+  exact variant SKU;
+- the preview shows creates, updates, inactive-row reactivations, all preferred-vendor
+  demotions, exact normalized mills, quote evidence, lead time, MOQ, and warnings;
+- the preview hash includes normalized requested values plus the current target and
+  competing preferred mapping fingerprints, so changed evidence or catalog state
+  requires another preview;
+- apply requires the exact preview hash, an idempotency key, purchasing-edit
+  permission, and an explicit browser confirmation;
+- apply reuses the existing single-supplier catalog batch writer, so reference locks,
+  quote validation, preferred demotion, reactivation, creates/updates, and structured
+  audit events commit atomically; and
+- the import never creates a purchase order, changes approval policy, or treats an
+  extended line total as reusable supplier pricing.
+
+The preview loads only vendor mappings for the resolved product ids rather than the
+entire supplier catalog.
+
+Current local evidence:
+
+- `npm.cmd run check`: passed
+- focused import/server/client contract gate: 4 files and 34 tests passed
+- procurement, supplier-catalog, and PO-editor regression gate: 86 files and 778
+  tests passed; 14 skipped
+- production build: passed; 3,606 client modules transformed and server bundle built
+- `git diff --check`: passed, with Windows line-ending notices only
+
 ## Recommended next implementation order
 
-1. Review and merge the exact demand-evidence review workflow.
-2. Complete an authenticated read-only smoke of Purchasing -> Supplier Setup Gaps ->
+1. Review and merge the verified supplier-evidence import workflow.
+2. Verify PR #939 and this slice deploy, then complete an authenticated read-only
+   smoke of Purchasing -> Supplier Setup Gaps ->
    exact Suppliers task and Purchasing -> Forecast Input Gaps -> exact review task.
-3. Correct supplier catalog, lead-time, quote, receive-variant, and demand-evidence
-   gaps only from verified business evidence; do not weaken approval policy.
+3. Use the previewed import or exact single-mapping tasks to correct supplier catalog,
+   lead-time, quote, receive-variant, and demand-evidence gaps only from verified
+   business evidence; do not weaken approval policy.
 4. When the readiness report identifies a genuinely eligible low-risk SKU, run and
    save its exact-SKU preflight and obtain explicit owner approval.
 5. Execute the one-SKU pilot once and complete the verification/lifecycle runbook
@@ -688,10 +737,11 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. PR #936 is deployed in current production and its authenticated
-> UI smoke remains outstanding. The production readiness report found 32 candidates,
-> zero eligible, and no automatic-purchasing writes; all 32 require supplier
-> configuration plus demand review. Review the merged supplier-remediation flow,
-> current exact demand-evidence review branch, and pilot runbook. Do not invent
-> supplier data, weaken policy, or execute a production pilot without an eligible
-> exact-SKU preflight and explicit owner approval.
+> unverified item. PR #939 is merged and deployed as Heroku v2401; current production
+> has subsequently advanced to v2402. The production readiness report found 32
+> candidates, zero eligible, and no automatic-purchasing writes; all 32 require
+> supplier configuration plus demand review. Review the merged supplier-remediation
+> and exact demand-review flows, the current verified supplier-evidence import branch,
+> and the pilot runbook. Do not invent supplier data, weaken policy, or execute a
+> production pilot without an eligible exact-SKU preflight and explicit owner
+> approval.
