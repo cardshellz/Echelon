@@ -1024,7 +1024,16 @@ export default function PurchasingDashboard() {
                           </Badge>
                         </div>
                         <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">{sample.action.detail}</p>
-                        <p className="mt-1 truncate text-[11px] text-amber-700">{sample.action.label}</p>
+                        <Button
+                          type="button"
+                          variant="link"
+                          size="sm"
+                          className="mt-1 h-auto p-0 text-[11px] text-amber-700"
+                          onClick={() => navigate(sample.action.href)}
+                        >
+                          {sample.action.label}
+                          <ArrowRight className="ml-1 h-3 w-3" />
+                        </Button>
                       </div>
                     ))}
                   </div>

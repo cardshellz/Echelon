@@ -64,7 +64,16 @@ function increment(counts: Record<string, number>, key: string | null | undefine
   counts[key] = (counts[key] ?? 0) + 1;
 }
 
-export function forecastInputGapAction(item: PurchasingRecommendationItem): ForecastInputGapAction {
+function exactRecommendationHref(href: string, item: PurchasingRecommendationItem, exact: boolean): string {
+  if (!exact) return href;
+  const separator = href.includes("?") ? "&" : "?";
+  return `${href}${separator}recommendationId=${encodeURIComponent(item.recommendationId)}`;
+}
+
+export function forecastInputGapAction(
+  item: PurchasingRecommendationItem,
+  options: { exact?: boolean } = {},
+): ForecastInputGapAction {
   const gaps = item.forecastProvenance.forecastTrust.inputGaps;
   const signal = item.forecastProvenance.forecastTrust.signal;
   const hasMissingDemandSampleMetadata =
@@ -76,7 +85,11 @@ export function forecastInputGapAction(item: PurchasingRecommendationItem): Fore
       code: "repair_order_velocity_source",
       label: "Repair velocity source",
       detail: "Recent order velocity is missing demand timestamps or sample metadata.",
-      href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source",
+      href: exactRecommendationHref(
+        "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source",
+        item,
+        Boolean(options.exact),
+      ),
       severity: "warning",
     };
   }
@@ -91,7 +104,11 @@ export function forecastInputGapAction(item: PurchasingRecommendationItem): Fore
       code: "rebuild_forecast_windows",
       label: "Rebuild forecast windows",
       detail: "One or more comparison windows are missing from the recommendation input.",
-      href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=rebuild_forecast_windows",
+      href: exactRecommendationHref(
+        "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=rebuild_forecast_windows",
+        item,
+        Boolean(options.exact),
+      ),
       severity: "warning",
     };
   }
@@ -101,7 +118,11 @@ export function forecastInputGapAction(item: PurchasingRecommendationItem): Fore
       code: "verify_recent_demand",
       label: "Verify recent demand",
       detail: "Demand is absent or stale enough to hold automated purchasing.",
-      href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
+      href: exactRecommendationHref(
+        "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
+        item,
+        Boolean(options.exact),
+      ),
       severity: "warning",
     };
   }
@@ -110,7 +131,11 @@ export function forecastInputGapAction(item: PurchasingRecommendationItem): Fore
     code: "monitor_thin_sample",
     label: "Monitor thin sample",
     detail: "Forecast trust is weak, but the recommendation is not held by a source-data gap.",
-    href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=monitor_thin_sample",
+    href: exactRecommendationHref(
+      "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=monitor_thin_sample",
+      item,
+      Boolean(options.exact),
+    ),
     severity: "info",
   };
 }
@@ -133,7 +158,7 @@ function buildSample(item: PurchasingRecommendationItem): ForecastInputGapDiagno
     forecastTrustDetail: trust.detail,
     latestDemandAgeDays: trust.latestDemandAgeDays,
     inputGaps: trust.inputGaps,
-    action: forecastInputGapAction(item),
+    action: forecastInputGapAction(item, { exact: true }),
   };
 }
 
