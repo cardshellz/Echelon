@@ -2833,6 +2833,7 @@ export function createPurchasingService(
       .select({
         vendorProductId: purchaseOrderLinesTable.vendorProductId,
         unitCostCents: purchaseOrderLinesTable.unitCostCents,
+        unitCostMills: purchaseOrderLinesTable.unitCostMills,
         receivedQty: purchaseOrderLinesTable.receivedQty,
       })
       .from(purchaseOrderLinesTable)
@@ -2846,31 +2847,37 @@ export function createPurchasingService(
 
     const totalsByVendorProductId = new Map<
       number,
-      { extendedCostCents: bigint; receivedQty: bigint }
+      { extendedCostMills: bigint; receivedQty: bigint }
     >();
     for (const line of purchasedLines) {
       const vendorProductId = Number(line.vendorProductId);
       if (!Number.isSafeInteger(vendorProductId) || vendorProductId <= 0) continue;
       const receivedQty = BigInt(line.receivedQty ?? 0);
       if (receivedQty <= BigInt(0)) continue;
-      const unitCostCents = BigInt(line.unitCostCents ?? 0);
+      const unitCostMills = BigInt(
+        line.unitCostMills ?? centsToMills(Number(line.unitCostCents ?? 0)),
+      );
       const current = totalsByVendorProductId.get(vendorProductId) ?? {
-        extendedCostCents: BigInt(0),
+        extendedCostMills: BigInt(0),
         receivedQty: BigInt(0),
       };
-      current.extendedCostCents += unitCostCents * receivedQty;
+      current.extendedCostMills += unitCostMills * receivedQty;
       current.receivedQty += receivedQty;
       totalsByVendorProductId.set(vendorProductId, current);
     }
-    const costByVendorProductId = new Map<number, number>();
+    const costByVendorProductId = new Map<
+      number,
+      { lastCostMills: number; lastCostCents: number }
+    >();
     for (const [vendorProductId, totals] of totalsByVendorProductId) {
-      const roundedUnitCostCents =
-        (totals.extendedCostCents * BigInt(2) + totals.receivedQty) /
+      const roundedUnitCostMills =
+        (totals.extendedCostMills * BigInt(2) + totals.receivedQty) /
         (totals.receivedQty * BigInt(2));
-      costByVendorProductId.set(
-        vendorProductId,
-        safeIntegerMoney(roundedUnitCostCents, "last_cost_cents"),
-      );
+      const lastCostMills = safeIntegerMoney(roundedUnitCostMills, "last_cost_mills");
+      costByVendorProductId.set(vendorProductId, {
+        lastCostMills,
+        lastCostCents: millsToCents(lastCostMills),
+      });
     }
     if (costByVendorProductId.size === 0) return;
 
@@ -2896,13 +2903,14 @@ export function createPurchasingService(
       ) {
         continue;
       }
-      const lastCostCents = costByVendorProductId.get(Number(current.id));
-      if (lastCostCents === undefined) continue;
+      const lastCost = costByVendorProductId.get(Number(current.id));
+      if (!lastCost) continue;
       const updatedRows = await tx
         .update(vendorProductsTable)
         .set({
           lastPurchasedAt: purchasedAt,
-          lastCostCents,
+          lastCostMills: lastCost.lastCostMills,
+          lastCostCents: lastCost.lastCostCents,
           updatedAt: now(),
         })
         .where(eq(vendorProductsTable.id, Number(current.id)))
@@ -6878,6 +6886,7 @@ export function createPurchasingService(
       quotedAt: row?.quotedAt ?? row?.quoted_at ?? null,
       quoteValidUntil: row?.quoteValidUntil ?? row?.quote_valid_until ?? null,
       lastPurchasedAt: row?.lastPurchasedAt ?? row?.last_purchased_at ?? null,
+      lastCostMills: row?.lastCostMills ?? row?.last_cost_mills ?? null,
       lastCostCents: row?.lastCostCents ?? row?.last_cost_cents ?? null,
     };
   }

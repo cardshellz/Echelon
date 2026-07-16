@@ -184,6 +184,7 @@ export const vendorProducts = procurementSchema.table("vendor_products", {
   isPreferred: integer("is_preferred").default(0), // 1 = primary vendor for this product
   isActive: integer("is_active").default(1),
   lastPurchasedAt: timestamp("last_purchased_at"), // For stale-link detection
+  lastCostMills: bigint("last_cost_mills", { mode: "number" }), // Exact normalized cost from most recent completed PO
   lastCostCents: bigint("last_cost_cents", { mode: "number" }), // Cost from most recent closed PO
   // Packaging dimensions (for shipment tracking / landed cost allocation)
   weightKg: numeric("weight_kg", { precision: 10, scale: 3 }),
@@ -215,6 +216,19 @@ export const vendorProducts = procurementSchema.table("vendor_products", {
   check(
     "vendor_products_moq_positive_chk",
     sql`${table.moq} IS NULL OR ${table.moq} > 0`,
+  ),
+  check(
+    "vendor_products_last_cost_precision_chk",
+    sql`(
+      ${table.lastCostMills} IS NULL
+      AND ${table.lastCostCents} IS NULL
+    ) OR (
+      ${table.lastCostMills} IS NOT NULL
+      AND ${table.lastCostMills} >= 0
+      AND ${table.lastCostCents} IS NOT NULL
+      AND ${table.lastCostCents} >= 0
+      AND ${table.lastCostCents}::numeric = floor((${table.lastCostMills}::numeric + 50) / 100)
+    )`,
   ),
   check(
     "vendor_products_explicit_pricing_consistency_chk",
