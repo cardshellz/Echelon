@@ -14,7 +14,7 @@ const evidenceRow = {
   sku: "SLV-C10000",
   purchase_order_id: 115,
   po_number: "PO-115",
-  completed_at: new Date("2026-07-08T18:11:25.932Z"),
+  completed_at: "2026-07-08T14:11:25.932",
   received_qty: 300_000,
   last_cost_mills: 60,
   last_cost_cents: 1,
@@ -58,6 +58,7 @@ describe("historical PO supplier evidence backfill", () => {
     );
     expect(preview.targets[0]).toMatchObject({
       action: "create_mapping",
+      sourceCompletedAt: "2026-07-08T14:11:25.932000",
       lastCostMills: 60,
       lastCostCents: 1,
       productVariantId: 73,
@@ -137,7 +138,14 @@ describe("historical PO supplier evidence backfill", () => {
     expect(insert?.sql).toContain("'legacy_unknown'");
     expect(insert?.sql).toContain("NULL, NULL, NULL");
     expect(insert?.sql).toContain("0, 1");
-    expect(insert?.values).toEqual([2, 36, 73, 1, 60, "2026-07-08T18:11:25.932Z"]);
+    expect(insert?.values).toEqual([
+      2,
+      36,
+      73,
+      1,
+      60,
+      "2026-07-08T14:11:25.932000",
+    ]);
     const audit = calls.find((call) => call.sql.includes("INSERT INTO public.audit_events"));
     expect(audit?.values?.[1]).toBe("vendor_catalog.historical_purchase_mapping_created");
     expect(calls.at(-1)?.sql).toBe("COMMIT");

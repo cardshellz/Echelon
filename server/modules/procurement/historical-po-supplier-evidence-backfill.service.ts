@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResult } from "pg";
 
-const BACKFILL_CONTRACT_VERSION = 1;
+const BACKFILL_CONTRACT_VERSION = 2;
 const BACKFILL_ADVISORY_LOCK = 1_947_206_126;
 
 type Queryable = {
@@ -148,13 +148,22 @@ const EVIDENCE_QUERY = `
     COALESCE(pv.sku, p.sku) AS sku,
     ranked.purchase_order_id,
     ranked.po_number,
-    ranked.completed_at,
+    to_char(
+      ranked.completed_at,
+      'YYYY-MM-DD"T"HH24:MI:SS.US'
+    ) AS completed_at,
     ranked.received_qty,
     ranked.last_cost_mills,
     FLOOR((ranked.last_cost_mills::numeric + 50) / 100)::bigint AS last_cost_cents,
     ranked.line_ids,
     vp.id AS vendor_product_id,
-    vp.last_purchased_at AS current_last_purchased_at,
+    CASE
+      WHEN vp.last_purchased_at IS NULL THEN NULL
+      ELSE to_char(
+        vp.last_purchased_at,
+        'YYYY-MM-DD"T"HH24:MI:SS.US'
+      )
+    END AS current_last_purchased_at,
     (to_jsonb(vp)->>'last_cost_mills')::bigint AS current_last_cost_mills,
     vp.last_cost_cents AS current_last_cost_cents,
     COALESCE((
@@ -230,18 +239,25 @@ function asOptionalSafeInteger(value: unknown, field: string): number | null {
   return value === null || value === undefined ? null : asSafeInteger(value, field);
 }
 
-function asIso(value: unknown): string {
-  const parsed = value instanceof Date ? value : new Date(String(value));
-  if (Number.isNaN(parsed.getTime())) throw new Error("Historical purchase evidence has an invalid date");
-  return parsed.toISOString();
+function asDatabaseTimestamp(value: unknown): string {
+  const normalized = String(value).trim().replace(" ", "T");
+  const match = normalized.match(
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?$/,
+  );
+  if (!match) {
+    throw new Error(
+      "Historical purchase evidence has an invalid database timestamp",
+    );
+  }
+  return `${match[1]}.${(match[2] ?? "").padEnd(6, "0")}`;
 }
 
 function rowTarget(row: Record<string, any>): HistoricalSupplierEvidenceTarget {
   const vendorProductId = asOptionalSafeInteger(row.vendor_product_id, "vendor_product_id");
-  const completedAt = asIso(row.completed_at);
+  const completedAt = asDatabaseTimestamp(row.completed_at);
   const currentPurchasedAt = row.current_last_purchased_at == null
     ? null
-    : asIso(row.current_last_purchased_at);
+    : asDatabaseTimestamp(row.current_last_purchased_at);
   const lastCostCents = asSafeInteger(row.last_cost_cents, "last_cost_cents");
   const lastCostMills = asSafeInteger(row.last_cost_mills, "last_cost_mills");
   const currentLastCostMills = asOptionalSafeInteger(
@@ -543,6 +559,7 @@ export async function applyHistoricalPoSupplierEvidence(input: {
             JSON.stringify({
               contractVersion: BACKFILL_CONTRACT_VERSION,
               source: "historical_completed_purchase_orders",
+              timestampSemantics: "database_wall_clock",
               vendorProductId,
               vendorId: target.vendorId,
               productId: target.productId,

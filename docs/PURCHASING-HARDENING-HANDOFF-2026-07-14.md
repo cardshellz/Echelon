@@ -770,9 +770,38 @@ The two conflicts are:
 - PO line 153: product 5 / variant 206 is linked to vendor-product 25 for product 102;
 - PO line 163: product 103 / variant 207 is linked to vendor-product 11 for product 39.
 
-No production data was changed. Do not run apply until migration 144 and this code are
-merged/deployed, a fresh preview is reviewed, and the owner explicitly approves the
-exact preview hash and exclusions.
+PR #943 merged as `b59398f8`, passed both CI jobs, and deployed as Heroku v2405.
+Migration 144, `last_cost_mills`, and the validated precision constraint were
+verified in production.
+
+The owner then approved the fresh post-deploy preview hash with vendor 101 excluded.
+The production apply committed:
+
+- 5 mappings created;
+- 16 mappings updated with exact last-purchase evidence;
+- 16 historical PO lines linked;
+- 2 conflicting legacy links skipped;
+- 1 zero-cost placeholder line excluded; and
+- 21 attributable source-evidence audit events.
+
+The first post-apply verification exposed a four-hour shift in
+`last_purchased_at`. All relevant source and target columns are PostgreSQL
+`timestamp without time zone`; converting the source through a JavaScript `Date`
+and then writing an ISO timestamp changed the stored database wall-clock value on
+this Eastern-time workstation.
+
+The repair was bounded to the exact 21 vendor-product IDs written by the approved
+backfill. One advisory-locked transaction recomputed each timestamp from its audited
+source PO/line columns, corrected all 21 rows, and wrote 21
+`vendor_catalog.historical_purchase_timestamp_repaired` audit events. Read-only
+verification then reported 21 evidence rows, zero timestamp mismatches, and 21
+repair audits. Costs, mappings, PO-line links, exclusions, and conflicts were not
+changed by the repair.
+
+The follow-up code bumps the backfill contract to version 2 and serializes source and
+current `timestamp without time zone` values as canonical database wall-clock text.
+Preview hashes and apply parameters are therefore deterministic across workstation
+and Heroku timezones, and no JavaScript timezone conversion occurs.
 
 ### Validation evidence
 
