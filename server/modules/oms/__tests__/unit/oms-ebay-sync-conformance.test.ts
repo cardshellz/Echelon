@@ -69,7 +69,7 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     // longer hold the order (unreservable lines surface as pick shorts).
     expect(WMS_SYNC_SRC).toContain('reserveBestEffort(wmsOrderId, omsOrderId, "post_promotion")');
     expect(WMS_SYNC_SRC).toContain("Reservation shortfall for WMS order");
-    expect(ensureEbaySyncBlock).toContain("enqueueOmsWmsSyncRetry(db, omsOrderId, err)");
+    expect(ensureEbaySyncBlock).toContain("enqueueOmsWmsSyncRetry(database, omsOrderId, err)");
     expect(ensureEbaySyncBlock).toContain("sync intentionally skipped");
     expect(retryEnqueueBlock).toContain('topic: "oms_wms_sync"');
     expect(retryEnqueueBlock).toContain("payload: { omsOrderId }");
@@ -110,8 +110,8 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     expect(EBAY_INGESTION_SRC).toContain(
       "await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData)",
     );
-    expect(EBAY_INGESTION_SRC).toContain(
-      "await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, ebayOrder.orderId)",
+    expect(EBAY_INGESTION_SRC).toMatch(
+      /await ensureEbayOrderQueuedForWmsSync\(\s*_wmsSyncService,\s*result\.id,\s*ebayOrder\.orderId,\s*database/,
     );
     expect(EBAY_INGESTION_SRC).toContain(
       "await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId)",
@@ -136,6 +136,8 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     expect(WMS_SYNC_SRC).toContain("isFinalOrCancelledOmsOrder");
     expect(WMS_SYNC_SRC).toContain("cancelExistingWmsOrderForFinalOmsOrder");
     expect(WMS_SYNC_SRC).toContain("skipped WMS sync");
+    expect(WMS_SYNC_SRC).toContain("omsOrder.customerEmail ?? null");
+    expect(WMS_SYNC_SRC).toMatch(/customer\?\.\id \?\? null/);
   });
 
   it("keeps eBay tracking push shipment-scoped, idempotent, and retry-backed", () => {

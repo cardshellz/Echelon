@@ -2066,7 +2066,14 @@ export class WmsSyncService {
         FROM membership.plans p
         INNER JOIN membership.member_subscriptions ms ON p.id = ms.plan_id
         INNER JOIN membership.members m ON ms.member_id = m.id
-        WHERE (m.email = ${omsOrder.customerEmail} OR m.shopify_customer_id = ${omsOrder.rawPayload ? (omsOrder.rawPayload as any).customer?.id : null})
+        WHERE (
+          m.email = ${omsOrder.customerEmail ?? null}
+          OR m.shopify_customer_id = ${
+            omsOrder.rawPayload
+              ? (omsOrder.rawPayload as any).customer?.id ?? null
+              : null
+          }
+        )
           AND ms.status IN ('active', 'pending_downgrade', 'pending_cancellation')
         ORDER BY ms.created_at DESC
         LIMIT 1
