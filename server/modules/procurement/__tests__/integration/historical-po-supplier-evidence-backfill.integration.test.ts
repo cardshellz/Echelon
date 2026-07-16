@@ -183,7 +183,7 @@ describeWithDisposableDb.sequential(
         INSERT INTO procurement.purchase_orders (
           id, po_number, vendor_id, status, closed_at
         ) VALUES (
-          115, 'PO-115', 2, 'received', '2026-07-08T18:11:25.932Z'
+          115, 'PO-115', 2, 'received', '2026-07-08 14:11:25.932'
         );
         INSERT INTO procurement.purchase_order_lines (
           id, purchase_order_id, line_type, status,
@@ -195,13 +195,13 @@ describeWithDisposableDb.sequential(
             167, 115, 'product', 'received',
             36, 73, 73,
             0, 48, 300000,
-            '2026-07-08T18:11:25.932Z'
+            '2026-07-08 14:11:25.932'
           ),
           (
             168, 115, 'product', 'received',
             37, NULL, NULL,
             0, 0, 10,
-            '2026-07-08T18:11:25.932Z'
+            '2026-07-08 14:11:25.932'
           );
       `);
     });
@@ -254,6 +254,7 @@ describeWithDisposableDb.sequential(
       expect(preview.targets[0]).toMatchObject({
         productId: 36,
         productVariantId: 73,
+        sourceCompletedAt: "2026-07-08T14:11:25.932000",
         lastCostMills: 48,
         lastCostCents: 0,
         linesToLink: [167],
@@ -279,6 +280,7 @@ describeWithDisposableDb.sequential(
         is_preferred: number;
         last_cost_mills: string;
         last_cost_cents: string;
+        last_purchased_at: string;
         line_vendor_product_id: number;
         audit_action: string;
       }>(`
@@ -288,6 +290,10 @@ describeWithDisposableDb.sequential(
           vp.is_preferred,
           vp.last_cost_mills::text,
           vp.last_cost_cents::text,
+          to_char(
+            vp.last_purchased_at,
+            'YYYY-MM-DD"T"HH24:MI:SS.US'
+          ) AS last_purchased_at,
           pol.vendor_product_id AS line_vendor_product_id,
           audit.action AS audit_action
         FROM procurement.vendor_products vp
@@ -302,6 +308,7 @@ describeWithDisposableDb.sequential(
         is_preferred: 0,
         last_cost_mills: "48",
         last_cost_cents: "0",
+        last_purchased_at: "2026-07-08T14:11:25.932000",
         line_vendor_product_id: expect.any(Number),
         audit_action: "vendor_catalog.historical_purchase_mapping_created",
       });
