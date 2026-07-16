@@ -18,24 +18,26 @@ pilot; PR #933 fixed its production CLI dependency loading; and PR #935 added
 read-only automatic-purchasing candidate discovery and readiness ranking. PR #936
 then made supplier-readiness blockers directly remediable without guessing supplier
 data, and PR #939 hardened the recommendation review queue with exact demand evidence
-and fail-closed operator attestations. The current local slice adds dry-run-first bulk
-intake for verified supplier catalog evidence. PR #941 merged the optional PO quote
-capture correction. The current continuation recovers supplier relationships and
-exact last-paid evidence from completed historical purchase orders.
+and fail-closed operator attestations. PR #941 merged the optional PO quote capture
+correction, PRs #943 and #944 recovered exact historical supplier evidence without
+timezone drift, and PR #945 added database guards for PO supplier-product identity.
+The current continuation repairs the remaining legacy PO receive-configuration
+snapshots with reviewed, attributable automation.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/historical-po-supplier-evidence-backfill-2026-07-16`
-- Base and current `origin/main`: `7fe44f8c`
-- Base hardening slice: merged PR #941
-- Deployment status: PR #941 deployed as Heroku v2404 at `7fe44f8c`
+- Branch: `codex/legacy-po-receive-variant-remediation-2026-07-16`
+- Base and current `origin/main`: `fca07306`
+- Base hardening slice: merged PR #945
+- Deployment status: PR #945 deployed as Heroku v2408 at `fca07306`
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
 - Migration 140 status: merged in PR #927; production state was not re-audited in
   this July 15 readiness continuation
-- Commit/PR status: historical-PO supplier-evidence backfill is local and not yet
-  published
+- Migration 146 status: applied and verified in production
+- Commit/PR status: legacy PO receive-configuration remediation is local and not
+  yet published
 
 Do not deploy this branch without owner approval.
 
@@ -832,6 +834,72 @@ configuration carried by their vendor-product mappings. Migration 146 does not
 rewrite those historical rows. It prevents new writes from repeating that state;
 the 11-row receive-configuration remediation remains a separate reviewed slice.
 
+## Legacy PO receive-configuration remediation slice
+
+The new command is preview-only by default:
+
+```text
+npm run procurement:remediate-legacy-po-receive-config
+```
+
+Apply requires `--execute`, an existing application user through `--actor`, and the
+exact SHA-256 preview hash. It recomputes the full evidence under a transaction-scoped
+advisory lock and rolls back if any line, supplier mapping, catalog variant, receipt,
+or replacement mapping changed.
+
+The command distinguishes the PO's expected supplier configuration from what was
+actually received:
+
+- an active linked supplier mapping is the expected receive configuration even when
+  a partial receipt arrived in a different pack size;
+- an archived variant remains valid historical PO identity when no receipt supersedes
+  it;
+- an archived mapping is relinked only when non-cancelled receiving rows, exact
+  base-piece receipt quantities, ordered-quantity divisibility, one active variant,
+  and one active supplier mapping all identify the same replacement; and
+- inactive supplier mappings, cross-product variants, invalid pack quantities,
+  ambiguous receipt variants, incomplete receipt arithmetic, and missing replacement
+  mappings fail closed.
+
+Each successful line update writes
+`purchase_order_line.receive_configuration_recovered` with before/after state, the
+approved preview hash, decision basis, supplier mapping identities, exact receiving
+evidence, and warnings in the same transaction.
+
+The production read-only preview on Heroku v2408 found exactly 11 candidates:
+
+- 11 safe and zero blocked;
+- 10 lines to stamp from their linked supplier mapping;
+- 1 line to relink from archived 700-count mapping `1` to the existing active
+  750-count mapping `67`, supported by 432 received cases and exactly 324,000 base
+  pieces;
+- 1 partial receipt where the PO expected 1,000-count cases but the shipment arrived
+  in 500-count cases; the command preserves the expected 1,000-count PO configuration
+  and leaves the actual receipt untouched;
+- 1 open line whose 1,000-count expected variant is now archived; the archived
+  identity is preserved because no receipt or successor mapping contradicts it; and
+- 5 lines without receiving evidence, all with active linked mappings and order
+  quantities exactly divisible by their mapped pack size.
+
+Preview hash at investigation time:
+`5648249b62f8da26818a0cef626c0e9a993a35017e2dd5595577c10aa409c67d`.
+This hash is evidence only and must be regenerated after deployment before any apply.
+No production rows were changed during development.
+
+Current local evidence for this remediation slice:
+
+- `npm.cmd run check`: passed;
+- focused CLI/service gate: 2 files and 7 tests passed;
+- procurement regression gate: 84 files and 744 tests passed; 21 skipped;
+- writer-ratchet gate: 2 tests passed;
+- production build: passed; 3,605 client modules transformed and the server bundle
+  built;
+- `git diff --check`: passed, with Windows line-ending notices only; and
+- a disposable PostgreSQL 16 integration suite is wired into CI to apply migration
+  146 over legacy fixtures and prove the guarded 10-stamp/1-relink transaction,
+  exact audits, and zero-candidate postcondition. It compiles and intentionally skips
+  locally without the explicit disposable-database environment.
+
 ### Validation evidence
 
 - `npm.cmd run check`: passed
@@ -847,11 +915,11 @@ the 11-row receive-configuration remediation remains a separate reviewed slice.
 
 ## Recommended next implementation order
 
-1. Review and merge the historical PO supplier-evidence recovery workflow.
-2. Verify the slice deploy, rerun the production preview with vendor 101 excluded,
-   and review the two conflicting legacy links.
-3. With explicit owner approval, apply the exact reviewed preview once and verify
-   created/updated mappings, PO-line links, audit rows, and recommendation economics.
+1. Review and merge the legacy PO receive-configuration remediation workflow.
+2. Verify the deploy and run a fresh production preview.
+3. With explicit owner approval, apply the exact reviewed hash once, then verify
+   zero remaining candidates, all 11 line snapshots, the single mapping relink,
+   unchanged receipt rows, and 11 audit events.
 4. Complete an authenticated read-only
    smoke of Purchasing -> Supplier Setup Gaps ->
    exact Suppliers task and Purchasing -> Forecast Input Gaps -> exact review task.
