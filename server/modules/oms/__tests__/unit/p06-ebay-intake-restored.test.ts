@@ -31,4 +31,13 @@ describe("P0.6 — eBay real-time intake", () => {
     expect(INGEST_SRC).toContain("lastmodifieddate:[");
     expect(INGEST_SRC).toContain("seenThisPoll");
   });
+
+  it("persists a recovery checkpoint and durable per-order failures", () => {
+    expect(INGEST_SRC).toContain("oms.ebay_order_poll_checkpoints");
+    expect(INGEST_SRC).toContain("POLL_DEEP_SCAN_LOOKBACK_DAYS");
+    expect(INGEST_SRC).toContain("POLL_OVERLAP_MINUTES");
+    expect(INGEST_SRC).toContain("EBAY_ORDER_INGEST_RECOVERY");
+    expect(INGEST_SRC).toContain("markEbayOrderPollSucceeded");
+    expect(INGEST_SRC).toContain("markEbayOrderPollFailed");
+  });
 });

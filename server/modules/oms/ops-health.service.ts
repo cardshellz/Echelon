@@ -8,6 +8,7 @@ import {
   type ChannelWritebackHealth,
 } from "./channel-writeback.service";
 import { getOmsOpsAlertSchedulerHeartbeat } from "./oms-ops-alert-heartbeat";
+import { getEbayOrderPollHeartbeat } from "./ebay-order-poll-heartbeat";
 import { getWebhookRetryWorkerHeartbeat } from "./webhook-retry.worker";
 import {
   HELD_LINE_AGING_DAYS,
@@ -38,6 +39,7 @@ export interface OmsOpsHealthSummary {
     webhookRetry: ReturnType<typeof getWebhookRetryWorkerHeartbeat>;
     omsFlowReconciliation: ReturnType<typeof getOmsFlowReconciliationSchedulerHeartbeat>;
     omsOpsAlert: ReturnType<typeof getOmsOpsAlertSchedulerHeartbeat>;
+    ebayOrderPoll: ReturnType<typeof getEbayOrderPollHeartbeat>;
   };
   counts: {
     critical: number;
@@ -80,6 +82,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
   const webhookRetryHeartbeat = getWebhookRetryWorkerHeartbeat();
   const reconciliationHeartbeat = getOmsFlowReconciliationSchedulerHeartbeat();
   const alertHeartbeat = getOmsOpsAlertSchedulerHeartbeat();
+  const ebayOrderPollHeartbeat = getEbayOrderPollHeartbeat();
   const nowMs = Date.now();
   const webhookRetryWorkerStartedMs = webhookRetryHeartbeat.startedAt
     ? new Date(webhookRetryHeartbeat.startedAt).getTime()
@@ -110,6 +113,11 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     30 * 60_000,
   );
   const alertSchedulerIsStale = schedulerIsStale(alertHeartbeat, 10 * 60_000, 15 * 60_000);
+  const ebayOrderPollIsStale = schedulerIsStale(
+    ebayOrderPollHeartbeat,
+    15 * 60_000,
+    15 * 60_000,
+  );
   const [
     flowReconciliationIssues,
     failedInbox,
@@ -882,6 +890,27 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
             message: "OMS ops alert scheduler has not run in more than 15 minutes.",
             sample: [alertHeartbeat],
           }),
+          issue({
+            code: "EBAY_ORDER_POLL_NOT_STARTED",
+            severity: "critical",
+            count: ebayOrderPollHeartbeat.startedAt ? 0 : 1,
+            message: "The eBay order safety-net poller has not started in this process.",
+            sample: [ebayOrderPollHeartbeat],
+          }),
+          issue({
+            code: "EBAY_ORDER_POLL_STALE",
+            severity: "critical",
+            count: ebayOrderPollIsStale ? 1 : 0,
+            message: "The eBay order safety-net poller has not run in more than 15 minutes.",
+            sample: [ebayOrderPollHeartbeat],
+          }),
+          issue({
+            code: "EBAY_ORDER_POLL_FAILED",
+            severity: "critical",
+            count: ebayOrderPollHeartbeat.lastError ? 1 : 0,
+            message: "The latest eBay order safety-net poll failed; durable order retries may be pending.",
+            sample: [ebayOrderPollHeartbeat],
+          }),
         ]),
     issue({
       code: "WEBHOOK_INBOX_FAILED",
@@ -1047,6 +1076,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       webhookRetry: webhookRetryHeartbeat,
       omsFlowReconciliation: reconciliationHeartbeat,
       omsOpsAlert: alertHeartbeat,
+      ebayOrderPoll: ebayOrderPollHeartbeat,
     },
     counts,
     issues,

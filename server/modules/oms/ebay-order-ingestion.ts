@@ -27,6 +27,13 @@ import {
 } from "./webhook-inbox.service";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 import { extractEbayShipByDate } from "./ebay-shipby";
+import { envPositiveInteger } from "../../infrastructure/scheduler-config";
+import {
+  markEbayOrderPollFailed,
+  markEbayOrderPollRunStarted,
+  markEbayOrderPollStarted,
+  markEbayOrderPollSucceeded,
+} from "./ebay-order-poll-heartbeat";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -34,18 +41,189 @@ import { extractEbayShipByDate } from "./ebay-shipby";
 
 const EBAY_CHANNEL_ID = 67;
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes — NON-NEGOTIABLE
-const POLL_WINDOW_MINUTES = 240; // Look back 4 hours each poll (deploys/restarts shouldn't drop orders)
+
+const POLL_OVERLAP_MINUTES = envPositiveInteger(
+  "EBAY_ORDER_POLL_OVERLAP_MINUTES",
+  24 * 60,
+);
+const POLL_DEEP_SCAN_INTERVAL_MINUTES = envPositiveInteger(
+  "EBAY_ORDER_DEEP_SCAN_INTERVAL_MINUTES",
+  60,
+);
+const POLL_DEEP_SCAN_LOOKBACK_DAYS = envPositiveInteger(
+  "EBAY_ORDER_DEEP_SCAN_LOOKBACK_DAYS",
+  30,
+);
+
+interface EbayOrderPollCheckpoint {
+  last_window_end: Date | string | null;
+  last_deep_scan_at: Date | string | null;
+}
+
+interface EbayOrderPollWindow {
+  startDate: Date;
+  endDate: Date;
+  deepScan: boolean;
+}
+
+export interface EbayOrderPollOptions {
+  database?: any;
+  now?: Date;
+  forceDeepScan?: boolean;
+}
+
+function firstResultRow<T>(result: any): T | null {
+  return Array.isArray(result?.rows) && result.rows.length > 0
+    ? result.rows[0] as T
+    : null;
+}
+
+function validDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+async function resolveEbayOrderPollWindow(
+  database: any,
+  now: Date,
+  forceDeepScan: boolean,
+): Promise<EbayOrderPollWindow> {
+  const checkpointResult = await database.execute(sql`
+    SELECT last_window_end, last_deep_scan_at
+    FROM oms.ebay_order_poll_checkpoints
+    WHERE channel_id = ${EBAY_CHANNEL_ID}
+    LIMIT 1
+  `);
+  const checkpoint = firstResultRow<EbayOrderPollCheckpoint>(checkpointResult);
+  const lastWindowEnd = validDate(checkpoint?.last_window_end);
+  const lastDeepScanAt = validDate(checkpoint?.last_deep_scan_at);
+  const deepScanDue = forceDeepScan
+    || lastDeepScanAt === null
+    || now.getTime() - lastDeepScanAt.getTime()
+      >= POLL_DEEP_SCAN_INTERVAL_MINUTES * 60_000;
+
+  if (deepScanDue) {
+    return {
+      startDate: new Date(
+        now.getTime() - POLL_DEEP_SCAN_LOOKBACK_DAYS * 24 * 60 * 60_000,
+      ),
+      endDate: now,
+      deepScan: true,
+    };
+  }
+
+  const cursorMs = Math.min(lastWindowEnd?.getTime() ?? now.getTime(), now.getTime());
+  return {
+    startDate: new Date(cursorMs - POLL_OVERLAP_MINUTES * 60_000),
+    endDate: now,
+    deepScan: false,
+  };
+}
+
+async function markEbayOrderPollRunInDatabase(database: any, now: Date): Promise<void> {
+  await database.execute(sql`
+    INSERT INTO oms.ebay_order_poll_checkpoints (
+      channel_id,
+      last_run_at,
+      created_at,
+      updated_at
+    )
+    VALUES (${EBAY_CHANNEL_ID}, ${now}, NOW(), NOW())
+    ON CONFLICT (channel_id)
+    DO UPDATE SET
+      last_run_at = EXCLUDED.last_run_at,
+      updated_at = NOW()
+  `);
+}
+
+async function markEbayOrderPollSuccessInDatabase(
+  database: any,
+  window: EbayOrderPollWindow,
+  ordersSeen: number,
+  ordersIngested: number,
+): Promise<void> {
+  await database.execute(sql`
+    UPDATE oms.ebay_order_poll_checkpoints
+    SET last_window_end = ${window.endDate},
+        last_success_at = NOW(),
+        last_deep_scan_at = CASE
+          WHEN ${window.deepScan} THEN ${window.endDate}
+          ELSE last_deep_scan_at
+        END,
+        last_error = NULL,
+        consecutive_failures = 0,
+        last_orders_seen = ${ordersSeen},
+        last_orders_ingested = ${ordersIngested},
+        updated_at = NOW()
+    WHERE channel_id = ${EBAY_CHANNEL_ID}
+  `);
+}
+
+async function markEbayOrderPollFailureInDatabase(
+  database: any,
+  error: unknown,
+): Promise<void> {
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+  await database.execute(sql`
+    UPDATE oms.ebay_order_poll_checkpoints
+    SET last_error = ${message},
+        consecutive_failures = consecutive_failures + 1,
+        updated_at = NOW()
+    WHERE channel_id = ${EBAY_CHANNEL_ID}
+  `);
+}
+
+async function enqueueEbayOrderIngestRetry(
+  database: any,
+  orderId: string,
+  error: unknown,
+  source: string,
+): Promise<void> {
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+  const payload = {
+    metadata: { topic: "EBAY_ORDER_INGEST_RECOVERY" },
+    notification: { data: { orderId } },
+    recovery: { source },
+  };
+  await database.execute(sql`
+    INSERT INTO oms.webhook_retry_queue (
+      provider,
+      topic,
+      payload,
+      attempts,
+      last_error,
+      next_retry_at,
+      status,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      'ebay',
+      'EBAY_ORDER_INGEST_RECOVERY',
+      ${JSON.stringify(payload)}::jsonb,
+      0,
+      ${message},
+      NOW(),
+      'pending',
+      NOW(),
+      NOW()
+    )
+    ON CONFLICT DO NOTHING
+  `);
+}
 
 async function ensureEbayOrderQueuedForWmsSync(
   wmsSyncService: WmsSyncService | null,
   omsOrderId: number,
   externalOrderId: string,
+  database: any = db,
 ): Promise<void> {
   if (!wmsSyncService) {
     const err = new Error(
       "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
     );
-    await enqueueOmsWmsSyncRetry(db, omsOrderId, err);
+    await enqueueOmsWmsSyncRetry(database, omsOrderId, err);
     throw err;
   }
 
@@ -57,7 +235,7 @@ async function ensureEbayOrderQueuedForWmsSync(
       console.log(`[eBay Orders] WMS sync skipped for ${externalOrderId} (omsOrder ${omsOrderId}) — already fulfilled out-of-band; no-op`);
     }
   } catch (err: any) {
-    await enqueueOmsWmsSyncRetry(db, omsOrderId, err);
+    await enqueueOmsWmsSyncRetry(database, omsOrderId, err);
     console.error(`[eBay Orders] WMS sync failed for ${externalOrderId}: ${err.message}`);
   }
 }
@@ -172,6 +350,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
 // ---------------------------------------------------------------------------
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+let pollInFlight = false;
 let _shipStationService: ShipStationService | null = null;
 let _wmsSyncService: WmsSyncService | null = null;
 let _wmsServices: {
@@ -200,11 +379,20 @@ export function startEbayOrderPolling(
     clearInterval(pollInterval);
   }
 
+  markEbayOrderPollStarted();
+
   async function poll() {
+    if (pollInFlight) {
+      console.warn("[eBay Orders] Previous poll is still running; overlapping poll skipped");
+      return;
+    }
+    pollInFlight = true;
     try {
       await pollEbayOrders(omsService, ebayApiClient);
     } catch (err: any) {
       console.error(`[eBay Orders] Poll error: ${err.message}`);
+    } finally {
+      pollInFlight = false;
     }
   }
 
@@ -225,15 +413,46 @@ export function stopEbayOrderPolling() {
 
 /**
  * Poll eBay Fulfillment API for recent orders.
- * Looks back POLL_WINDOW_MINUTES to catch any missed orders.
+ * Uses a durable checkpoint, a 24-hour overlap, and an hourly 30-day deep scan.
  * Idempotent — duplicates are safely ignored by ingestOrder().
  */
 export async function pollEbayOrders(
   omsService: OmsService,
   ebayApiClient: EbayApiClient,
+  options: EbayOrderPollOptions = {},
 ): Promise<number> {
-  const endDate = new Date();
-  const startDate = new Date(endDate.getTime() - POLL_WINDOW_MINUTES * 60 * 1000);
+  const database = options.database ?? db;
+  markEbayOrderPollRunStarted();
+  try {
+    return await runEbayOrderPoll(omsService, ebayApiClient, options);
+  } catch (error) {
+    markEbayOrderPollFailed(error);
+    try {
+      await markEbayOrderPollFailureInDatabase(database, error);
+    } catch (checkpointError: any) {
+      console.error(
+        `[eBay Orders] Failed to record poll checkpoint error: ${checkpointError.message}`,
+      );
+    }
+    throw error;
+  }
+}
+
+async function runEbayOrderPoll(
+  omsService: OmsService,
+  ebayApiClient: EbayApiClient,
+  options: EbayOrderPollOptions = {},
+): Promise<number> {
+  const database = options.database ?? db;
+  const now = options.now ?? new Date();
+  const window = await resolveEbayOrderPollWindow(
+    database,
+    now,
+    options.forceDeepScan === true,
+  );
+  await markEbayOrderPollRunInDatabase(database, now);
+  const endDate = window.endDate;
+  const startDate = window.startDate;
 
   // P0.6: sweep BOTH windows. creationdate catches new orders;
   // lastmodifieddate catches late cancels/refunds on orders created before
@@ -244,8 +463,10 @@ export async function pollEbayOrders(
   ];
 
   let totalIngested = 0;
+  let ordersSeen = 0;
   const limit = 50;
   const seenThisPoll = new Set<string>();
+  const failedOrders: Array<{ orderId: string; error: string }> = [];
 
   for (const filter of filters) {
   let offset = 0;
@@ -258,6 +479,7 @@ export async function pollEbayOrders(
       try {
         if (seenThisPoll.has(ebayOrder.orderId)) continue;
         seenThisPoll.add(ebayOrder.orderId);
+        ordersSeen++;
         const orderData = mapEbayOrderToOrderData(ebayOrder);
         const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, ebayOrder.orderId, orderData);
 
@@ -269,13 +491,13 @@ export async function pollEbayOrders(
             // Status changed on eBay — update OMS
             if (orderData.status === "cancelled" && existing.status !== "cancelled") {
               console.log(`[eBay Orders] Order ${ebayOrder.orderId} cancelled on eBay — updating OMS`);
-              await db.execute(sql`
+              await database.execute(sql`
                 UPDATE oms_orders SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
                 WHERE id = ${result.id} AND status != 'cancelled'
               `);
               // Release WMS reservation
               try {
-                const wmsOrder = await db.execute(sql`
+                const wmsOrder = await database.execute(sql`
                   SELECT id FROM wms.orders
                   WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(result.id)})
                      OR source_table_id = ${String(result.id)}
@@ -283,7 +505,7 @@ export async function pollEbayOrders(
                 `);
                 if (wmsOrder.rows.length > 0) {
                   const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
-                  await cancelWmsOrder(db, Number(wmsOrder.rows[0].id), "ebay_cancel");
+                  await cancelWmsOrder(database, Number(wmsOrder.rows[0].id), "ebay_cancel");
                 }
               } catch (e: any) {
                 console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
@@ -295,7 +517,7 @@ export async function pollEbayOrders(
               // eBay polls don't provide refund dollar amounts; full refund = total_cents,
               // partial = 0 (best-effort until eBay returns API exposes amounts).
               const refundAmountCents = orderData.financialStatus === "refunded" ? (existing.totalCents ?? 0) : 0;
-              await db.execute(sql`
+              await database.execute(sql`
                 UPDATE oms_orders
                 SET financial_status = ${orderData.financialStatus},
                     refunded_at = NOW(),
@@ -312,7 +534,12 @@ export async function pollEbayOrders(
         // webhook inserted it, so "already existed" must not mean "already
         // reached WMS".
         if (isNew || !result.warehouseId) {
-          await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, ebayOrder.orderId);
+          await ensureEbayOrderQueuedForWmsSync(
+            _wmsSyncService,
+            result.id,
+            ebayOrder.orderId,
+            database,
+          );
 
           if (!result.warehouseId) {
             // OMS-level reservation (delegates to WMS reservation service)
@@ -324,11 +551,24 @@ export async function pollEbayOrders(
             }
           }
 
-          await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, ebayOrder.orderId);
+          await ensureEbayOrderQueuedForWmsSync(
+            _wmsSyncService,
+            result.id,
+            ebayOrder.orderId,
+            database,
+          );
           totalIngested++;
         }
       } catch (err: any) {
-        console.error(`[eBay Orders] Failed to ingest order ${ebayOrder.orderId}: ${err.message}`);
+        const message = err?.message || String(err);
+        failedOrders.push({ orderId: ebayOrder.orderId, error: message });
+        console.error(`[eBay Orders] Failed to ingest order ${ebayOrder.orderId}: ${message}`);
+        await enqueueEbayOrderIngestRetry(
+          database,
+          ebayOrder.orderId,
+          err,
+          window.deepScan ? "deep_scan" : "incremental_poll",
+        );
       }
     }
 
@@ -338,10 +578,37 @@ export async function pollEbayOrders(
   }
   }
 
+  if (failedOrders.length > 0) {
+    throw new Error(
+      `${failedOrders.length} eBay order(s) failed ingestion: ${
+        failedOrders.map((item) => item.orderId).join(", ")
+      }`,
+    );
+  }
+
+  await markEbayOrderPollSuccessInDatabase(
+    database,
+    window,
+    ordersSeen,
+    totalIngested,
+  );
+  markEbayOrderPollSucceeded({
+    windowStart: window.startDate,
+    windowEnd: window.endDate,
+    deepScan: window.deepScan,
+    ordersSeen,
+    ordersIngested: totalIngested,
+  });
+
   if (totalIngested > 0) {
     console.log(`[eBay Orders] Poll complete — ${totalIngested} new order(s) ingested`);
   }
 
+  console.log(
+    `[eBay Orders] Poll checkpoint advanced - mode=${window.deepScan ? "deep" : "incremental"} `
+    + `window=${window.startDate.toISOString()}..${window.endDate.toISOString()} `
+    + `seen=${ordersSeen} ingested=${totalIngested}`,
+  );
   return totalIngested;
 }
 
@@ -513,6 +780,7 @@ export function createEbayOrderWebhookHandler(
                 VALUES
                   ('ebay', ${topic ?? "ORDER"}, ${JSON.stringify(payload)}::jsonb, ${inbox?.id ?? null},
                    0, ${String(err?.message ?? err).slice(0, 500)}, NOW(), 'pending', NOW(), NOW())
+                ON CONFLICT DO NOTHING
               `);
             } catch (queueErr: any) {
               console.error(`[eBay Webhook] Retry enqueue failed for ${orderId}: ${queueErr.message}`);
