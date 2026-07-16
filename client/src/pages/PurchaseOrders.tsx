@@ -21,6 +21,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
@@ -324,6 +325,7 @@ export default function PurchaseOrders() {
   const [inlineCatalogSearch, setInlineCatalogSearch] = useState("");
   const [inlineSelectedCatalogEntry, setInlineSelectedCatalogEntry] = useState<any>(null);
   const [inlineCatalogPricingUntouched, setInlineCatalogPricingUntouched] = useState(false);
+  const [inlineSaveToVendorCatalog, setInlineSaveToVendorCatalog] = useState(true);
 
   // Queries
   const { data: poData } = useQuery<{ purchaseOrders: PurchaseOrder[]; total: number }>({
@@ -567,6 +569,7 @@ export default function PurchaseOrders() {
     setInlineCatalogSearch("");
     setInlineSelectedCatalogEntry(null);
     setInlineCatalogPricingUntouched(false);
+    setInlineSaveToVendorCatalog(true);
     setAddingLine(false);
   }
 
@@ -593,7 +596,7 @@ export default function PurchaseOrders() {
       vendorSku: inlineVendorSku,
       vendorProductId: inlineSelectedCatalogEntry?.id,
       saveToVendorCatalog:
-        !inlineSelectedCatalogEntry &&
+        inlineSaveToVendorCatalog &&
         pricing.basis !== "extended_total" &&
         quoteMetadata.quotedAt !== null,
       quoteMetadata,
@@ -1120,6 +1123,7 @@ export default function PurchaseOrders() {
                                   className="w-full text-left p-2 hover:bg-muted/50 transition-colors"
                                   onClick={() => {
                                     setInlineSelectedCatalogEntry(entry);
+                                    setInlineSaveToVendorCatalog(false);
                                     setInlineCatalogPricingUntouched(
                                       isVendorCatalogQuoteReusable(entry),
                                     );
@@ -1244,6 +1248,7 @@ export default function PurchaseOrders() {
                                         setInlinePricing(createEmptyPoLinePricingDraft());
                                         setInlineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
                                         setInlineVendorSku("");
+                                        setInlineSaveToVendorCatalog(true);
                                         setInlineProductOpen(false);
                                         setInlineProductSearch("");
                                         // Auto-select if only one variant
@@ -1334,25 +1339,52 @@ export default function PurchaseOrders() {
                             placeholder="Supplier's catalog number"
                           />
                         </div>
+                        <div className="space-y-2 rounded-md border p-3">
+                          <div className="flex items-center gap-2">
+                            <Checkbox
+                              id="inlineSaveToVendorCatalog"
+                              checked={
+                                inlineSaveToVendorCatalog &&
+                                inlinePricing.basis !== "extended_total"
+                              }
+                              onCheckedChange={(value) => setInlineSaveToVendorCatalog(!!value)}
+                              disabled={inlinePricing.basis === "extended_total"}
+                            />
+                            <label
+                              htmlFor="inlineSaveToVendorCatalog"
+                              className="text-sm cursor-pointer select-none"
+                            >
+                              Update supplier price with this quote
+                            </label>
+                          </div>
+                          {inlineSaveToVendorCatalog &&
+                            inlinePricing.basis !== "extended_total" &&
+                            !inlineQuoteMetadata.quotedAt && (
+                              <p className="text-xs text-amber-700 ml-6" role="alert">
+                                Enter a quote date to save this reusable supplier price, or turn this option off.
+                              </p>
+                            )}
+                        </div>
                         {inlinePricing.basis === "extended_total" && (
                           <p className="text-xs text-muted-foreground">
                             This quantity-specific total will stay on the PO and will not be saved as a reusable catalog price.
                           </p>
                         )}
-                        {!inlineSelectedCatalogEntry &&
-                          inlinePricing.basis !== "extended_total" &&
-                          !inlineQuoteMetadata.quotedAt && (
-                            <p className="text-xs text-amber-700">
-                              Without a quote date, this price stays on the PO only and will not be saved for catalog automation.
-                            </p>
-                          )}
                         <div className="flex gap-2">
                           <Button variant="outline" size="sm" className="min-h-[44px] flex-1" onClick={resetInlineLineForm}>Cancel</Button>
                           <Button
                             size="sm"
                             className="min-h-[44px] flex-1"
                             onClick={addInlineLine}
-                            disabled={!inlinePricingEvaluation.pricing || !inlineQuoteMetadataEvaluation.metadata}
+                            disabled={
+                              !inlinePricingEvaluation.pricing ||
+                              !inlineQuoteMetadataEvaluation.metadata ||
+                              (
+                                inlineSaveToVendorCatalog &&
+                                inlinePricing.basis !== "extended_total" &&
+                                !inlineQuoteMetadata.quotedAt
+                              )
+                            }
                           >
                             <Plus className="h-4 w-4 mr-1" /> Add
                           </Button>
