@@ -31,7 +31,7 @@ WITH ranked AS (
 UPDATE oms.webhook_retry_queue retry
 SET status = 'success',
     last_error = COALESCE(retry.last_error || E'\n', '')
-      || 'Duplicate pending eBay order-ingestion retry retired by migration 144.',
+      || 'Duplicate pending eBay order-ingestion retry retired by migration 145.',
     updated_at = NOW()
 FROM ranked
 WHERE retry.id = ranked.id
@@ -42,4 +42,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_webhook_retry_pending_ebay_order
   WHERE provider = 'ebay'
     AND status = 'pending'
     AND payload #>> '{notification,data,orderId}' IS NOT NULL;
-
