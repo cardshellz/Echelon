@@ -795,7 +795,7 @@ async function prepareLines(
                 WHERE product_location.product_variant_id = catalog_variant.id
                   AND product_location.warehouse_location_id = inventory_level.warehouse_location_id
                   AND product_location.status = 'active'
-                  AND product_location.is_primary = true
+                  AND product_location.is_primary = 1
               ) DESC,
               inventory_level.variant_qty DESC,
               inventory_level.warehouse_location_id
@@ -1352,9 +1352,6 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
   }
   if (!String(shipment.shipDate ?? "").trim()) {
     throw new Error("ShipStation shipment has no shipped date");
-  }
-  if ((shipment.shipmentItems ?? []).length === 0 && optionalNotes(input.notes) === null) {
-    throw new Error("operator notes are required when ShipStation omitted package lines");
   }
   const exceptionId = await ensureException(db, context, shipment);
   const operator = requiredOperator(input.operator);
