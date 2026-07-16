@@ -373,6 +373,9 @@
   "membership.subscription_events": [
     "modules/subscriptions"
   ],
+  "oms.ebay_order_poll_checkpoints": [
+    "modules/oms"
+  ],
   "oms.fulfillment_routing_rules": [
     "modules/warehouse"
   ],

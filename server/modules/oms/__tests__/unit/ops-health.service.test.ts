@@ -75,6 +75,13 @@ describe("ops-health.service :: fulfillment alert severity", () => {
     expect(OPS_HEALTH_SRC).toMatch(/code: "OMS_OPS_ALERT_SCHEDULER_STALE"/);
   });
 
+  it("surfaces eBay order poller heartbeat failures as critical", () => {
+    expect(OPS_HEALTH_SRC).toMatch(/code: "EBAY_ORDER_POLL_NOT_STARTED"/);
+    expect(OPS_HEALTH_SRC).toMatch(/code: "EBAY_ORDER_POLL_STALE"/);
+    expect(OPS_HEALTH_SRC).toMatch(/code: "EBAY_ORDER_POLL_FAILED"/);
+    expect(OPS_HEALTH_SRC).toContain("getEbayOrderPollHeartbeat");
+  });
+
   it("surfaces Phase 7 OMS/WMS authority monitoring signals", () => {
     expect(OPS_HEALTH_SRC).toMatch(
       /code: "WMS_ITEM_WITHOUT_OMS_AUTHORITY"[\s\S]*severity: "critical"/,
@@ -167,6 +174,7 @@ describe("ops-health.service :: issue mapping", () => {
       expect(health.workers.webhookRetry).toHaveProperty("startedAt");
       expect(health.workers.omsFlowReconciliation).toHaveProperty("startedAt");
       expect(health.workers.omsOpsAlert).toHaveProperty("startedAt");
+      expect(health.workers.ebayOrderPoll).toHaveProperty("startedAt");
     } finally {
       if (previousDisableSchedulers === undefined) {
         delete process.env.DISABLE_SCHEDULERS;
