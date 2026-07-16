@@ -2823,6 +2823,121 @@ export function createPurchasingService(
    * use closeShort(reason) which records per-line close-short reasons and
    * is the single "close with known issues" path.
    */
+  async function persistCompletedVendorPurchaseEvidenceTx(
+    tx: any,
+    purchaseOrderId: number,
+    purchasedAt: Date,
+    userId?: string,
+  ): Promise<void> {
+    const purchasedLines = await tx
+      .select({
+        vendorProductId: purchaseOrderLinesTable.vendorProductId,
+        unitCostCents: purchaseOrderLinesTable.unitCostCents,
+        receivedQty: purchaseOrderLinesTable.receivedQty,
+      })
+      .from(purchaseOrderLinesTable)
+      .where(and(
+        eq(purchaseOrderLinesTable.purchaseOrderId, purchaseOrderId),
+        eq(purchaseOrderLinesTable.lineType, "product"),
+        ne(purchaseOrderLinesTable.status, "cancelled"),
+        sql`${purchaseOrderLinesTable.vendorProductId} IS NOT NULL`,
+        sql`${purchaseOrderLinesTable.receivedQty} > 0`,
+      ));
+
+    const totalsByVendorProductId = new Map<
+      number,
+      { extendedCostCents: bigint; receivedQty: bigint }
+    >();
+    for (const line of purchasedLines) {
+      const vendorProductId = Number(line.vendorProductId);
+      if (!Number.isSafeInteger(vendorProductId) || vendorProductId <= 0) continue;
+      const receivedQty = BigInt(line.receivedQty ?? 0);
+      if (receivedQty <= BigInt(0)) continue;
+      const unitCostCents = BigInt(line.unitCostCents ?? 0);
+      const current = totalsByVendorProductId.get(vendorProductId) ?? {
+        extendedCostCents: BigInt(0),
+        receivedQty: BigInt(0),
+      };
+      current.extendedCostCents += unitCostCents * receivedQty;
+      current.receivedQty += receivedQty;
+      totalsByVendorProductId.set(vendorProductId, current);
+    }
+    const costByVendorProductId = new Map<number, number>();
+    for (const [vendorProductId, totals] of totalsByVendorProductId) {
+      const roundedUnitCostCents =
+        (totals.extendedCostCents * BigInt(2) + totals.receivedQty) /
+        (totals.receivedQty * BigInt(2));
+      costByVendorProductId.set(
+        vendorProductId,
+        safeIntegerMoney(roundedUnitCostCents, "last_cost_cents"),
+      );
+    }
+    if (costByVendorProductId.size === 0) return;
+
+    const vendorProductIds = [...costByVendorProductId.keys()];
+    const currentRows = await tx
+      .select()
+      .from(vendorProductsTable)
+      .where(inArray(vendorProductsTable.id, vendorProductIds))
+      .for("update");
+    const { actorType, actorId } = resolveActor(userId);
+    const auditRows: Array<Record<string, unknown>> = [];
+
+    for (const current of currentRows) {
+      const priorPurchasedAt = current.lastPurchasedAt instanceof Date
+        ? current.lastPurchasedAt
+        : current.lastPurchasedAt
+          ? new Date(current.lastPurchasedAt)
+          : null;
+      if (
+        priorPurchasedAt &&
+        !Number.isNaN(priorPurchasedAt.getTime()) &&
+        priorPurchasedAt.getTime() > purchasedAt.getTime()
+      ) {
+        continue;
+      }
+      const lastCostCents = costByVendorProductId.get(Number(current.id));
+      if (lastCostCents === undefined) continue;
+      const updatedRows = await tx
+        .update(vendorProductsTable)
+        .set({
+          lastPurchasedAt: purchasedAt,
+          lastCostCents,
+          updatedAt: now(),
+        })
+        .where(eq(vendorProductsTable.id, Number(current.id)))
+        .returning();
+      const updated = updatedRows[0];
+      if (!updated) {
+        throw new PurchasingError("Supplier purchase evidence could not be updated", 409, {
+          code: "VENDOR_CATALOG_PURCHASE_EVIDENCE_CONFLICT",
+          vendorProductId: Number(current.id),
+        });
+      }
+      auditRows.push({
+        level: "AUDIT",
+        actor: `${actorType}:${actorId}`,
+        action: "vendor_catalog.purchase_evidence_updated",
+        target: `vendor_product:${updated.id}`,
+        changes: {
+          before: catalogAuditSnapshot(current),
+          after: catalogAuditSnapshot(updated),
+        },
+        context: {
+          purchaseOrderId,
+          vendorProductId: updated.id,
+          vendorId: updated.vendorId,
+          productId: updated.productId,
+          productVariantId: updated.productVariantId ?? null,
+        },
+      });
+    }
+
+    if (auditRows.length > 0) {
+      await tx.insert(auditEventsTable).values(auditRows);
+    }
+  }
+
   async function close(id: number, userId?: string, notes?: string) {
     const po = await storage.getPurchaseOrderById(id);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
@@ -2889,6 +3004,12 @@ export function createPurchasingService(
         to_status: change.history.toStatus,
         notes: notes ?? null,
       });
+      await persistCompletedVendorPurchaseEvidenceTx(
+        tx,
+        id,
+        change.patch.closedAt instanceof Date ? change.patch.closedAt : now(),
+        userId,
+      );
       return updated;
     });
   }
@@ -2928,6 +3049,12 @@ export function createPurchasingService(
         to_status: change.history.toStatus,
         reason,
       });
+      await persistCompletedVendorPurchaseEvidenceTx(
+        tx,
+        id,
+        change.patch.closedAt instanceof Date ? change.patch.closedAt : now(),
+        userId,
+      );
       return updated;
     });
   }
@@ -6750,6 +6877,8 @@ export function createPurchasingService(
       quoteReference: row?.quoteReference ?? row?.quote_reference ?? null,
       quotedAt: row?.quotedAt ?? row?.quoted_at ?? null,
       quoteValidUntil: row?.quoteValidUntil ?? row?.quote_valid_until ?? null,
+      lastPurchasedAt: row?.lastPurchasedAt ?? row?.last_purchased_at ?? null,
+      lastCostCents: row?.lastCostCents ?? row?.last_cost_cents ?? null,
     };
   }
 

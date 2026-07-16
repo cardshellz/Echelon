@@ -49,6 +49,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -89,11 +90,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  AddToCatalogDialog,
-  type AddToCatalogDecision,
-  type CatalogCandidate,
-} from "@/features/po-edit/AddToCatalogDialog";
 import {
   PoLinePricingEditor,
   createEmptyPoLinePricingDraft,
@@ -190,11 +186,6 @@ type LineDraft = {
   totalProductCostCents?: number;
   packagingCostCents?: number;
   vendorProductId?: number | null;
-  // Spec A follow-up: tracks whether the selected product was NOT in the
-  // vendor's catalog at the time of selection. Drives the "Add to catalog?"
-  // modal on PO save. `null` for lines whose origin we don't know (e.g.
-  // preloaded draft rows, legacy edit-mode rows).
-  catalogOriginallyAbsent?: boolean | null;
   catalogWrite?: {
     mode: "upsert";
     setPreferred?: boolean;
@@ -879,14 +870,6 @@ export default function PurchaseOrderEdit() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Spec A follow-up: "Add to catalog?" modal state.
-  // Populated right before a save when any line was selected from the
-  // non-catalog bucket. The resolver inside the dialog flow hands control
-  // back to the originating save handler via a ref-held Promise.
-  const [catalogDialogOpen, setCatalogDialogOpen] = useState(false);
-  const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
-  const catalogResolverRef = useRef<((resolvedLines: LineDraft[]) => void) | null>(null);
-
   // Remember the initial snapshot so we only flip dirty on real changes.
   const snapshotRef = useRef<string>("");
   const loadedVersionRef = useRef<string | null>(null);
@@ -1213,7 +1196,6 @@ export default function PurchaseOrderEdit() {
           : totalProductCostCents,
         packagingCostCents: serverPackaging,
         vendorProductId: l.vendorProductId ?? null,
-        catalogOriginallyAbsent: null,
       };
     });
 
@@ -1343,6 +1325,17 @@ export default function PurchaseOrderEdit() {
           errors[l.clientId] = metadataError;
           continue;
         }
+        if (
+          l.catalogWrite &&
+          (
+            !pricingEvaluation.pricing ||
+            pricingEvaluation.pricing.basis === "extended_total" ||
+            !l.quotedAt
+          )
+        ) {
+          errors[l.clientId] = "A reusable supplier price requires a quote date";
+          continue;
+        }
         continue;
       }
 
@@ -1432,6 +1425,16 @@ export default function PurchaseOrderEdit() {
         }
         const metadataError = poLineQuoteMetadataError(l);
         if (metadataError) return `${label}: ${metadataError}`;
+        if (
+          l.catalogWrite &&
+          (
+            !pricingEvaluation.pricing ||
+            pricingEvaluation.pricing.basis === "extended_total" ||
+            !l.quotedAt
+          )
+        ) {
+          return `${label}: enter a quote date to update the supplier price, or turn that option off.`;
+        }
         continue;
       }
 
@@ -1463,105 +1466,6 @@ export default function PurchaseOrderEdit() {
       }
     }
     return null;
-  }
-
-  // ── Add-to-catalog gate (Spec A follow-up) ────────────────────
-  //
-  // Computes the candidate list (lines selected from the "not in catalog"
-  // bucket that have a valid productVariantId and a non-negative cost). If
-  // none: resolves true immediately so the caller proceeds to save. If any:
-  // opens the dialog and waits for the user's decision. On "Add all" or
-  // "Add N selected" we attach a catalog directive to the same PO command.
-  // The server derives reusable economics from the validated line quote and
-  // commits the catalog mapping and PO together.
-  function computeCatalogCandidates(): CatalogCandidate[] {
-    if (!selectedVendor) return [];
-    const out: CatalogCandidate[] = [];
-    for (const l of lines) {
-      if (l.catalogOriginallyAbsent !== true) continue;
-      if (!l.productId) continue;
-      if (!l.pricingDraft) continue;
-      const pricingEvaluation = evaluatePoLinePricingDraft(l.pricingDraft);
-      const reusablePricing = pricingEvaluation.pricing;
-      // Extended totals are quantity-specific and cannot become a reusable
-      // vendor catalog price.
-      if (!reusablePricing || reusablePricing.basis === "extended_total") {
-        continue;
-      }
-      if (!pricingEvaluation.normalized) continue;
-      out.push({
-        clientId: l.clientId,
-        productId: l.productId,
-        productVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
-        productName: l.productName || "(unnamed)",
-        sku: l.sku,
-        // Dialog displays 4-decimal mills; cents derived for back-compat.
-        unitCostMills: pricingEvaluation.normalized.unitCostMills,
-        unitCostCents: pricingEvaluation.normalized.unitCostCents,
-        pricing: reusablePricing,
-        quotedAt: l.quotedAt,
-      });
-    }
-    return out;
-  }
-
-  async function maybePromptAddToCatalog(): Promise<LineDraft[]> {
-    if (!selectedVendor) return lines;
-    const candidates = computeCatalogCandidates();
-    if (candidates.length === 0) return lines;
-    setCatalogCandidates(candidates);
-    setCatalogDialogOpen(true);
-    return new Promise<LineDraft[]>((resolve) => {
-      catalogResolverRef.current = resolve;
-    });
-  }
-
-  function handleCatalogDecision(decision: AddToCatalogDecision) {
-    if (!selectedVendor) return;
-    const resolver = catalogResolverRef.current;
-    if (decision.action === "add-none") {
-      const resolvedLines = lines.map((line) =>
-        catalogCandidates.some((candidate) => candidate.clientId === line.clientId)
-          ? { ...line, catalogOriginallyAbsent: false, catalogWrite: undefined }
-          : line,
-      );
-      setLines(resolvedLines);
-      setCatalogDialogOpen(false);
-      catalogResolverRef.current = null;
-      resolver?.(resolvedLines);
-      return;
-    }
-    const toSend: CatalogCandidate[] =
-      decision.action === "add-all"
-        ? catalogCandidates
-        : catalogCandidates.filter((c) =>
-            decision.selectedClientIds.includes(c.clientId),
-          );
-    if (toSend.length === 0) {
-      const resolvedLines = lines.map((line) =>
-        catalogCandidates.some((candidate) => candidate.clientId === line.clientId)
-          ? { ...line, catalogOriginallyAbsent: false, catalogWrite: undefined }
-          : line,
-      );
-      setLines(resolvedLines);
-      setCatalogDialogOpen(false);
-      catalogResolverRef.current = null;
-      resolver?.(resolvedLines);
-      return;
-    }
-    const selectedIds = new Set(toSend.map((candidate) => candidate.clientId));
-    const candidateIds = new Set(catalogCandidates.map((candidate) => candidate.clientId));
-    const resolvedLines = lines.map((line) => {
-      if (!candidateIds.has(line.clientId)) return line;
-      if (selectedIds.has(line.clientId)) {
-        return { ...line, catalogWrite: { mode: "upsert" as const } };
-      }
-      return { ...line, catalogOriginallyAbsent: false, catalogWrite: undefined };
-    });
-    setLines(resolvedLines);
-    setCatalogDialogOpen(false);
-    catalogResolverRef.current = null;
-    resolver?.(resolvedLines);
   }
 
   // ── Save ──────────────────────────────────────────────────────────────
@@ -1690,7 +1594,7 @@ export default function PurchaseOrderEdit() {
     }
     setSaving(true);
     try {
-      const linesToSave = await maybePromptAddToCatalog();
+      const linesToSave = lines;
       const result = await saveMutation.mutateAsync({
         advanceToSent: false,
         linesToSave,
@@ -1721,7 +1625,6 @@ export default function PurchaseOrderEdit() {
             ...line,
             serverLineId: serverLineIdByClientId.get(line.clientId) ?? line.serverLineId,
             vendorProductId: savedLine?.vendorProductId ?? line.vendorProductId,
-            catalogOriginallyAbsent: line.catalogWrite ? false : line.catalogOriginallyAbsent,
             catalogWrite: undefined,
           };
         });
@@ -1763,7 +1666,7 @@ export default function PurchaseOrderEdit() {
     }
     setSaving(true);
     try {
-      const linesToSave = await maybePromptAddToCatalog();
+      const linesToSave = lines;
       const result = await saveMutation.mutateAsync({
         advanceToSent: true,
         linesToSave,
@@ -1940,7 +1843,6 @@ export default function PurchaseOrderEdit() {
                               current.map((line) => ({
                                 ...line,
                                 vendorProductId: null,
-                                catalogOriginallyAbsent: null,
                                 ...(line.lineType === "product"
                                   ? {
                                       pricingSource: "manual" as PricingSource,
@@ -2402,17 +2304,6 @@ export default function PurchaseOrderEdit() {
         </Button>
       </div>
 
-      {/* Spec A follow-up: "Add to catalog?" modal. Mounted at the page root
-          so it overlays on every save path. The dialog itself blocks Esc /
-          backdrop dismissal (see AddToCatalogDialog). */}
-      <AddToCatalogDialog
-        open={catalogDialogOpen}
-        vendorName={selectedVendor?.name ?? ""}
-        candidates={catalogCandidates}
-        submitting={false}
-        error={null}
-        onDecide={handleCatalogDecision}
-      />
     </div>
   );
 }
@@ -2723,7 +2614,6 @@ function ProductLineTableRow({
                                 productName: row.productName,
                                 sku: row.sku ?? null,
                                 vendorProductId: row.vendorProductId,
-                                catalogOriginallyAbsent: false,
                                 quoteReference: row.quoteReference ?? null,
                                 quotedAt: row.quotedAt ?? null,
                                 quoteValidUntil: row.quoteValidUntil ?? null,
@@ -2774,7 +2664,7 @@ function ProductLineTableRow({
                                 productName: row.productName,
                                 sku: row.sku ?? null,
                                 vendorProductId: null,
-                                catalogOriginallyAbsent: vendorId ? true : null,
+                                catalogWrite: vendorId ? { mode: "upsert" } : undefined,
                                 pricingDraft: manualPricingDraft,
                                 hasExplicitPricing: false,
                                 preserveLegacyPricing: false,
@@ -2900,7 +2790,14 @@ function ProductLineTableRow({
 
                 <PoLinePricingEditor
                   value={pricingDraft}
-                  onChange={(next) => onChange(normalizedPricingPatch(next, "manual"))}
+                  onChange={(next) =>
+                    onChange({
+                      ...normalizedPricingPatch(next, "manual"),
+                      ...(next.basis === "extended_total"
+                        ? { catalogWrite: undefined }
+                        : {}),
+                    })
+                  }
                   receiveConfiguration={{
                     label: line.productName || line.sku || "Selected product",
                     unitsPerVariant: expectedReceiveUnits,
@@ -2922,6 +2819,72 @@ function ProductLineTableRow({
                   ) : (
                     <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
                       Confirm the vendor quote basis and amount before adding quote reference or validity details.
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-2 rounded-md border p-3">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id={`supplier-price-${line.clientId}`}
+                      checked={
+                        !!line.catalogWrite &&
+                        pricingDraft.basis !== "extended_total"
+                      }
+                      onCheckedChange={(value) =>
+                        onChange(
+                          value === true
+                            ? {
+                                catalogWrite: { mode: "upsert" },
+                                pricingSource: "manual",
+                              }
+                            : { catalogWrite: undefined },
+                        )
+                      }
+                      disabled={
+                        !line.hasExplicitPricing ||
+                        pricingDraft.basis === "extended_total"
+                      }
+                    />
+                    <label
+                      htmlFor={`supplier-price-${line.clientId}`}
+                      className="text-sm cursor-pointer select-none"
+                    >
+                      Update supplier price with this quote
+                    </label>
+                  </div>
+                  {line.catalogWrite && pricingDraft.basis !== "extended_total" && (
+                    <>
+                      {!line.quotedAt && (
+                        <p className="text-xs text-amber-700 ml-6" role="alert">
+                          Enter a quote date to save this reusable supplier price.
+                        </p>
+                      )}
+                      <div className="flex items-center gap-2 ml-6">
+                        <Checkbox
+                          id={`preferred-supplier-${line.clientId}`}
+                          checked={line.catalogWrite.setPreferred === true}
+                          onCheckedChange={(value) =>
+                            onChange({
+                              catalogWrite: {
+                                mode: "upsert",
+                                setPreferred: value === true,
+                              },
+                            })
+                          }
+                        />
+                        <label
+                          htmlFor={`preferred-supplier-${line.clientId}`}
+                          className="text-sm cursor-pointer select-none text-muted-foreground"
+                        >
+                          Set as preferred supplier for this product
+                        </label>
+                      </div>
+                    </>
+                  )}
+                  {pricingDraft.basis === "extended_total" && (
+                    <p className="text-xs text-muted-foreground ml-6">
+                      A quantity-specific total remains on this PO and cannot become a reusable supplier price.
                     </p>
                   )}
                 </div>

@@ -207,9 +207,24 @@ const updateLineBodySchema = z.object({
   notes: nullableText(20_000),
   pricing: poLinePricingInputSchema.optional(),
   packagingCostCents: nonnegativeMoney.optional(),
+  catalogWrite: catalogWriteSchema.optional(),
   ...quoteMetadataFields,
 }).strict().superRefine((input, context) => {
   validateQuoteDateOrder(input, context);
+  if (input.catalogWrite && input.pricingSource !== undefined && input.pricingSource !== "manual") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["catalogWrite"],
+      message: "is only valid when this PO consumes a manual quote",
+    });
+  }
+  if (input.catalogWrite && input.pricing?.basis === "extended_total") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["catalogWrite"],
+      message: "cannot reuse a quantity-specific extended total",
+    });
+  }
   const editableKeys = Object.keys(input).filter(
     (key) => key !== "expectedPoUpdatedAt" && key !== "expectedLineUpdatedAt",
   );
@@ -270,11 +285,25 @@ type CommandDb = {
 };
 
 type AddLineValue = z.infer<typeof addLineValueSchema>;
+type CatalogWritableLine = Pick<
+  AddLineValue,
+  | "productId"
+  | "expectedReceiveVariantId"
+  | "expectedReceiveUnitsPerVariant"
+  | "vendorProductId"
+  | "vendorSku"
+  | "pricingSource"
+  | "pricing"
+  | "quoteReference"
+  | "quotedAt"
+  | "quoteValidUntil"
+  | "catalogWrite"
+>;
 type PurchaseOrderLineCommandOptions = {
   persistCatalogWrites?: (
     tx: any,
     vendorId: number,
-    lines: AddLineValue[],
+    lines: CatalogWritableLine[],
     userId?: string,
   ) => Promise<Array<number | null>>;
 };
@@ -1077,37 +1106,99 @@ export function createPurchaseOrderLineCommands(
           ? "manual"
           : line.pricingSource;
       const effectivePricing = input.pricing ?? (
-        resolvedPricingSource === "vendor_catalog"
+        resolvedPricingSource === "vendor_catalog" || input.catalogWrite
           ? pricingInputFromStoredLine(line)
           : undefined
       );
-      const contextInput = {
-        productId: Number(line.productId),
-        expectedReceiveVariantId: resolvedReceiveVariantId,
-        expectedReceiveUnitsPerVariant: resolvedReceiveUnits,
-        vendorProductId: input.vendorProductId === undefined ? line.vendorProductId : input.vendorProductId,
-        pricingSource: resolvedPricingSource,
-        pricing: effectivePricing,
-      };
-      const context = await resolveLineContext(tx, header, contextInput);
       const vendorSku = input.vendorSku === undefined ? line.vendorSku : input.vendorSku;
       const description = input.description === undefined ? line.description : input.description;
       const notes = input.notes === undefined ? line.notes : input.notes;
       const packagingCostCents = input.packagingCostCents === undefined
         ? storedInteger(line.packagingCostCents, "packaging_cost_cents")
         : input.packagingCostCents;
+      let quoteReference = input.quoteReference === undefined
+        ? line.quoteReference
+        : input.quoteReference;
+      let quotedAt = input.quotedAt === undefined ? line.quotedAt : input.quotedAt;
+      let validUntil = input.quoteValidUntil === undefined
+        ? line.quoteValidUntil
+        : input.quoteValidUntil;
+      let resolvedVendorProductId = input.vendorProductId === undefined
+        ? line.vendorProductId
+        : input.vendorProductId;
+
+      if (input.catalogWrite) {
+        if (resolvedPricingSource !== "manual") {
+          throw new PurchaseOrderLineCommandError(
+            "Catalog capture is only valid when this PO consumes a manual quote",
+            400,
+            { code: "PO_LINE_CATALOG_WRITE_SOURCE_INVALID" },
+          );
+        }
+        if (!effectivePricing || effectivePricing.basis === "extended_total") {
+          throw new PurchaseOrderLineCommandError(
+            "Catalog capture requires reusable per-piece or purchase-UOM pricing",
+            400,
+            { code: "PO_LINE_CATALOG_WRITE_PRICING_REQUIRED" },
+          );
+        }
+        if (!(quotedAt instanceof Date) || Number.isNaN(quotedAt.getTime())) {
+          throw new PurchaseOrderLineCommandError(
+            "A quote date is required when updating the supplier price",
+            400,
+            { code: "PO_LINE_CATALOG_WRITE_QUOTED_AT_REQUIRED" },
+          );
+        }
+        if (!options.persistCatalogWrites) {
+          throw new PurchaseOrderLineCommandError("Catalog persistence is unavailable", 500, {
+            code: "PO_LINE_CATALOG_WRITE_UNAVAILABLE",
+          });
+        }
+        const [vendorProductId] = await options.persistCatalogWrites(
+          tx,
+          Number(header.vendorId),
+          [{
+            productId: Number(line.productId),
+            expectedReceiveVariantId: resolvedReceiveVariantId,
+            expectedReceiveUnitsPerVariant: resolvedReceiveUnits,
+            vendorProductId: resolvedVendorProductId,
+            vendorSku,
+            pricingSource: "manual",
+            pricing: effectivePricing,
+            quoteReference,
+            quotedAt,
+            quoteValidUntil: validUntil,
+            catalogWrite: input.catalogWrite,
+          }],
+          userId,
+        );
+        if (!vendorProductId) {
+          throw new PurchaseOrderLineCommandError(
+            "Catalog persistence did not return a mapping",
+            500,
+            { code: "PO_LINE_CATALOG_WRITE_RESULT_MISSING" },
+          );
+        }
+        resolvedVendorProductId = vendorProductId;
+      }
+
+      const contextInput = {
+        productId: Number(line.productId),
+        expectedReceiveVariantId: resolvedReceiveVariantId,
+        expectedReceiveUnitsPerVariant: resolvedReceiveUnits,
+        vendorProductId: resolvedVendorProductId,
+        pricingSource: resolvedPricingSource,
+        pricing: effectivePricing,
+      };
+      const context = await resolveLineContext(tx, header, contextInput);
       const catalogQuote = resolvedPricingSource === "vendor_catalog"
         ? context.vendorProduct
         : null;
-      const quoteReference = catalogQuote
-        ? catalogQuote.quoteReference ?? null
-        : input.quoteReference === undefined ? line.quoteReference : input.quoteReference;
-      const quotedAt = catalogQuote
-        ? catalogQuote.quotedAt ?? null
-        : input.quotedAt === undefined ? line.quotedAt : input.quotedAt;
-      const validUntil = catalogQuote
-        ? catalogQuote.quoteValidUntil ?? null
-        : input.quoteValidUntil === undefined ? line.quoteValidUntil : input.quoteValidUntil;
+      if (catalogQuote) {
+        quoteReference = catalogQuote.quoteReference ?? null;
+        quotedAt = catalogQuote.quotedAt ?? null;
+        validUntil = catalogQuote.quoteValidUntil ?? null;
+      }
       const quotedDate = quoteDateOnly(quotedAt);
       if (quotedDate && validUntil && String(validUntil) < quotedDate) {
         throw new PurchaseOrderLineCommandError(

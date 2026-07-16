@@ -200,6 +200,32 @@ describe("purchase-order line command validation boundary", () => {
   });
 
   it.each([
+    [
+      "an extended total",
+      {
+        ...updateInput,
+        pricing: { basis: "extended_total", quantityPieces: 12, quotedTotalCents: 3_158 },
+        pricingSource: "manual",
+        quotedAt: VERSION,
+        catalogWrite: { mode: "upsert" },
+      },
+    ],
+    [
+      "catalog provenance instead of a manual quote",
+      {
+        ...updateInput,
+        pricing: addInput.pricing,
+        pricingSource: "vendor_catalog",
+        quotedAt: VERSION,
+        catalogWrite: { mode: "upsert" },
+      },
+    ],
+  ])("rejects existing-line supplier-price capture with %s before DB access", async (_label, input) => {
+    const { db, commands } = commandBoundary();
+    await expectInvalidBeforeDb(() => commands.updateLine(55, input), db, "catalogWrite");
+  });
+
+  it.each([
     ["productId", { ...addInput, productId: PG_INTEGER_MAX + 1 }, "productId"],
     [
       "piece quantity",
@@ -630,6 +656,14 @@ describe("purchase-order line command transaction invariants", () => {
     }
     expect(addLineSource).toContain("effectiveInput = { ...input, vendorProductId }");
     expect(addLineSource).toContain("normalizePricing(effectiveInput.pricing");
+
+    const updateCatalogPosition = updateLineSource.indexOf("await options.persistCatalogWrites(");
+    const updateLinePosition = updateLineSource.indexOf(".update(purchaseOrderLines)");
+    expect(updateCatalogPosition).toBeGreaterThanOrEqual(0);
+    expect(updateLinePosition).toBeGreaterThan(updateCatalogPosition);
+    expect(updateLineSource).toContain("resolvedVendorProductId = vendorProductId");
+    expect(updateLineSource).toContain("pricing: effectivePricing");
+    expect(updateLineSource).toContain("quotedAt,");
   });
 
   it("advances OCC timestamps monotonically at millisecond precision", () => {

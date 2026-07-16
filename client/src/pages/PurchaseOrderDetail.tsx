@@ -1073,6 +1073,8 @@ export default function PurchaseOrderDetail() {
   );
   const [editRequiresLegacyConfirmation, setEditRequiresLegacyConfirmation] = useState(false);
   const [legacyPricingConfirmed, setLegacyPricingConfirmed] = useState(false);
+  const [editSaveToVendorCatalog, setEditSaveToVendorCatalog] = useState(false);
+  const [editSetAsPreferred, setEditSetAsPreferred] = useState(false);
 
   // Add line form
   const [productSearch, setProductSearch] = useState("");
@@ -1319,6 +1321,11 @@ export default function PurchaseOrderDetail() {
     saveToVendorCatalog,
     linePricing.basis,
     lineQuoteMetadataEvaluation.metadata,
+  );
+  const editCatalogQuoteDateMissing = reusableCatalogQuoteDateMissing(
+    editSaveToVendorCatalog,
+    editLinePricing.basis,
+    editLineQuoteMetadataEvaluation.metadata,
   );
 
   // Mutations
@@ -2058,6 +2065,9 @@ export default function PurchaseOrderDetail() {
     onSuccess: (_result, command) => {
       updateLineIntent.complete(command.idempotencyKey);
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      if (command.body.catalogWrite) {
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor-products"] });
+      }
       setEditingLineId(null);
       setEditingLineField(null);
       setSkuVariants([]);
@@ -2066,6 +2076,8 @@ export default function PurchaseOrderDetail() {
       setOriginalEditLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
       setEditRequiresLegacyConfirmation(false);
       setLegacyPricingConfirmed(false);
+      setEditSaveToVendorCatalog(false);
+      setEditSetAsPreferred(false);
       toast({ title: "Line updated" });
     },
     onError: (err: Error, command) => {
@@ -2122,6 +2134,8 @@ export default function PurchaseOrderDetail() {
     setOriginalEditLineQuoteMetadata(storedMetadata);
     setEditRequiresLegacyConfirmation(stored.requiresLegacyConfirmation);
     setLegacyPricingConfirmed(false);
+    setEditSaveToVendorCatalog(false);
+    setEditSetAsPreferred(false);
   }
 
   async function startSkuEdit(line: any) {
@@ -2173,6 +2187,14 @@ export default function PurchaseOrderDetail() {
       });
       return;
     }
+    if (editCatalogQuoteDateMissing) {
+      toast({
+        title: "Quote date required",
+        description: "Enter the supplier quote date or turn off the supplier-price update.",
+        variant: "destructive",
+      });
+      return;
+    }
     submitLineUpdate(editingPricingLine, {
       // A human changed or confirmed this line. Keep its quote metadata, but
       // mark the pricing source as manual rather than claiming an untouched
@@ -2186,6 +2208,15 @@ export default function PurchaseOrderDetail() {
         editLineQuoteMetadata,
         metadataEvaluation.metadata,
       ),
+      ...(editSaveToVendorCatalog && evaluation.pricing.basis !== "extended_total"
+        ? {
+            catalogWrite: {
+              mode: "upsert" as const,
+              setPreferred: editSetAsPreferred,
+            },
+            quotedAt: metadataEvaluation.metadata.quotedAt,
+          }
+        : {}),
     });
   }
 
@@ -2201,6 +2232,8 @@ export default function PurchaseOrderDetail() {
     setOriginalEditLineQuoteMetadata(createEmptyPoLineQuoteMetadataDraft());
     setEditRequiresLegacyConfirmation(false);
     setLegacyPricingConfirmed(false);
+    setEditSaveToVendorCatalog(false);
+    setEditSetAsPreferred(false);
   }
 
   const updateChargesMutation = useMutation({
@@ -3903,6 +3936,53 @@ export default function PurchaseOrderDetail() {
                 onChange={setEditLineQuoteMetadata}
               />
 
+              <div className="space-y-2 rounded-md border p-3">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="editSaveToVendorCatalog"
+                    checked={
+                      editSaveToVendorCatalog &&
+                      editLinePricing.basis !== "extended_total"
+                    }
+                    onCheckedChange={(value) => setEditSaveToVendorCatalog(!!value)}
+                    disabled={editLinePricing.basis === "extended_total"}
+                  />
+                  <label
+                    htmlFor="editSaveToVendorCatalog"
+                    className="text-sm cursor-pointer select-none"
+                  >
+                    Update supplier price with this quote
+                  </label>
+                </div>
+                {editSaveToVendorCatalog && editLinePricing.basis !== "extended_total" && (
+                  <>
+                    {editCatalogQuoteDateMissing && (
+                      <p className="text-xs text-amber-700 ml-6" role="alert">
+                        Enter a quote date to save this reusable supplier price.
+                      </p>
+                    )}
+                    <div className="flex items-center gap-2 ml-6">
+                      <Checkbox
+                        id="editSetAsPreferred"
+                        checked={editSetAsPreferred}
+                        onCheckedChange={(value) => setEditSetAsPreferred(!!value)}
+                      />
+                      <label
+                        htmlFor="editSetAsPreferred"
+                        className="text-sm cursor-pointer select-none text-muted-foreground"
+                      >
+                        Set as preferred supplier for this product
+                      </label>
+                    </div>
+                  </>
+                )}
+                {editLinePricing.basis === "extended_total" && (
+                  <p className="text-xs text-muted-foreground ml-6">
+                    A quantity-specific total remains on this PO and cannot become a reusable supplier price.
+                  </p>
+                )}
+              </div>
+
               {editRequiresLegacyConfirmation && (
                 <div className="rounded-md border border-amber-300 bg-amber-50 p-3 space-y-3 text-sm text-amber-950">
                   <p>
@@ -3939,6 +4019,7 @@ export default function PurchaseOrderDetail() {
                     !editLinePricingEvaluation.pricing ||
                     !editLineQuoteMetadataEvaluation.metadata ||
                     (editRequiresLegacyConfirmation && !legacyPricingConfirmed) ||
+                    editCatalogQuoteDateMissing ||
                     updateLineMutation.isPending
                   }
                 >
@@ -4371,7 +4452,7 @@ export default function PurchaseOrderDetail() {
                       disabled={linePricing.basis === "extended_total"}
                     />
                     <label htmlFor="saveToVendorCatalog" className="text-sm cursor-pointer select-none">
-                      {selectedCatalogEntry ? "Update vendor catalog with new cost" : "Save to vendor catalog"}
+                      Update supplier price with this quote
                     </label>
                   </div>
                   {saveToVendorCatalog && linePricing.basis !== "extended_total" && (
@@ -4379,7 +4460,7 @@ export default function PurchaseOrderDetail() {
                       {catalogQuoteDateMissing && (
                         <p className="text-xs text-amber-700 ml-6" role="alert">
                           Enter a quote date to save this reusable catalog price, or uncheck
-                          {" "}“{selectedCatalogEntry ? "Update vendor catalog with new cost" : "Save to vendor catalog"}”
+                          {" "}“Update supplier price with this quote”
                           {" "}to add the line to this PO only.
                         </p>
                       )}
