@@ -1224,10 +1224,15 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       `);
       const existing = byOrderId?.rows?.[0];
       if (existing) {
+        const resolved = await resolveShipmentByOrderKey(
+          Number(existing.id),
+          shipment,
+          externalFulfillmentId,
+        );
         return {
-          row: existing,
+          row: resolved.row,
           fallback: false,
-          handled: false,
+          handled: resolved.handled,
           matchedByPhysicalIdentity: false,
         };
       }
@@ -1349,7 +1354,40 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         incomingTracking.length > 0 &&
         currentTracking === incomingTracking;
 
-      if (!samePhysicalShipment && !safeLegacyTrackingRepair) {
+      if (safeLegacyTrackingRepair) {
+        const incomingSsOrderId = Number(shipment.orderId);
+        const validIncomingSsOrderId =
+          Number.isInteger(incomingSsOrderId) && incomingSsOrderId > 0
+            ? incomingSsOrderId
+            : null;
+        await db.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET external_fulfillment_id = COALESCE(
+                external_fulfillment_id,
+                ${externalFulfillmentId}
+              ),
+              shipstation_order_id = COALESCE(
+                ${validIncomingSsOrderId},
+                shipstation_order_id
+              ),
+              engine_order_ref = COALESCE(
+                ${validIncomingSsOrderId != null ? String(validIncomingSsOrderId) : null},
+                engine_order_ref
+              ),
+              updated_at = NOW()
+          WHERE id = ${parent.id}
+        `);
+        return {
+          row: {
+            ...parent,
+            external_fulfillment_id:
+              parent.external_fulfillment_id ?? externalFulfillmentId,
+          },
+          handled: false,
+        };
+      }
+
+      if (!samePhysicalShipment) {
         await recordShipStationUnmappedPhysicalException(db, {
           shipment,
           wmsOrderId: Number(parent.order_id),

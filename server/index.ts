@@ -1255,6 +1255,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           JOIN wms.orders w ON w.id = os.order_id
           WHERE COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
             AND os.status IN ('queued', 'labeled', 'shipped')
+            AND COALESCE(os.requires_review, false) = false
             AND (
               os.last_reconciled_at IS NULL
               OR os.last_reconciled_at < NOW() - INTERVAL '1 hour'
@@ -1282,16 +1283,47 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
             // 1. Fetch engine order state + shipments
             const engineState = await engine.getState(ref);
+            const orderNumber = String(row.order_number ?? "").trim();
+            const canonicalShipments = await engine.getShipments(
+              ref,
+              orderNumber ? { orderNumber } : undefined,
+            );
             if (!engineState) {
+              const hasShippedPackageFact = canonicalShipments.some(
+                (shipment) => shipment.kind === "shipped",
+              );
+              const hasVoidedPackageFact = canonicalShipments.some(
+                (shipment) => shipment.kind === "voided",
+              );
+              if (
+                (row.wms_shipment_status === "queued" ||
+                  row.wms_shipment_status === "labeled") &&
+                (hasShippedPackageFact || hasVoidedPackageFact) &&
+                engine.applyInboundShipmentAuthority &&
+                orderNumber
+              ) {
+                const processed = await engine.applyInboundShipmentAuthority({
+                  engineRef: ref,
+                  orderNumber,
+                });
+                if (hasShippedPackageFact) markedShipped += processed;
+                else markedVoided += processed;
+                await db.execute(sql`
+                  UPDATE wms.outbound_shipments
+                  SET last_reconciled_at = NOW()
+                  WHERE id = ${shipmentId}
+                `);
+                continue;
+              }
+
               // The engine order 404s. A frequent cause is ShipStation "Combine
               // Orders": it merges this order into another and DESTROYS this SS
-              // order, so no SHIP_NOTIFY will ever arrive here and the shipment
-              // is stranded 'queued'/'labeled' forever. We used to skip silently
-              // every hour. Instead, surface a stranded, non-terminal shipment
-              // (order not cancelled; not brand-new, so a transient API miss
-              // can't trip it) for review, and stamp last_reconciled_at so we
-              // stop hammering the engine API. Shipped rows / cancelled orders
-              // are left untouched.
+              // order. The stable order-number lookup above gets first chance to
+              // recover any physical package facts. If none exist, surface a
+              // stranded, non-terminal shipment (order not cancelled; not
+              // brand-new, so a transient API miss can't trip it) for review,
+              // and stamp last_reconciled_at so we stop hammering the engine API.
+              // Shipped rows / cancelled orders are left untouched.
               const stranded =
                 (row.wms_shipment_status === "queued" ||
                   row.wms_shipment_status === "labeled") &&
@@ -1356,8 +1388,6 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
               continue;
             }
 
-            const canonicalShipments = await engine.getShipments(ref);
-
             // 2. Derive reconcile event from canonical types
             let event: { kind: string; [key: string]: any } | null =
               deriveReconcileEvent({
@@ -1370,6 +1400,34 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
                 // order itself is cancelled; otherwise it's flagged for review.
                 orderIsCancelled: row.oms_order_status === "cancelled",
               });
+
+            // Provider package facts must flow through the same authoritative
+            // resolver as webhooks. Directly applying one canonical ShipStation
+            // event to this parent row corrupts split orders: package one can
+            // mark the full parent shipped while package two is never discovered.
+            if (
+              event &&
+              (event.kind === "shipped" || event.kind === "voided") &&
+              engine.applyInboundShipmentAuthority
+            ) {
+              if (!orderNumber) {
+                throw new Error(
+                  `Inbound shipment authority requires an order number for shipment ${shipmentId}`,
+                );
+              }
+              const processed = await engine.applyInboundShipmentAuthority({
+                engineRef: ref,
+                orderNumber,
+              });
+              if (event.kind === "shipped") markedShipped += processed;
+              if (event.kind === "voided") markedVoided += processed;
+              await db.execute(sql`
+                UPDATE wms.outbound_shipments
+                SET last_reconciled_at = NOW()
+                WHERE id = ${shipmentId}
+              `);
+              continue;
+            }
 
             // 3. Push WMS shipped/cancelled status outward when engine has drifted.
             if (!event) {

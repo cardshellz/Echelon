@@ -174,7 +174,12 @@ describe("ShipStation Engine Adapter", () => {
       });
       engine = createShipStationEngine(ss);
 
-      const events = await engine.getShipments(ref);
+      const events = await engine.getShipments(ref, {
+        orderNumber: "#59826",
+      });
+      expect(ss.getShipments).toHaveBeenCalledWith(999, {
+        orderNumber: "#59826",
+      });
       expect(events).toHaveLength(2);
       expect(events[0].kind).toBe("shipped");
       if (events[0].kind === "shipped") {
@@ -186,6 +191,32 @@ describe("ShipStation Engine Adapter", () => {
         expect(events[0].carrierCostSource).toBe("shipstation_shipments_api");
       }
       expect(events[1].kind).toBe("voided");
+    });
+  });
+
+  describe("applyInboundShipmentAuthority", () => {
+    it("delegates all order packages to the authoritative SHIP_NOTIFY resolver", async () => {
+      const processed = await engine.applyInboundShipmentAuthority!({
+        engineRef: ref,
+        orderNumber: "#59826",
+      });
+
+      expect(ss.processShipNotify).toHaveBeenCalledWith(
+        "/shipments?orderNumber=%2359826",
+      );
+      expect(processed).toBe(1);
+    });
+
+    it("rejects a blank order number", async () => {
+      await expect(
+        engine.applyInboundShipmentAuthority!({
+          engineRef: ref,
+          orderNumber: "   ",
+        }),
+      ).rejects.toThrow(
+        "ShipStation inbound shipment authority requires an order number",
+      );
+      expect(ss.processShipNotify).not.toHaveBeenCalled();
     });
   });
 

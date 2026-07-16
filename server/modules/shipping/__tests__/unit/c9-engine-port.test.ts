@@ -243,12 +243,17 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
     expect(v2Block).not.toContain("ss.getOrderById");
   });
 
-  it("V2 reconciler calls engine.getShipments(ref) not ss.getShipments", () => {
+  it("V2 reconciler calls engine.getShipments with stable order identity, not ss.getShipments", () => {
     const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
     const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
     const v2Block = indexSrc.substring(v2Start, v2End);
-    expect(v2Block).toContain("engine.getShipments(ref)");
+    const shipmentsPos = v2Block.indexOf("engine.getShipments(");
+    const missingOrderPos = v2Block.indexOf("if (!engineState)");
+
+    expect(v2Block).toContain("engine.getShipments(");
+    expect(v2Block).toContain("orderNumber ? { orderNumber }");
     expect(v2Block).not.toContain("ss.getShipments");
+    expect(shipmentsPos).toBeLessThan(missingOrderPos);
   });
 
   it("V2 reconciler uses deriveReconcileEvent not SS-specific derive", () => {
@@ -257,6 +262,33 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
     const v2Block = indexSrc.substring(v2Start, v2End);
     expect(v2Block).toContain("deriveReconcileEvent(");
     expect(v2Block).not.toContain("deriveShipStationShipmentReconcileEvent");
+  });
+
+  it("V2 reconciler routes inbound package facts through engine authority before direct dispatch", () => {
+    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
+    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
+    const v2Block = indexSrc.substring(v2Start, v2End);
+    const authorityPos = v2Block.indexOf(
+      "engine.applyInboundShipmentAuthority",
+    );
+    const dispatchPos = v2Block.indexOf("dispatchShipmentEvent(");
+
+    expect(authorityPos).toBeGreaterThan(-1);
+    expect(dispatchPos).toBeGreaterThan(authorityPos);
+    expect(v2Block).toContain(
+      'event.kind === "shipped" || event.kind === "voided"',
+    );
+    expect(v2Block).toContain("String(row.order_number");
+  });
+
+  it("V2 reconciler never auto-applies shipments already flagged for review", () => {
+    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
+    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
+    const v2Block = indexSrc.substring(v2Start, v2End);
+
+    expect(v2Block).toContain(
+      "COALESCE(os.requires_review, false) = false",
+    );
   });
 
   it("V2 reconciler gates engine-cancel on order intent and flags live orders for review", () => {
