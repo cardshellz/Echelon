@@ -202,6 +202,7 @@ export interface PurchasingRecommendationRawRow {
   vendor_quoted_at?: string | Date | null;
   vendor_quoted_at_date?: string | null;
   vendor_quote_valid_until?: string | null;
+  last_cost_mills?: number | string | null;
   last_cost_cents?: number | string | null;
   vendor_product_last_purchased_at?: string | Date | null;
   vendor_product_updated_at?: string | Date | null;
@@ -302,6 +303,7 @@ export interface PurchasingRecommendationItem {
     quoteReference: string | null;
     quotedAt: string | Date | null;
     quoteValidUntil: string | null;
+    lastCostMills: number | null;
     lastCostCents: number | null;
     lastPurchasedAt: string | Date | null;
     vendorProductUpdatedAt: string | Date | null;
@@ -1369,10 +1371,12 @@ function buildRecommendationCandidateScore(input: {
   };
 }
 
-function resolveSupplierCost(input: {
+export function resolveSupplierCost(input: {
   estimatedCostMills: number | null;
   estimatedCostCents: number | null;
   unitCostCents: number | null;
+  pricingBasis: PurchasingRecommendationSupplierPricingBasis;
+  lastCostMills: number | null;
   lastCostCents: number | null;
   lastPurchasedAt: string | Date | null;
   quotedAt: string | Date | null;
@@ -1389,8 +1393,19 @@ function resolveSupplierCost(input: {
   let estimatedCostMills: number | null = null;
   let estimatedCostCents: number | null = null;
   let costSource: PurchasingRecommendationSupplierCostSource = "missing";
+  const hasExplicitSupplierQuote =
+    input.pricingBasis === "per_piece" ||
+    input.pricingBasis === "per_purchase_uom";
 
-  if (input.estimatedCostMills !== null) {
+  if (!hasExplicitSupplierQuote && input.lastCostMills !== null) {
+    estimatedCostMills = input.lastCostMills;
+    estimatedCostCents = millsToCents(estimatedCostMills);
+    costSource = "last_purchase_cost";
+  } else if (!hasExplicitSupplierQuote && input.lastCostCents !== null) {
+    estimatedCostCents = input.lastCostCents;
+    estimatedCostMills = centsToMills(estimatedCostCents);
+    costSource = "last_purchase_cost";
+  } else if (input.estimatedCostMills !== null) {
     estimatedCostMills = input.estimatedCostMills;
     estimatedCostCents = millsToCents(estimatedCostMills);
     costSource = "vendor_unit_cost_mills";
@@ -1398,6 +1413,10 @@ function resolveSupplierCost(input: {
     estimatedCostCents = input.estimatedCostCents ?? input.unitCostCents;
     estimatedCostMills = centsToMills(estimatedCostCents as number);
     costSource = "vendor_unit_cost_cents";
+  } else if (input.lastCostMills !== null) {
+    estimatedCostMills = input.lastCostMills;
+    estimatedCostCents = millsToCents(estimatedCostMills);
+    costSource = "last_purchase_cost";
   } else if (input.lastCostCents !== null) {
     estimatedCostCents = input.lastCostCents;
     estimatedCostMills = centsToMills(estimatedCostCents);
@@ -1785,11 +1804,14 @@ export function generatePurchasingRecommendations(
       suggestedOrderPieces % supplierQuote.piecesPerPurchaseUom === 0
     );
     const lastCostCents = asNonnegativeSafeIntegerOrNull(row.last_cost_cents);
+    const lastCostMills = asNonnegativeSafeIntegerOrNull(row.last_cost_mills);
     const supplierAnalysisAsOf = parseDate(row.recommendation_analysis_as_of) ?? asOf;
     const supplierCost = resolveSupplierCost({
       estimatedCostMills: asNonnegativeSafeIntegerOrNull(row.estimated_cost_mills),
       estimatedCostCents: asNonnegativeSafeIntegerOrNull(row.estimated_cost_cents),
       unitCostCents: asNonnegativeSafeIntegerOrNull(row.unit_cost_cents),
+      pricingBasis: supplierQuote.pricingBasis,
+      lastCostMills,
       lastCostCents,
       lastPurchasedAt: row.vendor_product_last_purchased_at ?? null,
       quotedAt: row.vendor_quoted_at ?? null,
@@ -1965,6 +1987,7 @@ export function generatePurchasingRecommendations(
         quoteReference: row.vendor_quote_reference ?? null,
         quotedAt: row.vendor_quoted_at ?? null,
         quoteValidUntil: row.vendor_quote_valid_until ?? null,
+        lastCostMills,
         lastCostCents,
         lastPurchasedAt: row.vendor_product_last_purchased_at ?? null,
         vendorProductUpdatedAt: row.vendor_product_updated_at ?? null,

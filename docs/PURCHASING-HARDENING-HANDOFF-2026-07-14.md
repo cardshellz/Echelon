@@ -19,21 +19,23 @@ read-only automatic-purchasing candidate discovery and readiness ranking. PR #93
 then made supplier-readiness blockers directly remediable without guessing supplier
 data, and PR #939 hardened the recommendation review queue with exact demand evidence
 and fail-closed operator attestations. The current local slice adds dry-run-first bulk
-intake for verified supplier catalog evidence.
+intake for verified supplier catalog evidence. PR #941 merged the optional PO quote
+capture correction. The current continuation recovers supplier relationships and
+exact last-paid evidence from completed historical purchase orders.
 
 ## Working state
 
 - Worktree: `Echelon-purchasing-hardening`
-- Branch: `codex/purchasing-supplier-evidence-import-2026-07-16`
-- Base: `e6a51464`; current `origin/main`: `a6b6c159`
-- Base hardening slice: merged PR #939
-- Deployment status: PR #939 deployed as Heroku v2401; current production v2402
-  contains subsequent merged PR #938
+- Branch: `codex/historical-po-supplier-evidence-backfill-2026-07-16`
+- Base and current `origin/main`: `7fe44f8c`
+- Base hardening slice: merged PR #941
+- Deployment status: PR #941 deployed as Heroku v2404 at `7fe44f8c`
 - Migration 136 status: applied and verified in production
 - Migration 138 status: applied and verified in production
 - Migration 140 status: merged in PR #927; production state was not re-audited in
   this July 15 readiness continuation
-- Commit/PR status: supplier-evidence import slice is local and not yet published
+- Commit/PR status: historical-PO supplier-evidence backfill is local and not yet
+  published
 
 Do not deploy this branch without owner approval.
 
@@ -711,18 +713,96 @@ Current local evidence:
 - production build: passed; 3,606 client modules transformed and server bundle built
 - `git diff --check`: passed, with Windows line-ending notices only
 
+## Historical PO supplier-evidence recovery slice
+
+The production database already contains completed purchase orders with actual
+supplier, product/variant, received quantity, and unit-cost evidence. The current
+slice uses those records rather than requiring operators to re-enter known history.
+
+The backfill is preview-only by default. Apply requires all of:
+
+- `--execute`;
+- an existing application user supplied through `--actor`;
+- the exact SHA-256 hash returned by the current preview; and
+- the same explicit vendor exclusions used during preview.
+
+The preview hash fingerprints the selected PO evidence, current vendor-product
+mapping/evidence state, line links, conflicts, and exclusions. Apply recomputes that
+state under a transaction-scoped advisory lock and rolls back if anything changed.
+
+For each active supplier/product/configuration key, the backfill:
+
+- selects the latest completed received/closed PO;
+- weights exact unit mills by actual received quantity;
+- preserves sub-cent prices, including values whose compatibility cents mirror is
+  zero;
+- rejects actual zero/placeholder costs;
+- creates a missing mapping as active, non-preferred `legacy_unknown` evidence
+  without inventing quote basis, quote dates, UOM, MOQ, lead time, or preference;
+- updates only `last_purchased_at`, exact `last_cost_mills`, and the rounded
+  `last_cost_cents` compatibility mirror on existing mappings;
+- links only currently unlinked completed PO lines;
+- never overwrites a conflicting legacy line link; and
+- writes attributable audit evidence in the same transaction.
+
+Migration 144 adds exact `vendor_products.last_cost_mills`, backfills existing cents,
+and enforces a database mills/cents mirror constraint. Recommendation economics now
+prefer exact last-paid mills for `legacy_unknown` mappings while continuing to prefer
+a verified explicit per-piece or per-UOM quote when one exists.
+
+The CLI accepts repeated `--exclude-vendor-id=ID` flags. Production preview excludes
+vendor 101, named `Test Vendor`, without hardcoding that identity into application
+logic.
+
+### Production read-only preview
+
+The final read-only preview on July 16 returned:
+
+- 21 validated supplier/product/configuration targets;
+- 5 mappings to create;
+- 16 existing mappings to update with last-purchase evidence;
+- 16 unlinked historical PO lines to link;
+- 2 conflicting legacy line links left untouched and explicitly reported; and
+- 1 zero-cost placeholder target excluded.
+
+The two conflicts are:
+
+- PO line 153: product 5 / variant 206 is linked to vendor-product 25 for product 102;
+- PO line 163: product 103 / variant 207 is linked to vendor-product 11 for product 39.
+
+No production data was changed. Do not run apply until migration 144 and this code are
+merged/deployed, a fresh preview is reviewed, and the owner explicitly approves the
+exact preview hash and exclusions.
+
+### Validation evidence
+
+- `npm.cmd run check`: passed
+- focused service, CLI, migration, recommendation, writer-ratchet, and
+  migration-prefix gate: passed
+- procurement regression gate: 85 files and 760 tests passed; 19 skipped
+- production build: passed; 3,605 client modules transformed and server bundle built
+- `git diff --check`: passed, with Windows line-ending notices only
+- a disposable PostgreSQL 16 integration suite is wired into CI to apply migration
+  144 and prove exact sub-cent evidence, zero-cost exclusion, atomic mapping/link/audit
+  writes, and database mirror enforcement; it compiles and intentionally skips
+  locally without the explicit disposable-database environment
+
 ## Recommended next implementation order
 
-1. Review and merge the verified supplier-evidence import workflow.
-2. Verify PR #939 and this slice deploy, then complete an authenticated read-only
+1. Review and merge the historical PO supplier-evidence recovery workflow.
+2. Verify the slice deploy, rerun the production preview with vendor 101 excluded,
+   and review the two conflicting legacy links.
+3. With explicit owner approval, apply the exact reviewed preview once and verify
+   created/updated mappings, PO-line links, audit rows, and recommendation economics.
+4. Complete an authenticated read-only
    smoke of Purchasing -> Supplier Setup Gaps ->
    exact Suppliers task and Purchasing -> Forecast Input Gaps -> exact review task.
-3. Use the previewed import or exact single-mapping tasks to correct supplier catalog,
+5. Use the verified import or exact single-mapping tasks to correct supplier catalog,
    lead-time, quote, receive-variant, and demand-evidence gaps only from verified
    business evidence; do not weaken approval policy.
-4. When the readiness report identifies a genuinely eligible low-risk SKU, run and
+6. When the readiness report identifies a genuinely eligible low-risk SKU, run and
    save its exact-SKU preflight and obtain explicit owner approval.
-5. Execute the one-SKU pilot once and complete the verification/lifecycle runbook
+7. Execute the one-SKU pilot once and complete the verification/lifecycle runbook
    before considering any wider unattended purchasing policy.
 
 Autonomous dead-command replay remains deferred. Encrypted request snapshots and a
