@@ -47,6 +47,7 @@ async function reconcileOneShipment(
     wms_shipment_status: string;
     tracking_number: string | null;
     carrier: string | null;
+    order_number?: string;
     oms_order_status?: string;
   },
   ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string },
@@ -57,11 +58,37 @@ async function reconcileOneShipment(
 
   // 1. Fetch engine order state + shipments
   const engineState: EngineOrderState | null = await engine.getState(ref);
+  const orderNumber = String(row.order_number ?? "").trim();
+  const canonicalShipments: CanonicalShipmentEvent[] = await engine.getShipments(
+    ref,
+    orderNumber ? { orderNumber } : undefined,
+  );
   if (!engineState) {
+    const hasInboundPackageFact = canonicalShipments.some(
+      (shipment) =>
+        shipment.kind === "shipped" || shipment.kind === "voided",
+    );
+    if (
+      (row.wms_shipment_status === "queued" ||
+        row.wms_shipment_status === "labeled") &&
+      hasInboundPackageFact &&
+      engine.applyInboundShipmentAuthority &&
+      orderNumber
+    ) {
+      const processed = await engine.applyInboundShipmentAuthority({
+        engineRef: ref,
+        orderNumber,
+      });
+      await db.execute("stamp_reconciled", { shipmentId });
+      return {
+        stamped: true,
+        event: null,
+        delegated: true,
+        processed,
+      };
+    }
     return { stamped: false, event: null };
   }
-
-  const canonicalShipments: CanonicalShipmentEvent[] = await engine.getShipments(ref);
 
   // 2. Derive reconcile event from canonical types
   let event: { kind: string; [key: string]: any } | null = deriveReconcileEvent({
@@ -74,6 +101,24 @@ async function reconcileOneShipment(
     // only authoritative when the ORDER itself is cancelled.
     orderIsCancelled: row.oms_order_status === "cancelled",
   });
+
+  if (
+    event &&
+    (event.kind === "shipped" || event.kind === "voided") &&
+    engine.applyInboundShipmentAuthority
+  ) {
+    if (!orderNumber) {
+      throw new Error(
+        `Inbound shipment authority requires an order number for shipment ${shipmentId}`,
+      );
+    }
+    const processed = await engine.applyInboundShipmentAuthority({
+      engineRef: ref,
+      orderNumber,
+    });
+    await db.execute("stamp_reconciled", { shipmentId });
+    return { stamped: true, event, delegated: true, processed };
+  }
 
   if (!event) {
     // No divergence — stamp to prove we checked
@@ -120,14 +165,20 @@ function makeEngine(overrides: {
   state?: EngineOrderState | null;
   shipments?: CanonicalShipmentEvent[];
   getStateThrows?: boolean;
+  applyInboundShipmentAuthority?: ReturnType<typeof vi.fn>;
 } = {}) {
-  return {
+  const engine: Record<string, unknown> = {
     isConfigured: () => true,
     getState: overrides.getStateThrows
       ? vi.fn().mockRejectedValue(new Error("Engine API down"))
       : vi.fn().mockResolvedValue(overrides.state ?? null),
     getShipments: vi.fn().mockResolvedValue(overrides.shipments ?? []),
   };
+  if (overrides.applyInboundShipmentAuthority) {
+    engine.applyInboundShipmentAuthority =
+      overrides.applyInboundShipmentAuthority;
+  }
+  return engine;
 }
 
 function makeRef(engineOrderRef = "9999") {
@@ -140,6 +191,7 @@ function makeRow(overrides: Partial<{
   wms_shipment_status: string;
   tracking_number: string | null;
   carrier: string | null;
+  order_number: string;
   oms_order_status: string;
 }> = {}) {
   return {
@@ -148,6 +200,7 @@ function makeRow(overrides: Partial<{
     wms_shipment_status: overrides.wms_shipment_status ?? "queued",
     tracking_number: overrides.tracking_number ?? null,
     carrier: overrides.carrier ?? null,
+    order_number: overrides.order_number ?? "#100",
     oms_order_status: overrides.oms_order_status ?? "confirmed",
   };
 }
@@ -194,6 +247,163 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     expect(db.execute).toHaveBeenCalledWith("oms_update_shipped", expect.any(Object));
     expect(db.execute).toHaveBeenCalledWith("stamp_reconciled", { shipmentId: 100 });
     expect(result.event?.kind).toBe("shipped");
+  });
+
+  it("delegates ShipStation package facts by order number instead of mutating the parent", async () => {
+    const applyInboundShipmentAuthority = vi.fn().mockResolvedValue(2);
+    const engine = makeEngine({
+      state: {
+        status: "shipped",
+        trackingNumber: "9434650106151102226396",
+        carrier: "stamps_com",
+        shipDate: new Date("2026-07-08T23:19:00.000Z"),
+      },
+      shipments: [
+        {
+          kind: "shipped",
+          trackingNumber: "9434650106151102226396",
+          carrierRaw: "stamps_com",
+          shipDate: new Date("2026-07-08T23:19:00.000Z"),
+          items: [],
+        },
+      ],
+      applyInboundShipmentAuthority,
+    });
+
+    const result = await reconcileOneShipment(
+      db,
+      engine,
+      makeRow({
+        shipment_id: 6576,
+        order_id: 204931,
+        order_number: "#59826",
+        wms_shipment_status: "queued",
+      }),
+      makeRef("759013549"),
+      dispatch as any,
+      recompute,
+    );
+
+    expect(applyInboundShipmentAuthority).toHaveBeenCalledWith({
+      engineRef: {
+        engine: "shipstation",
+        engineOrderRef: "759013549",
+        engineShipmentRef: undefined,
+      },
+      orderNumber: "#59826",
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(recompute).not.toHaveBeenCalled();
+    expect(db.execute).not.toHaveBeenCalledWith(
+      "oms_update_shipped",
+      expect.any(Object),
+    );
+    expect(db.execute).toHaveBeenCalledWith("stamp_reconciled", {
+      shipmentId: 6576,
+    });
+    expect(result).toEqual({
+      stamped: true,
+      event: expect.objectContaining({ kind: "shipped" }),
+      delegated: true,
+      processed: 2,
+    });
+  });
+
+  it("refuses direct mutation when package authority lacks an order number", async () => {
+    const applyInboundShipmentAuthority = vi.fn().mockResolvedValue(1);
+    const engine = makeEngine({
+      state: {
+        status: "shipped",
+        trackingNumber: "1Z999",
+        carrier: "ups",
+        shipDate: new Date("2026-07-08T23:19:00.000Z"),
+      },
+      shipments: [
+        {
+          kind: "shipped",
+          trackingNumber: "1Z999",
+          carrierRaw: "ups",
+          shipDate: new Date("2026-07-08T23:19:00.000Z"),
+          items: [],
+        },
+      ],
+      applyInboundShipmentAuthority,
+    });
+
+    await expect(
+      reconcileOneShipment(
+        db,
+        engine,
+        makeRow({ shipment_id: 6576, order_number: "   " }),
+        makeRef("759013549"),
+        dispatch as any,
+        recompute,
+      ),
+    ).rejects.toThrow(
+      "Inbound shipment authority requires an order number for shipment 6576",
+    );
+
+    expect(applyInboundShipmentAuthority).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(db.execute).not.toHaveBeenCalledWith(
+      "stamp_reconciled",
+      expect.any(Object),
+    );
+  });
+
+  it("recovers split package facts when the original engine order no longer exists", async () => {
+    const applyInboundShipmentAuthority = vi.fn().mockResolvedValue(1);
+    const engine = makeEngine({
+      state: null,
+      shipments: [
+        {
+          kind: "shipped",
+          shipmentId: 444249673,
+          engineRef: {
+            engine: "shipstation",
+            engineOrderRef: "759910102",
+          },
+          trackingNumber: "9434650106151102227331",
+          carrier: "USPS",
+          carrierRaw: "stamps_com",
+          shipDate: new Date("2026-07-08T23:25:00.000Z"),
+          items: [],
+        },
+      ],
+      applyInboundShipmentAuthority,
+    });
+
+    const result = await reconcileOneShipment(
+      db,
+      engine,
+      makeRow({
+        shipment_id: 6576,
+        order_number: "#59826",
+        wms_shipment_status: "queued",
+      }),
+      makeRef("759013549"),
+      dispatch as any,
+      recompute,
+    );
+
+    expect(engine.getShipments).toHaveBeenCalledWith(
+      makeRef("759013549"),
+      { orderNumber: "#59826" },
+    );
+    expect(applyInboundShipmentAuthority).toHaveBeenCalledWith({
+      engineRef: makeRef("759013549"),
+      orderNumber: "#59826",
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(db.execute).toHaveBeenCalledWith("stamp_reconciled", {
+      shipmentId: 6576,
+    });
+    expect(result).toEqual({
+      stamped: true,
+      event: null,
+      delegated: true,
+      processed: 1,
+    });
   });
 
   it("labeled → engine cancelled + ORDER cancelled → dispatches markShipmentCancelled + stamps", async () => {

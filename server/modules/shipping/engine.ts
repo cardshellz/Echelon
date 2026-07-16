@@ -77,7 +77,21 @@ export interface ShippingEngine {
   /**
    * Fetch shipments (tracking events) for an engine order.
    */
-  getShipments(engineRef: EngineRef): Promise<CanonicalShipmentEvent[]>;
+  getShipments(
+    engineRef: EngineRef,
+    opts?: { orderNumber?: string },
+  ): Promise<CanonicalShipmentEvent[]>;
+
+  /**
+   * Apply all inbound physical-package facts for one sales order through the
+   * engine adapter's authoritative webhook/package resolver. Reconcilers use
+   * this instead of applying a single canonical event to a parent shipment,
+   * which is unsafe when the engine has split the order into multiple packages.
+   */
+  applyInboundShipmentAuthority?(args: {
+    engineRef: EngineRef;
+    orderNumber: string;
+  }): Promise<number>;
 
   /**
    * Normalize a raw webhook payload into canonical shipment events.

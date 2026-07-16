@@ -174,9 +174,16 @@ export function createShipStationEngine(
       };
     },
 
-    async getShipments(engineRef: EngineRef): Promise<CanonicalShipmentEvent[]> {
+    async getShipments(
+      engineRef: EngineRef,
+      opts?: { orderNumber?: string },
+    ): Promise<CanonicalShipmentEvent[]> {
       const ssOrderId = fromEngineRef(engineRef);
-      const ssShipments = await ss.getShipments(ssOrderId);
+      const orderNumber = opts?.orderNumber?.trim();
+      const ssShipments = await ss.getShipments(
+        ssOrderId,
+        orderNumber ? { orderNumber } : undefined,
+      );
 
       return ssShipments.map((s: any) => {
         if (s.voidDate) {
@@ -209,6 +216,17 @@ export function createShipStationEngine(
           })),
         };
       });
+    },
+
+    async applyInboundShipmentAuthority({ engineRef, orderNumber }): Promise<number> {
+      fromEngineRef(engineRef);
+      const normalizedOrderNumber = orderNumber.trim();
+      if (!normalizedOrderNumber) {
+        throw new Error("ShipStation inbound shipment authority requires an order number");
+      }
+      return ss.processShipNotify(
+        `/shipments?orderNumber=${encodeURIComponent(normalizedOrderNumber)}`,
+      );
     },
 
     async processWebhook(resourceUrl: string): Promise<number> {

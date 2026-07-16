@@ -1850,6 +1850,69 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     expect(fnBlock).toContain("pg_advisory_lock(918406");
     expect(fnBlock).toContain("external_fulfillment_id = ${externalFulfillmentId}");
   });
+
+  it("routes legacy ShipStation order-id matches through package parity resolution", () => {
+    const src = readFileSync(
+      resolve(__dirname, "../../shipstation.service.ts"),
+      "utf-8",
+    );
+    const fnStart = src.indexOf(
+      "async function resolveWmsShipmentForShipNotify(",
+    );
+    const fnBlock = src.slice(
+      fnStart,
+      src.indexOf("async function resolveShipmentByOrderKey(", fnStart),
+    );
+    const orderIdLookupPos = fnBlock.indexOf(
+      "WHERE shipstation_order_id = ${ssOrderId}",
+    );
+    const resolverPos = fnBlock.indexOf(
+      "resolveShipmentByOrderKey(\n          Number(existing.id),",
+      orderIdLookupPos,
+    );
+
+    expect(orderIdLookupPos).toBeGreaterThan(-1);
+    expect(resolverPos).toBeGreaterThan(orderIdLookupPos);
+    expect(fnBlock.slice(orderIdLookupPos)).not.toContain("row: existing,");
+  });
+
+  it("repairs a terminal same-tracking replay before split-package logic can run", () => {
+    const src = readFileSync(
+      resolve(__dirname, "../../shipstation.service.ts"),
+      "utf-8",
+    );
+    const fnStart = src.indexOf("async function resolveShipmentByOrderKey(");
+    const fnBlock = src.slice(
+      fnStart,
+      src.indexOf(
+        "async function syncShipmentItemsFromShipStation(",
+        fnStart,
+      ),
+    );
+    const repairGuardPos = fnBlock.indexOf(
+      "if (safeLegacyTrackingRepair)",
+    );
+    const repairUpdatePos = fnBlock.indexOf(
+      "SET external_fulfillment_id = COALESCE(",
+      repairGuardPos,
+    );
+    const repairReturnPos = fnBlock.indexOf(
+      "handled: false,",
+      repairUpdatePos,
+    );
+    const itemParityPos = fnBlock.indexOf(
+      "const parsedShipStationItems",
+    );
+    const splitInsertPos = fnBlock.indexOf(
+      "INSERT INTO wms.outbound_shipments",
+    );
+
+    expect(repairGuardPos).toBeGreaterThan(-1);
+    expect(repairUpdatePos).toBeGreaterThan(repairGuardPos);
+    expect(repairReturnPos).toBeGreaterThan(repairUpdatePos);
+    expect(itemParityPos).toBeGreaterThan(repairReturnPos);
+    expect(splitInsertPos).toBeGreaterThan(itemParityPos);
+  });
 });
 
 // ─── Combined / merged (ShipStation "Combine Orders") shipment recovery ──
