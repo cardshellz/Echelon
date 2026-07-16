@@ -45,6 +45,7 @@ describe("completed supplier purchase evidence", () => {
             return Promise.resolve([{
               vendorProductId: 91,
               unitCostCents: 263,
+              unitCostMills: 26_321,
               receivedQty: 12,
             }]);
           }
@@ -100,6 +101,7 @@ describe("completed supplier purchase evidence", () => {
     const evidenceUpdate = updates.find((call) => call.table === vendorProducts);
     expect(evidenceUpdate?.patch).toMatchObject({
       lastCostCents: 263,
+      lastCostMills: 26_321,
       lastPurchasedAt: expect.any(Date),
     });
     expect(evidenceUpdate?.patch).not.toHaveProperty("unitCostCents");

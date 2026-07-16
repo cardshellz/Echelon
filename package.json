@@ -13,6 +13,7 @@
     "procurement:health-escalation": "tsx server/jobs/run-procurement-health-escalation.ts",
     "procurement:forecast-input-gaps": "tsx scripts/audit-forecast-input-gaps.ts --json",
     "procurement:automatic-purchasing-pilot": "tsx scripts/run-automatic-purchasing-pilot.ts",
+    "procurement:backfill-historical-supplier-evidence": "tsx scripts/backfill-historical-po-supplier-evidence.ts",
     "qa:daily-replen-counts": "tsx scripts/create-daily-replen-qa-counts.ts --json",
     "recover:allocation-exceptions": "tsx scripts/recover-allocation-exceptions.ts --json",
     "recover:replen-health": "tsx scripts/recover-replen-health.ts --json",
