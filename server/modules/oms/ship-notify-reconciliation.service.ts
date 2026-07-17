@@ -1,12 +1,15 @@
 import { sql } from "drizzle-orm";
 
 import { db } from "../../db";
+import { SHIPSTATION_UNMAPPED_PHYSICAL_RULE } from "./shipstation-unmapped-physical";
 
 const DEFAULT_RECOVERY_LIMIT = 250;
 const MAX_RECOVERY_LIMIT = 1_000;
 const DEFAULT_RESOLVED_BY = "system:ship_notify_reconciliation";
 const RECOVERY_RESOLUTION =
   "The provider physical shipment is now linked to WMS; the earlier SHIP_NOTIFY no-match condition recovered.";
+const VOIDED_SHIPMENT_RESOLUTION =
+  "ShipStation voided this label before fulfillment. No replacement shipment or inventory movement occurred.";
 
 interface QueryExecutor {
   execute: (query: unknown) => Promise<{ rows?: unknown[] }>;
@@ -29,6 +32,31 @@ export interface RecoveredShipNotifyException {
 export interface ShipNotifyExceptionRecoveryResult {
   resolvedCount: number;
   recovered: RecoveredShipNotifyException[];
+}
+
+export interface VoidedShipStationShipmentEvidence {
+  shipmentId: number;
+  voidDate: string;
+}
+
+export interface ShipStationShipmentLookup {
+  getShipmentById: (shipmentId: number) => Promise<{
+    shipmentId: number;
+    voidDate: string | null;
+  } | null>;
+}
+
+export interface VoidedUnmappedExceptionResolution {
+  exceptionId: number;
+  externalShipmentRef: string;
+  providerVoidDate: string;
+}
+
+export interface VoidedUnmappedExceptionSweepResult {
+  checkedCount: number;
+  resolvedCount: number;
+  resolved: VoidedUnmappedExceptionResolution[];
+  failures: Array<{ exceptionId: number; message: string }>;
 }
 
 function positiveInteger(value: unknown, field: string, maximum: number): number {
@@ -63,6 +91,15 @@ function resolvedByActor(value: string | undefined): string {
     throw new Error("resolvedBy must contain between 1 and 120 characters");
   }
   return normalized;
+}
+
+function providerVoidDate(value: unknown): { raw: string; date: Date } {
+  const raw = String(value ?? "").trim();
+  const date = new Date(raw);
+  if (!raw || Number.isNaN(date.getTime())) {
+    throw new Error("voidDate must be a valid ShipStation void timestamp");
+  }
+  return { raw, date };
 }
 
 function rows(result: { rows?: unknown[] }): Record<string, unknown>[] {
@@ -194,5 +231,121 @@ export async function resolveRecoveredShipNotifyNoMatchExceptions(
   return {
     resolvedCount: recovered.length,
     recovered,
+  };
+}
+
+/**
+ * Resolve one exact unmapped-physical exception from positive provider proof
+ * that the label was voided. This never creates shipment or inventory state.
+ */
+export async function resolveVoidedShipStationUnmappedPhysicalException(
+  dbArg: QueryExecutor,
+  evidence: VoidedShipStationShipmentEvidence,
+  options: Pick<ShipNotifyExceptionRecoveryOptions, "now" | "resolvedBy"> = {},
+): Promise<VoidedUnmappedExceptionResolution | null> {
+  const shipmentRef = externalShipmentRef(evidence.shipmentId);
+  if (shipmentRef === null) {
+    throw new Error("shipmentId must be a positive ShipStation shipment id");
+  }
+  const voided = providerVoidDate(evidence.voidDate);
+  const resolvedAt = validTimestamp(options.now);
+  const resolvedBy = resolvedByActor(
+    options.resolvedBy ?? "system:shipstation_void_reconciliation",
+  );
+
+  const result = await dbArg.execute(sql`
+    UPDATE wms.reconciliation_exceptions AS exception
+    SET classification = 'safe_auto_repair',
+        status = 'resolved',
+        severity = 'info',
+        resolved_at = ${resolvedAt}::timestamptz,
+        resolved_by = ${resolvedBy},
+        resolution = ${VOIDED_SHIPMENT_RESOLUTION},
+        details = exception.details || jsonb_build_object(
+          'autoResolvedReason', 'provider_physical_shipment_voided',
+          'autoResolvedAt', ${resolvedAt}::timestamptz,
+          'providerVoidDate', ${voided.date}::timestamptz
+        ),
+        updated_at = ${resolvedAt}::timestamptz
+    WHERE exception.rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+      AND exception.external_system = 'shipstation'
+      AND exception.external_shipment_ref = ${shipmentRef}
+      AND exception.status IN ('open', 'acknowledged')
+    RETURNING exception.id AS exception_id,
+              exception.external_shipment_ref
+  `);
+  const row = rows(result)[0];
+  if (!row) return null;
+  return {
+    exceptionId: positiveInteger(row.exception_id, "exception_id", Number.MAX_SAFE_INTEGER),
+    externalShipmentRef: String(row.external_shipment_ref),
+    providerVoidDate: voided.raw,
+  };
+}
+
+/**
+ * Re-check unresolved extra-package exceptions by exact ShipStation shipment
+ * id. Missing or still-active provider records remain open for review.
+ */
+export async function resolveVoidedShipStationUnmappedPhysicalExceptions(
+  dbArg: QueryExecutor,
+  shipStation: ShipStationShipmentLookup,
+  options: Pick<ShipNotifyExceptionRecoveryOptions, "limit" | "now" | "resolvedBy"> = {},
+): Promise<VoidedUnmappedExceptionSweepResult> {
+  const limit = positiveInteger(
+    options.limit ?? 100,
+    "limit",
+    MAX_RECOVERY_LIMIT,
+  );
+  const candidateResult = await dbArg.execute(sql`
+    SELECT exception.id AS exception_id,
+           exception.external_shipment_ref
+    FROM wms.reconciliation_exceptions AS exception
+    WHERE exception.rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+      AND exception.external_system = 'shipstation'
+      AND exception.status IN ('open', 'acknowledged')
+      AND exception.external_shipment_ref ~ '^[1-9][0-9]*$'
+    ORDER BY exception.first_seen_at, exception.id
+    LIMIT ${limit}
+  `);
+
+  const candidates = rows(candidateResult);
+  const resolved: VoidedUnmappedExceptionResolution[] = [];
+  const failures: Array<{ exceptionId: number; message: string }> = [];
+  for (const candidate of candidates) {
+    const exceptionId = positiveInteger(
+      candidate.exception_id,
+      "exception_id",
+      Number.MAX_SAFE_INTEGER,
+    );
+    try {
+      const shipmentId = positiveInteger(
+        candidate.external_shipment_ref,
+        "external_shipment_ref",
+        Number.MAX_SAFE_INTEGER,
+      );
+      const providerShipment = await shipStation.getShipmentById(shipmentId);
+      if (!providerShipment?.voidDate || providerShipment.shipmentId !== shipmentId) {
+        continue;
+      }
+      const resolution = await resolveVoidedShipStationUnmappedPhysicalException(
+        dbArg,
+        { shipmentId, voidDate: providerShipment.voidDate },
+        options,
+      );
+      if (resolution) resolved.push(resolution);
+    } catch (error: any) {
+      failures.push({
+        exceptionId,
+        message: error?.message ?? String(error),
+      });
+    }
+  }
+
+  return {
+    checkedCount: candidates.length,
+    resolvedCount: resolved.length,
+    resolved,
+    failures,
   };
 }

@@ -21,6 +21,7 @@ import { hasPermission } from "../modules/identity";
 import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
+  resolveShipStationUnmappedPhysicalAsVoided,
 } from "../modules/oms/shipstation-unmapped-remediation.service";
 
 export function registerOmsRoutes(app: Express) {
@@ -157,6 +158,40 @@ export function registerOmsRoutes(app: Express) {
         const status = /positive integer|exactly one|required|valid|must equal|does not match/i.test(message)
           ? 400
           : /not found/i.test(message)
+            ? 404
+            : /unavailable/i.test(message)
+              ? 503
+              : 409;
+        res.status(status).json({ error: message });
+      }
+    },
+  );
+
+  app.post(
+    "/api/oms/ops/shipstation-unmapped/resolve-voided",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const shipStation = getShipStation(req);
+        if (!shipStation) {
+          res.status(503).json({ error: "ShipStation service is unavailable" });
+          return;
+        }
+        const operator =
+          req.session.user?.username ||
+          req.session.user?.displayName ||
+          String(req.session.user?.id || "unknown");
+        res.json(await resolveShipStationUnmappedPhysicalAsVoided(db, shipStation, {
+          exceptionId: req.body?.exceptionId,
+          shipmentId: req.body?.shipmentId,
+          operator,
+        }));
+      } catch (err: any) {
+        console.error("[OMS Routes] ShipStation voided-label resolution error:", err);
+        const message = err?.message || "Failed to resolve voided ShipStation label";
+        const status = /positive integer|exactly one|required|different physical shipment|active, not voided/i.test(message)
+          ? 400
+          : /not found|already resolved/i.test(message)
             ? 404
             : /unavailable/i.test(message)
               ? 503

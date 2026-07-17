@@ -60,4 +60,47 @@ describe("fulfillment-sweeper.scheduler", () => {
 
     expect(pushShopifyFulfillment).not.toHaveBeenCalled();
   });
+
+  it("auto-resolves an open extra-package exception after ShipStation voids the label", async () => {
+    const getShipmentById = vi.fn(async () => ({
+      shipmentId: 446343015,
+      voidDate: "2026-07-17T08:51:25.473Z",
+    }));
+    const execute = vi.fn(async (query: any) => {
+      const text = (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ");
+      if (text.includes("exception.rule = 'ship_notify_no_match'")) {
+        return { rows: [] };
+      }
+      if (text.includes("SELECT exception.id AS exception_id")) {
+        return {
+          rows: [{ exception_id: 62, external_shipment_ref: "446343015" }],
+        };
+      }
+      if (text.includes("UPDATE wms.reconciliation_exceptions")) {
+        return {
+          rows: [{ exception_id: 62, external_shipment_ref: "446343015" }],
+        };
+      }
+      if (text.includes("FROM shipped_channel_shipments")) {
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+    const db = {
+      execute,
+      __shipStationService: { getShipmentById },
+    };
+
+    await runFulfillmentSweep(db);
+
+    expect(getShipmentById).toHaveBeenCalledWith(446343015);
+    expect(execute.mock.calls.some(([query]) => (
+      (query?.queryChunks ?? [])
+        .flatMap((chunk: any) => chunk?.value ?? [])
+        .join(" ")
+        .includes("provider_physical_shipment_voided")
+    ))).toBe(true);
+  });
 });

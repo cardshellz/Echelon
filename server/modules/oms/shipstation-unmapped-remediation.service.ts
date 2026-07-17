@@ -12,6 +12,7 @@ import {
   recordShipStationUnmappedPhysicalException,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
+import { resolveVoidedShipStationUnmappedPhysicalException } from "./ship-notify-reconciliation.service";
 
 export interface ShipStationUnmappedLocator {
   exceptionId?: number;
@@ -33,6 +34,11 @@ export interface ShipStationUnmappedReshipAdoptionInput
   reason: string;
   notes?: string;
   lineMappings: ShipStationUnmappedLineMapping[];
+}
+
+export interface ShipStationUnmappedVoidedResolutionInput
+  extends ShipStationUnmappedLocator {
+  operator: string;
 }
 
 interface RemediationContext {
@@ -1622,5 +1628,69 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     operator,
     providerIdentityRepaired: identityRepair !== null,
     originalPackageIdentityRepaired: originalPackageIdentityRepair !== null,
+  };
+}
+
+export async function resolveShipStationUnmappedPhysicalAsVoided(
+  db: any,
+  shipStation: ShipStationService,
+  input: ShipStationUnmappedVoidedResolutionInput,
+): Promise<Record<string, unknown>> {
+  const operator = requiredOperator(input.operator);
+  const context = await loadContext(db, input);
+  const shipmentId = positiveInteger(
+    context.externalShipmentRef,
+    "externalShipmentRef",
+  );
+  const providerShipment = await shipStation.getShipmentById(shipmentId);
+  if (!providerShipment) {
+    throw new Error(`ShipStation physical shipment ${shipmentId} was not found`);
+  }
+  if (providerShipment.shipmentId !== shipmentId) {
+    throw new Error("ShipStation returned a different physical shipment id");
+  }
+  if (!providerShipment.voidDate) {
+    throw new Error("ShipStation reports this shipment as active, not voided");
+  }
+
+  if (context.exceptionId !== null) {
+    const resolution = await resolveVoidedShipStationUnmappedPhysicalException(
+      db,
+      { shipmentId, voidDate: providerShipment.voidDate },
+      { resolvedBy: operator },
+    );
+    if (!resolution) {
+      throw new Error("voided ShipStation shipment exception is already resolved");
+    }
+    return {
+      resolved: true,
+      exceptionId: resolution.exceptionId,
+      providerShipmentId: shipmentId,
+      providerVoidDate: resolution.providerVoidDate,
+      inventoryChanged: false,
+      fulfillmentChanged: false,
+    };
+  }
+
+  const result: any = await db.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET requires_review = false,
+        review_reason = 'shipstation_voided_label_resolved',
+        updated_at = NOW()
+    WHERE id = ${context.authorityShipmentId}
+      AND external_fulfillment_id = ${`shipstation_shipment:${shipmentId}`}
+      AND requires_review = true
+    RETURNING id
+  `);
+  if (resultRows(result).length !== 1) {
+    throw new Error("voided ShipStation shipment review is already resolved");
+  }
+  return {
+    resolved: true,
+    shipmentId: context.authorityShipmentId,
+    providerShipmentId: shipmentId,
+    providerVoidDate: providerShipment.voidDate,
+    inventoryChanged: false,
+    fulfillmentChanged: false,
   };
 }

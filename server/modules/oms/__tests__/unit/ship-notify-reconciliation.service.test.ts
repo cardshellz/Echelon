@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { resolveRecoveredShipNotifyNoMatchExceptions } from "../../ship-notify-reconciliation.service";
+import {
+  resolveRecoveredShipNotifyNoMatchExceptions,
+  resolveVoidedShipStationUnmappedPhysicalException,
+  resolveVoidedShipStationUnmappedPhysicalExceptions,
+} from "../../ship-notify-reconciliation.service";
 
 function queryText(query: any): string {
   return (query?.queryChunks ?? [])
@@ -62,6 +66,91 @@ describe("ship-notify reconciliation exception recovery", () => {
       { execute },
       { limit: 0 },
     )).rejects.toThrow("limit");
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("resolves an exact extra-package exception when ShipStation proves the label was voided", async () => {
+    const execute = vi.fn(async (query: any) => {
+      const text = queryText(query);
+      expect(text).toContain("UPDATE wms.reconciliation_exceptions");
+      expect(text).toContain("provider_physical_shipment_voided");
+      expect(text).toContain("exception.external_shipment_ref");
+      expect(text).not.toContain("tracking_number");
+      expect(text).not.toContain("order_number");
+      return {
+        rows: [{
+          exception_id: 62,
+          external_shipment_ref: "446343015",
+        }],
+      };
+    });
+
+    const result = await resolveVoidedShipStationUnmappedPhysicalException(
+      { execute },
+      {
+        shipmentId: 446343015,
+        voidDate: "2026-07-17T08:51:25.473Z",
+      },
+      {
+        now: new Date("2026-07-17T18:00:00.000Z"),
+        resolvedBy: "system:test",
+      },
+    );
+
+    expect(result).toEqual({
+      exceptionId: 62,
+      externalShipmentRef: "446343015",
+      providerVoidDate: "2026-07-17T08:51:25.473Z",
+    });
+  });
+
+  it("re-checks exact provider ids and leaves active shipments open", async () => {
+    const execute = vi.fn(async (query: any) => {
+      const text = queryText(query);
+      if (text.includes("SELECT exception.id AS exception_id")) {
+        return {
+          rows: [
+            { exception_id: 61, external_shipment_ref: "446343014" },
+            { exception_id: 62, external_shipment_ref: "446343015" },
+          ],
+        };
+      }
+      if (text.includes("UPDATE wms.reconciliation_exceptions")) {
+        return {
+          rows: [{ exception_id: 62, external_shipment_ref: "446343015" }],
+        };
+      }
+      return { rows: [] };
+    });
+    const getShipmentById = vi.fn(async (shipmentId: number) => ({
+      shipmentId,
+      voidDate: shipmentId === 446343015
+        ? "2026-07-17T08:51:25.473Z"
+        : null,
+    }));
+
+    const result = await resolveVoidedShipStationUnmappedPhysicalExceptions(
+      { execute },
+      { getShipmentById },
+      { limit: 10, resolvedBy: "system:test" },
+    );
+
+    expect(getShipmentById).toHaveBeenCalledTimes(2);
+    expect(result.checkedCount).toBe(2);
+    expect(result.resolvedCount).toBe(1);
+    expect(result.resolved[0]?.exceptionId).toBe(62);
+    expect(result.failures).toEqual([]);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses invalid void evidence before updating an exception", async () => {
+    const execute = vi.fn();
+
+    await expect(resolveVoidedShipStationUnmappedPhysicalException(
+      { execute },
+      { shipmentId: 446343015, voidDate: "" },
+    )).rejects.toThrow("voidDate");
 
     expect(execute).not.toHaveBeenCalled();
   });
