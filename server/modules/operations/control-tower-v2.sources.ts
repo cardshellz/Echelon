@@ -452,7 +452,11 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
     const provider = providerDisplayName(row.external_system);
     const providerOrderRef = stringOrNull(row.external_order_ref);
     const providerShipmentRef = stringOrNull(row.external_shipment_ref);
-    const trackingNumber = stringOrNull(row.tracking_number ?? details.trackingNumber);
+    const trackingNumber = stringOrNull(
+      rule === "shipstation_unmapped_physical_shipment"
+        ? details.trackingNumber ?? row.tracking_number
+        : row.tracking_number ?? details.trackingNumber,
+    );
     const entityType = shipmentId ? "wms_shipment" : wmsOrderId ? "wms_order" : "external_order";
     const entityId = String(shipmentId ?? wmsOrderId ?? row.external_order_ref ?? id);
     const entityRef = orderNumber
@@ -465,7 +469,7 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
     const summary = rule === "ship_notify_no_match"
       ? `${provider} shipment ${providerShipmentRef ?? "unknown"} did not match a WMS shipment${orderNumber ? ` for order ${orderNumber}` : ""}.`
       : rule === "shipstation_unmapped_physical_shipment"
-        ? `${provider} shipment ${providerShipmentRef ?? "unknown"} is a distinct package without proof of remaining WMS line authority${orderNumber ? ` for order ${orderNumber}` : ""}.`
+        ? `${provider} reported another package${orderNumber ? ` for order ${orderNumber}` : ""}${trackingNumber ? ` with tracking ${trackingNumber}` : ""}. Echelon did not change fulfillment or inventory because the package has not been confirmed as an intentional replacement or a duplicate.`
         : String(row.summary ?? humanizeControlTowerCode(rule)).trim();
     const actualState = rule === "ship_notify_no_match"
       ? [

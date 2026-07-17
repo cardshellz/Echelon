@@ -73,6 +73,19 @@ export function shipStationShipmentRefFromExternalFulfillmentId(
   return match ? match[1] : null;
 }
 
+export function buildShipStationUnmappedPhysicalSummary(
+  evidence: ShipStationUnmappedPhysicalEvidence,
+): string {
+  const orderNumber = nullableExternalRef(evidence.orderNumber);
+  const trackingNumber = nullableExternalRef(evidence.trackingNumber);
+  return (
+    `ShipStation reported another package${orderNumber ? ` for order ${orderNumber}` : ""}` +
+    `${trackingNumber ? ` with tracking ${trackingNumber}` : ""}. ` +
+    "Echelon did not change fulfillment or inventory because it could not " +
+    "determine whether the package was an intentional replacement or a duplicate."
+  );
+}
+
 export async function recordShipStationUnmappedPhysicalException(
   db: QueryExecutor,
   input: RecordShipStationUnmappedPhysicalInput,
@@ -82,9 +95,7 @@ export async function recordShipStationUnmappedPhysicalException(
   const idempotencyKey = buildShipStationUnmappedPhysicalIdempotencyKey(
     input.shipment,
   );
-  const summary =
-    `ShipStation shipment ${shipmentRef ?? "unknown"} could not be authorized ` +
-    `against remaining WMS lines; fulfillment mutation was blocked.`;
+  const summary = buildShipStationUnmappedPhysicalSummary(input.shipment);
   const details = {
     blockedReason: input.blockedReason,
     fulfillmentMutationBlocked: true,
@@ -158,6 +169,7 @@ export async function recordShipStationUnmappedPhysicalException(
       occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
       wms_order_id = COALESCE(wms.reconciliation_exceptions.wms_order_id, EXCLUDED.wms_order_id),
       wms_shipment_id = COALESCE(wms.reconciliation_exceptions.wms_shipment_id, EXCLUDED.wms_shipment_id),
+      summary = EXCLUDED.summary,
       details = wms.reconciliation_exceptions.details || EXCLUDED.details
   `);
 }

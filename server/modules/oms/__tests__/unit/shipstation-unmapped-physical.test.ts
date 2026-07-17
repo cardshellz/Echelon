@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SHIPSTATION_UNMAPPED_PHYSICAL_RULE,
   buildShipStationUnmappedPhysicalIdempotencyKey,
+  buildShipStationUnmappedPhysicalSummary,
   recordShipStationUnmappedPhysicalException,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "../../shipstation-unmapped-physical";
@@ -33,6 +34,19 @@ describe("ShipStation unmapped physical shipment evidence", () => {
     expect(shipStationShipmentRefFromExternalFulfillmentId("gid://shopify/1")).toBeNull();
   });
 
+  it("explains the blocked decision in operational English", () => {
+    expect(buildShipStationUnmappedPhysicalSummary({
+      shipmentId: 446104678,
+      orderNumber: "EB-24-14838-80207",
+      trackingNumber: "1Z8X330WYN43653055",
+    })).toBe(
+      "ShipStation reported another package for order EB-24-14838-80207 " +
+      "with tracking 1Z8X330WYN43653055. Echelon did not change fulfillment " +
+      "or inventory because it could not determine whether the package was " +
+      "an intentional replacement or a duplicate.",
+    );
+  });
+
   it("records blocked fulfillment and inventory evidence as one open review exception", async () => {
     const execute = vi.fn(async () => ({ rows: [] }));
 
@@ -56,5 +70,6 @@ describe("ShipStation unmapped physical shipment evidence", () => {
     expect(statement).toContain("existing.status IN ('resolved', 'ignored')");
     expect(statement).toContain("ON CONFLICT (idempotency_key)");
     expect(statement).toContain("occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1");
+    expect(statement).toContain("summary = EXCLUDED.summary");
   });
 });
