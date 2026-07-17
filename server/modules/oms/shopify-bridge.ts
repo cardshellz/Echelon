@@ -1,26 +1,87 @@
 /**
  * Shopify Bridge — writes Shopify orders into OMS for unified view
  *
- * Hooks into the existing order-sync-listener LISTEN/NOTIFY flow.
- * After a shopify_orders row is synced to the WMS `orders` table,
- * this bridge also writes it to `oms_orders` for the unified view.
- *
- * This does NOT modify the existing Shopify flow. It's additive only.
+ * Bridges durable raw Shopify orders into OMS. It is used by both the
+ * LISTEN/NOTIFY path and the scheduled recovery sweep.
  */
 
-import { sql, ilike } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
-import { getShopifyConfig } from "../integrations/shopify";
-import { channelConnections } from "@shared/schema";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
-
-
-import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 import { buildChannelLineDisplayName } from "./line-display-name";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 
 let notificationBackfillRunning = false;
 let lastNotificationBackfillStartedAt = 0;
+const DEFAULT_SHOPIFY_CHANNEL_ID = 36;
+
+export interface ShopifyBridgeResult {
+  shopifyOrderId: string;
+  omsOrderId: number;
+  channelId: number;
+}
+
+export interface ShopifyBackfillResult {
+  attempted: number;
+  bridged: number;
+  failed: number;
+  failures: string[];
+}
+
+function normalizedShopDomain(value: unknown): string | null {
+  const domain = String(value ?? "")
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/$/, "")
+    .toLowerCase();
+  return domain || null;
+}
+
+async function resolveShopifyChannelId(db: any, raw: any): Promise<number> {
+  const rawChannelId = Number(raw.channel_id);
+  const channelId = Number.isInteger(rawChannelId) && rawChannelId > 0
+    ? rawChannelId
+    : null;
+  const orderDomain = normalizedShopDomain(raw.shop_domain);
+
+  let channelResult;
+  if (channelId !== null) {
+    channelResult = await db.execute(sql`
+      SELECT c.id AS channel_id
+      FROM channels.channels c
+      JOIN channels.channel_connections cc ON cc.channel_id = c.id
+      WHERE c.id = ${channelId}
+        AND c.provider = 'shopify'
+      LIMIT 1
+    `);
+  } else if (orderDomain) {
+    channelResult = await db.execute(sql`
+      SELECT c.id AS channel_id
+      FROM channels.channels c
+      JOIN channels.channel_connections cc ON cc.channel_id = c.id
+      WHERE c.provider = 'shopify'
+        AND LOWER(BTRIM(cc.shop_domain)) = ${orderDomain}
+      LIMIT 1
+    `);
+  } else {
+    channelResult = await db.execute(sql`
+      SELECT c.id AS channel_id
+      FROM channels.channels c
+      JOIN channels.channel_connections cc ON cc.channel_id = c.id
+      WHERE c.id = ${DEFAULT_SHOPIFY_CHANNEL_ID}
+        AND c.provider = 'shopify'
+      LIMIT 1
+    `);
+  }
+
+  const resolved = Number(channelResult.rows?.[0]?.channel_id);
+  if (!Number.isInteger(resolved) || resolved <= 0) {
+    throw new Error(
+      `No Shopify channel route for raw order ${raw.order_number ?? raw.id ?? "unknown"}`,
+    );
+  }
+  return resolved;
+}
 
 /**
  * Bridge a Shopify order into the OMS.
@@ -34,43 +95,19 @@ export async function bridgeShopifyOrderToOms(
   db: any,
   omsService: OmsService,
   shopifyOrderId: string,
-): Promise<void> {
+): Promise<ShopifyBridgeResult> {
   try {
     // Fetch shop_domain and full order row from legacy table
     const rawOrderResult = await db.execute(sql`
       SELECT * FROM shopify_orders WHERE id = ${shopifyOrderId}
     `);
     
-    if (rawOrderResult.rows.length === 0) return;
+    if (rawOrderResult.rows.length === 0) {
+      throw new Error(`Shopify raw order ${shopifyOrderId} was not found`);
+    }
     const raw = rawOrderResult.rows[0];
-    const orderDomain = raw.shop_domain;
+    const channelId = await resolveShopifyChannelId(db, raw);
 
-    // Determine channel dynamically
-    let connResult;
-    if (orderDomain) {
-      connResult = await db.execute(sql`
-        SELECT * FROM channel_connections
-        WHERE shop_domain ILIKE ${`%${orderDomain}%`}
-        LIMIT 1
-      `);
-    } else {
-      // Legacy rows without shop_domain MUST default strictly to the primary US store 
-      // because is_default was accidentally pointing to the CA store in the DB
-      connResult = await db.execute(sql`
-        SELECT cc.* FROM channel_connections cc
-        JOIN channels c ON c.id = cc.channel_id
-        WHERE cc.shop_domain ILIKE '%card-shellz.myshopify.com%' AND c.provider = 'shopify'
-        LIMIT 1
-      `);
-    }
-
-    if (connResult.rows.length === 0) {
-      // Debug only — skip logging every ignored order (floods logs)
-      // console.warn(`[Shopify Bridge] Ignoring order ${shopifyOrderId} - unknown channel`);
-      return;
-    }
-    
-    const { channel_id: channelId } = connResult.rows[0];
 
     const orderItemsResult = await db.execute(sql`
       SELECT * FROM shopify_order_items WHERE order_id = ${shopifyOrderId}
@@ -192,6 +229,9 @@ export async function bridgeShopifyOrderToOms(
     };
 
     const omsOrder = await omsService.ingestOrder(channelId, shopifyOrderId, orderData);
+    if (!omsOrder?.id) {
+      throw new Error(`OMS did not confirm Shopify order ${raw.order_number ?? shopifyOrderId}`);
+    }
 
     // Trigger OMS→WMS sync. The bridge paths (reconciliation poller +
     // LISTEN/NOTIFY) previously ended at ingestOrder and relied on
@@ -220,9 +260,16 @@ export async function bridgeShopifyOrderToOms(
         );
       }
     }
-  } catch (err: any) {
-    console.error(err);
-    console.error(`[Shopify Bridge] Failed to bridge order ${shopifyOrderId} to OMS: ${err.message}`);
+    return {
+      shopifyOrderId,
+      omsOrderId: Number(omsOrder.id),
+      channelId,
+    };
+  } catch (error: any) {
+    console.error(
+      `[Shopify Bridge] Failed to bridge ${shopifyOrderId}: ${error?.message ?? String(error)}`,
+    );
+    throw error;
   }
 }
 
@@ -234,33 +281,96 @@ export async function backfillShopifyOrders(
   db: any,
   omsService: OmsService,
   limit: number = 100,
-): Promise<number> {
+): Promise<ShopifyBackfillResult> {
+  try {
+    await db.execute(sql`
+      INSERT INTO oms.shopify_order_bridge_checkpoints (
+        id,
+        monitor_started_at,
+        last_run_at,
+        created_at,
+        updated_at
+      )
+      VALUES (1, TIMESTAMPTZ '2026-07-01 00:00:00+00', NOW(), NOW(), NOW())
+      ON CONFLICT (id)
+      DO UPDATE SET last_run_at = NOW(), updated_at = NOW()
+    `);
+
   const unsynced = await db.execute(sql`
-    SELECT so.id FROM shopify_orders so
-    WHERE NOT EXISTS (
-      SELECT 1 FROM oms.oms_orders oo
-      -- Match on the bare numeric id so legacy GID-format external_order_id
-      -- rows and new numeric rows both dedup (ingestOrder now normalizes to
-      -- numeric; shopify_orders.id is a GID). Without split_part this re-bridges
-      -- every already-ingested order on each run.
-      WHERE split_part(oo.external_order_id, '/', -1) = split_part(so.id, '/', -1)
-        AND oo.channel_id IN (SELECT id FROM channels.channels WHERE provider = 'shopify')
-    )
-    ORDER BY so.created_at DESC
+    SELECT so.id, so.order_number
+    FROM shopify_orders so
+    CROSS JOIN oms.shopify_order_bridge_checkpoints checkpoint
+    WHERE checkpoint.id = 1
+      AND so.created_at >= checkpoint.monitor_started_at
+      AND NOT EXISTS (
+        SELECT 1
+        FROM oms.oms_orders oo
+        WHERE oo.external_order_id IN (so.id, split_part(so.id, '/', -1))
+          AND oo.channel_id IN (
+            SELECT id FROM channels.channels WHERE provider = 'shopify'
+          )
+      )
+    ORDER BY so.created_at ASC
     LIMIT ${limit}
   `);
 
   let bridged = 0;
+  const failures: string[] = [];
   for (const row of unsynced.rows as any[]) {
-    await bridgeShopifyOrderToOms(db, omsService, row.id);
-    bridged++;
+    try {
+      await bridgeShopifyOrderToOms(db, omsService, row.id);
+      bridged++;
+    } catch (error: any) {
+      const message = error?.message ?? String(error);
+      const identity = row.order_number ?? row.id;
+      failures.push(`${identity}: ${message}`);
+      console.error(`[Shopify Bridge] Backfill failed for ${identity}: ${message}`);
+    }
   }
 
-  if (bridged > 0) {
-    console.log(`[Shopify Bridge] Backfilled ${bridged} orders to OMS`);
+  const attempted = unsynced.rows.length;
+  const failed = failures.length;
+  const lastError = failed > 0 ? failures.slice(0, 5).join("; ").slice(0, 2000) : null;
+
+  await db.execute(sql`
+    UPDATE oms.shopify_order_bridge_checkpoints
+    SET last_success_at = CASE WHEN ${failed} = 0 THEN NOW() ELSE last_success_at END,
+        last_error = ${lastError},
+        consecutive_failures = CASE
+          WHEN ${failed} = 0 THEN 0
+          ELSE consecutive_failures + 1
+        END,
+        last_candidates = ${attempted},
+        last_bridged = ${bridged},
+        last_failed = ${failed},
+        updated_at = NOW()
+    WHERE id = 1
+  `);
+
+  if (bridged > 0 || failed > 0) {
+    console.log(
+      `[Shopify Bridge] Backfill attempted=${attempted} bridged=${bridged} failed=${failed}`,
+    );
   }
 
-  return bridged;
+    return { attempted, bridged, failed, failures };
+  } catch (error: any) {
+    const message = (error?.message ?? String(error)).slice(0, 2000);
+    try {
+      await db.execute(sql`
+        UPDATE oms.shopify_order_bridge_checkpoints
+        SET last_error = ${message},
+            consecutive_failures = consecutive_failures + 1,
+            updated_at = NOW()
+        WHERE id = 1
+      `);
+    } catch (checkpointError: any) {
+      console.error(
+        `[Shopify Bridge] Could not record sweep failure: ${checkpointError?.message ?? String(checkpointError)}`,
+      );
+    }
+    throw error;
+  }
 }
 
 /**

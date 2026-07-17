@@ -53,6 +53,51 @@ describe("getFlowWaterfall", () => {
     expect(FLOW_WATERFALL_SRC).toContain("sla: { breached: slaBreached, sample: [] }");
   });
 
+  it("surfaces paid physical Shopify orders that reached raw intake but not OMS", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "SHOPIFY_RAW_WITHOUT_OMS"');
+    const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("shopify_order_bridge_checkpoints");
+    expect(issueBlock).toContain("so.created_at < NOW() - INTERVAL '10 minutes'");
+    expect(issueBlock).toContain("soi.requires_shipping::text");
+    expect(issueBlock).toContain("COALESCE(soi.quantity, 0) > 0");
+    expect(issueBlock).toContain("oo.external_order_id IN (so.id, split_part(so.id, '/', -1))");
+  });
+
+  it("reports a stale or failed Shopify recovery sweep independently of order gaps", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "SHOPIFY_RECOVERY_UNHEALTHY"');
+    const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("last_run_at < NOW() - INTERVAL '30 minutes'");
+    expect(issueBlock).toContain("checkpoint.last_error IS NOT NULL");
+    expect(issueBlock).toContain("checkpoint.consecutive_failures > 0");
+  });
+
+  it("alerts when the Shopify source-to-raw reconciliation checkpoint is stale", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "SHOPIFY_SOURCE_RECONCILIATION_UNHEALTHY"');
+    const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("warehouse.echelon_settings");
+    expect(issueBlock).toContain("shopify_reconciliation_last_check");
+    expect(issueBlock).toContain("MAX(updated_at) < NOW() - INTERVAL '30 minutes'");
+  });
+
+  it("does not claim the Shopify recovery sweep is active when disabled", async () => {
+    const previous = process.env.SYNC_RECOVERY_SCHEDULER_DISABLED;
+    process.env.SYNC_RECOVERY_SCHEDULER_DISABLED = "true";
+    try {
+      const result = await getFlowWaterfall(fakeDb());
+      const shopify = result.intakeModel.find((entry) => entry.provider === "shopify");
+      expect(shopify?.note).toContain("recovery sweep is disabled");
+    } finally {
+      if (previous === undefined) delete process.env.SYNC_RECOVERY_SCHEDULER_DISABLED;
+      else process.env.SYNC_RECOVERY_SCHEDULER_DISABLED = previous;
+    }
+  });
+
   it("exposes a canonical paid replay source for paid orders missing WMS", () => {
     const start = FLOW_WATERFALL_SRC.indexOf('code: "OMS_PAID_WITHOUT_WMS"');
     const end = FLOW_WATERFALL_SRC.indexOf('\n  },', start);

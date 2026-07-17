@@ -47,9 +47,9 @@ describe("ingestOrder applies the normalizer at the dedup chokepoint", () => {
 });
 
 describe("backfillShopifyOrders dedup tolerates both id formats", () => {
-  it("matches on the bare numeric id via split_part on both sides", () => {
+  it("matches either the raw GID or normalized numeric id", () => {
     expect(SHOPIFY_BRIDGE_SRC).toMatch(
-      /split_part\(oo\.external_order_id, '\/', -1\) = split_part\(so\.id, '\/', -1\)/,
+      /oo\.external_order_id IN \(so\.id, split_part\(so\.id, '\/', -1\)\)/,
     );
   });
 });
