@@ -1038,6 +1038,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     return Array.from(merged.values());
   }
 
+  async function getShipmentById(
+    shipmentId: number,
+  ): Promise<ShipStationShipment | null> {
+    if (!Number.isSafeInteger(shipmentId) || shipmentId <= 0) {
+      throw new Error("ShipStation shipment id must be a positive integer");
+    }
+    const result = await apiRequest<{ shipments: ShipStationShipment[] }>(
+      "GET",
+      `/shipments?shipmentId=${shipmentId}&includeShipmentItems=true`,
+    );
+    return (result.shipments ?? []).find(
+      (shipment) => shipment.shipmentId === shipmentId,
+    ) ?? null;
+  }
+
   // -------------------------------------------------------------------------
   // Get order by orderKey
   // -------------------------------------------------------------------------
@@ -4654,6 +4669,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
   return {
     pushShipment,
     getShipments,
+    getShipmentById,
     getOrderById,
     getOrderByKey,
     getOrderByNumber,

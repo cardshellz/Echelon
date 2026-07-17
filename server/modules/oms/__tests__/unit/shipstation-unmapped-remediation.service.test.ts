@@ -68,8 +68,6 @@ const contextRow = {
   authority_shipment_id: 10,
   candidate_shipment_id: 20,
   external_shipment_ref: "900",
-  provider_order_id: 700,
-  provider_order_key: "echelon-wms-shp-10",
   tracking_number: "1Z-RESHIP",
   authority_external_fulfillment_id: "shipstation_shipment:900",
   authority_tracking_number: "1Z-RESHIP",
@@ -91,6 +89,7 @@ const orderItemRow = {
 
 function shipStation(overrides: Record<string, unknown> = {}) {
   return {
+    getShipmentById: vi.fn(async () => providerShipment),
     getShipments: vi.fn(async () => [providerShipment]),
     getOrderByNumber: vi.fn(),
     processShipmentNotification: vi.fn(async () => ({ processed: true })),
@@ -150,6 +149,82 @@ describe("ShipStation unmapped physical remediation", () => {
       externalShipmentRef: "800",
       items: [{ orderItemId: 101, sku: "SKU-A", quantity: 1 }],
     });
+
+    const contextQuery = queryText(db.execute.mock.calls[0][0]);
+    expect(contextQuery).toContain(
+      "NULLIF(BTRIM(exception.details->>'orderNumber'), '')",
+    );
+    expect(contextQuery).not.toContain("provider_order_id");
+  });
+
+  it("loads the target exclusively by exact physical shipment id", async () => {
+    const exactShipment = {
+      ...providerShipment,
+      shipmentId: 446104678,
+      orderId: 763385590,
+      orderNumber: "EB-24-14838-80207",
+      trackingNumber: "1Z8X330WYN43653055",
+    };
+    const staleContext = {
+      ...contextRow,
+      order_number: "24-14838-80207",
+      external_shipment_ref: "446104678",
+    };
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [staleContext] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [orderItemRow] };
+        }
+        if (text.includes("COUNT(shipment_item.id)::int AS item_count")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const provider = shipStation({
+      getShipmentById: vi.fn(async () => exactShipment),
+      getShipments: vi.fn(async () => []),
+    });
+
+    const preview = await getShipStationUnmappedPhysicalPreview(
+      db,
+      provider,
+      { exceptionId: 77 },
+    );
+
+    expect(provider.getShipmentById).toHaveBeenCalledWith(446104678);
+    expect(provider.getShipments).not.toHaveBeenCalled();
+    expect(provider.getOrderByNumber).not.toHaveBeenCalled();
+    expect(preview.providerShipment).toEqual(exactShipment);
+  });
+
+  it("does not guess a physical shipment from order-level evidence", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [contextRow] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const provider = shipStation({
+      getShipmentById: vi.fn(async () => null),
+    });
+
+    await expect(getShipStationUnmappedPhysicalPreview(
+      db,
+      provider,
+      { exceptionId: 77 },
+    )).rejects.toThrow("ShipStation physical shipment 900 was not found");
+
+    expect(provider.getShipmentById).toHaveBeenCalledWith(900);
+    expect(provider.getShipments).not.toHaveBeenCalled();
+    expect(provider.getOrderByNumber).not.toHaveBeenCalled();
   });
 
   it("recovers a unique active package when legacy WMS rows crossed provider identity and tracking", async () => {
@@ -183,6 +258,7 @@ describe("ShipStation unmapped physical remediation", () => {
     const preview = await getShipStationUnmappedPhysicalPreview(
       db,
       shipStation({
+        getShipmentById: vi.fn(async () => supersededProviderShipment),
         getShipments: vi.fn(async () => [
           supersededProviderShipment,
           activeProviderShipment,
@@ -226,6 +302,7 @@ describe("ShipStation unmapped physical remediation", () => {
     const preview = await getShipStationUnmappedPhysicalPreview(
       db,
       shipStation({
+        getShipmentById: vi.fn(async () => supersededProviderShipment),
         getShipments: vi.fn(async () => [
           supersededProviderShipment,
           activeProviderShipment,
@@ -248,7 +325,6 @@ describe("ShipStation unmapped physical remediation", () => {
             ...contextRow,
             candidate_shipment_id: null,
             external_shipment_ref: "903",
-            provider_order_id: 701,
             tracking_number: "1Z-EMPTY-RESHIP",
             authority_external_fulfillment_id: "shipstation_shipment:904",
             authority_tracking_number: "1Z-EMPTY-RESHIP",
@@ -267,6 +343,7 @@ describe("ShipStation unmapped physical remediation", () => {
     const preview = await getShipStationUnmappedPhysicalPreview(
       db,
       shipStation({
+        getShipmentById: vi.fn(async () => emptyProviderShipment),
         getShipments: vi.fn(async () => [originalProviderShipment, emptyProviderShipment]),
       }),
       { exceptionId: 77 },
@@ -385,7 +462,6 @@ describe("ShipStation unmapped physical remediation", () => {
             ...contextRow,
             candidate_shipment_id: null,
             external_shipment_ref: "903",
-            provider_order_id: 701,
             tracking_number: "1Z-EMPTY-RESHIP",
             authority_external_fulfillment_id: "shipstation_shipment:904",
             authority_tracking_number: "1Z-EMPTY-RESHIP",
@@ -456,6 +532,7 @@ describe("ShipStation unmapped physical remediation", () => {
       }),
     };
     const service = shipStation({
+      getShipmentById: vi.fn(async () => emptyProviderShipment),
       getShipments: vi.fn(async () => [originalProviderShipment, emptyProviderShipment]),
     });
 
@@ -496,8 +573,6 @@ describe("ShipStation unmapped physical remediation", () => {
             ...contextRow,
             candidate_shipment_id: 20,
             external_shipment_ref: "903",
-            provider_order_id: 701,
-            provider_order_key: emptyProviderShipment.orderKey,
             tracking_number: emptyProviderShipment.trackingNumber,
             authority_external_fulfillment_id: "shipstation_shipment:903",
             authority_tracking_number: emptyProviderShipment.trackingNumber,
@@ -550,7 +625,7 @@ describe("ShipStation unmapped physical remediation", () => {
       }),
     };
     const service = shipStation({
-      getShipments: vi.fn(async () => [emptyProviderShipment]),
+      getShipmentById: vi.fn(async () => emptyProviderShipment),
     });
 
     const result = await adoptShipStationUnmappedPhysicalAsReship(db, service, {
@@ -587,7 +662,6 @@ describe("ShipStation unmapped physical remediation", () => {
             ...contextRow,
             candidate_shipment_id: null,
             external_shipment_ref: "903",
-            provider_order_id: 701,
             tracking_number: "1Z-EMPTY-RESHIP",
           }] };
         }
@@ -598,7 +672,7 @@ describe("ShipStation unmapped physical remediation", () => {
       }),
     };
     const service = shipStation({
-      getShipments: vi.fn(async () => [emptyProviderShipment]),
+      getShipmentById: vi.fn(async () => emptyProviderShipment),
     });
 
     await expect(adoptShipStationUnmappedPhysicalAsReship(db, service, {
@@ -698,6 +772,7 @@ describe("ShipStation unmapped physical remediation", () => {
       }),
     };
     const service = shipStation({
+      getShipmentById: vi.fn(async () => supersededProviderShipment),
       getShipments: vi.fn(async () => [
         supersededProviderShipment,
         activeProviderShipment,
@@ -762,7 +837,7 @@ describe("ShipStation unmapped physical remediation", () => {
 
     await expect(adoptShipStationUnmappedPhysicalAsReship(
       db,
-      shipStation({ getShipments: vi.fn(async () => [oversizedProvider]) }),
+      shipStation({ getShipmentById: vi.fn(async () => oversizedProvider) }),
       {
         exceptionId: 77,
         operator: "ops:test",
@@ -808,7 +883,7 @@ describe("ShipStation unmapped physical remediation", () => {
 
     await expect(adoptShipStationUnmappedPhysicalAsReship(
       db,
-      shipStation({ getShipments: vi.fn(async () => [duplicateLineProvider]) }),
+      shipStation({ getShipmentById: vi.fn(async () => duplicateLineProvider) }),
       {
         exceptionId: 77,
         operator: "ops:test",
@@ -836,10 +911,11 @@ describe("ShipStation unmapped physical remediation", () => {
     await expect(adoptShipStationUnmappedPhysicalAsReship(
       db,
       shipStation({
-        getShipments: vi.fn(async () => [{
+        getShipmentById: vi.fn(async () => ({
           ...providerShipment,
           voidDate: "2026-07-14T10:00:00Z",
-        }]),
+        })),
+        getShipments: vi.fn(async () => []),
       }),
       {
         exceptionId: 77,

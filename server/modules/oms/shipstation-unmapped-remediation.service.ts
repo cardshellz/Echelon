@@ -42,8 +42,6 @@ interface RemediationContext {
   authorityShipmentId: number;
   candidateShipmentId: number | null;
   externalShipmentRef: string;
-  providerOrderId: number | null;
-  providerOrderKey: string | null;
   trackingNumber: string | null;
   authorityExternalShipmentRef: string | null;
   authorityTrackingNumber: string | null;
@@ -199,23 +197,13 @@ async function loadContext(
       SELECT
         exception.id AS exception_id,
         COALESCE(exception.wms_order_id, authority.order_id) AS wms_order_id,
-        wms_order.order_number,
+        COALESCE(
+          NULLIF(BTRIM(exception.details->>'orderNumber'), ''),
+          wms_order.order_number
+        ) AS order_number,
         exception.wms_shipment_id AS authority_shipment_id,
         candidate.id AS candidate_shipment_id,
         exception.external_shipment_ref,
-        COALESCE(
-          candidate.shipstation_order_id,
-          authority.shipstation_order_id,
-          CASE
-            WHEN exception.external_order_ref ~ '^[1-9][0-9]*$'
-            THEN exception.external_order_ref::bigint
-          END,
-          CASE
-            WHEN exception.details->>'ssOrderId' ~ '^[1-9][0-9]*$'
-            THEN (exception.details->>'ssOrderId')::bigint
-          END
-        ) AS provider_order_id,
-        COALESCE(candidate.shipstation_order_key, authority.shipstation_order_key, exception.external_order_key) AS provider_order_key,
         COALESCE(candidate.tracking_number, exception.details->>'trackingNumber') AS tracking_number,
         authority.external_fulfillment_id AS authority_external_fulfillment_id,
         authority.tracking_number AS authority_tracking_number
@@ -241,8 +229,6 @@ async function loadContext(
       authorityShipmentId: positiveInteger(row.authority_shipment_id, "authorityShipmentId"),
       candidateShipmentId: optionalPositiveInteger(row.candidate_shipment_id),
       externalShipmentRef: String(row.external_shipment_ref),
-      providerOrderId: optionalPositiveInteger(row.provider_order_id),
-      providerOrderKey: row.provider_order_key == null ? null : String(row.provider_order_key),
       trackingNumber: row.tracking_number == null ? null : String(row.tracking_number),
       authorityExternalShipmentRef: shipStationShipmentRefFromExternalFulfillmentId(
         row.authority_external_fulfillment_id,
@@ -263,8 +249,6 @@ async function loadContext(
         shipment.external_fulfillment_id
         FROM '^shipstation_shipment:([1-9][0-9]*)$'
       ) AS external_shipment_ref,
-      shipment.shipstation_order_id AS provider_order_id,
-      shipment.shipstation_order_key AS provider_order_key,
       shipment.tracking_number,
       shipment.external_fulfillment_id AS authority_external_fulfillment_id,
       shipment.tracking_number AS authority_tracking_number
@@ -286,8 +270,6 @@ async function loadContext(
     authorityShipmentId: positiveInteger(row.authority_shipment_id, "authorityShipmentId"),
     candidateShipmentId: positiveInteger(row.candidate_shipment_id, "candidateShipmentId"),
     externalShipmentRef: String(row.external_shipment_ref),
-    providerOrderId: optionalPositiveInteger(row.provider_order_id),
-    providerOrderKey: row.provider_order_key == null ? null : String(row.provider_order_key),
     trackingNumber: row.tracking_number == null ? null : String(row.tracking_number),
     authorityExternalShipmentRef: shipStationShipmentRefFromExternalFulfillmentId(
       row.authority_external_fulfillment_id,
@@ -407,25 +389,48 @@ async function resolveProviderShipment(
   shipStation: ShipStationService,
   context: RemediationContext,
 ): Promise<ResolvedProviderShipment> {
-  let providerOrderId = context.providerOrderId;
-  if (providerOrderId === null) {
-    const providerOrder = await shipStation.getOrderByNumber(context.orderNumber);
-    providerOrderId = optionalPositiveInteger(providerOrder?.orderId);
-  }
-  if (providerOrderId === null) {
-    throw new Error(`ShipStation order for ${context.orderNumber} could not be loaded`);
-  }
-  const shipments = await shipStation.getShipments(providerOrderId, {
-    orderNumber: context.orderNumber,
-  });
-  const providerShipment = shipments.find(
-    (shipment) => String(shipment.shipmentId) === context.externalShipmentRef,
+  const externalShipmentId = positiveInteger(
+    context.externalShipmentRef,
+    "externalShipmentRef",
   );
-  if (!providerShipment) {
+  const directShipment = await shipStation.getShipmentById(externalShipmentId);
+  if (!directShipment) {
     throw new Error(
       `ShipStation physical shipment ${context.externalShipmentRef} was not found`,
     );
   }
+
+  const needsVoidedLabelEvidence = Boolean(
+    directShipment.voidDate && context.candidateShipmentId !== null,
+  );
+  const needsOriginalPackageEvidence = Boolean(
+    !directShipment.voidDate
+    && String(directShipment.shipDate ?? "").trim()
+    && (directShipment.shipmentItems ?? []).length === 0
+    && context.authorityExternalShipmentRef !== null
+    && context.authorityExternalShipmentRef !== String(directShipment.shipmentId)
+    && normalizedTrackingNumber(context.authorityTrackingNumber)
+      === normalizedTrackingNumber(directShipment.trackingNumber),
+  );
+  const shipments = [directShipment];
+  if (needsVoidedLabelEvidence || needsOriginalPackageEvidence) {
+    const providerOrderId = positiveInteger(
+      directShipment.orderId,
+      "ShipStation shipment orderId",
+    );
+    const providerOrderNumber = String(directShipment.orderNumber ?? "").trim();
+    const relatedShipments = await shipStation.getShipments(
+      providerOrderId,
+      providerOrderNumber ? { orderNumber: providerOrderNumber } : undefined,
+    );
+    for (const relatedShipment of relatedShipments) {
+      if (!shipments.some((shipment) => shipment.shipmentId === relatedShipment.shipmentId)) {
+        shipments.push(relatedShipment);
+      }
+    }
+  }
+
+  const providerShipment = directShipment;
   const originalPackageResolution = resolveOriginalPackageIdentityRepair(
     shipments,
     providerShipment,

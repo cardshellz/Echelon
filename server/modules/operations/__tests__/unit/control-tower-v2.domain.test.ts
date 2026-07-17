@@ -312,6 +312,56 @@ describe("Control Tower V2 domain", () => {
     });
   });
 
+  it("explains an unclassified physical package without internal authority language", () => {
+    const item = wmsReconciliationSource.projectRow({
+      id: 59,
+      source: "shipstation_notify",
+      classification: "manual_review",
+      rule: "shipstation_unmapped_physical_shipment",
+      status: "open",
+      severity: "review",
+      wms_order_id: 204826,
+      wms_shipment_id: 6096,
+      resolved_wms_order_id: 204826,
+      resolved_wms_shipment_id: 6096,
+      oms_order_id: 231695,
+      channel_order_number: "24-14838-80207",
+      wms_order_number: "24-14838-80207",
+      channel_provider: "ebay",
+      external_system: "shipstation",
+      external_order_ref: "763385590",
+      external_shipment_ref: "446104678",
+      external_order_key: "echelon-wms-shp-6096",
+      idempotency_key:
+        "shipstation_notify:shipstation_unmapped_physical_shipment:shipment:446104678",
+      summary: "legacy internal summary",
+      details: {
+        orderNumber: "EB-24-14838-80207",
+        trackingNumber: "1Z8X330WYN43653055",
+      },
+      first_seen_at: "2026-07-16T15:45:38.018Z",
+      last_seen_at: "2026-07-16T15:45:38.018Z",
+      occurrence_count: 1,
+      updated_at: "2026-07-16T15:45:38.018Z",
+      tracking_number: "1Z16D13WYW17318954",
+      shipping_engine: "shipstation",
+      engine_order_ref: "757838606",
+    }, new Date("2026-07-17T14:00:00.000Z"));
+
+    expect(item.summary).toBe(
+      "ShipStation reported another package for order 24-14838-80207 with " +
+      "tracking 1Z8X330WYN43653055. Echelon did not change fulfillment or " +
+      "inventory because the package has not been confirmed as an intentional " +
+      "replacement or a duplicate.",
+    );
+    expect(item.summary).not.toMatch(/authority|mutation|WMS lines/i);
+    expect(item.evidenceSummary).toMatchObject({
+      trackingNumber: "1Z8X330WYN43653055",
+      externalOrderRef: "763385590",
+      externalShipmentRef: "446104678",
+    });
+  });
+
   it("labels provider ids explicitly when no channel order number is known", () => {
     const item = wmsReconciliationSource.projectRow({
       id: 2,
