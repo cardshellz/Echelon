@@ -1,8 +1,9 @@
 import type { ShippingParcelSpec } from "../domain/shipment";
 import type { ShippingRateContext } from "../domain/shipping-channel";
 import {
-  quoteParcels,
+  quoteShipmentRates,
   RATE_QUOTE_ENGINE,
+  type FreightRatingContext,
   type RateQuoteResult,
 } from "./rate-quote.service";
 
@@ -16,6 +17,7 @@ export interface ShippingRateProviderRequest {
     postalCode: string;
   };
   parcels: readonly ShippingParcelSpec[];
+  freight?: FreightRatingContext | null;
   quotedAt?: Date;
   persistSnapshot?: boolean;
 }
@@ -32,7 +34,7 @@ export interface ShippingRateProvider {
 export const localRateTableShippingRateProvider: ShippingRateProvider = {
   provider: RATE_QUOTE_ENGINE,
   quote(input) {
-    return quoteParcels({
+    return quoteShipmentRates({
       rateContext: input.rateContext,
       originWarehouseId: input.originWarehouseId,
       destCountry: input.destination.country,
@@ -41,6 +43,7 @@ export const localRateTableShippingRateProvider: ShippingRateProvider = {
       parcels: input.parcels.map((parcel) => ({
         billableWeightGrams: parcel.billableWeightGrams,
       })),
+      freight: input.freight,
     }, {
       quotedAt: input.quotedAt,
       persistSnapshot: input.persistSnapshot,

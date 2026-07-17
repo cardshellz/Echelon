@@ -8,6 +8,7 @@ import type {
   ShipmentParcelPlan,
 } from "../domain/shipment";
 import type { RateQuoteResult } from "./rate-quote.service";
+import type { FreightRatingContext } from "./rate-quote.service";
 import type { ShipmentParcelProvider } from "./shipment-parcel-provider";
 import type { ShippingRateProvider } from "./shipping-rate-provider";
 
@@ -20,6 +21,7 @@ export interface ShipmentQuoteRequest {
     postalCode: string;
   };
   lines: readonly ShipmentLineInput[];
+  freight?: FreightRatingContext | null;
   quotedAt?: Date;
 }
 
@@ -72,6 +74,7 @@ export async function quoteShipment(
     originWarehouseId: request.originWarehouseId,
     destination: request.destination,
     parcels: parcelResult.plan.parcels,
+    freight: request.freight,
     quotedAt: request.quotedAt,
   });
 

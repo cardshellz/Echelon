@@ -32,7 +32,12 @@ export const SHIPPING_DEFAULT_FILL_FACTOR_BPS = 8500;
 export const SHIPPING_BOX_KINDS = ["box", "mailer", "envelope"] as const;
 export type ShippingBoxKind = (typeof SHIPPING_BOX_KINDS)[number];
 
-export const SHIPPING_SERVICE_LEVEL_CODES = ["standard", "expedited", "express"] as const;
+export const SHIPPING_SERVICE_LEVEL_CODES = [
+  "standard",
+  "expedited",
+  "express",
+  "pallet_freight",
+] as const;
 export type ShippingServiceLevelCode = (typeof SHIPPING_SERVICE_LEVEL_CODES)[number];
 
 export const SHIPPING_CARTON_ORIENTATIONS = [
@@ -199,10 +204,9 @@ export const shippingZoneRules = shippingSchema.table("zone_rules", {
 
 export const shippingRateTables = shippingSchema.table("rate_tables", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  // Nullable during the expand phase; all new writers provide a book explicitly.
-  rateBookId: integer("rate_book_id").references(() => shippingRateBooks.id, { onDelete: "restrict" }),
-  carrier: varchar("carrier", { length: 50 }).notNull(),
-  serviceCode: varchar("service_code", { length: 80 }).notNull(),
+  rateBookId: integer("rate_book_id").notNull().references(() => shippingRateBooks.id, { onDelete: "restrict" }),
+  serviceLevelId: integer("service_level_id").notNull().references(() => shippingServiceLevels.id, { onDelete: "restrict" }),
+  pricingBasis: varchar("pricing_basis", { length: 30 }).notNull().default("shipment_weight"),
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
   status: varchar("status", { length: 30 }).notNull().default("draft"),
   effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
@@ -211,8 +215,9 @@ export const shippingRateTables = shippingSchema.table("rate_tables", {
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  index("shipping_rate_table_carrier_service_idx").on(table.rateBookId, table.carrier, table.serviceCode, table.status),
+  index("shipping_rate_table_service_level_idx").on(table.rateBookId, table.serviceLevelId, table.status),
   check("shipping_rate_table_status_chk", sql`${table.status} IN ('draft', 'active', 'superseded', 'retired')`),
+  check("shipping_rate_table_pricing_basis_chk", sql`${table.pricingBasis} IN ('shipment_weight', 'pallet_count')`),
 ]);
 
 export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
@@ -222,8 +227,9 @@ export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
   destinationCountry: varchar("destination_country", { length: 2 }).notNull().default("US"),
   destinationRegion: varchar("destination_region", { length: 2 }).notNull(),
   postalPrefix: varchar("postal_prefix", { length: 5 }),
-  minWeightGrams: integer("min_weight_grams").notNull().default(0),
-  maxWeightGrams: integer("max_weight_grams").notNull(),
+  minMeasure: integer("min_measure").notNull().default(0),
+  maxMeasure: integer("max_measure").notNull(),
+  maxShipmentWeightGrams: integer("max_shipment_weight_grams"),
   rateCents: bigint("rate_cents", { mode: "number" }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
@@ -233,8 +239,9 @@ export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
     table.destinationCountry,
     table.destinationRegion,
     sql`COALESCE(${table.postalPrefix}, '')`,
-    table.minWeightGrams,
-    table.maxWeightGrams,
+    table.minMeasure,
+    table.maxMeasure,
+    sql`COALESCE(${table.maxShipmentWeightGrams}, 0)`,
   ),
   index("shipping_rate_row_lookup_idx").on(
     table.rateTableId,
@@ -246,14 +253,17 @@ export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
   check("shipping_rate_row_country_chk", sql`${table.destinationCountry} ~ '^[A-Z]{2}$'`),
   check("shipping_rate_row_region_chk", sql`${table.destinationRegion} ~ '^[A-Z]{2}$'`),
   check("shipping_rate_row_postal_prefix_chk", sql`${table.postalPrefix} IS NULL OR ${table.postalPrefix} ~ '^[0-9]{1,5}$'`),
-  check("shipping_rate_row_weight_chk", sql`${table.minWeightGrams} >= 0 AND ${table.maxWeightGrams} >= ${table.minWeightGrams}`),
+  check("shipping_rate_row_measure_chk", sql`${table.minMeasure} >= 0 AND ${table.maxMeasure} >= ${table.minMeasure}`),
+  check("shipping_rate_row_shipment_weight_chk", sql`
+    ${table.maxShipmentWeightGrams} IS NULL OR ${table.maxShipmentWeightGrams} > 0
+  `),
   check("shipping_rate_row_rate_chk", sql`${table.rateCents} >= 0`),
 ]);
 
 // ---------------------------------------------------------------------------
-// Service levels — what checkout SELLS (Standard/Expedited/Express).
-// Methods map a level to the carrier services allowed to fulfill its promise;
-// the engine picks the cheapest qualifying method at fulfillment time.
+// Service levels are Card Shellz-owned checkout options such as Standard,
+// Priority, Overnight, and Pallet Freight. Provider methods are future
+// fulfillment mappings and are deliberately separate from customer pricing.
 // ---------------------------------------------------------------------------
 
 export const shippingServiceLevels = shippingSchema.table("service_levels", {
@@ -261,12 +271,28 @@ export const shippingServiceLevels = shippingSchema.table("service_levels", {
   code: varchar("code", { length: 40 }).notNull(),
   displayName: varchar("display_name", { length: 120 }).notNull(),
   description: varchar("description", { length: 400 }),
+  fulfillmentMode: varchar("fulfillment_mode", { length: 30 }).notNull().default("parcel"),
+  promiseMinBusinessDays: integer("promise_min_business_days"),
+  promiseMaxBusinessDays: integer("promise_max_business_days"),
   sortOrder: integer("sort_order").notNull().default(0),
   isActive: boolean("is_active").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("shipping_service_level_code_idx").on(table.code),
+  check("shipping_service_level_fulfillment_mode_chk", sql`${table.fulfillmentMode} IN ('parcel', 'freight')`),
+  check("shipping_service_level_promise_chk", sql`
+    (
+      ${table.promiseMinBusinessDays} IS NULL
+      AND ${table.promiseMaxBusinessDays} IS NULL
+    )
+    OR (
+      ${table.promiseMinBusinessDays} IS NOT NULL
+      AND ${table.promiseMaxBusinessDays} IS NOT NULL
+      AND ${table.promiseMinBusinessDays} >= 0
+      AND ${table.promiseMaxBusinessDays} >= ${table.promiseMinBusinessDays}
+    )
+  `),
 ]);
 
 export const shippingServiceLevelMethods = shippingSchema.table("service_level_methods", {

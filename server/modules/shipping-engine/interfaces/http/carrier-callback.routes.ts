@@ -6,10 +6,9 @@
  * SHADOW-SAFE BY CONSTRUCTION:
  *   - 404s unless SHIPPING_CALLBACK_TOKEN is set AND the path token matches
  *     (constant-time compare) — with no env var the endpoint does not exist.
- *   - Quotes only map through ACTIVE shipping.service_levels via their
- *     service_level_methods — until levels are activated in admin the
- *     response is always { rates: [] }, so registering the route (or even
- *     pointing Shopify at it) sells nothing by accident.
+ *   - Quotes require an ACTIVE shipping.service_level and matching ACTIVE
+ *     local rate table. Provider-method routing is a later capability and is
+ *     not consulted by checkout quoting in the initial rollout.
  *
  * HARD RULES (checkout is latency- and failure-sensitive):
  *   - No external calls — Echelon catalog weights + local rate tables only.
@@ -27,18 +26,14 @@
 
 import { createHash, timingSafeEqual } from "crypto";
 import type { Express, Request, Response } from "express";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import {
   shippingQuoteSnapshots,
-  shippingServiceLevelMethods,
-  shippingServiceLevels,
-  shippingTransitMatrix,
   warehouses,
 } from "@shared/schema";
 import { db } from "../../../../db";
 import { deliveryWindow, type DeliveryWindow } from "../../domain/eta";
-import { rateComboKey } from "../../domain/rate-selection";
 import type { RateQuoteLine, RateQuoteResult } from "../../application/rate-quote.service";
 import { quoteShipment } from "../../application/shipment-quote.service";
 import { localRateTableShippingRateProvider } from "../../application/shipping-rate-provider";
@@ -155,60 +150,23 @@ export interface ShopifyRate {
   max_delivery_date?: string;
 }
 
-export interface ActiveServiceLevelMethod {
-  levelCode: string;
-  displayName: string;
-  description: string | null;
-  sortOrder: number;
-  carrier: string;
-  serviceCode: string;
-}
-
 /**
- * Map engine quotes to sellable Shopify rates through ACTIVE service levels.
- * A quote whose (carrier, serviceCode) is not attached to an active level is
- * excluded — no active levels means an empty response, by design. When
- * multiple carrier quotes satisfy one level, the cheapest fulfills it.
- *
- * `deliveryEstimates` (keyed by rateComboKey of the FULFILLING quote's
- * carrier/serviceCode) attaches min/max_delivery_date when a transit estimate
- * exists; an absent entry means the rate goes out without dates — never
- * blocked, never guessed.
+ * Map Card Shellz-owned service-level quotes directly to Shopify rates.
+ * Delivery estimates are keyed by service-level id. Missing promises omit
+ * dates without blocking an otherwise valid rate.
  */
 export function mapQuotesToShopifyRates(
   quotes: RateQuoteLine[],
-  activeMethods: ActiveServiceLevelMethod[],
-  deliveryEstimates?: ReadonlyMap<string, DeliveryWindow>,
+  deliveryEstimates?: ReadonlyMap<number, DeliveryWindow>,
 ): ShopifyRate[] {
-  const quoteByCombo = new Map<string, RateQuoteLine>();
-  for (const quote of quotes) {
-    const key = rateComboKey(quote.carrier, quote.serviceCode);
-    const incumbent = quoteByCombo.get(key);
-    if (!incumbent || quote.totalCents < incumbent.totalCents) quoteByCombo.set(key, quote);
-  }
-
-  const bestByLevel = new Map<string, { method: ActiveServiceLevelMethod; quote: RateQuoteLine }>();
-  for (const method of activeMethods) {
-    const quote = quoteByCombo.get(rateComboKey(method.carrier, method.serviceCode));
-    if (!quote) continue;
-    const incumbent = bestByLevel.get(method.levelCode);
-    if (!incumbent || quote.totalCents < incumbent.quote.totalCents) {
-      bestByLevel.set(method.levelCode, { method, quote });
-    }
-  }
-
-  return [...bestByLevel.values()]
-    .sort((a, b) =>
-      a.method.sortOrder - b.method.sortOrder
-      || a.method.levelCode.localeCompare(b.method.levelCode))
-    .map(({ method, quote }) => {
-      const estimate = deliveryEstimates?.get(rateComboKey(quote.carrier, quote.serviceCode));
+  return quotes.map((quote) => {
+      const estimate = deliveryEstimates?.get(quote.serviceLevelId);
       return {
-        service_name: method.displayName,
-        service_code: method.levelCode,
+        service_name: quote.displayName,
+        service_code: quote.serviceLevelCode,
         total_price: String(quote.totalCents),
         currency: quote.currency,
-        ...(method.description ? { description: method.description } : {}),
+        ...(quote.description ? { description: quote.description } : {}),
         ...(estimate ? { min_delivery_date: estimate.minDate, max_delivery_date: estimate.maxDate } : {}),
       };
     });
@@ -311,18 +269,17 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
     }
     const { parcelPlan, rates } = shipmentQuote;
 
-    // Delivery dates are best-effort decoration: a transit lookup failure (or
-    // simply no matching transit rows) must never block or degrade the rates.
-    let deliveryEstimates: Map<string, DeliveryWindow> = new Map();
+    // Delivery dates are best-effort decoration from the internal service
+    // promise. Carrier-method enforcement remains a fulfillment concern.
+    let deliveryEstimates: Map<number, DeliveryWindow> = new Map();
     try {
-      deliveryEstimates = await loadDeliveryEstimates(originWarehouseId, rates.zone, new Date());
+      deliveryEstimates = await loadDeliveryEstimates(originWarehouseId, rates.quotes, new Date());
     } catch (error) {
-      console.error("[CarrierCallback] transit lookup failed; rates returned without delivery dates:", error);
-      warnings.push(`transit lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error("[CarrierCallback] promise lookup failed; rates returned without delivery dates:", error);
+      warnings.push(`promise lookup failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    const activeMethods = await loadActiveServiceLevelMethods();
-    const shopifyRates = mapQuotesToShopifyRates(rates.quotes, activeMethods, deliveryEstimates);
+    const shopifyRates = mapQuotesToShopifyRates(rates.quotes, deliveryEstimates);
     warnings.push(...parcelPlan.warnings, ...rates.warnings);
 
     await persistCheckoutSnapshot({
@@ -343,65 +300,41 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
 }
 
 /**
- * Delivery windows per (carrier, serviceCode) combo for the resolved zone —
- * ONE query loads every transit row for (origin warehouse, zone) joined with
- * the warehouse's cutoff/timezone, then the pure ETA math runs per row.
- * No zone (unresolved destination) → empty map → rates go out without dates.
+ * Build delivery windows from each service level's promise and the origin
+ * warehouse cutoff. Carrier transit enforcement belongs to fulfillment.
  */
 async function loadDeliveryEstimates(
   originWarehouseId: number,
-  zone: string | null,
+  quotes: readonly RateQuoteLine[],
   now: Date,
-): Promise<Map<string, DeliveryWindow>> {
-  const estimates = new Map<string, DeliveryWindow>();
-  if (zone === null) return estimates;
-
-  const rows = await db
+): Promise<Map<number, DeliveryWindow>> {
+  const estimates = new Map<number, DeliveryWindow>();
+  const [warehouse] = await db
     .select({
-      carrier: shippingTransitMatrix.carrier,
-      serviceCode: shippingTransitMatrix.serviceCode,
-      minBusinessDays: shippingTransitMatrix.minBusinessDays,
-      maxBusinessDays: shippingTransitMatrix.maxBusinessDays,
       cutoffLocal: warehouses.orderCutoffLocal,
       timezone: warehouses.timezone,
     })
-    .from(shippingTransitMatrix)
-    .innerJoin(warehouses, eq(warehouses.id, shippingTransitMatrix.originWarehouseId))
-    .where(and(
-      eq(shippingTransitMatrix.originWarehouseId, originWarehouseId),
-      eq(shippingTransitMatrix.destinationZone, zone),
-    ));
+    .from(warehouses)
+    .where(eq(warehouses.id, originWarehouseId))
+    .limit(1);
+  if (!warehouse) return estimates;
 
-  for (const row of rows) {
-    estimates.set(rateComboKey(row.carrier, row.serviceCode), deliveryWindow({
+  for (const quote of quotes) {
+    if (
+      quote.promiseMinBusinessDays === null
+      || quote.promiseMaxBusinessDays === null
+    ) {
+      continue;
+    }
+    estimates.set(quote.serviceLevelId, deliveryWindow({
       now,
-      cutoffLocal: row.cutoffLocal,
-      timezone: row.timezone,
-      minBusinessDays: row.minBusinessDays,
-      maxBusinessDays: row.maxBusinessDays,
+      cutoffLocal: warehouse.cutoffLocal,
+      timezone: warehouse.timezone,
+      minBusinessDays: quote.promiseMinBusinessDays,
+      maxBusinessDays: quote.promiseMaxBusinessDays,
     }));
   }
   return estimates;
-}
-
-/** Active-level methods, joined for the quote→rate mapping. */
-async function loadActiveServiceLevelMethods(): Promise<ActiveServiceLevelMethod[]> {
-  const rows = await db
-    .select({
-      levelCode: shippingServiceLevels.code,
-      displayName: shippingServiceLevels.displayName,
-      description: shippingServiceLevels.description,
-      sortOrder: shippingServiceLevels.sortOrder,
-      carrier: shippingServiceLevelMethods.carrier,
-      serviceCode: shippingServiceLevelMethods.serviceCode,
-    })
-    .from(shippingServiceLevelMethods)
-    .innerJoin(shippingServiceLevels, eq(shippingServiceLevels.id, shippingServiceLevelMethods.serviceLevelId))
-    .where(and(
-      eq(shippingServiceLevels.isActive, true),
-      eq(shippingServiceLevelMethods.isActive, true),
-    ));
-  return rows;
 }
 
 /** Best-effort snapshot — a persistence failure must never affect checkout. */

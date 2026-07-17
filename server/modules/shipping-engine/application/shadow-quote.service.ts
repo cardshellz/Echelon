@@ -2,7 +2,7 @@
  * Shadow-mode quote runner — application layer.
  *
  * Replays recent real wms.orders through the full quote pipeline
- * (packing inputs → cartonize → quoteParcels) WITHOUT touching checkout,
+ * (packing inputs -> cartonize -> quoteShipmentRates) WITHOUT touching checkout,
  * persisting one shipping.quote_snapshots row per order (source 'shadow')
  * and returning a data-readiness report: with variant dims mostly missing
  * and rate tables empty today, expect ~everything fallback/empty — the
@@ -29,7 +29,7 @@ import {
 import { buildCartonizeItems } from "../../cartonization/domain/build-items";
 export { buildCartonizeItems } from "../../cartonization/domain/build-items";
 import {
-  quoteParcels,
+  quoteShipmentRates,
   RATE_QUOTE_ENGINE,
   type RateQuoteResult,
 } from "./rate-quote.service";
@@ -87,7 +87,7 @@ export interface ShadowDeps {
   resolveVariantIdsBySku: typeof resolveVariantIdsBySku;
   loadPackingInputs: typeof loadPackingInputs;
   loadActiveBoxes: typeof loadActiveBoxes;
-  quoteParcels: typeof quoteParcels;
+  quoteShipmentRates: typeof quoteShipmentRates;
   persistSnapshot: (row: typeof shippingQuoteSnapshots.$inferInsert) => Promise<void>;
   now: () => Date;
 }
@@ -102,7 +102,7 @@ export async function runShadow(
     resolveVariantIdsBySku,
     loadPackingInputs,
     loadActiveBoxes,
-    quoteParcels,
+    quoteShipmentRates,
     persistSnapshot: async (row) => {
       await db.insert(shippingQuoteSnapshots).values(row);
     },
@@ -143,7 +143,7 @@ export async function runShadow(
         variantIdBySku,
         packingInputs,
         boxesForWarehouse,
-        quote: deps.quoteParcels,
+        quote: deps.quoteShipmentRates,
         persistSnapshot: deps.persistSnapshot,
         quotedAt: now,
       }));
@@ -169,7 +169,7 @@ interface OrderRunContext {
   variantIdBySku: Map<string, number>;
   packingInputs: Map<number, CartonizeItem>;
   boxesForWarehouse: (warehouseId: number) => Promise<CartonizeBox[]>;
-  quote: typeof quoteParcels;
+  quote: typeof quoteShipmentRates;
   persistSnapshot: ShadowDeps["persistSnapshot"];
   quotedAt: Date;
 }
