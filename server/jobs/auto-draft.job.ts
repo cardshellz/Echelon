@@ -36,6 +36,10 @@ import {
   type AutomaticRecommendationPoHandoffResult,
   type CreatedRecommendationPurchaseOrder,
 } from "../modules/procurement/recommendation-po-handoff.service";
+import {
+  buildPurchaseRecommendationRunInput,
+  createPurchaseRecommendationSnapshotService,
+} from "../modules/procurement/purchase-recommendation-snapshot.service";
 
 export interface AutoDraftOptions {
   triggeredBy: "scheduler" | "manual";
@@ -191,6 +195,11 @@ export interface AutoDraftJobResult {
   recommendationRun: {
     id: number;
     detail: ReturnType<typeof buildPurchasingRecommendationRunDetail>;
+  };
+  purchaseRecommendationRun: {
+    id: number;
+    lineCount: number;
+    reused: boolean;
   };
   pilot?: Omit<AutomaticPurchasingPilotPreview, "mode"> & {
     mode: "execute";
@@ -609,6 +618,7 @@ async function executeAutoDraftJob(
   let skippedOnOrder = 0;
   let skippedExcluded = 0;
   let recommendationRunDetail: ReturnType<typeof buildPurchasingRecommendationRunDetail> | null = null;
+  let purchaseRecommendationRun: AutoDraftJobResult["purchaseRecommendationRun"] | null = null;
   let pilotPreview: AutomaticPurchasingPilotPreview | undefined;
 
   try {
@@ -617,6 +627,26 @@ async function executeAutoDraftJob(
     skippedExcluded = recommendationResult.summary.excludedCount;
     skippedNoVendor = recommendationResult.summary.skippedNoVendor;
     skippedOnOrder = recommendationResult.summary.skippedOnOrder;
+
+    // Persist the complete calculation output before any PO mutation. The
+    // source-scoped key makes retries of the same durable auto-draft run exact.
+    const snapshot = await createPurchaseRecommendationSnapshotService(db).createRun(
+      buildPurchaseRecommendationRunInput({
+        recommendationResult,
+        settings,
+        lookbackDays,
+        asOf: runRecord.runAt,
+        source: "auto_draft",
+        sourceRunKey: String(runRecord.id),
+        evaluatedCount: rawData.length,
+      }),
+      options.triggeredByUser ?? "system:auto-draft",
+    );
+    purchaseRecommendationRun = {
+      id: Number(snapshot.run.id),
+      lineCount: snapshot.lines.length,
+      reused: snapshot.reused,
+    };
 
     let eligibleItems: AutomaticRecommendationPoHandoffItem[];
     if (options.pilot) {
@@ -720,6 +750,7 @@ async function executeAutoDraftJob(
         id: runRecord.id,
         detail: recommendationRunDetail,
       },
+      purchaseRecommendationRun,
       ...(pilotPreview ? {
         pilot: {
           ...pilotPreview,

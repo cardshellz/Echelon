@@ -424,7 +424,14 @@ interface RfqQueueItem {
 }
 
 interface RfqQueueResponse {
-  run: { id: number; calculationVersion: string; asOf: string; policySnapshot: Record<string, unknown> } | null;
+  run: {
+    id: number;
+    calculationVersion: string;
+    source: "manual" | "auto_draft" | "api";
+    sourceRunKey: string | null;
+    asOf: string;
+    policySnapshot: Record<string, unknown>;
+  } | null;
   generatedAt: string | null;
   lookbackDays: number | null;
   summary: {
@@ -1473,6 +1480,11 @@ export default function PurchasingView() {
                   <CardDescription>
                     Select requirements, adjust quantities, and assign suppliers. One multi-line RFQ draft is created per supplier; pricing comes later.
                   </CardDescription>
+                  {rfqQueue?.generatedAt && (
+                    <div className="mt-1 text-[11px] text-zinc-500">
+                      Run #{rfqQueue.run?.id} generated {new Date(rfqQueue.generatedAt).toLocaleString()} via {rfqQueue.run?.source === "auto_draft" ? "scheduled purchasing" : "manual refresh"} using {rfqQueue.run?.calculationVersion}
+                    </div>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-2 text-xs">
                   <Badge variant="outline">{rfqQueue?.summary.open ?? 0} open</Badge>

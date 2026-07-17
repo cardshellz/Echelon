@@ -38,7 +38,7 @@ import {
   requestForQuoteLines as requestForQuoteLinesTable,
   vendors as vendorsTable,
 } from "@shared/schema";
-import { buildPurchasingRfqQueue } from "./purchasing-rfq.service";
+import { buildPurchaseRecommendationRunInput } from "./purchase-recommendation-snapshot.service";
 import {
   normalizePurchasingForecastPolicy,
   type PurchasingForecastPolicy,
@@ -1116,43 +1116,15 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         return res.status(503).json({ error: "Purchasing recommendation service is unavailable" });
       }
       const { configuredLookback, settings, recommendationResult } = await loadRecommendationReviewQueueData();
-      const candidates = buildPurchasingRfqQueue(recommendationResult);
       const userId = (req as any).user?.id ?? req.session?.user?.id ?? null;
       const asOf = new Date();
-      const result = await purchasing.snapshotPurchaseRecommendations({
-        calculationVersion: "purchasing-recommendation-v2",
-        asOf,
+      const result = await purchasing.snapshotPurchaseRecommendations(buildPurchaseRecommendationRunInput({
+        recommendationResult,
+        settings,
         lookbackDays: configuredLookback,
-        policySnapshot: { ...settings },
-        inputSummary: {
-          candidateCount: candidates.length,
-          evaluatedCount: recommendationResult.items.length + recommendationResult.skippedItems.length,
-          summary: recommendationResult.summary,
-        },
-        lines: candidates.map((item) => ({
-          recommendationKey: item.recommendationId,
-          productId: item.productId,
-          productVariantId: item.productVariantId,
-          warehouseId: null,
-          sku: item.sku,
-          productName: item.productName,
-          requiredByDate: null,
-          recommendedPieces: item.requestedPieces,
-          preferredVendorId: item.preferredVendorId,
-          preferredVendorProductId: item.vendorProductId,
-          evidenceSnapshot: {
-            ...item.demandSnapshot,
-            availablePieces: item.availablePieces,
-            onOrderPieces: item.onOrderPieces,
-            reorderPointPieces: item.reorderPointPieces,
-            forecastMethod: item.forecastMethod,
-            forecastDailyPieces: item.forecastDailyPieces,
-            leadTimeDays: item.leadTimeDays,
-            safetyStockDays: item.safetyStockDays,
-            forwardDemandPieces: item.forwardDemandPieces,
-          },
-        })),
-      }, userId);
+        asOf,
+        source: "manual",
+      }), userId);
       res.status(201).json({ run: result.run, lineCount: result.lines.length });
     } catch (error) {
       console.error("Error generating purchasing recommendation run:", error);
@@ -1252,7 +1224,14 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
       const activeRfqIds = new Set(allocations.map((allocation) => allocation.rfqId));
       res.json({
-        run: { id: run.id, calculationVersion: run.calculationVersion, asOf: run.asOf, policySnapshot: run.policySnapshot },
+        run: {
+          id: run.id,
+          calculationVersion: run.calculationVersion,
+          source: run.source,
+          sourceRunKey: run.sourceRunKey,
+          asOf: run.asOf,
+          policySnapshot: run.policySnapshot,
+        },
         generatedAt: run.generatedAt,
         lookbackDays: run.lookbackDays,
         summary: {

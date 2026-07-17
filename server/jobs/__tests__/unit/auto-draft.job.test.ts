@@ -26,6 +26,9 @@ const mocks = vi.hoisted(() => ({
   stalePoEscalation: {
     run: vi.fn(),
   },
+  recommendationSnapshot: {
+    createRun: vi.fn(),
+  },
 }));
 
 vi.mock("../../../db", () => ({ db: mocks.db }));
@@ -61,6 +64,13 @@ vi.mock("../../../modules/procurement/recommendation-po-handoff.service", async 
 vi.mock("../../../modules/procurement/auto-draft-po-escalation.service", () => ({
   runStaleAutoDraftPoEscalationCheck: mocks.stalePoEscalation.run,
 }));
+vi.mock("../../../modules/procurement/purchase-recommendation-snapshot.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../modules/procurement/purchase-recommendation-snapshot.service")>();
+  return {
+    ...actual,
+    createPurchaseRecommendationSnapshotService: () => mocks.recommendationSnapshot,
+  };
+});
 
 import {
   previewAutomaticPurchasingPilot,
@@ -152,6 +162,11 @@ describe("auto-draft job", () => {
       signature: null,
       notificationTypeKey: "auto_draft_po_critical_stale",
     });
+    mocks.recommendationSnapshot.createRun.mockResolvedValue({
+      run: { id: 9001, source: "auto_draft", sourceRunKey: "500" },
+      lines: [{ id: 9002, recommendationKey: "1:11:90" }],
+      reused: false,
+    });
   });
 
   it("delegates every eligible mutation to the atomic handoff service", async () => {
@@ -164,6 +179,18 @@ describe("auto-draft job", () => {
       triggeredByUser: null,
     });
     expect(mocks.lifecycle.heartbeatRun).toHaveBeenCalledWith({ runId: 500 });
+    expect(mocks.recommendationSnapshot.createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "auto_draft",
+        sourceRunKey: "500",
+        asOf: new Date("2026-07-11T18:00:00.000Z"),
+        lookbackDays: 90,
+        lines: [expect.objectContaining({ recommendationKey: "1:11:90", sku: "HIGH-1" })],
+      }),
+      "system:auto-draft",
+    );
+    expect(mocks.recommendationSnapshot.createRun.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.handoff.createAutomaticHandoff.mock.invocationCallOrder[0]);
     expect(mocks.handoff.createAutomaticHandoff).toHaveBeenCalledWith({
       actorId: "system:auto-draft",
       autoDraftRunId: 500,
@@ -210,6 +237,7 @@ describe("auto-draft job", () => {
       itemsSkippedAfterAnalysis: 0,
       reviewOnly: false,
       recommendationRun: { id: 500 },
+      purchaseRecommendationRun: { id: 9001, lineCount: 1, reused: false },
     });
   });
 
@@ -675,6 +703,27 @@ describe("auto-draft job", () => {
 
     expect(mocks.lifecycle.startRun).not.toHaveBeenCalled();
     expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+  });
+
+  it("fails the durable run before any PO mutation when recommendation evidence cannot be saved", async () => {
+    mocks.recommendationSnapshot.createRun.mockRejectedValue(new Error("recommendation snapshot unavailable"));
+
+    await expect(runAutoDraftJob({ triggeredBy: "scheduler" }))
+      .rejects.toThrow("recommendation snapshot unavailable");
+
+    expect(mocks.lifecycle.heartbeatRun).not.toHaveBeenCalled();
+    expect(mocks.handoff.createAutomaticHandoff).not.toHaveBeenCalled();
+    expect(mocks.lifecycle.failRun).toHaveBeenCalledWith({
+      runId: 500,
+      errorMessage: "recommendation snapshot unavailable",
+      progress: {
+        itemsAnalyzed: 1,
+        skippedNoVendor: 0,
+        skippedOnOrder: 0,
+        skippedExcluded: 0,
+        summaryJson: null,
+      },
+    });
   });
 
   it("records analysis failure through compare-and-set lifecycle state", async () => {
