@@ -26,6 +26,7 @@ import { eq } from "drizzle-orm";
 import type { OmsService } from "../oms/oms.service";
 import type { WmsSyncService } from "../oms/wms-sync.service";
 import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
+import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 
 // Re-export for registration in index.ts
 export { startShopifyReconciliation };
@@ -109,6 +110,10 @@ const RECONCILIATION_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const SHOPIFY_CHANNEL_ID = 36;
 const SHOPIFY_API_VERSION = "2024-10";
 const RATE_LIMIT_DELAY_MS = 550; // ~2 calls/sec
+const MAX_RECONCILIATION_PAGES = envPositiveInteger(
+  "SHOPIFY_RECONCILIATION_MAX_PAGES",
+  100,
+);
 
 let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 let isRunning = false;
@@ -213,10 +218,10 @@ async function fetchOrdersFromShopify(since: Date): Promise<ShopifyApiOrder[]> {
       await delay(RATE_LIMIT_DELAY_MS);
     }
 
-    // Safety: don't fetch more than 10 pages (2500 orders) in one run
-    if (page >= 10) {
-      console.warn(`[RECONCILE] Hit page limit (${page} pages, ${allOrders.length} orders)`);
-      break;
+    if (pageInfo && page >= MAX_RECONCILIATION_PAGES) {
+      throw new Error(
+        `Shopify reconciliation exceeded ${MAX_RECONCILIATION_PAGES} pages; checkpoint was not advanced`,
+      );
     }
   } while (pageInfo);
 
@@ -340,7 +345,7 @@ async function getLastCheckTime(): Promise<Date> {
 async function setLastCheckTime(ts: Date): Promise<void> {
   const isoValue = ts.toISOString();
   await db.execute(sql`
-    INSERT INTO echelon_settings (key, value, type, category)
+    INSERT INTO warehouse.echelon_settings (key, value, type, category)
     VALUES (${SETTINGS_KEY}, ${isoValue}, 'string', 'sync')
     ON CONFLICT (key) DO UPDATE SET value = ${isoValue}, updated_at = NOW()
   `);
@@ -439,8 +444,14 @@ async function runReconciliation(): Promise<ReconciliationResult> {
       await delay(100);
     }
 
-    // Update last check time to now
-    await setLastCheckTime(new Date());
+    // A failed order stays inside the next overlapping poll window.
+    if (result.failed === 0) {
+      await setLastCheckTime(new Date());
+    } else {
+      console.error(
+        `[RECONCILE] ${result.failed} order(s) failed; checkpoint was not advanced`,
+      );
+    }
 
     const durationMs = Date.now() - startTime;
     if (result.reconciled > 0) {
