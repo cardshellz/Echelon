@@ -13,7 +13,6 @@
 
 import { randomUUID } from "node:crypto";
 import { eq, and, sql, inArray, ne, lte, desc, getTableColumns } from "drizzle-orm";
-import { alias } from "drizzle-orm/pg-core";
 import {
   inboundShipmentLines,
   landedCostSnapshots,
@@ -77,7 +76,10 @@ import {
   reconcilePurchaseOrderReceipt,
   type ReceivingReconciliationLine,
 } from "./purchase-order-receipt-reconciliation.service";
-import { purchasingSkuAllocationKey } from "./purchasing-rfq.service";
+import {
+  lockAndLoadActiveRfqAllocations,
+  purchasingSkuAllocationKey,
+} from "./purchasing-rfq.service";
 import {
   deliveryDateIso,
   sameDeliveryDate,
@@ -7368,31 +7370,7 @@ export function createPurchasingService(
           });
         }
 
-        const recommendationProductIds: number[] = Array.from(new Set<number>(
-          recommendationRows.map((line: any) => Number(line.productId)),
-        )).sort((left, right) => left - right);
-        await tx.select({ id: productsTable.id }).from(productsTable).where(
-          inArray(productsTable.id, recommendationProductIds),
-        ).orderBy(productsTable.id).for("update");
-
-        const allocatedRecommendation = alias(purchaseRecommendationLinesTable, "allocated_recommendation");
-        const existingAllocations = await tx.select({
-          productId: allocatedRecommendation.productId,
-          productVariantId: allocatedRecommendation.productVariantId,
-          warehouseId: allocatedRecommendation.warehouseId,
-          requestedPieces: requestForQuoteLinesTable.requestedPieces,
-        }).from(requestForQuoteLinesTable).innerJoin(
-          allocatedRecommendation,
-          eq(requestForQuoteLinesTable.recommendationLineId, allocatedRecommendation.id),
-        ).where(and(
-          inArray(allocatedRecommendation.productId, recommendationProductIds),
-          inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
-        ));
-        const allocatedBySku = new Map<string, number>();
-        for (const allocation of existingAllocations) {
-          const key = purchasingSkuAllocationKey(allocation);
-          allocatedBySku.set(key, (allocatedBySku.get(key) ?? 0) + Number(allocation.requestedPieces));
-        }
+        const allocatedBySku = await lockAndLoadActiveRfqAllocations(tx, recommendationRows);
 
         const grouped = new Map<number, CreateRfqBatchLineInput[]>();
         for (const selection of input.lines) {

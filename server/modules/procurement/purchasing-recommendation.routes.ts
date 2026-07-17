@@ -1997,6 +1997,10 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         skipNoVendor,
         candidateScoreStrongThreshold,
         candidateScoreReviewThreshold,
+        rfqDraftAutomationMode,
+        rfqDraftMinimumConfidence,
+        rfqDraftRequireTrustedForecast,
+        rfqDraftMaximumLinesPerRun,
         forecastPolicy,
         stalePoThresholds,
       } = req.body;
@@ -2010,6 +2014,22 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         return res.status(400).json({
           error: "approvalPolicy must be one of: high_confidence_only, high_confidence_and_strong_candidate",
         });
+      }
+      if (rfqDraftAutomationMode !== undefined && !["manual", "preferred_vendor"].includes(rfqDraftAutomationMode)) {
+        return res.status(400).json({ error: "rfqDraftAutomationMode must be one of: manual, preferred_vendor" });
+      }
+      if (rfqDraftMinimumConfidence !== undefined && !["high", "medium"].includes(rfqDraftMinimumConfidence)) {
+        return res.status(400).json({ error: "rfqDraftMinimumConfidence must be one of: high, medium" });
+      }
+      if (rfqDraftRequireTrustedForecast !== undefined && typeof rfqDraftRequireTrustedForecast !== "boolean") {
+        return res.status(400).json({ error: "rfqDraftRequireTrustedForecast must be a boolean" });
+      }
+      if (rfqDraftMaximumLinesPerRun !== undefined && (
+        !Number.isSafeInteger(rfqDraftMaximumLinesPerRun)
+        || rfqDraftMaximumLinesPerRun < 1
+        || rfqDraftMaximumLinesPerRun > 500
+      )) {
+        return res.status(400).json({ error: "rfqDraftMaximumLinesPerRun must be an integer between 1 and 500" });
       }
       const parsedStrongThreshold = parseCandidateScoreThreshold(candidateScoreStrongThreshold, "candidateScoreStrongThreshold");
       if (typeof parsedStrongThreshold === "object") {
@@ -2044,6 +2064,10 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         skipNoVendor,
         candidateScoreStrongThreshold: parsedStrongThreshold,
         candidateScoreReviewThreshold: parsedReviewThreshold,
+        rfqDraftAutomationMode,
+        rfqDraftMinimumConfidence,
+        rfqDraftRequireTrustedForecast,
+        rfqDraftMaximumLinesPerRun,
         forecastPolicy: parsedForecastPolicy,
         stalePoThresholds: parsedStalePoThresholds,
       });

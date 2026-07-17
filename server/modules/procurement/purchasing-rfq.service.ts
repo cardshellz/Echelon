@@ -1,3 +1,10 @@
+import { and, eq, inArray } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import {
+  products as productsTable,
+  purchaseRecommendationLines as purchaseRecommendationLinesTable,
+  requestForQuoteLines as requestForQuoteLinesTable,
+} from "@shared/schema";
 import type { PurchasingRecommendationItem } from "./purchasing-recommendation.engine";
 
 const nonRfqSkipReasons = new Set([
@@ -26,6 +33,13 @@ export type PurchasingRfqQueueItem = {
   preferredVendorName: string | null;
   vendorProductId: number | null;
   supplierAssignmentRequired: boolean;
+  confidence: PurchasingRecommendationItem["confidence"];
+  rfqConfidence: PurchasingRecommendationItem["rfqConfidence"];
+  recommendationCandidateScore: PurchasingRecommendationItem["recommendationCandidateScore"];
+  forecastTrust: PurchasingRecommendationItem["demandBasis"]["forecastTrust"];
+  qualityGate: PurchasingRecommendationItem["qualityGate"];
+  autopilotBlockers: PurchasingRecommendationItem["autopilotBlockers"];
+  supplierBasis: PurchasingRecommendationItem["supplierBasis"];
   demandSnapshot: Record<string, unknown>;
 };
 
@@ -35,6 +49,41 @@ export function purchasingSkuAllocationKey(input: {
   warehouseId?: number | null;
 }): string {
   return `${input.productId}:${input.productVariantId ?? "base"}:${input.warehouseId ?? "all"}`;
+}
+
+export async function lockAndLoadActiveRfqAllocations(
+  tx: any,
+  recommendations: Array<{ productId: number; productVariantId?: number | null; warehouseId?: number | null }>,
+): Promise<Map<string, number>> {
+  const productIds = Array.from(new Set<number>(recommendations.map((line) => Number(line.productId))))
+    .sort((left, right) => left - right);
+  if (productIds.length === 0) return new Map();
+
+  await tx.select({ id: productsTable.id }).from(productsTable)
+    .where(inArray(productsTable.id, productIds))
+    .orderBy(productsTable.id)
+    .for("update");
+
+  const allocatedRecommendation = alias(purchaseRecommendationLinesTable, "allocated_recommendation");
+  const allocations = await tx.select({
+    productId: allocatedRecommendation.productId,
+    productVariantId: allocatedRecommendation.productVariantId,
+    warehouseId: allocatedRecommendation.warehouseId,
+    requestedPieces: requestForQuoteLinesTable.requestedPieces,
+  }).from(requestForQuoteLinesTable).innerJoin(
+    allocatedRecommendation,
+    eq(requestForQuoteLinesTable.recommendationLineId, allocatedRecommendation.id),
+  ).where(and(
+    inArray(allocatedRecommendation.productId, productIds),
+    inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
+  ));
+
+  const allocatedBySku = new Map<string, number>();
+  for (const allocation of allocations) {
+    const key = purchasingSkuAllocationKey(allocation);
+    allocatedBySku.set(key, (allocatedBySku.get(key) ?? 0) + Number(allocation.requestedPieces));
+  }
+  return allocatedBySku;
 }
 
 export function isPurchasingRfqCandidate(item: PurchasingRecommendationItem): boolean {
@@ -71,6 +120,13 @@ export function buildPurchasingRfqQueue(
       preferredVendorName: item.preferredVendorName,
       vendorProductId: item.supplierBasis.vendorProductId,
       supplierAssignmentRequired: !item.preferredVendorId,
+      confidence: item.confidence,
+      rfqConfidence: item.rfqConfidence,
+      recommendationCandidateScore: item.recommendationCandidateScore,
+      forecastTrust: item.demandBasis.forecastTrust,
+      qualityGate: item.qualityGate,
+      autopilotBlockers: item.autopilotBlockers,
+      supplierBasis: item.supplierBasis,
       demandSnapshot: {
         recommendationId: item.recommendationId,
         generatedForLookbackDays: item.forecastProvenance.demandWindowDays,

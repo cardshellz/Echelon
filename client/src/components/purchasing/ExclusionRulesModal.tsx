@@ -42,6 +42,10 @@ interface AutoDraftSettings {
   skipNoVendor: boolean;
   candidateScoreStrongThreshold: number;
   candidateScoreReviewThreshold: number;
+  rfqDraftAutomationMode: "manual" | "preferred_vendor";
+  rfqDraftMinimumConfidence: "high" | "medium";
+  rfqDraftRequireTrustedForecast: boolean;
+  rfqDraftMaximumLinesPerRun: number;
   stalePoThresholds: AutoDraftStalePoThresholds;
   forecastPolicy: PurchasingForecastPolicy;
 }
@@ -593,6 +597,67 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
                 <Button size="sm" onClick={saveForecastPolicy} disabled={updateSettingsMutation.isPending}>
                   Save forecast policy
                 </Button>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t" />
+
+          <div className="space-y-3">
+            <div>
+              <span className="text-xs font-semibold block">RFQ Draft Automation</span>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Scheduled recommendation runs can prepare price-free RFQ drafts for trusted requirements with an existing preferred supplier. Drafts are never sent automatically.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-3 rounded-md border bg-muted/40 p-3 sm:grid-cols-2">
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Draft mode</label>
+                <Select
+                  value={settings?.rfqDraftAutomationMode ?? "manual"}
+                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftAutomationMode: value as AutoDraftSettings["rfqDraftAutomationMode"] })}
+                >
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="manual">Manual selection only</SelectItem>
+                    <SelectItem value="preferred_vendor">Draft for preferred suppliers</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Minimum demand confidence</label>
+                <Select
+                  value={settings?.rfqDraftMinimumConfidence ?? "high"}
+                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftMinimumConfidence: value as AutoDraftSettings["rfqDraftMinimumConfidence"] })}
+                >
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="high">High only</SelectItem>
+                    <SelectItem value="medium">Medium or high</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Maximum lines per run</label>
+                <Select
+                  value={String(settings?.rfqDraftMaximumLinesPerRun ?? 100)}
+                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftMaximumLinesPerRun: Number(value) })}
+                >
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {[25, 50, 100, 250, 500].map((value) => <SelectItem key={value} value={String(value)}>{value} lines</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
+                <div>
+                  <div className="text-xs font-medium">Require trusted forecast</div>
+                  <p className="text-[10px] text-muted-foreground">Hold watch/review demand signals for an operator.</p>
+                </div>
+                <Switch
+                  checked={settings?.rfqDraftRequireTrustedForecast ?? true}
+                  onCheckedChange={(value) => updateSettingsMutation.mutate({ rfqDraftRequireTrustedForecast: value })}
+                />
               </div>
             </div>
           </div>

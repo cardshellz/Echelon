@@ -124,6 +124,13 @@ export function buildPurchaseRecommendationRunInput(input: {
         leadTimeDays: item.leadTimeDays,
         safetyStockDays: item.safetyStockDays,
         forwardDemandPieces: item.forwardDemandPieces,
+        confidence: item.confidence,
+        rfqConfidence: item.rfqConfidence,
+        candidateScore: item.recommendationCandidateScore,
+        forecastTrust: item.forecastTrust,
+        qualityGate: item.qualityGate,
+        autopilotBlockers: item.autopilotBlockers,
+        supplierBasis: item.supplierBasis,
       },
     })),
   };
@@ -196,4 +203,3 @@ export function createPurchaseRecommendationSnapshotService(database: any) {
 
   return { createRun };
 }
-

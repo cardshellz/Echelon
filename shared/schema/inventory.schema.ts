@@ -272,6 +272,10 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   purchasingForwardDemandLowWeight: integer("purchasing_forward_demand_low_weight").notNull().default(40),
   purchasingAutomationMinOrderCount: integer("purchasing_automation_min_order_count").notNull().default(2),
   purchasingAutomationMinActiveDays: integer("purchasing_automation_min_active_days").notNull().default(2),
+  rfqDraftAutomationMode: varchar("rfq_draft_automation_mode", { length: 30 }).notNull().default("manual"),
+  rfqDraftMinimumConfidence: varchar("rfq_draft_minimum_confidence", { length: 10 }).notNull().default("high"),
+  rfqDraftRequireTrustedForecast: boolean("rfq_draft_require_trusted_forecast").notNull().default(true),
+  rfqDraftMaximumLinesPerRun: integer("rfq_draft_maximum_lines_per_run").notNull().default(100),
   autoDraftMode: varchar("auto_draft_mode", { length: 20 }).notNull().default("draft_po"), // draft_po, review_only
   autoDraftApprovalPolicy: varchar("auto_draft_approval_policy", { length: 50 }).notNull().default("high_confidence_only"),
   recommendationCandidateScoreStrongThreshold: integer("recommendation_candidate_score_strong_threshold").notNull().default(80),
@@ -359,6 +363,11 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
     ${table.purchasingAutomationMinOrderCount} BETWEEN 1 AND 100
     AND ${table.purchasingAutomationMinActiveDays} BETWEEN 1 AND 100
     AND ${table.purchasingAutomationMinActiveDays} <= ${table.velocityLookbackDays}
+  `),
+  check("warehouse_settings_rfq_draft_automation_chk", sql`
+    ${table.rfqDraftAutomationMode} IN ('manual', 'preferred_vendor')
+    AND ${table.rfqDraftMinimumConfidence} IN ('high', 'medium')
+    AND ${table.rfqDraftMaximumLinesPerRun} BETWEEN 1 AND 500
   `),
 ]);
 

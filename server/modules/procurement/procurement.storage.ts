@@ -2185,6 +2185,10 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(purchasing_forward_demand_low_weight, 40) AS purchasing_forward_demand_low_weight,
         COALESCE(purchasing_automation_min_order_count, 2) AS purchasing_automation_min_order_count,
         COALESCE(purchasing_automation_min_active_days, 2) AS purchasing_automation_min_active_days,
+        COALESCE(rfq_draft_automation_mode, 'manual') AS rfq_draft_automation_mode,
+        COALESCE(rfq_draft_minimum_confidence, 'high') AS rfq_draft_minimum_confidence,
+        COALESCE(rfq_draft_require_trusted_forecast, TRUE) AS rfq_draft_require_trusted_forecast,
+        COALESCE(rfq_draft_maximum_lines_per_run, 100) AS rfq_draft_maximum_lines_per_run,
         COALESCE(auto_draft_po_review_warning_days, 2) AS auto_draft_po_review_warning_days,
         COALESCE(auto_draft_po_review_critical_days, 5) AS auto_draft_po_review_critical_days,
         COALESCE(auto_draft_po_supplier_send_warning_days, 2) AS auto_draft_po_supplier_send_warning_days,
@@ -2213,6 +2217,10 @@ export const procurementMethods: IProcurementStorage = {
       skipNoVendor: row?.skip_no_vendor ?? true,
       candidateScoreStrongThreshold: row?.candidate_score_strong_threshold ?? 80,
       candidateScoreReviewThreshold: row?.candidate_score_review_threshold ?? 60,
+      rfqDraftAutomationMode: row?.rfq_draft_automation_mode === "preferred_vendor" ? "preferred_vendor" : "manual",
+      rfqDraftMinimumConfidence: row?.rfq_draft_minimum_confidence === "medium" ? "medium" : "high",
+      rfqDraftRequireTrustedForecast: row?.rfq_draft_require_trusted_forecast ?? true,
+      rfqDraftMaximumLinesPerRun: Math.min(500, Math.max(1, Number(row?.rfq_draft_maximum_lines_per_run ?? 100))),
       forecastPolicy: normalizePurchasingForecastPolicy({
         method: row?.purchasing_forecast_method,
         shortWindowDays: row?.purchasing_forecast_short_window_days,
@@ -2267,6 +2275,17 @@ export const procurementMethods: IProcurementStorage = {
     const forecastPolicy = settings.forecastPolicy
       ? normalizePurchasingForecastPolicy(settings.forecastPolicy)
       : null;
+    const rfqDraftAutomationMode = settings.rfqDraftAutomationMode === "preferred_vendor"
+      ? "preferred_vendor"
+      : settings.rfqDraftAutomationMode === "manual" ? "manual" : null;
+    const rfqDraftMinimumConfidence = settings.rfqDraftMinimumConfidence === "medium"
+      ? "medium"
+      : settings.rfqDraftMinimumConfidence === "high" ? "high" : null;
+    const rfqDraftMaximumLinesPerRun = Number.isSafeInteger(settings.rfqDraftMaximumLinesPerRun)
+      && settings.rfqDraftMaximumLinesPerRun >= 1
+      && settings.rfqDraftMaximumLinesPerRun <= 500
+      ? settings.rfqDraftMaximumLinesPerRun
+      : null;
     await db.execute(sql`
       UPDATE warehouse_settings SET
         auto_draft_mode = COALESCE(${autoDraftMode}, auto_draft_mode),
@@ -2293,6 +2312,10 @@ export const procurementMethods: IProcurementStorage = {
         purchasing_forward_demand_low_weight = COALESCE(${forecastPolicy?.forwardDemandConfidenceWeights.low ?? null}, purchasing_forward_demand_low_weight),
         purchasing_automation_min_order_count = COALESCE(${forecastPolicy?.automationMinimumOrderCount ?? null}, purchasing_automation_min_order_count),
         purchasing_automation_min_active_days = COALESCE(${forecastPolicy?.automationMinimumActiveDays ?? null}, purchasing_automation_min_active_days),
+        rfq_draft_automation_mode = COALESCE(${rfqDraftAutomationMode}, rfq_draft_automation_mode),
+        rfq_draft_minimum_confidence = COALESCE(${rfqDraftMinimumConfidence}, rfq_draft_minimum_confidence),
+        rfq_draft_require_trusted_forecast = COALESCE(${settings.rfqDraftRequireTrustedForecast ?? null}, rfq_draft_require_trusted_forecast),
+        rfq_draft_maximum_lines_per_run = COALESCE(${rfqDraftMaximumLinesPerRun}, rfq_draft_maximum_lines_per_run),
         auto_draft_po_review_warning_days = COALESCE(${settings.stalePoThresholds?.reviewPendingWarningDays ?? null}, auto_draft_po_review_warning_days),
         auto_draft_po_review_critical_days = COALESCE(${settings.stalePoThresholds?.reviewPendingCriticalDays ?? null}, auto_draft_po_review_critical_days),
         auto_draft_po_supplier_send_warning_days = COALESCE(${settings.stalePoThresholds?.supplierSendWarningDays ?? null}, auto_draft_po_supplier_send_warning_days),

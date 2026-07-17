@@ -2566,6 +2566,41 @@ describe("purchasing recommendation routes", () => {
     );
   });
 
+  it("validates and updates automatic RFQ draft policy", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      rfqDraftAutomationMode: "preferred_vendor",
+      rfqDraftMinimumConfidence: "medium",
+      rfqDraftRequireTrustedForecast: false,
+      rfqDraftMaximumLinesPerRun: 250,
+    });
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(mocks.procurement.updateAutoDraftSettings).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        rfqDraftAutomationMode: "preferred_vendor",
+        rfqDraftMinimumConfidence: "medium",
+        rfqDraftRequireTrustedForecast: false,
+        rfqDraftMaximumLinesPerRun: 250,
+      }),
+    );
+  });
+
+  it("rejects unsafe automatic RFQ draft policy values", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      rfqDraftMaximumLinesPerRun: 501,
+    });
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ error: "rfqDraftMaximumLinesPerRun must be an integer between 1 and 500" });
+    expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
+  });
+
   it("updates stale auto-draft PO aging thresholds", async () => {
     server = await startServer(buildApp());
 

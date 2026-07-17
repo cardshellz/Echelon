@@ -29,6 +29,9 @@ const mocks = vi.hoisted(() => ({
   recommendationSnapshot: {
     createRun: vi.fn(),
   },
+  automaticRfqDraft: {
+    createDrafts: vi.fn(),
+  },
 }));
 
 vi.mock("../../../db", () => ({ db: mocks.db }));
@@ -69,6 +72,13 @@ vi.mock("../../../modules/procurement/purchase-recommendation-snapshot.service",
   return {
     ...actual,
     createPurchaseRecommendationSnapshotService: () => mocks.recommendationSnapshot,
+  };
+});
+vi.mock("../../../modules/procurement/automatic-rfq-draft.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../modules/procurement/automatic-rfq-draft.service")>();
+  return {
+    ...actual,
+    createAutomaticRfqDraftService: () => mocks.automaticRfqDraft,
   };
 });
 
@@ -164,7 +174,26 @@ describe("auto-draft job", () => {
     });
     mocks.recommendationSnapshot.createRun.mockResolvedValue({
       run: { id: 9001, source: "auto_draft", sourceRunKey: "500" },
-      lines: [{ id: 9002, recommendationKey: "1:11:90" }],
+      lines: [{
+        id: 9002,
+        runId: 9001,
+        recommendationKey: "1:11:90",
+        productId: 1,
+        productVariantId: 11,
+        warehouseId: null,
+        sku: "HIGH-1",
+        recommendedPieces: 4,
+        preferredVendorId: 7,
+        preferredVendorProductId: 701,
+        status: "open",
+        evidenceSnapshot: {},
+      }],
+      reused: false,
+    });
+    mocks.automaticRfqDraft.createDrafts.mockResolvedValue({
+      rfqs: [],
+      lines: [],
+      skipped: [],
       reused: false,
     });
   });
@@ -190,7 +219,20 @@ describe("auto-draft job", () => {
       "system:auto-draft",
     );
     expect(mocks.recommendationSnapshot.createRun.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.automaticRfqDraft.createDrafts.mock.invocationCallOrder[0]);
+    expect(mocks.automaticRfqDraft.createDrafts.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.handoff.createAutomaticHandoff.mock.invocationCallOrder[0]);
+    expect(mocks.automaticRfqDraft.createDrafts).toHaveBeenCalledWith({
+      recommendationRunId: 9001,
+      lines: [expect.objectContaining({ id: 9002, sku: "HIGH-1" })],
+      policy: {
+        mode: "manual",
+        minimumConfidence: "high",
+        requireTrustedForecast: true,
+        maximumLinesPerRun: 100,
+      },
+      actorId: "system:auto-draft",
+    });
     expect(mocks.handoff.createAutomaticHandoff).toHaveBeenCalledWith({
       actorId: "system:auto-draft",
       autoDraftRunId: 500,
@@ -238,6 +280,14 @@ describe("auto-draft job", () => {
       reviewOnly: false,
       recommendationRun: { id: 500 },
       purchaseRecommendationRun: { id: 9001, lineCount: 1, reused: false },
+      automaticRfqDrafts: {
+        mode: "manual",
+        suppressedForPilot: false,
+        rfqCount: 0,
+        lineCount: 0,
+        skippedCount: 0,
+        reused: false,
+      },
     });
   });
 
