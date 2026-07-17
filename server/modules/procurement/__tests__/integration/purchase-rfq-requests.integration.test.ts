@@ -10,9 +10,9 @@ config({ path: resolve(process.cwd(), ".env.test") });
 const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const DISPOSABLE_DB = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeWithDisposableDb = TEST_DB_URL && DISPOSABLE_DB ? describe : describe.skip;
-const migrationSql = readFileSync(resolve(process.cwd(), "migrations/147_purchase_rfq_requests.sql"), "utf8");
+const migrationSql = readFileSync(resolve(process.cwd(), "migrations/148_purchase_rfq_requests.sql"), "utf8");
 const automationMigrationSql = readFileSync(
-  resolve(process.cwd(), "migrations/149_purchase_recommendation_run_automation.sql"),
+  resolve(process.cwd(), "migrations/150_purchase_recommendation_run_automation.sql"),
   "utf8",
 );
 
