@@ -13,6 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import { eq, and, sql, inArray, ne, lte, desc, getTableColumns } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import {
   inboundShipmentLines,
   landedCostSnapshots,
@@ -77,6 +78,7 @@ import {
   reconcilePurchaseOrderReceipt,
   type ReceivingReconciliationLine,
 } from "./purchase-order-receipt-reconciliation.service";
+import { purchasingSkuAllocationKey } from "./purchasing-rfq.service";
 import {
   deliveryDateIso,
   sameDeliveryDate,
@@ -7425,14 +7427,30 @@ export function createPurchasingService(
           });
         }
 
-        const existingAllocations = await tx.select().from(requestForQuoteLinesTable).where(and(
-          inArray(requestForQuoteLinesTable.recommendationLineId, recommendationIds),
+        const recommendationProductIds: number[] = Array.from(new Set<number>(
+          recommendationRows.map((line: any) => Number(line.productId)),
+        )).sort((left, right) => left - right);
+        await tx.select({ id: productsTable.id }).from(productsTable).where(
+          inArray(productsTable.id, recommendationProductIds),
+        ).orderBy(productsTable.id).for("update");
+
+        const allocatedRecommendation = alias(purchaseRecommendationLinesTable, "allocated_recommendation");
+        const existingAllocations = await tx.select({
+          productId: allocatedRecommendation.productId,
+          productVariantId: allocatedRecommendation.productVariantId,
+          warehouseId: allocatedRecommendation.warehouseId,
+          requestedPieces: requestForQuoteLinesTable.requestedPieces,
+        }).from(requestForQuoteLinesTable).innerJoin(
+          allocatedRecommendation,
+          eq(requestForQuoteLinesTable.recommendationLineId, allocatedRecommendation.id),
+        ).where(and(
+          inArray(allocatedRecommendation.productId, recommendationProductIds),
           inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
         ));
-        const allocatedByRecommendation = new Map<number, number>();
+        const allocatedBySku = new Map<string, number>();
         for (const allocation of existingAllocations) {
-          const key = Number(allocation.recommendationLineId);
-          allocatedByRecommendation.set(key, (allocatedByRecommendation.get(key) ?? 0) + Number(allocation.requestedPieces));
+          const key = purchasingSkuAllocationKey(allocation);
+          allocatedBySku.set(key, (allocatedBySku.get(key) ?? 0) + Number(allocation.requestedPieces));
         }
 
         const grouped = new Map<number, CreateRfqBatchLineInput[]>();
@@ -7444,7 +7462,8 @@ export function createPurchasingService(
               recommendationLineId: selection.recommendationLineId,
             });
           }
-          const alreadyAllocated = allocatedByRecommendation.get(selection.recommendationLineId) ?? 0;
+          const allocationKey = purchasingSkuAllocationKey(recommendation);
+          const alreadyAllocated = allocatedBySku.get(allocationKey) ?? 0;
           const remaining = Number(recommendation.recommendedPieces) - alreadyAllocated;
           if (selection.requestedPieces > remaining) {
             throw new PurchasingError("Requested RFQ quantity exceeds the recommendation's remaining quantity", 409, {
@@ -7461,7 +7480,7 @@ export function createPurchasingService(
               recommendationLineId: selection.recommendationLineId,
             });
           }
-          allocatedByRecommendation.set(selection.recommendationLineId, alreadyAllocated + selection.requestedPieces);
+          allocatedBySku.set(allocationKey, alreadyAllocated + selection.requestedPieces);
           const group = grouped.get(selection.vendorId) ?? [];
           group.push(selection);
           grouped.set(selection.vendorId, group);

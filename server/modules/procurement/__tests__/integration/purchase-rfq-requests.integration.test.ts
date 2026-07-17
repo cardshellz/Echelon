@@ -146,27 +146,57 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
     await expectDatabaseError(() => addLine(overflow, vendorProductA, 1), "23514");
   });
 
-  it("serializes concurrent allocation so only the available quantity can commit", async () => {
+  it("serializes concurrent allocation across recommendation runs for the same exact SKU", async () => {
+    const concurrentProductId = (await pool.query(
+      "INSERT INTO catalog.products (sku) VALUES ($1) RETURNING id",
+      [`RFQ-CONCURRENT-${suffix}`],
+    )).rows[0].id;
+    const concurrentVariantId = (await pool.query(
+      "INSERT INTO catalog.product_variants (product_id) VALUES ($1) RETURNING id",
+      [concurrentProductId],
+    )).rows[0].id;
+    const concurrentVendorProductA = (await pool.query(
+      "INSERT INTO procurement.vendor_products (vendor_id, product_id, product_variant_id) VALUES ($1,$2,$3) RETURNING id",
+      [vendorA, concurrentProductId, concurrentVariantId],
+    )).rows[0].id;
+    const concurrentVendorProductB = (await pool.query(
+      "INSERT INTO procurement.vendor_products (vendor_id, product_id, product_variant_id) VALUES ($1,$2,$3) RETURNING id",
+      [vendorB, concurrentProductId, concurrentVariantId],
+    )).rows[0].id;
+    const firstRun = (await pool.query(
+      `INSERT INTO procurement.purchase_recommendation_runs
+        (calculation_version, as_of, lookback_days, policy_snapshot)
+       VALUES ('concurrency-v1', NOW(), 30, '{}'::jsonb) RETURNING id`,
+    )).rows[0].id;
     const secondRun = (await pool.query(
       `INSERT INTO procurement.purchase_recommendation_runs
         (calculation_version, as_of, lookback_days, policy_snapshot)
        VALUES ('concurrency-v2', NOW(), 30, '{}'::jsonb) RETURNING id`,
     )).rows[0].id;
+    const firstLine = (await pool.query(
+      `INSERT INTO procurement.purchase_recommendation_lines
+        (run_id, recommendation_key, product_id, product_variant_id, sku, product_name, recommended_pieces, evidence_snapshot)
+       VALUES ($1,$2,$3,$4,$5,'Concurrent Product',10,'{}'::jsonb) RETURNING id`,
+      [firstRun, `concurrent-first-${suffix}`, concurrentProductId, concurrentVariantId, `RFQ-CONCURRENT-${suffix}`],
+    )).rows[0].id;
     const secondLine = (await pool.query(
       `INSERT INTO procurement.purchase_recommendation_lines
         (run_id, recommendation_key, product_id, product_variant_id, sku, product_name, recommended_pieces, evidence_snapshot)
        VALUES ($1,$2,$3,$4,$5,'Concurrent Product',10,'{}'::jsonb) RETURNING id`,
-      [secondRun, `concurrent-${suffix}`, productId, variantId, `RFQ-${suffix}`],
+      [secondRun, `concurrent-second-${suffix}`, concurrentProductId, concurrentVariantId, `RFQ-CONCURRENT-${suffix}`],
     )).rows[0].id;
     const rfqA = await createRfq(vendorA, `concurrent-a-${suffix}`);
     const rfqB = await createRfq(vendorB, `concurrent-b-${suffix}`);
-    const insert = (rfqId: number, vendorProductId: number) => pool.query(
+    const insert = (rfqId: number, recommendationId: number, vendorProductId: number) => pool.query(
       `INSERT INTO procurement.request_for_quote_lines
         (rfq_id, recommendation_line_id, vendor_product_id, requested_pieces)
        VALUES ($1,$2,$3,10)`,
-      [rfqId, secondLine, vendorProductId],
+      [rfqId, recommendationId, vendorProductId],
     );
-    const settled = await Promise.allSettled([insert(rfqA, vendorProductA), insert(rfqB, vendorProductB)]);
+    const settled = await Promise.allSettled([
+      insert(rfqA, firstLine, concurrentVendorProductA),
+      insert(rfqB, secondLine, concurrentVendorProductB),
+    ]);
     expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(settled.filter((result) => result.status === "rejected")).toHaveLength(1);
   });

@@ -29,6 +29,14 @@ export type PurchasingRfqQueueItem = {
   demandSnapshot: Record<string, unknown>;
 };
 
+export function purchasingSkuAllocationKey(input: {
+  productId: number;
+  productVariantId?: number | null;
+  warehouseId?: number | null;
+}): string {
+  return `${input.productId}:${input.productVariantId ?? "base"}:${input.warehouseId ?? "all"}`;
+}
+
 export function isPurchasingRfqCandidate(item: PurchasingRecommendationItem): boolean {
   if (!Number.isSafeInteger(item.suggestedOrderPieces) || item.suggestedOrderPieces <= 0) return false;
   if (item.skippedReason && nonRfqSkipReasons.has(item.skippedReason)) return false;

@@ -124,8 +124,9 @@ CREATE INDEX request_for_quote_lines_recommendation_idx
 CREATE INDEX request_for_quote_lines_rfq_idx
   ON procurement.request_for_quote_lines (rfq_id, id);
 
--- Serializes allocation against one recommendation line. The original
--- recommendation never changes; cancelled/declined RFQ lines release quantity.
+-- Serializes allocation against the exact SKU demand identity across every
+-- recommendation run. The latest calculation remains immutable while active
+-- sourcing from an earlier run continues to consume its recommended quantity.
 CREATE OR REPLACE FUNCTION procurement.guard_rfq_line_allocation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -135,6 +136,7 @@ DECLARE
   allocated_qty BIGINT;
   recommendation_product_id INTEGER;
   recommendation_variant_id INTEGER;
+  recommendation_warehouse_id INTEGER;
   mapping_product_id INTEGER;
   mapping_variant_id INTEGER;
   mapping_vendor_id INTEGER;
@@ -149,8 +151,8 @@ BEGIN
       USING ERRCODE = '23514';
   END IF;
 
-  SELECT recommended_pieces, product_id, product_variant_id
-    INTO recommendation_qty, recommendation_product_id, recommendation_variant_id
+  SELECT recommended_pieces, product_id, product_variant_id, warehouse_id
+    INTO recommendation_qty, recommendation_product_id, recommendation_variant_id, recommendation_warehouse_id
     FROM procurement.purchase_recommendation_lines
    WHERE id = NEW.recommendation_line_id
    FOR UPDATE;
@@ -158,6 +160,13 @@ BEGIN
     RAISE EXCEPTION 'Recommendation line does not exist'
       USING ERRCODE = '23503';
   END IF;
+
+  -- Recommendation rows differ between runs, so lock the durable product row
+  -- to serialize allocations that represent the same underlying SKU demand.
+  PERFORM 1
+    FROM catalog.products
+   WHERE id = recommendation_product_id
+   FOR UPDATE;
 
   SELECT product_id, product_variant_id, vendor_id
     INTO mapping_product_id, mapping_variant_id, mapping_vendor_id
@@ -175,16 +184,20 @@ BEGIN
   END IF;
 
   IF NEW.status IN ('draft', 'sent', 'quoted', 'accepted', 'ordered') THEN
-    SELECT COALESCE(SUM(requested_pieces), 0)
+    SELECT COALESCE(SUM(rfq_line.requested_pieces), 0)
       INTO allocated_qty
-      FROM procurement.request_for_quote_lines
-     WHERE recommendation_line_id = NEW.recommendation_line_id
-       AND status IN ('draft', 'sent', 'quoted', 'accepted', 'ordered')
-       AND (TG_OP = 'INSERT' OR id <> NEW.id);
+      FROM procurement.request_for_quote_lines rfq_line
+      JOIN procurement.purchase_recommendation_lines source_recommendation
+        ON source_recommendation.id = rfq_line.recommendation_line_id
+     WHERE source_recommendation.product_id = recommendation_product_id
+       AND source_recommendation.product_variant_id IS NOT DISTINCT FROM recommendation_variant_id
+       AND source_recommendation.warehouse_id IS NOT DISTINCT FROM recommendation_warehouse_id
+       AND rfq_line.status IN ('draft', 'sent', 'quoted', 'accepted', 'ordered')
+       AND (TG_OP = 'INSERT' OR rfq_line.id <> NEW.id);
 
     IF allocated_qty + NEW.requested_pieces > recommendation_qty
        AND NULLIF(BTRIM(NEW.allocation_override_reason), '') IS NULL THEN
-      RAISE EXCEPTION 'RFQ allocation exceeds the recommended quantity'
+      RAISE EXCEPTION 'RFQ allocation exceeds the recommended quantity for this SKU across recommendation runs'
         USING ERRCODE = '23514';
     END IF;
   END IF;

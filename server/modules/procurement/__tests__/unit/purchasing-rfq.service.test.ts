@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildPurchasingRfqQueue, isPurchasingRfqCandidate } from "../../purchasing-rfq.service";
+import {
+  buildPurchasingRfqQueue,
+  isPurchasingRfqCandidate,
+  purchasingSkuAllocationKey,
+} from "../../purchasing-rfq.service";
 
 function recommendation(overrides: Record<string, unknown> = {}) {
   return {
@@ -31,6 +35,11 @@ function recommendation(overrides: Record<string, unknown> = {}) {
 }
 
 describe("purchasing RFQ queue", () => {
+  it("uses product, variant, and warehouse as the durable allocation identity", () => {
+    expect(purchasingSkuAllocationKey({ productId: 20, productVariantId: 30, warehouseId: 90 })).toBe("20:30:90");
+    expect(purchasingSkuAllocationKey({ productId: 20, productVariantId: null, warehouseId: null })).toBe("20:base:all");
+  });
+
   it("surfaces the exact SKU and required pieces without a vendor or price", () => {
     const item = recommendation();
 

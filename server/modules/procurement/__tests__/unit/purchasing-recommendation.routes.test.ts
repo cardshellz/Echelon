@@ -626,7 +626,10 @@ describe("purchasing recommendation routes", () => {
       }]))
       .mockReturnValueOnce(selectChain([{
         id: 22,
-        recommendationLineId: 11,
+        recommendationLineId: 10,
+        productId: 301,
+        productVariantId: 3001,
+        warehouseId: null,
         requestedPieces: 40,
         lineStatus: "draft",
         rfqId: 33,
@@ -651,6 +654,7 @@ describe("purchasing recommendation routes", () => {
       supplierAssignmentRequired: true,
     });
     expect(body.items[0].allocations[0]).toMatchObject({ rfqNumber: "RFQ-TEST", vendorName: "Supplier 77" });
+    expect(body.items[0].allocations[0].recommendationLineId).toBe(10);
   });
 
   it("creates a supplier-grouped RFQ batch without accepting price fields", async () => {
