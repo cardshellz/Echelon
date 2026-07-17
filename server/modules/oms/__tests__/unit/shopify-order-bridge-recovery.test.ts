@@ -14,6 +14,10 @@ const SHOPIFY_RECONCILIATION_SRC = readFileSync(
   resolve(__dirname, "../../../orders/shopify-order-reconciliation.ts"),
   "utf8",
 );
+const SYNC_RECOVERY_SRC = readFileSync(
+  resolve(__dirname, "../../../sync/sync-recovery.service.ts"),
+  "utf8",
+);
 
 function rawOrder(id: string, orderNumber: string) {
   return {
@@ -96,5 +100,19 @@ describe("Shopify raw-to-OMS bridge recovery", () => {
     expect(SHOPIFY_RECONCILIATION_SRC).toContain("checkpoint was not advanced");
     expect(SHOPIFY_RECONCILIATION_SRC).toContain("SHOPIFY_RECONCILIATION_MAX_PAGES");
     expect(SHOPIFY_RECONCILIATION_SRC).toContain("warehouse.echelon_settings");
+  });
+
+  it("uses canonical source identity and OMS authority to detect ingestion gaps", () => {
+    expect(SHOPIFY_RECONCILIATION_SRC).toContain("normalizeShopifyOrderGid(order.id)");
+    expect(SHOPIFY_RECONCILIATION_SRC).toContain("JOIN oms.oms_orders oo");
+    expect(SHOPIFY_RECONCILIATION_SRC).not.toContain(
+      "SELECT source_table_id FROM wms.orders",
+    );
+  });
+
+  it("drains locally captured orders before calling the remote source poller", () => {
+    expect(SYNC_RECOVERY_SRC.indexOf("this.runShopifyToOmsBackfill()"))
+      .toBeLessThan(SYNC_RECOVERY_SRC.indexOf("this.runShopifyReconcile()"));
+    expect(SYNC_RECOVERY_SRC).toContain("oms_to_wms_after_shopify_reconcile");
   });
 });
