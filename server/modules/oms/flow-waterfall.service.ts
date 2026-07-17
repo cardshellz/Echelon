@@ -22,6 +22,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { schedulerIsDisabled } from "../../infrastructure/scheduler-config";
 import { getChannelWritebackHealth, type ChannelWritebackHealth } from "./channel-writeback.service";
 import {
   HELD_LINE_AGING_DAYS,
@@ -226,6 +227,138 @@ const DEAD_LETTER_LABELS: Record<string, string> = {
 // as its own drillable bucket at the stage where it actually fails.
 const BASE_ISSUES: FlowIssueDef[] = [
   // ---- intake ----
+  {
+    code: "SHOPIFY_RAW_WITHOUT_OMS", kind: "stuck", stage: "intake", severity: "critical",
+    message: "Paid Shopify orders are missing from Echelon",
+    why: "Shopify delivered these physical orders, but Echelon did not create their order records within 10 minutes. The recovery sweep retries them automatically; if they remain here, that sweep is stopped or failing.",
+    remediation: "REPLAY_AFTER_FIX", replaySafe: true,
+    count: () => sql`
+      SELECT COUNT(*)::int AS count
+      FROM public.shopify_orders so
+      CROSS JOIN oms.shopify_order_bridge_checkpoints checkpoint
+      WHERE checkpoint.id = 1
+        AND so.created_at >= checkpoint.monitor_started_at
+        AND so.created_at < NOW() - INTERVAL '10 minutes'
+        AND COALESCE(LOWER(so.financial_status), '') IN ('paid', 'partially_paid')
+        AND EXISTS (
+          SELECT 1
+          FROM public.shopify_order_items soi
+          WHERE soi.order_id = so.id
+            AND COALESCE(soi.quantity, 0) > 0
+            AND LOWER(COALESCE(soi.requires_shipping::text, 'true')) NOT IN ('false', 'f', '0')
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM oms.oms_orders oo
+          WHERE oo.external_order_id IN (so.id, split_part(so.id, '/', -1))
+            AND oo.channel_id IN (
+              SELECT id FROM channels.channels WHERE provider = 'shopify'
+            )
+        )
+    `,
+    sample: () => sql`
+      SELECT so.order_number,
+             so.id AS shopify_order_id,
+             so.financial_status,
+             so.fulfillment_status,
+             so.created_at AS at,
+             COUNT(soi.id)::int AS shippable_line_count
+      FROM public.shopify_orders so
+      CROSS JOIN oms.shopify_order_bridge_checkpoints checkpoint
+      JOIN public.shopify_order_items soi ON soi.order_id = so.id
+      WHERE checkpoint.id = 1
+        AND so.created_at >= checkpoint.monitor_started_at
+        AND so.created_at < NOW() - INTERVAL '10 minutes'
+        AND COALESCE(LOWER(so.financial_status), '') IN ('paid', 'partially_paid')
+        AND COALESCE(soi.quantity, 0) > 0
+        AND LOWER(COALESCE(soi.requires_shipping::text, 'true')) NOT IN ('false', 'f', '0')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM oms.oms_orders oo
+          WHERE oo.external_order_id IN (so.id, split_part(so.id, '/', -1))
+            AND oo.channel_id IN (
+              SELECT id FROM channels.channels WHERE provider = 'shopify'
+            )
+        )
+      GROUP BY so.id, so.order_number, so.financial_status, so.fulfillment_status, so.created_at
+      ORDER BY so.created_at ASC
+      LIMIT 50
+    `,
+  },
+  {
+    code: "SHOPIFY_RECOVERY_UNHEALTHY", kind: "stuck", stage: "intake", severity: "critical",
+    message: "Shopify order recovery is not healthy",
+    why: "The automatic Shopify cleanup has not completed recently or its latest run failed. Missing orders will still appear separately, but this safety net needs to be restored before another intake interruption.",
+    remediation: "CODE_FIX", replaySafe: false,
+    count: () => sql`
+      SELECT CASE
+        WHEN checkpoint.last_run_at IS NULL
+          OR checkpoint.last_run_at < NOW() - INTERVAL '30 minutes'
+          OR checkpoint.last_error IS NOT NULL
+          OR checkpoint.consecutive_failures > 0
+        THEN 1 ELSE 0
+      END::int AS count
+      FROM (SELECT 1 AS id) singleton
+      LEFT JOIN oms.shopify_order_bridge_checkpoints checkpoint ON checkpoint.id = singleton.id
+    `,
+    sample: () => sql`
+      SELECT CASE
+               WHEN checkpoint.last_run_at IS NULL THEN 'never ran'
+               WHEN checkpoint.last_error IS NOT NULL OR checkpoint.consecutive_failures > 0 THEN 'latest run failed'
+               ELSE 'last run is stale'
+             END AS recovery_state,
+             checkpoint.last_run_at,
+             checkpoint.last_success_at,
+             checkpoint.last_candidates,
+             checkpoint.last_bridged,
+             checkpoint.last_failed,
+             checkpoint.consecutive_failures,
+             checkpoint.last_error,
+             COALESCE(checkpoint.updated_at, checkpoint.created_at) AS at
+      FROM (SELECT 1 AS id) singleton
+      LEFT JOIN oms.shopify_order_bridge_checkpoints checkpoint ON checkpoint.id = singleton.id
+      WHERE checkpoint.last_run_at IS NULL
+         OR checkpoint.last_run_at < NOW() - INTERVAL '30 minutes'
+         OR checkpoint.last_error IS NOT NULL
+         OR checkpoint.consecutive_failures > 0
+      LIMIT 1
+    `,
+  },
+  {
+    code: "SHOPIFY_SOURCE_RECONCILIATION_UNHEALTHY", kind: "stuck", stage: "intake", severity: "critical",
+    message: "Shopify source reconciliation is not running",
+    why: "The safety poll that compares Shopify with Echelon has not completed in the last 30 minutes. Until it is restored, an order missing from raw intake cannot be recovered automatically.",
+    remediation: "CODE_FIX", replaySafe: false,
+    count: () => sql`
+      SELECT CASE
+        WHEN MAX(updated_at) IS NULL
+          OR MAX(updated_at) < NOW() - INTERVAL '30 minutes'
+        THEN 1 ELSE 0
+      END::int AS count
+      FROM warehouse.echelon_settings
+      WHERE key = 'shopify_reconciliation_last_check'
+    `,
+    sample: () => sql`
+      SELECT CASE
+               WHEN checkpoint.updated_at IS NULL THEN 'never completed'
+               ELSE 'last completion is stale'
+             END AS reconciliation_state,
+             checkpoint.value AS last_shopify_window_end,
+             checkpoint.updated_at AS last_completed_at,
+             checkpoint.updated_at AS at
+      FROM (SELECT 1 AS id) singleton
+      LEFT JOIN LATERAL (
+        SELECT value, updated_at
+        FROM warehouse.echelon_settings
+        WHERE key = 'shopify_reconciliation_last_check'
+        ORDER BY updated_at DESC NULLS LAST
+        LIMIT 1
+      ) checkpoint ON TRUE
+      WHERE checkpoint.updated_at IS NULL
+         OR checkpoint.updated_at < NOW() - INTERVAL '30 minutes'
+      LIMIT 1
+    `,
+  },
   {
     code: "WEBHOOK_INBOX_FAILED", kind: "stuck", stage: "intake", severity: "critical",
     message: "Channel events failed to finish",
@@ -1058,6 +1191,8 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       .sort((a, b) => b.count - a.count)
       .slice(0, 14);
 
+    const shopifyRecoveryEnabled = !schedulerIsDisabled("SYNC_RECOVERY_SCHEDULER_DISABLED");
+
     return {
       generatedAt: new Date().toISOString(),
       windowDays,
@@ -1068,7 +1203,14 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       eventSpine,
       intakeModel: [
         { provider: "ebay", model: "poll-primary", cadenceSeconds: 300, note: "eBay Fulfillment API polled every 5 min (4h lookback); intake self-reconciles." },
-        { provider: "shopify", model: "webhook-primary", cadenceSeconds: 900, note: "Real-time webhooks plus a 15-min order-reconciliation sweep." },
+        {
+          provider: "shopify",
+          model: "webhook-primary",
+          cadenceSeconds: 900,
+          note: shopifyRecoveryEnabled
+            ? "Real-time intake plus a monitored 15-minute recovery sweep."
+            : "Real-time intake is active, but the 15-minute recovery sweep is disabled; raw-to-OMS gaps remain critical.",
+        },
       ],
       // Back-compat summary fields, now derived from the registry counts.
       duplicates: { omsToPicking: bc.OMS_DOUBLE_PICKING ?? 0, overShippedItems: bc.ITEM_OVER_SHIPPED ?? 0, unmappedEngineSplits: bc.UNMAPPED_ENGINE_SPLIT ?? 0, blockedDupOrders: bc.BLOCKED_DUP_INGEST ?? 0, sample: [] },

@@ -411,6 +411,9 @@
   "oms.order_line_adjustments": [
     "modules/oms"
   ],
+  "oms.shopify_order_bridge_checkpoints": [
+    "modules/oms"
+  ],
   "oms.webhook_inbox": [
     "modules/oms"
   ],

@@ -125,12 +125,23 @@ export class SyncRecoveryService {
           error: "oms service unavailable",
         };
       }
-      const bridged = await backfillShopifyOrders(
+      const result = await backfillShopifyOrders(
         this.db,
         this.services.oms,
         envPositiveInteger("SYNC_RECOVERY_SHOPIFY_TO_OMS_LIMIT", 50),
       );
-      return { name: "shopify_to_oms", ok: true, data: { bridged } };
+      return {
+        name: "shopify_to_oms",
+        ok: result.failed === 0,
+        data: {
+          attempted: result.attempted,
+          bridged: result.bridged,
+          failed: result.failed,
+        },
+        error: result.failed > 0
+          ? `${result.failed} Shopify order(s) failed raw-to-OMS recovery`
+          : undefined,
+      };
     } catch (err: any) {
       console.error("[SyncRecovery] shopify_to_oms failed:", err);
       return {
