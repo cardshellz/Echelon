@@ -39,6 +39,7 @@ import {
   requestForQuoteLines as requestForQuoteLinesTable,
   vendors as vendorsTable,
 } from "@shared/schema";
+import { buildPurchaseRecommendationRunInput } from "./purchase-recommendation-snapshot.service";
 import { buildPurchasingRfqQueue, purchasingSkuAllocationKey } from "./purchasing-rfq.service";
 import {
   normalizePurchasingForecastPolicy,
@@ -1117,43 +1118,15 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         return res.status(503).json({ error: "Purchasing recommendation service is unavailable" });
       }
       const { configuredLookback, settings, recommendationResult } = await loadRecommendationReviewQueueData();
-      const candidates = buildPurchasingRfqQueue(recommendationResult);
       const userId = (req as any).user?.id ?? req.session?.user?.id ?? null;
       const asOf = new Date();
-      const result = await purchasing.snapshotPurchaseRecommendations({
-        calculationVersion: "purchasing-recommendation-v2",
-        asOf,
+      const result = await purchasing.snapshotPurchaseRecommendations(buildPurchaseRecommendationRunInput({
+        recommendationResult,
+        settings,
         lookbackDays: configuredLookback,
-        policySnapshot: { ...settings },
-        inputSummary: {
-          candidateCount: candidates.length,
-          evaluatedCount: recommendationResult.items.length + recommendationResult.skippedItems.length,
-          summary: recommendationResult.summary,
-        },
-        lines: candidates.map((item) => ({
-          recommendationKey: item.recommendationId,
-          productId: item.productId,
-          productVariantId: item.productVariantId,
-          warehouseId: null,
-          sku: item.sku,
-          productName: item.productName,
-          requiredByDate: null,
-          recommendedPieces: item.requestedPieces,
-          preferredVendorId: item.preferredVendorId,
-          preferredVendorProductId: item.vendorProductId,
-          evidenceSnapshot: {
-            ...item.demandSnapshot,
-            availablePieces: item.availablePieces,
-            onOrderPieces: item.onOrderPieces,
-            reorderPointPieces: item.reorderPointPieces,
-            forecastMethod: item.forecastMethod,
-            forecastDailyPieces: item.forecastDailyPieces,
-            leadTimeDays: item.leadTimeDays,
-            safetyStockDays: item.safetyStockDays,
-            forwardDemandPieces: item.forwardDemandPieces,
-          },
-        })),
-      }, userId);
+        asOf,
+        source: "manual",
+      }), userId);
       res.status(201).json({ run: result.run, lineCount: result.lines.length });
     } catch (error) {
       console.error("Error generating purchasing recommendation run:", error);
@@ -1258,7 +1231,14 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
       const activeRfqIds = new Set(allocations.map((allocation) => allocation.rfqId));
       res.json({
-        run: { id: run.id, calculationVersion: run.calculationVersion, asOf: run.asOf, policySnapshot: run.policySnapshot },
+        run: {
+          id: run.id,
+          calculationVersion: run.calculationVersion,
+          source: run.source,
+          sourceRunKey: run.sourceRunKey,
+          asOf: run.asOf,
+          policySnapshot: run.policySnapshot,
+        },
         generatedAt: run.generatedAt,
         lookbackDays: run.lookbackDays,
         summary: {
@@ -2017,6 +1997,10 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         skipNoVendor,
         candidateScoreStrongThreshold,
         candidateScoreReviewThreshold,
+        rfqDraftAutomationMode,
+        rfqDraftMinimumConfidence,
+        rfqDraftRequireTrustedForecast,
+        rfqDraftMaximumLinesPerRun,
         forecastPolicy,
         stalePoThresholds,
       } = req.body;
@@ -2030,6 +2014,22 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         return res.status(400).json({
           error: "approvalPolicy must be one of: high_confidence_only, high_confidence_and_strong_candidate",
         });
+      }
+      if (rfqDraftAutomationMode !== undefined && !["manual", "preferred_vendor"].includes(rfqDraftAutomationMode)) {
+        return res.status(400).json({ error: "rfqDraftAutomationMode must be one of: manual, preferred_vendor" });
+      }
+      if (rfqDraftMinimumConfidence !== undefined && !["high", "medium"].includes(rfqDraftMinimumConfidence)) {
+        return res.status(400).json({ error: "rfqDraftMinimumConfidence must be one of: high, medium" });
+      }
+      if (rfqDraftRequireTrustedForecast !== undefined && typeof rfqDraftRequireTrustedForecast !== "boolean") {
+        return res.status(400).json({ error: "rfqDraftRequireTrustedForecast must be a boolean" });
+      }
+      if (rfqDraftMaximumLinesPerRun !== undefined && (
+        !Number.isSafeInteger(rfqDraftMaximumLinesPerRun)
+        || rfqDraftMaximumLinesPerRun < 1
+        || rfqDraftMaximumLinesPerRun > 500
+      )) {
+        return res.status(400).json({ error: "rfqDraftMaximumLinesPerRun must be an integer between 1 and 500" });
       }
       const parsedStrongThreshold = parseCandidateScoreThreshold(candidateScoreStrongThreshold, "candidateScoreStrongThreshold");
       if (typeof parsedStrongThreshold === "object") {
@@ -2064,6 +2064,10 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         skipNoVendor,
         candidateScoreStrongThreshold: parsedStrongThreshold,
         candidateScoreReviewThreshold: parsedReviewThreshold,
+        rfqDraftAutomationMode,
+        rfqDraftMinimumConfidence,
+        rfqDraftRequireTrustedForecast,
+        rfqDraftMaximumLinesPerRun,
         forecastPolicy: parsedForecastPolicy,
         stalePoThresholds: parsedStalePoThresholds,
       });

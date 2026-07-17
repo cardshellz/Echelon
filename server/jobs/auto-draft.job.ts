@@ -36,6 +36,15 @@ import {
   type AutomaticRecommendationPoHandoffResult,
   type CreatedRecommendationPurchaseOrder,
 } from "../modules/procurement/recommendation-po-handoff.service";
+import {
+  buildPurchaseRecommendationRunInput,
+  createPurchaseRecommendationSnapshotService,
+} from "../modules/procurement/purchase-recommendation-snapshot.service";
+import {
+  createAutomaticRfqDraftService,
+  normalizeAutomaticRfqDraftPolicy,
+  summarizeAutomaticRfqDraftResult,
+} from "../modules/procurement/automatic-rfq-draft.service";
 
 export interface AutoDraftOptions {
   triggeredBy: "scheduler" | "manual";
@@ -191,6 +200,20 @@ export interface AutoDraftJobResult {
   recommendationRun: {
     id: number;
     detail: ReturnType<typeof buildPurchasingRecommendationRunDetail>;
+  };
+  purchaseRecommendationRun: {
+    id: number;
+    lineCount: number;
+    reused: boolean;
+  };
+  automaticRfqDrafts: {
+    mode: "manual" | "preferred_vendor";
+    suppressedForPilot: boolean;
+    rfqCount: number;
+    lineCount: number;
+    skippedCount: number;
+    skippedByCode: Record<string, number>;
+    reused: boolean;
   };
   pilot?: Omit<AutomaticPurchasingPilotPreview, "mode"> & {
     mode: "execute";
@@ -609,6 +632,7 @@ async function executeAutoDraftJob(
   let skippedOnOrder = 0;
   let skippedExcluded = 0;
   let recommendationRunDetail: ReturnType<typeof buildPurchasingRecommendationRunDetail> | null = null;
+  let purchaseRecommendationRun: AutoDraftJobResult["purchaseRecommendationRun"] | null = null;
   let pilotPreview: AutomaticPurchasingPilotPreview | undefined;
 
   try {
@@ -617,6 +641,53 @@ async function executeAutoDraftJob(
     skippedExcluded = recommendationResult.summary.excludedCount;
     skippedNoVendor = recommendationResult.summary.skippedNoVendor;
     skippedOnOrder = recommendationResult.summary.skippedOnOrder;
+
+    // Persist the complete calculation output before any PO mutation. The
+    // source-scoped key makes retries of the same durable auto-draft run exact.
+    const snapshot = await createPurchaseRecommendationSnapshotService(db).createRun(
+      buildPurchaseRecommendationRunInput({
+        recommendationResult,
+        settings,
+        lookbackDays,
+        asOf: runRecord.runAt,
+        source: "auto_draft",
+        sourceRunKey: String(runRecord.id),
+        evaluatedCount: rawData.length,
+      }),
+      options.triggeredByUser ?? "system:auto-draft",
+    );
+    purchaseRecommendationRun = {
+      id: Number(snapshot.run.id),
+      lineCount: snapshot.lines.length,
+      reused: snapshot.reused,
+    };
+
+    recommendationRunDetail = buildPurchasingRecommendationRunDetail(recommendationResult, {
+      lookbackDays,
+      settings,
+      generatedAt: runRecord.runAt,
+      poMutations: [],
+      poMutationSkips: [],
+    });
+
+    const rfqPolicy = normalizeAutomaticRfqDraftPolicy(settings);
+    await lifecycle.heartbeatRun({ runId: runRecord.id });
+    const automaticRfqResult = options.pilot
+      ? { rfqs: [], lines: [], skipped: [], reused: false }
+      : await createAutomaticRfqDraftService(db).createDrafts({
+          recommendationRunId: Number(snapshot.run.id),
+          lines: snapshot.lines as any,
+          policy: rfqPolicy,
+          actorId: options.triggeredByUser ?? "system:auto-draft",
+        });
+    const automaticRfqDrafts = {
+      ...summarizeAutomaticRfqDraftResult(rfqPolicy, automaticRfqResult),
+      suppressedForPilot: Boolean(options.pilot),
+    };
+    recommendationRunDetail = {
+      ...recommendationRunDetail,
+      rfqDraftAutomation: automaticRfqDrafts,
+    };
 
     let eligibleItems: AutomaticRecommendationPoHandoffItem[];
     if (options.pilot) {
@@ -639,14 +710,6 @@ async function executeAutoDraftJob(
         .map((item) => toAutomaticHandoffItem(item, lookbackDays, settings));
     }
     const createDraftPos = shouldCreateDraftPos(settings);
-    recommendationRunDetail = buildPurchasingRecommendationRunDetail(recommendationResult, {
-      lookbackDays,
-      settings,
-      generatedAt: runRecord.runAt,
-      poMutations: [],
-      poMutationSkips: [],
-    });
-
     await lifecycle.heartbeatRun({ runId: runRecord.id });
     const handoffResult = createDraftPos && eligibleItems.length > 0
       ? await handoffService.createAutomaticHandoff({
@@ -720,6 +783,8 @@ async function executeAutoDraftJob(
         id: runRecord.id,
         detail: recommendationRunDetail,
       },
+      purchaseRecommendationRun,
+      automaticRfqDrafts,
       ...(pilotPreview ? {
         pilot: {
           ...pilotPreview,

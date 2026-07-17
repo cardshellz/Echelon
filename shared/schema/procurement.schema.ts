@@ -885,6 +885,8 @@ export const poEmailOutbox = procurementSchema.table("po_email_outbox", {
 export const purchaseRecommendationRuns = procurementSchema.table("purchase_recommendation_runs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   calculationVersion: varchar("calculation_version", { length: 80 }).notNull(),
+  source: varchar("source", { length: 30 }).notNull().default("manual"),
+  sourceRunKey: varchar("source_run_key", { length: 160 }),
   status: varchar("status", { length: 20 }).notNull().default("completed"),
   asOf: timestamp("as_of", { withTimezone: true }).notNull(),
   lookbackDays: integer("lookback_days").notNull(),
@@ -893,8 +895,12 @@ export const purchaseRecommendationRuns = procurementSchema.table("purchase_reco
   generatedBy: varchar("generated_by", { length: 255 }),
   generatedAt: timestamp("generated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
+  uniqueIndex("purchase_recommendation_runs_source_key_uidx")
+    .on(table.source, table.sourceRunKey)
+    .where(sql`${table.sourceRunKey} IS NOT NULL`),
   index("purchase_recommendation_runs_latest_idx").on(table.generatedAt, table.id),
   check("purchase_recommendation_runs_status_chk", sql`${table.status} IN ('completed', 'failed')`),
+  check("purchase_recommendation_runs_source_chk", sql`${table.source} IN ('manual', 'auto_draft', 'api')`),
   check("purchase_recommendation_runs_lookback_chk", sql`${table.lookbackDays} > 0`),
 ]);
 

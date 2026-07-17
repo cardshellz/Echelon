@@ -11,6 +11,10 @@ const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const DISPOSABLE_DB = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeWithDisposableDb = TEST_DB_URL && DISPOSABLE_DB ? describe : describe.skip;
 const migrationSql = readFileSync(resolve(process.cwd(), "migrations/147_purchase_rfq_requests.sql"), "utf8");
+const automationMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/149_purchase_recommendation_run_automation.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString) ? false : { rejectUnauthorized: false };
@@ -61,6 +65,7 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
       );
     `);
     await pool.query(migrationSql);
+    await pool.query(automationMigrationSql);
     productId = (await pool.query("INSERT INTO catalog.products (sku) VALUES ($1) RETURNING id", [`RFQ-${suffix}`])).rows[0].id;
     variantId = (await pool.query("INSERT INTO catalog.product_variants (product_id) VALUES ($1) RETURNING id", [productId])).rows[0].id;
     vendorA = (await pool.query("INSERT INTO procurement.vendors (name) VALUES ($1) RETURNING id", [`Vendor A ${suffix}`])).rows[0].id;
@@ -213,5 +218,23 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
     await createRfq(vendorA, `idem-${suffix}`);
     await expectDatabaseError(() => createRfq(vendorA, `idem-${suffix}`), "23505");
     await expect(createRfq(vendorB, `idem-${suffix}`)).resolves.toBeTypeOf("number");
+  });
+
+  it("makes automatic recommendation snapshots idempotent per durable job run", async () => {
+    await pool.query(
+      `INSERT INTO procurement.purchase_recommendation_runs
+        (calculation_version, source, source_run_key, as_of, lookback_days, policy_snapshot)
+       VALUES ('automated-v2', 'auto_draft', $1, NOW(), 30, '{}'::jsonb)`,
+      [`job-${suffix}`],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        `INSERT INTO procurement.purchase_recommendation_runs
+          (calculation_version, source, source_run_key, as_of, lookback_days, policy_snapshot)
+         VALUES ('automated-v2', 'auto_draft', $1, NOW(), 30, '{}'::jsonb)`,
+        [`job-${suffix}`],
+      ),
+      "23505",
+    );
   });
 });

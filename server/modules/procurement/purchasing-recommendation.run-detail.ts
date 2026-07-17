@@ -29,6 +29,17 @@ export interface PurchasingRecommendationRunDetailOptions {
   generatedAt?: Date;
   poMutations?: PurchasingRecommendationRunPoMutation[];
   poMutationSkips?: PurchasingRecommendationRunPoMutationSkip[];
+  rfqDraftAutomation?: PurchasingRecommendationRunRfqDraftAutomation | null;
+}
+
+export interface PurchasingRecommendationRunRfqDraftAutomation {
+  mode: "manual" | "preferred_vendor";
+  suppressedForPilot: boolean;
+  rfqCount: number;
+  lineCount: number;
+  skippedCount: number;
+  skippedByCode: Record<string, number>;
+  reused: boolean;
 }
 
 export interface PurchasingRecommendationRunDetail {
@@ -46,6 +57,7 @@ export interface PurchasingRecommendationRunDetail {
   skippedRecommendations: Array<ReturnType<typeof summarizeRecommendation>>;
   poMutations: PurchasingRecommendationRunPoMutation[];
   poMutationSkips: PurchasingRecommendationRunPoMutationSkip[];
+  rfqDraftAutomation: PurchasingRecommendationRunRfqDraftAutomation | null;
 }
 
 function increment(map: Record<string, number>, key: string | null | undefined) {
@@ -312,5 +324,6 @@ export function buildPurchasingRecommendationRunDetail(
       .map(summarizeRecommendation),
     poMutations: options.poMutations ?? [],
     poMutationSkips: options.poMutationSkips ?? [],
+    rfqDraftAutomation: options.rfqDraftAutomation ?? null,
   };
 }

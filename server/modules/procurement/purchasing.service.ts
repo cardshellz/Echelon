@@ -13,7 +13,6 @@
 
 import { randomUUID } from "node:crypto";
 import { eq, and, sql, inArray, ne, lte, desc, getTableColumns } from "drizzle-orm";
-import { alias } from "drizzle-orm/pg-core";
 import {
   inboundShipmentLines,
   landedCostSnapshots,
@@ -33,7 +32,6 @@ import {
   productVariants as productVariantsTable,
   vendors as vendorsTable,
   vendorProducts as vendorProductsTable,
-  purchaseRecommendationRuns as purchaseRecommendationRunsTable,
   purchaseRecommendationLines as purchaseRecommendationLinesTable,
   requestForQuotes as requestForQuotesTable,
   requestForQuoteLines as requestForQuoteLinesTable,
@@ -78,7 +76,10 @@ import {
   reconcilePurchaseOrderReceipt,
   type ReceivingReconciliationLine,
 } from "./purchase-order-receipt-reconciliation.service";
-import { purchasingSkuAllocationKey } from "./purchasing-rfq.service";
+import {
+  lockAndLoadActiveRfqAllocations,
+  purchasingSkuAllocationKey,
+} from "./purchasing-rfq.service";
 import {
   deliveryDateIso,
   sameDeliveryDate,
@@ -96,6 +97,10 @@ import {
   vendorCatalogQuoteUsability,
 } from "./purchase-order-line-commands";
 import { assessSupplierQuoteValidity } from "./supplier-quote-validity";
+import {
+  createPurchaseRecommendationSnapshotService,
+  type CreatePurchaseRecommendationRunInput,
+} from "./purchase-recommendation-snapshot.service";
 import type { FinancialCommandDescriptor } from "../../platform/commands/transactional-command.service";
 
 const PG_INTEGER_MAX = 2_147_483_647;
@@ -7271,80 +7276,18 @@ export function createPurchasingService(
     return row !== null;
   }
 
-  type RecommendationRunLineInput = {
-    recommendationKey: string;
-    productId: number;
-    productVariantId: number | null;
-    warehouseId?: number | null;
-    sku: string;
-    productName: string;
-    requiredByDate?: string | null;
-    recommendedPieces: number;
-    preferredVendorId?: number | null;
-    preferredVendorProductId?: number | null;
-    evidenceSnapshot: Record<string, unknown>;
-  };
-
-  async function snapshotPurchaseRecommendations(input: {
-    calculationVersion: string;
-    asOf: Date;
-    lookbackDays: number;
-    policySnapshot: Record<string, unknown>;
-    inputSummary?: Record<string, unknown>;
-    lines: RecommendationRunLineInput[];
-  }, userId?: string | null) {
-    if (!input.calculationVersion?.trim() || input.calculationVersion.length > 80) {
-      throw new PurchasingError("calculationVersion is required", 400);
-    }
-    assertPositivePgInteger(input.lookbackDays, "lookbackDays");
-    if (!Array.isArray(input.lines) || input.lines.length > MAX_BULK_CATALOG_ENTRIES) {
-      throw new PurchasingError(`lines cannot contain more than ${MAX_BULK_CATALOG_ENTRIES} items`, 400);
-    }
-    const seen = new Set<string>();
-    for (const [index, line] of input.lines.entries()) {
-      const key = line.recommendationKey?.trim();
-      if (!key || key.length > 160 || seen.has(key)) {
-        throw new PurchasingError(`lines[${index}].recommendationKey must be unique and no longer than 160 characters`, 400);
+  async function snapshotPurchaseRecommendations(
+    input: CreatePurchaseRecommendationRunInput,
+    userId?: string | null,
+  ) {
+    try {
+      return await createPurchaseRecommendationSnapshotService(db).createRun(input, userId);
+    } catch (error: any) {
+      if (error instanceof RangeError) {
+        throw new PurchasingError(error.message, 400, { code: "PURCHASE_RECOMMENDATION_RUN_INVALID" });
       }
-      seen.add(key);
-      assertPositivePgInteger(line.productId, `lines[${index}].productId`);
-      if (line.productVariantId !== null) assertPositivePgInteger(line.productVariantId, `lines[${index}].productVariantId`);
-      if (line.warehouseId != null) assertPositivePgInteger(line.warehouseId, `lines[${index}].warehouseId`);
-      assertPositivePgInteger(line.recommendedPieces, `lines[${index}].recommendedPieces`);
+      throw error;
     }
-
-    return db.transaction(async (tx: any) => {
-      const insertedRuns = await tx.insert(purchaseRecommendationRunsTable).values({
-        calculationVersion: input.calculationVersion.trim(),
-        status: "completed",
-        asOf: input.asOf,
-        lookbackDays: input.lookbackDays,
-        policySnapshot: input.policySnapshot,
-        inputSummary: input.inputSummary ?? {},
-        generatedBy: userId ?? null,
-      }).returning();
-      const run = insertedRuns[0];
-      if (!run) throw new PurchasingError("Recommendation run was not saved", 409);
-      const lines = input.lines.length === 0 ? [] : await tx.insert(purchaseRecommendationLinesTable).values(
-        input.lines.map((line) => ({
-          runId: run.id,
-          recommendationKey: line.recommendationKey.trim(),
-          productId: line.productId,
-          productVariantId: line.productVariantId ?? null,
-          warehouseId: line.warehouseId ?? null,
-          sku: line.sku.trim().slice(0, 100),
-          productName: line.productName.trim(),
-          requiredByDate: line.requiredByDate ?? null,
-          recommendedPieces: line.recommendedPieces,
-          baseUom: "piece",
-          preferredVendorId: line.preferredVendorId ?? null,
-          preferredVendorProductId: line.preferredVendorProductId ?? null,
-          status: "open",
-          evidenceSnapshot: line.evidenceSnapshot,
-        })),
-      ).returning();
-      return { run, lines };
-    });
   }
 
   type CreateRfqBatchLineInput = {
@@ -7427,31 +7370,7 @@ export function createPurchasingService(
           });
         }
 
-        const recommendationProductIds: number[] = Array.from(new Set<number>(
-          recommendationRows.map((line: any) => Number(line.productId)),
-        )).sort((left, right) => left - right);
-        await tx.select({ id: productsTable.id }).from(productsTable).where(
-          inArray(productsTable.id, recommendationProductIds),
-        ).orderBy(productsTable.id).for("update");
-
-        const allocatedRecommendation = alias(purchaseRecommendationLinesTable, "allocated_recommendation");
-        const existingAllocations = await tx.select({
-          productId: allocatedRecommendation.productId,
-          productVariantId: allocatedRecommendation.productVariantId,
-          warehouseId: allocatedRecommendation.warehouseId,
-          requestedPieces: requestForQuoteLinesTable.requestedPieces,
-        }).from(requestForQuoteLinesTable).innerJoin(
-          allocatedRecommendation,
-          eq(requestForQuoteLinesTable.recommendationLineId, allocatedRecommendation.id),
-        ).where(and(
-          inArray(allocatedRecommendation.productId, recommendationProductIds),
-          inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
-        ));
-        const allocatedBySku = new Map<string, number>();
-        for (const allocation of existingAllocations) {
-          const key = purchasingSkuAllocationKey(allocation);
-          allocatedBySku.set(key, (allocatedBySku.get(key) ?? 0) + Number(allocation.requestedPieces));
-        }
+        const allocatedBySku = await lockAndLoadActiveRfqAllocations(tx, recommendationRows);
 
         const grouped = new Map<number, CreateRfqBatchLineInput[]>();
         for (const selection of input.lines) {

@@ -252,6 +252,10 @@ export interface AutoDraftRecommendationSettings {
   candidateScoreStrongThreshold?: number;
   candidateScoreReviewThreshold?: number;
   forecastPolicy?: Partial<PurchasingForecastPolicy>;
+  rfqDraftAutomationMode?: "manual" | "preferred_vendor";
+  rfqDraftMinimumConfidence?: "high" | "medium";
+  rfqDraftRequireTrustedForecast?: boolean;
+  rfqDraftMaximumLinesPerRun?: number;
 }
 
 export interface GeneratePurchasingRecommendationsOptions {
@@ -407,6 +411,7 @@ export interface PurchasingRecommendationItem {
     forecastTrust: PurchasingRecommendationForecastTrustDiagnostics;
   };
   confidence: PurchasingRecommendationConfidence;
+  rfqConfidence: PurchasingRecommendationConfidence;
   confidenceFactors: string[];
   qualityControls: PurchasingRecommendationQualityControl[];
   autopilotBlockers: PurchasingRecommendationQualityControl[];
@@ -708,6 +713,21 @@ function buildConfidence(input: {
   if (input.demandTrend === "new_demand" || input.demandTrend === "falling") return "medium";
   if (!input.hasVendor || input.leadTimeSource !== "vendor_product") return "medium";
   if (input.costQuality !== "current" || input.costSource === "last_purchase_cost") return "medium";
+  return "high";
+}
+
+function buildRfqConfidence(input: {
+  demandQuality: PurchasingRecommendationDemandQuality;
+  demandTrend: PurchasingRecommendationDemandTrend;
+  demandMixSignal: PurchasingDemandForecastDemandMixSignal;
+  leadTimeSource: PurchasingRecommendationLeadTimeSource;
+  hasVendor: boolean;
+}): PurchasingRecommendationConfidence {
+  if (input.demandQuality === "no_recent_demand") return "low";
+  if (input.demandQuality === "thin_history") return "medium";
+  if (input.demandMixSignal === "mostly_zero_revenue" || input.demandMixSignal === "mixed_discounted_or_free") return "medium";
+  if (input.demandTrend === "new_demand" || input.demandTrend === "falling") return "medium";
+  if (!input.hasVendor || input.leadTimeSource !== "vendor_product") return "medium";
   return "high";
 }
 
@@ -1944,6 +1964,13 @@ export function generatePurchasingRecommendations(
       costSource: supplierCost.costSource,
       hasVendor,
     });
+    const rfqConfidence = buildRfqConfidence({
+      demandQuality,
+      demandTrend,
+      demandMixSignal,
+      leadTimeSource,
+      hasVendor,
+    });
     const qualityControls = buildQualityControls({
       lookbackDays,
       demandQuality,
@@ -2116,6 +2143,7 @@ export function generatePurchasingRecommendations(
         forecastTrust,
       },
       confidence,
+      rfqConfidence,
       confidenceFactors: buildConfidenceFactors({
         demandQuality,
         demandTrend,
