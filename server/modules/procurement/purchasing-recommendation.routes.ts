@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { centsToMills, computeLineTotalCentsFromMills } from "@shared/utils/money";
 import { db } from "../../db";
 import { requirePermission } from "../../routes/middleware";
@@ -39,6 +40,7 @@ import {
   vendors as vendorsTable,
 } from "@shared/schema";
 import { buildPurchaseRecommendationRunInput } from "./purchase-recommendation-snapshot.service";
+import { buildPurchasingRfqQueue, purchasingSkuAllocationKey } from "./purchasing-rfq.service";
 import {
   normalizePurchasingForecastPolicy,
   type PurchasingForecastPolicy,
@@ -1152,10 +1154,14 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const lines = await db.select().from(purchaseRecommendationLinesTable)
         .where(eq(purchaseRecommendationLinesTable.runId, run.id))
         .orderBy(purchaseRecommendationLinesTable.id);
-      const lineIds = lines.map((line) => line.id);
-      const allocations = lineIds.length === 0 ? [] : await db.select({
+      const productIds = Array.from(new Set(lines.map((line) => line.productId)));
+      const allocatedRecommendation = alias(purchaseRecommendationLinesTable, "allocated_recommendation");
+      const allocations = productIds.length === 0 ? [] : await db.select({
         id: requestForQuoteLinesTable.id,
         recommendationLineId: requestForQuoteLinesTable.recommendationLineId,
+        productId: allocatedRecommendation.productId,
+        productVariantId: allocatedRecommendation.productVariantId,
+        warehouseId: allocatedRecommendation.warehouseId,
         requestedPieces: requestForQuoteLinesTable.requestedPieces,
         lineStatus: requestForQuoteLinesTable.status,
         rfqId: requestForQuotesTable.id,
@@ -1164,11 +1170,11 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         vendorId: requestForQuotesTable.vendorId,
         createdAt: requestForQuotesTable.createdAt,
       }).from(requestForQuoteLinesTable)
+        .innerJoin(allocatedRecommendation, eq(requestForQuoteLinesTable.recommendationLineId, allocatedRecommendation.id))
         .innerJoin(requestForQuotesTable, eq(requestForQuoteLinesTable.rfqId, requestForQuotesTable.id))
         .where(and(
-          inArray(requestForQuoteLinesTable.recommendationLineId, lineIds),
+          inArray(allocatedRecommendation.productId, productIds),
           inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
-          inArray(requestForQuotesTable.status, ["draft", "sent", "partially_quoted", "quoted"]),
         ));
       const vendorIds = Array.from(new Set([
         ...lines.map((line) => line.preferredVendorId).filter((id): id is number => id != null),
@@ -1179,14 +1185,15 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         name: vendorsTable.name,
       }).from(vendorsTable).where(inArray(vendorsTable.id, vendorIds));
       const vendorNameById = new Map(vendorRows.map((vendor) => [vendor.id, vendor.name]));
-      const allocationsByLine = new Map<number, typeof allocations>();
+      const allocationsBySku = new Map<string, typeof allocations>();
       for (const allocation of allocations) {
-        const group = allocationsByLine.get(allocation.recommendationLineId) ?? [];
+        const key = purchasingSkuAllocationKey(allocation);
+        const group = allocationsBySku.get(key) ?? [];
         group.push(allocation);
-        allocationsByLine.set(allocation.recommendationLineId, group);
+        allocationsBySku.set(key, group);
       }
       const items = lines.map((line) => {
-        const lineAllocations = allocationsByLine.get(line.id) ?? [];
+        const lineAllocations = allocationsBySku.get(purchasingSkuAllocationKey(line)) ?? [];
         const allocatedPieces = lineAllocations.reduce((sum, allocation) => sum + Number(allocation.requestedPieces), 0);
         const remainingPieces = Math.max(Number(line.recommendedPieces) - allocatedPieces, 0);
         const evidence = (line.evidenceSnapshot ?? {}) as Record<string, any>;
