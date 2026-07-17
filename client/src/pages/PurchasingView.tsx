@@ -17,7 +17,7 @@ import {
   MoreHorizontal,
   PackageSearch,
   ShoppingCart,
-  TrendingDown,
+  SlidersHorizontal,
   XCircle
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -42,7 +42,16 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { reorderAnalysisSearchParams } from "@/features/purchasing/reorderAnalysisDeepLink";
+import { ExclusionRulesModal } from "@/components/purchasing/ExclusionRulesModal";
 import {
   Table,
   TableBody,
@@ -375,6 +384,81 @@ interface RecommendationReviewQueueResponse {
   items: RecommendationReviewQueueItem[];
 }
 
+interface RfqQueueItem {
+  recommendationLineId: number;
+  recommendationId: string;
+  runId: number;
+  productId: number;
+  productVariantId: number | null;
+  warehouseId: number | null;
+  requiredByDate: string | null;
+  sku: string;
+  productName: string;
+  recommendedPieces: number;
+  allocatedPieces: number;
+  remainingPieces: number;
+  sourcingStatus: "open" | "partially_allocated" | "fully_allocated";
+  availablePieces: number;
+  onOrderPieces: number;
+  reorderPointPieces: number;
+  forecastMethod: string;
+  forecastDailyPieces: number;
+  leadTimeDays: number;
+  safetyStockDays: number;
+  forwardDemandPieces: number;
+  preferredVendorId: number | null;
+  preferredVendorName: string | null;
+  vendorProductId: number | null;
+  supplierAssignmentRequired: boolean;
+  allocations: Array<{
+    id: number;
+    rfqId: number;
+    rfqNumber: string;
+    rfqStatus: string;
+    vendorId: number;
+    requestedPieces: number;
+    lineStatus: string;
+    vendorName: string | null;
+    createdAt: string;
+  }>;
+}
+
+interface RfqQueueResponse {
+  run: {
+    id: number;
+    calculationVersion: string;
+    source: "manual" | "auto_draft" | "api";
+    sourceRunKey: string | null;
+    asOf: string;
+    policySnapshot: Record<string, unknown>;
+  } | null;
+  generatedAt: string | null;
+  lookbackDays: number | null;
+  summary: {
+    total: number;
+    open: number;
+    partiallyAllocated: number;
+    fullyAllocated: number;
+    supplierAssignmentRequired: number;
+    activeRfqs: number;
+  };
+  items: RfqQueueItem[];
+}
+
+interface RfqSelection {
+  requestedPieces: number;
+  vendorId: string;
+  vendorSku: string;
+  quantityOverrideReason: string;
+}
+
+interface RfqVendor {
+  id: number;
+  code: string;
+  name: string;
+  active: number;
+}
+
 interface AcceptedRecommendationQueueItem {
   recommendationId: string;
   kind: Exclude<ReviewQueueKind, "all">;
@@ -583,6 +667,13 @@ export default function PurchasingView() {
     item: RecommendationReviewQueueItem;
     decision: Exclude<RecommendationDecisionValue, "po_handoff_created">;
   } | null>(null);
+  const [selectedRfqLineIds, setSelectedRfqLineIds] = useState<Set<number>>(new Set());
+  const [rfqSelections, setRfqSelections] = useState<Record<number, RfqSelection>>({});
+  const [rfqBatchDialogOpen, setRfqBatchDialogOpen] = useState(false);
+  const [rfqBatchIdempotencyKey, setRfqBatchIdempotencyKey] = useState("");
+  const [rfqRequestNote, setRfqRequestNote] = useState("");
+  const [rfqResponseDueDate, setRfqResponseDueDate] = useState("");
+  const [planningPolicyOpen, setPlanningPolicyOpen] = useState(false);
   const [decisionNote, setDecisionNote] = useState("");
   const [reviewedControlCodes, setReviewedControlCodes] = useState<Set<string>>(new Set());
   const [automationEligibilityAcknowledged, setAutomationEligibilityAcknowledged] = useState(false);
@@ -630,6 +721,19 @@ export default function PurchasingView() {
     },
   });
 
+  const { data: rfqQueue, isLoading: isLoadingRfqQueue } = useQuery<RfqQueueResponse>({
+    queryKey: ["/api/purchasing/rfq-queue"],
+    queryFn: async () => {
+      const res = await fetch("/api/purchasing/rfq-queue");
+      if (!res.ok) throw new Error("Failed to fetch RFQ queue");
+      return res.json();
+    },
+  });
+
+  const { data: rfqVendors = [] } = useQuery<RfqVendor[]>({
+    queryKey: ["/api/vendors"],
+  });
+
   const { data: acceptedRecommendationQueue } = useQuery<AcceptedRecommendationQueueResponse>({
     queryKey: ["/api/purchasing/recommendation-accepted-queue"],
     queryFn: async () => {
@@ -646,33 +750,6 @@ export default function PurchasingView() {
       if (!res.ok) throw new Error("Failed to fetch recommendation decision history");
       return res.json();
     },
-  });
-
-  const autoDraftMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/purchasing/auto-draft-run", {
-         method: "POST", 
-         headers: { "Content-Type": "application/json" } 
-      });
-      if (!res.ok) throw new Error("Network response was not ok");
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
-      toast({
-        title: "Autonomous Procurement Synced",
-        description: `Successfully analyzed burn rates and updated ${data.count} Vendor POs for ${data.itemsDrafted} critical items.`,
-      });
-    },
-    onError: () => {
-      toast({
-        title: "System Error",
-        description: "The AI agent was unable to execute the PO drafting protocol.",
-        variant: "destructive"
-      });
-    }
   });
 
   const recommendationDecisionMutation = useMutation({
@@ -771,6 +848,81 @@ export default function PurchasingView() {
         description: error.message,
         variant: "destructive",
       });
+    },
+  });
+
+  const createRfqMutation = useMutation({
+    mutationFn: async (input: {
+      idempotencyKey: string;
+      lines: Array<{
+        recommendationLineId: number;
+        vendorId: number;
+        vendorSku: string;
+        requestedPieces: number;
+        quantityOverrideReason: string;
+      }>;
+      requestNote: string;
+      responseDueDate: string;
+    }) => {
+      const res = await fetch("/api/purchasing/rfq-queue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idempotencyKey: input.idempotencyKey,
+          lines: input.lines.map((line) => ({
+            ...line,
+            vendorSku: line.vendorSku.trim() || null,
+            quantityOverrideReason: line.quantityOverrideReason.trim() || null,
+          })),
+          requestNote: input.requestNote.trim() || null,
+          responseDueDate: input.responseDueDate || null,
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error ?? "Failed to create RFQ draft");
+      return body;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/rfq-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/supplier-setup-gaps"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor-products"] });
+      setRfqBatchDialogOpen(false);
+      setSelectedRfqLineIds(new Set());
+      setRfqSelections({});
+      setRfqBatchIdempotencyKey("");
+      setRfqRequestNote("");
+      setRfqResponseDueDate("");
+      toast({
+        title: "RFQ drafts prepared",
+        description: `${data.rfqs?.length ?? 0} supplier RFQ${data.rfqs?.length === 1 ? "" : "s"} created from ${data.lines?.length ?? 0} recommendation line${data.lines?.length === 1 ? "" : "s"}.`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "RFQ not created", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const refreshRecommendationsMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/purchasing/recommendation-runs", { method: "POST" });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error ?? "Failed to generate recommendations");
+      return body;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/rfq-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      setSelectedRfqLineIds(new Set());
+      setRfqSelections({});
+      toast({
+        title: "Purchase recommendations refreshed",
+        description: `${data.lineCount ?? 0} current requirements were saved as a new calculation run.`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Recommendations not refreshed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -975,7 +1127,121 @@ export default function PurchasingView() {
   };
 
   const handleReviewQueueAction = (item: RecommendationReviewQueueItem) => {
+    if (item.action.action === "prepare_rfq") {
+      const rfqItem = rfqQueue?.items.find((candidate) => candidate.recommendationId === item.recommendationId);
+      if (rfqItem) {
+        selectRecommendationForRfq(rfqItem);
+        document.getElementById("rfq-queue")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      toast({
+        title: "RFQ requirement changed",
+        description: "Refresh the queue to load the current required-piece quantity.",
+        variant: "destructive",
+      });
+      return;
+    }
     handleRecommendationHref(item.action.href);
+  };
+
+  const selectionForRfqItem = (item: RfqQueueItem): RfqSelection => rfqSelections[item.recommendationLineId] ?? {
+    requestedPieces: item.remainingPieces,
+    vendorId: item.preferredVendorId ? String(item.preferredVendorId) : "",
+    vendorSku: "",
+    quantityOverrideReason: "",
+  };
+
+  const selectRecommendationForRfq = (item: RfqQueueItem) => {
+    if (item.remainingPieces <= 0) return;
+    setSelectedRfqLineIds((current) => new Set(current).add(item.recommendationLineId));
+    setRfqSelections((current) => current[item.recommendationLineId] ? current : {
+      ...current,
+      [item.recommendationLineId]: {
+        requestedPieces: item.remainingPieces,
+        vendorId: item.preferredVendorId ? String(item.preferredVendorId) : "",
+        vendorSku: "",
+        quantityOverrideReason: "",
+      },
+    });
+  };
+
+  const toggleRecommendationForRfq = (item: RfqQueueItem, selected: boolean) => {
+    if (selected) {
+      selectRecommendationForRfq(item);
+      return;
+    }
+    setSelectedRfqLineIds((current) => {
+      const next = new Set(current);
+      next.delete(item.recommendationLineId);
+      return next;
+    });
+  };
+
+  const updateRfqSelection = (item: RfqQueueItem, patch: Partial<RfqSelection>) => {
+    setRfqSelections((current) => ({
+      ...current,
+      [item.recommendationLineId]: { ...selectionForRfqItem(item), ...patch },
+    }));
+  };
+
+  const selectedRfqItems = (rfqQueue?.items ?? []).filter((item) => selectedRfqLineIds.has(item.recommendationLineId));
+  const selectedRfqGroups = selectedRfqItems.reduce<Map<string, { vendorName: string; items: RfqQueueItem[]; pieces: number }>>(
+    (groups, item) => {
+      const selection = selectionForRfqItem(item);
+      const vendor = rfqVendors.find((candidate) => String(candidate.id) === selection.vendorId);
+      const key = selection.vendorId || "unassigned";
+      const group = groups.get(key) ?? { vendorName: vendor?.name ?? "Supplier not assigned", items: [], pieces: 0 };
+      group.items.push(item);
+      group.pieces += Number(selection.requestedPieces) || 0;
+      groups.set(key, group);
+      return groups;
+    },
+    new Map(),
+  );
+
+  const openRfqBatchDialog = () => {
+    const invalid = selectedRfqItems.find((item) => {
+      const selection = selectionForRfqItem(item);
+      return !selection.vendorId
+        || !Number.isSafeInteger(selection.requestedPieces)
+        || selection.requestedPieces <= 0
+        || selection.requestedPieces > item.remainingPieces
+        || (selection.requestedPieces !== item.remainingPieces && selection.quantityOverrideReason.trim().length < 3);
+    });
+    if (invalid) {
+      toast({
+        title: "Complete the RFQ selections",
+        description: `${invalid.sku} needs a supplier, valid remaining quantity, and an adjustment reason when its quantity is changed.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    const randomPart = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+    setRfqBatchIdempotencyKey(`purchasing-rfq-${randomPart}`);
+    setRfqRequestNote("");
+    const defaultDueDate = new Date();
+    defaultDueDate.setDate(defaultDueDate.getDate() + 7);
+    setRfqResponseDueDate(defaultDueDate.toISOString().slice(0, 10));
+    setRfqBatchDialogOpen(true);
+  };
+
+  const submitRfqDraft = () => {
+    if (!rfqBatchIdempotencyKey || selectedRfqItems.length === 0) return;
+    createRfqMutation.mutate({
+      idempotencyKey: rfqBatchIdempotencyKey,
+      lines: selectedRfqItems.map((item) => {
+        const selection = selectionForRfqItem(item);
+        return {
+          recommendationLineId: item.recommendationLineId,
+          vendorId: Number(selection.vendorId),
+          vendorSku: selection.vendorSku,
+          requestedPieces: selection.requestedPieces,
+          quantityOverrideReason: selection.quantityOverrideReason,
+        };
+      }),
+      requestNote: rfqRequestNote,
+      responseDueDate: rfqResponseDueDate,
+    });
   };
 
   const openRecommendationDecision = (
@@ -1022,23 +1288,24 @@ export default function PurchasingView() {
               Supply Chain Command Center
             </h1>
             <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-              Autonomous Inventory Health & Procurement Engine
+              Inventory demand planning and supplier RFQ coordination
             </p>
           </div>
 
-          <Button 
-            size="lg" 
-            className="gap-2 shadow-lg hover:shadow-xl transition-all"
-            onClick={() => autoDraftMutation.mutate()}
-            disabled={autoDraftMutation.isPending}
-          >
-            {autoDraftMutation.isPending ? (
-              <TrendingDown className="h-4 w-4 animate-bounce" />
-            ) : (
-              <ShoppingCart className="h-4 w-4" />
-            )}
-            Run Draft Protocol
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="lg" className="gap-2" onClick={() => setPlanningPolicyOpen(true)}>
+              <SlidersHorizontal className="h-4 w-4" />
+              Planning Policy
+            </Button>
+            <Button
+              size="lg"
+              className="gap-2 shadow-lg hover:shadow-xl transition-all"
+              onClick={() => document.getElementById("rfq-queue")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            >
+              <PackageSearch className="h-4 w-4" />
+              Review Purchase Recommendations
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -1201,6 +1468,145 @@ export default function PurchasingView() {
             </CardContent>
           </Card>
         )}
+
+        <Card id="rfq-queue" className="mb-6 scroll-mt-24 border-blue-200 shadow-sm dark:border-blue-900 dark:bg-zinc-900">
+            <CardHeader className="border-b border-blue-100 bg-blue-50/60 pb-4 dark:border-blue-900 dark:bg-blue-950/20">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-lg">
+                    <PackageSearch className="h-5 w-5 text-blue-700" />
+                    Purchase Recommendations
+                  </CardTitle>
+                  <CardDescription>
+                    Select requirements, adjust quantities, and assign suppliers. One multi-line RFQ draft is created per supplier; pricing comes later.
+                  </CardDescription>
+                  {rfqQueue?.generatedAt && (
+                    <div className="mt-1 text-[11px] text-zinc-500">
+                      Run #{rfqQueue.run?.id} generated {new Date(rfqQueue.generatedAt).toLocaleString()} via {rfqQueue.run?.source === "auto_draft" ? "scheduled purchasing" : "manual refresh"} using {rfqQueue.run?.calculationVersion}
+                    </div>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <Badge variant="outline">{rfqQueue?.summary.open ?? 0} open</Badge>
+                  <Badge variant="outline" className="border-amber-300 text-amber-700">
+                    {rfqQueue?.summary.supplierAssignmentRequired ?? 0} need supplier
+                  </Badge>
+                  <Badge variant="outline" className="border-blue-300 text-blue-700">
+                    {rfqQueue?.summary.activeRfqs ?? 0} active RFQs
+                  </Badge>
+                  <Button size="sm" variant="outline" disabled={refreshRecommendationsMutation.isPending} onClick={() => refreshRecommendationsMutation.mutate()}>
+                    {refreshRecommendationsMutation.isPending ? "Calculating..." : "Refresh recommendations"}
+                  </Button>
+                  <Button size="sm" disabled={selectedRfqLineIds.size === 0} onClick={openRfqBatchDialog}>
+                    Create RFQ drafts ({selectedRfqLineIds.size})
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-4">
+              {isLoadingRfqQueue ? (
+                <div className="py-6 text-center text-sm text-zinc-500">Loading RFQ requirements...</div>
+              ) : !rfqQueue?.run ? (
+                <div className="rounded-md border border-dashed p-6 text-center">
+                  <div className="font-medium">No saved recommendation run yet</div>
+                  <p className="mt-1 text-sm text-zinc-500">Generate a versioned set of requirements from the active planning policy.</p>
+                  <Button className="mt-3" disabled={refreshRecommendationsMutation.isPending} onClick={() => refreshRecommendationsMutation.mutate()}>
+                    {refreshRecommendationsMutation.isPending ? "Calculating..." : "Generate recommendations"}
+                  </Button>
+                </div>
+              ) : (rfqQueue?.items.length ?? 0) === 0 ? (
+                <div className="py-6 text-center text-sm text-zinc-500">This recommendation run has no purchase requirements.</div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                {(rfqQueue?.items ?? []).map((item) => (
+                  <div key={item.recommendationLineId} className={`rounded-md border p-3 dark:bg-zinc-900 ${selectedRfqLineIds.has(item.recommendationLineId) ? "border-blue-400 bg-blue-50/30" : "bg-white"}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-sm font-semibold text-primary">{item.sku}</span>
+                          {item.supplierAssignmentRequired ? (
+                            <Badge variant="outline" className="border-amber-300 text-amber-700">Supplier needed</Badge>
+                          ) : (
+                            <Badge variant="outline" className="border-green-300 text-green-700">{item.preferredVendorName}</Badge>
+                          )}
+                          <Badge variant="outline" className="capitalize">{item.sourcingStatus.replaceAll("_", " ")}</Badge>
+                        </div>
+                        <div className="mt-1 truncate text-sm">{item.productName}</div>
+                        <div className="mt-3 flex items-end gap-5">
+                          <div>
+                            <div className="text-2xl font-bold text-blue-800">{item.remainingPieces.toLocaleString()}</div>
+                            <div className="text-[11px] text-zinc-500">pieces remaining</div>
+                          </div>
+                          <div className="text-xs text-zinc-500">
+                            <div>{item.availablePieces.toLocaleString()} available</div>
+                            <div>{item.onOrderPieces.toLocaleString()} already on order</div>
+                          </div>
+                        </div>
+                        {item.allocatedPieces > 0 && (
+                          <div className="mt-2 text-xs text-blue-700">
+                            {item.allocatedPieces.toLocaleString()} of {item.recommendedPieces.toLocaleString()} recommended pieces are already allocated to active RFQs.
+                          </div>
+                        )}
+                        <div className="mt-2 text-[11px] text-zinc-500">
+                          {item.forecastMethod === "weighted_blend_v1" ? "Weighted forecast" : "Recent velocity"} {item.forecastDailyPieces.toFixed(2)} pieces/day · {item.leadTimeDays} lead days + {item.safetyStockDays} safety days
+                          {item.forwardDemandPieces > 0 ? ` · ${item.forwardDemandPieces.toLocaleString()} future-demand pieces` : ""}
+                          {` · ${item.reorderPointPieces.toLocaleString()}-piece target`}
+                        </div>
+                      </div>
+                      <div className="w-64 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            checked={selectedRfqLineIds.has(item.recommendationLineId)}
+                            disabled={item.remainingPieces <= 0}
+                            onCheckedChange={(checked) => toggleRecommendationForRfq(item, Boolean(checked))}
+                          />
+                          <span className="text-xs font-medium">Add to RFQ</span>
+                        </div>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={item.remainingPieces}
+                          step={1}
+                          disabled={!selectedRfqLineIds.has(item.recommendationLineId)}
+                          value={selectionForRfqItem(item).requestedPieces}
+                          onChange={(event) => updateRfqSelection(item, { requestedPieces: Number(event.target.value) })}
+                        />
+                        {selectedRfqLineIds.has(item.recommendationLineId) && selectionForRfqItem(item).requestedPieces !== item.remainingPieces && (
+                          <Input
+                            value={selectionForRfqItem(item).quantityOverrideReason}
+                            onChange={(event) => updateRfqSelection(item, { quantityOverrideReason: event.target.value })}
+                            placeholder="Quantity adjustment reason *"
+                            maxLength={2000}
+                          />
+                        )}
+                        <Select
+                          disabled={!selectedRfqLineIds.has(item.recommendationLineId)}
+                          value={selectionForRfqItem(item).vendorId}
+                          onValueChange={(value) => updateRfqSelection(item, { vendorId: value })}
+                        >
+                          <SelectTrigger><SelectValue placeholder="Assign supplier" /></SelectTrigger>
+                          <SelectContent>
+                            {rfqVendors.filter((vendor) => vendor.active === 1).sort((a, b) => a.name.localeCompare(b.name)).map((vendor) => (
+                              <SelectItem key={vendor.id} value={String(vendor.id)}>{vendor.name} ({vendor.code})</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        {selectedRfqLineIds.has(item.recommendationLineId) && (
+                          <Input
+                            value={selectionForRfqItem(item).vendorSku}
+                            onChange={(event) => updateRfqSelection(item, { vendorSku: event.target.value })}
+                            placeholder="Supplier SKU (optional)"
+                            maxLength={100}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
         {(recommendationReviewQueue?.summary.total ?? 0) > 0 && (
           <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
@@ -1689,6 +2095,69 @@ export default function PurchasingView() {
           </div>
         </Card>
       </div>
+
+      <Dialog
+        open={rfqBatchDialogOpen}
+        onOpenChange={(open) => {
+          if (!createRfqMutation.isPending) setRfqBatchDialogOpen(open);
+        }}
+      >
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Create supplier RFQ drafts</DialogTitle>
+            <DialogDescription>
+              The selected recommendation quantities will be grouped into one multi-line draft per supplier. Missing catalog SKUs are created without a price.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {Array.from(selectedRfqGroups.entries()).map(([vendorId, group]) => (
+              <div key={vendorId} className="rounded-md border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-semibold">{group.vendorName}</div>
+                  <Badge variant="outline">{group.items.length} line{group.items.length === 1 ? "" : "s"} · {group.pieces.toLocaleString()} pieces</Badge>
+                </div>
+                <div className="mt-2 space-y-1 text-xs text-zinc-600">
+                  {group.items.map((item) => (
+                    <div key={item.recommendationLineId} className="flex justify-between gap-3">
+                      <span><span className="font-mono font-medium">{item.sku}</span> · {item.productName}</span>
+                      <span className="whitespace-nowrap font-medium">{selectionForRfqItem(item).requestedPieces.toLocaleString()} pieces</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="space-y-2">
+              <Label htmlFor="rfq-response-due-date">Requested response date</Label>
+              <Input
+                id="rfq-response-due-date"
+                type="date"
+                value={rfqResponseDueDate}
+                onChange={(event) => setRfqResponseDueDate(event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="rfq-request-note">Instructions for all supplier drafts (optional)</Label>
+              <Textarea
+                id="rfq-request-note"
+                value={rfqRequestNote}
+                onChange={(event) => setRfqRequestNote(event.target.value)}
+                placeholder="Packaging, delivery, quote-validity, or response instructions"
+                rows={3}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={createRfqMutation.isPending} onClick={() => setRfqBatchDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={selectedRfqItems.length === 0 || createRfqMutation.isPending} onClick={submitRfqDraft}>
+              {createRfqMutation.isPending ? "Creating drafts..." : `Create ${selectedRfqGroups.size} RFQ draft${selectedRfqGroups.size === 1 ? "" : "s"}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ExclusionRulesModal open={planningPolicyOpen} onOpenChange={setPlanningPolicyOpen} />
 
       <Dialog
         open={Boolean(decisionDialog)}

@@ -68,6 +68,7 @@ import {
   type PurchasingRecommendationProductMeta,
   type PurchasingRecommendationRawRow,
 } from "./purchasing-recommendation.engine";
+import { normalizePurchasingForecastPolicy } from "./purchasing-forecast-policy";
 
 export interface IProcurementStorage {
   getAllVendors(): Promise<Vendor[]>;
@@ -1377,10 +1378,55 @@ export const procurementMethods: IProcurementStorage = {
 
   async getReorderAnalysisData(lookbackDays: number): Promise<any[]> {
     const normalizedLookbackDays = Math.max(1, Math.trunc(Number(lookbackDays) || 30));
-    const shortWindowDays = Math.max(1, Math.min(7, normalizedLookbackDays));
-    const longWindowDays = Math.max(90, normalizedLookbackDays * 3);
-    const seasonalWindowDays = normalizedLookbackDays;
-    const seasonalScanWindowDays = 365 + seasonalWindowDays * 2;
+    const forecastSettings = await db.execute(sql`
+      SELECT
+        purchasing_forecast_method,
+        purchasing_forecast_short_window_days,
+        purchasing_forecast_long_window_days,
+        purchasing_forecast_seasonal_enabled,
+        purchasing_forecast_seasonal_window_days,
+        purchasing_forecast_weight_short,
+        purchasing_forecast_weight_standard,
+        purchasing_forecast_weight_long,
+        purchasing_forecast_weight_seasonal,
+        purchasing_forward_demand_enabled,
+        purchasing_forward_demand_horizon_days,
+        purchasing_forward_demand_high_weight,
+        purchasing_forward_demand_medium_weight,
+        purchasing_forward_demand_low_weight,
+        purchasing_automation_min_order_count,
+        purchasing_automation_min_active_days
+      FROM inventory.warehouse_settings
+      LIMIT 1
+    `);
+    const configured = (forecastSettings.rows as any[])[0] ?? {};
+    const forecastPolicy = normalizePurchasingForecastPolicy({
+      method: configured.purchasing_forecast_method,
+      shortWindowDays: configured.purchasing_forecast_short_window_days,
+      standardWindowDays: normalizedLookbackDays,
+      longWindowDays: configured.purchasing_forecast_long_window_days,
+      seasonalEnabled: configured.purchasing_forecast_seasonal_enabled,
+      seasonalWindowDays: configured.purchasing_forecast_seasonal_window_days,
+      weights: {
+        short: configured.purchasing_forecast_weight_short,
+        standard: configured.purchasing_forecast_weight_standard,
+        long: configured.purchasing_forecast_weight_long,
+        seasonal: configured.purchasing_forecast_weight_seasonal,
+      },
+      forwardDemandEnabled: configured.purchasing_forward_demand_enabled,
+      forwardDemandHorizonDays: configured.purchasing_forward_demand_horizon_days,
+      forwardDemandConfidenceWeights: {
+        high: configured.purchasing_forward_demand_high_weight,
+        medium: configured.purchasing_forward_demand_medium_weight,
+        low: configured.purchasing_forward_demand_low_weight,
+      },
+      automationMinimumOrderCount: configured.purchasing_automation_min_order_count,
+      automationMinimumActiveDays: configured.purchasing_automation_min_active_days,
+    });
+    const shortWindowDays = Math.min(forecastPolicy.shortWindowDays, normalizedLookbackDays);
+    const longWindowDays = Math.max(forecastPolicy.longWindowDays, normalizedLookbackDays);
+    const seasonalWindowDays = forecastPolicy.seasonalWindowDays;
+    const seasonalScanWindowDays = forecastPolicy.seasonalEnabled ? 365 + seasonalWindowDays * 2 : 0;
     const demandScanWindowDays = Math.max(
       normalizedLookbackDays * 2,
       shortWindowDays * 2,
@@ -1712,9 +1758,9 @@ export const procurementMethods: IProcurementStorage = {
         SELECT del.product_id,
                SUM(
                  CASE del.confidence
-                   WHEN 'high'   THEN del.expected_pieces
-                   WHEN 'medium' THEN CEIL(del.expected_pieces * 0.7)
-                   WHEN 'low'    THEN CEIL(del.expected_pieces * 0.4)
+                    WHEN 'high'   THEN CEIL(del.expected_pieces * ${forecastPolicy.forwardDemandConfidenceWeights.high} / 100.0)
+                    WHEN 'medium' THEN CEIL(del.expected_pieces * ${forecastPolicy.forwardDemandConfidenceWeights.medium} / 100.0)
+                    WHEN 'low'    THEN CEIL(del.expected_pieces * ${forecastPolicy.forwardDemandConfidenceWeights.low} / 100.0)
                    ELSE 0
                  END
                ) AS weighted_pieces,
@@ -1722,8 +1768,9 @@ export const procurementMethods: IProcurementStorage = {
                COUNT(DISTINCT de.id) AS event_count
         FROM procurement.demand_event_lines del
         JOIN procurement.demand_events de ON de.id = del.demand_event_id
-        WHERE de.status IN ('planned', 'active')
-          AND de.start_date <= CURRENT_DATE + INTERVAL '90 days'
+        WHERE ${forecastPolicy.forwardDemandEnabled}
+          AND de.status IN ('planned', 'active')
+          AND de.start_date <= CURRENT_DATE + MAKE_INTERVAL(days => ${forecastPolicy.forwardDemandHorizonDays})
           AND (de.end_date IS NULL OR de.end_date >= CURRENT_DATE)
         GROUP BY del.product_id
       ) fwd ON fwd.product_id = p.id
@@ -2121,6 +2168,27 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(auto_draft_skip_no_vendor, true) AS skip_no_vendor,
         COALESCE(recommendation_candidate_score_strong_threshold, 80) AS candidate_score_strong_threshold,
         COALESCE(recommendation_candidate_score_review_threshold, 60) AS candidate_score_review_threshold,
+        COALESCE(velocity_lookback_days, 30) AS purchasing_forecast_standard_window_days,
+        COALESCE(purchasing_forecast_method, 'weighted_blend_v1') AS purchasing_forecast_method,
+        COALESCE(purchasing_forecast_short_window_days, 7) AS purchasing_forecast_short_window_days,
+        COALESCE(purchasing_forecast_long_window_days, 90) AS purchasing_forecast_long_window_days,
+        COALESCE(purchasing_forecast_seasonal_enabled, true) AS purchasing_forecast_seasonal_enabled,
+        COALESCE(purchasing_forecast_seasonal_window_days, 30) AS purchasing_forecast_seasonal_window_days,
+        COALESCE(purchasing_forecast_weight_short, 30) AS purchasing_forecast_weight_short,
+        COALESCE(purchasing_forecast_weight_standard, 35) AS purchasing_forecast_weight_standard,
+        COALESCE(purchasing_forecast_weight_long, 20) AS purchasing_forecast_weight_long,
+        COALESCE(purchasing_forecast_weight_seasonal, 15) AS purchasing_forecast_weight_seasonal,
+        COALESCE(purchasing_forward_demand_enabled, true) AS purchasing_forward_demand_enabled,
+        COALESCE(purchasing_forward_demand_horizon_days, 90) AS purchasing_forward_demand_horizon_days,
+        COALESCE(purchasing_forward_demand_high_weight, 100) AS purchasing_forward_demand_high_weight,
+        COALESCE(purchasing_forward_demand_medium_weight, 70) AS purchasing_forward_demand_medium_weight,
+        COALESCE(purchasing_forward_demand_low_weight, 40) AS purchasing_forward_demand_low_weight,
+        COALESCE(purchasing_automation_min_order_count, 2) AS purchasing_automation_min_order_count,
+        COALESCE(purchasing_automation_min_active_days, 2) AS purchasing_automation_min_active_days,
+        COALESCE(rfq_draft_automation_mode, 'manual') AS rfq_draft_automation_mode,
+        COALESCE(rfq_draft_minimum_confidence, 'high') AS rfq_draft_minimum_confidence,
+        COALESCE(rfq_draft_require_trusted_forecast, TRUE) AS rfq_draft_require_trusted_forecast,
+        COALESCE(rfq_draft_maximum_lines_per_run, 100) AS rfq_draft_maximum_lines_per_run,
         COALESCE(auto_draft_po_review_warning_days, 2) AS auto_draft_po_review_warning_days,
         COALESCE(auto_draft_po_review_critical_days, 5) AS auto_draft_po_review_critical_days,
         COALESCE(auto_draft_po_supplier_send_warning_days, 2) AS auto_draft_po_supplier_send_warning_days,
@@ -2149,6 +2217,33 @@ export const procurementMethods: IProcurementStorage = {
       skipNoVendor: row?.skip_no_vendor ?? true,
       candidateScoreStrongThreshold: row?.candidate_score_strong_threshold ?? 80,
       candidateScoreReviewThreshold: row?.candidate_score_review_threshold ?? 60,
+      rfqDraftAutomationMode: row?.rfq_draft_automation_mode === "preferred_vendor" ? "preferred_vendor" : "manual",
+      rfqDraftMinimumConfidence: row?.rfq_draft_minimum_confidence === "medium" ? "medium" : "high",
+      rfqDraftRequireTrustedForecast: row?.rfq_draft_require_trusted_forecast ?? true,
+      rfqDraftMaximumLinesPerRun: Math.min(500, Math.max(1, Number(row?.rfq_draft_maximum_lines_per_run ?? 100))),
+      forecastPolicy: normalizePurchasingForecastPolicy({
+        method: row?.purchasing_forecast_method,
+        shortWindowDays: row?.purchasing_forecast_short_window_days,
+        standardWindowDays: row?.purchasing_forecast_standard_window_days,
+        longWindowDays: row?.purchasing_forecast_long_window_days,
+        seasonalEnabled: row?.purchasing_forecast_seasonal_enabled,
+        seasonalWindowDays: row?.purchasing_forecast_seasonal_window_days,
+        weights: {
+          short: row?.purchasing_forecast_weight_short,
+          standard: row?.purchasing_forecast_weight_standard,
+          long: row?.purchasing_forecast_weight_long,
+          seasonal: row?.purchasing_forecast_weight_seasonal,
+        },
+        forwardDemandEnabled: row?.purchasing_forward_demand_enabled,
+        forwardDemandHorizonDays: row?.purchasing_forward_demand_horizon_days,
+        forwardDemandConfidenceWeights: {
+          high: row?.purchasing_forward_demand_high_weight,
+          medium: row?.purchasing_forward_demand_medium_weight,
+          low: row?.purchasing_forward_demand_low_weight,
+        },
+        automationMinimumOrderCount: row?.purchasing_automation_min_order_count,
+        automationMinimumActiveDays: row?.purchasing_automation_min_active_days,
+      }),
       stalePoThresholds: {
         reviewPendingWarningDays: row?.auto_draft_po_review_warning_days ?? 2,
         reviewPendingCriticalDays: row?.auto_draft_po_review_critical_days ?? 5,
@@ -2177,6 +2272,20 @@ export const procurementMethods: IProcurementStorage = {
       settings.approvalPolicy === "high_confidence_only" || settings.approvalPolicy === "high_confidence_and_strong_candidate"
         ? settings.approvalPolicy
         : null;
+    const forecastPolicy = settings.forecastPolicy
+      ? normalizePurchasingForecastPolicy(settings.forecastPolicy)
+      : null;
+    const rfqDraftAutomationMode = settings.rfqDraftAutomationMode === "preferred_vendor"
+      ? "preferred_vendor"
+      : settings.rfqDraftAutomationMode === "manual" ? "manual" : null;
+    const rfqDraftMinimumConfidence = settings.rfqDraftMinimumConfidence === "medium"
+      ? "medium"
+      : settings.rfqDraftMinimumConfidence === "high" ? "high" : null;
+    const rfqDraftMaximumLinesPerRun = Number.isSafeInteger(settings.rfqDraftMaximumLinesPerRun)
+      && settings.rfqDraftMaximumLinesPerRun >= 1
+      && settings.rfqDraftMaximumLinesPerRun <= 500
+      ? settings.rfqDraftMaximumLinesPerRun
+      : null;
     await db.execute(sql`
       UPDATE warehouse_settings SET
         auto_draft_mode = COALESCE(${autoDraftMode}, auto_draft_mode),
@@ -2186,6 +2295,27 @@ export const procurementMethods: IProcurementStorage = {
         auto_draft_skip_no_vendor = COALESCE(${settings.skipNoVendor ?? null}, auto_draft_skip_no_vendor),
         recommendation_candidate_score_strong_threshold = COALESCE(${settings.candidateScoreStrongThreshold ?? null}, recommendation_candidate_score_strong_threshold),
         recommendation_candidate_score_review_threshold = COALESCE(${settings.candidateScoreReviewThreshold ?? null}, recommendation_candidate_score_review_threshold),
+        velocity_lookback_days = COALESCE(${forecastPolicy?.standardWindowDays ?? null}, velocity_lookback_days),
+        purchasing_forecast_method = COALESCE(${forecastPolicy?.method ?? null}, purchasing_forecast_method),
+        purchasing_forecast_short_window_days = COALESCE(${forecastPolicy?.shortWindowDays ?? null}, purchasing_forecast_short_window_days),
+        purchasing_forecast_long_window_days = COALESCE(${forecastPolicy?.longWindowDays ?? null}, purchasing_forecast_long_window_days),
+        purchasing_forecast_seasonal_enabled = COALESCE(${forecastPolicy?.seasonalEnabled ?? null}, purchasing_forecast_seasonal_enabled),
+        purchasing_forecast_seasonal_window_days = COALESCE(${forecastPolicy?.seasonalWindowDays ?? null}, purchasing_forecast_seasonal_window_days),
+        purchasing_forecast_weight_short = COALESCE(${forecastPolicy?.weights.short ?? null}, purchasing_forecast_weight_short),
+        purchasing_forecast_weight_standard = COALESCE(${forecastPolicy?.weights.standard ?? null}, purchasing_forecast_weight_standard),
+        purchasing_forecast_weight_long = COALESCE(${forecastPolicy?.weights.long ?? null}, purchasing_forecast_weight_long),
+        purchasing_forecast_weight_seasonal = COALESCE(${forecastPolicy?.weights.seasonal ?? null}, purchasing_forecast_weight_seasonal),
+        purchasing_forward_demand_enabled = COALESCE(${forecastPolicy?.forwardDemandEnabled ?? null}, purchasing_forward_demand_enabled),
+        purchasing_forward_demand_horizon_days = COALESCE(${forecastPolicy?.forwardDemandHorizonDays ?? null}, purchasing_forward_demand_horizon_days),
+        purchasing_forward_demand_high_weight = COALESCE(${forecastPolicy?.forwardDemandConfidenceWeights.high ?? null}, purchasing_forward_demand_high_weight),
+        purchasing_forward_demand_medium_weight = COALESCE(${forecastPolicy?.forwardDemandConfidenceWeights.medium ?? null}, purchasing_forward_demand_medium_weight),
+        purchasing_forward_demand_low_weight = COALESCE(${forecastPolicy?.forwardDemandConfidenceWeights.low ?? null}, purchasing_forward_demand_low_weight),
+        purchasing_automation_min_order_count = COALESCE(${forecastPolicy?.automationMinimumOrderCount ?? null}, purchasing_automation_min_order_count),
+        purchasing_automation_min_active_days = COALESCE(${forecastPolicy?.automationMinimumActiveDays ?? null}, purchasing_automation_min_active_days),
+        rfq_draft_automation_mode = COALESCE(${rfqDraftAutomationMode}, rfq_draft_automation_mode),
+        rfq_draft_minimum_confidence = COALESCE(${rfqDraftMinimumConfidence}, rfq_draft_minimum_confidence),
+        rfq_draft_require_trusted_forecast = COALESCE(${settings.rfqDraftRequireTrustedForecast ?? null}, rfq_draft_require_trusted_forecast),
+        rfq_draft_maximum_lines_per_run = COALESCE(${rfqDraftMaximumLinesPerRun}, rfq_draft_maximum_lines_per_run),
         auto_draft_po_review_warning_days = COALESCE(${settings.stalePoThresholds?.reviewPendingWarningDays ?? null}, auto_draft_po_review_warning_days),
         auto_draft_po_review_critical_days = COALESCE(${settings.stalePoThresholds?.reviewPendingCriticalDays ?? null}, auto_draft_po_review_critical_days),
         auto_draft_po_supplier_send_warning_days = COALESCE(${settings.stalePoThresholds?.supplierSendWarningDays ?? null}, auto_draft_po_supplier_send_warning_days),
@@ -2205,7 +2335,10 @@ export const procurementMethods: IProcurementStorage = {
 
   async getDashboardData(lookbackDays: number): Promise<any> {
     // Get reorder analysis data with exclusion filtering
-    const rawRows = await this.getReorderAnalysisData(lookbackDays);
+    const [rawRows, autoDraftSettings] = await Promise.all([
+      this.getReorderAnalysisData(lookbackDays),
+      this.getAutoDraftSettings(),
+    ]);
 
     // Get exclusion rules to filter out
     const rules = await db.select().from(reorderExclusionRules);
@@ -2243,6 +2376,7 @@ export const procurementMethods: IProcurementStorage = {
       lookbackDays,
       productMetaById: productMeta,
       exclusionRules: rules,
+      autoDraftSettings,
       defaults: {
         leadTimeDays: defaultLeadTimeDays,
         safetyStockDays: defaultSafetyStockDays,

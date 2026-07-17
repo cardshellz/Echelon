@@ -256,6 +256,26 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
 
   // Velocity calculation
   velocityLookbackDays: integer("velocity_lookback_days").notNull().default(14), // Days of pick history for SKU velocity
+  purchasingForecastMethod: varchar("purchasing_forecast_method", { length: 30 }).notNull().default("weighted_blend_v1"),
+  purchasingForecastShortWindowDays: integer("purchasing_forecast_short_window_days").notNull().default(7),
+  purchasingForecastLongWindowDays: integer("purchasing_forecast_long_window_days").notNull().default(90),
+  purchasingForecastSeasonalEnabled: boolean("purchasing_forecast_seasonal_enabled").notNull().default(true),
+  purchasingForecastSeasonalWindowDays: integer("purchasing_forecast_seasonal_window_days").notNull().default(30),
+  purchasingForecastWeightShort: integer("purchasing_forecast_weight_short").notNull().default(30),
+  purchasingForecastWeightStandard: integer("purchasing_forecast_weight_standard").notNull().default(35),
+  purchasingForecastWeightLong: integer("purchasing_forecast_weight_long").notNull().default(20),
+  purchasingForecastWeightSeasonal: integer("purchasing_forecast_weight_seasonal").notNull().default(15),
+  purchasingForwardDemandEnabled: boolean("purchasing_forward_demand_enabled").notNull().default(true),
+  purchasingForwardDemandHorizonDays: integer("purchasing_forward_demand_horizon_days").notNull().default(90),
+  purchasingForwardDemandHighWeight: integer("purchasing_forward_demand_high_weight").notNull().default(100),
+  purchasingForwardDemandMediumWeight: integer("purchasing_forward_demand_medium_weight").notNull().default(70),
+  purchasingForwardDemandLowWeight: integer("purchasing_forward_demand_low_weight").notNull().default(40),
+  purchasingAutomationMinOrderCount: integer("purchasing_automation_min_order_count").notNull().default(2),
+  purchasingAutomationMinActiveDays: integer("purchasing_automation_min_active_days").notNull().default(2),
+  rfqDraftAutomationMode: varchar("rfq_draft_automation_mode", { length: 30 }).notNull().default("manual"),
+  rfqDraftMinimumConfidence: varchar("rfq_draft_minimum_confidence", { length: 10 }).notNull().default("high"),
+  rfqDraftRequireTrustedForecast: boolean("rfq_draft_require_trusted_forecast").notNull().default(true),
+  rfqDraftMaximumLinesPerRun: integer("rfq_draft_maximum_lines_per_run").notNull().default(100),
   autoDraftMode: varchar("auto_draft_mode", { length: 20 }).notNull().default("draft_po"), // draft_po, review_only
   autoDraftApprovalPolicy: varchar("auto_draft_approval_policy", { length: 50 }).notNull().default("high_confidence_only"),
   recommendationCandidateScoreStrongThreshold: integer("recommendation_candidate_score_strong_threshold").notNull().default(80),
@@ -313,7 +333,43 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  check("warehouse_settings_purchasing_forecast_method_chk", sql`${table.purchasingForecastMethod} IN ('recent_order_velocity_v1', 'weighted_blend_v1')`),
+  check("warehouse_settings_purchasing_forecast_windows_chk", sql`
+    ${table.purchasingForecastShortWindowDays} BETWEEN 1 AND 60
+    AND ${table.velocityLookbackDays} BETWEEN 7 AND 180
+    AND ${table.purchasingForecastLongWindowDays} BETWEEN 30 AND 730
+    AND ${table.purchasingForecastSeasonalWindowDays} BETWEEN 7 AND 120
+    AND ${table.purchasingForecastShortWindowDays} <= ${table.velocityLookbackDays}
+    AND ${table.velocityLookbackDays} <= ${table.purchasingForecastLongWindowDays}
+  `),
+  check("warehouse_settings_purchasing_forecast_weights_chk", sql`
+    ${table.purchasingForecastWeightShort} BETWEEN 0 AND 100
+    AND ${table.purchasingForecastWeightStandard} BETWEEN 0 AND 100
+    AND ${table.purchasingForecastWeightLong} BETWEEN 0 AND 100
+    AND ${table.purchasingForecastWeightSeasonal} BETWEEN 0 AND 100
+    AND ${table.purchasingForecastWeightShort} + ${table.purchasingForecastWeightStandard}
+      + ${table.purchasingForecastWeightLong} + ${table.purchasingForecastWeightSeasonal} = 100
+  `),
+  check("warehouse_settings_purchasing_forward_demand_chk", sql`
+    ${table.purchasingForwardDemandHorizonDays} BETWEEN 1 AND 365
+    AND ${table.purchasingForwardDemandHighWeight} BETWEEN 0 AND 100
+    AND ${table.purchasingForwardDemandMediumWeight} BETWEEN 0 AND 100
+    AND ${table.purchasingForwardDemandLowWeight} BETWEEN 0 AND 100
+    AND ${table.purchasingForwardDemandHighWeight} >= ${table.purchasingForwardDemandMediumWeight}
+    AND ${table.purchasingForwardDemandMediumWeight} >= ${table.purchasingForwardDemandLowWeight}
+  `),
+  check("warehouse_settings_purchasing_automation_sample_chk", sql`
+    ${table.purchasingAutomationMinOrderCount} BETWEEN 1 AND 100
+    AND ${table.purchasingAutomationMinActiveDays} BETWEEN 1 AND 100
+    AND ${table.purchasingAutomationMinActiveDays} <= ${table.velocityLookbackDays}
+  `),
+  check("warehouse_settings_rfq_draft_automation_chk", sql`
+    ${table.rfqDraftAutomationMode} IN ('manual', 'preferred_vendor')
+    AND ${table.rfqDraftMinimumConfidence} IN ('high', 'medium')
+    AND ${table.rfqDraftMaximumLinesPerRun} BETWEEN 1 AND 500
+  `),
+]);
 
 export const insertWarehouseSettingsSchema = createInsertSchema(warehouseSettings).omit({
   id: true,

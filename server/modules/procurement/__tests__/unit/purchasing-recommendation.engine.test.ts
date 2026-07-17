@@ -220,6 +220,43 @@ describe("purchasing recommendation engine", () => {
     expect(result.items[0].explanation).toContain("Recommend 4 pieces");
   });
 
+  it("keeps RFQ demand confidence high when only supplier price evidence is missing", () => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-05-20T12:00:00.000Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 11,
+        variant_id: 111,
+        base_sku: "NEEDS-QUOTE",
+        product_name: "Needs Quote",
+        total_pieces: 0,
+        total_reserved_pieces: 0,
+        total_outbound_pieces: 60,
+        previous_outbound_pieces: 60,
+        demand_order_count: 12,
+        demand_active_days: 10,
+        latest_demand_at: "2026-05-18T12:00:00.000Z",
+        on_order_pieces: 0,
+        open_po_count: 0,
+        lead_time_days: 14,
+        vendor_lead_time_days: 5,
+        safety_stock_days: 2,
+        order_uom_units: 10,
+        order_uom_level: 3,
+        vendor_product_id: 771,
+        preferred_vendor_id: 77,
+        preferred_vendor_name: "Vendor",
+      }],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      confidence: "medium",
+      rfqConfidence: "high",
+      supplierBasis: { costSource: "missing", costQuality: "missing" },
+      qualityGate: { autoDraftEligible: false },
+    });
+  });
+
   it.each([
     {
       label: "expired",

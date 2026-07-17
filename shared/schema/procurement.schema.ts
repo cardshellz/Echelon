@@ -882,6 +882,126 @@ export const poEmailOutbox = procurementSchema.table("po_email_outbox", {
   index("po_email_outbox_po_created_idx").on(table.purchaseOrderId, table.createdAt, table.id),
 ]);
 
+export const purchaseRecommendationRuns = procurementSchema.table("purchase_recommendation_runs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  calculationVersion: varchar("calculation_version", { length: 80 }).notNull(),
+  source: varchar("source", { length: 30 }).notNull().default("manual"),
+  sourceRunKey: varchar("source_run_key", { length: 160 }),
+  status: varchar("status", { length: 20 }).notNull().default("completed"),
+  asOf: timestamp("as_of", { withTimezone: true }).notNull(),
+  lookbackDays: integer("lookback_days").notNull(),
+  policySnapshot: jsonb("policy_snapshot").notNull(),
+  inputSummary: jsonb("input_summary").notNull().default({}),
+  generatedBy: varchar("generated_by", { length: 255 }),
+  generatedAt: timestamp("generated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("purchase_recommendation_runs_source_key_uidx")
+    .on(table.source, table.sourceRunKey)
+    .where(sql`${table.sourceRunKey} IS NOT NULL`),
+  index("purchase_recommendation_runs_latest_idx").on(table.generatedAt, table.id),
+  check("purchase_recommendation_runs_status_chk", sql`${table.status} IN ('completed', 'failed')`),
+  check("purchase_recommendation_runs_source_chk", sql`${table.source} IN ('manual', 'auto_draft', 'api')`),
+  check("purchase_recommendation_runs_lookback_chk", sql`${table.lookbackDays} > 0`),
+]);
+
+export const purchaseRecommendationLines = procurementSchema.table("purchase_recommendation_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  runId: integer("run_id").notNull().references(() => purchaseRecommendationRuns.id, { onDelete: "restrict" }),
+  recommendationKey: varchar("recommendation_key", { length: 160 }).notNull(),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "restrict" }),
+  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "restrict" }),
+  sku: varchar("sku", { length: 100 }).notNull(),
+  productName: text("product_name").notNull(),
+  requiredByDate: date("required_by_date"),
+  recommendedPieces: integer("recommended_pieces").notNull(),
+  baseUom: varchar("base_uom", { length: 30 }).notNull().default("piece"),
+  preferredVendorId: integer("preferred_vendor_id").references(() => vendors.id, { onDelete: "restrict" }),
+  preferredVendorProductId: integer("preferred_vendor_product_id").references(() => vendorProducts.id, { onDelete: "restrict" }),
+  status: varchar("status", { length: 24 }).notNull().default("open"),
+  evidenceSnapshot: jsonb("evidence_snapshot").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("purchase_recommendation_lines_run_key_uidx").on(table.runId, table.recommendationKey),
+  index("purchase_recommendation_lines_run_status_idx").on(table.runId, table.status, table.id),
+  index("purchase_recommendation_lines_product_idx").on(table.productId, table.productVariantId, table.warehouseId),
+  check("purchase_recommendation_lines_qty_chk", sql`${table.recommendedPieces} > 0`),
+  check("purchase_recommendation_lines_status_chk", sql`${table.status} IN ('open', 'cancelled')`),
+]);
+
+export const requestForQuoteStatusEnum = [
+  "draft", "sent", "partially_quoted", "quoted", "declined", "cancelled", "expired",
+] as const;
+export type RequestForQuoteStatus = typeof requestForQuoteStatusEnum[number];
+
+export const requestForQuotes = procurementSchema.table("request_for_quotes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  rfqNumber: varchar("rfq_number", { length: 80 }).notNull().unique(),
+  vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: "restrict" }),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull().default("draft"),
+  requestNote: text("request_note"),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  responseDueDate: date("response_due_date"),
+  createdBy: varchar("created_by", { length: 255 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  respondedAt: timestamp("responded_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+}, (table) => [
+  uniqueIndex("request_for_quotes_vendor_idempotency_uidx").on(table.vendorId, table.idempotencyKey),
+  index("request_for_quotes_vendor_status_idx").on(table.vendorId, table.status, table.createdAt),
+  index("request_for_quotes_status_created_idx").on(table.status, table.createdAt),
+  check("request_for_quotes_status_chk", sql`${table.status} IN ('draft', 'sent', 'partially_quoted', 'quoted', 'declined', 'cancelled', 'expired')`),
+  check("request_for_quotes_currency_chk", sql`${table.currency} ~ '^[A-Z]{3}$'`),
+]);
+
+export const requestForQuoteLineStatusEnum = [
+  "draft", "sent", "quoted", "declined", "cancelled", "accepted", "ordered",
+] as const;
+export type RequestForQuoteLineStatus = typeof requestForQuoteLineStatusEnum[number];
+
+export const requestForQuoteLines = procurementSchema.table("request_for_quote_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  rfqId: integer("rfq_id").notNull().references(() => requestForQuotes.id, { onDelete: "restrict" }),
+  recommendationLineId: integer("recommendation_line_id").notNull().references(() => purchaseRecommendationLines.id, { onDelete: "restrict" }),
+  vendorProductId: integer("vendor_product_id").notNull().references(() => vendorProducts.id, { onDelete: "restrict" }),
+  requestedPieces: integer("requested_pieces").notNull(),
+  purchaseUom: varchar("purchase_uom", { length: 50 }),
+  piecesPerPurchaseUom: integer("pieces_per_purchase_uom"),
+  requestedPurchaseUomQty: numeric("requested_purchase_uom_qty", { precision: 14, scale: 4 }),
+  status: varchar("status", { length: 24 }).notNull().default("draft"),
+  quantityOverrideReason: text("quantity_override_reason"),
+  allocationOverrideReason: text("allocation_override_reason"),
+  quotedPieces: integer("quoted_pieces"),
+  quotedUnitCostMills: bigint("quoted_unit_cost_mills", { mode: "number" }),
+  quoteReference: varchar("quote_reference", { length: 255 }),
+  quoteValidUntil: date("quote_valid_until"),
+  quotedAt: timestamp("quoted_at", { withTimezone: true }),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+  orderedAt: timestamp("ordered_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("request_for_quote_lines_rfq_recommendation_uidx").on(table.rfqId, table.recommendationLineId),
+  index("request_for_quote_lines_recommendation_idx").on(table.recommendationLineId, table.status),
+  index("request_for_quote_lines_rfq_idx").on(table.rfqId, table.id),
+  check("request_for_quote_lines_requested_qty_chk", sql`${table.requestedPieces} > 0`),
+  check("request_for_quote_lines_pack_chk", sql`${table.piecesPerPurchaseUom} IS NULL OR ${table.piecesPerPurchaseUom} > 0`),
+  check("request_for_quote_lines_status_chk", sql`${table.status} IN ('draft', 'sent', 'quoted', 'declined', 'cancelled', 'accepted', 'ordered')`),
+]);
+
+export const insertPurchaseRecommendationRunSchema = createInsertSchema(purchaseRecommendationRuns).omit({ id: true, generatedAt: true });
+export const insertPurchaseRecommendationLineSchema = createInsertSchema(purchaseRecommendationLines).omit({ id: true, createdAt: true });
+export const insertRequestForQuoteSchema = createInsertSchema(requestForQuotes).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertRequestForQuoteLineSchema = createInsertSchema(requestForQuoteLines).omit({ id: true, createdAt: true, updatedAt: true });
+
+export type PurchaseRecommendationRun = typeof purchaseRecommendationRuns.$inferSelect;
+export type PurchaseRecommendationLine = typeof purchaseRecommendationLines.$inferSelect;
+export type RequestForQuote = typeof requestForQuotes.$inferSelect;
+export type RequestForQuoteLine = typeof requestForQuoteLines.$inferSelect;
+
 export type PoEmailOutbox = typeof poEmailOutbox.$inferSelect;
 
 // ===== PO REVISIONS (field-level change audit) =====

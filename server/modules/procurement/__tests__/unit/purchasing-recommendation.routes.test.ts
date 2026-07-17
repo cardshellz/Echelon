@@ -38,6 +38,8 @@ const mocks = vi.hoisted(() => ({
   startAutoDraftJob: vi.fn(),
   purchasingService: {
     createPOFromReorder: vi.fn(),
+    snapshotPurchaseRecommendations: vi.fn(),
+    createRfqBatch: vi.fn(),
   },
   recommendationPoHandoffService: {
     recordDecision: vi.fn(),
@@ -108,13 +110,36 @@ async function requestJson(baseUrl: string, method: string, path: string, body?:
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
+function selectChain(rows: any[]) {
+  const chain: any = {
+    from: vi.fn(() => chain),
+    where: vi.fn(() => chain),
+    orderBy: vi.fn(() => chain),
+    innerJoin: vi.fn(() => chain),
+    limit: vi.fn().mockResolvedValue(rows),
+    then: (resolve: (value: any[]) => unknown, reject?: (reason: unknown) => unknown) =>
+      Promise.resolve(rows).then(resolve, reject),
+  };
+  return chain;
+}
+
 describe("purchasing recommendation routes", () => {
   let server: { url: string; close: () => Promise<void> } | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.db.execute.mockResolvedValue({ rows: [] });
-    mocks.db.select.mockReturnValue({ from: vi.fn().mockResolvedValue([]) });
+    mocks.db.select.mockImplementation(() => {
+      const chain: any = {
+        from: vi.fn(() => chain),
+        where: vi.fn(() => chain),
+        orderBy: vi.fn(() => chain),
+        innerJoin: vi.fn(() => chain),
+        limit: vi.fn().mockResolvedValue([]),
+        then: (resolve: (value: any[]) => unknown) => Promise.resolve([]).then(resolve),
+      };
+      return chain;
+    });
     mocks.runAutoDraftJob.mockResolvedValue({
       success: true,
       pos: [],
@@ -161,6 +186,15 @@ describe("purchasing recommendation routes", () => {
       createdAt: "2026-05-22T12:00:00.000Z",
     }));
     mocks.purchasingService.createPOFromReorder.mockResolvedValue([]);
+    mocks.purchasingService.snapshotPurchaseRecommendations.mockImplementation(async (input) => ({
+      run: { id: 701, calculationVersion: input.calculationVersion },
+      lines: input.lines.map((line: any, index: number) => ({ id: index + 1, ...line })),
+    }));
+    mocks.purchasingService.createRfqBatch.mockResolvedValue({
+      reused: false,
+      rfqs: [{ id: 801, status: "draft", vendorId: 77 }],
+      lines: [{ id: 901, recommendationLineId: 11, requestedPieces: 12 }],
+    });
     mocks.recommendationPoHandoffService.recordDecision.mockImplementation(async (data) => ({
       id: 5001,
       ...data,
@@ -521,6 +555,130 @@ describe("purchasing recommendation routes", () => {
     expect(body.items.map((item: any) => item.sku)).toContain("STALE-COST");
   });
 
+  it("saves versioned recommendations without requiring a preferred vendor or supplier price", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([{
+      product_id: 301,
+      variant_id: 3001,
+      base_sku: "RFQ-NO-VENDOR",
+      product_name: "RFQ Product",
+      total_pieces: 0,
+      total_reserved_pieces: 0,
+      total_outbound_pieces: 60,
+      previous_outbound_pieces: 60,
+      demand_order_count: 12,
+      demand_active_days: 10,
+      on_order_pieces: 0,
+      open_po_count: 0,
+      lead_time_days: 5,
+      safety_stock_days: 1,
+      order_uom_units: 10,
+      order_uom_level: 2,
+      preferred_vendor_id: null,
+      estimated_cost_mills: null,
+      estimated_cost_cents: null,
+    }]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/recommendation-runs");
+
+    expect(status).toBe(201);
+    expect(body).toMatchObject({ run: { id: 701 }, lineCount: 1 });
+    expect(mocks.purchasingService.snapshotPurchaseRecommendations).toHaveBeenCalledTimes(1);
+    const input = mocks.purchasingService.snapshotPurchaseRecommendations.mock.calls[0][0];
+    expect(input.lines[0]).toMatchObject({
+      recommendationKey: "301:3001:30",
+      sku: "RFQ-NO-VENDOR",
+      productId: 301,
+      productVariantId: 3001,
+      preferredVendorId: null,
+      preferredVendorProductId: null,
+    });
+    expect(input.lines[0].recommendedPieces).toBeGreaterThan(0);
+    expect(input.lines[0]).not.toHaveProperty("estimatedCostMills");
+  });
+
+  it("returns the latest durable recommendation run with allocated and remaining quantities", async () => {
+    mocks.db.select
+      .mockReturnValueOnce(selectChain([{
+        id: 701,
+        calculationVersion: "purchasing-recommendation-v2",
+        status: "completed",
+        asOf: new Date("2026-07-17T12:00:00.000Z"),
+        generatedAt: new Date("2026-07-17T12:01:00.000Z"),
+        lookbackDays: 30,
+        policySnapshot: { seasonalityEnabled: true },
+      }]))
+      .mockReturnValueOnce(selectChain([{
+        id: 11,
+        runId: 701,
+        recommendationKey: "301:3001:30",
+        productId: 301,
+        productVariantId: 3001,
+        warehouseId: null,
+        requiredByDate: null,
+        sku: "RFQ-NO-VENDOR",
+        productName: "RFQ Product",
+        recommendedPieces: 100,
+        preferredVendorId: null,
+        preferredVendorProductId: null,
+        evidenceSnapshot: { availablePieces: 5, onOrderPieces: 10, forecastDailyPieces: 3 },
+      }]))
+      .mockReturnValueOnce(selectChain([{
+        id: 22,
+        recommendationLineId: 10,
+        productId: 301,
+        productVariantId: 3001,
+        warehouseId: null,
+        requestedPieces: 40,
+        lineStatus: "draft",
+        rfqId: 33,
+        rfqNumber: "RFQ-TEST",
+        rfqStatus: "draft",
+        vendorId: 77,
+        createdAt: new Date("2026-07-17T12:02:00.000Z"),
+      }]))
+      .mockReturnValueOnce(selectChain([{ id: 77, name: "Supplier 77" }]));
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfq-queue");
+
+    expect(status).toBe(200);
+    expect(body.summary).toMatchObject({ total: 1, partiallyAllocated: 1, activeRfqs: 1 });
+    expect(body.items[0]).toMatchObject({
+      recommendationLineId: 11,
+      recommendedPieces: 100,
+      allocatedPieces: 40,
+      remainingPieces: 60,
+      sourcingStatus: "partially_allocated",
+      supplierAssignmentRequired: true,
+    });
+    expect(body.items[0].allocations[0]).toMatchObject({ rfqNumber: "RFQ-TEST", vendorName: "Supplier 77" });
+    expect(body.items[0].allocations[0].recommendationLineId).toBe(10);
+  });
+
+  it("creates a supplier-grouped RFQ batch without accepting price fields", async () => {
+    server = await startServer(buildApp());
+
+    const { status } = await requestJson(server.url, "POST", "/api/purchasing/rfq-queue", {
+      idempotencyKey: "ui-request-123",
+      requestNote: "Quote delivery to the main warehouse",
+      lines: [{ recommendationLineId: 11, vendorId: 77, vendorSku: "SUP-302", requestedPieces: 12 }],
+      unitCostCents: 1,
+    });
+
+    expect(status).toBe(201);
+    expect(mocks.purchasingService.createRfqBatch).toHaveBeenCalledTimes(1);
+    const input = mocks.purchasingService.createRfqBatch.mock.calls[0][0];
+    expect(input).toMatchObject({
+      idempotencyKey: "ui-request-123",
+      requestNote: "Quote delivery to the main warehouse",
+      lines: [{ recommendationLineId: 11, vendorId: 77, vendorSku: "SUP-302", requestedPieces: 12 }],
+    });
+    expect(input).not.toHaveProperty("unitCostCents");
+    expect(input).not.toHaveProperty("pricing");
+  });
+
   it("returns live forecast input gap diagnostics with actionable samples", async () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
     mocks.procurement.getAutoDraftSettings.mockResolvedValue({
@@ -791,7 +949,7 @@ describe("purchasing recommendation routes", () => {
         medium_confidence_review: 1,
       },
       actionCounts: {
-        assign_vendor: 1,
+        prepare_rfq: 1,
         review_approval_policy: 1,
         review_quality_gate: 1,
       },
@@ -804,13 +962,10 @@ describe("purchasing recommendation routes", () => {
     ]);
     const skippedVendor = allQueue.body.items.find((item: any) => item.kind === "skipped");
     const skippedVendorUrl = new URL(skippedVendor.action.href, "https://echelon.example");
-    expect(skippedVendor.action).toMatchObject({ action: "assign_vendor", label: "Assign vendor" });
+    expect(skippedVendor.action).toMatchObject({ action: "prepare_rfq", label: "Add to RFQ selection" });
     expect(Object.fromEntries(skippedVendorUrl.searchParams)).toMatchObject({
-      setupProductId: "201",
-      setupVariantId: "2001",
-      setupAction: "assign_preferred_vendor",
+      reviewQueue: "skipped",
       recommendationId: "201:2001:30",
-      returnTo: "/purchasing",
     });
     expect(skippedVendor.forecastAction).toMatchObject({
       code: expect.any(String),
@@ -2411,6 +2566,41 @@ describe("purchasing recommendation routes", () => {
     );
   });
 
+  it("validates and updates automatic RFQ draft policy", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      rfqDraftAutomationMode: "preferred_vendor",
+      rfqDraftMinimumConfidence: "medium",
+      rfqDraftRequireTrustedForecast: false,
+      rfqDraftMaximumLinesPerRun: 250,
+    });
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(mocks.procurement.updateAutoDraftSettings).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        rfqDraftAutomationMode: "preferred_vendor",
+        rfqDraftMinimumConfidence: "medium",
+        rfqDraftRequireTrustedForecast: false,
+        rfqDraftMaximumLinesPerRun: 250,
+      }),
+    );
+  });
+
+  it("rejects unsafe automatic RFQ draft policy values", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      rfqDraftMaximumLinesPerRun: 501,
+    });
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ error: "rfqDraftMaximumLinesPerRun must be an integer between 1 and 500" });
+    expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
+  });
+
   it("updates stale auto-draft PO aging thresholds", async () => {
     server = await startServer(buildApp());
 
@@ -2446,6 +2636,46 @@ describe("purchasing recommendation routes", () => {
         }),
       }),
     );
+  });
+
+  it("validates and updates the purchasing forecast policy", async () => {
+    server = await startServer(buildApp());
+    const forecastPolicy = {
+      method: "weighted_blend_v1",
+      shortWindowDays: 14,
+      standardWindowDays: 45,
+      longWindowDays: 180,
+      seasonalEnabled: true,
+      seasonalWindowDays: 45,
+      weights: { short: 35, standard: 30, long: 20, seasonal: 15 },
+      forwardDemandEnabled: true,
+      forwardDemandHorizonDays: 120,
+      forwardDemandConfidenceWeights: { high: 100, medium: 75, low: 35 },
+      automationMinimumOrderCount: 5,
+      automationMinimumActiveDays: 4,
+    };
+
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      forecastPolicy,
+    });
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(mocks.procurement.updateAutoDraftSettings).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({ forecastPolicy }),
+    );
+  });
+
+  it("rejects forecast weights that do not total 100", async () => {
+    server = await startServer(buildApp());
+    const { status, body } = await requestJson(server.url, "PATCH", "/api/purchasing/auto-draft-settings", {
+      forecastPolicy: { weights: { short: 40, standard: 40, long: 20, seasonal: 10 } },
+    });
+
+    expect(status).toBe(400);
+    expect(body).toEqual({ error: "Forecast weights must total 100" });
+    expect(mocks.procurement.updateAutoDraftSettings).not.toHaveBeenCalled();
   });
 
   it("rejects invalid candidate score threshold settings", async () => {

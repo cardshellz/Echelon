@@ -1,5 +1,6 @@
 import type { Express } from "express";
-import { sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { centsToMills, computeLineTotalCentsFromMills } from "@shared/utils/money";
 import { db } from "../../db";
 import { requirePermission } from "../../routes/middleware";
@@ -30,7 +31,20 @@ import {
 } from "./forecast-input-gap-diagnostics.service";
 import { loadPurchasingRecommendationContext } from "./purchasing-recommendation-context.service";
 import { resolveRecommendationPoQuantity } from "./recommendation-po-quantity";
-import { buildSupplierSetupGaps, buildSupplierSetupHref } from "./supplier-setup-gaps.service";
+import { buildSupplierSetupGaps } from "./supplier-setup-gaps.service";
+import {
+  purchaseRecommendationRuns as purchaseRecommendationRunsTable,
+  purchaseRecommendationLines as purchaseRecommendationLinesTable,
+  requestForQuotes as requestForQuotesTable,
+  requestForQuoteLines as requestForQuoteLinesTable,
+  vendors as vendorsTable,
+} from "@shared/schema";
+import { buildPurchaseRecommendationRunInput } from "./purchase-recommendation-snapshot.service";
+import { buildPurchasingRfqQueue, purchasingSkuAllocationKey } from "./purchasing-rfq.service";
+import {
+  normalizePurchasingForecastPolicy,
+  type PurchasingForecastPolicy,
+} from "./purchasing-forecast-policy";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
 function parseRunHistoryLimit(value: unknown): number {
@@ -374,6 +388,76 @@ function parseRecommendationDecision(value: unknown): RecommendationDecision | n
   return recommendationDecisionValues.includes(value as RecommendationDecision) ? value as RecommendationDecision : null;
 }
 
+function parsePurchasingForecastPolicy(
+  value: unknown,
+  base: PurchasingForecastPolicy,
+): PurchasingForecastPolicy | undefined | { error: string } {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { error: "forecastPolicy must be an object" };
+  }
+  const source = value as Record<string, any>;
+  const merged = normalizePurchasingForecastPolicy({
+    ...base,
+    ...source,
+    weights: { ...base.weights, ...(source.weights ?? {}) },
+    forwardDemandConfidenceWeights: {
+      ...base.forwardDemandConfidenceWeights,
+      ...(source.forwardDemandConfidenceWeights ?? {}),
+    },
+  });
+  const integerRanges: Array<[string, unknown, number, number]> = [
+    ["shortWindowDays", source.shortWindowDays, 1, 60],
+    ["standardWindowDays", source.standardWindowDays, 7, 180],
+    ["longWindowDays", source.longWindowDays, 30, 730],
+    ["seasonalWindowDays", source.seasonalWindowDays, 7, 120],
+    ["forwardDemandHorizonDays", source.forwardDemandHorizonDays, 1, 365],
+    ["automationMinimumOrderCount", source.automationMinimumOrderCount, 1, 100],
+    ["automationMinimumActiveDays", source.automationMinimumActiveDays, 1, 100],
+  ];
+  for (const [field, raw, min, max] of integerRanges) {
+    const numeric = Number(raw);
+    if (raw !== undefined && (!Number.isInteger(numeric) || numeric < min || numeric > max)) {
+      return { error: `forecastPolicy.${field} must be an integer between ${min} and ${max}` };
+    }
+  }
+  for (const [group, values] of [
+    ["weights", source.weights],
+    ["forwardDemandConfidenceWeights", source.forwardDemandConfidenceWeights],
+  ] as const) {
+    if (values !== undefined && (!values || typeof values !== "object" || Array.isArray(values))) {
+      return { error: `forecastPolicy.${group} must be an object` };
+    }
+    for (const [key, raw] of Object.entries(values ?? {})) {
+      const numeric = Number(raw);
+      if (!Number.isInteger(numeric) || numeric < 0 || numeric > 100) {
+        return { error: `forecastPolicy.${group}.${key} must be an integer between 0 and 100` };
+      }
+    }
+  }
+  if (source.method !== undefined && !["recent_order_velocity_v1", "weighted_blend_v1"].includes(source.method)) {
+    return { error: "forecastPolicy.method must be recent_order_velocity_v1 or weighted_blend_v1" };
+  }
+  for (const field of ["seasonalEnabled", "forwardDemandEnabled"] as const) {
+    if (source[field] !== undefined && typeof source[field] !== "boolean") {
+      return { error: `forecastPolicy.${field} must be boolean` };
+    }
+  }
+  if (!(merged.shortWindowDays <= merged.standardWindowDays && merged.standardWindowDays <= merged.longWindowDays)) {
+    return { error: "Forecast windows must satisfy shortWindowDays <= standardWindowDays <= longWindowDays" };
+  }
+  const weightTotal = Object.values(merged.weights).reduce((sum, weight) => sum + weight, 0);
+  if (weightTotal !== 100) return { error: "Forecast weights must total 100" };
+  const confidence = merged.forwardDemandConfidenceWeights;
+  if (!(confidence.high >= confidence.medium && confidence.medium >= confidence.low)) {
+    return { error: "Future-demand confidence weights must satisfy high >= medium >= low" };
+  }
+  if (merged.automationMinimumActiveDays > merged.standardWindowDays) {
+    return { error: "automationMinimumActiveDays cannot exceed standardWindowDays" };
+  }
+  return merged;
+}
+
 function parseReviewedControlCodes(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length > 50) return null;
   const codes = value.map((code) => typeof code === "string" ? code.trim() : "");
@@ -492,9 +576,9 @@ function reviewQueueAction(item: PurchasingRecommendationItem, kind: Recommendat
   switch (item.reviewSignal?.action) {
     case "assign_vendor":
       return {
-        action: "assign_vendor",
-        label: "Assign vendor",
-        href: buildSupplierSetupHref(item, "assign_preferred_vendor"),
+        action: "prepare_rfq",
+        label: "Add to RFQ selection",
+        href: buildRecommendationReviewHref(item, kind),
       };
     case "review_open_po":
       return { action: "review_open_po", label: "Review open PO", href: "/purchase-orders" };
@@ -700,6 +784,7 @@ async function loadRecommendationReviewQueueData() {
   return {
     configuredLookback,
     settings,
+    recommendationResult,
     queue: buildRecommendationReviewQueue(recommendationResult, settings),
   };
 }
@@ -945,10 +1030,12 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     try {
       const configuredLookback = await storage.getVelocityLookbackDays();
       const rawRows = await storage.getReorderAnalysisData(configuredLookback);
+      const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
       const context = await loadPurchasingRecommendationContext();
       const recommendationResult = generatePurchasingRecommendations({
         rows: rawRows as PurchasingRecommendationRawRow[],
         lookbackDays: configuredLookback,
+        autoDraftSettings: settings,
         ...context,
       });
 
@@ -1021,6 +1108,189 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching supplier setup gaps:", error);
       res.status(500).json({ error: "Failed to fetch supplier setup gaps" });
+    }
+  });
+
+  app.post("/api/purchasing/recommendation-runs", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const purchasing = app.locals.services?.purchasing;
+      if (!purchasing?.snapshotPurchaseRecommendations) {
+        return res.status(503).json({ error: "Purchasing recommendation service is unavailable" });
+      }
+      const { configuredLookback, settings, recommendationResult } = await loadRecommendationReviewQueueData();
+      const userId = (req as any).user?.id ?? req.session?.user?.id ?? null;
+      const asOf = new Date();
+      const result = await purchasing.snapshotPurchaseRecommendations(buildPurchaseRecommendationRunInput({
+        recommendationResult,
+        settings,
+        lookbackDays: configuredLookback,
+        asOf,
+        source: "manual",
+      }), userId);
+      res.status(201).json({ run: result.run, lineCount: result.lines.length });
+    } catch (error) {
+      console.error("Error generating purchasing recommendation run:", error);
+      res.status(500).json({ error: "Failed to generate purchasing recommendations" });
+    }
+  });
+
+  app.get("/api/purchasing/rfq-queue", requirePermission("inventory", "view"), async (_req, res) => {
+    try {
+      const latestRuns = await db.select().from(purchaseRecommendationRunsTable)
+        .where(eq(purchaseRecommendationRunsTable.status, "completed"))
+        .orderBy(desc(purchaseRecommendationRunsTable.generatedAt), desc(purchaseRecommendationRunsTable.id))
+        .limit(1);
+      const run = latestRuns[0] ?? null;
+      if (!run) {
+        return res.json({
+          run: null,
+          generatedAt: null,
+          lookbackDays: null,
+          summary: { total: 0, open: 0, partiallyAllocated: 0, fullyAllocated: 0, supplierAssignmentRequired: 0, activeRfqs: 0 },
+          items: [],
+        });
+      }
+
+      const lines = await db.select().from(purchaseRecommendationLinesTable)
+        .where(eq(purchaseRecommendationLinesTable.runId, run.id))
+        .orderBy(purchaseRecommendationLinesTable.id);
+      const productIds = Array.from(new Set(lines.map((line) => line.productId)));
+      const allocatedRecommendation = alias(purchaseRecommendationLinesTable, "allocated_recommendation");
+      const allocations = productIds.length === 0 ? [] : await db.select({
+        id: requestForQuoteLinesTable.id,
+        recommendationLineId: requestForQuoteLinesTable.recommendationLineId,
+        productId: allocatedRecommendation.productId,
+        productVariantId: allocatedRecommendation.productVariantId,
+        warehouseId: allocatedRecommendation.warehouseId,
+        requestedPieces: requestForQuoteLinesTable.requestedPieces,
+        lineStatus: requestForQuoteLinesTable.status,
+        rfqId: requestForQuotesTable.id,
+        rfqNumber: requestForQuotesTable.rfqNumber,
+        rfqStatus: requestForQuotesTable.status,
+        vendorId: requestForQuotesTable.vendorId,
+        createdAt: requestForQuotesTable.createdAt,
+      }).from(requestForQuoteLinesTable)
+        .innerJoin(allocatedRecommendation, eq(requestForQuoteLinesTable.recommendationLineId, allocatedRecommendation.id))
+        .innerJoin(requestForQuotesTable, eq(requestForQuoteLinesTable.rfqId, requestForQuotesTable.id))
+        .where(and(
+          inArray(allocatedRecommendation.productId, productIds),
+          inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
+        ));
+      const vendorIds = Array.from(new Set([
+        ...lines.map((line) => line.preferredVendorId).filter((id): id is number => id != null),
+        ...allocations.map((allocation) => allocation.vendorId),
+      ]));
+      const vendorRows = vendorIds.length === 0 ? [] : await db.select({
+        id: vendorsTable.id,
+        name: vendorsTable.name,
+      }).from(vendorsTable).where(inArray(vendorsTable.id, vendorIds));
+      const vendorNameById = new Map(vendorRows.map((vendor) => [vendor.id, vendor.name]));
+      const allocationsBySku = new Map<string, typeof allocations>();
+      for (const allocation of allocations) {
+        const key = purchasingSkuAllocationKey(allocation);
+        const group = allocationsBySku.get(key) ?? [];
+        group.push(allocation);
+        allocationsBySku.set(key, group);
+      }
+      const items = lines.map((line) => {
+        const lineAllocations = allocationsBySku.get(purchasingSkuAllocationKey(line)) ?? [];
+        const allocatedPieces = lineAllocations.reduce((sum, allocation) => sum + Number(allocation.requestedPieces), 0);
+        const remainingPieces = Math.max(Number(line.recommendedPieces) - allocatedPieces, 0);
+        const evidence = (line.evidenceSnapshot ?? {}) as Record<string, any>;
+        return {
+          recommendationLineId: line.id,
+          recommendationId: line.recommendationKey,
+          runId: line.runId,
+          productId: line.productId,
+          productVariantId: line.productVariantId,
+          warehouseId: line.warehouseId,
+          requiredByDate: line.requiredByDate,
+          sku: line.sku,
+          productName: line.productName,
+          recommendedPieces: line.recommendedPieces,
+          allocatedPieces,
+          remainingPieces,
+          sourcingStatus: remainingPieces === 0 ? "fully_allocated" : allocatedPieces > 0 ? "partially_allocated" : "open",
+          availablePieces: Number(evidence.availablePieces ?? 0),
+          onOrderPieces: Number(evidence.onOrderPieces ?? 0),
+          reorderPointPieces: Number(evidence.reorderPointPieces ?? 0),
+          forecastMethod: String(evidence.forecastMethod ?? "unknown"),
+          forecastDailyPieces: Number(evidence.forecastDailyPieces ?? 0),
+          leadTimeDays: Number(evidence.leadTimeDays ?? 0),
+          safetyStockDays: Number(evidence.safetyStockDays ?? 0),
+          forwardDemandPieces: Number(evidence.forwardDemandPieces ?? 0),
+          preferredVendorId: line.preferredVendorId,
+          preferredVendorName: line.preferredVendorId ? vendorNameById.get(line.preferredVendorId) ?? null : null,
+          vendorProductId: line.preferredVendorProductId,
+          supplierAssignmentRequired: !line.preferredVendorId,
+          allocations: lineAllocations.map((allocation) => ({
+            ...allocation,
+            vendorName: vendorNameById.get(allocation.vendorId) ?? null,
+          })),
+        };
+      });
+      const activeRfqIds = new Set(allocations.map((allocation) => allocation.rfqId));
+      res.json({
+        run: {
+          id: run.id,
+          calculationVersion: run.calculationVersion,
+          source: run.source,
+          sourceRunKey: run.sourceRunKey,
+          asOf: run.asOf,
+          policySnapshot: run.policySnapshot,
+        },
+        generatedAt: run.generatedAt,
+        lookbackDays: run.lookbackDays,
+        summary: {
+          total: items.length,
+          open: items.filter((item) => item.sourcingStatus === "open").length,
+          partiallyAllocated: items.filter((item) => item.sourcingStatus === "partially_allocated").length,
+          fullyAllocated: items.filter((item) => item.sourcingStatus === "fully_allocated").length,
+          supplierAssignmentRequired: items.filter((item) => item.supplierAssignmentRequired && item.remainingPieces > 0).length,
+          activeRfqs: activeRfqIds.size,
+        },
+        items,
+      });
+    } catch (error) {
+      console.error("Error fetching purchasing recommendation queue:", error);
+      res.status(500).json({ error: "Failed to fetch purchasing recommendations" });
+    }
+  });
+
+  app.post("/api/purchasing/rfq-queue", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      if (!Array.isArray(req.body?.lines) || req.body.lines.length === 0) {
+        return res.status(400).json({ error: "lines must include at least one recommendation selection" });
+      }
+      const purchasing = app.locals.services?.purchasing;
+      if (!purchasing?.createRfqBatch) {
+        return res.status(503).json({ error: "Purchasing RFQ service is unavailable" });
+      }
+      const userId = (req as any).user?.id ?? req.session?.user?.id ?? null;
+      const result = await purchasing.createRfqBatch({
+        idempotencyKey: typeof req.body.idempotencyKey === "string" ? req.body.idempotencyKey : "",
+        requestNote: req.body.requestNote == null ? null : String(req.body.requestNote),
+        responseDueDate: req.body.responseDueDate == null ? null : String(req.body.responseDueDate),
+        lines: req.body.lines.map((line: any) => ({
+          recommendationLineId: Number(line?.recommendationLineId),
+          vendorId: Number(line?.vendorId),
+          vendorSku: line?.vendorSku == null ? null : String(line.vendorSku),
+          requestedPieces: Number(line?.requestedPieces),
+          quantityOverrideReason: line?.quantityOverrideReason == null ? null : String(line.quantityOverrideReason),
+        })),
+      }, userId);
+      res.status(result.reused ? 200 : 201).json(result);
+    } catch (error: any) {
+      console.error("Error creating purchasing RFQ batch:", error);
+      const statusCode = Number(error?.statusCode);
+      if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
+        return res.status(statusCode).json({
+          error: error.message,
+          code: error.code ?? error.context?.code ?? "RFQ_CREATE_REJECTED",
+          context: error.context ?? {},
+        });
+      }
+      res.status(500).json({ error: "Failed to create RFQ drafts" });
     }
   });
 
@@ -1450,6 +1720,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         approvalPolicy: settings.approvalPolicy,
         candidateScoreStrongThreshold: settings.candidateScoreStrongThreshold,
         candidateScoreReviewThreshold: settings.candidateScoreReviewThreshold,
+        forecastPolicy: settings.forecastPolicy,
       };
       const context = await loadPurchasingRecommendationContext();
       const recommendationResult = generatePurchasingRecommendations({
@@ -1726,6 +1997,11 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         skipNoVendor,
         candidateScoreStrongThreshold,
         candidateScoreReviewThreshold,
+        rfqDraftAutomationMode,
+        rfqDraftMinimumConfidence,
+        rfqDraftRequireTrustedForecast,
+        rfqDraftMaximumLinesPerRun,
+        forecastPolicy,
         stalePoThresholds,
       } = req.body;
       if (autoDraftMode !== undefined && !["draft_po", "review_only"].includes(autoDraftMode)) {
@@ -1739,6 +2015,22 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
           error: "approvalPolicy must be one of: high_confidence_only, high_confidence_and_strong_candidate",
         });
       }
+      if (rfqDraftAutomationMode !== undefined && !["manual", "preferred_vendor"].includes(rfqDraftAutomationMode)) {
+        return res.status(400).json({ error: "rfqDraftAutomationMode must be one of: manual, preferred_vendor" });
+      }
+      if (rfqDraftMinimumConfidence !== undefined && !["high", "medium"].includes(rfqDraftMinimumConfidence)) {
+        return res.status(400).json({ error: "rfqDraftMinimumConfidence must be one of: high, medium" });
+      }
+      if (rfqDraftRequireTrustedForecast !== undefined && typeof rfqDraftRequireTrustedForecast !== "boolean") {
+        return res.status(400).json({ error: "rfqDraftRequireTrustedForecast must be a boolean" });
+      }
+      if (rfqDraftMaximumLinesPerRun !== undefined && (
+        !Number.isSafeInteger(rfqDraftMaximumLinesPerRun)
+        || rfqDraftMaximumLinesPerRun < 1
+        || rfqDraftMaximumLinesPerRun > 500
+      )) {
+        return res.status(400).json({ error: "rfqDraftMaximumLinesPerRun must be an integer between 1 and 500" });
+      }
       const parsedStrongThreshold = parseCandidateScoreThreshold(candidateScoreStrongThreshold, "candidateScoreStrongThreshold");
       if (typeof parsedStrongThreshold === "object") {
         return res.status(400).json(parsedStrongThreshold);
@@ -1748,6 +2040,13 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         return res.status(400).json(parsedReviewThreshold);
       }
       const currentSettings = await storage.getAutoDraftSettings();
+      const parsedForecastPolicy = parsePurchasingForecastPolicy(
+        forecastPolicy,
+        normalizePurchasingForecastPolicy(currentSettings.forecastPolicy),
+      );
+      if (typeof parsedForecastPolicy === "object" && "error" in parsedForecastPolicy) {
+        return res.status(400).json(parsedForecastPolicy);
+      }
       const parsedStalePoThresholds = parseStalePoThresholds(stalePoThresholds, currentSettings.stalePoThresholds);
       if (typeof parsedStalePoThresholds === "object" && "error" in parsedStalePoThresholds) {
         return res.status(400).json(parsedStalePoThresholds);
@@ -1765,6 +2064,11 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         skipNoVendor,
         candidateScoreStrongThreshold: parsedStrongThreshold,
         candidateScoreReviewThreshold: parsedReviewThreshold,
+        rfqDraftAutomationMode,
+        rfqDraftMinimumConfidence,
+        rfqDraftRequireTrustedForecast,
+        rfqDraftMaximumLinesPerRun,
+        forecastPolicy: parsedForecastPolicy,
         stalePoThresholds: parsedStalePoThresholds,
       });
       res.json({ ok: true });

@@ -42,8 +42,43 @@ interface AutoDraftSettings {
   skipNoVendor: boolean;
   candidateScoreStrongThreshold: number;
   candidateScoreReviewThreshold: number;
+  rfqDraftAutomationMode: "manual" | "preferred_vendor";
+  rfqDraftMinimumConfidence: "high" | "medium";
+  rfqDraftRequireTrustedForecast: boolean;
+  rfqDraftMaximumLinesPerRun: number;
   stalePoThresholds: AutoDraftStalePoThresholds;
+  forecastPolicy: PurchasingForecastPolicy;
 }
+
+interface PurchasingForecastPolicy {
+  method: "recent_order_velocity_v1" | "weighted_blend_v1";
+  shortWindowDays: number;
+  standardWindowDays: number;
+  longWindowDays: number;
+  seasonalEnabled: boolean;
+  seasonalWindowDays: number;
+  weights: { short: number; standard: number; long: number; seasonal: number };
+  forwardDemandEnabled: boolean;
+  forwardDemandHorizonDays: number;
+  forwardDemandConfidenceWeights: { high: number; medium: number; low: number };
+  automationMinimumOrderCount: number;
+  automationMinimumActiveDays: number;
+}
+
+const DEFAULT_FORECAST_POLICY: PurchasingForecastPolicy = {
+  method: "weighted_blend_v1",
+  shortWindowDays: 7,
+  standardWindowDays: 30,
+  longWindowDays: 90,
+  seasonalEnabled: true,
+  seasonalWindowDays: 30,
+  weights: { short: 30, standard: 35, long: 20, seasonal: 15 },
+  forwardDemandEnabled: true,
+  forwardDemandHorizonDays: 90,
+  forwardDemandConfidenceWeights: { high: 100, medium: 70, low: 40 },
+  automationMinimumOrderCount: 2,
+  automationMinimumActiveDays: 2,
+};
 
 interface AutoDraftStalePoThresholds {
   reviewPendingWarningDays: number;
@@ -121,6 +156,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
   const [candidateScoreStrongThreshold, setCandidateScoreStrongThreshold] = useState("80");
   const [candidateScoreReviewThreshold, setCandidateScoreReviewThreshold] = useState("60");
   const [stalePoThresholdInputs, setStalePoThresholdInputs] = useState<Record<keyof AutoDraftStalePoThresholds, string>>(thresholdInputDefaults());
+  const [forecastPolicyDraft, setForecastPolicyDraft] = useState<PurchasingForecastPolicy>(DEFAULT_FORECAST_POLICY);
 
   const { data: rulesData, isLoading } = useQuery<RulesData>({
     queryKey: ["/api/purchasing/exclusion-rules"],
@@ -187,13 +223,17 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
       });
-      if (!res.ok) throw new Error("Failed to update settings");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? "Failed to update settings");
+      }
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft-settings"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/rfq-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/stale-pos?limit=25"] });
     },
     onError: (err: Error) => {
@@ -209,6 +249,15 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
     setStalePoThresholdInputs(Object.fromEntries(
       Object.entries(stalePoThresholds).map(([key, value]) => [key, String(value)]),
     ) as Record<keyof AutoDraftStalePoThresholds, string>);
+    setForecastPolicyDraft({
+      ...DEFAULT_FORECAST_POLICY,
+      ...(settings.forecastPolicy ?? {}),
+      weights: { ...DEFAULT_FORECAST_POLICY.weights, ...(settings.forecastPolicy?.weights ?? {}) },
+      forwardDemandConfidenceWeights: {
+        ...DEFAULT_FORECAST_POLICY.forwardDemandConfidenceWeights,
+        ...(settings.forecastPolicy?.forwardDemandConfidenceWeights ?? {}),
+      },
+    });
   }, [settings]);
 
   const handleAddRule = () => {
@@ -264,16 +313,34 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
     updateSettingsMutation.mutate({ stalePoThresholds: parsed });
   };
 
+  const saveForecastPolicy = () => {
+    const weightTotal = Object.values(forecastPolicyDraft.weights).reduce((sum, value) => sum + value, 0);
+    if (weightTotal !== 100) {
+      toast({ title: "Invalid forecast weights", description: "Short, standard, long, and seasonal weights must total 100.", variant: "destructive" });
+      return;
+    }
+    if (!(forecastPolicyDraft.shortWindowDays <= forecastPolicyDraft.standardWindowDays && forecastPolicyDraft.standardWindowDays <= forecastPolicyDraft.longWindowDays)) {
+      toast({ title: "Invalid forecast windows", description: "Window lengths must run from short to standard to long.", variant: "destructive" });
+      return;
+    }
+    const confidence = forecastPolicyDraft.forwardDemandConfidenceWeights;
+    if (!(confidence.high >= confidence.medium && confidence.medium >= confidence.low)) {
+      toast({ title: "Invalid confidence weights", description: "High must be at least medium, and medium at least low.", variant: "destructive" });
+      return;
+    }
+    updateSettingsMutation.mutate({ forecastPolicy: forecastPolicyDraft });
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[540px] max-h-[82vh] overflow-y-auto">
+      <DialogContent className="max-w-[760px] max-h-[88vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Filter className="h-4 w-4" />
-            Reorder Exclusions
+            Purchasing Planning Policy
           </DialogTitle>
           <DialogDescription>
-            Products matching these rules are hidden from reorder analysis and skipped by the nightly auto-draft job.
+            Configure demand forecasting, future-demand overlays, automation guardrails, and reorder exclusions.
           </DialogDescription>
         </DialogHeader>
 
@@ -373,14 +440,241 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
 
           <div className="border-t" />
 
-          {/* Auto-Draft Toggles */}
+          <div className="space-y-3">
+            <div>
+              <span className="text-xs font-semibold block">Demand Forecast Policy</span>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                These settings drive the required-piece quantity shown in the RFQ queue. Every RFQ stores the applied calculation as immutable evidence.
+              </p>
+            </div>
+            <div className="rounded-md border bg-muted/40 p-3 space-y-4">
+              <div>
+                <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Forecast method</label>
+                <Select
+                  value={forecastPolicyDraft.method}
+                  onValueChange={(method) => setForecastPolicyDraft((current) => ({
+                    ...current,
+                    method: method as PurchasingForecastPolicy["method"],
+                  }))}
+                >
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="weighted_blend_v1">Weighted multi-window forecast</SelectItem>
+                    <SelectItem value="recent_order_velocity_v1">Standard-window velocity only</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
+                <div className="text-xs font-medium mb-2">Demand windows (days)</div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {([
+                    ["Short", "shortWindowDays", 1, 60],
+                    ["Standard", "standardWindowDays", 7, 180],
+                    ["Long", "longWindowDays", 30, 730],
+                    ["Last-year period", "seasonalWindowDays", 7, 120],
+                  ] as const).map(([label, key, min, max]) => (
+                    <div key={key}>
+                      <label className="text-[10px] text-muted-foreground block mb-1">{label}</label>
+                      <Input
+                        type="number"
+                        min={min}
+                        max={max}
+                        step={1}
+                        value={forecastPolicyDraft[key]}
+                        onChange={(event) => setForecastPolicyDraft((current) => ({
+                          ...current,
+                          [key]: Number(event.target.value),
+                        }))}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-4 mb-2">
+                  <div>
+                    <div className="text-xs font-medium">Same-period-last-year seasonality</div>
+                    <p className="text-[10px] text-muted-foreground">When history is unavailable, its weight is automatically redistributed.</p>
+                  </div>
+                  <Switch
+                    checked={forecastPolicyDraft.seasonalEnabled}
+                    onCheckedChange={(seasonalEnabled) => setForecastPolicyDraft((current) => ({ ...current, seasonalEnabled }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {(Object.keys(forecastPolicyDraft.weights) as Array<keyof PurchasingForecastPolicy["weights"]>).map((key) => (
+                    <div key={key}>
+                      <label className="text-[10px] capitalize text-muted-foreground block mb-1">{key} weight %</label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={forecastPolicyDraft.weights[key]}
+                        onChange={(event) => setForecastPolicyDraft((current) => ({
+                          ...current,
+                          weights: { ...current.weights, [key]: Number(event.target.value) },
+                        }))}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Total: {Object.values(forecastPolicyDraft.weights).reduce((sum, value) => sum + value, 0)}%
+                </p>
+              </div>
+
+              <div className="border-t pt-3 space-y-2">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-xs font-medium">Future-demand overlays</div>
+                    <p className="text-[10px] text-muted-foreground">Adds planned drops, preorders, promotions, wholesale commitments, seasonal plans, and manual forecasts.</p>
+                  </div>
+                  <Switch
+                    checked={forecastPolicyDraft.forwardDemandEnabled}
+                    onCheckedChange={(forwardDemandEnabled) => setForecastPolicyDraft((current) => ({ ...current, forwardDemandEnabled }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div>
+                    <label className="text-[10px] text-muted-foreground block mb-1">Horizon days</label>
+                    <Input
+                      type="number" min={1} max={365} step={1}
+                      value={forecastPolicyDraft.forwardDemandHorizonDays}
+                      onChange={(event) => setForecastPolicyDraft((current) => ({ ...current, forwardDemandHorizonDays: Number(event.target.value) }))}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  {(Object.keys(forecastPolicyDraft.forwardDemandConfidenceWeights) as Array<keyof PurchasingForecastPolicy["forwardDemandConfidenceWeights"]>).map((key) => (
+                    <div key={key}>
+                      <label className="text-[10px] capitalize text-muted-foreground block mb-1">{key} confidence %</label>
+                      <Input
+                        type="number" min={0} max={100} step={1}
+                        value={forecastPolicyDraft.forwardDemandConfidenceWeights[key]}
+                        onChange={(event) => setForecastPolicyDraft((current) => ({
+                          ...current,
+                          forwardDemandConfidenceWeights: {
+                            ...current.forwardDemandConfidenceWeights,
+                            [key]: Number(event.target.value),
+                          },
+                        }))}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-t pt-3">
+                <div className="text-xs font-medium mb-2">Automation sample guardrail</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-muted-foreground block mb-1">Minimum orders</label>
+                    <Input
+                      type="number" min={1} max={100} step={1}
+                      value={forecastPolicyDraft.automationMinimumOrderCount}
+                      onChange={(event) => setForecastPolicyDraft((current) => ({ ...current, automationMinimumOrderCount: Number(event.target.value) }))}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-muted-foreground block mb-1">Minimum active demand days</label>
+                    <Input
+                      type="number" min={1} max={100} step={1}
+                      value={forecastPolicyDraft.automationMinimumActiveDays}
+                      onChange={(event) => setForecastPolicyDraft((current) => ({ ...current, automationMinimumActiveDays: Number(event.target.value) }))}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <Button size="sm" onClick={saveForecastPolicy} disabled={updateSettingsMutation.isPending}>
+                  Save forecast policy
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t" />
+
+          <div className="space-y-3">
+            <div>
+              <span className="text-xs font-semibold block">RFQ Draft Automation</span>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Scheduled recommendation runs can prepare price-free RFQ drafts for trusted requirements with an existing preferred supplier. Drafts are never sent automatically.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-3 rounded-md border bg-muted/40 p-3 sm:grid-cols-2">
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Draft mode</label>
+                <Select
+                  value={settings?.rfqDraftAutomationMode ?? "manual"}
+                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftAutomationMode: value as AutoDraftSettings["rfqDraftAutomationMode"] })}
+                >
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="manual">Manual selection only</SelectItem>
+                    <SelectItem value="preferred_vendor">Draft for preferred suppliers</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Minimum demand confidence</label>
+                <Select
+                  value={settings?.rfqDraftMinimumConfidence ?? "high"}
+                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftMinimumConfidence: value as AutoDraftSettings["rfqDraftMinimumConfidence"] })}
+                >
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="high">High only</SelectItem>
+                    <SelectItem value="medium">Medium or high</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-[10px] text-muted-foreground block mb-1">Maximum lines per run</label>
+                <Select
+                  value={String(settings?.rfqDraftMaximumLinesPerRun ?? 100)}
+                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftMaximumLinesPerRun: Number(value) })}
+                >
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {[25, 50, 100, 250, 500].map((value) => <SelectItem key={value} value={String(value)}>{value} lines</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
+                <div>
+                  <div className="text-xs font-medium">Require trusted forecast</div>
+                  <p className="text-[10px] text-muted-foreground">Hold watch/review demand signals for an operator.</p>
+                </div>
+                <Switch
+                  checked={settings?.rfqDraftRequireTrustedForecast ?? true}
+                  onCheckedChange={(value) => updateSettingsMutation.mutate({ rfqDraftRequireTrustedForecast: value })}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t" />
+
+          {/* Downstream priced-PO automation */}
           <div>
-            <span className="text-xs font-semibold block mb-3">Auto-Draft Behavior</span>
+            <span className="text-xs font-semibold block">Downstream Priced-PO Automation</span>
+            <p className="text-[11px] text-muted-foreground mt-1 mb-3">
+              RFQ requirements are always calculated without price. These controls apply only after a supplier and usable quote exist.
+            </p>
             <div className="space-y-3">
               <div>
                 <h4 className="text-sm font-medium mb-1">Run mode</h4>
                 <p className="text-[11px] text-muted-foreground mb-2">
-                  Create draft POs only uses recommendations that pass the quality gate. Recommendation only records an auditable run without PO changes.
+                  Create draft POs only for priced recommendations that pass the quality gate. Recommendation only records an auditable run without PO changes.
                 </p>
                 <Select
                   value={settings?.autoDraftMode ?? "draft_po"}

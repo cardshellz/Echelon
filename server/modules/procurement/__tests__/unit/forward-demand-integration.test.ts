@@ -151,4 +151,81 @@ describe("forward demand integration into purchasing recommendations", () => {
     // 210 > 92 → should not need to order
     expect(item.suggestedOrderPieces).toBe(0);
   });
+
+  it("uses the configured weighted forecast to calculate required pieces", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [baseRow({
+        short_window_days: 7,
+        short_outbound_pieces: 70,
+        short_demand_order_count: 7,
+        short_demand_active_days: 7,
+        long_window_days: 90,
+        long_outbound_pieces: 90,
+        long_demand_order_count: 20,
+        long_demand_active_days: 15,
+        seasonal_window_days: 30,
+        seasonal_outbound_pieces: 30,
+        seasonal_demand_order_count: 10,
+        seasonal_demand_active_days: 8,
+      })],
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+      autoDraftSettings: {
+        forecastPolicy: {
+          method: "weighted_blend_v1",
+          weights: { short: 50, standard: 20, long: 20, seasonal: 10 },
+          seasonalEnabled: true,
+        },
+      },
+    });
+
+    expect(result.items[0]).toMatchObject({
+      avgDailyUsage: 5.7,
+      reorderPoint: 120,
+      suggestedOrderPieces: 75,
+      forecastProvenance: {
+        forecastMethod: "weighted_blend_v1",
+        forecastVersion: 2,
+        forecastBlend: {
+          seasonalHistoryAvailable: true,
+          appliedWeights: { short: 0.5, standard: 0.2, long: 0.2, seasonal: 0.1 },
+        },
+      },
+    });
+  });
+
+  it("can disable future-demand overlays without discarding their stored source data", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [baseRow({
+        forward_demand_pieces: 100,
+        forward_demand_raw_pieces: 125,
+        forward_demand_event_count: 2,
+      })],
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+      autoDraftSettings: { forecastPolicy: { forwardDemandEnabled: false } },
+    });
+
+    expect(result.items[0].forwardDemandBasis).toMatchObject({
+      forwardDemandPieces: 0,
+      forwardDemandRawPieces: 0,
+      forwardDemandEventCount: 0,
+    });
+  });
+
+  it("blocks automation when the configured demand sample minimum is not met", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [baseRow({ total_pieces: 0, demand_order_count: 3, demand_active_days: 2 })],
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+      autoDraftSettings: {
+        forecastPolicy: { automationMinimumOrderCount: 5, automationMinimumActiveDays: 4 },
+      },
+    });
+
+    expect(result.items[0].qualityControls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "automation_sample_below_policy", severity: "block" }),
+    ]));
+    expect(result.items[0].qualityGate.autoDraftEligible).toBe(false);
+  });
 });

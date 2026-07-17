@@ -7,7 +7,7 @@ export type PurchasingDemandForecastTrend =
   | "stable"
   | "falling";
 export type PurchasingDemandForecastSource = "recent_order_velocity";
-export type PurchasingDemandForecastMethod = "recent_order_velocity_v1";
+export type PurchasingDemandForecastMethod = "recent_order_velocity_v1" | "weighted_blend_v1";
 export type PurchasingDemandForecastWindowLabel = "standard" | "short" | "long" | "seasonal";
 export type PurchasingDemandForecastAccelerationSignal =
   | "not_available"
@@ -78,6 +78,15 @@ export interface PurchasingDemandForecastWindowDiagnostics {
   baselineSignal: PurchasingDemandForecastBaselineSignal;
   seasonalRatio: number | null;
   seasonalSignal: PurchasingDemandForecastSeasonalitySignal;
+}
+
+export interface PurchasingDemandForecastBlend {
+  method: "recent_order_velocity_v1" | "weighted_blend_v1";
+  avgDailyUsagePieces: number;
+  configuredWeights: Record<PurchasingDemandForecastWindowLabel, number>;
+  appliedWeights: Record<PurchasingDemandForecastWindowLabel, number>;
+  contributions: Record<PurchasingDemandForecastWindowLabel, number>;
+  seasonalHistoryAvailable: boolean;
 }
 
 function asNumber(value: unknown, fallback = 0): number {
@@ -322,5 +331,74 @@ export function buildPurchasingDemandForecastWindowDiagnostics(input: {
     baselineSignal: baseline.baselineSignal,
     seasonalRatio: seasonality.seasonalRatio,
     seasonalSignal: seasonality.seasonalSignal,
+  };
+}
+
+export function buildPurchasingDemandForecastBlend(input: {
+  method: "recent_order_velocity_v1" | "weighted_blend_v1";
+  standardWindow: PurchasingDemandForecastBasis;
+  shortWindow: PurchasingDemandForecastBasis;
+  longWindow: PurchasingDemandForecastBasis;
+  seasonalWindow?: PurchasingDemandForecastBasis;
+  seasonalEnabled: boolean;
+  weights: { short: number; standard: number; long: number; seasonal: number };
+}): PurchasingDemandForecastBlend {
+  const configuredWeights = {
+    short: Math.max(0, input.weights.short),
+    standard: Math.max(0, input.weights.standard),
+    long: Math.max(0, input.weights.long),
+    seasonal: Math.max(0, input.weights.seasonal),
+  };
+  const seasonalHistoryAvailable = Boolean(
+    input.seasonalEnabled &&
+    input.seasonalWindow &&
+    (input.seasonalWindow.demandOrderCount ?? 0) > 0,
+  );
+
+  if (input.method === "recent_order_velocity_v1") {
+    return {
+      method: input.method,
+      avgDailyUsagePieces: input.standardWindow.avgDailyUsagePieces,
+      configuredWeights,
+      appliedWeights: { short: 0, standard: 1, long: 0, seasonal: 0 },
+      contributions: {
+        short: 0,
+        standard: input.standardWindow.avgDailyUsagePieces,
+        long: 0,
+        seasonal: 0,
+      },
+      seasonalHistoryAvailable,
+    };
+  }
+
+  const effectiveWeights = {
+    short: configuredWeights.short,
+    standard: configuredWeights.standard,
+    long: configuredWeights.long,
+    seasonal: seasonalHistoryAvailable ? configuredWeights.seasonal : 0,
+  };
+  const total = effectiveWeights.short + effectiveWeights.standard + effectiveWeights.long + effectiveWeights.seasonal;
+  const safeTotal = total > 0 ? total : 1;
+  const appliedWeights = {
+    short: effectiveWeights.short / safeTotal,
+    standard: effectiveWeights.standard / safeTotal,
+    long: effectiveWeights.long / safeTotal,
+    seasonal: effectiveWeights.seasonal / safeTotal,
+  };
+  const contributions = {
+    short: input.shortWindow.avgDailyUsagePieces * appliedWeights.short,
+    standard: input.standardWindow.avgDailyUsagePieces * appliedWeights.standard,
+    long: input.longWindow.avgDailyUsagePieces * appliedWeights.long,
+    seasonal: (input.seasonalWindow?.avgDailyUsagePieces ?? 0) * appliedWeights.seasonal,
+  };
+  const avgDailyUsagePieces = contributions.short + contributions.standard + contributions.long + contributions.seasonal;
+
+  return {
+    method: input.method,
+    avgDailyUsagePieces,
+    configuredWeights,
+    appliedWeights,
+    contributions,
+    seasonalHistoryAvailable,
   };
 }

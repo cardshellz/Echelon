@@ -27,13 +27,14 @@ describe("forward demand columns in reorder analysis query", () => {
     expect(STORAGE_SRC).toMatch(/procurement\.demand_event_lines del/);
     expect(STORAGE_SRC).toMatch(/procurement\.demand_events de/);
     expect(STORAGE_SRC).toMatch(/CASE del\.confidence/);
-    expect(STORAGE_SRC).toMatch(/WHEN 'high'\s+THEN del\.expected_pieces/);
-    expect(STORAGE_SRC).toMatch(/WHEN 'medium'\s+THEN CEIL\(del\.expected_pieces \* 0\.7\)/);
-    expect(STORAGE_SRC).toMatch(/WHEN 'low'\s+THEN CEIL\(del\.expected_pieces \* 0\.4\)/);
+    expect(STORAGE_SRC).toMatch(/forecastPolicy\.forwardDemandConfidenceWeights\.high/);
+    expect(STORAGE_SRC).toMatch(/forecastPolicy\.forwardDemandConfidenceWeights\.medium/);
+    expect(STORAGE_SRC).toMatch(/forecastPolicy\.forwardDemandConfidenceWeights\.low/);
   });
 
   it("filters to active/planned events within horizon", () => {
     expect(STORAGE_SRC).toMatch(/de\.status IN \('planned', 'active'\)/);
+    expect(STORAGE_SRC).toMatch(/forecastPolicy\.forwardDemandHorizonDays/);
     expect(STORAGE_SRC).toMatch(/de\.end_date IS NULL OR de\.end_date >= CURRENT_DATE/);
   });
 });
