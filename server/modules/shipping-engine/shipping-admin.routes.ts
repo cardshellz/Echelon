@@ -11,7 +11,6 @@ import {
   SHIPPING_BOX_KINDS,
   shippingBoxCatalog,
   shippingBoxWarehouseStock,
-  shippingServiceLevelMethods,
   shippingServiceLevels,
   shippingVariantAttrs,
 } from "@shared/schema";
@@ -46,15 +45,11 @@ const updateServiceLevelSchema = z.object({
   description: z.string().trim().max(400).nullable().optional(),
   sortOrder: z.number().int().optional(),
   isActive: z.boolean().optional(),
+  promiseMinBusinessDays: z.number().int().min(0).nullable().optional(),
+  promiseMaxBusinessDays: z.number().int().min(0).nullable().optional(),
 });
 
-const replaceMethodsSchema = z.object({
-  methods: z.array(z.object({
-    carrier: z.string().trim().min(1).max(50),
-    serviceCode: z.string().trim().min(1).max(80),
-    isActive: z.boolean().default(true),
-  })).max(50),
-});
+const INITIAL_CHECKOUT_SERVICE_LEVEL_CODE = "standard";
 
 export function registerShippingAdminRoutes(app: Express): void {
   app.get(
@@ -62,11 +57,10 @@ export function registerShippingAdminRoutes(app: Express): void {
     requirePermission("settings", "view"),
     async (_req, res) => {
       try {
-        const [boxes, stock, levels, methods, coverage] = await Promise.all([
+        const [boxes, stock, levels, coverage] = await Promise.all([
           db.select().from(shippingBoxCatalog).orderBy(asc(shippingBoxCatalog.code)),
           db.select().from(shippingBoxWarehouseStock),
           db.select().from(shippingServiceLevels).orderBy(asc(shippingServiceLevels.sortOrder)),
-          db.select().from(shippingServiceLevelMethods).orderBy(asc(shippingServiceLevelMethods.carrier)),
           db.select({
             variantsTotal: sql<number>`count(*)::int`,
             variantsWithDims: sql<number>`count(*) filter (
@@ -85,16 +79,9 @@ export function registerShippingAdminRoutes(app: Express): void {
           list.push(row.warehouseId);
           stockByBox.set(row.boxId, list);
         }
-        const methodsByLevel = new Map<number, typeof methods>();
-        for (const method of methods) {
-          const list = methodsByLevel.get(method.serviceLevelId) ?? [];
-          list.push(method);
-          methodsByLevel.set(method.serviceLevelId, list);
-        }
-
         return res.json({
           boxes: boxes.map((box) => ({ ...box, warehouseIds: stockByBox.get(box.id) ?? [] })),
-          serviceLevels: levels.map((level) => ({ ...level, methods: methodsByLevel.get(level.id) ?? [] })),
+          serviceLevels: levels,
           dimsCoverage: coverage[0] ?? { variantsTotal: 0, variantsWithDims: 0 },
         });
       } catch (error) {
@@ -290,6 +277,41 @@ export function registerShippingAdminRoutes(app: Express): void {
         if (!parsed.success) {
           return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
         }
+        const [current] = await db.select().from(shippingServiceLevels)
+          .where(eq(shippingServiceLevels.id, id))
+          .limit(1);
+        if (!current) {
+          return res.status(404).json({ error: { code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_FOUND" } });
+        }
+        if (parsed.data.isActive === true && current.code !== INITIAL_CHECKOUT_SERVICE_LEVEL_CODE) {
+          return res.status(409).json({
+            error: {
+              code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_AVAILABLE",
+              message: "Only Standard Shipping is available in the initial rollout.",
+            },
+          });
+        }
+        const nextPromiseMin = parsed.data.promiseMinBusinessDays === undefined
+          ? current.promiseMinBusinessDays
+          : parsed.data.promiseMinBusinessDays;
+        const nextPromiseMax = parsed.data.promiseMaxBusinessDays === undefined
+          ? current.promiseMaxBusinessDays
+          : parsed.data.promiseMaxBusinessDays;
+        if (
+          (nextPromiseMin === null) !== (nextPromiseMax === null)
+          || (
+            nextPromiseMin !== null
+            && nextPromiseMax !== null
+            && nextPromiseMax < nextPromiseMin
+          )
+        ) {
+          return res.status(400).json({
+            error: {
+              code: "SHIPPING_ADMIN_INVALID_PROMISE",
+              message: "Delivery promise minimum and maximum must both be blank or form a valid range.",
+            },
+          });
+        }
         const updated = await db.update(shippingServiceLevels)
           .set({ ...parsed.data, updatedAt: new Date() })
           .where(eq(shippingServiceLevels.id, id))
@@ -297,47 +319,13 @@ export function registerShippingAdminRoutes(app: Express): void {
         if (updated.length === 0) {
           return res.status(404).json({ error: { code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_FOUND" } });
         }
-        const methods = await db.select().from(shippingServiceLevelMethods)
-          .where(eq(shippingServiceLevelMethods.serviceLevelId, id));
-        return res.json({ serviceLevel: { ...updated[0], methods } });
+        return res.json({ serviceLevel: updated[0] });
       } catch (error) {
         return sendShippingAdminError(res, error, "update service level");
       }
     },
   );
 
-  app.put(
-    "/api/shipping/admin/service-levels/:id/methods",
-    requirePermission("settings", "edit"),
-    async (req, res) => {
-      try {
-        const id = Number(req.params.id);
-        if (!Number.isInteger(id) || id <= 0) {
-          return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", message: "invalid id" } });
-        }
-        const parsed = replaceMethodsSchema.safeParse(req.body);
-        if (!parsed.success) {
-          return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
-        }
-        const level = await db.select().from(shippingServiceLevels)
-          .where(eq(shippingServiceLevels.id, id)).limit(1);
-        if (level.length === 0) {
-          return res.status(404).json({ error: { code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_FOUND" } });
-        }
-
-        const methods = await db.transaction(async (tx) => {
-          await tx.delete(shippingServiceLevelMethods).where(eq(shippingServiceLevelMethods.serviceLevelId, id));
-          if (parsed.data.methods.length === 0) return [];
-          return tx.insert(shippingServiceLevelMethods).values(
-            parsed.data.methods.map((m) => ({ ...m, serviceLevelId: id })),
-          ).returning();
-        });
-        return res.json({ serviceLevel: { ...level[0], methods } });
-      } catch (error) {
-        return sendShippingAdminError(res, error, "replace service level methods");
-      }
-    },
-  );
 }
 
 function sendShippingAdminError(res: Response, error: unknown, action: string): Response {

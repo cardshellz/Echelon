@@ -73,6 +73,8 @@ import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import ProcurementSettings from "@/pages/ProcurementSettings";
 import ShippingSettings from "@/pages/ShippingSettings";
+import ShippingServiceLevels from "@/pages/ShippingServiceLevels";
+import ShippingServiceLevelDetail from "@/pages/ShippingServiceLevelDetail";
 import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
 import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
@@ -436,6 +438,12 @@ function Router() {
         </Route>
         <Route path="/shipping-settings">
           <ProtectedRoute component={ShippingSettings} allowedRoles={["admin"]} />
+        </Route>
+        <Route path="/shipping-service-levels/:id">
+          <ProtectedRoute component={ShippingServiceLevelDetail} allowedRoles={["admin"]} />
+        </Route>
+        <Route path="/shipping-service-levels">
+          <ProtectedRoute component={ShippingServiceLevels} allowedRoles={["admin"]} />
         </Route>
         <Route path="/settings">
           <ProtectedRoute component={Settings} allowedRoles={["admin"]} />

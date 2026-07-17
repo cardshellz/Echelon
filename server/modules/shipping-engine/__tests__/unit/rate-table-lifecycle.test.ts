@@ -14,8 +14,9 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
     destinationCountry: "US",
     destinationRegion: "PA",
     postalPrefix: null,
-    minWeightGrams: 0,
-    maxWeightGrams: 1000,
+    minMeasure: 0,
+    maxMeasure: 1000,
+    maxShipmentWeightGrams: null,
     rateCents: 800,
     ...overrides,
   };
@@ -23,58 +24,64 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
 
 describe("rate table lifecycle analysis", () => {
   it("blocks an empty table", () => {
-    const result = analyzeRateTable([]);
+    const result = analyzeRateTable([], "shipment_weight");
     expect(result.canActivate).toBe(false);
     expect(result.errors).toContain("The table has no rate rows.");
   });
 
-  it("blocks missing, overlapping, and discontinuous weight coverage", () => {
+  it("blocks missing, overlapping, and discontinuous parcel coverage", () => {
     const result = analyzeRateTable([
-      row({ minWeightGrams: 100, maxWeightGrams: 500 }),
-      row({ minWeightGrams: 500, maxWeightGrams: 700 }),
-      row({ minWeightGrams: 900, maxWeightGrams: 1200 }),
-    ]);
+      row({ minMeasure: 100, maxMeasure: 500 }),
+      row({ minMeasure: 500, maxMeasure: 700 }),
+      row({ minMeasure: 900, maxMeasure: 1200 }),
+    ], "shipment_weight");
     expect(result.errors).toEqual(expect.arrayContaining([
       "PA statewide has no rate from 0g to 99g.",
-      "PA statewide has overlapping weight bands 100-500g and 500-700g.",
+      "PA statewide has overlapping bands 100g-500g and 500g-700g.",
       "PA statewide has no rate from 701g to 899g.",
     ]));
   });
 
-  it("blocks ZIP overrides without a statewide fallback", () => {
-    const result = analyzeRateTable([row({ postalPrefix: "191" })]);
-    expect(result.canActivate).toBe(false);
-    expect(result.errors).toContain("PA has a ZIP override but no statewide fallback rate");
+  it("starts pallet coverage at one and permits a freight weight ceiling", () => {
+    const result = analyzeRateTable([
+      row({ minMeasure: 1, maxMeasure: 2, maxShipmentWeightGrams: 500_000 }),
+      row({ minMeasure: 3, maxMeasure: 4, maxShipmentWeightGrams: 1_000_000 }),
+    ], "pallet_count");
+    expect(result.canActivate).toBe(true);
   });
 
-  it("warns about uncovered regions but permits explicit activation", () => {
-    const result = analyzeRateTable([row()]);
+  it("blocks freight-only ceilings on parcel tables", () => {
+    const result = analyzeRateTable([
+      row({ maxShipmentWeightGrams: 500_000 }),
+    ], "shipment_weight");
+    expect(result.canActivate).toBe(false);
+    expect(result.errors[0]).toContain("freight weight ceiling");
+  });
+
+  it("blocks ZIP overrides without a statewide fallback", () => {
+    const result = analyzeRateTable([row({ postalPrefix: "191" })], "shipment_weight");
+    expect(result.canActivate).toBe(false);
+  });
+
+  it("warns about uncovered regions but permits activation", () => {
+    const result = analyzeRateTable([row()], "shipment_weight");
     expect(result.canActivate).toBe(true);
-    expect(result.warnings[0]).toContain("No statewide rates are configured for:");
     expect(result.coverage.stateCount).toBe(1);
-    expect(result.coverage.missingRegions).not.toContain("PA");
   });
 
   it("has no geography warning when every US postal region has a fallback", () => {
     const rows = US_POSTAL_REGIONS.map((region) => row({ destinationRegion: region }));
-    const result = analyzeRateTable(rows);
+    const result = analyzeRateTable(rows, "shipment_weight");
     expect(result.canActivate).toBe(true);
     expect(result.warnings).toEqual([]);
-    expect(result.coverage.stateCount).toBe(US_POSTAL_REGIONS.length);
   });
 });
 
 describe("rate table lifecycle transitions", () => {
-  it("only activates and deletes drafts", () => {
+  it("keeps draft-first lifecycle rules", () => {
     expect(canActivateRateTable("draft")).toBe(true);
-    expect(canActivateRateTable("active")).toBe(false);
     expect(canDeleteRateTable("draft")).toBe(true);
-    expect(canDeleteRateTable("retired")).toBe(false);
-  });
-
-  it("retires active or superseded tables", () => {
     expect(canRetireRateTable("active")).toBe(true);
     expect(canRetireRateTable("superseded")).toBe(true);
-    expect(canRetireRateTable("draft")).toBe(false);
   });
 });

@@ -144,11 +144,18 @@ describe("quoteShipment", () => {
           rateBook: { id: 1, code: "test-book" },
           zone: "US-48",
           quotes: [{
-            carrier: "USPS",
-            serviceCode: "ground",
+            serviceLevelId: 1,
+            serviceLevelCode: "standard",
+            displayName: "Standard Shipping",
+            description: null,
+            fulfillmentMode: "parcel",
+            pricingBasis: "shipment_weight",
             totalCents: 799,
             currency: "USD",
-            perParcelCents: [799],
+            promiseMinBusinessDays: 3,
+            promiseMaxBusinessDays: 7,
+            ratedMeasure: 400,
+            maxShipmentWeightGrams: null,
           }],
           warnings: [],
         };
@@ -219,6 +226,35 @@ describe("quoteShipment", () => {
       rateContext: {
         pricingChannel: "dropship",
         purpose: "vendor_fulfillment_charge",
+      },
+    }));
+  });
+
+  it("forwards pallet freight context without coupling it to a carrier", async () => {
+    const observe = vi.fn();
+    const result = await quoteShipment({
+      channel: "internal",
+      originWarehouseId: 1,
+      destination: { country: "US", region: "PA", postalCode: "16066" },
+      lines: [{ sku: "CASE-1", quantity: 20, unitWeightGrams: 5000 }],
+      freight: {
+        palletCount: 2,
+        totalWeightGrams: 100_000,
+        freightClass: "70",
+        accessorials: ["liftgate"],
+      },
+    }, {
+      parcelProvider: weightOnlyParcelProvider,
+      rateProvider: fakeRateProvider(observe),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(observe).toHaveBeenCalledWith(expect.objectContaining({
+      freight: {
+        palletCount: 2,
+        totalWeightGrams: 100_000,
+        freightClass: "70",
+        accessorials: ["liftgate"],
       },
     }));
   });

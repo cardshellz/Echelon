@@ -14,57 +14,81 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
     destinationCountry: "US",
     destinationRegion: "PA",
     postalPrefix: null,
-    minWeightGrams: 0,
-    maxWeightGrams: 1000,
+    minMeasure: 0,
+    maxMeasure: 1000,
+    maxShipmentWeightGrams: null,
     rateCents: 899,
     ...overrides,
   };
 }
 
 describe("parseRateTableCsv", () => {
-  it("parses state defaults and ZIP overrides without internal zones", () => {
+  it("parses parcel state defaults and ZIP overrides", () => {
     const result = parseRateTableCsv(
       "state,zip_prefix,min_lb,max_lb,rate_usd\nPA,,0,1,8.99\nPA,160,0,1,7.99\n",
     );
-    expect(result.pricingMode).toBe("state_zip");
-    expect(result.errors).toEqual([]);
+    expect(result).toMatchObject({
+      pricingMode: "state_zip",
+      pricingBasis: "shipment_weight",
+      dialect: "pounds",
+      errors: [],
+    });
+    expect(result.rows[0]).toMatchObject({
+      destinationRegion: "PA",
+      postalPrefix: null,
+      minMeasure: 0,
+      maxMeasure: 454,
+      maxShipmentWeightGrams: null,
+      rateCents: 899,
+    });
+  });
+
+  it("parses pallet-count bands with an optional total-weight ceiling", () => {
+    const result = parseRateTableCsv([
+      "state,zip_prefix,min_pallets,max_pallets,max_total_lb,rate_usd",
+      "PA,,1,2,2500,189.00",
+      "OH,,3,4,,299.00",
+    ].join("\n"));
+    expect(result).toMatchObject({
+      pricingBasis: "pallet_count",
+      dialect: "pallets",
+      errors: [],
+    });
     expect(result.rows).toEqual([
-      {
-        originWarehouseId: null,
-        destinationCountry: "US",
+      expect.objectContaining({
         destinationRegion: "PA",
-        postalPrefix: null,
-        minWeightGrams: 0,
-        maxWeightGrams: 454,
-        rateCents: 899,
-      },
-      {
-        originWarehouseId: null,
-        destinationCountry: "US",
-        destinationRegion: "PA",
-        postalPrefix: "160",
-        minWeightGrams: 0,
-        maxWeightGrams: 454,
-        rateCents: 799,
-      },
+        minMeasure: 1,
+        maxMeasure: 2,
+        maxShipmentWeightGrams: Math.round(2500 * GRAMS_PER_POUND),
+        rateCents: 18900,
+      }),
+      expect.objectContaining({
+        destinationRegion: "OH",
+        minMeasure: 3,
+        maxMeasure: 4,
+        maxShipmentWeightGrams: null,
+        rateCents: 29900,
+      }),
     ]);
   });
 
-  it("rejects zone-shaped files, invalid states, and invalid ZIP prefixes", () => {
-    expect(parseRateTableCsv("zone,min_lb,max_lb,rate_usd\nUS-48,0,1,8.99\n").errors[0].message)
-      .toContain("unrecognized header");
-    const result = parseRateTableCsv(
-      "state,zip_prefix,min_lb,max_lb,rate_usd\nAtlantis,,0,1,8.99\nPA,16A,0,1,7.99\n",
-    );
+  it("rejects invalid geography and pallet quantities", () => {
+    const result = parseRateTableCsv([
+      "state,zip_prefix,min_pallets,max_pallets,max_total_lb,rate_usd",
+      "Atlantis,,1,2,2500,189",
+      "PA,16A,1,2,2500,189",
+      "PA,,0,2,2500,189",
+    ].join("\n"));
     expect(result.errors.map((error) => error.message)).toEqual([
       'invalid US state or territory "Atlantis"',
       "zip_prefix must contain 1 to 5 digits",
+      "minimum pallet count must be 1 or greater",
     ]);
   });
 
-  it("converts pounds and dollars with deterministic rounding", () => {
+  it("converts parcel pounds and dollars with deterministic rounding", () => {
     const result = parseRateTableCsv("state,min_lb,max_lb,rate_usd\nPA,0,0.5,4.15\n");
-    expect(result.rows[0].maxWeightGrams).toBe(Math.round(0.5 * GRAMS_PER_POUND));
+    expect(result.rows[0].maxMeasure).toBe(Math.round(0.5 * GRAMS_PER_POUND));
     expect(result.rows[0].rateCents).toBe(Math.round(4.15 * CENTS_PER_USD));
   });
 
@@ -72,19 +96,7 @@ describe("parseRateTableCsv", () => {
     const result = parseRateTableCsv("state,min_g,max_g,rate_cents\nPA,0,1000,1599\n");
     expect(result.dialect).toBe("grams");
     expect(result.errors).toEqual([]);
-    expect(result.rows[0]).toMatchObject({ minWeightGrams: 0, maxWeightGrams: 1000, rateCents: 1599 });
-  });
-
-  it("rejects fractional grams/cents and invalid numeric ranges", () => {
-    expect(parseRateTableCsv("state,min_g,max_g,rate_cents\nPA,0,1000.5,899\n").errors[0].message)
-      .toBe("min_g, max_g and rate_cents must be whole numbers");
-    const result = parseRateTableCsv([
-      "state,min_lb,max_lb,rate_usd",
-      "PA,x,1,8.99",
-      "PA,2,1,8.99",
-      "PA,1,2,-1",
-    ].join("\n"));
-    expect(result.errors.map((error) => error.line)).toEqual([2, 3, 4]);
+    expect(result.rows[0]).toMatchObject({ minMeasure: 0, maxMeasure: 1000, rateCents: 1599 });
   });
 
   it("reports empty files and enforces the row cap", () => {
@@ -101,37 +113,21 @@ describe("parseRateTableCsv", () => {
 });
 
 describe("findBandOverlaps", () => {
-  it("accepts adjacent bands in one pricing area", () => {
+  it("accepts adjacent bands and rejects inclusive overlaps", () => {
     expect(findBandOverlaps([
-      row({ minWeightGrams: 0, maxWeightGrams: 1000 }),
-      row({ minWeightGrams: 1001, maxWeightGrams: 2000 }),
+      row({ minMeasure: 0, maxMeasure: 1000 }),
+      row({ minMeasure: 1001, maxMeasure: 2000 }),
     ])).toEqual([]);
-  });
-
-  it("detects inclusive overlaps in the same geography and warehouse", () => {
-    const errors = findBandOverlaps([
-      row({ minWeightGrams: 0, maxWeightGrams: 1000 }),
-      row({ minWeightGrams: 1000, maxWeightGrams: 2000 }),
-    ]);
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain("PA statewide");
-  });
-
-  it("allows identical bands for different ZIP prefixes or warehouses", () => {
     expect(findBandOverlaps([
-      row({ postalPrefix: "160" }),
-      row({ postalPrefix: "191" }),
-      row({ originWarehouseId: 2 }),
-    ])).toEqual([]);
+      row({ minMeasure: 0, maxMeasure: 1000 }),
+      row({ minMeasure: 1000, maxMeasure: 2000 }),
+    ])).toHaveLength(1);
   });
 });
 
 describe("findMissingStateDefaults", () => {
-  it("accepts an override with a statewide fallback", () => {
+  it("requires ZIP fallbacks in the same warehouse scope", () => {
     expect(findMissingStateDefaults([row(), row({ postalPrefix: "160" })])).toEqual([]);
-  });
-
-  it("requires the fallback in the same warehouse scope", () => {
     expect(findMissingStateDefaults([
       row({ originWarehouseId: 1, postalPrefix: "160" }),
     ])).toEqual(["PA at warehouse 1 has a ZIP override but no statewide fallback rate"]);

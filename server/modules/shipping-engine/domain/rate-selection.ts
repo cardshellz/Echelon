@@ -1,17 +1,31 @@
-/** Direct-geography rate-band selection. Pure domain logic, no I/O. */
+/** Direct-geography service-level rate selection. Pure domain logic, no I/O. */
+
+export type ShippingPricingBasis = "shipment_weight" | "pallet_count";
+export type ShippingFulfillmentMode = "parcel" | "freight";
 
 export interface RateCandidateRow {
   rateTableId: number;
-  carrier: string;
-  serviceCode: string;
+  serviceLevelId: number;
+  serviceLevelCode: string;
+  displayName: string;
+  description: string | null;
+  fulfillmentMode: ShippingFulfillmentMode;
+  pricingBasis: ShippingPricingBasis;
+  sortOrder: number;
+  promiseMinBusinessDays: number | null;
+  promiseMaxBusinessDays: number | null;
   currency: string;
   /** NULL = applies to any origin warehouse. */
   originWarehouseId: number | null;
   destinationCountry: string;
   destinationRegion: string;
   postalPrefix: string | null;
-  minWeightGrams: number;
-  maxWeightGrams: number;
+  /** Grams for shipment_weight; pallet quantity for pallet_count. */
+  minMeasure: number;
+  /** Grams for shipment_weight; pallet quantity for pallet_count. */
+  maxMeasure: number;
+  /** Optional freight eligibility ceiling. */
+  maxShipmentWeightGrams: number | null;
   rateCents: number;
 }
 
@@ -19,67 +33,99 @@ export interface RateSelectionInput {
   destinationCountry: string;
   destinationRegion: string;
   destinationPostal: string;
-  billableWeightGrams: number;
+  shipmentWeightGrams: number;
+  palletCount?: number | null;
   originWarehouseId: number;
 }
 
-export interface SelectedRateQuote {
-  carrier: string;
-  serviceCode: string;
+export interface SelectedServiceLevelRate {
+  serviceLevelId: number;
+  serviceLevelCode: string;
+  displayName: string;
+  description: string | null;
+  fulfillmentMode: ShippingFulfillmentMode;
+  pricingBasis: ShippingPricingBasis;
+  sortOrder: number;
+  promiseMinBusinessDays: number | null;
+  promiseMaxBusinessDays: number | null;
   currency: string;
   rateCents: number;
   rateTableId: number;
+  ratedMeasure: number;
+  maxShipmentWeightGrams: number | null;
   warehouseSpecific: boolean;
   postalSpecific: boolean;
 }
 
-export function rateComboKey(carrier: string, serviceCode: string): string {
-  return `${carrier.trim().toLowerCase()}\0${serviceCode.trim().toLowerCase()}`;
-}
-
 /**
- * Select the winning rate per carrier/service for one parcel.
+ * Select one charge per internal service level.
+ *
  * Warehouse-specific rows outrank global rows. Within that scope, the longest
  * matching ZIP prefix outranks a shorter prefix or statewide fallback.
  */
-export function selectParcelRates(
+export function selectServiceLevelRates(
   rows: readonly RateCandidateRow[],
   input: RateSelectionInput,
-): SelectedRateQuote[] | null {
-  const weight = input.billableWeightGrams;
-  if (!Number.isFinite(weight)) return null;
+): SelectedServiceLevelRate[] {
+  if (!Number.isFinite(input.shipmentWeightGrams) || input.shipmentWeightGrams < 0) {
+    return [];
+  }
 
   const country = input.destinationCountry.trim().toUpperCase();
   const region = input.destinationRegion.trim().toUpperCase();
   const postal = input.destinationPostal.trim().toUpperCase();
-  const bestByCombo = new Map<string, RateCandidateRow>();
+  const bestByLevel = new Map<number, RateCandidateRow>();
 
   for (const row of rows) {
+    const measure = measureForBasis(row.pricingBasis, input);
+    if (measure === null) continue;
     if (row.destinationCountry.toUpperCase() !== country) continue;
     if (row.destinationRegion.toUpperCase() !== region) continue;
     if (row.postalPrefix !== null && !postal.startsWith(row.postalPrefix)) continue;
     if (row.originWarehouseId !== null && row.originWarehouseId !== input.originWarehouseId) continue;
-    if (row.minWeightGrams > weight || row.maxWeightGrams < weight) continue;
+    if (row.minMeasure > measure || row.maxMeasure < measure) continue;
+    if (
+      row.maxShipmentWeightGrams !== null
+      && input.shipmentWeightGrams > row.maxShipmentWeightGrams
+    ) {
+      continue;
+    }
 
-    const key = rateComboKey(row.carrier, row.serviceCode);
-    const incumbent = bestByCombo.get(key);
+    const incumbent = bestByLevel.get(row.serviceLevelId);
     if (incumbent === undefined || compareRows(row, incumbent) < 0) {
-      bestByCombo.set(key, row);
+      bestByLevel.set(row.serviceLevelId, row);
     }
   }
 
-  if (bestByCombo.size === 0) return null;
-  return [...bestByCombo.values()]
+  return [...bestByLevel.values()]
     .map((row) => ({
-      carrier: row.carrier,
-      serviceCode: row.serviceCode,
+      serviceLevelId: row.serviceLevelId,
+      serviceLevelCode: row.serviceLevelCode,
+      displayName: row.displayName,
+      description: row.description,
+      fulfillmentMode: row.fulfillmentMode,
+      pricingBasis: row.pricingBasis,
+      sortOrder: row.sortOrder,
+      promiseMinBusinessDays: row.promiseMinBusinessDays,
+      promiseMaxBusinessDays: row.promiseMaxBusinessDays,
       currency: row.currency,
       rateCents: row.rateCents,
       rateTableId: row.rateTableId,
+      ratedMeasure: measureForBasis(row.pricingBasis, input)!,
+      maxShipmentWeightGrams: row.maxShipmentWeightGrams,
       warehouseSpecific: row.originWarehouseId !== null,
       postalSpecific: row.postalPrefix !== null,
     }))
-    .sort(compareQuotes);
+    .sort(compareRates);
+}
+
+function measureForBasis(
+  pricingBasis: ShippingPricingBasis,
+  input: RateSelectionInput,
+): number | null {
+  if (pricingBasis === "shipment_weight") return input.shipmentWeightGrams;
+  const palletCount = input.palletCount;
+  return Number.isInteger(palletCount) && palletCount! > 0 ? palletCount! : null;
 }
 
 function compareRows(a: RateCandidateRow, b: RateCandidateRow): number {
@@ -87,14 +133,24 @@ function compareRows(a: RateCandidateRow, b: RateCandidateRow): number {
   if (warehouseSpecificity !== 0) return warehouseSpecificity;
   const postalSpecificity = (b.postalPrefix?.length ?? 0) - (a.postalPrefix?.length ?? 0);
   if (postalSpecificity !== 0) return postalSpecificity;
+  const weightCeilingSpecificity = compareOptionalCeiling(
+    a.maxShipmentWeightGrams,
+    b.maxShipmentWeightGrams,
+  );
+  if (weightCeilingSpecificity !== 0) return weightCeilingSpecificity;
   if (a.rateCents !== b.rateCents) return a.rateCents - b.rateCents;
   if (a.rateTableId !== b.rateTableId) return a.rateTableId - b.rateTableId;
-  return a.minWeightGrams - b.minWeightGrams;
+  return a.minMeasure - b.minMeasure;
 }
 
-function compareQuotes(a: SelectedRateQuote, b: SelectedRateQuote): number {
-  if (a.rateCents !== b.rateCents) return a.rateCents - b.rateCents;
-  const byCarrier = a.carrier.localeCompare(b.carrier);
-  if (byCarrier !== 0) return byCarrier;
-  return a.serviceCode.localeCompare(b.serviceCode);
+function compareOptionalCeiling(a: number | null, b: number | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a - b;
+}
+
+function compareRates(a: SelectedServiceLevelRate, b: SelectedServiceLevelRate): number {
+  if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+  return a.serviceLevelCode.localeCompare(b.serviceLevelCode);
 }

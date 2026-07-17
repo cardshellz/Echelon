@@ -60,6 +60,7 @@ import { registerCarrierCallbackRoutes } from "./modules/shipping-engine/interfa
 import { registerShadowAdminRoutes } from "./modules/shipping-engine/interfaces/http/shadow-admin.routes";
 import { registerPackingRoutes } from "./modules/shipping-engine/interfaces/http/packing.routes";
 import { registerRateTableAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-table-admin.routes";
+import { registerRateBookAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-book-admin.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -91,6 +92,7 @@ export async function registerRoutes(
   registerShadowAdminRoutes(app);
   registerPackingRoutes(app);
   registerRateTableAdminRoutes(app);
+  registerRateBookAdminRoutes(app);
   registerOutboundShipmentRoutes(app);
   registerDropshipAdminOmsChannelConfigRoutes(app);
   registerDropshipAdminWorkerOpsRoutes(app);

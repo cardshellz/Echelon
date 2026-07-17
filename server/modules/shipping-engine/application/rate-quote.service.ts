@@ -1,44 +1,51 @@
 /**
- * Rate quote orchestration — application layer, thin over drizzle.
+ * Channel-neutral service-level rating orchestration.
  *
- * Loads effective-dated rate tables/rows once, matches destination geography,
- * rates each parcel with the pure domain functions, then sums
- * per (carrier, serviceCode) across parcels. A (carrier, serviceCode) is only
- * offered when EVERY parcel priced under it — a parcel with no matching band
- * adds a warning and drops the combo (caller decides how to fall back).
- *
- * Design: docs/SHIPPING-ENGINE-DESIGN.md ("Rates Engine"). This is the local
- * deterministic rates core behind the runtime rate-provider adapter and shadow runs.
- *
- * Contract: never throws for data problems (no zone, no bands, bad postal) —
- * those degrade to { quotes: [], warnings }. Infrastructure failures (DB down)
- * still reject, except the optional snapshot write which only warns.
+ * Rate books define what a channel charges for Card Shellz-owned shipping
+ * options. Carrier methods and purchase cost belong to the later fulfillment
+ * selection layer and are deliberately absent from this contract.
  */
 
 import { createHash } from "crypto";
-import { and, eq, gt, isNull, lte, or } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, lte, or } from "drizzle-orm";
 import {
   shippingQuoteSnapshots,
   shippingRateTableRows,
   shippingRateTables,
+  shippingServiceLevels,
   shippingZoneRules,
 } from "@shared/schema";
 import { db } from "../../../db";
 import {
-  rateComboKey,
-  selectParcelRates,
+  selectServiceLevelRates,
   type RateCandidateRow,
-  type SelectedRateQuote,
+  type ShippingFulfillmentMode,
+  type ShippingPricingBasis,
 } from "../domain/rate-selection";
 import { selectRateBookAssignment } from "../domain/rate-book";
 import type { ShippingRateContext } from "../domain/shipping-channel";
 import { resolveZone, type ZoneRule } from "../domain/zones";
 import { loadActiveRateBookAssignments } from "../infrastructure/rate-book.repository";
 
-export const RATE_QUOTE_ENGINE = { name: "cardshellz-rates", version: "1.2.0" } as const;
+export const RATE_QUOTE_ENGINE = { name: "cardshellz-rates", version: "2.0.0" } as const;
 
 export interface RateQuoteParcel {
   billableWeightGrams: number;
+}
+
+export type FreightAccessorial =
+  | "appointment"
+  | "inside_delivery"
+  | "liftgate"
+  | "limited_access"
+  | "residential";
+
+export interface FreightRatingContext {
+  palletCount: number;
+  /** Includes pallet/platform weight when known. */
+  totalWeightGrams?: number | null;
+  freightClass?: string | null;
+  accessorials?: readonly FreightAccessorial[];
 }
 
 export interface RateQuoteRequest {
@@ -48,6 +55,7 @@ export interface RateQuoteRequest {
   destRegion?: string | null;
   destPostal: string;
   parcels: RateQuoteParcel[];
+  freight?: FreightRatingContext | null;
 }
 
 export interface RateQuoteOptions {
@@ -58,12 +66,18 @@ export interface RateQuoteOptions {
 }
 
 export interface RateQuoteLine {
-  carrier: string;
-  serviceCode: string;
+  serviceLevelId: number;
+  serviceLevelCode: string;
+  displayName: string;
+  description: string | null;
+  fulfillmentMode: ShippingFulfillmentMode;
+  pricingBasis: ShippingPricingBasis;
   totalCents: number;
   currency: string;
-  /** Winning rate per parcel, aligned with the request's parcels order. */
-  perParcelCents: number[];
+  promiseMinBusinessDays: number | null;
+  promiseMaxBusinessDays: number | null;
+  ratedMeasure: number;
+  maxShipmentWeightGrams: number | null;
 }
 
 export interface RateQuoteResult {
@@ -73,7 +87,7 @@ export interface RateQuoteResult {
   warnings: string[];
 }
 
-export async function quoteParcels(
+export async function quoteShipmentRates(
   request: RateQuoteRequest,
   opts: RateQuoteOptions = {},
 ): Promise<RateQuoteResult> {
@@ -91,8 +105,26 @@ export async function quoteParcels(
     warnings.push("destination state or region is required to select a rate table");
     return { rateBook: null, zone: null, quotes: [], warnings };
   }
-  if (request.parcels.length === 0) {
-    warnings.push("no parcels to rate");
+  if (request.parcels.length === 0 && !request.freight) {
+    warnings.push("no shipment measure to rate");
+    return { rateBook: null, zone: null, quotes: [], warnings };
+  }
+  if (
+    request.freight
+    && (!Number.isInteger(request.freight.palletCount) || request.freight.palletCount <= 0)
+  ) {
+    warnings.push("freight pallet count must be a positive whole number");
+    return { rateBook: null, zone: null, quotes: [], warnings };
+  }
+  if (
+    request.freight?.totalWeightGrams !== null
+    && request.freight?.totalWeightGrams !== undefined
+    && (
+      !Number.isFinite(request.freight.totalWeightGrams)
+      || request.freight.totalWeightGrams < 0
+    )
+  ) {
+    warnings.push("freight total weight must be zero or greater");
     return { rateBook: null, zone: null, quotes: [], warnings };
   }
 
@@ -117,8 +149,8 @@ export async function quoteParcels(
     code: selection.assignment.rateBookCode,
   };
 
-  // Zones remain useful for transit estimates and quote observability, but
-  // shared pricing no longer depends on them.
+  // Zones remain useful for transit observability and later carrier-method
+  // enforcement, but customer charge selection no longer depends on them.
   const zone = await resolveZoneForOrigin(
     selection.assignment.zoneSetId,
     request.originWarehouseId,
@@ -133,15 +165,45 @@ export async function quoteParcels(
     destRegion,
     quotedAt,
   );
-  const quotes = rateAllParcels(request, destCountry, destRegion, destPostal, candidateRows, warnings);
+  const parcelWeightGrams = request.parcels.reduce(
+    (sum, parcel) => sum + Math.max(0, parcel.billableWeightGrams),
+    0,
+  );
+  const shipmentWeightGrams = request.freight?.totalWeightGrams ?? parcelWeightGrams;
+  const quotes = selectServiceLevelRates(candidateRows, {
+    destinationCountry: destCountry,
+    destinationRegion: destRegion,
+    destinationPostal: destPostal,
+    shipmentWeightGrams,
+    palletCount: request.freight?.palletCount ?? null,
+    originWarehouseId: request.originWarehouseId,
+  }).map((quote) => ({
+    serviceLevelId: quote.serviceLevelId,
+    serviceLevelCode: quote.serviceLevelCode,
+    displayName: quote.displayName,
+    description: quote.description,
+    fulfillmentMode: quote.fulfillmentMode,
+    pricingBasis: quote.pricingBasis,
+    totalCents: quote.rateCents,
+    currency: quote.currency.toUpperCase(),
+    promiseMinBusinessDays: quote.promiseMinBusinessDays,
+    promiseMaxBusinessDays: quote.promiseMaxBusinessDays,
+    ratedMeasure: quote.ratedMeasure,
+    maxShipmentWeightGrams: quote.maxShipmentWeightGrams,
+  }));
+
+  if (!request.freight && candidateRows.some((row) => row.pricingBasis === "pallet_count")) {
+    warnings.push("pallet freight was not quoted because pallet count was not provided");
+  }
+  if (quotes.length === 0) {
+    warnings.push(
+      `no active service-level rate covers ${destCountry} ${destRegion} ${destPostal}`,
+    );
+  }
 
   await maybePersistSnapshot({ request, destCountry, destPostal, rateBook, zone, quotes, quotedAt, warnings, opts });
   return { rateBook, zone, quotes, warnings };
 }
-
-// ---------------------------------------------------------------------------
-// Orchestration steps
-// ---------------------------------------------------------------------------
 
 async function resolveZoneForOrigin(
   zoneSetId: number,
@@ -176,25 +238,35 @@ async function loadCandidateRows(
   destinationRegion: string,
   quotedAt: Date,
 ): Promise<RateCandidateRow[]> {
-  return db
+  const rows = await db
     .select({
       rateTableId: shippingRateTableRows.rateTableId,
-      carrier: shippingRateTables.carrier,
-      serviceCode: shippingRateTables.serviceCode,
+      serviceLevelId: shippingServiceLevels.id,
+      serviceLevelCode: shippingServiceLevels.code,
+      displayName: shippingServiceLevels.displayName,
+      description: shippingServiceLevels.description,
+      fulfillmentMode: shippingServiceLevels.fulfillmentMode,
+      pricingBasis: shippingRateTables.pricingBasis,
+      sortOrder: shippingServiceLevels.sortOrder,
+      promiseMinBusinessDays: shippingServiceLevels.promiseMinBusinessDays,
+      promiseMaxBusinessDays: shippingServiceLevels.promiseMaxBusinessDays,
       currency: shippingRateTables.currency,
       originWarehouseId: shippingRateTableRows.originWarehouseId,
       destinationCountry: shippingRateTableRows.destinationCountry,
       destinationRegion: shippingRateTableRows.destinationRegion,
       postalPrefix: shippingRateTableRows.postalPrefix,
-      minWeightGrams: shippingRateTableRows.minWeightGrams,
-      maxWeightGrams: shippingRateTableRows.maxWeightGrams,
+      minMeasure: shippingRateTableRows.minMeasure,
+      maxMeasure: shippingRateTableRows.maxMeasure,
+      maxShipmentWeightGrams: shippingRateTableRows.maxShipmentWeightGrams,
       rateCents: shippingRateTableRows.rateCents,
     })
     .from(shippingRateTableRows)
     .innerJoin(shippingRateTables, eq(shippingRateTableRows.rateTableId, shippingRateTables.id))
+    .innerJoin(shippingServiceLevels, eq(shippingRateTables.serviceLevelId, shippingServiceLevels.id))
     .where(and(
       eq(shippingRateTables.rateBookId, rateBookId),
       eq(shippingRateTables.status, "active"),
+      eq(shippingServiceLevels.isActive, true),
       lte(shippingRateTables.effectiveFrom, quotedAt),
       or(isNull(shippingRateTables.effectiveTo), gt(shippingRateTables.effectiveTo, quotedAt)),
       eq(shippingRateTableRows.destinationCountry, destinationCountry),
@@ -203,99 +275,14 @@ async function loadCandidateRows(
         isNull(shippingRateTableRows.originWarehouseId),
         eq(shippingRateTableRows.originWarehouseId, originWarehouseId),
       ),
-    ));
+    ))
+    .orderBy(asc(shippingServiceLevels.sortOrder), asc(shippingServiceLevels.code));
+  return rows.map((row) => ({
+    ...row,
+    fulfillmentMode: row.fulfillmentMode as ShippingFulfillmentMode,
+    pricingBasis: row.pricingBasis as ShippingPricingBasis,
+  }));
 }
-
-/**
- * Rate each parcel with the pure selector, then intersect: only combos that
- * priced EVERY parcel survive; everything else drops with a warning.
- */
-function rateAllParcels(
-  request: RateQuoteRequest,
-  destinationCountry: string,
-  destinationRegion: string,
-  destinationPostal: string,
-  candidateRows: RateCandidateRow[],
-  warnings: string[],
-): RateQuoteLine[] {
-  const perParcel: Array<Map<string, SelectedRateQuote>> = [];
-  const representative = new Map<string, SelectedRateQuote>();
-
-  request.parcels.forEach((parcel, index) => {
-    const selected = selectParcelRates(candidateRows, {
-      destinationCountry,
-      destinationRegion,
-      destinationPostal,
-      billableWeightGrams: parcel.billableWeightGrams,
-      originWarehouseId: request.originWarehouseId,
-    });
-    if (selected === null) {
-      warnings.push(
-        `parcel ${index + 1} (${parcel.billableWeightGrams}g): no rate band covers ${destinationCountry} ${destinationRegion} ${destinationPostal}`,
-      );
-      perParcel.push(new Map());
-      return;
-    }
-    const byCombo = new Map<string, SelectedRateQuote>();
-    for (const quote of selected) {
-      const key = rateComboKey(quote.carrier, quote.serviceCode);
-      byCombo.set(key, quote);
-      if (!representative.has(key)) representative.set(key, quote);
-    }
-    perParcel.push(byCombo);
-  });
-
-  const lines: RateQuoteLine[] = [];
-  for (const [key, sample] of representative) {
-    const perParcelCents: number[] = [];
-    const missingParcels: number[] = [];
-    const currencies = new Set<string>();
-
-    perParcel.forEach((byCombo, index) => {
-      const quote = byCombo.get(key);
-      if (!quote) {
-        // Fully unmatched parcels already warned above; only call out gaps
-        // in parcels that DID price other services.
-        if (byCombo.size > 0) missingParcels.push(index + 1);
-        return;
-      }
-      perParcelCents.push(quote.rateCents);
-      currencies.add(quote.currency.toUpperCase());
-    });
-
-    if (perParcelCents.length !== perParcel.length) {
-      if (missingParcels.length > 0) {
-        warnings.push(
-          `${sample.carrier} ${sample.serviceCode} dropped: no matching band for parcel(s) ${missingParcels.join(", ")}`,
-        );
-      }
-      continue;
-    }
-    if (currencies.size > 1) {
-      warnings.push(
-        `${sample.carrier} ${sample.serviceCode} dropped: mixed currencies across parcels (${[...currencies].join(", ")})`,
-      );
-      continue;
-    }
-
-    lines.push({
-      carrier: sample.carrier,
-      serviceCode: sample.serviceCode,
-      totalCents: perParcelCents.reduce((sum, cents) => sum + cents, 0),
-      currency: [...currencies][0] ?? sample.currency.toUpperCase(),
-      perParcelCents,
-    });
-  }
-
-  return lines.sort((a, b) =>
-    a.totalCents - b.totalCents
-    || a.carrier.localeCompare(b.carrier)
-    || a.serviceCode.localeCompare(b.serviceCode));
-}
-
-// ---------------------------------------------------------------------------
-// Optional snapshot persistence (calibration/observability dataset)
-// ---------------------------------------------------------------------------
 
 async function maybePersistSnapshot(input: {
   request: RateQuoteRequest;
@@ -317,6 +304,7 @@ async function maybePersistSnapshot(input: {
     destRegion: input.request.destRegion?.trim().toUpperCase() || null,
     destPostal: input.destPostal,
     parcels: input.request.parcels.map((p) => ({ billableWeightGrams: p.billableWeightGrams })),
+    freight: input.request.freight ?? null,
   };
 
   try {
@@ -339,7 +327,6 @@ async function maybePersistSnapshot(input: {
       },
     });
   } catch (error) {
-    // The snapshot is observability, not the quote — degrade loudly, not fatally.
     input.warnings.push(
       `quote snapshot persist failed: ${error instanceof Error ? error.message : String(error)}`,
     );

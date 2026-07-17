@@ -1,6 +1,10 @@
 # Cardshellz Shipping Engine — Design v1 (2026-07-02)
 
-Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedited/…), the engine finds the **cheapest carrier+method** satisfying the promise, and the WMS hands the pack station an **optimized box/split plan**. Replaces Parcelify.
+Mini-Amazon shipping engine: checkout sells Card Shellz-owned **service levels** (Standard/Priority/Overnight/Pallet Freight), independently assigned rate books set the customer or vendor charge, and the WMS can later choose an eligible carrier method and optimized pack plan. Replaces Parcelify.
+
+> **UX design brief:** [SHIPPING-RATE-MANAGEMENT-UX-DESIGN-SPEC.md](./SHIPPING-RATE-MANAGEMENT-UX-DESIGN-SPEC.md) defines the target administrator experience for pricing programs, destination groups, parcel bands, pallet bands, revisions, validation, and activation. The current shipping-settings UI is an engineering scaffold, not the target visual design.
+
+> **Service-level pricing decision — 2026-07-16:** checkout pricing is never keyed to a provider-owned carrier or service code. `shipping.rate_tables` belongs to an internal service level and declares either `shipment_weight` or `pallet_count` pricing. Parcel rates use total shipment weight once. Pallet Freight uses pallet-count bands with an optional total-weight ceiling. The freight quote contract also reserves freight class and accessorial inputs for later live freight providers. Carrier-method mappings remain a separate fulfillment concern and cannot change the checkout option the customer bought.
 
 > **Implementation update — 2026-07-13:** standalone cartonizer v3.1 now performs real non-overlapping 3D placement with six rotations and emits unit coordinates/orientations. Dropship and WMS test adapters can use the same core. WMS enforcement is intentionally deferred: plans can be generated explicitly, and an opt-in shadow mode can observe packing handoffs without blocking or changing order status. The earlier volume-only/sorted-dimension cartonizer description below is superseded where noted.
 
@@ -46,7 +50,7 @@ Mini-Amazon shipping engine: checkout sells **service levels** (Standard/Expedit
 QUOTE PLANE (checkout, member-agnostic, <1s)
 Shopify checkout ──► CarrierService callback (Echelon, new)
   every cart line ──► Echelon weight (Shopify fallback) ─► one shipment ─► Rates (local tables)
-             ─► ETA (cutoff + transit table) ─► service-level offers (Standard/Expedited/Express + dates)
+             ─► ETA (cutoff + service promise) ─► service-level offers (Standard/Priority/Overnight + dates)
   member benefits: shipping-discount Function (club app — LIVE) discounts per plan on top
 
 OPTIONAL FULFILLMENT PLANE (pack station, exact; separately approved)
@@ -71,10 +75,10 @@ Storage is `shipping.rate_books` plus deterministic `shipping.rate_book_assignme
 3. **Cartonizer v3.1** `cartonize(items, boxes) → candidatePackings[]` — optional standalone pure-domain engine with multi-SKU packing, physical units for every ordered quantity, all six orthogonal rotations, non-overlap and box-boundary enforcement, per-unit placement output, own-container passthrough, fill-factor clearance, and geometry/weight-driven multi-carton splits. Every ordinary carton is capped at 22,679 g (under 50 lb); a box may set a lower structural maximum. It is not part of the initial Shopify quote path and cannot gate WMS status. Verified unit placements persist on `shipping.pack_plan_parcels` (migration 135).
    **DECIDED 2026-07-02 (user confirmed): co-mingling = RIDER/VOID model, not group×group rules.** Shipping groups stay the default partition (storage boxes ship flat, separately). Rider consolidation now defaults off because cubic void alone cannot prove physical placement. Re-enable it only after void regions have real dimensions and can use the same non-overlap checks. Policy/physics separation remains: free-shipping thresholds key on shipping-group spend; rates key on parcels.
 4. **Split Planner** `plan(order) → shipments[]` — deferred until cartonization/multi-origin work. The initial quote path deliberately treats the cart as one weight-based shipment.
-5. **Rates Engine** `quote(shipment, destination, rateContext) → quotes[]` — a rate-book resolver selects independently priced local tables from `shipping.*`; the same deterministic zone, weight-band, effective-date, and cheapest-wins core serves Shopify retail and dropship vendor fulfillment. The rate-provider port retains full parcel fields so live/dimensional providers can be added later without changing channel adapters.
+5. **Rates Engine** `quote(shipment, destination, rateContext) → quotes[]` — a rate-book resolver selects independently priced local tables from `shipping.*`. Each table prices one internal service level by either total shipment weight or pallet count. Shopify retail and dropship vendor fulfillment share selection and audit behavior while using separately assigned books. `FreightRatingContext` carries pallet count, optional total weight, freight class, and reserved accessorials so a later live freight provider does not require a channel-contract rewrite.
 6. **Carrier Adapters** — rating port is separate from the C9 fulfillment port. The local table provider is first. ShipStation API v2/direct-carrier providers remain offline calibration or later special-destination implementations; they do not block the initial Shopify launch.
-7. **Service Levels** `shipping.service_levels` — e.g. Standard (3–7d), Expedited (2–3d), Express (1–2d); each maps to eligible carrier services + transit windows per zone. Checkout offers levels; fulfillment re-solves cheapest carrier meeting the promised date (Amazon decoupling).
-8. **ETA** — ship date (existing cutoff/SLA) + `shipping.transit_matrix` (zone × service → business days, seeded from carrier standards, corrected by actuals) → `min/max_delivery_date` on every rate (checkout shows dates for the first time).
+7. **Service Levels** `shipping.service_levels` — internal offers with a fulfillment mode and optional business-day promise: Standard, Priority, Overnight, and Pallet Freight. A rate table determines what the option costs. Future fulfillment mappings determine which carrier methods may satisfy it.
+8. **ETA** — ship date (existing cutoff/SLA) + the service level's promised business-day range → `min/max_delivery_date`. Carrier transit observations can later validate or tighten fulfillment choices without becoming the checkout pricing key.
 9. **Membership Policy** (club app — mostly DONE) — extend BenefitKind with `express_discount` / per-group express pricing; project into the compact metafield; Function discounts express/standard per plan. Base = full price for guests.
 10. **Packer Execution** — v1: "BOX: 12X10X4 ×2" via ShipStation customField (zero UI, days to ship). v2: Echelon Packing page consuming the persisted ship plan, confirming actual box/weight into outbound_shipment_items → closes the calibration loop.
 
@@ -84,7 +88,7 @@ Storage is `shipping.rate_books` plus deterministic `shipping.rate_book_assignme
 - **P1 — Shopify weight audit + shadow comparison:** improve active-variant weight coverage, validate local tables and mappings, replay representative carts through the same runtime service, quantify intentional undercharges from missing weights, and compare against Parcelify. Missing weight is an accuracy issue, not a checkout gate.
 - **P2 — Checkout cutover (Standard only):** register CarrierService (club-app token → Echelon URL); serve Standard with ETA dates alongside Parcelify; verify member Function discounts; soak, roll back cleanly if needed, then decommission Parcelify.
 - **P3 — Channel expansion:** import dropship's distinct vendor rates into a dropship-assigned `shipping.*` book, dual-run old/new providers, then switch only after parity; add the first-party authenticated quote API and Shellz Club benefit-policy adapter; retain eBay fulfillment-policy selection in its adapter.
-- **P4 — Service levels and providers:** Expedited/Express, live/direct carrier providers where they add value, and multi-origin routing when required.
+- **P4 — Service levels and providers:** Priority/Overnight/Pallet Freight, live/direct carrier and freight providers where they add value, fulfillment-method enforcement, and multi-origin routing when required.
 - **P5 — Optional cartonization:** dimensions/box capture, explicit plan tests, non-blocking shadow, pack-station actuals, calibration, and only then a separately approved enforcement proposal.
 
 ## Walkthrough decisions from 2026-07-02
