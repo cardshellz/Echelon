@@ -42,6 +42,7 @@ import {
   ArrowUpDown,
   PackageCheck,
   TrendingUp,
+  Route as RouteIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -171,6 +172,7 @@ const navStructure: NavEntry[] = [
     children: [
       { label: "Shipments", icon: Truck, href: "/outbound-shipments" },
       { label: "Shipping Groups", icon: Layers, href: "/shipping-groups" },
+      { label: "Service Levels", icon: RouteIcon, href: "/shipping-service-levels", roles: ["admin"] },
       { label: "Settings", icon: Package, href: "/shipping-settings", roles: ["admin"] },
     ],
   },

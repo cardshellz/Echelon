@@ -1,11 +1,12 @@
 /**
- * Shared shipping rate-table CSV parsing and draft validation.
+ * Shared service-level rate-table CSV parsing and draft validation.
  *
- * Operators price US destinations directly by state/territory, with an
- * optional ZIP prefix override. Internal shipping zones are deliberately not
- * part of this contract.
+ * Operators price US destinations directly by state/territory, with optional
+ * ZIP-prefix overrides. Parcel tables use shipment weight; freight tables use
+ * pallet count with an optional total-shipment weight ceiling.
  */
 
+import type { ShippingPricingBasis } from "./rate-selection";
 import { normalizeUsPostalRegion } from "./us-geography";
 
 export const GRAMS_PER_POUND = 453.59237;
@@ -20,8 +21,12 @@ export interface RateTableImportRow {
   destinationCountry: string;
   destinationRegion: string;
   postalPrefix: string | null;
-  minWeightGrams: number;
-  maxWeightGrams: number;
+  /** Grams for shipment_weight; pallet quantity for pallet_count. */
+  minMeasure: number;
+  /** Grams for shipment_weight; pallet quantity for pallet_count. */
+  maxMeasure: number;
+  /** Optional freight eligibility ceiling. */
+  maxShipmentWeightGrams: number | null;
   rateCents: number;
 }
 
@@ -31,22 +36,25 @@ export interface CsvRowError {
   message: string;
 }
 
-export type RateCsvDialect = "pounds" | "grams";
+export type RateCsvDialect = "pounds" | "grams" | "pallets";
 
 export interface ParseRateCsvResult {
   dialect: RateCsvDialect | null;
   pricingMode: RatePricingMode | null;
+  pricingBasis: ShippingPricingBasis | null;
   rows: RateTableImportRow[];
   errors: CsvRowError[];
 }
 
 interface HeaderLayout {
   dialect: RateCsvDialect;
+  pricingBasis: ShippingPricingBasis;
   stateIdx: number;
   postalPrefixIdx: number;
   minIdx: number;
   maxIdx: number;
   rateIdx: number;
+  maxShipmentWeightIdx: number;
 }
 
 function splitCsvLine(line: string): string[] {
@@ -62,11 +70,40 @@ function detectHeader(cells: string[]): HeaderLayout | null {
   const postalPrefixIdx = idx("zip_prefix");
   const pounds = { minIdx: idx("min_lb"), maxIdx: idx("max_lb"), rateIdx: idx("rate_usd") };
   if (pounds.minIdx !== -1 && pounds.maxIdx !== -1 && pounds.rateIdx !== -1) {
-    return { dialect: "pounds", stateIdx, postalPrefixIdx, ...pounds };
+    return {
+      dialect: "pounds",
+      pricingBasis: "shipment_weight",
+      stateIdx,
+      postalPrefixIdx,
+      maxShipmentWeightIdx: -1,
+      ...pounds,
+    };
   }
   const grams = { minIdx: idx("min_g"), maxIdx: idx("max_g"), rateIdx: idx("rate_cents") };
   if (grams.minIdx !== -1 && grams.maxIdx !== -1 && grams.rateIdx !== -1) {
-    return { dialect: "grams", stateIdx, postalPrefixIdx, ...grams };
+    return {
+      dialect: "grams",
+      pricingBasis: "shipment_weight",
+      stateIdx,
+      postalPrefixIdx,
+      maxShipmentWeightIdx: -1,
+      ...grams,
+    };
+  }
+  const pallets = {
+    minIdx: idx("min_pallets"),
+    maxIdx: idx("max_pallets"),
+    rateIdx: idx("rate_usd"),
+    maxShipmentWeightIdx: idx("max_total_lb"),
+  };
+  if (pallets.minIdx !== -1 && pallets.maxIdx !== -1 && pallets.rateIdx !== -1) {
+    return {
+      dialect: "pallets",
+      pricingBasis: "pallet_count",
+      stateIdx,
+      postalPrefixIdx,
+      ...pallets,
+    };
   }
   return null;
 }
@@ -100,10 +137,10 @@ export function parseRateTableCsv(
         errors.push({
           line: lineNo,
           message:
-            "unrecognized header - expected state,zip_prefix,min_lb,max_lb,rate_usd or " +
-            "state,zip_prefix,min_g,max_g,rate_cents (zip_prefix is optional)",
+            "unrecognized header - expected parcel weight columns or " +
+            "state,zip_prefix,min_pallets,max_pallets,max_total_lb,rate_usd",
         });
-        return { dialect: null, pricingMode: null, rows: [], errors };
+        return emptyParseResult(errors);
       }
       continue;
     }
@@ -112,15 +149,37 @@ export function parseRateTableCsv(
     if (row !== null) rows.push(row);
     if (rows.length > maxRows) {
       errors.push({ line: lineNo, message: `too many rows - the import limit is ${maxRows}` });
-      return { dialect: layout!.dialect, pricingMode: "state_zip", rows: [], errors };
+      return {
+        dialect: layout!.dialect,
+        pricingMode: "state_zip",
+        pricingBasis: layout!.pricingBasis,
+        rows: [],
+        errors,
+      };
     }
   }
 
   if (!headerSeen) {
     errors.push({ line: 1, message: "CSV is empty - a header row is required" });
-    return { dialect: null, pricingMode: null, rows: [], errors };
+    return emptyParseResult(errors);
   }
-  return { dialect: layout!.dialect, pricingMode: "state_zip", rows, errors };
+  return {
+    dialect: layout!.dialect,
+    pricingMode: "state_zip",
+    pricingBasis: layout!.pricingBasis,
+    rows,
+    errors,
+  };
+}
+
+function emptyParseResult(errors: CsvRowError[]): ParseRateCsvResult {
+  return {
+    dialect: null,
+    pricingMode: null,
+    pricingBasis: null,
+    rows: [],
+    errors,
+  };
 }
 
 function parseDataLine(
@@ -148,28 +207,55 @@ function parseDataLine(
   const minRaw = parseFiniteNumber(cells[layout.minIdx] ?? "");
   const maxRaw = parseFiniteNumber(cells[layout.maxIdx] ?? "");
   const rateRaw = parseFiniteNumber(cells[layout.rateIdx] ?? "");
-  if (minRaw === null) return fail(`invalid min weight ${JSON.stringify(cells[layout.minIdx] ?? "")}`);
-  if (maxRaw === null) return fail(`invalid max weight ${JSON.stringify(cells[layout.maxIdx] ?? "")}`);
+  if (minRaw === null) return fail(`invalid minimum ${JSON.stringify(cells[layout.minIdx] ?? "")}`);
+  if (maxRaw === null) return fail(`invalid maximum ${JSON.stringify(cells[layout.maxIdx] ?? "")}`);
   if (rateRaw === null) return fail(`invalid rate ${JSON.stringify(cells[layout.rateIdx] ?? "")}`);
 
-  let minWeightGrams: number;
-  let maxWeightGrams: number;
+  let minMeasure: number;
+  let maxMeasure: number;
+  let maxShipmentWeightGrams: number | null = null;
   let rateCents: number;
   if (layout.dialect === "pounds") {
-    minWeightGrams = Math.round(minRaw * GRAMS_PER_POUND);
-    maxWeightGrams = Math.round(maxRaw * GRAMS_PER_POUND);
+    minMeasure = Math.round(minRaw * GRAMS_PER_POUND);
+    maxMeasure = Math.round(maxRaw * GRAMS_PER_POUND);
     rateCents = Math.round(rateRaw * CENTS_PER_USD);
-  } else {
+  } else if (layout.dialect === "grams") {
     if (!Number.isInteger(minRaw) || !Number.isInteger(maxRaw) || !Number.isInteger(rateRaw)) {
       return fail("min_g, max_g and rate_cents must be whole numbers");
     }
-    minWeightGrams = minRaw;
-    maxWeightGrams = maxRaw;
+    minMeasure = minRaw;
+    maxMeasure = maxRaw;
     rateCents = rateRaw;
+  } else {
+    if (!Number.isInteger(minRaw) || !Number.isInteger(maxRaw)) {
+      return fail("min_pallets and max_pallets must be whole numbers");
+    }
+    minMeasure = minRaw;
+    maxMeasure = maxRaw;
+    rateCents = Math.round(rateRaw * CENTS_PER_USD);
+    if (layout.maxShipmentWeightIdx !== -1) {
+      const weightRaw = parseFiniteNumber(cells[layout.maxShipmentWeightIdx] ?? "");
+      if ((cells[layout.maxShipmentWeightIdx] ?? "").trim() !== "" && weightRaw === null) {
+        return fail("max_total_lb must be blank or a positive number");
+      }
+      maxShipmentWeightGrams = weightRaw === null
+        ? null
+        : Math.round(weightRaw * GRAMS_PER_POUND);
+    }
   }
 
-  if (minWeightGrams < 0) return fail("min weight must be zero or greater");
-  if (maxWeightGrams < minWeightGrams) return fail("max weight must be >= min weight");
+  const minimumAllowed = layout.pricingBasis === "pallet_count" ? 1 : 0;
+  if (minMeasure < minimumAllowed) {
+    return fail(
+      layout.pricingBasis === "pallet_count"
+        ? "minimum pallet count must be 1 or greater"
+        : "minimum weight must be zero or greater",
+    );
+  }
+  if (maxMeasure < minMeasure) return fail("maximum must be greater than or equal to minimum");
+  if (maxShipmentWeightGrams !== null && maxShipmentWeightGrams <= 0) {
+    return fail("max_total_lb must be greater than zero");
+  }
   if (rateCents < 0) return fail("rate must be zero or greater");
 
   return {
@@ -177,8 +263,9 @@ function parseDataLine(
     destinationCountry: "US",
     destinationRegion,
     postalPrefix: prefix || null,
-    minWeightGrams,
-    maxWeightGrams,
+    minMeasure,
+    maxMeasure,
+    maxShipmentWeightGrams,
     rateCents,
   };
 }
@@ -203,16 +290,16 @@ export function findBandOverlaps(rows: readonly RateTableImportRow[]): string[] 
   const errors: string[] = [];
   for (const entries of byScope.values()) {
     const sorted = [...entries].sort(
-      (a, b) => a.row.minWeightGrams - b.row.minWeightGrams || a.row.maxWeightGrams - b.row.maxWeightGrams,
+      (a, b) => a.row.minMeasure - b.row.minMeasure || a.row.maxMeasure - b.row.maxMeasure,
     );
     for (let index = 1; index < sorted.length; index += 1) {
       const previous = sorted[index - 1];
       const current = sorted[index];
-      if (current.row.minWeightGrams <= previous.row.maxWeightGrams) {
+      if (current.row.minMeasure <= previous.row.maxMeasure) {
         errors.push(
-          `overlapping weight bands in ${pricingAreaLabel(current.row)}: ` +
-          `[${previous.row.minWeightGrams}, ${previous.row.maxWeightGrams}]g (row ${previous.index + 1}) and ` +
-          `[${current.row.minWeightGrams}, ${current.row.maxWeightGrams}]g (row ${current.index + 1})`,
+          `overlapping bands in ${pricingAreaLabel(current.row)}: ` +
+          `[${previous.row.minMeasure}, ${previous.row.maxMeasure}] (row ${previous.index + 1}) and ` +
+          `[${current.row.minMeasure}, ${current.row.maxMeasure}] (row ${current.index + 1})`,
         );
       }
     }

@@ -61,6 +61,50 @@ const originalProviderShipment = {
   }],
 };
 
+const historicalOriginalProviderShipment = {
+  ...providerShipment,
+  shipmentId: 443917507,
+  orderId: 759013579,
+  orderKey: "echelon-wms-shp-6584",
+  orderNumber: "59834",
+  trackingNumber: "9434650206217247896302",
+  shipmentItems: [
+    { sku: "SKU-A", name: "Card A", quantity: 1, lineItemKey: "wms-item-10464" },
+    { sku: "SKU-B", name: "Card B", quantity: 1, lineItemKey: "wms-item-10465" },
+  ],
+};
+
+const historicalReplacementProviderShipment = {
+  ...providerShipment,
+  shipmentId: 446350792,
+  orderId: 763886876,
+  orderKey: "echelon-wms-shp-6584",
+  orderNumber: "59834",
+  trackingNumber: "1Z16D13WYW56744134",
+  shipmentItems: [],
+};
+
+const historicalSplitContextRow = {
+  exception_id: 77,
+  wms_order_id: 204939,
+  order_number: "59834",
+  authority_shipment_id: 6584,
+  candidate_shipment_id: null,
+  external_shipment_ref: "446350792",
+  tracking_number: "1Z16D13WYW56744134",
+  authority_external_fulfillment_id: null,
+  authority_tracking_number: "9434650206217247896302",
+};
+
+const historicalSplitItemRows = [
+  { id: 10464, shipment_id: 6584, order_item_id: 312293, qty: 1 },
+  { id: 10465, shipment_id: 6584, order_item_id: 312294, qty: 1 },
+  // The original provider package was a valid partial shipment.
+  { id: 10466, shipment_id: 6584, order_item_id: 312295, qty: 1 },
+  { id: 11013, shipment_id: 7741, order_item_id: 312293, qty: 1 },
+  { id: 11014, shipment_id: 7741, order_item_id: 312294, qty: 1 },
+];
+
 const contextRow = {
   exception_id: 77,
   wms_order_id: 42,
@@ -358,6 +402,271 @@ describe("ShipStation unmapped physical remediation", () => {
       currentTrackingNumber: "1Z-EMPTY-RESHIP",
       originalTrackingNumber: "1Z-ORIGINAL-PACKAGE",
     });
+  });
+
+  it("recognizes a failed historical partial split as the original package", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [historicalSplitContextRow] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, source, external_fulfillment_id")
+          && text.includes("LIMIT 2")
+        ) {
+          return { rows: [{
+            id: 7741,
+            order_id: 204939,
+            status: "cancelled",
+            source: "shipstation_split",
+            external_fulfillment_id: "shipstation_shipment:443917507",
+            requires_review: true,
+            review_reason: "duplicate key value violates unique constraint \"uq_outbound_shipments_shipped_order_tracking\"",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, shipment_id, order_item_id, qty")
+          && text.includes("ORDER BY shipment_id, id")
+        ) {
+          return { rows: historicalSplitItemRows };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [] };
+        }
+        if (text.includes("COUNT(shipment_item.id)::int AS item_count")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const provider = shipStation({
+      getShipmentById: vi.fn(async () => historicalReplacementProviderShipment),
+      getShipments: vi.fn(async () => [
+        historicalOriginalProviderShipment,
+        historicalReplacementProviderShipment,
+      ]),
+    });
+
+    const preview = await getShipStationUnmappedPhysicalPreview(
+      db,
+      provider,
+      { exceptionId: 77 },
+    );
+
+    expect(provider.getShipmentById).toHaveBeenCalledWith(446350792);
+    expect(provider.getShipments).toHaveBeenCalledWith(
+      763886876,
+      { orderNumber: "59834" },
+    );
+    expect(preview.providerShipment).toEqual(historicalReplacementProviderShipment);
+    expect(preview.originalPackageIdentityRepair).toEqual({
+      wmsShipmentId: 6584,
+      providerShipmentId: 443917507,
+      providerOrderId: 759013579,
+      providerOrderKey: "echelon-wms-shp-6584",
+      currentTrackingNumber: "9434650206217247896302",
+      originalTrackingNumber: "9434650206217247896302",
+      historicalSplitGhostShipmentId: 7741,
+    });
+  });
+
+  it("leaves a historical split in review when copied quantities do not match", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [historicalSplitContextRow] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, source, external_fulfillment_id")
+          && text.includes("LIMIT 2")
+        ) {
+          return { rows: [{
+            id: 7741,
+            order_id: 204939,
+            status: "cancelled",
+            source: "shipstation_split",
+            external_fulfillment_id: "shipstation_shipment:443917507",
+            requires_review: true,
+            review_reason: "uq_outbound_shipments_shipped_order_tracking",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, shipment_id, order_item_id, qty")
+          && text.includes("ORDER BY shipment_id, id")
+        ) {
+          return {
+            rows: historicalSplitItemRows.map((row) => (
+              row.id === 11013 ? { ...row, qty: 2 } : row
+            )),
+          };
+        }
+        if (text.includes("FROM wms.order_items order_item")) return { rows: [] };
+        if (text.includes("COUNT(shipment_item.id)::int AS item_count")) return { rows: [] };
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    const preview = await getShipStationUnmappedPhysicalPreview(
+      db,
+      shipStation({
+        getShipmentById: vi.fn(async () => historicalReplacementProviderShipment),
+        getShipments: vi.fn(async () => [
+          historicalOriginalProviderShipment,
+          historicalReplacementProviderShipment,
+        ]),
+      }),
+      { exceptionId: 77 },
+    );
+
+    expect(preview.originalPackageIdentityRepair).toBeNull();
+  });
+
+  it("collapses the failed partial-split child before adopting the later package", async () => {
+    const calls: string[] = [];
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [historicalSplitContextRow] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, source, external_fulfillment_id")
+          && text.includes("LIMIT 2")
+        ) {
+          return { rows: [{
+            id: 7741,
+            order_id: 204939,
+            status: "cancelled",
+            source: "shipstation_split",
+            external_fulfillment_id: "shipstation_shipment:443917507",
+            requires_review: true,
+            review_reason: "duplicate key value violates unique constraint \"uq_outbound_shipments_shipped_order_tracking\"",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, source, external_fulfillment_id")
+          && text.includes("WHERE id")
+          && text.includes("FOR UPDATE")
+        ) {
+          return { rows: [{
+            id: 7741,
+            order_id: 204939,
+            status: "cancelled",
+            source: "shipstation_split",
+            external_fulfillment_id: "shipstation_shipment:443917507",
+            requires_review: true,
+            review_reason: "duplicate key value violates unique constraint \"uq_outbound_shipments_shipped_order_tracking\"",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, shipment_id, order_item_id, qty")
+          && text.includes("ORDER BY shipment_id, id")
+        ) {
+          return { rows: historicalSplitItemRows };
+        }
+        if (text.includes("JOIN LATERAL")) {
+          return { rows: [{
+            order_item_id: 312293,
+            sku: "SKU-A",
+            product_variant_id: 201,
+            from_location_id: 301,
+            source_quantity: 1,
+          }] };
+        }
+        if (text.includes("FROM wms.order_items order_item")) {
+          return { rows: [{
+            id: 312293,
+            sku: "SKU-A",
+            name: "Card A",
+            quantity: 1,
+            fulfilled_quantity: 1,
+            customer_shipped_quantity: 1,
+          }] };
+        }
+        if (
+          text.includes("FROM wms.reconciliation_exceptions")
+          && text.includes("FOR UPDATE")
+        ) {
+          return { rows: [{ id: 77 }] };
+        }
+        if (
+          text.includes("SELECT id, status, order_id")
+          && text.includes("FROM wms.outbound_shipments")
+        ) {
+          return { rows: [{
+            id: 6584,
+            status: "shipped",
+            order_id: 204939,
+            shipment_purpose: "customer_fulfillment",
+            has_customer_items: true,
+            external_fulfillment_id: null,
+            tracking_number: "9434650206217247896302",
+            shipstation_order_id: 759013579,
+            shipstation_order_key: "echelon-wms-shp-6584",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, order_id, status, source, shipment_purpose")
+          && text.includes("external_fulfillment_id")
+        ) {
+          return { rows: [] };
+        }
+        if (text.includes("INSERT INTO wms.outbound_shipments")) {
+          return { rows: [{
+            id: 8000,
+            order_id: 204939,
+            status: "queued",
+            source: "shipstation_reship_adopted",
+            shipment_purpose: "replacement",
+          }] };
+        }
+        if (
+          text.includes("SELECT id, order_item_id, replacement_for_order_item_id")
+          && text.includes("FROM wms.outbound_shipment_items")
+        ) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+    const service = shipStation({
+      getShipmentById: vi.fn(async () => historicalReplacementProviderShipment),
+      getShipments: vi.fn(async () => [
+        historicalOriginalProviderShipment,
+        historicalReplacementProviderShipment,
+      ]),
+    });
+
+    const result = await adoptShipStationUnmappedPhysicalAsReship(db, service, {
+      exceptionId: 77,
+      operator: "ops:test",
+      originalShipmentId: 6584,
+      reason: "carrier_replacement",
+      lineMappings: [{
+        evidenceSource: "original_wms",
+        orderItemId: 312293,
+        quantity: 1,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      changed: true,
+      exceptionId: 77,
+      candidateShipmentId: 8000,
+      originalPackageIdentityRepaired: true,
+    });
+    expect(service.processShipmentNotification).toHaveBeenCalledWith(
+      historicalReplacementProviderShipment,
+    );
+    const allSql = calls.join("\n");
+    expect(allSql).toContain("shipstation_split_ghost_collapsed");
+    expect(allSql).toContain("external_fulfillment_id = NULL");
+    expect(allSql).toContain("shipstation_shipment:443917507");
+    expect(allSql).toContain("shipstation_original_identity_restored");
   });
 
   it("adopts a classified reship with replacement lineage and no direct fulfillment link", async () => {

@@ -8,6 +8,7 @@ import {
   shippingRateBooks,
   shippingRateTableRows,
   shippingRateTables,
+  shippingServiceLevels,
   shippingZoneSets,
   warehouses,
 } from "@shared/schema";
@@ -28,32 +29,71 @@ import {
 } from "../../domain/rate-table-lifecycle";
 import { normalizeUsPostalRegion } from "../../domain/us-geography";
 
+const INITIAL_RATE_TABLE_SERVICE_LEVEL_CODE = "standard";
+
 const rateRowSchema = z.object({
   originWarehouseId: z.number().int().positive().nullable().optional(),
   destinationCountry: z.string().trim().length(2).default("US"),
   destinationRegion: z.string().trim().length(2),
   postalPrefix: z.string().trim().regex(/^\d{1,5}$/).nullable().optional(),
-  minWeightGrams: z.number().int().min(0),
-  maxWeightGrams: z.number().int().min(0),
+  minMeasure: z.number().int().min(0),
+  maxMeasure: z.number().int().min(0),
+  maxShipmentWeightGrams: z.number().int().positive().nullable().optional(),
   rateCents: z.number().int().min(0),
 }).superRefine((row, context) => {
-  if (row.maxWeightGrams < row.minWeightGrams) {
+  if (row.maxMeasure < row.minMeasure) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ["maxWeightGrams"],
-      message: "Maximum weight must be greater than or equal to minimum weight.",
+      path: ["maxMeasure"],
+      message: "Maximum must be greater than or equal to minimum.",
     });
   }
+});
+
+// Editor-owned presentation state persisted with a draft so the visual
+// destination groups (names, membership, raw band inputs — including cells
+// the operator has not finished typing) survive save/reopen exactly. The
+// server never interprets this beyond bounding its size; expanded rate rows
+// remain the single pricing source of truth.
+const draftLayoutSchema = z.object({
+  version: z.literal(1),
+  groups: z.array(z.object({
+    name: z.string().trim().max(120),
+    originWarehouseId: z.number().int().positive().nullable(),
+    regions: z.array(z.string().trim().length(2)).max(60),
+    zipEntries: z.array(z.object({
+      state: z.string().trim().length(2),
+      prefixes: z.array(z.string().regex(/^\d{1,5}$/)).max(500),
+    })).max(200),
+    bands: z.array(z.object({
+      maxMeasure: z.string().max(20),
+      rateUsd: z.string().max(20),
+      maxShipmentWeightLb: z.string().max(20),
+    })).max(100),
+  })).max(100),
 });
 
 const importSchema = z.object({
   pricingMode: z.literal("state_zip").default("state_zip"),
   rateBookCode: z.string().trim().min(1).max(80).default("shopify-retail-default"),
-  carrier: z.string().trim().min(1).max(50),
-  serviceCode: z.string().trim().min(1).max(80),
+  serviceLevelCode: z.string().trim().min(1).max(40),
+  pricingBasis: z.enum(["shipment_weight", "pallet_count"]),
   currency: z.string().trim().length(3).default("USD"),
   effectiveFrom: z.coerce.date().optional(),
-  rows: z.array(rateRowSchema).min(1).max(MAX_IMPORT_ROWS),
+  rows: z.array(rateRowSchema).max(MAX_IMPORT_ROWS),
+  // Draft-first editing (UX spec): an in-progress draft may be saved with
+  // aggregate validation failures — even zero finished rows — while
+  // activation stays strictly gated on a clean analysis.
+  allowIncomplete: z.boolean().default(false),
+  draftLayout: draftLayoutSchema.nullish(),
+}).superRefine((input, context) => {
+  if (!input.allowIncomplete && input.rows.length === 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["rows"],
+      message: "At least one rate row is required.",
+    });
+  }
 });
 
 const parseCsvSchema = z.object({ csv: z.string().min(1).max(2_000_000) });
@@ -71,7 +111,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "view"),
     async (_req, res) => {
       try {
-        const [tables, coverage, books, assignments] = await Promise.all([
+        const [tables, coverage, books, assignments, serviceLevels] = await Promise.all([
           db.select().from(shippingRateTables)
             .orderBy(desc(shippingRateTables.effectiveFrom), desc(shippingRateTables.id)),
           db.select({
@@ -79,8 +119,8 @@ export function registerRateTableAdminRoutes(app: Express): void {
             rowCount: sql<number>`count(*)::int`,
             stateCount: sql<number>`count(distinct case when ${shippingRateTableRows.postalPrefix} is null then ${shippingRateTableRows.destinationRegion} end)::int`,
             zipOverrideCount: sql<number>`count(*) filter (where ${shippingRateTableRows.postalPrefix} is not null)::int`,
-            minWeightGrams: sql<number>`min(${shippingRateTableRows.minWeightGrams})::int`,
-            maxWeightGrams: sql<number>`max(${shippingRateTableRows.maxWeightGrams})::int`,
+            minMeasure: sql<number>`min(${shippingRateTableRows.minMeasure})::int`,
+            maxMeasure: sql<number>`max(${shippingRateTableRows.maxMeasure})::int`,
           })
             .from(shippingRateTableRows)
             .groupBy(shippingRateTableRows.rateTableId),
@@ -104,6 +144,8 @@ export function registerRateTableAdminRoutes(app: Express): void {
             .from(shippingRateBookAssignments)
             .leftJoin(warehouses, eq(shippingRateBookAssignments.originWarehouseId, warehouses.id))
             .orderBy(asc(shippingRateBookAssignments.pricingChannel), asc(shippingRateBookAssignments.ratePurpose)),
+          db.select().from(shippingServiceLevels)
+            .orderBy(asc(shippingServiceLevels.sortOrder), asc(shippingServiceLevels.id)),
         ]);
 
         const assignmentsByBook = groupBy(assignments, (assignment) => assignment.rateBookId);
@@ -113,17 +155,20 @@ export function registerRateTableAdminRoutes(app: Express): void {
           assignments: assignmentsByBook.get(book.id) ?? [],
         }));
         const bookById = new Map(hydratedBooks.map((book) => [book.id, book]));
+        const serviceLevelById = new Map(serviceLevels.map((level) => [level.id, level]));
 
         return res.json({
           rateBooks: hydratedBooks,
+          serviceLevels,
           rateTables: tables.map((table) => ({
             ...table,
-            rateBook: table.rateBookId ? bookById.get(table.rateBookId) ?? null : null,
+            rateBook: bookById.get(table.rateBookId) ?? null,
+            serviceLevel: serviceLevelById.get(table.serviceLevelId) ?? null,
             rowCount: coverageByTable.get(table.id)?.rowCount ?? 0,
             stateCount: coverageByTable.get(table.id)?.stateCount ?? 0,
             zipOverrideCount: coverageByTable.get(table.id)?.zipOverrideCount ?? 0,
-            minWeightGrams: coverageByTable.get(table.id)?.minWeightGrams ?? null,
-            maxWeightGrams: coverageByTable.get(table.id)?.maxWeightGrams ?? null,
+            minMeasure: coverageByTable.get(table.id)?.minMeasure ?? null,
+            maxMeasure: coverageByTable.get(table.id)?.maxMeasure ?? null,
           })),
         });
       } catch (error) {
@@ -166,7 +211,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
   );
 
   app.post(
-    "/api/shipping/admin/rate-tables/import",
+    ["/api/shipping/admin/rate-tables/drafts", "/api/shipping/admin/rate-tables/import"],
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
@@ -177,17 +222,22 @@ export function registerRateTableAdminRoutes(app: Express): void {
         const rateTable = await db.transaction(async (tx) => {
           const [table] = await tx.insert(shippingRateTables).values({
             rateBookId: prepared.rateBook.id,
-            carrier: prepared.carrier,
-            serviceCode: prepared.serviceCode,
+            serviceLevelId: prepared.serviceLevel.id,
+            pricingBasis: prepared.pricingBasis,
             currency: prepared.currency,
             status: "draft",
             effectiveFrom: prepared.effectiveFrom ?? now,
-            metadata: importMetadata(prepared.rows.length, now),
+            metadata: importMetadata(prepared.rows.length, now, prepared.draftLayout),
           }).returning();
           await insertRateRows(tx, table.id, prepared.rows);
           return table;
         });
-        return res.status(201).json({ rateTable, rowCount: prepared.rows.length, warnings: [] });
+        return res.status(201).json({
+          rateTable,
+          rowCount: prepared.rows.length,
+          warnings: prepared.analysis.warnings,
+          analysis: prepared.analysis,
+        });
       } catch (error) {
         return sendRateTableAdminError(res, error, "import rate table draft");
       }
@@ -208,12 +258,12 @@ export function registerRateTableAdminRoutes(app: Express): void {
           const [updated] = await tx.update(shippingRateTables)
             .set({
               rateBookId: prepared.rateBook.id,
-              carrier: prepared.carrier,
-              serviceCode: prepared.serviceCode,
+              serviceLevelId: prepared.serviceLevel.id,
+              pricingBasis: prepared.pricingBasis,
               currency: prepared.currency,
               effectiveFrom: prepared.effectiveFrom ?? now,
               effectiveTo: null,
-              metadata: importMetadata(prepared.rows.length, now),
+              metadata: importMetadata(prepared.rows.length, now, prepared.draftLayout),
             })
             .where(and(eq(shippingRateTables.id, id), eq(shippingRateTables.status, "draft")))
             .returning();
@@ -222,7 +272,12 @@ export function registerRateTableAdminRoutes(app: Express): void {
           await insertRateRows(tx, id, prepared.rows);
           return updated;
         });
-        return res.json({ rateTable, rowCount: prepared.rows.length, warnings: [] });
+        return res.json({
+          rateTable,
+          rowCount: prepared.rows.length,
+          warnings: prepared.analysis.warnings,
+          analysis: prepared.analysis,
+        });
       } catch (error) {
         return sendRateTableAdminError(res, error, "replace rate table draft");
       }
@@ -240,7 +295,8 @@ export function registerRateTableAdminRoutes(app: Express): void {
         const row = normalizeRateRow(parsed.data);
         await validateWarehouseIds(db, [row]);
         const [created] = await db.transaction(async (tx) => {
-          await assertDraftTable(tx, id);
+          const table = await assertDraftTable(tx, id);
+          validateRowForBasis(row, table.pricingBasis);
           return tx.insert(shippingRateTableRows).values({ rateTableId: id, ...row }).returning();
         });
         return res.status(201).json({ row: created });
@@ -262,7 +318,8 @@ export function registerRateTableAdminRoutes(app: Express): void {
         const row = normalizeRateRow(parsed.data);
         await validateWarehouseIds(db, [row]);
         const updated = await db.transaction(async (tx) => {
-          await assertDraftTable(tx, id);
+          const table = await assertDraftTable(tx, id);
+          validateRowForBasis(row, table.pricingBasis);
           const [result] = await tx.update(shippingRateTableRows)
             .set(row)
             .where(and(eq(shippingRateTableRows.id, rowId), eq(shippingRateTableRows.rateTableId, id)))
@@ -314,8 +371,8 @@ export function registerRateTableAdminRoutes(app: Express): void {
         const rateTable = await db.transaction(async (tx) => {
           const [draft] = await tx.insert(shippingRateTables).values({
             rateBookId: detail.rateTable.rateBookId,
-            carrier: detail.rateTable.carrier,
-            serviceCode: detail.rateTable.serviceCode,
+            serviceLevelId: detail.rateTable.serviceLevelId,
+            pricingBasis: detail.rateTable.pricingBasis,
             currency: detail.rateTable.currency,
             status: "draft",
             effectiveFrom: now,
@@ -384,8 +441,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
             .set({ status: "superseded", effectiveTo: now })
             .where(and(
               eq(shippingRateTables.rateBookId, activeRateBook.id),
-              eq(shippingRateTables.carrier, target.carrier),
-              eq(shippingRateTables.serviceCode, target.serviceCode),
+              eq(shippingRateTables.serviceLevelId, target.serviceLevelId),
               eq(shippingRateTables.status, "active"),
               ne(shippingRateTables.id, target.id),
             ));
@@ -446,19 +502,26 @@ export function registerRateTableAdminRoutes(app: Express): void {
 }
 
 async function prepareRateTableImport(input: ImportInput) {
-  const rows = normalizeImportRows(input.rows);
-  const bandErrors = findBandOverlaps(rows);
-  if (bandErrors.length > 0) {
-    throw new RateTableAdminError(400, "SHIPPING_ADMIN_RATE_BANDS_INVALID", "Weight bands overlap.", bandErrors);
-  }
-  const geographyErrors = findMissingStateDefaults(rows);
-  if (geographyErrors.length > 0) {
-    throw new RateTableAdminError(
-      400,
-      "SHIPPING_ADMIN_STATE_FALLBACK_REQUIRED",
-      "Every ZIP override requires a statewide fallback rate.",
-      geographyErrors,
-    );
+  // Row identity mirrors shipping_rate_row_band_idx; an incomplete draft may
+  // legitimately describe the same scope twice mid-edit, so collapse exact
+  // index collisions instead of failing the whole save on 23505.
+  const rows = input.allowIncomplete
+    ? dedupeRowsByBandIdentity(normalizeImportRows(input.rows))
+    : normalizeImportRows(input.rows);
+  if (!input.allowIncomplete) {
+    const bandErrors = findBandOverlaps(rows);
+    if (bandErrors.length > 0) {
+      throw new RateTableAdminError(400, "SHIPPING_ADMIN_RATE_BANDS_INVALID", "Rate bands overlap.", bandErrors);
+    }
+    const geographyErrors = findMissingStateDefaults(rows);
+    if (geographyErrors.length > 0) {
+      throw new RateTableAdminError(
+        400,
+        "SHIPPING_ADMIN_STATE_FALLBACK_REQUIRED",
+        "Every ZIP override requires a statewide fallback rate.",
+        geographyErrors,
+      );
+    }
   }
   await validateWarehouseIds(db, rows);
   const [rateBook] = await db.select({
@@ -469,14 +532,76 @@ async function prepareRateTableImport(input: ImportInput) {
   if (!rateBook || rateBook.status === "retired") {
     throw new RateTableAdminError(400, "SHIPPING_ADMIN_RATE_BOOK_INVALID", `Rate book ${input.rateBookCode} is missing or retired.`);
   }
+  const [serviceLevel] = await db.select({
+    id: shippingServiceLevels.id,
+    code: shippingServiceLevels.code,
+    fulfillmentMode: shippingServiceLevels.fulfillmentMode,
+  }).from(shippingServiceLevels)
+    .where(eq(shippingServiceLevels.code, input.serviceLevelCode))
+    .limit(1);
+  if (!serviceLevel) {
+    throw new RateTableAdminError(
+      400,
+      "SHIPPING_ADMIN_SERVICE_LEVEL_INVALID",
+      `Shipping option ${input.serviceLevelCode} is missing.`,
+    );
+  }
+  if (serviceLevel.code !== INITIAL_RATE_TABLE_SERVICE_LEVEL_CODE) {
+    throw new RateTableAdminError(
+      409,
+      "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_AVAILABLE",
+      "Only Standard Shipping rate tables are available in the initial rollout.",
+    );
+  }
+  const expectedBasis = serviceLevel.fulfillmentMode === "freight"
+    ? "pallet_count"
+    : "shipment_weight";
+  if (input.pricingBasis !== expectedBasis) {
+    throw new RateTableAdminError(
+      400,
+      "SHIPPING_ADMIN_PRICING_BASIS_INVALID",
+      `${serviceLevel.code} requires ${expectedBasis} pricing.`,
+    );
+  }
+  const analysis = analyzeRateTable(rows, input.pricingBasis);
+  if (!input.allowIncomplete && !analysis.canActivate) {
+    throw new RateTableAdminError(
+      400,
+      "SHIPPING_ADMIN_RATE_ROWS_INVALID",
+      "Resolve the rate-table validation errors.",
+      analysis.errors,
+    );
+  }
   return {
     rateBook,
+    serviceLevel,
     rows,
-    carrier: input.carrier,
-    serviceCode: input.serviceCode,
+    analysis,
+    pricingBasis: input.pricingBasis,
     currency: input.currency.toUpperCase(),
     effectiveFrom: input.effectiveFrom,
+    draftLayout: input.draftLayout ?? null,
   };
+}
+
+function dedupeRowsByBandIdentity(rows: readonly RateTableImportRow[]): RateTableImportRow[] {
+  const seen = new Set<string>();
+  const deduped: RateTableImportRow[] = [];
+  for (const row of rows) {
+    const key = [
+      row.originWarehouseId ?? 0,
+      row.destinationCountry,
+      row.destinationRegion,
+      row.postalPrefix ?? "",
+      row.minMeasure,
+      row.maxMeasure,
+      row.maxShipmentWeightGrams ?? 0,
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+  return deduped;
 }
 
 async function insertRateRows(
@@ -492,8 +617,9 @@ async function insertRateRows(
         destinationCountry: row.destinationCountry,
         destinationRegion: row.destinationRegion,
         postalPrefix: row.postalPrefix,
-        minWeightGrams: row.minWeightGrams,
-        maxWeightGrams: row.maxWeightGrams,
+        minMeasure: row.minMeasure,
+        maxMeasure: row.maxMeasure,
+        maxShipmentWeightGrams: row.maxShipmentWeightGrams,
         rateCents: row.rateCents,
       })),
     );
@@ -505,12 +631,13 @@ async function loadRateTableDetail(id: number) {
     .where(eq(shippingRateTables.id, id)).limit(1);
   if (!rateTable) return null;
 
-  const [rateBook, rows] = await Promise.all([
-    rateTable.rateBookId === null
-      ? Promise.resolve(null)
-      : db.select().from(shippingRateBooks)
-          .where(eq(shippingRateBooks.id, rateTable.rateBookId)).limit(1)
-          .then((items) => items[0] ?? null),
+  const [rateBook, serviceLevel, rows] = await Promise.all([
+    db.select().from(shippingRateBooks)
+      .where(eq(shippingRateBooks.id, rateTable.rateBookId)).limit(1)
+      .then((items) => items[0] ?? null),
+    db.select().from(shippingServiceLevels)
+      .where(eq(shippingServiceLevels.id, rateTable.serviceLevelId)).limit(1)
+      .then((items) => items[0] ?? null),
     db.select({
       id: shippingRateTableRows.id,
       originWarehouseId: shippingRateTableRows.originWarehouseId,
@@ -518,8 +645,9 @@ async function loadRateTableDetail(id: number) {
       destinationCountry: shippingRateTableRows.destinationCountry,
       destinationRegion: shippingRateTableRows.destinationRegion,
       postalPrefix: shippingRateTableRows.postalPrefix,
-      minWeightGrams: shippingRateTableRows.minWeightGrams,
-      maxWeightGrams: shippingRateTableRows.maxWeightGrams,
+      minMeasure: shippingRateTableRows.minMeasure,
+      maxMeasure: shippingRateTableRows.maxMeasure,
+      maxShipmentWeightGrams: shippingRateTableRows.maxShipmentWeightGrams,
       rateCents: shippingRateTableRows.rateCents,
     })
       .from(shippingRateTableRows)
@@ -530,7 +658,7 @@ async function loadRateTableDetail(id: number) {
         asc(shippingRateTableRows.destinationRegion),
         asc(shippingRateTableRows.postalPrefix),
         asc(shippingRateTableRows.originWarehouseId),
-        asc(shippingRateTableRows.minWeightGrams),
+        asc(shippingRateTableRows.minMeasure),
       ),
   ]);
 
@@ -558,10 +686,11 @@ async function loadRateTableDetail(id: number) {
 
   return {
     rateTable,
+    serviceLevel,
     rateBook: rateBook === null ? null : { ...rateBook, zoneSet, assignments },
     pricingMode: "state_zip" as const,
     rows,
-    analysis: analyzeRateTable(rows),
+    analysis: analyzeRateTable(rows, rateTable.pricingBasis as "shipment_weight" | "pallet_count"),
   };
 }
 
@@ -586,8 +715,9 @@ function normalizeRateRow(input: RateRowInput): RateTableImportRow {
     destinationCountry,
     destinationRegion,
     postalPrefix: input.postalPrefix?.trim() || null,
-    minWeightGrams: input.minWeightGrams,
-    maxWeightGrams: input.maxWeightGrams,
+    minMeasure: input.minMeasure,
+    maxMeasure: input.maxMeasure,
+    maxShipmentWeightGrams: input.maxShipmentWeightGrams ?? null,
     rateCents: input.rateCents,
   };
 }
@@ -607,19 +737,51 @@ async function validateWarehouseIds(
   }
 }
 
-async function assertDraftTable(tx: RateTableTransaction, id: number): Promise<void> {
-  const [table] = await tx.select({ status: shippingRateTables.status })
+async function assertDraftTable(tx: RateTableTransaction, id: number) {
+  const [table] = await tx.select({
+    status: shippingRateTables.status,
+    pricingBasis: shippingRateTables.pricingBasis,
+  })
     .from(shippingRateTables).where(eq(shippingRateTables.id, id)).limit(1);
   if (!table) throw notFoundError();
   if (table.status !== "draft") throw draftRequiredError("Only a draft rate table can be edited.");
+  return table;
 }
 
-function importMetadata(rowCount: number, importedAt: Date) {
+function validateRowForBasis(
+  row: RateTableImportRow,
+  pricingBasis: string,
+): void {
+  if (pricingBasis === "pallet_count") {
+    if (row.minMeasure < 1) {
+      throw new RateTableAdminError(
+        400,
+        "SHIPPING_ADMIN_RATE_MEASURE_INVALID",
+        "Pallet rate bands must begin at one pallet or greater.",
+      );
+    }
+    return;
+  }
+  if (row.maxShipmentWeightGrams !== null) {
+    throw new RateTableAdminError(
+      400,
+      "SHIPPING_ADMIN_RATE_MEASURE_INVALID",
+      "Shipment-weight rate rows cannot have a freight weight ceiling.",
+    );
+  }
+}
+
+function importMetadata(
+  rowCount: number,
+  importedAt: Date,
+  draftLayout: z.infer<typeof draftLayoutSchema> | null = null,
+) {
   return {
-    source: "admin-import",
+    source: draftLayout === null ? "admin-import" : "admin-editor",
     pricingGeography: "state_zip",
     importedAt: importedAt.toISOString(),
     rowCount,
+    ...(draftLayout === null ? {} : { draftLayout }),
   };
 }
 

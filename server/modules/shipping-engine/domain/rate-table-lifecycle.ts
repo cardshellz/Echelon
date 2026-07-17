@@ -3,6 +3,7 @@ import {
   ratePricingAreaKey,
   type RateTableImportRow,
 } from "./rate-table-import";
+import type { ShippingPricingBasis } from "./rate-selection";
 import { US_POSTAL_REGIONS } from "./us-geography";
 
 export type RateTableStatus = "draft" | "active" | "superseded" | "retired";
@@ -16,13 +17,14 @@ export interface RateTableLifecycleAnalysis {
     stateCount: number;
     zipOverrideCount: number;
     missingRegions: string[];
-    minWeightGrams: number | null;
-    maxWeightGrams: number | null;
+    minMeasure: number | null;
+    maxMeasure: number | null;
   };
 }
 
 export function analyzeRateTable(
   rows: readonly RateTableImportRow[],
+  pricingBasis: ShippingPricingBasis,
 ): RateTableLifecycleAnalysis {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -31,7 +33,8 @@ export function analyzeRateTable(
     errors.push("The table has no rate rows.");
   }
 
-  errors.push(...findWeightBandIssues(rows));
+  errors.push(...findBandIssues(rows, pricingBasis));
+  errors.push(...findBasisIssues(rows, pricingBasis));
 
   errors.push(...findMissingStateDefaults(rows));
 
@@ -54,8 +57,8 @@ export function analyzeRateTable(
       stateCount: statewideRegions.size,
       zipOverrideCount: rows.filter((row) => row.postalPrefix !== null).length,
       missingRegions,
-      minWeightGrams: rows.length > 0 ? Math.min(...rows.map((row) => row.minWeightGrams)) : null,
-      maxWeightGrams: rows.length > 0 ? Math.max(...rows.map((row) => row.maxWeightGrams)) : null,
+      minMeasure: rows.length > 0 ? Math.min(...rows.map((row) => row.minMeasure)) : null,
+      maxMeasure: rows.length > 0 ? Math.max(...rows.map((row) => row.maxMeasure)) : null,
     },
   };
 }
@@ -72,7 +75,10 @@ export function canRetireRateTable(status: string): boolean {
   return status === "active" || status === "superseded";
 }
 
-function findWeightBandIssues(rows: readonly RateTableImportRow[]): string[] {
+function findBandIssues(
+  rows: readonly RateTableImportRow[],
+  pricingBasis: ShippingPricingBasis,
+): string[] {
   const groups = new Map<string, RateTableImportRow[]>();
   for (const row of rows) {
     const key = ratePricingAreaKey(row);
@@ -82,29 +88,50 @@ function findWeightBandIssues(rows: readonly RateTableImportRow[]): string[] {
   const errors: string[] = [];
   for (const group of groups.values()) {
     const sorted = [...group].sort(
-      (a, b) => a.minWeightGrams - b.minWeightGrams || a.maxWeightGrams - b.maxWeightGrams,
+      (a, b) => a.minMeasure - b.minMeasure || a.maxMeasure - b.maxMeasure,
     );
     const label = pricingAreaLabel(sorted[0]);
-    if (sorted[0].minWeightGrams > 0) {
-      errors.push(`${label} has no rate from 0g to ${sorted[0].minWeightGrams - 1}g.`);
+    const firstMeasure = pricingBasis === "pallet_count" ? 1 : 0;
+    if (sorted[0].minMeasure > firstMeasure) {
+      errors.push(
+        `${label} has no rate from ${formatMeasure(firstMeasure, pricingBasis)} to ` +
+        `${formatMeasure(sorted[0].minMeasure - 1, pricingBasis)}.`,
+      );
     }
     for (let index = 1; index < sorted.length; index += 1) {
       const previous = sorted[index - 1];
       const current = sorted[index];
-      if (current.minWeightGrams <= previous.maxWeightGrams) {
+      if (current.minMeasure <= previous.maxMeasure) {
         errors.push(
-          `${label} has overlapping weight bands ` +
-          `${previous.minWeightGrams}-${previous.maxWeightGrams}g and ` +
-          `${current.minWeightGrams}-${current.maxWeightGrams}g.`,
+          `${label} has overlapping bands ` +
+          `${formatMeasure(previous.minMeasure, pricingBasis)}-${formatMeasure(previous.maxMeasure, pricingBasis)} and ` +
+          `${formatMeasure(current.minMeasure, pricingBasis)}-${formatMeasure(current.maxMeasure, pricingBasis)}.`,
         );
-      } else if (current.minWeightGrams > previous.maxWeightGrams + 1) {
+      } else if (current.minMeasure > previous.maxMeasure + 1) {
         errors.push(
-          `${label} has no rate from ${previous.maxWeightGrams + 1}g to ${current.minWeightGrams - 1}g.`,
+          `${label} has no rate from ${formatMeasure(previous.maxMeasure + 1, pricingBasis)} to ` +
+          `${formatMeasure(current.minMeasure - 1, pricingBasis)}.`,
         );
       }
     }
   }
   return errors;
+}
+
+function findBasisIssues(
+  rows: readonly RateTableImportRow[],
+  pricingBasis: ShippingPricingBasis,
+): string[] {
+  if (pricingBasis === "pallet_count") return [];
+  return rows
+    .filter((row) => row.maxShipmentWeightGrams !== null)
+    .map((row) => `${pricingAreaLabel(row)} has a freight weight ceiling on a shipment-weight table.`);
+}
+
+function formatMeasure(value: number, pricingBasis: ShippingPricingBasis): string {
+  return pricingBasis === "pallet_count"
+    ? `${value} pallet${value === 1 ? "" : "s"}`
+    : `${value}g`;
 }
 
 function pricingAreaLabel(row: RateTableImportRow): string {

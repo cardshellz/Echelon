@@ -538,19 +538,34 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       // Parent item qty is larger than this physical package, so this must
       // become a child shipment instead of mutating the parent item to qty=1.
       { rows: [{ id: 10001, qty: 3 }] },
-      // Advisory lock for the parent WMS order.
+      // Transaction-scoped advisory lock for the parent WMS order.
       { rows: [] },
       // Post-lock external id dedup guard -> still not found.
       { rows: [] },
+      // Parent is still active after taking its row lock.
+      { rows: [{ id: 501, status: "planned" }] },
       // INSERT child wms.outbound_shipments with source=shipstation_split.
       { rows: [{ id: 9001, order_id: 42, status: "queued", shipstation_order_id: 555000 }] },
-      // Advisory unlock for the parent WMS order.
-      { rows: [] },
+      // Lock the parent source quantity.
+      { rows: [{ id: 10001, qty: 3 }] },
+      // Insert the physical child quantity from the parent authority row.
+      { rows: [{ id: 11001 }] },
+      // Reduce the parent remainder from 3 to 2.
+      { rows: [{ id: 10001 }] },
       // Combined-shipment source item order grouping.
       { rows: [{ source_shipment_item_id: 10001, wms_order_id: 42 }] },
-      // Child shipment currently has no copied item rows.
-      { rows: [] },
-      // Source item copied from the original shipment row.
+      // Child owns only the physical quantity while the source ID remains on the parent.
+      {
+        rows: [{
+          id: 11001,
+          order_item_id: 30001,
+          replacement_for_order_item_id: null,
+          shipment_item_purpose: "customer_fulfillment",
+          product_variant_id: 40001,
+          qty: 1,
+        }],
+      },
+      // Reload the authoritative item for location and package metadata.
       {
         rows: [
           {
@@ -563,13 +578,13 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
-      // INSERT child wms.outbound_shipment_items.
-      { rows: [{ id: 91001 }] },
+      // Refresh quantity/location/tracking on the physical child item.
+      { rows: [] },
       // loadValidatedInventoryShipmentItems.
       {
         rows: [
           {
-            id: 91001,
+            id: 11001,
             order_item_id: 30001,
             product_variant_id: 40001,
             qty: 1,
@@ -615,6 +630,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       // Shopify fulfillment provider guard.
       { rows: [{ provider: "shopify" }] },
     ]);
+    mock.db.transaction = vi.fn(async (work: (tx: any) => Promise<unknown>) => (
+      work(mock.db)
+    ));
 
     globalThis.fetch = mockFetchOnceOk({
       shipments: [shipmentPayload],
@@ -626,12 +644,16 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(processed).toBe(1);
     expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
       orderItemId: 30001,
+      shipmentItemId: 11001,
       qty: 1,
       shipmentId: "9001",
     }));
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
     expect(sqlText).toMatch(/shipstation_split/);
-    expect(sqlText).not.toMatch(/UPDATE wms\.outbound_shipment_items[\s\S]*SET qty/);
+    expect(sqlText).toMatch(/INSERT INTO wms\.outbound_shipment_items[\s\S]*shipment_item_purpose/);
+    expect(sqlText).toMatch(/SET qty = qty -/);
+    expect(sqlText).not.toMatch(/SET shipment_id/);
+    expect(mock.db.transaction).toHaveBeenCalledTimes(1);
     expect(sqlText).toMatch(/fulfilled_quantity = LEAST\(/);
     expect(sqlText).toMatch(/SUM\(osi\.qty\)/);
     expect(sqlText).toMatch(/outbound_shipment_items/);
@@ -1846,9 +1868,13 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     // a second row.
     expect(fnBlock).toContain("shipstation_duplicate_order_key_repaired");
 
-    // The split INSERT is dedup-guarded by the physical shipment id.
-    expect(fnBlock).toContain("pg_advisory_lock(918406");
+    // The split mutation is transactional, deduped, and preserves source IDs
+    // on the parent so later physical packages can still reference them.
+    expect(fnBlock).toContain("pg_advisory_xact_lock(918406");
     expect(fnBlock).toContain("external_fulfillment_id = ${externalFulfillmentId}");
+    expect(fnBlock).toContain("SET qty = qty - ${item.qty}");
+    expect(fnBlock).toContain("shipment_item_purpose, product_variant_id, ${item.qty}");
+    expect(fnBlock).toContain("db.transaction(createSplit)");
   });
 
   it("routes legacy ShipStation order-id matches through package parity resolution", () => {

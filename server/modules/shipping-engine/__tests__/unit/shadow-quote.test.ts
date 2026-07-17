@@ -49,6 +49,21 @@ const BOX: CartonizeBox = {
   isActive: true,
 };
 
+const STANDARD_RATE = {
+  serviceLevelId: 1,
+  serviceLevelCode: "standard",
+  displayName: "Standard Shipping",
+  description: null,
+  fulfillmentMode: "parcel" as const,
+  pricingBasis: "shipment_weight" as const,
+  totalCents: 899,
+  currency: "USD",
+  promiseMinBusinessDays: 3,
+  promiseMaxBusinessDays: 7,
+  ratedMeasure: 500,
+  maxShipmentWeightGrams: null,
+};
+
 function fakeDeps(input: {
   orders: ShadowOrder[];
   itemsByOrder: Map<number, ShadowOrderItem[]>;
@@ -64,7 +79,7 @@ function fakeDeps(input: {
     resolveVariantIdsBySku: async () => input.variantIdBySku ?? new Map(),
     loadPackingInputs: async () => input.packingInputs ?? new Map(),
     loadActiveBoxes: async () => input.boxes ?? [],
-    quoteParcels: async () => input.quotes ?? {
+    quoteShipmentRates: async () => input.quotes ?? {
       rateBook: null,
       zone: null,
       quotes: [],
@@ -114,7 +129,7 @@ describe("runShadow", () => {
       quotes: {
         rateBook: { id: 1, code: "shopify-retail-default" },
         zone: "Z4",
-        quotes: [{ carrier: "USPS", serviceCode: "ga", totalCents: 899, currency: "USD", perParcelCents: [899] }],
+        quotes: [STANDARD_RATE],
         warnings: [],
       },
     });
@@ -206,15 +221,15 @@ describe("runShadow", () => {
       variantIdBySku: new Map([["SLV-100", 101]]),
       packingInputs: new Map([[101, packingInput()]]),
       boxes: [BOX],
-      quotes: { rateBook: { id: 1, code: "shopify-retail-default" }, zone: "Z4", quotes: [{ carrier: "USPS", serviceCode: "ga", totalCents: 899, currency: "USD", perParcelCents: [899] }], warnings: [] },
+      quotes: { rateBook: { id: 1, code: "shopify-retail-default" }, zone: "Z4", quotes: [STANDARD_RATE], warnings: [] },
     });
     let calls = 0;
     const deps: Partial<ShadowDeps> = {
       ...base.deps,
-      quoteParcels: async () => {
+      quoteShipmentRates: async () => {
         calls++;
         if (calls === 1) throw new Error("boom");
-        return { rateBook: { id: 1, code: "shopify-retail-default" }, zone: "Z4", quotes: [{ carrier: "USPS", serviceCode: "ga", totalCents: 899, currency: "USD", perParcelCents: [899] }], warnings: [] };
+        return { rateBook: { id: 1, code: "shopify-retail-default" }, zone: "Z4", quotes: [STANDARD_RATE], warnings: [] };
       },
     };
 

@@ -1,6 +1,8 @@
 # Cardshellz Shipping Engine — Dev Team Handoff
 
-*Updated July 14, 2026 · rating core deployed and dormant; shipping-first channel convergence is in progress. Full design: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md).*
+*Updated July 16, 2026 · service-level pricing and pallet-freight support are in progress; the engine remains dormant. Full design: [SHIPPING-ENGINE-DESIGN.md](./SHIPPING-ENGINE-DESIGN.md).*
+
+> **July 16 service-level pricing decision:** local rate tables price Card Shellz-owned checkout options, not carrier service codes. A table references a service level and uses either `shipment_weight` or `pallet_count`. Pallet Freight has a dedicated freight context with pallet count, optional total shipment weight, freight class, and reserved accessorials. Provider-method mapping and enforcement remain a later fulfillment capability.
 
 > **July 14 shipping-first decision:** launch the shipping engine independently of cartonization. Shopify, future first-party websites, and dropship vendor fulfillment use one runtime rating engine with separately assigned rate books. Echelon catalog variant weight is canonical; Shopify weight is a warned transition fallback. eBay continues to use eBay fulfillment policies for shopper checkout. Dropship selects its own vendor rate book, then applies insurance/handling/wallet policy. Cartonization remains a standalone optional provider and a WMS test path until separately approved.
 
@@ -12,7 +14,7 @@ The local zone/rate-table core, service levels, ETA data, callback shell, and sn
 
 ## 1 · Vision & model
 
-Checkout sells **service levels** (Standard / Expedited / Express), not carriers. The shared engine owns zone resolution, base rates, service-level selection, and delivery promises. Channel adapters own how that capability is consumed. Parcel selection is an injected provider: initial checkout uses a single weight-based shipment; the standalone cartonizer can be substituted later without changing the rate or channel contracts.
+Checkout sells **service levels** (Standard / Priority / Overnight / Pallet Freight), not carriers. The shared engine owns geography resolution, rate-book selection, service-level pricing, and delivery promises. Channel adapters own how that capability is consumed. Parcel checkout uses one total shipment weight; freight callers provide pallet context. The standalone cartonizer remains replaceable and optional.
 
 - **Replaces Parcelify** (static zip/weight/value tiers) at checkout. Parcelify is still active today serving US zones only; its admin UI has stopped loading for us (unresolved, app-side), which raises the urgency of cutover.
 - **Long-term replaces ShipStation** via the per-carrier provider seam (FedEx own account first ≈10% of volume, then USPS ≈54%, UPS ≈36%). Commercial gate: own-account rates vs ShipStation wallet rates.
@@ -25,8 +27,8 @@ Checkout sells **service levels** (Standard / Expedited / Express), not carriers
 ```
 Shopify checkout ──POST──▶ /api/shipping/rates-callback/:token   (CarrierService, token-gated)
    every item[sku?,qty,grams] ─▶ SKU→Echelon weight (Shopify fallback) ─▶ one shipment
-   shipment ─▶ resolveZone (zone_rules) ─▶ local rate provider (ACTIVE tables) ─▶ quotes
-   quotes ─▶ map through ACTIVE service_levels ─▶ Shopify rates (+ETA dates from transit_matrix)
+   shipment ─▶ resolve rate book ─▶ ACTIVE service-level tables ─▶ quotes
+   quotes ─▶ map directly to ACTIVE service_levels ─▶ Shopify rates (+promise dates)
    every request ─▶ shipping.quote_snapshots (source 'checkout')  ← calibration dataset
 ```
 
@@ -65,8 +67,8 @@ Everything lives in `server/modules/shipping-engine/` (hexagonal layout), regist
 |---|---|---|
 | cartonization (standalone) | `server/modules/cartonization` | Public cartonizer v3.1 plus WMS adapter: real 3D placement with six rotations, non-overlap/bounds checks, box choice, geometry/weight splits, own-container handling, persisted placements, explicit test generation, and non-enforcing shadow observation |
 | domain | `domain/zones.ts` | `resolveZone`: longest-prefix-wins postal matching; priority tiebreak; region-scoped rules skipped in v1 |
-| domain | `domain/rate-selection.ts` | Per-parcel rate band selection per (carrier, serviceCode) |
-| domain | `domain/eta.ts` | Delivery window = warehouse cutoff/timezone + transit_matrix business days |
+| domain | `domain/rate-selection.ts` | Geography and shipment-measure selection, returning one price per internal service level |
+| domain | `domain/eta.ts` | Delivery window calendar math; checkout currently supplies the service-level promise |
 | domain | `domain/rate-table-import.ts` | CSV grid import parsing/validation |
 | domain | `domain/shipping-channel.ts`, `domain/shipment.ts` | Channel ownership/modes plus canonical shipment-line and parcel contracts |
 | application | `application/shipment-quote.service.ts` | Runtime quote orchestration over injected parcel and rate providers; sends pricing channel + rate purpose for rate-book selection and rejects external-policy channels such as eBay checkout |
@@ -76,14 +78,14 @@ Everything lives in `server/modules/shipping-engine/` (hexagonal layout), regist
 | infrastructure | `infrastructure/catalog-weight.repository.ts` | One-query exact-SKU lookup of `catalog.product_variants.weight_grams` |
 | application | `application/weight-only-parcel.provider.ts` | One shipment from resolved weights, no boxes or dimensions |
 | application | `application/shipping-rate-provider.ts` | Rate-provider port plus local deterministic table adapter |
-| application | `application/rate-quote.service.ts` | `quoteParcels`: zone → candidate rows (ACTIVE + effective-dated tables only) → per-parcel intersect → summed quotes; optional snapshot |
+| application | `application/rate-quote.service.ts` | `quoteShipmentRates`: active rate book → service-level rows → total-weight or pallet-count quote; optional snapshot |
 | application | `application/shadow-quote.service.ts` | `runShadow`: replays recent real wms.orders through the full pipeline, persists 'shadow' snapshots, returns readiness report |
 | application | `cartonization/application/wms-pack-plan.service.ts`, `shipping-engine/application/packing.service.ts` | Channel-neutral WMS pack plans + pack-station actuals |
 | infrastructure | `cartonization/infrastructure/packing-input.repository.ts` | Variant dims/weights/shipping-group/own-container loaders; active box loader |
 | application | `application/rate-calibration.service.ts` | Quoted-vs-actual calibration (needs ShipStation v2 key for live-rate comparison) |
 | infrastructure | `infrastructure/shipstation-v2-rating.adapter.ts` | ShipStation v2 live-rate adapter (offline calibration + HIPRAK) |
 | interfaces | `interfaces/http/*` | `carrier-callback` (unauthenticated, token-gated, registered before auth middleware), `shadow-admin`, `rate-table-admin`, `calibration-admin`, `packing`; plus `shipping-admin.routes.ts`, `outbound-shipments.routes.ts` |
-| client | `ShippingSettings.tsx` | 5 tabs: Service levels · Box catalog · Zone rules · Rate tables (import/review/activate) · Shadow runs |
+| client | `ShippingSettings.tsx`, `components/shipping/RateTableBuilder.tsx` | Service-level promises plus visual destination, weight-band, pallet-band, CSV-assisted draft creation/review/activation |
 | client | `Packing.tsx`, `OutboundShipments.tsx` | Pack-station + outbound shipment views |
 
 ## 4 · Data model & current prod state
@@ -93,11 +95,12 @@ Schema: `shipping.*` in the shared Postgres (Echelon owns it; the club app owns 
 | Table | Purpose | Prod state |
 |---|---|---|
 | `zone_rules` | country + postal-prefix → zone | 48 active US rules → `US-48` / `US-HIPRAK`; region labels NULLed by mig 124 (they made resolveZone skip HIPRAK rules) |
-| `rate_tables` + `rate_table_rows` | carrier/service, status, effective dating; zone × weight-band cents | ids 1 (US-48, 6 bands $4.99–$10.99) & 2 (US-HIPRAK, 5 bands $7.99–$29.94), **status=draft** — derived from 2,183 real orders; **91.2% of a 924-order backtest within $1** (56.2% exact); provenance in metadata |
+| `rate_tables` + `rate_table_rows` | internal service level, pricing basis, status, effective dating; state/ZIP × shipment-measure cents | clean service-level shape is being introduced before activation; existing unused shared drafts can be discarded rather than migrated |
 | `zone_sets` + `rate_books` + `rate_book_assignments` | reusable geography, independently priced books, deterministic channel/warehouse selection | migration 137 backfills all current shipping zones/tables to `shopify-retail-default`; dropship is not imported or activated |
 | `box_catalog` | boxes: inner dims, tare, optional lower max weight, cost, fill factor | **14 seeded Jul 9** from 4,259 real ShipStation shipments (top 14 dim combos ≈ 85% of volume, incl. 2 storage-box flats); dimensions/tare/cost still require review in admin. NULL max weight uses the automatic 22,679 g handling ceiling. |
-| `service_levels` + `service_level_methods` | sellable levels → carrier/method attachments | standard / expedited / express seeded, **all inactive** — the checkout kill-switch |
-| `transit_matrix` | zone × carrier/service business-day windows | 24 rows seeded (mig 120) — feeds ETA dates on rates |
+| `service_levels` | sellable checkout options | Standard is the only initial option and remains the checkout kill-switch; priority, overnight, and pallet freight are inactive future options |
+| `service_level_methods` | reserved future fulfillment mappings | dormant until connected provider accounts supply a canonical method catalog; it is not used by checkout quoting or activation today |
+| `transit_matrix` | historical carrier/method transit windows | 24 rows seeded (mig 120); retained for later fulfillment validation, not checkout-price identity |
 | `quote_snapshots` | every quote (checkout/shadow/manual) — calibration dataset | accumulating; first shadow run persisted Jul 9 |
 | pack plans + actuals | fulfillment plane | schema live (migrations 122 + 135); plans are test/shadow artifacts and are not required for any WMS status transition |
 
@@ -126,12 +129,12 @@ Each step is independently reversible; nothing reaches customers until step 5.
 
 1. **DONE — Separate shipping from packing and prices:** shared shipment, Echelon-weight resolver, parcel/rate providers, pricing context, zone sets, and independently assigned rate books are in place. eBay shopper checkout remains policy-owned.
 2. **NEXT — Improve Echelon weight coverage:** resolve active variants with no `catalog.product_variants.weight_grams` and verify representative carts. Shopify weight is a warned fallback during transition; missing both sources is recorded and underquoted by policy, not blocked.
-3. **NEXT — Finish base-rate configuration:** validate the draft US-48/HIPRAK rows, service-method mappings, and the exact Parcelify rules that must be preserved. Keep tables and service levels inactive.
+3. **NEXT — Finish base-rate configuration:** create internal service-level tables for Standard, Priority, Overnight, and any Pallet Freight programs needed by assigned rate books. Keep tables and service levels inactive.
 4. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
 5. **Go live (Standard only):**
    - Set Heroku config `SHIPPING_CALLBACK_TOKEN` (random secret) and, if origin ≠ warehouse 1, `SHIPPING_CALLBACK_ORIGIN_WAREHOUSE_ID`.
    - Register the CarrierService in Shopify pointing at `POST /api/shipping/rates-callback/<token>`.
-   - Activate the `standard` service level (+ its method mapping to the blended/standard table).
+   - Activate the `standard` service level and its reviewed rate table.
    - Attach the new carrier service to the US zones in the delivery profiles alongside Parcelify; verify rate parity in a real checkout; then remove Parcelify from the zones.
    - **Open item before uninstalling Parcelify entirely:** confirm how CarrierService (third-party calculated rates) is enabled on the current Shopify plan — Parcelify being installed may be what grants it today.
 6. **Decommission Parcelify** once the engine has served checkout cleanly for an agreed soak period.
@@ -149,10 +152,10 @@ Each step is independently reversible; nothing reaches customers until step 5.
 - **When cartonization is invoked, fit means placement:** every non-SIOC packed unit must have an in-bounds, non-overlapping placement. It still uses no arbitrary unit cap, and the ordinary-carton handling ceiling remains 22,679 g.
 - **Plan reuse includes engine version:** an active pack plan is idempotently reused only when both its input hash and cartonizer version match. Deploying a new cartonizer automatically supersedes older plans on their next evaluation.
 - **WMS rollout safety:** `POST /api/shipping/packing/orders/:wmsOrderId/generate-plan` is the explicit per-order test path. Automatic observation is off by default and requires `SHIPPING_WMS_CARTONIZATION_SHADOW_ENABLED=true`; failures are logged only, never block a handoff, and never route an order to `exception`. Held and already-fulfilled units are excluded from generated plans. There is deliberately no runtime enforcement flag.
-- **Draft = inert:** `quoteParcels` reads `status='active'` tables with effective-dating only. Rate review happens in draft safely.
+- **Draft = inert:** `quoteShipmentRates` reads `status='active'` tables with effective dating only. Rate review happens in draft safely.
 - **Inactive levels = silent engine:** quotes map to Shopify rates only through active `service_levels`. Both switches (levels + token) must be on for checkout to see anything.
 - **Zone resolution:** longest postal-prefix wins, then priority, then lowest id; region-scoped rules (`destination_region` set) are skipped by design in v1 — *never seed region labels on prefix rules* (that was the HIPRAK bug, fixed in mig 124).
-- **A (carrier, serviceCode) is offered only if EVERY parcel priced under it** — partial quotes are dropped with warnings, not summed optimistically.
+- **One table, one customer-facing option:** carrier and service codes cannot identify a checkout price. Parcel tables rate total shipment weight once; freight tables require pallet count and may enforce a total-weight ceiling.
 - **US-only free shipping:** the engine has no international rates (US-only zone rules, no $0 rows). The member free-shipping Shopify Function (repo `shellz-club-functions`, extension `cardshellz-shipping-discount`) is gated to explicit `US` delivery addresses (PR #15, deployed Jul 9) after two international leaks (#59782 CA, #60039 DE). Keep both invariants when touching either system.
 - **Every quote is snapshotted** (`quote_snapshots`, sources: checkout / shadow / manual) — that dataset drives calibration; don't turn it off.
 
@@ -168,13 +171,13 @@ Each step is independently reversible; nothing reaches customers until step 5.
 
 ## 9 · Backlog after cutover
 
-1. **Expedited/Express service levels** — attach methods + rate tables, activate per level.
+1. **Priority/Overnight/Pallet Freight service levels** — configure and validate rate tables, then activate per level. Add fulfillment-method mappings only when the fulfillment engine can enforce them.
 2. **Calibration loop** — with the v2 key: scheduled quoted-vs-actual + live-rate comparison; adjust bands from `quote_snapshots`.
 3. **First-party quote API and benefit policy** — reuse the runtime service with authenticated Shellz Club benefit context.
 4. **Dropship shared-engine migration** — import the existing vendor rates as a separate `shipping.*` book, compare the shared engine against `DropshipShippingRateProvider`, switch only at parity, then retire duplicate tables while retaining dropship insurance, handling, snapshot, and wallet policy.
 5. **Pack-station/cartonization rollout** — run explicit plans first, then opt-in shadow observation; capture actual box, weight, and cost before proposing enforcement.
 6. **Multi-origin routing** — schema supports per-warehouse zone rules and rate rows; the callback currently prices from one origin (env-selected).
-7. **Member Express benefit** — express for all, discounted per plan via the Function (member-exclusive rates are impossible: CarrierService sees no customer; Functions can only reduce existing rates).
+7. **Member Overnight benefit** — overnight for all, discounted per plan via the Function (member-exclusive rates are impossible: CarrierService sees no customer; Functions can only reduce existing rates).
 8. **ShipStation replacement** — carrier adapters behind the provider seam (mig 115 varchar), FedEx-first.
 
 ---
