@@ -537,9 +537,7 @@ function reviewQueueReason(item: PurchasingRecommendationItem, kind: Recommendat
 
 function reviewQueueForecastAction(
   item: PurchasingRecommendationItem,
-  kind: RecommendationReviewQueueKind,
 ): ForecastInputGapAction | null {
-  if (kind !== "quality_review_required") return null;
   const trust = item.forecastProvenance.forecastTrust;
   if (trust.severity === "ok" && trust.inputGaps.length === 0 && item.qualityGate.reason !== "forecast_trust_review") {
     return null;
@@ -595,7 +593,7 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
       severity,
       reason: reviewQueueReason(item, kind),
       action: reviewQueueAction(item, kind),
-      forecastAction: reviewQueueForecastAction(item, kind),
+      forecastAction: reviewQueueForecastAction(item),
       productId: item.productId,
       productVariantId: item.productVariantId ?? null,
       sku: item.sku,

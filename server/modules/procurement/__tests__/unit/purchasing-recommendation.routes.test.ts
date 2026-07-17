@@ -666,7 +666,7 @@ describe("purchasing recommendation routes", () => {
       qualityGateReason: "forecast_trust_review",
       action: {
         code: "verify_recent_demand",
-        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand&recommendationId=211%3A2110%3A30",
+        href: "/reorder-analysis?forecastAction=verify_recent_demand&recommendationId=211%3A2110%3A30",
       },
     });
     expect(body.samples[1]).toMatchObject({
@@ -676,7 +676,7 @@ describe("purchasing recommendation routes", () => {
       inputGaps: ["missing_latest_demand_at"],
       action: {
         code: "repair_order_velocity_source",
-        href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source&recommendationId=212%3A2120%3A30",
+        href: "/reorder-analysis?forecastAction=repair_order_velocity_source&recommendationId=212%3A2120%3A30",
       },
     });
   });
@@ -811,6 +811,26 @@ describe("purchasing recommendation routes", () => {
       setupAction: "assign_preferred_vendor",
       recommendationId: "201:2001:30",
       returnTo: "/purchasing",
+    });
+    expect(skippedVendor.forecastAction).toMatchObject({
+      code: expect.any(String),
+      href: expect.stringContaining("recommendationId=201%3A2001%3A30"),
+    });
+    const skippedForecastUrl = new URL(skippedVendor.forecastAction.href, "https://echelon.example");
+    expect(skippedForecastUrl.searchParams.has("reviewQueue")).toBe(false);
+    expect(skippedForecastUrl.searchParams.has("reason")).toBe(false);
+
+    const exactSkippedForecastQueue = await requestJson(
+      server.url,
+      "GET",
+      `/api/purchasing/recommendation-review-queue?forecastAction=${encodeURIComponent(skippedVendor.forecastAction.code)}&recommendationId=201%3A2001%3A30&limit=10`,
+    );
+    expect(exactSkippedForecastQueue.status).toBe(200);
+    expect(exactSkippedForecastQueue.body.filteredCount).toBe(1);
+    expect(exactSkippedForecastQueue.body.items[0]).toMatchObject({
+      kind: "skipped",
+      sku: "QUEUE-NO-VENDOR",
+      recommendationId: "201:2001:30",
     });
 
     const heldQueue = await requestJson(
@@ -1016,7 +1036,7 @@ describe("purchasing recommendation routes", () => {
       },
       forecastAction: {
         code: "verify_recent_demand",
-        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand&recommendationId=211%3A2110%3A30",
+        href: "/reorder-analysis?forecastAction=verify_recent_demand&recommendationId=211%3A2110%3A30",
       },
     });
 
@@ -1032,7 +1052,7 @@ describe("purchasing recommendation routes", () => {
       sku: "MISSING-LATEST",
       forecastAction: {
         code: "repair_order_velocity_source",
-        href: "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source&recommendationId=212%3A2120%3A30",
+        href: "/reorder-analysis?forecastAction=repair_order_velocity_source&recommendationId=212%3A2120%3A30",
       },
     });
 
