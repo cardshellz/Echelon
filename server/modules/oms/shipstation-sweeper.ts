@@ -94,10 +94,16 @@ async function flagWmsShipmentForShipStationReview(
 
 async function getWmsShipmentFinality(
   shipmentId: number,
-): Promise<{ isFinal: boolean; shipmentStatus: string | null; warehouseStatus: string | null }> {
+): Promise<{
+  isFinal: boolean;
+  shipmentStatus: string | null;
+  warehouseStatus: string | null;
+  shipStationOrderId: number | null;
+}> {
   const shipmentQuery = await db.execute(sql`
     SELECT os.status AS shipment_status,
-           wo.warehouse_status
+           wo.warehouse_status,
+           os.shipstation_order_id
     FROM wms.outbound_shipments os
     JOIN wms.orders wo ON wo.id = os.order_id
     WHERE os.id = ${shipmentId}
@@ -105,7 +111,12 @@ async function getWmsShipmentFinality(
   `);
   const row = shipmentQuery.rows[0] as any;
   if (!row) {
-    return { isFinal: false, shipmentStatus: null, warehouseStatus: null };
+    return {
+      isFinal: false,
+      shipmentStatus: null,
+      warehouseStatus: null,
+      shipStationOrderId: null,
+    };
   }
 
   const shipmentStatus = String(row.shipment_status || "");
@@ -119,7 +130,40 @@ async function getWmsShipmentFinality(
       warehouseStatus === "cancelled",
     shipmentStatus,
     warehouseStatus,
+    shipStationOrderId:
+      Number.isSafeInteger(Number(row.shipstation_order_id))
+      && Number(row.shipstation_order_id) > 0
+        ? Number(row.shipstation_order_id)
+        : null,
   };
+}
+
+function isCanonicalShipStationOrder(
+  order: ShipStationQueueOrder,
+  shipStationOrderId: number | null,
+): boolean {
+  const incomingOrderId = Number(order.orderId);
+  return shipStationOrderId !== null
+    && Number.isSafeInteger(incomingOrderId)
+    && incomingOrderId === shipStationOrderId;
+}
+
+async function clearResolvedQueueReviewFlags(
+  activeCanonicalShipmentIds: Set<number>,
+): Promise<void> {
+  const activeIds = [...activeCanonicalShipmentIds];
+  const activePredicate = activeIds.length > 0
+    ? sql`AND id NOT IN (${sql.join(activeIds.map((id) => sql`${id}`), sql`, `)})`
+    : sql``;
+  await db.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET requires_review = false,
+        review_reason = NULL,
+        updated_at = NOW()
+    WHERE requires_review = true
+      AND review_reason = 'shipstation_queue_review_required'
+      ${activePredicate}
+  `);
 }
 
 async function isOmsOrderFinal(orderId: number): Promise<boolean> {
@@ -156,6 +200,8 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   let page = 1;
   const pageSize = 100;
   let totalFlagged = 0;
+  let awaitingShipmentScanComplete = true;
+  const activeCanonicalShipmentIds = new Set<number>();
 
   while (true) {
     const res = await fetch(
@@ -168,6 +214,7 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
 
     if (!res.ok) {
       console.warn("[ShipStation Sweeper] Failed to fetch SS queue", await res.text());
+      awaitingShipmentScanComplete = false;
       break;
     }
 
@@ -218,9 +265,18 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
 
         if (wmsShipmentId) {
           const finality = await getWmsShipmentFinality(wmsShipmentId);
+          if (!isCanonicalShipStationOrder(order, finality.shipStationOrderId)) {
+            console.log(
+              `[ShipStation Sweeper] Ignored additional SS order ${order.orderId} ` +
+                `for WMS shipment ${wmsShipmentId}; canonical SS order is ` +
+                `${finality.shipStationOrderId ?? "unknown"}.`,
+            );
+            continue;
+          }
           if (!finality.isFinal) {
             continue;
           }
+          activeCanonicalShipmentIds.add(wmsShipmentId);
           await flagWmsShipmentForShipStationReview(
             wmsShipmentId,
             "shipstation_queue_review_required",
@@ -260,6 +316,10 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
     encodedAuth,
   );
   totalFlagged += awaitingPaymentFlagged;
+
+  if (awaitingShipmentScanComplete) {
+    await clearResolvedQueueReviewFlags(activeCanonicalShipmentIds);
+  }
 
   if (totalFlagged > 0) {
     console.log(
@@ -308,6 +368,15 @@ async function flagAwaitingPaymentOrdersForReview(
       const omsOrderId = parseOmsOrderId(orderKey);
 
       if (wmsShipmentId) {
+        const finality = await getWmsShipmentFinality(wmsShipmentId);
+        if (!isCanonicalShipStationOrder(order, finality.shipStationOrderId)) {
+          console.log(
+            `[ShipStation Sweeper] Ignored additional awaiting_payment SS order ` +
+              `${order.orderId} for WMS shipment ${wmsShipmentId}; canonical SS order is ` +
+              `${finality.shipStationOrderId ?? "unknown"}.`,
+          );
+          continue;
+        }
         await flagWmsShipmentForShipStationReview(
           wmsShipmentId,
           "shipstation_awaiting_payment_review",

@@ -24,7 +24,7 @@ describe("P0.4 — SHIP_NOTIFY creation paths are closed", () => {
     const inserts = SS_SRC.match(/INSERT INTO wms\.outbound_shipments/g) ?? [];
     // split child + combined child — and nothing else (legacy INSERT removed)
     expect(inserts.length).toBe(2);
-    const lockCalls = SS_SRC.match(/pg_advisory_lock\(918406/g) ?? [];
+    const lockCalls = SS_SRC.match(/pg_advisory_(?:xact_)?lock\(918406/g) ?? [];
     expect(lockCalls.length).toBeGreaterThanOrEqual(2);
     // the legacy row shape must never come back
     expect(SS_SRC).not.toMatch(/VALUES \([^)]*'api', 'shipped'/);

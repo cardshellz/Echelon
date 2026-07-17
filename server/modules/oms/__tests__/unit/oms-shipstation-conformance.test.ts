@@ -102,10 +102,11 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(SHIPSTATION_SRC).toContain(
       'const SHIPSTATION_SPLIT_SOURCE = "shipstation_split"',
     );
-    expect(splitResolutionBlock).toContain("SELECT pg_advisory_lock");
+    expect(splitResolutionBlock).toContain("SELECT pg_advisory_xact_lock");
     expect(splitResolutionBlock).toContain("hasSameShipmentItemSet");
     expect(splitResolutionBlock).toContain("${SHIPSTATION_SPLIT_SOURCE}, 'queued'");
-    expect(splitResolutionBlock).toContain("SELECT pg_advisory_unlock");
+    expect(splitResolutionBlock).toContain("db.transaction(createSplit)");
+    expect(splitResolutionBlock).not.toContain("SELECT pg_advisory_unlock");
     expect(itemSyncBlock).toContain("parseWmsShipmentItemLineKey");
     expect(itemSyncBlock).toContain("shipstation_split_items_unmapped");
     expect(itemSyncBlock).toContain("shipstation_split_source_item_missing");

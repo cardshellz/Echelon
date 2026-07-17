@@ -64,6 +64,7 @@ export interface ShipStationOriginalPackageIdentityRepair {
   providerOrderKey: string;
   currentTrackingNumber: string;
   originalTrackingNumber: string;
+  historicalSplitGhostShipmentId?: number;
 }
 
 interface ResolvedProviderShipment {
@@ -300,7 +301,12 @@ function shipmentItemSignature(shipment: ShipStationShipment): string | null {
     .join("|");
 }
 
-function providerWmsItemSignature(shipment: ShipStationShipment): string | null {
+interface ProviderWmsItemLine {
+  shipmentItemId: number;
+  quantity: number;
+}
+
+function providerWmsItemLines(shipment: ShipStationShipment): ProviderWmsItemLine[] | null {
   const quantities = new Map<number, number>();
   const items = shipment.shipmentItems ?? [];
   if (items.length === 0) return null;
@@ -320,8 +326,65 @@ function providerWmsItemSignature(shipment: ShipStationShipment): string | null 
   }
   return [...quantities.entries()]
     .sort(([left], [right]) => left - right)
-    .map(([shipmentItemId, quantity]) => `${shipmentItemId}:${quantity}`)
+    .map(([shipmentItemId, quantity]) => ({ shipmentItemId, quantity }));
+}
+
+function providerWmsItemSignature(shipment: ShipStationShipment): string | null {
+  const lines = providerWmsItemLines(shipment);
+  if (!lines) return null;
+  return lines
+    .map(({ shipmentItemId, quantity }) => `${shipmentItemId}:${quantity}`)
     .join("|");
+}
+
+function historicalGhostItemsMatch(
+  providerShipment: ShipStationShipment,
+  authorityShipmentId: number,
+  ghostShipmentId: number,
+  rows: any[],
+): boolean {
+  const providerLines = providerWmsItemLines(providerShipment);
+  if (!providerLines) return false;
+
+  const parentRows = new Map<number, { orderItemId: number; quantity: number }>();
+  const ghostQuantities = new Map<number, number>();
+  for (const row of rows) {
+    const shipmentId = optionalPositiveInteger(row.shipment_id);
+    const itemId = optionalPositiveInteger(row.id);
+    const orderItemId = optionalPositiveInteger(row.order_item_id);
+    const quantity = Number(row.qty);
+    if (
+      shipmentId === null
+      || itemId === null
+      || orderItemId === null
+      || !Number.isSafeInteger(quantity)
+      || quantity <= 0
+    ) {
+      return false;
+    }
+    if (shipmentId === authorityShipmentId) {
+      parentRows.set(itemId, { orderItemId, quantity });
+    } else if (shipmentId === ghostShipmentId) {
+      ghostQuantities.set(
+        orderItemId,
+        (ghostQuantities.get(orderItemId) ?? 0) + quantity,
+      );
+    }
+  }
+
+  const expectedGhostQuantities = new Map<number, number>();
+  for (const line of providerLines) {
+    const parent = parentRows.get(line.shipmentItemId);
+    if (!parent || parent.quantity !== line.quantity) return false;
+    expectedGhostQuantities.set(
+      parent.orderItemId,
+      (expectedGhostQuantities.get(parent.orderItemId) ?? 0) + line.quantity,
+    );
+  }
+  if (ghostQuantities.size !== expectedGhostQuantities.size) return false;
+  return [...expectedGhostQuantities.entries()].every(
+    ([orderItemId, quantity]) => ghostQuantities.get(orderItemId) === quantity,
+  );
 }
 
 function resolveOriginalPackageIdentityRepair(
@@ -384,6 +447,97 @@ function resolveOriginalPackageIdentityRepair(
   };
 }
 
+async function resolveHistoricalSplitGhostRepair(
+  db: any,
+  shipments: ShipStationShipment[],
+  providerShipment: ShipStationShipment,
+  context: RemediationContext,
+): Promise<{
+  repair: ShipStationOriginalPackageIdentityRepair;
+  providerShipment: ShipStationShipment;
+} | null> {
+  const authorityTrackingNumber = normalizedTrackingNumber(
+    context.authorityTrackingNumber,
+  );
+  if (
+    providerShipment.voidDate
+    || !String(providerShipment.shipDate ?? "").trim()
+    || (providerShipment.shipmentItems ?? []).length !== 0
+    || context.candidateShipmentId !== null
+    || context.authorityExternalShipmentRef !== null
+    || !authorityTrackingNumber
+    || authorityTrackingNumber === normalizedTrackingNumber(providerShipment.trackingNumber)
+  ) {
+    return null;
+  }
+
+  const originalMatches = shipments.filter((candidate) => (
+    candidate.shipmentId !== providerShipment.shipmentId
+    && !candidate.voidDate
+    && Boolean(String(candidate.shipDate ?? "").trim())
+    && candidate.orderKey === providerShipment.orderKey
+    && normalizedTrackingNumber(candidate.trackingNumber) === authorityTrackingNumber
+    && providerWmsItemSignature(candidate) !== null
+  ));
+  if (originalMatches.length !== 1) return null;
+  const originalProviderShipment = originalMatches[0];
+
+  const ghostResult: any = await db.execute(sql`
+    SELECT id, order_id, status, source, external_fulfillment_id,
+           requires_review, review_reason
+    FROM wms.outbound_shipments
+    WHERE external_fulfillment_id = ${`shipstation_shipment:${originalProviderShipment.shipmentId}`}
+    LIMIT 2
+  `);
+  const ghosts = resultRows(ghostResult);
+  if (ghosts.length !== 1) return null;
+  const ghost = ghosts[0];
+  const ghostShipmentId = optionalPositiveInteger(ghost.id);
+  if (
+    ghostShipmentId === null
+    || Number(ghost.order_id) !== context.wmsOrderId
+    || !["cancelled", "voided"].includes(String(ghost.status))
+    || String(ghost.source) !== "shipstation_split"
+    || ghost.requires_review !== true
+    || !String(ghost.review_reason ?? "").includes(
+      "uq_outbound_shipments_shipped_order_tracking",
+    )
+  ) {
+    return null;
+  }
+
+  const itemResult: any = await db.execute(sql`
+    SELECT id, shipment_id, order_item_id, qty
+    FROM wms.outbound_shipment_items
+    WHERE shipment_id IN (${context.authorityShipmentId}, ${ghostShipmentId})
+    ORDER BY shipment_id, id
+  `);
+  if (!historicalGhostItemsMatch(
+    originalProviderShipment,
+    context.authorityShipmentId,
+    ghostShipmentId,
+    resultRows(itemResult),
+  )) {
+    return null;
+  }
+
+  const providerOrderId = optionalPositiveInteger(originalProviderShipment.orderId);
+  const providerOrderKey = String(originalProviderShipment.orderKey ?? "").trim();
+  if (providerOrderId === null || !providerOrderKey) return null;
+  return {
+    repair: {
+      wmsShipmentId: context.authorityShipmentId,
+      providerShipmentId: originalProviderShipment.shipmentId,
+      providerOrderId,
+      providerOrderKey,
+      currentTrackingNumber: context.authorityTrackingNumber!,
+      originalTrackingNumber: originalProviderShipment.trackingNumber,
+      historicalSplitGhostShipmentId: ghostShipmentId,
+    },
+    providerShipment: originalProviderShipment,
+  };
+}
+
 async function resolveProviderShipment(
   db: any,
   shipStation: ShipStationService,
@@ -412,8 +566,22 @@ async function resolveProviderShipment(
     && normalizedTrackingNumber(context.authorityTrackingNumber)
       === normalizedTrackingNumber(directShipment.trackingNumber),
   );
+  const needsHistoricalSplitGhostEvidence = Boolean(
+    !directShipment.voidDate
+    && String(directShipment.shipDate ?? "").trim()
+    && (directShipment.shipmentItems ?? []).length === 0
+    && context.candidateShipmentId === null
+    && context.authorityExternalShipmentRef === null
+    && normalizedTrackingNumber(context.authorityTrackingNumber)
+    && normalizedTrackingNumber(context.authorityTrackingNumber)
+      !== normalizedTrackingNumber(directShipment.trackingNumber),
+  );
   const shipments = [directShipment];
-  if (needsVoidedLabelEvidence || needsOriginalPackageEvidence) {
+  if (
+    needsVoidedLabelEvidence
+    || needsOriginalPackageEvidence
+    || needsHistoricalSplitGhostEvidence
+  ) {
     const providerOrderId = positiveInteger(
       directShipment.orderId,
       "ShipStation shipment orderId",
@@ -432,6 +600,11 @@ async function resolveProviderShipment(
 
   const providerShipment = directShipment;
   const originalPackageResolution = resolveOriginalPackageIdentityRepair(
+    shipments,
+    providerShipment,
+    context,
+  ) ?? await resolveHistoricalSplitGhostRepair(
+    db,
     shipments,
     providerShipment,
     context,
@@ -1018,33 +1191,86 @@ async function restoreOriginalPackageIdentity(
   identityRepair: ShipStationOriginalPackageIdentityRepair,
   providerShipment: ShipStationShipment,
 ): Promise<void> {
+  const historicalGhostShipmentId = optionalPositiveInteger(
+    identityRepair.historicalSplitGhostShipmentId,
+  );
   if (
     Number(original.id) !== identityRepair.wmsShipmentId
-    || String(original.external_fulfillment_id) !== `shipstation_shipment:${identityRepair.providerShipmentId}`
     || normalizedTrackingNumber(original.tracking_number) !== normalizedTrackingNumber(identityRepair.currentTrackingNumber)
     || providerShipment.shipmentId !== identityRepair.providerShipmentId
     || providerShipment.orderId !== identityRepair.providerOrderId
     || providerShipment.orderKey !== identityRepair.providerOrderKey
     || normalizedTrackingNumber(providerShipment.trackingNumber) !== normalizedTrackingNumber(identityRepair.originalTrackingNumber)
+    || (historicalGhostShipmentId === null
+      ? String(original.external_fulfillment_id) !== `shipstation_shipment:${identityRepair.providerShipmentId}`
+      : original.external_fulfillment_id !== null)
   ) {
     throw new Error("the original ShipStation package identity changed before it could be restored");
   }
-  const providerSignature = providerWmsItemSignature(providerShipment);
-  const itemResult: any = await tx.execute(sql`
-    SELECT id, qty
-    FROM wms.outbound_shipment_items
-    WHERE shipment_id = ${identityRepair.wmsShipmentId}
-    ORDER BY id
-  `);
-  const wmsSignature = resultRows(itemResult)
-    .map((row) => `${Number(row.id)}:${Number(row.qty)}`)
-    .join("|");
-  if (!providerSignature || providerSignature !== wmsSignature) {
-    throw new Error("the original ShipStation package items no longer match WMS authority");
+
+  if (historicalGhostShipmentId !== null) {
+    const ghostResult: any = await tx.execute(sql`
+      SELECT id, order_id, status, source, external_fulfillment_id,
+             requires_review, review_reason
+      FROM wms.outbound_shipments
+      WHERE id = ${historicalGhostShipmentId}
+      FOR UPDATE
+    `);
+    const ghost = resultRows(ghostResult)[0];
+    if (
+      !ghost
+      || Number(ghost.order_id) !== Number(original.order_id)
+      || !["cancelled", "voided"].includes(String(ghost.status))
+      || String(ghost.source) !== "shipstation_split"
+      || String(ghost.external_fulfillment_id) !== `shipstation_shipment:${identityRepair.providerShipmentId}`
+      || ghost.requires_review !== true
+      || !String(ghost.review_reason ?? "").includes(
+        "uq_outbound_shipments_shipped_order_tracking",
+      )
+    ) {
+      throw new Error("the failed historical split changed before it could be repaired");
+    }
+    const itemResult: any = await tx.execute(sql`
+      SELECT id, shipment_id, order_item_id, qty
+      FROM wms.outbound_shipment_items
+      WHERE shipment_id IN (${identityRepair.wmsShipmentId}, ${historicalGhostShipmentId})
+      ORDER BY shipment_id, id
+    `);
+    if (!historicalGhostItemsMatch(
+      providerShipment,
+      identityRepair.wmsShipmentId,
+      historicalGhostShipmentId,
+      resultRows(itemResult),
+    )) {
+      throw new Error("the failed historical split items no longer match ShipStation evidence");
+    }
+    await tx.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET external_fulfillment_id = NULL,
+          requires_review = false,
+          review_reason = 'shipstation_split_ghost_collapsed',
+          updated_at = NOW()
+      WHERE id = ${historicalGhostShipmentId}
+    `);
+  } else {
+    const providerSignature = providerWmsItemSignature(providerShipment);
+    const itemResult: any = await tx.execute(sql`
+      SELECT id, qty
+      FROM wms.outbound_shipment_items
+      WHERE shipment_id = ${identityRepair.wmsShipmentId}
+      ORDER BY id
+    `);
+    const wmsSignature = resultRows(itemResult)
+      .map((row) => `${Number(row.id)}:${Number(row.qty)}`)
+      .join("|");
+    if (!providerSignature || providerSignature !== wmsSignature) {
+      throw new Error("the original ShipStation package items no longer match WMS authority");
+    }
   }
   await tx.execute(sql`
     UPDATE wms.outbound_shipments
-    SET tracking_number = ${identityRepair.originalTrackingNumber},
+    SET external_fulfillment_id = ${`shipstation_shipment:${identityRepair.providerShipmentId}`},
+        tracking_number = ${identityRepair.originalTrackingNumber},
         shipstation_order_id = ${identityRepair.providerOrderId},
         shipstation_order_key = ${identityRepair.providerOrderKey},
         engine_order_ref = ${String(identityRepair.providerOrderId)},

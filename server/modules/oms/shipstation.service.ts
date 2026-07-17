@@ -819,21 +819,26 @@ function parsePositiveWmsShipmentItemsFromShipStation(
     : [];
   if (ssItems.length === 0) return null;
 
-  const parsed: Array<{ sourceShipmentItemId: number; qty: number }> = [];
+  const quantitiesBySourceItemId = new Map<number, number>();
   for (const item of ssItems) {
     const sourceShipmentItemId = parseWmsShipmentItemLineKey(item.lineItemKey);
     const qty = Number(item.quantity);
     if (
       sourceShipmentItemId === null ||
       !Number.isInteger(qty) ||
-      qty < 0
+      qty <= 0
     ) {
       return null;
     }
-    parsed.push({ sourceShipmentItemId, qty });
+    quantitiesBySourceItemId.set(
+      sourceShipmentItemId,
+      (quantitiesBySourceItemId.get(sourceShipmentItemId) ?? 0) + qty,
+    );
   }
 
-  return parsed;
+  return [...quantitiesBySourceItemId.entries()].map(
+    ([sourceShipmentItemId, qty]) => ({ sourceShipmentItemId, qty }),
+  );
 }
 
 function hasSameShipmentItemSet(
@@ -1429,6 +1434,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         SELECT id, qty
         FROM wms.outbound_shipment_items
         WHERE shipment_id = ${parent.id}
+          AND qty > 0
       `);
       const parentItems = (parentItemsResult?.rows ?? []).map((row: any) => ({
         id: Number(row.id),
@@ -1493,9 +1499,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
 
     const orderId = parent.order_id;
-    await db.execute(sql`SELECT pg_advisory_lock(918406, ${orderId})`);
-    try {
-      const existingAfterLock: any = await db.execute(sql`
+    const createSplit = async (tx: any): Promise<{ row: any | null; handled: boolean }> => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(918406, ${orderId})`);
+      const existingAfterLock: any = await tx.execute(sql`
         SELECT id, order_id, status, shipstation_order_id
         FROM wms.outbound_shipments
         WHERE external_fulfillment_id = ${externalFulfillmentId}
@@ -1505,8 +1511,27 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         return { row: existingAfterLock.rows[0], handled: false };
       }
 
+      const lockedParentResult: any = await tx.execute(sql`
+        SELECT id, status
+        FROM wms.outbound_shipments
+        WHERE id = ${parent.id}
+        FOR UPDATE
+      `);
+      const lockedParent = lockedParentResult?.rows?.[0];
+      if (
+        !lockedParent
+        || !["planned", "queued", "labeled", "on_hold"].includes(
+          String(lockedParent.status),
+        )
+      ) {
+        throw new Error(
+          `WMS shipment ${parent.id} changed state while physical split ` +
+            `${shipment.shipmentId} was being created`,
+        );
+      }
+
       const ssOrderKey = shipment.orderKey || parent.shipstation_order_key;
-      const inserted: any = await db.execute(sql`
+      const inserted: any = await tx.execute(sql`
         INSERT INTO wms.outbound_shipments
           (order_id, channel_id, external_fulfillment_id, source, status,
            shipstation_order_id, shipstation_order_key,
@@ -1527,10 +1552,66 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           `Failed to create WMS split shipment for ShipStation shipment ${shipment.shipmentId}`,
         );
       }
+
+      for (const item of parsedShipStationItems ?? []) {
+        const sourceResult: any = await tx.execute(sql`
+          SELECT id, qty
+          FROM wms.outbound_shipment_items
+          WHERE id = ${item.sourceShipmentItemId}
+            AND shipment_id = ${parent.id}
+          FOR UPDATE
+        `);
+        const source = sourceResult?.rows?.[0];
+        if (!source || Number(source.qty) < item.qty) {
+          throw new Error(
+            `WMS shipment item ${item.sourceShipmentItemId} does not have ` +
+              `${item.qty} units available for physical split ${shipment.shipmentId}`,
+          );
+        }
+
+        const insertedItem: any = await tx.execute(sql`
+          INSERT INTO wms.outbound_shipment_items
+            (shipment_id, order_item_id, replacement_for_order_item_id,
+             shipment_item_purpose, product_variant_id, qty,
+             from_location_id, box_id, weight_oz, tracking_id, created_at)
+          SELECT
+            ${row.id}, order_item_id, replacement_for_order_item_id,
+            shipment_item_purpose, product_variant_id, ${item.qty},
+            from_location_id, box_id, weight_oz,
+            ${String(shipment.shipmentId)}, NOW()
+          FROM wms.outbound_shipment_items
+          WHERE id = ${item.sourceShipmentItemId}
+            AND shipment_id = ${parent.id}
+          RETURNING id
+        `);
+        if ((insertedItem?.rows ?? []).length !== 1) {
+          throw new Error(
+            `WMS shipment item ${item.sourceShipmentItemId} could not be copied ` +
+              `atomically to physical split ${shipment.shipmentId}`,
+          );
+        }
+
+        const reduced: any = await tx.execute(sql`
+          UPDATE wms.outbound_shipment_items
+          SET qty = qty - ${item.qty}
+          WHERE id = ${item.sourceShipmentItemId}
+            AND shipment_id = ${parent.id}
+            AND qty >= ${item.qty}
+          RETURNING id
+        `);
+        if ((reduced?.rows ?? []).length !== 1) {
+          throw new Error(
+            `WMS shipment item ${item.sourceShipmentItemId} could not be reduced ` +
+              `after physical split ${shipment.shipmentId} was created`,
+          );
+        }
+      }
       return { row, handled: false };
-    } finally {
-      await db.execute(sql`SELECT pg_advisory_unlock(918406, ${orderId})`);
-    }
+    };
+
+    return typeof db.transaction === "function"
+      ? db.transaction(createSplit)
+      : createSplit(db);
   }
   async function syncShipmentItemsFromShipStation(
     targetShipmentId: number,
@@ -1544,16 +1625,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       return;
     }
 
-    let parsedItems = ssItems
-      .map((item) => ({
-        sourceShipmentItemId: parseWmsShipmentItemLineKey(item.lineItemKey),
-        qty: Number(item.quantity),
-      }))
-      .filter((item) =>
-        item.sourceShipmentItemId !== null &&
-        Number.isInteger(item.qty) &&
-        item.qty >= 0
-      ) as Array<{ sourceShipmentItemId: number; qty: number }>;
+    let parsedItems = parsePositiveWmsShipmentItemsFromShipStation(shipment) ?? [];
 
     const targetItems: any = await db.execute(sql`
       SELECT osi.id, osi.order_item_id, osi.replacement_for_order_item_id,
@@ -1576,7 +1648,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
       for (const ssItem of ssItems) {
         const sku = typeof ssItem.sku === "string" ? ssItem.sku.trim() : "";
         const qty = Number(ssItem.quantity);
-        if (!sku || !Number.isInteger(qty) || qty < 0) {
+        if (!sku || !Number.isInteger(qty) || qty <= 0) {
           continue;
         }
 
@@ -1721,11 +1793,9 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           `);
           touchedChildIds.push(Number(existingChild.id));
         } else {
-          // Copy the parent's OWN item row onto the split child (quantities
-          // from the physical package). This only runs for split children
-          // created by resolveShipmentByOrderKey — an active parent's
-          // partial-package fork — never for foreign/terminal shipments
-          // (those are rejected before any row exists to sync onto).
+          // New splits reach this path with the parent quantity already
+          // reduced and the physical child row already inserted atomically.
+          // The insert below remains only for pre-hardening split rows.
           const inserted: any = await db.execute(sql`
             INSERT INTO wms.outbound_shipment_items
               (shipment_id, order_item_id, replacement_for_order_item_id,
