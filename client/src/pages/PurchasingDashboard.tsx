@@ -851,7 +851,7 @@ export default function PurchasingDashboard() {
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="sm" onClick={() => setExclusionModalOpen(true)}>
               <Filter className="h-3.5 w-3.5 mr-1.5" />
-              Exclusions
+              Planning Policy
             </Button>
             <Button variant="ghost" size="sm" onClick={() => navigate("/reorder-analysis")}>
               <BarChart3 className="h-3.5 w-3.5 mr-1.5" />
@@ -1855,7 +1855,7 @@ export default function PurchasingDashboard() {
                 className="w-full mt-1 text-[11px] justify-center text-muted-foreground"
                 onClick={() => setExclusionModalOpen(true)}
               >
-                ⚙️ Manage Exclusions
+                ⚙️ Manage Planning Policy
               </Button>
             </Card>
           </div>

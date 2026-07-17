@@ -1,13 +1,20 @@
 import { centsToMills, millsToCents } from "@shared/utils/money";
 import {
   buildPurchasingDemandForecastBasis,
+  buildPurchasingDemandForecastBlend,
   buildPurchasingDemandForecastWindowDiagnostics,
+  type PurchasingDemandForecastBlend,
   type PurchasingDemandForecastMethod,
   type PurchasingDemandForecastDemandMixSignal,
   type PurchasingDemandForecastQuality,
   type PurchasingDemandForecastTrend,
   type PurchasingDemandForecastWindowDiagnostics,
 } from "./purchasing-demand-forecast.engine";
+import {
+  DEFAULT_PURCHASING_FORECAST_POLICY,
+  normalizePurchasingForecastPolicy,
+  type PurchasingForecastPolicy,
+} from "./purchasing-forecast-policy";
 import {
   assessSupplierQuoteValidity,
   RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS,
@@ -244,6 +251,7 @@ export interface AutoDraftRecommendationSettings {
   skipNoVendor?: boolean;
   candidateScoreStrongThreshold?: number;
   candidateScoreReviewThreshold?: number;
+  forecastPolicy?: Partial<PurchasingForecastPolicy>;
 }
 
 export interface GeneratePurchasingRecommendationsOptions {
@@ -372,7 +380,7 @@ export interface PurchasingRecommendationItem {
   };
   forecastProvenance: {
     forecastMethod: PurchasingDemandForecastMethod;
-    forecastVersion: 1;
+    forecastVersion: 1 | 2;
     demandSource: "recent_order_velocity";
     demandWindowDays: number;
     demandQuality: PurchasingRecommendationDemandQuality;
@@ -393,6 +401,8 @@ export interface PurchasingRecommendationItem {
     safetyStockSource: PurchasingRecommendationSafetyStockSource;
     orderUomSource: PurchasingRecommendationOrderUomSource;
     demandWindowDiagnostics: PurchasingDemandForecastWindowDiagnostics;
+    forecastBlend: PurchasingDemandForecastBlend;
+    planningPolicy: PurchasingForecastPolicy;
     demandSuppressionRisk: PurchasingRecommendationDemandSuppressionRisk;
     forecastTrust: PurchasingRecommendationForecastTrustDiagnostics;
   };
@@ -655,6 +665,7 @@ function buildExplanation(input: {
   suggestedOrderPieces: number;
   orderUomLabel: string;
   skippedReason: PurchasingRecommendationSkipReason | null;
+  forecastMethod: PurchasingDemandForecastMethod;
 }): string {
   if (input.skippedReason === "excluded") {
     return "Excluded by purchasing reorder policy.";
@@ -673,7 +684,11 @@ function buildExplanation(input: {
   }
   return [
     `Available ${input.available} pieces plus open PO supply gives ${input.effectiveSupply} effective pieces.`,
-    `Reorder point is ${input.reorderPoint} pieces from ${input.avgDailyUsage.toFixed(2)} pieces/day over ${input.lookbackDays} days, ${input.leadTimeDays} lead days, and ${input.safetyStockDays} safety days.`,
+    `Reorder point is ${input.reorderPoint} pieces from ${input.avgDailyUsage.toFixed(2)} pieces/day ${
+      input.forecastMethod === "weighted_blend_v1"
+        ? "using the configured multi-window blend"
+        : `over ${input.lookbackDays} days`
+    }, ${input.leadTimeDays} lead days, and ${input.safetyStockDays} safety days.`,
     `Recommend ${input.suggestedOrderQty} ${input.orderUomLabel} (${input.suggestedOrderPieces} pieces).`,
   ].join(" ");
 }
@@ -718,6 +733,8 @@ function buildQualityControls(input: {
   hasExplicitSupplierQuote: boolean;
   supplierQuoteQuantityCompatible: boolean;
   supplierMinimumOrderValid: boolean;
+  automationMinimumOrderCount: number;
+  automationMinimumActiveDays: number;
 }): PurchasingRecommendationQualityControl[] {
   const controls: PurchasingRecommendationQualityControl[] = [];
   const demandSample =
@@ -756,6 +773,22 @@ function buildQualityControls(input: {
       code: "falling_demand",
       label: "Falling demand",
       detail: "Current demand is lower than the prior lookback window, so the reorder quantity needs operator review.",
+    });
+  }
+
+  if (
+    input.actionable &&
+    (
+      (input.demandOrderCount ?? 0) < input.automationMinimumOrderCount ||
+      (input.demandActiveDays ?? 0) < input.automationMinimumActiveDays
+    )
+  ) {
+    controls.push({
+      area: "demand",
+      severity: "block",
+      code: "automation_sample_below_policy",
+      label: "Demand sample below automation policy",
+      detail: `Automated purchasing requires at least ${input.automationMinimumOrderCount} orders across ${input.automationMinimumActiveDays} active days.${demandSample}`,
     });
   }
 
@@ -1623,6 +1656,11 @@ export function generatePurchasingRecommendations(
   };
   const rules = options.exclusionRules ?? [];
   const settings = options.autoDraftSettings ?? {};
+  const hasExplicitForecastPolicy = Boolean(settings.forecastPolicy);
+  const forecastPolicy = normalizePurchasingForecastPolicy(settings.forecastPolicy ?? {
+    ...DEFAULT_PURCHASING_FORECAST_POLICY,
+    method: "recent_order_velocity_v1",
+  });
   const candidateScoreThresholds = normalizeCandidateScoreThresholds(settings);
   const lookbackDays = asPositiveInt(options.lookbackDays, 30);
   const asOf = normalizeAsOf(options.asOf);
@@ -1701,6 +1739,15 @@ export function generatePurchasingRecommendations(
       longWindow: longDemandForecast,
       seasonalWindow: seasonalDemandForecast,
     });
+    const forecastBlend = buildPurchasingDemandForecastBlend({
+      method: forecastPolicy.method,
+      standardWindow: demandForecast,
+      shortWindow: shortDemandForecast,
+      longWindow: longDemandForecast,
+      seasonalWindow: seasonalDemandForecast,
+      seasonalEnabled: forecastPolicy.seasonalEnabled,
+      weights: forecastPolicy.weights,
+    });
     const periodUsage = demandForecast.periodUsagePieces;
     const priorPeriodUsage = demandForecast.priorPeriodUsagePieces;
     const demandOrderCount = demandForecast.demandOrderCount;
@@ -1713,7 +1760,7 @@ export function generatePurchasingRecommendations(
     const zeroRevenueDemandShare = demandForecast.zeroRevenueDemandShare;
     const couponDiscountDemandShare = demandForecast.couponDiscountDemandShare;
     const demandMixSignal = demandForecast.demandMixSignal;
-    const avgDailyUsage = demandForecast.avgDailyUsagePieces;
+    const avgDailyUsage = forecastBlend.avgDailyUsagePieces;
     const roundedAvgDailyUsage = Math.round(avgDailyUsage * 100) / 100;
     const onOrderPieces = asNumber(row.on_order_pieces);
     const openPoCount = asNumber(row.open_po_count);
@@ -1738,9 +1785,9 @@ export function generatePurchasingRecommendations(
         ? defaults.safetyStockDays
         : asNumber(row.safety_stock_days);
     const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
-    const forwardDemandPieces = asNumber(row.forward_demand_pieces);
-    const forwardDemandRawPieces = asNumber(row.forward_demand_raw_pieces);
-    const forwardDemandEventCount = asNumber(row.forward_demand_event_count);
+    const forwardDemandPieces = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_pieces) : 0;
+    const forwardDemandRawPieces = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_raw_pieces) : 0;
+    const forwardDemandEventCount = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_event_count) : 0;
     const adjustedReorderPoint = reorderPoint + forwardDemandPieces;
     const effectiveSupply = available + onOrderPieces;
     const rawOrderQtyPieces = Math.max(0, adjustedReorderPoint - effectiveSupply);
@@ -1875,6 +1922,7 @@ export function generatePurchasingRecommendations(
       suggestedOrderPieces,
       orderUomLabel,
       skippedReason,
+      forecastMethod: forecastBlend.method,
     });
     const reviewSignal = buildReviewSignal({
       status,
@@ -1918,6 +1966,8 @@ export function generatePurchasingRecommendations(
       hasExplicitSupplierQuote: supplierQuote.complete,
       supplierQuoteQuantityCompatible,
       supplierMinimumOrderValid,
+      automationMinimumOrderCount: hasExplicitForecastPolicy ? forecastPolicy.automationMinimumOrderCount : 0,
+      automationMinimumActiveDays: hasExplicitForecastPolicy ? forecastPolicy.automationMinimumActiveDays : 0,
     });
     const autopilotBlockers = qualityControls;
     const qualityGate = buildQualityGate({
@@ -2038,8 +2088,8 @@ export function generatePurchasingRecommendations(
         reorderPointPieces: adjustedReorderPoint,
       },
       forecastProvenance: {
-        forecastMethod: demandForecast.method,
-        forecastVersion: demandForecast.version,
+        forecastMethod: forecastBlend.method,
+        forecastVersion: forecastBlend.method === "weighted_blend_v1" ? 2 : 1,
         demandSource: "recent_order_velocity",
         demandWindowDays: lookbackDays,
         demandQuality,
@@ -2060,6 +2110,8 @@ export function generatePurchasingRecommendations(
         safetyStockSource,
         orderUomSource,
         demandWindowDiagnostics,
+        forecastBlend,
+        planningPolicy: forecastPolicy,
         demandSuppressionRisk,
         forecastTrust,
       },

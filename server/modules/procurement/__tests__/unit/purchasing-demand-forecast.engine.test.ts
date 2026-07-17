@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPurchasingDemandForecastBasis,
+  buildPurchasingDemandForecastBlend,
   buildPurchasingDemandForecastWindowDiagnostics,
 } from "../../purchasing-demand-forecast.engine";
 
@@ -266,5 +267,49 @@ describe("purchasing demand forecast engine", () => {
       couponDiscountDemandShare: 0.7,
       demandMixSignal: "mostly_zero_revenue",
     });
+  });
+
+  it("blends short, standard, long, and same-period-last-year demand using configured weights", () => {
+    const basis = (days: number, pieces: number, orders = 10) => buildPurchasingDemandForecastBasis({
+      lookbackDays: days,
+      periodUsagePieces: pieces,
+      demandOrderCount: orders,
+      demandActiveDays: Math.min(days, orders),
+    });
+    const blend = buildPurchasingDemandForecastBlend({
+      method: "weighted_blend_v1",
+      shortWindow: basis(10, 40),
+      standardWindow: basis(20, 60),
+      longWindow: basis(100, 200),
+      seasonalWindow: basis(25, 125),
+      seasonalEnabled: true,
+      weights: { short: 30, standard: 35, long: 20, seasonal: 15 },
+    });
+
+    expect(blend.avgDailyUsagePieces).toBeCloseTo(3.4, 8);
+    expect(blend.appliedWeights).toEqual({ short: 0.3, standard: 0.35, long: 0.2, seasonal: 0.15 });
+    expect(blend.seasonalHistoryAvailable).toBe(true);
+  });
+
+  it("redistributes seasonal weight when last-year history is unavailable", () => {
+    const basis = (days: number, pieces: number, orders = 10) => buildPurchasingDemandForecastBasis({
+      lookbackDays: days,
+      periodUsagePieces: pieces,
+      demandOrderCount: orders,
+      demandActiveDays: Math.min(days, Math.max(1, orders)),
+    });
+    const blend = buildPurchasingDemandForecastBlend({
+      method: "weighted_blend_v1",
+      shortWindow: basis(10, 40),
+      standardWindow: basis(20, 60),
+      longWindow: basis(100, 200),
+      seasonalWindow: basis(25, 0, 0),
+      seasonalEnabled: true,
+      weights: { short: 30, standard: 35, long: 20, seasonal: 15 },
+    });
+
+    expect(blend.seasonalHistoryAvailable).toBe(false);
+    expect(blend.appliedWeights.seasonal).toBe(0);
+    expect(blend.appliedWeights.short + blend.appliedWeights.standard + blend.appliedWeights.long).toBeCloseTo(1, 8);
   });
 });

@@ -11,6 +11,7 @@
  * - Reorder-to-PO generation
  */
 
+import { randomUUID } from "node:crypto";
 import { eq, and, sql, inArray, ne, lte, desc, getTableColumns } from "drizzle-orm";
 import {
   inboundShipmentLines,
@@ -31,6 +32,10 @@ import {
   productVariants as productVariantsTable,
   vendors as vendorsTable,
   vendorProducts as vendorProductsTable,
+  purchaseRecommendationRuns as purchaseRecommendationRunsTable,
+  purchaseRecommendationLines as purchaseRecommendationLinesTable,
+  requestForQuotes as requestForQuotesTable,
+  requestForQuoteLines as requestForQuoteLinesTable,
   warehouseSettings as warehouseSettingsTable,
 } from "@shared/schema";
 import type { PoLineType, PoPhysicalStatus, PoFinancialStatus } from "@shared/schema/procurement.schema";
@@ -7264,6 +7269,322 @@ export function createPurchasingService(
     return row !== null;
   }
 
+  type RecommendationRunLineInput = {
+    recommendationKey: string;
+    productId: number;
+    productVariantId: number | null;
+    warehouseId?: number | null;
+    sku: string;
+    productName: string;
+    requiredByDate?: string | null;
+    recommendedPieces: number;
+    preferredVendorId?: number | null;
+    preferredVendorProductId?: number | null;
+    evidenceSnapshot: Record<string, unknown>;
+  };
+
+  async function snapshotPurchaseRecommendations(input: {
+    calculationVersion: string;
+    asOf: Date;
+    lookbackDays: number;
+    policySnapshot: Record<string, unknown>;
+    inputSummary?: Record<string, unknown>;
+    lines: RecommendationRunLineInput[];
+  }, userId?: string | null) {
+    if (!input.calculationVersion?.trim() || input.calculationVersion.length > 80) {
+      throw new PurchasingError("calculationVersion is required", 400);
+    }
+    assertPositivePgInteger(input.lookbackDays, "lookbackDays");
+    if (!Array.isArray(input.lines) || input.lines.length > MAX_BULK_CATALOG_ENTRIES) {
+      throw new PurchasingError(`lines cannot contain more than ${MAX_BULK_CATALOG_ENTRIES} items`, 400);
+    }
+    const seen = new Set<string>();
+    for (const [index, line] of input.lines.entries()) {
+      const key = line.recommendationKey?.trim();
+      if (!key || key.length > 160 || seen.has(key)) {
+        throw new PurchasingError(`lines[${index}].recommendationKey must be unique and no longer than 160 characters`, 400);
+      }
+      seen.add(key);
+      assertPositivePgInteger(line.productId, `lines[${index}].productId`);
+      if (line.productVariantId !== null) assertPositivePgInteger(line.productVariantId, `lines[${index}].productVariantId`);
+      if (line.warehouseId != null) assertPositivePgInteger(line.warehouseId, `lines[${index}].warehouseId`);
+      assertPositivePgInteger(line.recommendedPieces, `lines[${index}].recommendedPieces`);
+    }
+
+    return db.transaction(async (tx: any) => {
+      const insertedRuns = await tx.insert(purchaseRecommendationRunsTable).values({
+        calculationVersion: input.calculationVersion.trim(),
+        status: "completed",
+        asOf: input.asOf,
+        lookbackDays: input.lookbackDays,
+        policySnapshot: input.policySnapshot,
+        inputSummary: input.inputSummary ?? {},
+        generatedBy: userId ?? null,
+      }).returning();
+      const run = insertedRuns[0];
+      if (!run) throw new PurchasingError("Recommendation run was not saved", 409);
+      const lines = input.lines.length === 0 ? [] : await tx.insert(purchaseRecommendationLinesTable).values(
+        input.lines.map((line) => ({
+          runId: run.id,
+          recommendationKey: line.recommendationKey.trim(),
+          productId: line.productId,
+          productVariantId: line.productVariantId ?? null,
+          warehouseId: line.warehouseId ?? null,
+          sku: line.sku.trim().slice(0, 100),
+          productName: line.productName.trim(),
+          requiredByDate: line.requiredByDate ?? null,
+          recommendedPieces: line.recommendedPieces,
+          baseUom: "piece",
+          preferredVendorId: line.preferredVendorId ?? null,
+          preferredVendorProductId: line.preferredVendorProductId ?? null,
+          status: "open",
+          evidenceSnapshot: line.evidenceSnapshot,
+        })),
+      ).returning();
+      return { run, lines };
+    });
+  }
+
+  type CreateRfqBatchLineInput = {
+    recommendationLineId: number;
+    vendorId: number;
+    vendorSku?: string | null;
+    requestedPieces: number;
+    quantityOverrideReason?: string | null;
+  };
+
+  async function createRfqBatch(input: {
+    idempotencyKey: string;
+    requestNote?: string | null;
+    responseDueDate?: string | null;
+    lines: CreateRfqBatchLineInput[];
+  }, userId?: string | null): Promise<{ rfqs: any[]; lines: any[]; reused: boolean }> {
+    const idempotencyKey = input.idempotencyKey?.trim();
+    if (!idempotencyKey || idempotencyKey.length > 160) {
+      throw new PurchasingError("idempotencyKey is required and cannot exceed 160 characters", 400);
+    }
+    assertOptionalCatalogText(input.requestNote, "requestNote", 20_000);
+    if (input.responseDueDate != null && !/^\d{4}-\d{2}-\d{2}$/.test(input.responseDueDate)) {
+      throw new PurchasingError("responseDueDate must use YYYY-MM-DD format", 400);
+    }
+    if (!Array.isArray(input.lines) || input.lines.length === 0 || input.lines.length > 500) {
+      throw new PurchasingError("lines must contain between 1 and 500 selections", 400);
+    }
+    const duplicateKeys = new Set<string>();
+    for (const [index, line] of input.lines.entries()) {
+      assertPositivePgInteger(line.recommendationLineId, `lines[${index}].recommendationLineId`);
+      assertPositivePgInteger(line.vendorId, `lines[${index}].vendorId`);
+      assertPositivePgInteger(line.requestedPieces, `lines[${index}].requestedPieces`);
+      assertOptionalCatalogText(line.vendorSku, `lines[${index}].vendorSku`, 100);
+      assertOptionalCatalogText(line.quantityOverrideReason, `lines[${index}].quantityOverrideReason`, 2_000);
+      const duplicateKey = `${line.vendorId}:${line.recommendationLineId}`;
+      if (duplicateKeys.has(duplicateKey)) {
+        throw new PurchasingError(`lines[${index}] duplicates a recommendation for the same supplier`, 400);
+      }
+      duplicateKeys.add(duplicateKey);
+    }
+
+    const vendorIds = Array.from(new Set(input.lines.map((line) => line.vendorId)));
+    const writeTime = now();
+    const { actorType, actorId } = resolveActor(userId);
+
+    try {
+      return await db.transaction(async (tx: any) => {
+        const priorRfqs = await tx.select().from(requestForQuotesTable).where(and(
+          eq(requestForQuotesTable.idempotencyKey, idempotencyKey),
+          inArray(requestForQuotesTable.vendorId, vendorIds),
+        ));
+        if (priorRfqs.length > 0) {
+          if (priorRfqs.length !== vendorIds.length) {
+            throw new PurchasingError("The idempotency key was already used for a different supplier grouping", 409, {
+              code: "RFQ_IDEMPOTENCY_CONFLICT",
+            });
+          }
+          const priorLines = await tx.select().from(requestForQuoteLinesTable).where(
+            inArray(requestForQuoteLinesTable.rfqId, priorRfqs.map((rfq: any) => rfq.id)),
+          );
+          return { rfqs: priorRfqs, lines: priorLines, reused: true };
+        }
+
+        const vendorRows = await tx.select().from(vendorsTable).where(inArray(vendorsTable.id, vendorIds)).for("update");
+        const vendorById = new Map(vendorRows.map((vendor: any) => [Number(vendor.id), vendor]));
+        if (vendorRows.length !== vendorIds.length || vendorRows.some((vendor: any) => Number(vendor.active) !== 1)) {
+          throw new PurchasingError("Every RFQ supplier must exist and be active", 409, {
+            code: "RFQ_VENDOR_INACTIVE_OR_MISSING",
+          });
+        }
+
+        const recommendationIds = Array.from(new Set(input.lines.map((line) => line.recommendationLineId)));
+        const recommendationRows = await tx.select().from(purchaseRecommendationLinesTable).where(
+          inArray(purchaseRecommendationLinesTable.id, recommendationIds),
+        ).for("update");
+        const recommendationById = new Map(recommendationRows.map((line: any) => [Number(line.id), line]));
+        if (recommendationRows.length !== recommendationIds.length) {
+          throw new PurchasingError("One or more recommendation lines no longer exist", 409, {
+            code: "RFQ_RECOMMENDATION_MISSING",
+          });
+        }
+
+        const existingAllocations = await tx.select().from(requestForQuoteLinesTable).where(and(
+          inArray(requestForQuoteLinesTable.recommendationLineId, recommendationIds),
+          inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
+        ));
+        const allocatedByRecommendation = new Map<number, number>();
+        for (const allocation of existingAllocations) {
+          const key = Number(allocation.recommendationLineId);
+          allocatedByRecommendation.set(key, (allocatedByRecommendation.get(key) ?? 0) + Number(allocation.requestedPieces));
+        }
+
+        const grouped = new Map<number, CreateRfqBatchLineInput[]>();
+        for (const selection of input.lines) {
+          const recommendation = recommendationById.get(selection.recommendationLineId) as any;
+          if (!recommendation || recommendation.status !== "open") {
+            throw new PurchasingError("A selected recommendation is no longer open", 409, {
+              code: "RFQ_RECOMMENDATION_CLOSED",
+              recommendationLineId: selection.recommendationLineId,
+            });
+          }
+          const alreadyAllocated = allocatedByRecommendation.get(selection.recommendationLineId) ?? 0;
+          const remaining = Number(recommendation.recommendedPieces) - alreadyAllocated;
+          if (selection.requestedPieces > remaining) {
+            throw new PurchasingError("Requested RFQ quantity exceeds the recommendation's remaining quantity", 409, {
+              code: "RFQ_ALLOCATION_EXCEEDED",
+              recommendationLineId: selection.recommendationLineId,
+              recommendedPieces: recommendation.recommendedPieces,
+              alreadyAllocated,
+              remainingPieces: Math.max(remaining, 0),
+            });
+          }
+          if (selection.requestedPieces !== remaining && (selection.quantityOverrideReason?.trim().length ?? 0) < 3) {
+            throw new PurchasingError("A reason is required when changing the suggested RFQ quantity", 400, {
+              code: "RFQ_QUANTITY_REASON_REQUIRED",
+              recommendationLineId: selection.recommendationLineId,
+            });
+          }
+          allocatedByRecommendation.set(selection.recommendationLineId, alreadyAllocated + selection.requestedPieces);
+          const group = grouped.get(selection.vendorId) ?? [];
+          group.push(selection);
+          grouped.set(selection.vendorId, group);
+        }
+
+        const createdRfqs: any[] = [];
+        const createdLines: any[] = [];
+        const auditRows: Array<Record<string, unknown>> = [];
+        for (const [vendorId, selections] of grouped.entries()) {
+          const insertedRfqs = await tx.insert(requestForQuotesTable).values({
+            rfqNumber: `RFQ-${writeTime.toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8).toUpperCase()}`,
+            vendorId,
+            idempotencyKey,
+            status: "draft",
+            requestNote: input.requestNote?.trim() || null,
+            currency: String((vendorById.get(vendorId) as any)?.currency ?? "USD").toUpperCase(),
+            responseDueDate: input.responseDueDate ?? null,
+            createdBy: userId ?? null,
+          }).returning();
+          const rfq = insertedRfqs[0];
+          if (!rfq) throw new PurchasingError("RFQ header was not created", 409);
+          createdRfqs.push(rfq);
+
+          for (const selection of selections) {
+            const recommendation = recommendationById.get(selection.recommendationLineId) as any;
+            const variantId = recommendation.productVariantId ?? null;
+            await lockVendorProductReferences(tx, vendorId, Number(recommendation.productId), variantId);
+            const mappingRows = await tx.select().from(vendorProductsTable).where(and(
+              eq(vendorProductsTable.vendorId, vendorId),
+              eq(vendorProductsTable.productId, Number(recommendation.productId)),
+              sql`COALESCE(${vendorProductsTable.productVariantId}, 0) = ${variantId ?? 0}`,
+            )).limit(1).for("update");
+            const existingMapping = mappingRows[0] ?? null;
+            const makePreferred = recommendation.preferredVendorId == null;
+            if (makePreferred) {
+              const demotions = await demoteCompetingPreferredMappings(tx, {
+                vendorId,
+                productId: Number(recommendation.productId),
+                productVariantId: variantId,
+                updatedAt: writeTime,
+              });
+              appendPreferredDemotionAudits(auditRows, demotions, actorType, actorId, {
+                vendorId,
+                productId: Number(recommendation.productId),
+                productVariantId: variantId,
+              });
+            }
+
+            let vendorProduct: any;
+            let catalogAction: "created" | "updated";
+            if (existingMapping) {
+              const updated = await tx.update(vendorProductsTable).set({
+                isActive: 1,
+                ...(makePreferred ? { isPreferred: 1 } : {}),
+                ...(selection.vendorSku !== undefined ? { vendorSku: selection.vendorSku?.trim() || null } : {}),
+                updatedAt: writeTime,
+              }).where(eq(vendorProductsTable.id, existingMapping.id)).returning();
+              vendorProduct = updated[0];
+              catalogAction = "updated";
+            } else {
+              const inserted = await tx.insert(vendorProductsTable).values({
+                vendorId,
+                productId: Number(recommendation.productId),
+                productVariantId: variantId,
+                vendorSku: selection.vendorSku?.trim() || null,
+                unitCostCents: null,
+                unitCostMills: null,
+                pricingBasis: "legacy_unknown",
+                isPreferred: makePreferred ? 1 : 0,
+                isActive: 1,
+              }).returning();
+              vendorProduct = inserted[0];
+              catalogAction = "created";
+            }
+            if (!vendorProduct) throw new PurchasingError("Supplier catalog mapping was not saved", 409);
+
+            const insertedLines = await tx.insert(requestForQuoteLinesTable).values({
+              rfqId: rfq.id,
+              recommendationLineId: selection.recommendationLineId,
+              vendorProductId: Number(vendorProduct.id),
+              requestedPieces: selection.requestedPieces,
+              status: "draft",
+              quantityOverrideReason: selection.quantityOverrideReason?.trim() || null,
+              purchaseUom: vendorProduct.purchaseUom ?? null,
+              piecesPerPurchaseUom: vendorProduct.piecesPerPurchaseUom ?? null,
+              requestedPurchaseUomQty: vendorProduct.piecesPerPurchaseUom
+                ? String(selection.requestedPieces / Number(vendorProduct.piecesPerPurchaseUom))
+                : null,
+            }).returning();
+            const rfqLine = insertedLines[0];
+            if (!rfqLine) throw new PurchasingError("RFQ line was not created", 409);
+            createdLines.push(rfqLine);
+            auditRows.push({
+              level: "AUDIT",
+              actor: `${actorType}:${actorId}`,
+              action: `vendor_catalog.rfq_${catalogAction}`,
+              target: `vendor_product:${vendorProduct.id}`,
+              changes: { after: catalogAuditSnapshot(vendorProduct) },
+              context: { recommendationLineId: recommendation.id, rfqId: rfq.id, requestedPieces: selection.requestedPieces },
+            });
+          }
+          auditRows.push({
+            level: "AUDIT",
+            actor: `${actorType}:${actorId}`,
+            action: "purchase_rfq.batch_created",
+            target: `request_for_quote:${rfq.id}`,
+            changes: { after: { rfqNumber: rfq.rfqNumber, vendorId, lineCount: selections.length, status: "draft" } },
+            context: { idempotencyKey },
+          });
+        }
+        if (auditRows.length > 0) await tx.insert(auditEventsTable).values(auditRows);
+        return { rfqs: createdRfqs, lines: createdLines, reused: false };
+      });
+    } catch (error: any) {
+      if (error?.code === "23514" && String(error?.message ?? "").includes("allocation exceeds")) {
+        throw new PurchasingError("Another RFQ consumed some of this recommendation; refresh and try again", 409, {
+          code: "RFQ_ALLOCATION_CONFLICT",
+        });
+      }
+      rethrowVendorCatalogWriteError(error);
+    }
+  }
+
   async function bulkUpsertVendorCatalog(
     vendorId: number,
     entries: BulkCatalogEntry[],
@@ -8112,6 +8433,8 @@ export function createPurchasingService(
     updateVendorProduct,
     deleteVendorProduct: deactivateVendorProduct,
     bulkUpsertVendorCatalog,
+    snapshotPurchaseRecommendations,
+    createRfqBatch,
 
     // Spec A: inline create, one-click send, duplicate, preload, settings.
     createPurchaseOrderWithLines,
