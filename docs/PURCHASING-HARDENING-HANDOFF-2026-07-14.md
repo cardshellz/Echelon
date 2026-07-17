@@ -913,22 +913,69 @@ Current local evidence for this remediation slice:
   writes, and database mirror enforcement; it compiles and intentionally skips
   locally without the explicit disposable-database environment
 
+## July 17 production transaction and authenticated smoke
+
+PR #946 merged and deployed the legacy PO receive-configuration remediation.
+After deployment, the production preview was regenerated and its exact hash
+`5648249b62f8da26818a0cef626c0e9a993a35017e2dd5595577c10aa409c67d` was
+explicitly approved and applied once by actor
+`cbd2f877-3a96-4499-8be1-ff75ce466f0e`.
+
+The transaction:
+
+- stamped 10 PO lines from their linked supplier mappings;
+- relinked 1 line to the evidence-backed active 750-count mapping;
+- wrote 11 distinct audit events; and
+- left receipt rows, received quantities, costs, inventory, and supplier prices
+  unchanged.
+
+Postconditions passed: the deployed preview returned zero candidates, all 11 line
+snapshots matched, all 11 audit targets were distinct, and supplier identities had
+zero mismatches.
+
+The authenticated read-only smoke then proved the Purchasing -> Supplier Setup Gaps
+handoff for `QUAD-BOX-TOP`: Suppliers received product `77`, receive variant `163`,
+recommendation `77:163:90`, and displayed the locked target
+`QUAD-BOX-TOP-C25`. No supplier mutation was submitted.
+
+The Forecast Input Gaps smoke found a real deep-link defect for
+`GLV-GRD-SGC-JRSY` (`324:product:90`): the URL carried the exact task, but Reorder
+Analysis ignored the browser query and displayed the unfiltered skipped queue. The
+dashboard also forced `quality_review_required` and `forecast_trust_review`, even
+when another blocker placed the same recommendation in `skipped`.
+
+The current branch corrects that defect by:
+
+- reading the real browser search string when the router exposes only the pathname;
+- attaching forecast-action metadata to skipped and policy-held review entries, not
+  only quality-review entries;
+- removing incompatible queue-kind and primary-reason constraints from forecast
+  action links while preserving the exact recommendation and action; and
+- opening the exact recommendation's audited `Mark reviewed` evidence dialog for an
+  exact forecast deep link, without submitting or changing any decision.
+
+Current validation for the correction:
+
+- focused client/route gate: 3 files and 33 tests passed;
+- procurement regression gate plus the client deep-link test: 84 files and 743
+  tests passed; 14 skipped;
+- `npx.cmd tsc --noEmit --pretty false`: passed; and
+- production build: passed; 3,606 client modules transformed and the server bundle
+  built; and
+- `git diff --check`: passed.
+
 ## Recommended next implementation order
 
-1. Review and merge the legacy PO receive-configuration remediation workflow.
-2. Verify the deploy and run a fresh production preview.
-3. With explicit owner approval, apply the exact reviewed hash once, then verify
-   zero remaining candidates, all 11 line snapshots, the single mapping relink,
-   unchanged receipt rows, and 11 audit events.
-4. Complete an authenticated read-only
-   smoke of Purchasing -> Supplier Setup Gaps ->
-   exact Suppliers task and Purchasing -> Forecast Input Gaps -> exact review task.
-5. Use the verified import or exact single-mapping tasks to correct supplier catalog,
+1. Review and merge the exact forecast-review deep-link correction.
+2. Verify the deployment, then repeat the authenticated read-only exact forecast
+   smoke and confirm the correct SKU, current demand evidence, controls, note field,
+   and confirmation field appear without submitting a decision.
+3. Use the verified import or exact single-mapping tasks to correct supplier catalog,
    lead-time, quote, receive-variant, and demand-evidence gaps only from verified
    business evidence; do not weaken approval policy.
-6. When the readiness report identifies a genuinely eligible low-risk SKU, run and
+4. When the readiness report identifies a genuinely eligible low-risk SKU, run and
    save its exact-SKU preflight and obtain explicit owner approval.
-7. Execute the one-SKU pilot once and complete the verification/lifecycle runbook
+5. Execute the one-SKU pilot once and complete the verification/lifecycle runbook
    before considering any wider unattended purchasing policy.
 
 Autonomous dead-command replay remains deferred. Encrypted request snapshots and a
@@ -943,11 +990,12 @@ written as reusable catalog economics.
 
 > Read the purchasing handoffs dated July 12, 13, and 14. Pull current `origin/main`,
 > verify the branch/PR/deployment state, and continue from the highest-priority
-> unverified item. PR #939 is merged and deployed as Heroku v2401; current production
-> has subsequently advanced to v2402. The production readiness report found 32
-> candidates, zero eligible, and no automatic-purchasing writes; all 32 require
-> supplier configuration plus demand review. Review the merged supplier-remediation
-> and exact demand-review flows, the current verified supplier-evidence import branch,
-> and the pilot runbook. Do not invent supplier data, weaken policy, or execute a
+> unverified item. PR #946 is merged and its explicitly approved production
+> receive-configuration transaction completed with zero remaining candidates and all
+> postconditions satisfied. The authenticated supplier-task smoke passed, while the
+> exact forecast-review smoke exposed a queue-kind/query parsing defect. Review and
+> merge the July 17 exact forecast-review deep-link correction, deploy it, and repeat
+> that read-only smoke before any supplier-data remediation or pilot. Do not invent
+> supplier data, weaken policy, submit a forecast decision during smoke, or execute a
 > production pilot without an eligible exact-SKU preflight and explicit owner
 > approval.

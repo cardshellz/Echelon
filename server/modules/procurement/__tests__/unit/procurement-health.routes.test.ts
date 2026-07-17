@@ -267,7 +267,7 @@ describe("procurement health routes", () => {
         critical: 0,
         warning: 1,
         total: 1,
-        href: "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
+        href: "/reorder-analysis?forecastAction=verify_recent_demand",
       }),
     ]));
   });

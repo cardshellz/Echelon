@@ -980,7 +980,7 @@ export default function PurchasingDashboard() {
                   variant="outline"
                   size="sm"
                   className="self-start lg:self-center"
-                  onClick={() => navigate("/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review")}
+                  onClick={() => navigate(forecastInputGaps.actions[0]?.href ?? "/reorder-analysis")}
                 >
                   Review Forecasts
                   <ArrowRight className="h-3.5 w-3.5 ml-1.5" />

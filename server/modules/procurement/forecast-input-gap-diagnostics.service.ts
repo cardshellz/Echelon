@@ -86,7 +86,7 @@ export function forecastInputGapAction(
       label: "Repair velocity source",
       detail: "Recent order velocity is missing demand timestamps or sample metadata.",
       href: exactRecommendationHref(
-        "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=repair_order_velocity_source",
+        "/reorder-analysis?forecastAction=repair_order_velocity_source",
         item,
         Boolean(options.exact),
       ),
@@ -105,7 +105,7 @@ export function forecastInputGapAction(
       label: "Rebuild forecast windows",
       detail: "One or more comparison windows are missing from the recommendation input.",
       href: exactRecommendationHref(
-        "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=rebuild_forecast_windows",
+        "/reorder-analysis?forecastAction=rebuild_forecast_windows",
         item,
         Boolean(options.exact),
       ),
@@ -119,7 +119,7 @@ export function forecastInputGapAction(
       label: "Verify recent demand",
       detail: "Demand is absent or stale enough to hold automated purchasing.",
       href: exactRecommendationHref(
-        "/reorder-analysis?reviewQueue=quality_review_required&reason=forecast_trust_review&forecastAction=verify_recent_demand",
+        "/reorder-analysis?forecastAction=verify_recent_demand",
         item,
         Boolean(options.exact),
       ),
@@ -132,7 +132,7 @@ export function forecastInputGapAction(
     label: "Monitor thin sample",
     detail: "Forecast trust is weak, but the recommendation is not held by a source-data gap.",
     href: exactRecommendationHref(
-      "/reorder-analysis?reviewQueue=quality_review_required&forecastAction=monitor_thin_sample",
+      "/reorder-analysis?forecastAction=monitor_thin_sample",
       item,
       Boolean(options.exact),
     ),

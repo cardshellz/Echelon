@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import {
@@ -42,6 +42,7 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { reorderAnalysisSearchParams } from "@/features/purchasing/reorderAnalysisDeepLink";
 import {
   Table,
   TableBody,
@@ -557,25 +558,25 @@ export default function PurchasingView() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [location, navigate] = useLocation();
   const [candidateBandFilter, setCandidateBandFilter] = useState<CandidateBandFilter>(() => {
-    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    const params = reorderAnalysisSearchParams(location);
     const requested = params.get("candidateBand");
     return isCandidateBandFilter(requested) ? requested : "all";
   });
   const [reviewQueueFilter, setReviewQueueFilter] = useState<ReviewQueueKind>(() => {
-    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    const params = reorderAnalysisSearchParams(location);
     const requested = params.get("reviewQueue");
     return isReviewQueueKind(requested) ? requested : "all";
   });
   const [reviewQueueReasonFilter, setReviewQueueReasonFilter] = useState<string>(() => {
-    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    const params = reorderAnalysisSearchParams(location);
     return params.get("reason")?.trim() || "all";
   });
   const [reviewQueueForecastActionFilter, setReviewQueueForecastActionFilter] = useState<string>(() => {
-    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    const params = reorderAnalysisSearchParams(location);
     return params.get("forecastAction")?.trim() || "all";
   });
   const [reviewQueueRecommendationId, setReviewQueueRecommendationId] = useState<string>(() => {
-    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    const params = reorderAnalysisSearchParams(location);
     return params.get("recommendationId")?.trim() || "all";
   });
   const [decisionDialog, setDecisionDialog] = useState<{
@@ -586,6 +587,7 @@ export default function PurchasingView() {
   const [reviewedControlCodes, setReviewedControlCodes] = useState<Set<string>>(new Set());
   const [automationEligibilityAcknowledged, setAutomationEligibilityAcknowledged] = useState(false);
   const [decisionConfirmed, setDecisionConfirmed] = useState(false);
+  const openedForecastDeepLinkRef = useRef<string | null>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -835,7 +837,21 @@ export default function PurchasingView() {
   useEffect(() => {
     if (reviewQueueRecommendationId === "all" || filteredReviewQueue.length !== 1) return;
     document.getElementById("recommendation-review-target")?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [reviewQueueRecommendationId, recommendationReviewQueue?.generatedAt]);
+    if (reviewQueueForecastActionFilter === "all") return;
+
+    const deepLinkKey = `${reviewQueueRecommendationId}:${reviewQueueForecastActionFilter}`;
+    if (openedForecastDeepLinkRef.current === deepLinkKey) return;
+    openedForecastDeepLinkRef.current = deepLinkKey;
+    setDecisionDialog({ item: filteredReviewQueue[0], decision: "reviewed" });
+    setDecisionNote("");
+    setReviewedControlCodes(new Set());
+    setAutomationEligibilityAcknowledged(false);
+    setDecisionConfirmed(false);
+  }, [
+    reviewQueueRecommendationId,
+    reviewQueueForecastActionFilter,
+    recommendationReviewQueue?.generatedAt,
+  ]);
 
   const SortIcon = ({ field }: { field: string }) => {
     if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-muted-foreground ml-1" />;
