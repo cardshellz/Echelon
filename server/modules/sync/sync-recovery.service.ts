@@ -68,17 +68,26 @@ export class SyncRecoveryService {
 
     this.isRunning = true;
     try {
-      // 1) Pull any missing orders from Shopify → shopify_orders
-      stages.push(await this.runShopifyReconcile());
-
-      // 2) Bridge shopify_orders that haven't reached OMS yet
+      // Drain durable local work before calling any remote source API.
       stages.push(await this.runShopifyToOmsBackfill());
-
-      // 3) Bridge oms_orders that haven't reached WMS yet
       stages.push(await this.runOmsToWmsBackfill());
-
-      // 4) Push WMS outbound shipments stuck in 'planned' to ShipStation
       stages.push(await this.runWmsToShipStationBackfill());
+
+      const sourceResult = await this.runShopifyReconcile();
+      stages.push(sourceResult);
+
+      // Source reconciliation bridges recovered rows into OMS. Complete
+      // their downstream handoff without waiting for the next interval.
+      if ((sourceResult.data?.reconciled ?? 0) > 0) {
+        stages.push(
+          await this.runOmsToWmsBackfill("oms_to_wms_after_shopify_reconcile"),
+        );
+        stages.push(
+          await this.runWmsToShipStationBackfill(
+            "wms_to_shipstation_after_shopify_reconcile",
+          ),
+        );
+      }
     } finally {
       this.isRunning = false;
     }
@@ -96,15 +105,19 @@ export class SyncRecoveryService {
   async runShopifyReconcile(): Promise<StageResult> {
     try {
       const result = await shopifyReconcile();
+      const failed = result?.failed ?? 0;
       return {
         name: "shopify_reconcile",
-        ok: true,
+        ok: failed === 0,
         data: {
           checked: result?.checked ?? 0,
           reconciled: result?.reconciled ?? 0,
-          failed: result?.failed ?? 0,
+          failed,
           skipped: result?.skipped ?? 0,
         },
+        error: failed > 0
+          ? `${failed} Shopify source order(s) failed reconciliation`
+          : undefined,
       };
     } catch (err: any) {
       console.error("[SyncRecovery] shopify_reconcile failed:", err);
@@ -152,11 +165,11 @@ export class SyncRecoveryService {
     }
   }
 
-  async runOmsToWmsBackfill(): Promise<StageResult> {
+  async runOmsToWmsBackfill(name = "oms_to_wms"): Promise<StageResult> {
     try {
       if (!this.services.wmsSync?.backfillUnsynced) {
         return {
-          name: "oms_to_wms",
+          name,
           ok: false,
           error: "wmsSync service unavailable",
         };
@@ -164,22 +177,24 @@ export class SyncRecoveryService {
       const synced = await this.services.wmsSync.backfillUnsynced(
         envPositiveInteger("SYNC_RECOVERY_OMS_TO_WMS_LIMIT", 50),
       );
-      return { name: "oms_to_wms", ok: true, data: { synced } };
+      return { name, ok: true, data: { synced } };
     } catch (err: any) {
       console.error("[SyncRecovery] oms_to_wms failed:", err);
       return {
-        name: "oms_to_wms",
+        name,
         ok: false,
         error: err?.message || String(err),
       };
     }
   }
 
-  async runWmsToShipStationBackfill(): Promise<StageResult> {
+  async runWmsToShipStationBackfill(
+    name = "wms_to_shipstation",
+  ): Promise<StageResult> {
     try {
       if (!this.services.shipStation) {
         return {
-          name: "wms_to_shipstation",
+          name,
           ok: false,
           error: "shipStation service unavailable",
         };
@@ -199,7 +214,7 @@ export class SyncRecoveryService {
       
       const shipmentIds = result.rows.map((r: any) => r.id);
       if (shipmentIds.length === 0) {
-        return { name: "wms_to_shipstation", ok: true, data: { checked: 0, pushed: 0, failed: 0 } };
+        return { name, ok: true, data: { checked: 0, pushed: 0, failed: 0 } };
       }
       
       let pushed = 0;
@@ -219,11 +234,18 @@ export class SyncRecoveryService {
         ));
       }
 
-      return { name: "wms_to_shipstation", ok: true, data: { checked: shipmentIds.length, pushed, failed } };
+      return {
+        name,
+        ok: failed === 0,
+        data: { checked: shipmentIds.length, pushed, failed },
+        error: failed > 0
+          ? `${failed} WMS shipment(s) failed ShipStation recovery`
+          : undefined,
+      };
     } catch (err: any) {
       console.error("[SyncRecovery] wms_to_shipstation sweep failed:", err);
       return {
-        name: "wms_to_shipstation",
+        name,
         ok: false,
         error: err?.message || String(err),
       };

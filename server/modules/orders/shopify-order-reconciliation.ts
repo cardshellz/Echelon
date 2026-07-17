@@ -10,9 +10,9 @@
  *
  * Flow:
  *   1. Fetch recent orders from Shopify REST API (since last check)
- *   2. Check if each exists in WMS `orders` table (by source_table_id)
+ *   2. Check whether each canonical Shopify GID has reached OMS
  *   3. If missing from `shopify_orders`, insert the raw row + items first
- *   4. Then sync to WMS via the existing syncSingleOrder() pipeline
+ *   4. Bridge the raw order to OMS; unified recovery handles WMS
  *   5. Track last check timestamp in echelon_settings
  *
  * This does NOT replace the existing real-time sync. It's additive.
@@ -27,6 +27,7 @@ import type { OmsService } from "../oms/oms.service";
 import type { WmsSyncService } from "../oms/wms-sync.service";
 import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
+import { normalizeShopifyOrderGid } from "./shopify-order-id";
 
 // Re-export for registration in index.ts
 export { startShopifyReconciliation };
@@ -36,7 +37,7 @@ export { startShopifyReconciliation };
 // ---------------------------------------------------------------------------
 
 interface ShopifyApiOrder {
-  id: number;
+  id: number | string;
   order_number: number;
   name: string; // e.g. "#54950"
   email: string | null;
@@ -233,7 +234,7 @@ async function fetchOrdersFromShopify(since: Date): Promise<ShopifyApiOrder[]> {
 // ---------------------------------------------------------------------------
 
 async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
-  const shopifyId = String(order.id);
+  const shopifyId = normalizeShopifyOrderGid(order.id);
 
   // Check if already exists
   const existing = await db.execute<{ id: string }>(sql`
@@ -390,16 +391,28 @@ async function runReconciliation(): Promise<ReconciliationResult> {
       return result;
     }
 
-    // Batch-check which orders already exist in WMS
-    const shopifyIds = shopifyOrders.map((o) => String(o.id));
-    const existingWms = await db.execute<{ source_table_id: string }>(sql`
-      SELECT source_table_id FROM wms.orders
-      WHERE source_table_id = ANY(${sql.raw(`ARRAY[${shopifyIds.map(id => `'${id}'`).join(',')}]`)})
+    // WMS keys are internal OMS identifiers and cannot prove whether the
+    // Shopify source order reached OMS. Compare canonical source identity.
+    const shopifyIds = shopifyOrders.map((order) =>
+      normalizeShopifyOrderGid(order.id),
+    );
+    const existingOms = await db.execute<{ shopify_order_id: string }>(sql`
+      SELECT DISTINCT so.id AS shopify_order_id
+      FROM public.shopify_orders so
+      JOIN oms.oms_orders oo
+        ON oo.external_order_id IN (so.id, split_part(so.id, '/', -1))
+      WHERE so.id = ANY(
+        ARRAY[${sql.join(shopifyIds.map((id) => sql`${id}`), sql`, `)}]::text[]
+      )
+        AND oo.channel_id IN (
+          SELECT id FROM channels.channels WHERE provider = 'shopify'
+        )
     `);
-    const existingSet = new Set(existingWms.rows.map((r) => r.source_table_id));
+    const existingSet = new Set(existingOms.rows.map((r) => r.shopify_order_id));
 
-    // Filter to missing orders
-    const missingOrders = shopifyOrders.filter((o) => !existingSet.has(String(o.id)));
+    const missingOrders = shopifyOrders.filter(
+      (order) => !existingSet.has(normalizeShopifyOrderGid(order.id)),
+    );
 
     if (missingOrders.length === 0) {
       await setLastCheckTime(new Date());
@@ -409,7 +422,7 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     console.log(`[RECONCILE] Found ${missingOrders.length} missing orders out of ${shopifyOrders.length} checked`);
 
     for (const order of missingOrders) {
-      const orderId = String(order.id);
+      const orderId = normalizeShopifyOrderGid(order.id);
 
       // Skip cancelled orders
       if (order.cancelled_at) {
