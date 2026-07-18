@@ -82,7 +82,7 @@ export interface ControlTowerResponse {
   generatedAt: string;
   status: "healthy" | "degraded" | "critical";
   overview: {
-    funnel: { entered: number; reachedWms: number; hasShipment: number; shipped: number; trackingConfirmed: number };
+    funnel: { sourceObserved: number; entered: number; reachedWms: number; hasShipment: number; shipped: number; trackingConfirmed: number };
     wmsBuckets: Array<{ status: string; count: number }>;
     deadLetterCauses: Array<{ code: string; cause: string; count: number }>;
     crossSystem: { wmsShippedOmsOpen: number; omsNotUpdated: number };

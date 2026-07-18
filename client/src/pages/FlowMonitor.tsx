@@ -162,6 +162,7 @@ interface FlowWaterfallSnapshot {
   generatedAt: string;
   windowDays: number;
   funnel: {
+    sourceObserved?: number;
     entered: number;
     reachedWms: number;
     hasShipment: number;
@@ -169,6 +170,17 @@ interface FlowWaterfallSnapshot {
     trackingConfirmed: number;
   };
   channels: Array<{ provider: string; entered: number }>;
+  channelIntake?: Array<{
+    channelId: number | null;
+    channelName: string;
+    provider: string;
+    observed: number;
+    omsReceived: number;
+    pending: number;
+    missing: number;
+    failed: number;
+    lastObservedAt: string | null;
+  }>;
   crossSystem: { wmsShippedOmsOpen: number; omsNotUpdated: number };
   sla: { breached: number };
   issues: FlowIssueSnapshot[];
@@ -1730,7 +1742,8 @@ function FlowOverview(props: {
   const stages = useMemo(() => {
     if (!snapshot) return [];
     return [
-      { key: "entered", label: "Channel accepted", count: snapshot.funnel.entered, icon: RadioTower, issueStages: ["intake"] as FlowIssueStage[] },
+      { key: "source", label: "Sales channel observed", count: snapshot.funnel.sourceObserved ?? snapshot.funnel.entered, icon: RadioTower, issueStages: ["intake"] as FlowIssueStage[] },
+      { key: "entered", label: "OMS received", count: snapshot.funnel.entered, icon: Inbox, issueStages: [] as FlowIssueStage[] },
       { key: "wms", label: "Reached WMS", count: snapshot.funnel.reachedWms, icon: Boxes, issueStages: ["oms_to_wms"] as FlowIssueStage[] },
       { key: "shipment", label: "Shipment created", count: snapshot.funnel.hasShipment, icon: PackageCheck, issueStages: ["wms_fulfill", "engine_push"] as FlowIssueStage[] },
       { key: "shipped", label: "Shipped", count: snapshot.funnel.shipped, icon: Truck, issueStages: ["shipped"] as FlowIssueStage[] },
@@ -1745,6 +1758,21 @@ function FlowOverview(props: {
         monitorMatches: issues.reduce((total, issue) => total + issue.count, 0),
       };
     });
+  }, [snapshot]);
+  const channelIntake = useMemo(() => {
+    if (!snapshot) return [];
+    if (snapshot.channelIntake) return snapshot.channelIntake;
+    return snapshot.channels.map((channel) => ({
+      channelId: null,
+      channelName: humanize(channel.provider),
+      provider: channel.provider,
+      observed: channel.entered,
+      omsReceived: channel.entered,
+      pending: 0,
+      missing: 0,
+      failed: 0,
+      lastObservedAt: null,
+    }));
   }, [snapshot]);
   const selectedStage = stages.find((stage) => stage.key === selectedStageKey) ?? null;
   const selectedIssue = selectedStage?.issues.find((issue) => issue.code === selectedIssueCode) ?? null;
@@ -1843,14 +1871,14 @@ function FlowOverview(props: {
       </div>
 
       {props.loading ? (
-        <div className="grid gap-2 md:grid-cols-5">
-          {Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-20 w-full" />)}
+        <div className="grid gap-2 md:grid-cols-6">
+          {Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-20 w-full" />)}
         </div>
       ) : props.error ? (
         <div className="border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{props.error.message}</div>
       ) : snapshot ? (
         <>
-          <div className="grid grid-cols-2 overflow-hidden border md:grid-cols-5">
+          <div className="grid grid-cols-2 overflow-hidden border md:grid-cols-6">
             {stages.map((stage, index) => {
               const priorCount = index === 0 ? null : stages[index - 1].count;
               const gap = priorCount === null ? null : Math.max(0, priorCount - stage.count);
@@ -1862,7 +1890,7 @@ function FlowOverview(props: {
                   onClick={() => openStage(stage)}
                   disabled={stage.issues.length === 0}
                   className={cn(
-                    "relative min-w-0 border-b border-r p-3 text-left even:border-r-0 last:col-span-2 last:border-b-0 md:border-b-0 md:border-r md:even:border-r md:last:col-span-1 md:last:border-r-0",
+                    "relative min-w-0 border-b border-r p-3 text-left even:border-r-0 md:border-b-0 md:border-r md:even:border-r md:last:border-r-0",
                     stage.issues.length > 0 && "cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
                   )}
                   aria-label={stage.issues.length > 0 ? `Review ${stage.label} exceptions` : `${stage.label}: no open exceptions`}
@@ -1888,9 +1916,48 @@ function FlowOverview(props: {
             <span><strong>{snapshot.crossSystem.wmsShippedOmsOpen.toLocaleString()}</strong> shipped orders still open upstream</span>
             <span><strong>{snapshot.crossSystem.omsNotUpdated.toLocaleString()}</strong> fulfillment writebacks incomplete</span>
             <span><strong>{snapshot.sla.breached.toLocaleString()}</strong> orders past ship-by date</span>
-            <span className="text-muted-foreground">
-              {snapshot.channels.map((channel) => `${humanize(channel.provider)} ${channel.entered.toLocaleString()}`).join(" · ")}
-            </span>
+          </div>
+          <div className="mt-4 overflow-x-auto border">
+            <div className="border-b bg-muted/30 px-3 py-2">
+              <h3 className="text-sm font-semibold">Channel order intake</h3>
+              <p className="text-xs text-muted-foreground">Physical orders reported by each sales channel compared with OMS receipts.</p>
+            </div>
+            <table className="w-full min-w-[760px] text-sm">
+              <thead className="border-b bg-muted/20 text-left text-xs uppercase text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Channel</th>
+                  <th className="px-3 py-2 text-right font-medium">Source seen</th>
+                  <th className="px-3 py-2 text-right font-medium">OMS received</th>
+                  <th className="px-3 py-2 text-right font-medium">Awaiting</th>
+                  <th className="px-3 py-2 text-right font-medium">Missing</th>
+                  <th className="px-3 py-2 text-right font-medium">Failed</th>
+                  <th className="px-3 py-2 text-right font-medium">Last seen</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {channelIntake.map((channel) => (
+                  <tr key={`${channel.provider}:${channel.channelId ?? channel.channelName}`}>
+                    <td className="px-3 py-2">
+                      <div className="font-medium">{channel.channelName}</div>
+                      <div className="text-xs text-muted-foreground">{humanize(channel.provider)}</div>
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{channel.observed.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{channel.omsReceived.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-amber-700">{channel.pending.toLocaleString()}</td>
+                    <td className={cn("px-3 py-2 text-right tabular-nums", channel.missing > 0 && "font-semibold text-red-700")}>{channel.missing.toLocaleString()}</td>
+                    <td className={cn("px-3 py-2 text-right tabular-nums", channel.failed > 0 && "font-semibold text-red-700")}>{channel.failed.toLocaleString()}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right text-xs text-muted-foreground">
+                      {channel.lastObservedAt ? formatTimestamp(channel.lastObservedAt) : "Not recorded"}
+                    </td>
+                  </tr>
+                ))}
+                {channelIntake.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="px-3 py-5 text-center text-muted-foreground">No physical channel orders were observed in this window.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </>
       ) : (

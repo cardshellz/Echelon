@@ -13,8 +13,9 @@ function waterfall(generatedAt = "2026-07-11T12:00:01.000Z") {
   return {
     generatedAt,
     windowDays: 30,
-    funnel: { entered: 100, reachedWms: 99, hasShipment: 98, shipped: 95, trackingConfirmed: 94 },
+    funnel: { sourceObserved: 101, entered: 100, reachedWms: 99, hasShipment: 98, shipped: 95, trackingConfirmed: 94 },
     channels: [],
+    channelIntake: [],
     volumePerDay: [],
     wmsBuckets: [],
     eventSpine: [],
@@ -70,6 +71,7 @@ describe("Control Tower flow snapshot", () => {
     expect(getFlowWaterfall).toHaveBeenCalledTimes(1);
     expect(database.statements.some(({ text }) => text.startsWith("INSERT INTO operations.control_tower_flow_snapshots"))).toBe(true);
     const success = database.statements.find(({ text }) => text.startsWith("UPDATE operations.control_tower_flow_snapshots"));
+    expect(success?.values[1]).toContain('"sourceObserved":101');
     expect(success?.values[1]).toContain('"trackingConfirmed":94');
   });
 

@@ -22,6 +22,7 @@ describe("getFlowWaterfall", () => {
     const result = await getFlowWaterfall(fakeDb(), { windowDays: 14 });
 
     expect(result.windowDays).toBe(14);
+    expect(typeof result.funnel.sourceObserved).toBe("number");
     expect(typeof result.funnel.entered).toBe("number");
     expect(typeof result.funnel.shipped).toBe("number");
     expect(typeof result.funnel.trackingConfirmed).toBe("number");
@@ -53,16 +54,16 @@ describe("getFlowWaterfall", () => {
     expect(FLOW_WATERFALL_SRC).toContain("sla: { breached: slaBreached, sample: [] }");
   });
 
-  it("surfaces paid physical Shopify orders that reached raw intake but not OMS", () => {
-    const start = FLOW_WATERFALL_SRC.indexOf('code: "SHOPIFY_RAW_WITHOUT_OMS"');
+  it("surfaces physical orders from any channel that did not reach OMS", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "CHANNEL_ORDER_MISSING_OMS"');
     const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
     const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
 
-    expect(issueBlock).toContain("shopify_order_bridge_checkpoints");
-    expect(issueBlock).toContain("so.created_at < NOW() - INTERVAL '10 minutes'");
-    expect(issueBlock).toContain("soi.requires_shipping::text");
-    expect(issueBlock).toContain("COALESCE(soi.quantity, 0) > 0");
-    expect(issueBlock).toContain("oo.external_order_id IN (so.id, split_part(so.id, '/', -1))");
+    expect(issueBlock).toContain("oms.channel_order_intakes");
+    expect(issueBlock).toContain("intake.source_observed_at < NOW() - INTERVAL '10 minutes'");
+    expect(issueBlock).toContain("intake.is_shippable IS TRUE");
+    expect(issueBlock).toContain("intake.oms_order_id IS NULL");
+    expect(issueBlock).not.toContain("provider = 'shopify'");
   });
 
   it("reports a stale or failed Shopify recovery sweep independently of order gaps", () => {
@@ -83,6 +84,17 @@ describe("getFlowWaterfall", () => {
     expect(issueBlock).toContain("warehouse.echelon_settings");
     expect(issueBlock).toContain("shopify_reconciliation_last_check");
     expect(issueBlock).toContain("MAX(updated_at) < NOW() - INTERVAL '30 minutes'");
+  });
+
+  it("alerts when the poll-primary eBay intake safety net is unhealthy", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "EBAY_ORDER_POLL_UNHEALTHY"');
+    const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
+
+    expect(issueBlock).toContain("oms.ebay_order_poll_checkpoints");
+    expect(issueBlock).toContain("last_success_at < NOW() - INTERVAL '15 minutes'");
+    expect(issueBlock).toContain("checkpoint.last_error IS NOT NULL");
+    expect(issueBlock).toContain("checkpoint.consecutive_failures > 0");
   });
 
   it("does not claim the Shopify recovery sweep is active when disabled", async () => {
