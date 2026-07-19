@@ -1,5 +1,7 @@
 # Dropship Laptop Handoff - 2026-07-12
 
+> Current continuation status: use `docs/DROPSHIP-SHIPPING-WEEKLY-HANDOFF-2026-07-19.md`. This July 12 file is retained for historical context.
+
 This is a current pickup checkpoint for continuing the dropship program on another machine. It does not replace the design or work-order documents below.
 
 ## Read in this order
