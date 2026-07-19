@@ -64,7 +64,7 @@ describe("eBay order poll recovery", () => {
 
   it("runs a 30-day deep scan when no durable checkpoint exists", async () => {
     const now = new Date("2026-07-16T12:00:00.000Z");
-    const { database, statements } = databaseWithCheckpoint(null);
+    const { database, execute, statements } = databaseWithCheckpoint(null);
     const syncOmsOrderToWms = vi.fn(async () => 205570);
     setWmsSyncService({ syncOmsOrderToWms } as any);
 
@@ -92,6 +92,16 @@ describe("eBay order poll recovery", () => {
 
     expect(ingested).toBe(1);
     expect(ingestOrder).toHaveBeenCalledOnce();
+    const ledgerCalls = execute.mock.calls
+      .map(([query]) => query)
+      .filter((query) => queryText(query).includes("oms.record_channel_order_intake"));
+    expect(ledgerCalls).toHaveLength(2);
+    const successParameters = ledgerCalls[1].queryChunks.filter(
+      (chunk: unknown) => ["string", "number", "boolean"].includes(typeof chunk),
+    );
+    expect(successParameters).toContain("ingested");
+    expect(successParameters).toContain(269119);
+    expect(successParameters).toContain(false);
     expect(syncOmsOrderToWms).toHaveBeenCalledTimes(2);
     expect(getOrders).toHaveBeenCalledTimes(2);
     expect(getOrders.mock.calls[0][0].filter).toContain(

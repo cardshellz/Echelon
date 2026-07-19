@@ -110,6 +110,16 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     expect(EBAY_INGESTION_SRC).toContain(
       "await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData)",
     );
+    expect(EBAY_INGESTION_SRC).toContain("async function recordEbayOrderIngested");
+    expect(EBAY_INGESTION_SRC).toContain('status: "ingested"');
+    expect(EBAY_INGESTION_SRC).toContain("omsOrderId");
+    expect(EBAY_INGESTION_SRC).toContain("incrementObservation: false");
+    expect(EBAY_INGESTION_SRC).toContain(
+      'await recordEbayOrderIngested(db, ebayOrder, "manual_reingest", result.id)',
+    );
+    expect(EBAY_INGESTION_SRC).toMatch(
+      /await recordEbayOrderIngested\(\s*db,\s*ebayOrder,\s*"webhook_fetch",\s*result\.id/,
+    );
     expect(EBAY_INGESTION_SRC).toMatch(
       /await ensureEbayOrderQueuedForWmsSync\(\s*_wmsSyncService,\s*result\.id,\s*ebayOrder\.orderId,\s*database/,
     );

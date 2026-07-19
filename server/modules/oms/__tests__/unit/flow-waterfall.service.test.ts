@@ -62,8 +62,27 @@ describe("getFlowWaterfall", () => {
     expect(issueBlock).toContain("oms.channel_order_intakes");
     expect(issueBlock).toContain("intake.source_observed_at < NOW() - INTERVAL '10 minutes'");
     expect(issueBlock).toContain("intake.is_shippable IS TRUE");
-    expect(issueBlock).toContain("intake.oms_order_id IS NULL");
+    expect(issueBlock).toContain("NOT ${CHANNEL_INTAKE_HAS_OMS_ORDER}");
     expect(issueBlock).not.toContain("provider = 'shopify'");
+  });
+
+  it("derives intake funnel state from canonical OMS identity, not only the cached FK", () => {
+    const authorityBlock = FLOW_WATERFALL_SRC.slice(
+      FLOW_WATERFALL_SRC.indexOf("const CHANNEL_INTAKE_HAS_OMS_ORDER"),
+      FLOW_WATERFALL_SRC.indexOf("const DEAD_LETTER_REASON_CODE"),
+    );
+    const intakeSummaryBlock = FLOW_WATERFALL_SRC.slice(
+      FLOW_WATERFALL_SRC.indexOf("const channelIntake"),
+      FLOW_WATERFALL_SRC.indexOf("const sourceObserved"),
+    );
+
+    expect(authorityBlock).toContain("matched_order.external_order_id = intake.external_order_id");
+    expect(authorityBlock).toContain("matched_order.channel_id = intake.channel_id");
+    expect(authorityBlock).toContain("LOWER(matched_channel.provider) = LOWER(intake.provider)");
+    expect(authorityBlock).toContain("intake.channel_id IS NULL");
+    expect(authorityBlock).toContain("AND 1 = (");
+    expect(intakeSummaryBlock).toContain("${CHANNEL_INTAKE_HAS_OMS_ORDER}");
+    expect(intakeSummaryBlock).not.toContain("intake.oms_order_id IS NULL");
   });
 
   it("reports a stale or failed Shopify recovery sweep independently of order gaps", () => {

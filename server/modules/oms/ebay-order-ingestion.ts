@@ -60,6 +60,29 @@ const POLL_DEEP_SCAN_LOOKBACK_DAYS = envPositiveInteger(
   30,
 );
 
+async function recordEbayOrderIngested(
+  database: any,
+  ebayOrder: EbayOrder,
+  observationMethod: string,
+  omsOrderId: number,
+  sourceInboxId?: number | null,
+): Promise<void> {
+  await recordChannelOrderObservation(database, {
+    provider: "ebay",
+    channelId: EBAY_CHANNEL_ID,
+    externalOrderId: ebayOrder.orderId,
+    externalOrderNumber: ebayOrder.orderId,
+    observationMethod,
+    sourceInboxId: sourceInboxId ?? null,
+    rawPayload: ebayOrder,
+    isShippable: ebayOrderIsShippable(ebayOrder),
+    sourceOrderedAt: ebayOrder.creationDate,
+    status: "ingested",
+    omsOrderId,
+    incrementObservation: false,
+  });
+}
+
 interface EbayOrderPollCheckpoint {
   last_window_end: Date | string | null;
   last_deep_scan_at: Date | string | null;
@@ -497,6 +520,12 @@ async function runEbayOrderPoll(
         });
         const orderData = mapEbayOrderToOrderData(ebayOrder);
         const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, ebayOrder.orderId, orderData);
+        await recordEbayOrderIngested(
+          database,
+          ebayOrder,
+          window.deepScan ? "ebay_deep_scan" : "ebay_poll",
+          result.id,
+        );
 
         // Check if existing order needs status update (cancelled, refunded)
         const isNew = result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
@@ -677,6 +706,7 @@ export async function reingestEbayOrder(
   try {
     const orderData = mapEbayOrderToOrderData(ebayOrder);
     result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
+    await recordEbayOrderIngested(db, ebayOrder, "manual_reingest", result.id);
   } catch (error) {
     await recordChannelOrderFailure(db, {
       provider: "ebay",
@@ -802,6 +832,13 @@ export function createEbayOrderWebhookHandler(
             });
             const orderData = mapEbayOrderToOrderData(ebayOrder);
             const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
+            await recordEbayOrderIngested(
+              db,
+              ebayOrder,
+              "webhook_fetch",
+              result.id,
+              inbox?.id ?? null,
+            );
 
             // Post-ingest if newly created, or if a prior delivery inserted
             // the OMS order but did not finish routing it to WMS.
