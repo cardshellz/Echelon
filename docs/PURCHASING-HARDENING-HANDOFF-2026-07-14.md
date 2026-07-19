@@ -238,7 +238,7 @@ repository using a random disposable probe table. It covers:
 - database-trigger rejection of early lease/retry reclamation
 
 It only runs with an explicit `ECHELON_TEST_DATABASE_URL`, refuses an exact match
-with `DATABASE_URL` or `EXTERNAL_DATABASE_URL`, and cleans only its random probe and
+with `DATABASE_URL`, and cleans only its random probe and
 actor-owned rows. This laptop has no Docker, `psql`, or configured test database, so
 all seven tests currently skip cleanly. They have not yet executed against PostgreSQL.
 
@@ -323,7 +323,7 @@ require a fully bootstrapped application database:
 
 The outbox suite requires both `ECHELON_TEST_DATABASE_URL` and the explicit
 `ECHELON_TEST_DATABASE_DISPOSABLE=true` acknowledgment. It refuses a URL matching
-`DATABASE_URL` or `EXTERNAL_DATABASE_URL`, creates only minimal dependency schemas
+`DATABASE_URL`, creates only minimal dependency schemas
 inside the disposable CI database, and removes them afterward. This prevents the
 test from silently running against production or a shared developer database.
 
@@ -499,7 +499,7 @@ The three older channel/inventory integration suites no longer build obsolete
 unqualified `public` tables. Their shared harness now requires both
 `ECHELON_TEST_DATABASE_URL` and the explicit
 `ECHELON_TEST_DATABASE_DISPOSABLE=true` acknowledgment, rejects a URL matching
-`DATABASE_URL` or `EXTERNAL_DATABASE_URL`, and rebuilds only its owned
+`DATABASE_URL`, and rebuilds only its owned
 `catalog`, `warehouse`, `inventory`, `channels`, and `wms` fixture schemas.
 
 Cleanup is schema-qualified and the suites run without file parallelism so one

@@ -5,15 +5,15 @@
  * the excess reservation. Also cleans up orphaned zero-qty rows.
  *
  * Usage:
- *   EXTERNAL_DATABASE_URL=... npx tsx scripts/cleanup-over-reserved.ts [--dry-run]
+ *   DATABASE_URL=... npx tsx scripts/cleanup-over-reserved.ts [--dry-run]
  */
 
 import { Pool } from "pg";
 
 const DRY_RUN = process.argv.includes("--dry-run");
-const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
-  console.error("Set EXTERNAL_DATABASE_URL or DATABASE_URL");
+  console.error("Set DATABASE_URL");
   process.exit(1);
 }
 

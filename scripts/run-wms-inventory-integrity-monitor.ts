@@ -69,7 +69,6 @@ function requiredEnvironment(name: string): string {
 
 function registryConnectionString(): string {
   const value = process.env.WMS_INTEGRITY_REGISTRY_DATABASE_URL
-    || process.env.EXTERNAL_DATABASE_URL
     || process.env.DATABASE_URL;
   if (!value) throw new Error("WMS_INTEGRITY_REGISTRY_DATABASE_URL or the app database URL is required");
   return value;

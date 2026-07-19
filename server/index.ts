@@ -56,6 +56,7 @@ import {
   schedulerIsDisabled,
 } from "./infrastructure/scheduler-config";
 import { reportError, runWithContext } from "./platform/observability";
+import { databaseSsl, resolveDatabaseUrl } from "./config/database";
 
 declare module "express-session" {
   interface SessionData {
@@ -104,11 +105,10 @@ if (!process.env.SESSION_SECRET) {
 
 // Set up PostgreSQL session store for persistent sessions
 const PgSession = connectPgSimple(session);
-const dbConnectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
-const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "production";
+const dbConnectionString = resolveDatabaseUrl();
 const sessionPool = new Pool({
   connectionString: dbConnectionString,
-  ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+  ssl: databaseSsl(dbConnectionString),
   max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
 });
 

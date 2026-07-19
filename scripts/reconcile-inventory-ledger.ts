@@ -16,8 +16,7 @@
  *   npx tsx scripts/reconcile-inventory-ledger.ts --limit=50      # top N variances
  *   npx tsx scripts/reconcile-inventory-ledger.ts --variant=1234  # one variant only
  *
- * Connection: uses EXTERNAL_DATABASE_URL (per CLAUDE.md), falling back to
- * DATABASE_URL.
+ * Connection: uses DATABASE_URL.
  *
  * Exit code: 0 if zero variance, 1 if any variance found (so it can gate CI).
  */
@@ -50,11 +49,10 @@ function parseArgs(argv: string[]): CliOptions {
 
 async function main() {
   const opts = parseArgs(process.argv);
-  const connectionString =
-    process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL;
 
   if (!connectionString) {
-    console.error("ERROR: EXTERNAL_DATABASE_URL (or DATABASE_URL) is not set.");
+    console.error("ERROR: DATABASE_URL is not set.");
     process.exit(2);
   }
 

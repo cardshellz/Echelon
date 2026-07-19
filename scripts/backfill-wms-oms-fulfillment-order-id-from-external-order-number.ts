@@ -28,7 +28,7 @@
  * Audit: shipstation-flow-refactor-plan.md
  *
  * Required env vars:
- *   EXTERNAL_DATABASE_URL  (preferred) or DATABASE_URL
+ *   DATABASE_URL
  *
  * Run commands (do NOT run without reviewing dry-run output first):
  *

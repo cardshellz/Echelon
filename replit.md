@@ -5,7 +5,7 @@ Echelon is a full-stack operations management system providing end-to-end contro
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
-Database: Uses EXTERNAL database (EXTERNAL_DATABASE_URL), NOT Replit's built-in database. Do not reference Replit Database pane for production issues - provide SQL directly.
+Database: Uses `DATABASE_URL`; production is on Heroku, not Replit's built-in database. Do not reference Replit Database pane for production issues - provide SQL directly.
 Testing: ALWAYS test on PRODUCTION (Heroku). Development database is empty/unused.
 
 ## System Architecture

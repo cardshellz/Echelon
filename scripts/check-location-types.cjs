@@ -11,7 +11,7 @@ for (const line of envContent.split('\n')) {
   }
 }
 const { Pool } = require('pg');
-const pool = new Pool({ connectionString: process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 async function main() {
   const { rows: types } = await pool.query("SELECT location_type, count(*) as cnt FROM warehouse_locations GROUP BY location_type ORDER BY cnt DESC");

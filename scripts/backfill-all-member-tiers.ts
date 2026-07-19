@@ -5,7 +5,7 @@
 
 import { Pool } from 'pg';
 
-const connectionString = process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL;
+const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   console.error('DATABASE_URL not set');
   process.exit(1);

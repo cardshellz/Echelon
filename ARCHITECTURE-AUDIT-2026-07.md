@@ -238,8 +238,8 @@ WMS-sync pre-pick (`wms-sync.service.ts:612-629`); the #658 ship-before-pick fal
 ### P3 — platform hygiene
 
 - `db.ts` (1,077 lines): second migration authority, duplicates ~15 tracked migrations, contains
-  DDL/DML with no migration counterpart, swallow-all catch; boot uses `EXTERNAL_DATABASE_URL`
-  while release migrations use `DATABASE_URL` (split-brain risk). Two interleaved migration
+  DDL/DML with no migration counterpart, and has a swallow-all catch. Boot and release
+  migrations now both use `DATABASE_URL`. Two interleaved migration
   numbering series with 43 numeric collisions, lexicographic ordering.
 - Structured logger exists but is imported by one file; ~1,600 raw `console.*` across four logging
   systems. Correlation IDs are ad-hoc JSON.

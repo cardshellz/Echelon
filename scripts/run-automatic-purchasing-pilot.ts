@@ -64,7 +64,7 @@ export function parseAutomaticPurchasingPilotArgs(args: string[]): CliOptions {
 }
 
 export async function loadLocalEnvironmentIfNeeded(): Promise<void> {
-  if (process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL) return;
+  if (process.env.DATABASE_URL) return;
   try {
     const dotenv = await import("dotenv");
     dotenv.config({ quiet: true });

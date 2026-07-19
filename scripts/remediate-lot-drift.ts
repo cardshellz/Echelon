@@ -29,7 +29,7 @@
  *   npx tsx scripts/remediate-lot-drift.ts --limit=30  # dry-run, show 30 sample cells
  *   npx tsx scripts/remediate-lot-drift.ts --apply     # WRITE (lot layer only)
  *
- * Connection: EXTERNAL_DATABASE_URL (per CLAUDE.md), falling back to DATABASE_URL.
+ * Connection: DATABASE_URL.
  * Verify after apply with: npm run wms:reconcile-lots  (expect zero variance).
  */
 
@@ -63,10 +63,9 @@ interface Cell {
 
 async function main() {
   const opts = parseArgs(process.argv);
-  const connectionString =
-    process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
-    console.error("ERROR: EXTERNAL_DATABASE_URL (or DATABASE_URL) is not set.");
+    console.error("ERROR: DATABASE_URL is not set.");
     process.exit(2);
   }
 

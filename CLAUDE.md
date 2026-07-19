@@ -209,8 +209,8 @@ non-idempotent financial operations · use `allowNegative: true` · commit secre
 
 ## Project-specific operational notes
 
-- **Database:** uses the EXTERNAL database (`EXTERNAL_DATABASE_URL`), not Replit's. The
-  dev database is empty; production is on Heroku (`cardshellz-echelon`).
+- **Database:** uses `DATABASE_URL`. The dev database is empty; production is on
+  Heroku (`cardshellz-echelon`).
 - **Money:** confirm the unit (cents vs decimal) of any financial column before computing.
 - **Migrations:** numbered SQL files in `migrations/`; `server/db.ts` has fallback
   startup migrations.

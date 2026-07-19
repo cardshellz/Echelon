@@ -8,7 +8,7 @@ async function executeMigration() {
   console.log("Starting Full Namespace Isolation Migration...");
 
   try {
-    const isProduction = process.env.NODE_ENV === "production" || !!process.env.EXTERNAL_DATABASE_URL;
+    const isProduction = process.env.NODE_ENV === "production";
     if (!isProduction) {
       console.warn("WARNING: Running locally. Skipping actual SCHEMA mutations unless confirmed.");
     }

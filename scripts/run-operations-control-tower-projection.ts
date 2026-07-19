@@ -59,8 +59,8 @@ export function parseProjectionFlags(argv: string[]): ProjectionFlags {
 }
 
 function connectionString(): string {
-  const value = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
-  if (!value) throw new Error("EXTERNAL_DATABASE_URL or DATABASE_URL is required");
+  const value = process.env.DATABASE_URL;
+  if (!value) throw new Error("DATABASE_URL is required");
   return value;
 }
 

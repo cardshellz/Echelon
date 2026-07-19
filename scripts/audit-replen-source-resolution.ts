@@ -415,17 +415,13 @@ async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   await loadDotenvIfAvailable();
 
-  if (!process.env.DATABASE_URL && !process.env.EXTERNAL_DATABASE_URL) {
-    throw new Error("DATABASE_URL or EXTERNAL_DATABASE_URL is required");
-  }
-  if (!process.env.EXTERNAL_DATABASE_URL && process.env.DATABASE_URL) {
-    process.env.EXTERNAL_DATABASE_URL = process.env.DATABASE_URL;
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL is required");
   }
 
-  const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL;
   const useSSL = Boolean(
-    process.env.EXTERNAL_DATABASE_URL ||
-    (process.env.DATABASE_URL && process.env.DATABASE_URL.includes("amazonaws.com"))
+    process.env.DATABASE_URL.includes("amazonaws.com")
   );
   const pool = new Pool({
     connectionString,

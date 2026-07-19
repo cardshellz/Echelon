@@ -499,7 +499,7 @@ export function buildReadinessChecks(): ReadinessCheck[] {
 }
 
 function loadDotenvIfAvailable(): void {
-  if (process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL) return;
+  if (process.env.DATABASE_URL) return;
   const envPath = path.resolve(process.cwd(), ".env");
   if (!fs.existsSync(envPath)) return;
 
@@ -524,9 +524,9 @@ function loadDotenvIfAvailable(): void {
 
 function connectionStringFromEnv(): string {
   loadDotenvIfAvailable();
-  const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error("EXTERNAL_DATABASE_URL or DATABASE_URL is required");
+    throw new Error("DATABASE_URL is required");
   }
   return connectionString;
 }

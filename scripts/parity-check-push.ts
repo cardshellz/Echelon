@@ -29,8 +29,8 @@
  *
  * With --strict flag: address_only outcomes are promoted to diverge (exit 1).
  *
- * Required env: same as the rest of Echelon (DATABASE_URL or
- * EXTERNAL_DATABASE_URL, SHIPSTATION_API_KEY/SECRET, etc.)
+ * Required env: same as the rest of Echelon (DATABASE_URL,
+ * SHIPSTATION_API_KEY/SECRET, etc.)
  */
 
 // Note: no `dotenv` import — production dynos load env vars via Heroku

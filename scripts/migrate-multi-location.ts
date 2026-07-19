@@ -1,9 +1,9 @@
 import { Pool } from 'pg';
 
 async function migrate() {
-  const databaseUrl = process.env.EXTERNAL_DATABASE_URL;
+  const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
-    console.error('EXTERNAL_DATABASE_URL is required');
+    console.error('DATABASE_URL is required');
     process.exit(1);
   }
 

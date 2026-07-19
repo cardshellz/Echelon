@@ -5,7 +5,7 @@
  * downloads them, and stores in product_assets with both URL and cached file.
  *
  * Usage:
- *   EXTERNAL_DATABASE_URL=... npx tsx scripts/sync-ebay-images.ts [--dry-run] [--limit=50]
+ *   DATABASE_URL=... npx tsx scripts/sync-ebay-images.ts [--dry-run] [--limit=50]
  */
 
 import { Pool } from "pg";
@@ -14,9 +14,9 @@ const DRY_RUN = process.argv.includes("--dry-run");
 const LIMIT_ARG = process.argv.find((a) => a.startsWith("--limit="));
 const LIMIT = LIMIT_ARG ? parseInt(LIMIT_ARG.split("=")[1], 10) : 500;
 
-const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
-  console.error("Set EXTERNAL_DATABASE_URL or DATABASE_URL");
+  console.error("Set DATABASE_URL");
   process.exit(1);
 }
 

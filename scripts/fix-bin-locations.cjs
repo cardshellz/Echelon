@@ -11,7 +11,7 @@ for (const line of envContent.split('\n')) {
   }
 }
 const { Pool } = require('pg');
-const pool = new Pool({ connectionString: process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 async function main() {
   // Fix the 108 bin locations that were missed
