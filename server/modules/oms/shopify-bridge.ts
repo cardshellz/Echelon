@@ -219,7 +219,7 @@ export async function bridgeShopifyOrderToOms(
       totalCents: raw.total_price_cents || 0,
       currency: raw.currency || "USD",
       taxExempt: raw.tax_exempt === true,
-      rawPayload: null, // we don't have the raw payload anymore
+      rawPayload: { order: raw, lineItems: orderItems },
       notes: raw.note,
       tags: Array.isArray(raw.tags) ? raw.tags : (typeof raw.tags === 'string' ? raw.tags.split(",").map((t: string) => t.trim()) : []),
       shippingMethod: null,

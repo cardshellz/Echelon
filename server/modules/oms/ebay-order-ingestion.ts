@@ -27,6 +27,11 @@ import {
 } from "./webhook-inbox.service";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 import { extractEbayShipByDate } from "./ebay-shipby";
+import {
+  ebayOrderIsShippable,
+  recordChannelOrderFailure,
+  recordChannelOrderObservation,
+} from "./channel-order-intake.service";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 import {
   markEbayOrderPollFailed,
@@ -480,6 +485,16 @@ async function runEbayOrderPoll(
         if (seenThisPoll.has(ebayOrder.orderId)) continue;
         seenThisPoll.add(ebayOrder.orderId);
         ordersSeen++;
+        await recordChannelOrderObservation(database, {
+          provider: "ebay",
+          channelId: EBAY_CHANNEL_ID,
+          externalOrderId: ebayOrder.orderId,
+          externalOrderNumber: ebayOrder.orderId,
+          observationMethod: window.deepScan ? "ebay_deep_scan" : "ebay_poll",
+          rawPayload: ebayOrder,
+          isShippable: ebayOrderIsShippable(ebayOrder),
+          sourceOrderedAt: ebayOrder.creationDate,
+        });
         const orderData = mapEbayOrderToOrderData(ebayOrder);
         const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, ebayOrder.orderId, orderData);
 
@@ -563,6 +578,16 @@ async function runEbayOrderPoll(
         const message = err?.message || String(err);
         failedOrders.push({ orderId: ebayOrder.orderId, error: message });
         console.error(`[eBay Orders] Failed to ingest order ${ebayOrder.orderId}: ${message}`);
+        await recordChannelOrderFailure(database, {
+          provider: "ebay",
+          channelId: EBAY_CHANNEL_ID,
+          externalOrderId: ebayOrder.orderId,
+          externalOrderNumber: ebayOrder.orderId,
+          observationMethod: window.deepScan ? "ebay_deep_scan" : "ebay_poll",
+          rawPayload: ebayOrder,
+          isShippable: ebayOrderIsShippable(ebayOrder),
+          sourceOrderedAt: ebayOrder.creationDate,
+        }, err);
         await enqueueEbayOrderIngestRetry(
           database,
           ebayOrder.orderId,
@@ -637,8 +662,34 @@ export async function reingestEbayOrder(
   const ebayOrder = await ebayApiClient.getOrder(orderId);
   if (!ebayOrder) throw new Error(`eBay order ${orderId} not found on platform`);
 
-  const orderData = mapEbayOrderToOrderData(ebayOrder);
-  const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
+  await recordChannelOrderObservation(db, {
+    provider: "ebay",
+    channelId: EBAY_CHANNEL_ID,
+    externalOrderId: orderId,
+    externalOrderNumber: orderId,
+    observationMethod: "manual_reingest",
+    rawPayload: ebayOrder,
+    isShippable: ebayOrderIsShippable(ebayOrder),
+    sourceOrderedAt: ebayOrder.creationDate,
+  });
+
+  let result;
+  try {
+    const orderData = mapEbayOrderToOrderData(ebayOrder);
+    result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
+  } catch (error) {
+    await recordChannelOrderFailure(db, {
+      provider: "ebay",
+      channelId: EBAY_CHANNEL_ID,
+      externalOrderId: orderId,
+      externalOrderNumber: orderId,
+      observationMethod: "manual_reingest",
+      rawPayload: ebayOrder,
+      isShippable: ebayOrderIsShippable(ebayOrder),
+      sourceOrderedAt: ebayOrder.creationDate,
+    }, error);
+    throw error;
+  }
 
   const wasCreated =
     result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
@@ -738,6 +789,17 @@ export function createEbayOrderWebhookHandler(
           try {
             // Fetch the full order from eBay API
             const ebayOrder = await ebayApiClient.getOrder(orderId);
+            await recordChannelOrderObservation(db, {
+              provider: "ebay",
+              channelId: EBAY_CHANNEL_ID,
+              externalOrderId: orderId,
+              externalOrderNumber: orderId,
+              observationMethod: "webhook_fetch",
+              sourceInboxId: inbox?.id ?? null,
+              rawPayload: ebayOrder,
+              isShippable: ebayOrderIsShippable(ebayOrder),
+              sourceOrderedAt: ebayOrder.creationDate,
+            });
             const orderData = mapEbayOrderToOrderData(ebayOrder);
             const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
 
@@ -763,6 +825,15 @@ export function createEbayOrderWebhookHandler(
             console.log(`[eBay Webhook] Processed order ${orderId}`);
           } catch (err: any) {
             console.error(`[eBay Webhook] Failed to process order ${orderId}: ${err.message}`);
+            await recordChannelOrderFailure(db, {
+              provider: "ebay",
+              channelId: EBAY_CHANNEL_ID,
+              externalOrderId: orderId,
+              externalOrderNumber: orderId,
+              observationMethod: "webhook_fetch",
+              sourceInboxId: inbox?.id ?? null,
+              isShippable: true,
+            }, err);
             if (inbox) {
               await markWebhookFailed(db, inbox.id, err).catch((markErr: any) => {
                 console.error(`[eBay Webhook] Failed to mark inbox ${inbox?.id} failed: ${markErr.message}`);

@@ -65,7 +65,18 @@ export interface FlowDuplicates {
   sample: any[];
 }
 export interface FlowIntakeModel { provider: string; model: "poll-primary" | "webhook-primary"; cadenceSeconds: number; note: string }
-export interface FlowFunnel { entered: number; reachedWms: number; hasShipment: number; shipped: number; trackingConfirmed: number }
+export interface FlowFunnel { sourceObserved: number; entered: number; reachedWms: number; hasShipment: number; shipped: number; trackingConfirmed: number }
+export interface FlowChannelIntake {
+  channelId: number | null;
+  channelName: string;
+  provider: string;
+  observed: number;
+  omsReceived: number;
+  pending: number;
+  missing: number;
+  failed: number;
+  lastObservedAt: string | null;
+}
 export interface FlowIssue {
   code: string;
   kind: IssueKind;
@@ -84,6 +95,7 @@ export interface FlowWaterfall {
   windowDays: number;
   funnel: FlowFunnel;
   channels: Array<{ provider: string; entered: number }>;
+  channelIntake: FlowChannelIntake[];
   volumePerDay: Array<{ day: string; orders: number }>;
   wmsBuckets: Array<{ status: string; count: number }>;
   eventSpine: Array<{ eventType: string; count: number }>;
@@ -143,6 +155,14 @@ interface FlowIssueDef {
 // The soft OMS↔WMS correlation (no FK): join on the fulfillment-order id or the
 // source_table_id. Used by several issue queries — keep aliases oo / wo.
 const LINK = sql`((wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text) OR (wo.source_table_id = oo.id::text))`;
+const PHYSICAL_OMS_ORDER = sql`EXISTS (
+  SELECT 1
+  FROM oms.oms_order_lines physical_line
+  WHERE physical_line.order_id = oo.id
+    AND physical_line.quantity > 0
+    AND COALESCE(physical_line.requires_shipping, TRUE)
+    AND NOT COALESCE(physical_line.gift_card, FALSE)
+)`;
 
 // ── Dead-letter reason taxonomy ─────────────────────────────────────
 // 99.8% of the dead-letter backlog is a handful of reasons. Classify each row by
@@ -228,60 +248,43 @@ const DEAD_LETTER_LABELS: Record<string, string> = {
 const BASE_ISSUES: FlowIssueDef[] = [
   // ---- intake ----
   {
-    code: "SHOPIFY_RAW_WITHOUT_OMS", kind: "stuck", stage: "intake", severity: "critical",
-    message: "Paid Shopify orders are missing from Echelon",
-    why: "Shopify delivered these physical orders, but Echelon did not create their order records within 10 minutes. The recovery sweep retries them automatically; if they remain here, that sweep is stopped or failing.",
+    code: "CHANNEL_ORDER_MISSING_OMS", kind: "stuck", stage: "intake", severity: "critical",
+    message: "Sales channel orders are missing from Echelon",
+    why: "The sales channel reported these physical orders more than 10 minutes ago, but no matching OMS order exists. Review the recorded source payload and intake failure, then restore the channel worker or replay the order.",
     remediation: "REPLAY_AFTER_FIX", replaySafe: true,
-    count: () => sql`
+    count: (win) => sql`
       SELECT COUNT(*)::int AS count
-      FROM public.shopify_orders so
-      CROSS JOIN oms.shopify_order_bridge_checkpoints checkpoint
-      WHERE checkpoint.id = 1
-        AND so.created_at >= checkpoint.monitor_started_at
-        AND so.created_at < NOW() - INTERVAL '10 minutes'
-        AND COALESCE(LOWER(so.financial_status), '') IN ('paid', 'partially_paid')
-        AND EXISTS (
-          SELECT 1
-          FROM public.shopify_order_items soi
-          WHERE soi.order_id = so.id
-            AND COALESCE(soi.quantity, 0) > 0
-            AND LOWER(COALESCE(soi.requires_shipping::text, 'true')) NOT IN ('false', 'f', '0')
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM oms.oms_orders oo
-          WHERE oo.external_order_id IN (so.id, split_part(so.id, '/', -1))
-            AND oo.channel_id IN (
-              SELECT id FROM channels.channels WHERE provider = 'shopify'
-            )
-        )
+      FROM oms.channel_order_intakes intake
+      WHERE intake.source_observed_at IS NOT NULL
+        AND COALESCE(intake.source_ordered_at, intake.source_observed_at) > ${win}
+        AND intake.source_observed_at < NOW() - INTERVAL '10 minutes'
+        AND intake.is_shippable IS TRUE
+        AND intake.oms_order_id IS NULL
+        AND intake.status <> 'ignored'
     `,
-    sample: () => sql`
-      SELECT so.order_number,
-             so.id AS shopify_order_id,
-             so.financial_status,
-             so.fulfillment_status,
-             so.created_at AS at,
-             COUNT(soi.id)::int AS shippable_line_count
-      FROM public.shopify_orders so
-      CROSS JOIN oms.shopify_order_bridge_checkpoints checkpoint
-      JOIN public.shopify_order_items soi ON soi.order_id = so.id
-      WHERE checkpoint.id = 1
-        AND so.created_at >= checkpoint.monitor_started_at
-        AND so.created_at < NOW() - INTERVAL '10 minutes'
-        AND COALESCE(LOWER(so.financial_status), '') IN ('paid', 'partially_paid')
-        AND COALESCE(soi.quantity, 0) > 0
-        AND LOWER(COALESCE(soi.requires_shipping::text, 'true')) NOT IN ('false', 'f', '0')
-        AND NOT EXISTS (
-          SELECT 1
-          FROM oms.oms_orders oo
-          WHERE oo.external_order_id IN (so.id, split_part(so.id, '/', -1))
-            AND oo.channel_id IN (
-              SELECT id FROM channels.channels WHERE provider = 'shopify'
-            )
-        )
-      GROUP BY so.id, so.order_number, so.financial_status, so.fulfillment_status, so.created_at
-      ORDER BY so.created_at ASC
+    sample: (win) => sql`
+      SELECT intake.external_order_number AS order_number,
+             intake.external_order_id,
+             COALESCE(c.name, INITCAP(intake.provider)) AS channel,
+             intake.provider,
+             intake.status AS intake_status,
+             intake.last_observation_method AS observed_by,
+             intake.observation_count,
+             intake.attempt_count,
+             intake.last_error,
+             intake.source_ordered_at,
+             intake.source_observed_at,
+             intake.first_observed_at,
+             intake.last_observed_at AS at
+      FROM oms.channel_order_intakes intake
+      LEFT JOIN channels.channels c ON c.id = intake.channel_id
+      WHERE intake.source_observed_at IS NOT NULL
+        AND COALESCE(intake.source_ordered_at, intake.source_observed_at) > ${win}
+        AND intake.source_observed_at < NOW() - INTERVAL '10 minutes'
+        AND intake.is_shippable IS TRUE
+        AND intake.oms_order_id IS NULL
+        AND intake.status <> 'ignored'
+      ORDER BY intake.source_observed_at ASC
       LIMIT 50
     `,
   },
@@ -321,6 +324,54 @@ const BASE_ISSUES: FlowIssueDef[] = [
          OR checkpoint.last_run_at < NOW() - INTERVAL '30 minutes'
          OR checkpoint.last_error IS NOT NULL
          OR checkpoint.consecutive_failures > 0
+      LIMIT 1
+    `,
+  },
+  {
+    code: "EBAY_ORDER_POLL_UNHEALTHY", kind: "stuck", stage: "intake", severity: "critical",
+    message: "eBay order intake is not running",
+    why: "The eBay order poll has not completed successfully in the last 15 minutes or its latest run failed. Until it recovers, new eBay orders may not appear in Echelon.",
+    remediation: "CODE_FIX", replaySafe: false,
+    count: () => sql`
+      SELECT COUNT(*) FILTER (
+        WHERE checkpoint.last_success_at IS NULL
+          OR checkpoint.last_success_at < NOW() - INTERVAL '15 minutes'
+          OR checkpoint.last_error IS NOT NULL
+          OR checkpoint.consecutive_failures > 0
+      )::int AS count
+      FROM channels.channels expected
+      LEFT JOIN oms.ebay_order_poll_checkpoints checkpoint
+        ON checkpoint.channel_id = expected.id
+      WHERE expected.provider = 'ebay'
+        AND expected.status = 'active'
+    `,
+    sample: () => sql`
+      SELECT COALESCE(c.name, 'eBay') AS channel,
+             CASE
+               WHEN checkpoint.last_run_at IS NULL THEN 'never ran'
+               WHEN checkpoint.last_error IS NOT NULL OR checkpoint.consecutive_failures > 0 THEN 'latest run failed'
+               ELSE 'last successful run is stale'
+             END AS poll_state,
+             checkpoint.last_run_at,
+             checkpoint.last_success_at,
+             checkpoint.last_deep_scan_at,
+             checkpoint.last_orders_seen,
+             checkpoint.last_orders_ingested,
+             checkpoint.consecutive_failures,
+             checkpoint.last_error,
+             COALESCE(checkpoint.updated_at, checkpoint.created_at) AS at
+      FROM channels.channels c
+      LEFT JOIN oms.ebay_order_poll_checkpoints checkpoint
+        ON checkpoint.channel_id = c.id
+      WHERE c.provider = 'ebay'
+        AND c.status = 'active'
+        AND (
+          checkpoint.last_success_at IS NULL
+          OR checkpoint.last_success_at < NOW() - INTERVAL '15 minutes'
+          OR checkpoint.last_error IS NOT NULL
+          OR checkpoint.consecutive_failures > 0
+        )
+      ORDER BY c.priority DESC, c.id
       LIMIT 1
     `,
   },
@@ -1086,10 +1137,10 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     const win = sql`NOW() - make_interval(days => ${windowDays})`;
 
     // ---- funnel (windowed on the INDEXED ordered_at) ----
-    const entered = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win}`));
-    const reachedWms = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE oo.ordered_at > ${win}`));
-    const hasShipment = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} JOIN wms.outbound_shipments os ON os.order_id = wo.id AND os.status <> 'voided' WHERE oo.ordered_at > ${win}`));
-    const shipped = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win} AND oo.status IN ('shipped', 'partially_shipped')`));
+    const entered = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win} AND ${PHYSICAL_OMS_ORDER}`));
+    const reachedWms = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} WHERE oo.ordered_at > ${win} AND ${PHYSICAL_OMS_ORDER}`));
+    const hasShipment = num(await tx.execute(sql`SELECT COUNT(DISTINCT oo.id)::int AS count FROM oms.oms_orders oo JOIN wms.orders wo ON ${LINK} JOIN wms.outbound_shipments os ON os.order_id = wo.id AND os.status <> 'voided' WHERE oo.ordered_at > ${win} AND ${PHYSICAL_OMS_ORDER}`));
+    const shipped = num(await tx.execute(sql`SELECT COUNT(*)::int AS count FROM oms.oms_orders oo WHERE oo.ordered_at > ${win} AND ${PHYSICAL_OMS_ORDER} AND oo.status IN ('shipped', 'partially_shipped')`));
     const trackingConfirmed = num(await tx.execute(sql`
       WITH shipped_orders AS (
         SELECT oo.id,
@@ -1113,6 +1164,7 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
         JOIN wms.orders wo ON ${LINK}
         JOIN wms.outbound_shipments os ON os.order_id = wo.id
         WHERE oo.ordered_at > ${win}
+          AND ${PHYSICAL_OMS_ORDER}
           AND oo.status IN ('shipped', 'partially_shipped')
           AND os.status = 'shipped'
           AND c.provider IN ('ebay', 'shopify')
@@ -1131,8 +1183,48 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
       WHERE all_shipments_written
     `));
 
-    const channels = rows(await tx.execute(sql`SELECT COALESCE(c.provider,'unknown') AS provider, COUNT(*)::int AS entered FROM oms.oms_orders oo LEFT JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.ordered_at > ${win} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ provider: String(r.provider), entered: Number(r.entered) || 0 }));
-    const volumePerDay = rows(await tx.execute(sql`SELECT to_char(date_trunc('day', ordered_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS orders FROM oms.oms_orders WHERE ordered_at > ${win} GROUP BY 1 ORDER BY 1`)).map((r) => ({ day: String(r.day), orders: Number(r.orders) || 0 }));
+    const channels = rows(await tx.execute(sql`SELECT COALESCE(c.provider,'unknown') AS provider, COUNT(*)::int AS entered FROM oms.oms_orders oo LEFT JOIN channels.channels c ON c.id = oo.channel_id WHERE oo.ordered_at > ${win} AND ${PHYSICAL_OMS_ORDER} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ provider: String(r.provider), entered: Number(r.entered) || 0 }));
+    const channelIntake = rows(await tx.execute(sql`
+      SELECT intake.channel_id AS "channelId",
+             COALESCE(c.name, INITCAP(intake.provider)) AS "channelName",
+             intake.provider,
+             COUNT(*)::int AS observed,
+             COUNT(*) FILTER (WHERE intake.oms_order_id IS NOT NULL)::int AS "omsReceived",
+             COUNT(*) FILTER (
+               WHERE intake.oms_order_id IS NULL
+                 AND intake.status <> 'ignored'
+                 AND intake.source_observed_at >= NOW() - INTERVAL '10 minutes'
+             )::int AS pending,
+             COUNT(*) FILTER (
+               WHERE intake.oms_order_id IS NULL
+                 AND intake.status <> 'ignored'
+                 AND intake.source_observed_at < NOW() - INTERVAL '10 minutes'
+             )::int AS missing,
+             COUNT(*) FILTER (
+               WHERE intake.oms_order_id IS NULL
+                 AND intake.status = 'failed'
+             )::int AS failed,
+             MAX(intake.last_observed_at) AS "lastObservedAt"
+      FROM oms.channel_order_intakes intake
+      LEFT JOIN channels.channels c ON c.id = intake.channel_id
+      WHERE intake.source_observed_at IS NOT NULL
+        AND COALESCE(intake.source_ordered_at, intake.source_observed_at) > ${win}
+        AND intake.is_shippable IS TRUE
+      GROUP BY intake.channel_id, COALESCE(c.name, INITCAP(intake.provider)), intake.provider
+      ORDER BY missing DESC, observed DESC, "channelName"
+    `)).map((r) => ({
+      channelId: r.channelId === null || r.channelId === undefined ? null : Number(r.channelId),
+      channelName: String(r.channelName),
+      provider: String(r.provider),
+      observed: Number(r.observed) || 0,
+      omsReceived: Number(r.omsReceived) || 0,
+      pending: Number(r.pending) || 0,
+      missing: Number(r.missing) || 0,
+      failed: Number(r.failed) || 0,
+      lastObservedAt: r.lastObservedAt ? new Date(r.lastObservedAt).toISOString() : null,
+    }));
+    const sourceObserved = channelIntake.reduce((total, channel) => total + channel.observed, 0);
+    const volumePerDay = rows(await tx.execute(sql`SELECT to_char(date_trunc('day', oo.ordered_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS orders FROM oms.oms_orders oo WHERE oo.ordered_at > ${win} AND ${PHYSICAL_OMS_ORDER} GROUP BY 1 ORDER BY 1`)).map((r) => ({ day: String(r.day), orders: Number(r.orders) || 0 }));
     const wmsBuckets = rows(await tx.execute(sql`SELECT warehouse_status AS status, COUNT(*)::int AS count FROM wms.orders WHERE created_at > ${win} GROUP BY 1 ORDER BY 2 DESC`)).map((r) => ({ status: String(r.status), count: Number(r.count) || 0 }));
     const eventSpine = rows(await tx.execute(sql`SELECT event_type AS "eventType", COUNT(*)::int AS count FROM oms.oms_order_events WHERE created_at > ${win} GROUP BY 1 ORDER BY 2 DESC LIMIT 12`)).map((r) => ({ eventType: String(r.eventType), count: Number(r.count) || 0 }));
     // Ship-by performance is an operational KPI, not evidence of a broken
@@ -1196,13 +1288,14 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
     return {
       generatedAt: new Date().toISOString(),
       windowDays,
-      funnel: { entered, reachedWms, hasShipment, shipped, trackingConfirmed },
+      funnel: { sourceObserved, entered, reachedWms, hasShipment, shipped, trackingConfirmed },
       channels,
+      channelIntake,
       volumePerDay,
       wmsBuckets,
       eventSpine,
       intakeModel: [
-        { provider: "ebay", model: "poll-primary", cadenceSeconds: 300, note: "eBay Fulfillment API polled every 5 min (4h lookback); intake self-reconciles." },
+        { provider: "ebay", model: "poll-primary", cadenceSeconds: 300, note: "eBay Fulfillment API is polled every 5 minutes with a 24-hour overlap and an hourly 30-day deep scan." },
         {
           provider: "shopify",
           model: "webhook-primary",

@@ -49,7 +49,7 @@ describe("operations control tower service", () => {
     vi.mocked(getOmsOpsHealth).mockResolvedValue(omsHealth as any);
     vi.mocked(getFlowBucketSamples).mockResolvedValue({ rows: [{ oms_order_id: 42, order_number: "#1234" }] } as any);
     vi.mocked(getFlowWaterfall).mockResolvedValue({
-      funnel: { entered: 1, reachedWms: 1, hasShipment: 1, shipped: 0, trackingConfirmed: 0 },
+      funnel: { sourceObserved: 1, entered: 1, reachedWms: 1, hasShipment: 1, shipped: 0, trackingConfirmed: 0 },
       wmsBuckets: [],
       deadLetterCauses: [],
       crossSystem: { wmsShippedOmsOpen: 0, omsNotUpdated: 0 },

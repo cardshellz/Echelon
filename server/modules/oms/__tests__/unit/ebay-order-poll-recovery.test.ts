@@ -49,6 +49,9 @@ function databaseWithCheckpoint(checkpoint: Record<string, unknown> | null) {
     if (text.includes("SELECT last_window_end, last_deep_scan_at")) {
       return { rows: checkpoint ? [checkpoint] : [] };
     }
+    if (text.includes("oms.record_channel_order_intake")) {
+      return { rows: [{ id: 1 }] };
+    }
     return { rows: [] };
   });
   return { database: { execute }, execute, statements };

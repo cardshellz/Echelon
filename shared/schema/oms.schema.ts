@@ -463,3 +463,60 @@ export const insertWebhookInboxSchema = createInsertSchema(webhookInbox).omit({
 
 export type InsertWebhookInbox = z.infer<typeof insertWebhookInboxSchema>;
 export type WebhookInbox = typeof webhookInbox.$inferSelect;
+
+// ============================================================================
+// CHANNEL ORDER INTAKES - Source observation to OMS ingestion ledger
+// ============================================================================
+
+export const channelOrderIntakes = omsSchema.table("channel_order_intakes", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  provider: varchar("provider", { length: 50 }).notNull(),
+  channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }),
+  sourceDomain: varchar("source_domain", { length: 255 }),
+  externalOrderId: varchar("external_order_id", { length: 200 }).notNull(),
+  externalOrderNumber: varchar("external_order_number", { length: 100 }),
+  firstObservationMethod: varchar("first_observation_method", { length: 50 }).notNull(),
+  lastObservationMethod: varchar("last_observation_method", { length: 50 }).notNull(),
+  sourceInboxId: integer("source_inbox_id").references(() => webhookInbox.id, { onDelete: "set null" }),
+  sourceEventId: varchar("source_event_id", { length: 200 }),
+  rawPayload: jsonb("raw_payload"),
+  isShippable: boolean("is_shippable"),
+  status: varchar("status", { length: 20 }).notNull().default("observed"),
+  observationCount: integer("observation_count").notNull().default(1),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  sourceOrderedAt: timestamp("source_ordered_at", { withTimezone: true }),
+  sourceObservedAt: timestamp("source_observed_at", { withTimezone: true }),
+  firstObservedAt: timestamp("first_observed_at", { withTimezone: true }).defaultNow().notNull(),
+  lastObservedAt: timestamp("last_observed_at", { withTimezone: true }).defaultNow().notNull(),
+  processingAt: timestamp("processing_at", { withTimezone: true }),
+  ingestedAt: timestamp("ingested_at", { withTimezone: true }),
+  failedAt: timestamp("failed_at", { withTimezone: true }),
+  omsOrderId: bigint("oms_order_id", { mode: "number" }).references(() => omsOrders.id, { onDelete: "set null" }),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("channel_order_intakes_provider_external_idx").on(table.provider, table.externalOrderId),
+  index("idx_channel_order_intakes_status_observed").on(table.status, table.lastObservedAt),
+  index("idx_channel_order_intakes_channel_ordered").on(table.channelId, table.sourceOrderedAt),
+  index("idx_channel_order_intakes_provider_ordered").on(table.provider, table.sourceOrderedAt),
+  index("idx_channel_order_intakes_oms_order").on(table.omsOrderId),
+  index("idx_channel_order_intakes_source_inbox").on(table.sourceInboxId),
+]);
+
+export const insertChannelOrderIntakeSchema = createInsertSchema(channelOrderIntakes).omit({
+  id: true,
+  observationCount: true,
+  attemptCount: true,
+  sourceObservedAt: true,
+  firstObservedAt: true,
+  lastObservedAt: true,
+  processingAt: true,
+  ingestedAt: true,
+  failedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelOrderIntake = z.infer<typeof insertChannelOrderIntakeSchema>;
+export type ChannelOrderIntake = typeof channelOrderIntakes.$inferSelect;
