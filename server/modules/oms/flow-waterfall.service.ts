@@ -164,6 +164,33 @@ const PHYSICAL_OMS_ORDER = sql`EXISTS (
     AND NOT COALESCE(physical_line.gift_card, FALSE)
 )`;
 
+// The FK on the intake row is a projection cache, not the authority for OMS
+// existence. Defend the monitor against a missed cache write by checking the
+// canonical provider/channel/external-id identity. Provider-only fallback is
+// allowed only when the intake has no channel and exactly one OMS match exists.
+// Keep the `intake` alias at every use site.
+const CHANNEL_INTAKE_HAS_OMS_ORDER = sql`(
+  intake.oms_order_id IS NOT NULL
+  OR EXISTS (
+    SELECT 1
+    FROM oms.oms_orders matched_order
+    JOIN channels.channels matched_channel ON matched_channel.id = matched_order.channel_id
+    WHERE matched_order.external_order_id = intake.external_order_id
+      AND matched_order.channel_id = intake.channel_id
+      AND LOWER(matched_channel.provider) = LOWER(intake.provider)
+  )
+  OR (
+    intake.channel_id IS NULL
+    AND 1 = (
+      SELECT COUNT(*)
+      FROM oms.oms_orders matched_order
+      JOIN channels.channels matched_channel ON matched_channel.id = matched_order.channel_id
+      WHERE matched_order.external_order_id = intake.external_order_id
+        AND LOWER(matched_channel.provider) = LOWER(intake.provider)
+    )
+  )
+)`;
+
 // ── Dead-letter reason taxonomy ─────────────────────────────────────
 // 99.8% of the dead-letter backlog is a handful of reasons. Classify each row by
 // the (provider, topic, last_error) signature into a CANONICAL code, with a
@@ -259,7 +286,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
         AND COALESCE(intake.source_ordered_at, intake.source_observed_at) > ${win}
         AND intake.source_observed_at < NOW() - INTERVAL '10 minutes'
         AND intake.is_shippable IS TRUE
-        AND intake.oms_order_id IS NULL
+        AND NOT ${CHANNEL_INTAKE_HAS_OMS_ORDER}
         AND intake.status <> 'ignored'
     `,
     sample: (win) => sql`
@@ -282,7 +309,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
         AND COALESCE(intake.source_ordered_at, intake.source_observed_at) > ${win}
         AND intake.source_observed_at < NOW() - INTERVAL '10 minutes'
         AND intake.is_shippable IS TRUE
-        AND intake.oms_order_id IS NULL
+        AND NOT ${CHANNEL_INTAKE_HAS_OMS_ORDER}
         AND intake.status <> 'ignored'
       ORDER BY intake.source_observed_at ASC
       LIMIT 50
@@ -1189,19 +1216,19 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
              COALESCE(c.name, INITCAP(intake.provider)) AS "channelName",
              intake.provider,
              COUNT(*)::int AS observed,
-             COUNT(*) FILTER (WHERE intake.oms_order_id IS NOT NULL)::int AS "omsReceived",
+             COUNT(*) FILTER (WHERE ${CHANNEL_INTAKE_HAS_OMS_ORDER})::int AS "omsReceived",
              COUNT(*) FILTER (
-               WHERE intake.oms_order_id IS NULL
+               WHERE NOT ${CHANNEL_INTAKE_HAS_OMS_ORDER}
                  AND intake.status <> 'ignored'
                  AND intake.source_observed_at >= NOW() - INTERVAL '10 minutes'
              )::int AS pending,
              COUNT(*) FILTER (
-               WHERE intake.oms_order_id IS NULL
+               WHERE NOT ${CHANNEL_INTAKE_HAS_OMS_ORDER}
                  AND intake.status <> 'ignored'
                  AND intake.source_observed_at < NOW() - INTERVAL '10 minutes'
              )::int AS missing,
              COUNT(*) FILTER (
-               WHERE intake.oms_order_id IS NULL
+               WHERE NOT ${CHANNEL_INTAKE_HAS_OMS_ORDER}
                  AND intake.status = 'failed'
              )::int AS failed,
              MAX(intake.last_observed_at) AS "lastObservedAt"

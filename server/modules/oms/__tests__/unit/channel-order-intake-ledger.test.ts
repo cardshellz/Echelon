@@ -11,6 +11,10 @@ const migration = readFileSync(
   resolve(process.cwd(), "migrations/152_channel_order_intake_ledger.sql"),
   "utf8",
 );
+const linkageMigration = readFileSync(
+  resolve(process.cwd(), "migrations/153_channel_order_intake_oms_linkage.sql"),
+  "utf8",
+);
 
 describe("channel order intake ledger", () => {
   it("stores source payloads and links source observations to OMS ingestion", () => {
@@ -46,6 +50,17 @@ describe("channel order intake ledger", () => {
     expect(ebayOrderIsShippable({ lineItems: [] })).toBe(false);
     expect(ebayOrderIsShippable({ lineItems: [{ quantity: 0 }] })).toBe(false);
     expect(ebayOrderIsShippable({ lineItems: [{ quantity: 1 }] })).toBe(true);
+  });
+
+  it("self-links late source observations and repairs only unambiguous OMS matches", () => {
+    expect(linkageMigration).toContain("v_resolved_oms_order_id BIGINT := p_oms_order_id");
+    expect(linkageMigration).toContain("AND (p_channel_id IS NULL OR oo.channel_id = p_channel_id)");
+    expect(linkageMigration).toContain("IF v_match_count <> 1 THEN");
+    expect(linkageMigration).toContain("WHEN v_resolved_oms_order_id IS NOT NULL THEN 'ingested'");
+    expect(linkageMigration).toContain("COALESCE(p_source_ordered_at, v_resolved_ordered_at)");
+    expect(linkageMigration).toContain("HAVING COUNT(*) = 1");
+    expect(linkageMigration).toContain("status = 'ingested'");
+    expect(linkageMigration).toContain("last_error = NULL");
   });
 
   it("requires the database ledger to acknowledge observations and failures", async () => {
