@@ -131,7 +131,7 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
                  ) AS has_shippable_items,
                  requires_review, review_reason, on_hold_reason, created_at
           FROM wms.outbound_shipments
-          WHERE order_id = ANY(${wmsIds})
+          WHERE order_id IN (${sql.join(wmsIds.map((wmsId) => sql`${wmsId}`), sql`, `)})
           ORDER BY created_at ASC
         `),
       )
@@ -146,20 +146,24 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
 
   // Raw webhook timeline (reuses the matching approach from getOrderFlowHistory)
   const externalIds = [o.external_order_id, o.external_order_number, String(omsId)].filter(Boolean) as string[];
+  const externalIdList = sql.join(
+    externalIds.map((externalId) => sql`${externalId}`),
+    sql`, `,
+  );
   // Sequential (not Promise.all): inside the single-connection tx, two concurrent
   // queries would contend for the one connection. These two are cheap + LIMIT 20.
   const inbox = await db.execute(sql`
     SELECT id, provider, topic, status, attempts, last_error, first_received_at, last_attempt_at, processed_at, updated_at
     FROM oms.webhook_inbox
-    WHERE payload->>'id' = ANY(${externalIds}) OR payload->>'order_id' = ANY(${externalIds})
-       OR payload->>'admin_graphql_api_id' = ANY(${externalIds}) OR payload->>'name' = ANY(${externalIds})
+    WHERE payload->>'id' IN (${externalIdList}) OR payload->>'order_id' IN (${externalIdList})
+       OR payload->>'admin_graphql_api_id' IN (${externalIdList}) OR payload->>'name' IN (${externalIdList})
     ORDER BY COALESCE(processed_at, last_attempt_at, first_received_at, updated_at) DESC NULLS LAST LIMIT 20
   `);
   const retries = await db.execute(sql`
     SELECT id, provider, topic, status, attempts, last_error, source_inbox_id, next_retry_at, created_at, updated_at
     FROM oms.webhook_retry_queue
-    WHERE payload->>'id' = ANY(${externalIds}) OR payload->>'order_id' = ANY(${externalIds})
-       OR payload->>'orderId' = ${String(omsId)} OR payload->>'name' = ANY(${externalIds})
+    WHERE payload->>'id' IN (${externalIdList}) OR payload->>'order_id' IN (${externalIdList})
+       OR payload->>'orderId' = ${String(omsId)} OR payload->>'name' IN (${externalIdList})
     ORDER BY updated_at DESC NULLS LAST LIMIT 20
   `);
 
