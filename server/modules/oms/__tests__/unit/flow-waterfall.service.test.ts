@@ -111,6 +111,7 @@ describe("getFlowWaterfall", () => {
     const issueBlock = FLOW_WATERFALL_SRC.slice(start, end);
 
     expect(issueBlock).toContain("oms.ebay_order_poll_checkpoints");
+    expect(issueBlock).toContain('message: "eBay order intake poll is unhealthy"');
     expect(issueBlock).toContain("last_success_at < NOW() - INTERVAL '15 minutes'");
     expect(issueBlock).toContain("checkpoint.last_error IS NOT NULL");
     expect(issueBlock).toContain("checkpoint.consecutive_failures > 0");

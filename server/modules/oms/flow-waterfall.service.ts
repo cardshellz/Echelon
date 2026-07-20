@@ -356,7 +356,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
   },
   {
     code: "EBAY_ORDER_POLL_UNHEALTHY", kind: "stuck", stage: "intake", severity: "critical",
-    message: "eBay order intake is not running",
+    message: "eBay order intake poll is unhealthy",
     why: "The eBay order poll has not completed successfully in the last 15 minutes or its latest run failed. Until it recovers, new eBay orders may not appear in Echelon.",
     remediation: "CODE_FIX", replaySafe: false,
     count: () => sql`

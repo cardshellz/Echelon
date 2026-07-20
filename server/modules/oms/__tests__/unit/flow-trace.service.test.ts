@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { getFlowTrace } from "../../flow-trace.service";
+
+const dialect = new PgDialect();
 
 // Pure unit test: a fake db whose .transaction runs the callback with a fake tx
 // that returns queued results positionally (mirrors flow-waterfall.service.test.ts).
@@ -8,9 +11,16 @@ import { getFlowTrace } from "../../flow-trace.service";
 //   3. oms_orders lookup                4. wms.orders
 //   5. outbound_shipments (iff WMS hit) 6. oms_order_events
 //   7. webhook_inbox                    8. webhook_retry_queue
-function fakeDb(results: Array<{ rows: any[] }>) {
+function fakeDb(
+  results: Array<{ rows: any[] }>,
+  renderedQueries?: Array<{ sql: string; params: unknown[] }>,
+) {
   const queue = [{ rows: [] }, { rows: [] }, ...results]; // two SET statements first
-  const execute = async () => {
+  const execute = async (query: any) => {
+    if (renderedQueries) {
+      const rendered = dialect.sqlToQuery(query);
+      renderedQueries.push({ sql: rendered.sql, params: rendered.params });
+    }
     const next = queue.shift();
     if (!next) throw new Error("fakeDb: query queue exhausted — test enqueued too few results");
     return next;
@@ -46,6 +56,33 @@ function inboxRow(overrides: Record<string, any>) {
 }
 
 describe("getFlowTrace :: ingestion stage vs recovered webhook failures", () => {
+  it("binds order identity lists as scalar SQL parameters", async () => {
+    const renderedQueries: Array<{ sql: string; params: unknown[] }> = [];
+
+    await getFlowTrace(
+      fakeDb([
+        { rows: [OMS_ROW] },
+        { rows: [WMS_ROW] },
+        { rows: [SHIPMENT_ROW] },
+        { rows: [CREATED_EVENT] },
+        { rows: [] },
+        { rows: [] },
+      ], renderedQueries),
+      "#58780",
+    );
+
+    const membershipQueries = renderedQueries.filter((query) => (
+      query.sql.includes("wms.outbound_shipments")
+      || query.sql.includes("oms.webhook_inbox")
+      || query.sql.includes("oms.webhook_retry_queue")
+    ));
+    expect(membershipQueries).toHaveLength(3);
+    for (const query of membershipQueries) {
+      expect(query.sql).not.toContain("ANY(");
+      expect(query.sql).toContain(" IN (");
+    }
+  });
+
   it("does NOT fail the ingestion stage when a failed delivery was superseded by a later success of the same topic", async () => {
     const inbox = [
       // earlier deliveries failed on a transient pool timeout…

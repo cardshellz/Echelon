@@ -706,6 +706,10 @@ export function createOmsService(db: any, reservationService?: any) {
       order.externalOrderNumber,
       order.id != null ? String(order.id) : null,
     ].filter((value): value is string => Boolean(value));
+    const externalOrderIdList = sql.join(
+      externalOrderIds.map((externalOrderId) => sql`${externalOrderId}`),
+      sql`, `,
+    );
 
     const [webhooks, retries, flowEvents] = await Promise.all([
       db.execute(sql`
@@ -713,11 +717,11 @@ export function createOmsService(db: any, reservationService?: any) {
                first_received_at, last_attempt_at, processed_at, updated_at
         FROM oms.webhook_inbox
         WHERE (
-             payload->>'id' = ANY(${externalOrderIds})
-          OR payload->>'order_id' = ANY(${externalOrderIds})
-          OR payload->>'admin_graphql_api_id' = ANY(${externalOrderIds})
-          OR payload->>'name' = ANY(${externalOrderIds})
-          OR payload #>> '{notification,data,orderId}' = ANY(${externalOrderIds})
+             payload->>'id' IN (${externalOrderIdList})
+          OR payload->>'order_id' IN (${externalOrderIdList})
+          OR payload->>'admin_graphql_api_id' IN (${externalOrderIdList})
+          OR payload->>'name' IN (${externalOrderIdList})
+          OR payload #>> '{notification,data,orderId}' IN (${externalOrderIdList})
         )
         ORDER BY COALESCE(processed_at, last_attempt_at, first_received_at, updated_at) DESC NULLS LAST
         LIMIT 20
@@ -727,12 +731,12 @@ export function createOmsService(db: any, reservationService?: any) {
                next_retry_at, created_at, updated_at
         FROM oms.webhook_retry_queue
         WHERE (
-             payload->>'id' = ANY(${externalOrderIds})
-          OR payload->>'order_id' = ANY(${externalOrderIds})
-          OR payload->>'admin_graphql_api_id' = ANY(${externalOrderIds})
-          OR payload->>'name' = ANY(${externalOrderIds})
+             payload->>'id' IN (${externalOrderIdList})
+          OR payload->>'order_id' IN (${externalOrderIdList})
+          OR payload->>'admin_graphql_api_id' IN (${externalOrderIdList})
+          OR payload->>'name' IN (${externalOrderIdList})
           OR payload->>'orderId' = ${String(order.id)}
-          OR payload #>> '{notification,data,orderId}' = ANY(${externalOrderIds})
+          OR payload #>> '{notification,data,orderId}' IN (${externalOrderIdList})
         )
         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
         LIMIT 20
