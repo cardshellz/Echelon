@@ -24,6 +24,8 @@ import type {
 import { inboundShipmentLines, inboundFreightCosts, vendors } from "@shared/schema";
 import { centsToMills, millsToCents, perUnitMills } from "@shared/utils/money";
 import { createCOGSService } from "../inventory/cogs.service";
+import { Decimal } from "decimal.js";
+import { eq, sql as sqlTag } from "drizzle-orm";
 
 /**
  * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
@@ -46,7 +48,53 @@ export function computeLotLandedMills(args: {
   const totalMills = (args.poUnitCostMills || 0) + (args.packagingCostMills || 0) + landedCostMills;
   return { landedCostMills, totalMills, totalCents: millsToCents(totalMills) };
 }
-import { sql as sqlTag, eq } from "drizzle-orm";
+
+export function allocateCentsByBasis(
+  amountCents: number,
+  basisValues: Array<{ lineId: number; basis: number }>,
+): Array<{ lineId: number; basis: number; allocatedCents: number; sharePercent: string }> {
+  if (!Number.isSafeInteger(amountCents) || amountCents < 0) {
+    throw new ShipmentTrackingError("Allocation amount must be a non-negative safe integer cents value");
+  }
+  if (basisValues.length === 0) return [];
+
+  const normalized = basisValues.map((value) => {
+    if (!Number.isInteger(value.lineId) || value.lineId <= 0) {
+      throw new ShipmentTrackingError("Allocation line identity must be a positive integer");
+    }
+    const basis = new Decimal(String(value.basis));
+    if (!basis.isFinite() || basis.isNegative()) {
+      throw new ShipmentTrackingError("Allocation basis must be a non-negative finite number");
+    }
+    return { lineId: value.lineId, basis };
+  });
+  const basisTotal = normalized.reduce((sum, value) => sum.plus(value.basis), new Decimal(0));
+  if (!basisTotal.isPositive()) {
+    throw new ShipmentTrackingError("Allocation basis total must be positive");
+  }
+
+  const rows = normalized.map((value) => {
+    const exactCents = new Decimal(amountCents).mul(value.basis).div(basisTotal);
+    return {
+      lineId: value.lineId,
+      basis: value.basis.toNumber(),
+      allocatedCents: exactCents.toDecimalPlaces(0, Decimal.ROUND_FLOOR).toNumber(),
+      remainder: exactCents.mod(1),
+      sharePercent: value.basis.div(basisTotal).mul(100).toDecimalPlaces(4).toFixed(4),
+    };
+  });
+
+  const centsRemaining = amountCents - rows.reduce((sum, row) => sum + row.allocatedCents, 0);
+  const remainderOrder = [...rows].sort((left, right) => {
+    const remainderComparison = right.remainder.comparedTo(left.remainder);
+    return remainderComparison !== 0 ? remainderComparison : left.lineId - right.lineId;
+  });
+  for (let index = 0; index < centsRemaining; index++) {
+    remainderOrder[index % remainderOrder.length].allocatedCents += 1;
+  }
+
+  return rows.map(({ remainder: _remainder, ...row }) => row);
+}
 
 // ── Minimal dependency interfaces ───────────────────────────────────
 
@@ -54,54 +102,54 @@ interface Storage {
   // Inbound Shipments
   getInboundShipments(filters?: any): Promise<InboundShipment[]>;
   getInboundShipmentsCount(filters?: any): Promise<number>;
-  getInboundShipmentById(id: number): Promise<InboundShipment | undefined>;
+  getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
   createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
-  updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>): Promise<InboundShipment | null>;
+  updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number): Promise<boolean>;
   generateShipmentNumber(): Promise<string>;
   // Lines
-  getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]>;
+  getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
   getShippedQtyByPoLines(poLineIds: number[], executor?: any): Promise<Map<number, number>>;
   createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine>;
   bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]>;
-  updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null>;
+  updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor?: any): Promise<InboundShipmentLine | null>;
   deleteInboundShipmentLine(id: number): Promise<boolean>;
   // Costs
-  getInboundFreightCosts(inboundShipmentId: number): Promise<InboundFreightCost[]>;
-  getInboundFreightCostById(id: number): Promise<InboundFreightCost | undefined>;
-  createInboundFreightCost(data: InsertInboundFreightCost): Promise<InboundFreightCost>;
-  updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>): Promise<InboundFreightCost | null>;
-  deleteInboundFreightCost(id: number): Promise<boolean>;
+  getInboundFreightCosts(inboundShipmentId: number, executor?: any): Promise<InboundFreightCost[]>;
+  getInboundFreightCostById(id: number, executor?: any): Promise<InboundFreightCost | undefined>;
+  createInboundFreightCost(data: InsertInboundFreightCost, executor?: any): Promise<InboundFreightCost>;
+  updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>, executor?: any): Promise<InboundFreightCost | null>;
+  deleteInboundFreightCost(id: number, executor?: any): Promise<boolean>;
   // Allocations
-  getInboundFreightCostAllocations(inboundFreightCostId: number): Promise<any[]>;
-  getAllocationsForLine(inboundShipmentLineId: number): Promise<any[]>;
-  createInboundFreightCostAllocation(data: InsertInboundFreightAllocation): Promise<any>;
-  bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[]): Promise<any[]>;
-  deleteAllocationsForShipment(inboundShipmentId: number): Promise<void>;
+  getInboundFreightCostAllocations(inboundFreightCostId: number, executor?: any): Promise<any[]>;
+  getAllocationsForLine(inboundShipmentLineId: number, executor?: any): Promise<any[]>;
+  createInboundFreightCostAllocation(data: InsertInboundFreightAllocation, executor?: any): Promise<any>;
+  bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[], executor?: any): Promise<any[]>;
+  deleteAllocationsForShipment(inboundShipmentId: number, executor?: any): Promise<void>;
   // Landed cost snapshots
-  getLandedCostSnapshots(inboundShipmentLineId: number): Promise<any[]>;
+  getLandedCostSnapshots(inboundShipmentLineId: number, executor?: any): Promise<any[]>;
   getLandedCostSnapshotByPoLine(purchaseOrderLineId: number): Promise<any>;
   createLandedCostSnapshot(data: InsertLandedCostSnapshot): Promise<any>;
-  bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[]): Promise<any[]>;
-  deleteLandedCostSnapshotsForShipment(inboundShipmentId: number): Promise<void>;
-  createLandedCostAdjustment(data: any): Promise<any>;
+  bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[], executor?: any): Promise<any[]>;
+  deleteLandedCostSnapshotsForShipment(inboundShipmentId: number, executor?: any): Promise<void>;
+  createLandedCostAdjustment(data: any, executor?: any): Promise<any>;
   // Status history
   createInboundShipmentStatusHistory(data: any): Promise<InboundShipmentStatusHistory>;
   getInboundShipmentStatusHistory(inboundShipmentId: number): Promise<InboundShipmentStatusHistory[]>;
   // Cross-references
   getInboundShipmentsByPo(purchaseOrderId: number): Promise<InboundShipment[]>;
-  getProvisionalLotsByShipment(inboundShipmentId: number): Promise<InventoryLot[]>;
+  getProvisionalLotsByShipment(inboundShipmentId: number, executor?: any): Promise<InventoryLot[]>;
   // PO references
   getPurchaseOrderById(id: number): Promise<any>;
   getPurchaseOrderLines(purchaseOrderId: number): Promise<any[]>;
-  getPurchaseOrderLineById(id: number): Promise<any>;
+  getPurchaseOrderLineById(id: number, executor?: any): Promise<any>;
   // Vendor product dimensions
   getVendorProducts(filters?: any): Promise<any[]>;
   // Product variant + product lookups
-  getProductVariantById(id: number): Promise<any>;
+  getProductVariantById(id: number, executor?: any): Promise<any>;
   getProductById(id: number): Promise<any>;
   // Inventory lots
   updateInventoryLot(id: number, updates: any): Promise<any>;
@@ -109,6 +157,7 @@ interface Storage {
 
 interface LotCostRevalueService {
   updateLotLandedCostMills(lotId: number, landedCostMills: number): Promise<any | null>;
+  withTx(tx: any): LotCostRevalueService;
 }
 
 // ── Custom error ────────────────────────────────────────────────────
@@ -273,6 +322,30 @@ export function createShipmentTrackingService(
   lotCostRevalueService: LotCostRevalueService = createCOGSService(db),
 ) {
 
+  async function runInTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
+    if (typeof db?.transaction !== "function") {
+      throw new ShipmentTrackingError("Database transaction support is required for landed-cost writes", 500);
+    }
+    return await db.transaction(fn);
+  }
+
+  async function lockShipment(tx: any, shipmentId: number): Promise<InboundShipment> {
+    const lockResult = await tx.execute(sqlTag`
+      SELECT id
+      FROM procurement.inbound_shipments
+      WHERE id = ${shipmentId}
+      FOR UPDATE
+    `);
+    if (!lockResult.rows?.[0]) {
+      throw new ShipmentTrackingError("Shipment not found", 404);
+    }
+    const shipment = await storage.getInboundShipmentById(shipmentId, tx);
+    if (!shipment) {
+      throw new ShipmentTrackingError("Shipment not found", 404);
+    }
+    return shipment;
+  }
+
   // ─── Private helpers ────────────────────────────────────────────
 
   function resolveAllocationMethod(cost: InboundFreightCost, shipment: InboundShipment) {
@@ -289,7 +362,7 @@ export function createShipmentTrackingService(
     return { method: "by_volume", source: "fallback_default" };
   }
 
-  async function buildAllocationBasis(lines: InboundShipmentLine[], method: string) {
+  async function buildAllocationBasis(lines: InboundShipmentLine[], method: string, executor?: any) {
     const values: Array<{ lineId: number; basis: number }> = [];
     let rawBasisTotal = 0;
 
@@ -307,7 +380,7 @@ export function createShipmentTrackingService(
           break;
         case "by_value":
           if (line.purchaseOrderLineId) {
-            const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId);
+            const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId, executor);
             basis = (poLine?.unitCostCents || 0) * line.qtyShipped;
           }
           break;
@@ -317,8 +390,9 @@ export function createShipmentTrackingService(
         default:
           basis = 1;
       }
-      values.push({ lineId: line.id, basis });
-      rawBasisTotal += basis;
+      const normalizedBasis = allocationBasisNumber(basis);
+      values.push({ lineId: line.id, basis: normalizedBasis });
+      rawBasisTotal += normalizedBasis;
     }
 
     if (rawBasisTotal === 0) {
@@ -359,9 +433,9 @@ export function createShipmentTrackingService(
     });
   }
 
-  async function recomputeShipmentTotals(shipmentId: number) {
-    const lines = await storage.getInboundShipmentLines(shipmentId);
-    const costs = await storage.getInboundFreightCosts(shipmentId);
+  async function recomputeShipmentTotals(shipmentId: number, executor?: any) {
+    const lines = await storage.getInboundShipmentLines(shipmentId, executor);
+    const costs = await storage.getInboundFreightCosts(shipmentId, executor);
 
     // Aggregate NET totals from lines (weight/volume computed from per-carton values × cartonCount)
     let totalWeightKg = 0;
@@ -391,17 +465,38 @@ export function createShipmentTrackingService(
       totalCartons,
       estimatedTotalCostCents,
       actualTotalCostCents,
-    } as any);
+    } as any, executor);
+  }
+
+  async function refreshAllocationsForShipmentInTransaction(
+    tx: any,
+    shipmentId: number,
+    lockedShipment: InboundShipment,
+  ) {
+    const lines = await storage.getInboundShipmentLines(shipmentId, tx);
+    if (lines.length === 0) {
+      await storage.deleteAllocationsForShipment(shipmentId, tx);
+      return null;
+    }
+
+    return await runAllocationInTransaction(tx, shipmentId, lockedShipment);
   }
 
   async function refreshAllocationsForShipment(shipmentId: number) {
-    const lines = await storage.getInboundShipmentLines(shipmentId);
-    if (lines.length === 0) {
-      await storage.deleteAllocationsForShipment(shipmentId);
-      return;
-    }
-
-    await runAllocation(shipmentId);
+    return await runInTransaction(async (tx) => {
+      const shipment = await lockShipment(tx, shipmentId);
+      if (shipment.status === "closed") {
+        throw new ShipmentTrackingError(
+          "Closed shipment costs must be changed through landed-cost finalization so adjustments are recorded",
+          409,
+          { code: "CLOSED_SHIPMENT_ALLOCATION_REQUIRES_FINALIZATION", shipmentId },
+        );
+      }
+      if (shipment.status === "cancelled") {
+        throw new ShipmentTrackingError("Cannot allocate costs for a cancelled shipment");
+      }
+      return await refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment);
+    });
   }
 
   async function getAllocationBreakdownsByLine(shipmentId: number) {
@@ -594,8 +689,8 @@ export function createShipmentTrackingService(
     return shipment;
   }
 
-  async function getShipment(id: number) {
-    const shipment = await storage.getInboundShipmentById(id);
+  async function getShipment(id: number, executor?: any) {
+    const shipment = await storage.getInboundShipmentById(id, executor);
     if (!shipment) throw new ShipmentTrackingError("Shipment not found", 404);
     return shipment;
   }
@@ -1104,67 +1199,76 @@ export function createShipmentTrackingService(
     performedByName?: string;
     notes?: string;
   }) {
-    const shipment = await getShipment(shipmentId);
-    if (shipment.status === "closed" || shipment.status === "cancelled") {
-      throw new ShipmentTrackingError("Cannot add costs to a closed or cancelled shipment");
-    }
-
-    // Coerce date strings to Date objects for Drizzle timestamp columns
     const coerced: any = { ...data };
     if (coerced.invoiceDate && typeof coerced.invoiceDate === "string") coerced.invoiceDate = new Date(coerced.invoiceDate);
     if (coerced.dueDate && typeof coerced.dueDate === "string") coerced.dueDate = new Date(coerced.dueDate);
     if (coerced.paidDate && typeof coerced.paidDate === "string") coerced.paidDate = new Date(coerced.paidDate);
 
-    const cost = await storage.createInboundFreightCost({
-      inboundShipmentId: shipmentId,
-      ...coerced,
-    } as any);
+    return await runInTransaction(async (tx) => {
+      const shipment = await lockShipment(tx, shipmentId);
+      if (shipment.status === "closed" || shipment.status === "cancelled") {
+        throw new ShipmentTrackingError("Cannot add costs to a closed or cancelled shipment");
+      }
 
-    await recomputeShipmentTotals(shipmentId);
-    // Auto-run allocation so lines reflect updated costs immediately
-    try { await runAllocation(shipmentId); } catch (_) { /* no lines yet is ok */ }
-    return cost;
+      const cost = await storage.createInboundFreightCost({
+        inboundShipmentId: shipmentId,
+        ...coerced,
+      } as any, tx);
+      await recomputeShipmentTotals(shipmentId, tx);
+      await refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment);
+      return cost;
+    });
   }
 
   async function updateCost(costId: number, updates: Partial<InsertInboundFreightCost>) {
-    const cost = await storage.getInboundFreightCostById(costId);
-    if (!cost) throw new ShipmentTrackingError("Cost not found", 404);
-
-    const shipment = await getShipment(cost.inboundShipmentId);
-    if (shipment.status === "closed") {
-      throw new ShipmentTrackingError("Cannot edit costs on a closed shipment");
-    }
-
-    // Coerce date strings to Date objects for Drizzle timestamp columns
     const coerced: any = { ...updates };
     if (coerced.invoiceDate && typeof coerced.invoiceDate === "string") coerced.invoiceDate = new Date(coerced.invoiceDate);
     if (coerced.dueDate && typeof coerced.dueDate === "string") coerced.dueDate = new Date(coerced.dueDate);
     if (coerced.paidDate && typeof coerced.paidDate === "string") coerced.paidDate = new Date(coerced.paidDate);
 
-    const updated = await storage.updateInboundFreightCost(costId, coerced);
-    await recomputeShipmentTotals(cost.inboundShipmentId);
-    try { await runAllocation(cost.inboundShipmentId); } catch (_) { }
-    return updated;
+    return await runInTransaction(async (tx) => {
+      const initialCost = await storage.getInboundFreightCostById(costId, tx);
+      if (!initialCost) throw new ShipmentTrackingError("Cost not found", 404);
+      const shipment = await lockShipment(tx, initialCost.inboundShipmentId);
+      const cost = await storage.getInboundFreightCostById(costId, tx);
+      if (!cost || cost.inboundShipmentId !== shipment.id) {
+        throw new ShipmentTrackingError("Cost not found", 404);
+      }
+      if (shipment.status === "closed" || shipment.status === "cancelled") {
+        throw new ShipmentTrackingError("Cannot edit costs on a closed or cancelled shipment");
+      }
+
+      const updated = await storage.updateInboundFreightCost(costId, coerced, tx);
+      await recomputeShipmentTotals(cost.inboundShipmentId, tx);
+      await refreshAllocationsForShipmentInTransaction(tx, cost.inboundShipmentId, shipment);
+      return updated;
+    });
   }
 
   async function removeCost(costId: number) {
-    const cost = await storage.getInboundFreightCostById(costId);
-    if (!cost) throw new ShipmentTrackingError("Cost not found", 404);
+    return await runInTransaction(async (tx) => {
+      const initialCost = await storage.getInboundFreightCostById(costId, tx);
+      if (!initialCost) throw new ShipmentTrackingError("Cost not found", 404);
+      const shipment = await lockShipment(tx, initialCost.inboundShipmentId);
+      const cost = await storage.getInboundFreightCostById(costId, tx);
+      if (!cost || cost.inboundShipmentId !== shipment.id) {
+        throw new ShipmentTrackingError("Cost not found", 404);
+      }
+      if (shipment.status === "closed" || shipment.status === "cancelled") {
+        throw new ShipmentTrackingError("Cannot remove costs from a closed or cancelled shipment");
+      }
 
-    const shipment = await getShipment(cost.inboundShipmentId);
-    if (shipment.status === "closed") {
-      throw new ShipmentTrackingError("Cannot remove costs from a closed shipment");
-    }
-
-    await storage.deleteInboundFreightCost(costId);
-    await recomputeShipmentTotals(cost.inboundShipmentId);
-    try { await runAllocation(cost.inboundShipmentId); } catch (_) { }
-    return true;
+      const deleted = await storage.deleteInboundFreightCost(costId, tx);
+      if (!deleted) throw new ShipmentTrackingError("Cost not found", 404);
+      await recomputeShipmentTotals(cost.inboundShipmentId, tx);
+      await refreshAllocationsForShipmentInTransaction(tx, cost.inboundShipmentId, shipment);
+      return true;
+    });
   }
 
   // ─── Allocation engine ─────────────────────────────────────────
 
-  async function runAllocation(shipmentId: number): Promise<{
+  async function runAllocationInTransaction(tx: any, shipmentId: number, lockedShipment?: InboundShipment): Promise<{
     allocations: Array<{
       lineId: number;
       sku: string | null;
@@ -1178,16 +1282,13 @@ export function createShipmentTrackingService(
     }>;
     totalAllocated: number;
   }> {
-    const shipment = await getShipment(shipmentId);
-    const lines = await storage.getInboundShipmentLines(shipmentId);
-    const costs = await storage.getInboundFreightCosts(shipmentId);
+    const shipment = lockedShipment ?? await lockShipment(tx, shipmentId);
+    const lines = await storage.getInboundShipmentLines(shipmentId, tx);
+    const costs = await storage.getInboundFreightCosts(shipmentId, tx);
 
     if (lines.length === 0) {
       throw new ShipmentTrackingError("No lines to allocate costs to");
     }
-
-    // Clear previous allocations
-    await storage.deleteAllocationsForShipment(shipmentId);
 
     // Per-line accumulators
     const lineAllocations = new Map<number, {
@@ -1203,71 +1304,57 @@ export function createShipmentTrackingService(
     const allNewAllocations: InsertInboundFreightAllocation[] = [];
 
     for (const cost of costs) {
-      const effectiveAmount = cost.actualCents ?? cost.estimatedCents ?? 0;
+      const effectiveAmount = Number(cost.actualCents ?? cost.estimatedCents ?? 0);
+      if (!Number.isSafeInteger(effectiveAmount) || effectiveAmount < 0) {
+        throw new ShipmentTrackingError(
+          `Cost ${cost.id} must have a non-negative safe integer cents amount`,
+          409,
+          { code: "INVALID_LANDED_COST_AMOUNT", shipmentId, costId: cost.id, effectiveAmount },
+        );
+      }
       if (effectiveAmount === 0) continue;
 
       const { method } = resolveAllocationMethod(cost, shipment);
-      const basisSummary = await buildAllocationBasis(lines, method);
+      const basisSummary = await buildAllocationBasis(lines, method, tx);
       const basisValues = basisSummary.values;
       const basisTotal = basisSummary.basisTotal;
 
-      // Allocate to each line
-      let allocated = 0;
-      let maxBasisIdx = 0;
-      let maxBasis = 0;
-
-      for (let i = 0; i < basisValues.length; i++) {
-        const bv = basisValues[i];
-        const share = bv.basis / basisTotal;
-        const lineCents = Math.round(effectiveAmount * share);
-        allocated += lineCents;
-
-        if (bv.basis > maxBasis) {
-          maxBasis = bv.basis;
-          maxBasisIdx = i;
-        }
-
+      const distributed = allocateCentsByBasis(effectiveAmount, basisValues);
+      for (const allocation of distributed) {
         allNewAllocations.push({
           shipmentCostId: cost.id,
-          inboundShipmentLineId: bv.lineId,
-          allocationBasisValue: String(bv.basis),
+          inboundShipmentLineId: allocation.lineId,
+          allocationBasisValue: String(allocation.basis),
           allocationBasisTotal: String(basisTotal),
-          sharePercent: String(Math.round(share * 10000) / 100),
-          allocatedCents: lineCents,
+          sharePercent: allocation.sharePercent,
+          allocatedCents: allocation.allocatedCents,
         } as any);
 
         // Accumulate by cost type category
-        const lineAcc = lineAllocations.get(bv.lineId)!;
+        const lineAcc = lineAllocations.get(allocation.lineId)!;
         const category = getCostCategory(cost.costType);
-        if (category === "freight") lineAcc.freightCents += lineCents;
-        else if (category === "duty") lineAcc.dutyCents += lineCents;
-        else if (category === "insurance") lineAcc.insuranceCents += lineCents;
-        else lineAcc.otherCents += lineCents;
+        if (category === "freight") lineAcc.freightCents += allocation.allocatedCents;
+        else if (category === "duty") lineAcc.dutyCents += allocation.allocatedCents;
+        else if (category === "insurance") lineAcc.insuranceCents += allocation.allocatedCents;
+        else lineAcc.otherCents += allocation.allocatedCents;
       }
 
-      // Rounding remainder → add to largest-basis line
-      const remainder = effectiveAmount - allocated;
-      if (remainder !== 0) {
-        const lastAlloc = allNewAllocations[allNewAllocations.length - basisValues.length + maxBasisIdx];
-        lastAlloc.allocatedCents = (lastAlloc.allocatedCents as number) + remainder;
-
-        const lineAcc = lineAllocations.get(basisValues[maxBasisIdx].lineId)!;
-        const category = getCostCategory(cost.costType);
-        if (category === "freight") lineAcc.freightCents += remainder;
-        else if (category === "duty") lineAcc.dutyCents += remainder;
-        else if (category === "insurance") lineAcc.insuranceCents += remainder;
-        else lineAcc.otherCents += remainder;
-      }
     }
 
     // Bulk insert all allocations
-    await storage.bulkCreateInboundFreightCostAllocations(allNewAllocations);
-
-    // Update each line's allocated_cost_cents and landed_unit_cost_cents
     let totalAllocated = 0;
     const resultLines: any[] = [];
+    const lineUpdates: Array<{ lineId: number; allocatedCostCents: number; landedUnitCostCents: number }> = [];
 
     for (const line of lines) {
+      const qtyShipped = Number(line.qtyShipped);
+      if (!Number.isSafeInteger(qtyShipped) || qtyShipped <= 0) {
+        throw new ShipmentTrackingError(
+          `Shipment line ${line.id} must have a positive safe integer shipped quantity`,
+          409,
+          { code: "INVALID_SHIPMENT_LINE_QUANTITY", shipmentId, lineId: line.id, qtyShipped },
+        );
+      }
       const acc = lineAllocations.get(line.id)!;
       const totalForLine = acc.freightCents + acc.dutyCents + acc.insuranceCents + acc.otherCents;
       totalAllocated += totalForLine;
@@ -1275,17 +1362,30 @@ export function createShipmentTrackingService(
       // Look up PO unit cost
       let poUnitCostCents = 0;
       if (line.purchaseOrderLineId) {
-        const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId);
-        poUnitCostCents = poLine?.unitCostCents || 0;
+        const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx);
+        poUnitCostCents = Number(poLine?.unitCostCents || 0);
+      }
+      if (!Number.isSafeInteger(poUnitCostCents) || poUnitCostCents < 0) {
+        throw new ShipmentTrackingError(
+          `Shipment line ${line.id} has an invalid PO unit cost`,
+          409,
+          { code: "INVALID_PO_UNIT_COST", shipmentId, lineId: line.id, poUnitCostCents },
+        );
       }
 
-      const totalCostCents = (poUnitCostCents * line.qtyShipped) + totalForLine;
-      const landedUnitCostCents = line.qtyShipped > 0 ? Math.round(totalCostCents / line.qtyShipped) : 0;
-
-      await storage.updateInboundShipmentLine(line.id, {
-        allocatedCostCents: totalForLine,
-        landedUnitCostCents,
-      } as any);
+      const totalCostCents = (poUnitCostCents * qtyShipped) + totalForLine;
+      if (!Number.isSafeInteger(totalCostCents)) {
+        throw new ShipmentTrackingError(
+          `Shipment line ${line.id} landed cost exceeds safe integer range`,
+          409,
+          { code: "LANDED_COST_OVERFLOW", shipmentId, lineId: line.id },
+        );
+      }
+      const landedUnitCostCents = new Decimal(totalCostCents)
+        .div(qtyShipped)
+        .toDecimalPlaces(0, Decimal.ROUND_HALF_UP)
+        .toNumber();
+      lineUpdates.push({ lineId: line.id, allocatedCostCents: totalForLine, landedUnitCostCents });
 
       resultLines.push({
         lineId: line.id,
@@ -1297,13 +1397,46 @@ export function createShipmentTrackingService(
       });
     }
 
+    if (!Number.isSafeInteger(totalAllocated)) {
+      throw new ShipmentTrackingError("Allocated landed cost exceeds safe integer range", 409, {
+        code: "LANDED_COST_OVERFLOW",
+        shipmentId,
+      });
+    }
+
+    await storage.deleteAllocationsForShipment(shipmentId, tx);
+    await storage.bulkCreateInboundFreightCostAllocations(allNewAllocations, tx);
+    for (const update of lineUpdates) {
+      await storage.updateInboundShipmentLine(update.lineId, {
+        allocatedCostCents: update.allocatedCostCents,
+        landedUnitCostCents: update.landedUnitCostCents,
+      } as any, tx);
+    }
+
     return { allocations: resultLines, totalAllocated };
   }
 
-  async function getAllocationStatus(shipmentId: number) {
-    const shipment = await getShipment(shipmentId);
-    const lines = await storage.getInboundShipmentLines(shipmentId);
-    const costs = await storage.getInboundFreightCosts(shipmentId);
+  async function runAllocation(shipmentId: number) {
+    return await runInTransaction(async (tx) => {
+      const shipment = await lockShipment(tx, shipmentId);
+      if (shipment.status === "closed") {
+        throw new ShipmentTrackingError(
+          "Closed shipment costs must be changed through landed-cost finalization so adjustments are recorded",
+          409,
+          { code: "CLOSED_SHIPMENT_ALLOCATION_REQUIRES_FINALIZATION", shipmentId },
+        );
+      }
+      if (shipment.status === "cancelled") {
+        throw new ShipmentTrackingError("Cannot allocate costs for a cancelled shipment");
+      }
+      return await runAllocationInTransaction(tx, shipmentId, shipment);
+    });
+  }
+
+  async function getAllocationStatus(shipmentId: number, executor?: any) {
+    const shipment = await getShipment(shipmentId, executor);
+    const lines = await storage.getInboundShipmentLines(shipmentId, executor);
+    const costs = await storage.getInboundFreightCosts(shipmentId, executor);
     const currentLineIds = new Set(lines.map((line) => line.id));
     const issues: Array<{
       severity: "blocker" | "warning";
@@ -1329,11 +1462,11 @@ export function createShipmentTrackingService(
     for (const cost of costs) {
       const effectiveCents = cost.actualCents ?? cost.estimatedCents ?? 0;
       const { method, source } = resolveAllocationMethod(cost, shipment);
-      const allocations = await storage.getInboundFreightCostAllocations(cost.id);
+      const allocations = await storage.getInboundFreightCostAllocations(cost.id, executor);
       const allocatedCents = allocations.reduce((sum: number, allocation: any) => sum + Number(allocation.allocatedCents || 0), 0);
       const staleAllocationCount = allocations.filter((allocation: any) => !currentLineIds.has(allocation.inboundShipmentLineId)).length;
       const basisSummary = lines.length > 0
-        ? await buildAllocationBasis(lines, method)
+        ? await buildAllocationBasis(lines, method, executor)
         : { rawBasisTotal: 0, basisTotal: 0, usedFallback: false };
       const basisValues = "values" in basisSummary ? basisSummary.values : [];
       const expectedBasisByLine = new Map(
@@ -1622,12 +1755,13 @@ export function createShipmentTrackingService(
   }
 
   async function finalizeAllocations(shipmentId: number, userId?: string) {
-    const shipment = await getShipment(shipmentId);
+    return await runInTransaction(async (tx) => {
+    const shipment = await lockShipment(tx, shipmentId);
     if (!["costing", "closed"].includes(shipment.status)) {
       throw new ShipmentTrackingError("Landed costs can only be finalized while shipment is in costing or closed status");
     }
 
-    const lines = await storage.getInboundShipmentLines(shipmentId);
+    const lines = await storage.getInboundShipmentLines(shipmentId, tx);
 
     if (lines.length === 0) {
       throw new ShipmentTrackingError("No lines to finalize");
@@ -1636,7 +1770,7 @@ export function createShipmentTrackingService(
     // A dimensional cost with an incomplete basis would otherwise equal-split when
     // all values are absent or assign $0 to individual dimensionless lines. Keep the
     // gate inside finalization so the standalone finalize action cannot bypass it.
-    const allocationStatus = await getAllocationStatus(shipmentId);
+    const allocationStatus = await getAllocationStatus(shipmentId, tx);
     const dimensionIssues = allocationStatus.issues.filter((issue) => issue.code === "missing_dimensions");
     if (dimensionIssues.length > 0) {
       throw new ShipmentTrackingError(
@@ -1650,15 +1784,15 @@ export function createShipmentTrackingService(
     }
 
     // Run allocation first to ensure fresh numbers
-    await runAllocation(shipmentId);
+    await runAllocationInTransaction(tx, shipmentId, shipment);
 
     // Re-fetch lines after allocation
-    const updatedLines = await storage.getInboundShipmentLines(shipmentId);
+    const updatedLines = await storage.getInboundShipmentLines(shipmentId, tx);
 
     // Fetch old snapshots before deleting
     const oldSnapshotsByLine = new Map<number, any>();
     for (const line of updatedLines) {
-      const snaps = await storage.getLandedCostSnapshots(line.id);
+      const snaps = await storage.getLandedCostSnapshots(line.id, tx);
       if (snaps.length > 0) {
         oldSnapshotsByLine.set(line.id, snaps[0]);
       }
@@ -1666,14 +1800,15 @@ export function createShipmentTrackingService(
 
     const snapshots: InsertLandedCostSnapshot[] = [];
     const adjustments: any[] = [];
+    const finalizedAt = new Date();
 
     for (const line of updatedLines) {
       // Get per-category breakdown
-      const allocations = await storage.getAllocationsForLine(line.id);
+      const allocations = await storage.getAllocationsForLine(line.id, tx);
       let freightCents = 0, dutyCents = 0, insuranceCents = 0, otherCents = 0;
 
       for (const alloc of allocations) {
-        const cost = await storage.getInboundFreightCostById(alloc.shipmentCostId);
+        const cost = await storage.getInboundFreightCostById(alloc.shipmentCostId, tx);
         if (!cost) continue;
         const category = getCostCategory(cost.costType);
         const cents = alloc.allocatedCents || 0;
@@ -1685,22 +1820,34 @@ export function createShipmentTrackingService(
 
       let poUnitCostCents = 0;
       if (line.purchaseOrderLineId) {
-        const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId);
-        poUnitCostCents = poLine?.unitCostCents || 0;
+        const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx);
+        poUnitCostCents = Number(poLine?.unitCostCents || 0);
       }
 
-      const totalLandedCostCents = (poUnitCostCents * line.qtyShipped) + freightCents + dutyCents + insuranceCents + otherCents;
-      const landedUnitCostCents = line.qtyShipped > 0 ? Math.round(totalLandedCostCents / line.qtyShipped) : 0;
+      const qtyShipped = Number(line.qtyShipped);
+      const totalLandedCostCents = (poUnitCostCents * qtyShipped) + freightCents + dutyCents + insuranceCents + otherCents;
+      const landedUnitCostCents = new Decimal(totalLandedCostCents)
+        .div(qtyShipped)
+        .toDecimalPlaces(0, Decimal.ROUND_HALF_UP)
+        .toNumber();
 
       // H6: Landed-cost re-allocation must not retroactively mutate closed lines
       if (shipment.status === "closed") {
         const oldSnap = oldSnapshotsByLine.get(line.id);
         if (oldSnap && oldSnap.totalLandedCostCents !== totalLandedCostCents) {
+          const adjustmentPoLineId = Number(line.purchaseOrderLineId);
+          if (!Number.isInteger(adjustmentPoLineId) || adjustmentPoLineId <= 0) {
+            throw new ShipmentTrackingError(
+              `Closed shipment line ${line.id} cannot record a landed-cost adjustment without a PO line`,
+              409,
+              { code: "LANDED_COST_ADJUSTMENT_MISSING_PO_LINE", shipmentId, lineId: line.id },
+            );
+          }
           const adjustmentCents = totalLandedCostCents - oldSnap.totalLandedCostCents;
           
           adjustments.push({
             inboundShipmentLineId: line.id,
-            purchaseOrderLineId: line.purchaseOrderLineId,
+            purchaseOrderLineId: adjustmentPoLineId,
             adjustmentAmountCents: adjustmentCents,
             reason: "Post-close landed cost reallocation",
             createdBy: userId || "system",
@@ -1720,7 +1867,7 @@ export function createShipmentTrackingService(
         totalLandedCostCents,
         landedUnitCostCents,
         qty: line.qtyShipped,
-        finalizedAt: new Date(),
+        finalizedAt,
       } as any);
     }
 
@@ -1735,12 +1882,13 @@ export function createShipmentTrackingService(
       return { finalized: snapshots.length, unchanged: true, adjustments: 0 };
     }
 
-    await storage.deleteLandedCostSnapshotsForShipment(shipmentId);
+    await storage.deleteLandedCostSnapshotsForShipment(shipmentId, tx);
     for (const adjustment of adjustments) {
-      await storage.createLandedCostAdjustment(adjustment);
+      await storage.createLandedCostAdjustment(adjustment, tx);
     }
-    await storage.bulkCreateLandedCostSnapshots(snapshots);
+    await storage.bulkCreateLandedCostSnapshots(snapshots, tx);
     return { finalized: snapshots.length, unchanged: false, adjustments: adjustments.length };
+    });
   }
 
   // ─── Receiving integration ─────────────────────────────────────
@@ -1750,15 +1898,16 @@ export function createShipmentTrackingService(
    * Called when closing the shipment or manually triggered.
    */
   async function pushLandedCostsToLots(shipmentId: number) {
-    const shipment = await getShipment(shipmentId);
+    return await runInTransaction(async (tx) => {
+    const shipment = await lockShipment(tx, shipmentId);
     if (shipment.status === "cancelled") {
       throw new ShipmentTrackingError("Cannot push landed costs for a cancelled shipment");
     }
 
-    const lots = await storage.getProvisionalLotsByShipment(shipmentId);
+    const lots = await storage.getProvisionalLotsByShipment(shipmentId, tx);
     if (lots.length === 0) return { updated: 0, total: 0, skipped: [] };
 
-    const lines = await storage.getInboundShipmentLines(shipmentId);
+    const lines = await storage.getInboundShipmentLines(shipmentId, tx);
     // Build finalized landed cost keyed by PO LINE. Snapshots/shipment lines are
     // product-level (purchase_order_line_id) and lots are variant-level (case), so
     // po_line is the durable join — the old variant-keyed match never matched
@@ -1772,7 +1921,7 @@ export function createShipmentTrackingService(
       const poLineId = Number(line.purchaseOrderLineId);
       if (!Number.isInteger(poLineId) || poLineId <= 0) continue;
 
-      const snapshots = await storage.getLandedCostSnapshots(line.id);
+      const snapshots = await storage.getLandedCostSnapshots(line.id, tx);
       const snapshot = snapshots[0];
       if (!snapshot || snapshot.totalLandedCostCents == null) {
         unfinalizedPoLines.add(poLineId);
@@ -1786,7 +1935,7 @@ export function createShipmentTrackingService(
         + Number(snapshot.insuranceAllocatedCents || 0)
         + Number(snapshot.otherAllocatedCents || 0),
       );
-      if (!Number.isFinite(nonProduct) || qty <= 0) {
+      if (!Number.isSafeInteger(nonProduct) || nonProduct < 0 || !Number.isSafeInteger(qty) || qty <= 0) {
         unfinalizedPoLines.add(poLineId);
         continue;
       }
@@ -1796,18 +1945,30 @@ export function createShipmentTrackingService(
         // Same PO line across >1 line of this shipment: sum landed + qty.
         existing.landedNonProductCents += nonProduct;
         existing.qty += qty;
+        if (!Number.isSafeInteger(existing.landedNonProductCents) || !Number.isSafeInteger(existing.qty)) {
+          throw new ShipmentTrackingError("Finalized landed-cost totals exceed safe integer range", 409, {
+            code: "LANDED_COST_OVERFLOW",
+            shipmentId,
+            purchaseOrderLineId: poLineId,
+          });
+        }
         existing.lineIds.push(line.id);
       } else {
         finalizedByPoLine.set(poLineId, { landedNonProductCents: nonProduct, qty, lineIds: [line.id] });
       }
     }
 
-    let updated = 0;
     const skipped: Array<{
       lotId: number;
       productVariantId: number | null;
       reason: string;
       lineIds?: number[];
+    }> = [];
+    const revaluePlans: Array<{
+      lotId: number;
+      productVariantId: number;
+      landedCostMills: number;
+      lineIds: number[];
     }> = [];
 
     for (const lot of lots) {
@@ -1829,7 +1990,16 @@ export function createShipmentTrackingService(
 
       // Allocate the line's non-product landed cost to THIS lot's variant unit, then
       // delegate row locking, layer recompute, COGS cascade, and audit logging to COGS.
-      const variant = await storage.getProductVariantById(Number(lot.productVariantId));
+      const productVariantId = Number(lot.productVariantId);
+      if (!Number.isInteger(productVariantId) || productVariantId <= 0) {
+        skipped.push({ lotId: lot.id, productVariantId: null, reason: "lot_missing_product_variant", lineIds: finalized.lineIds });
+        continue;
+      }
+      const variant = await storage.getProductVariantById(productVariantId, tx);
+      if (!variant) {
+        skipped.push({ lotId: lot.id, productVariantId, reason: "product_variant_not_found", lineIds: finalized.lineIds });
+        continue;
+      }
       const { landedCostMills } = computeLotLandedMills({
         landedNonProductCents: finalized.landedNonProductCents,
         unitsPerVariant: Number(variant?.unitsPerVariant) || 1,
@@ -1837,23 +2007,52 @@ export function createShipmentTrackingService(
         poUnitCostMills: Number((lot as any).poUnitCostMills) || 0,
         packagingCostMills: Number((lot as any).packagingCostMills) || 0,
       });
+      revaluePlans.push({ lotId: lot.id, productVariantId, landedCostMills, lineIds: finalized.lineIds });
+    }
 
+    // Preflight the complete shipment before touching any lot. A missing mapping
+    // or snapshot blocks the batch so COGS cannot be partially finalized.
+    if (skipped.length > 0) {
+      return { updated: 0, total: lots.length, skipped };
+    }
+    if (typeof lotCostRevalueService.withTx !== "function") {
+      throw new ShipmentTrackingError("Transactional lot-cost revaluation is unavailable", 500, {
+        code: "LANDED_COST_REVALUE_TRANSACTION_UNAVAILABLE",
+        shipmentId,
+      });
+    }
+
+    const transactionalRevalue = lotCostRevalueService.withTx(tx);
+    let updated = 0;
+    for (const plan of revaluePlans) {
       try {
-        const revalue = await lotCostRevalueService.updateLotLandedCostMills(lot.id, landedCostMills);
+        const revalue = await transactionalRevalue.updateLotLandedCostMills(plan.lotId, plan.landedCostMills);
         if (!revalue) {
-          skipped.push({ lotId: lot.id, productVariantId: lot.productVariantId, reason: "lot_update_failed", lineIds: finalized.lineIds });
-          continue;
+          throw new ShipmentTrackingError(`Inventory lot ${plan.lotId} was not found during landed-cost push`, 409, {
+            code: "LANDED_COST_LOT_NOT_FOUND",
+            shipmentId,
+            lotId: plan.lotId,
+            productVariantId: plan.productVariantId,
+            lineIds: plan.lineIds,
+          });
         }
-      } catch (e: any) {
-        console.warn(`[ShipmentTracking] landed-cost lot revalue for lot ${lot.id} failed: ${e.message}`);
-        skipped.push({ lotId: lot.id, productVariantId: lot.productVariantId, reason: "lot_update_failed", lineIds: finalized.lineIds });
-        continue;
+      } catch (error: any) {
+        if (error instanceof ShipmentTrackingError) throw error;
+        throw new ShipmentTrackingError(`Landed-cost revaluation failed for inventory lot ${plan.lotId}`, 500, {
+          code: "LANDED_COST_LOT_REVALUE_FAILED",
+          shipmentId,
+          lotId: plan.lotId,
+          productVariantId: plan.productVariantId,
+          lineIds: plan.lineIds,
+          cause: error?.message || String(error),
+        });
       }
 
       updated++;
     }
 
-    return { updated, total: lots.length, skipped };
+    return { updated, total: lots.length, skipped: [] };
+    });
   }
 
   /**

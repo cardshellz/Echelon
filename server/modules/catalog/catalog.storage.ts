@@ -47,7 +47,7 @@ export interface IProductStorage {
   deleteProduct(id: number): Promise<boolean>;
 
   getAllProductVariants(includeInactive?: boolean): Promise<ProductVariant[]>;
-  getProductVariantById(id: number): Promise<ProductVariant | undefined>;
+  getProductVariantById(id: number, executor?: any): Promise<ProductVariant | undefined>;
   getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
   getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined>;
   getProductVariantsByProductId(productId: number): Promise<ProductVariant[]>;
@@ -178,8 +178,8 @@ export const productMethods: IProductStorage = {
     return await db.select().from(productVariants).where(eq(productVariants.isActive, true)).orderBy(asc(productVariants.sku));
   },
 
-  async getProductVariantById(id: number): Promise<ProductVariant | undefined> {
-    const result = await db.select().from(productVariants).where(eq(productVariants.id, id));
+  async getProductVariantById(id: number, executor: any = db): Promise<ProductVariant | undefined> {
+    const result = await executor.select().from(productVariants).where(eq(productVariants.id, id));
     return result[0];
   },
 

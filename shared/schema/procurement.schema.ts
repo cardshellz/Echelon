@@ -1266,7 +1266,10 @@ export const inboundFreightAllocations = procurementSchema.table("inbound_freigh
   sharePercent: numeric("share_percent", { precision: 8, scale: 4 }),
   allocatedCents: bigint("allocated_cents", { mode: "number" }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("inbound_freight_allocations_cost_line_uidx")
+    .on(table.shipmentCostId, table.inboundShipmentLineId),
+]);
 
 export const insertInboundFreightAllocationSchema = createInsertSchema(inboundFreightAllocations).omit({
   id: true,
@@ -1295,7 +1298,11 @@ export const landedCostSnapshots = procurementSchema.table("landed_cost_snapshot
   qty: integer("qty"),
   finalizedAt: timestamp("finalized_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("landed_cost_snapshots_shipment_line_uidx")
+    .on(table.inboundShipmentLineId)
+    .where(sql`${table.inboundShipmentLineId} IS NOT NULL`),
+]);
 
 export const insertLandedCostSnapshotSchema = createInsertSchema(landedCostSnapshots).omit({
   id: true,
