@@ -24,6 +24,12 @@ describe("EbayApiClient.createShippingFulfillment", () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
+        Response.json({
+          total: 0,
+          fulfillments: [],
+        }),
+      )
+      .mockResolvedValueOnce(
         new Response("", {
           status: 201,
           headers: {
@@ -55,16 +61,96 @@ describe("EbayApiClient.createShippingFulfillment", () => {
     );
 
     expect(result.fulfillmentId).toBe("track-1");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(getFetchHeaders(fetchMock, 0)["Accept-Language"]).toBe("en-US");
     expect(getFetchHeaders(fetchMock, 1)["Accept-Language"]).toBe("en-US");
-    expect(fetchMock.mock.calls[1][0]).toBe(
+    expect(getFetchHeaders(fetchMock, 2)["Accept-Language"]).toBe("en-US");
+    expect(fetchMock.mock.calls[2][0]).toBe(
       "https://api.ebay.com/sell/fulfillment/v1/order/22-14563-95067/shipping_fulfillment",
     );
   });
 
+  it("returns the existing fulfillment without POSTing when tracking is already present", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({
+        total: 1,
+        fulfillments: [
+          {
+            fulfillmentId: "existing-fulfillment",
+            shipmentTrackingNumber: "track-1",
+          },
+        ],
+      }),
+    );
+
+    const result = await makeClient().createShippingFulfillment(
+      "22-14563-95067",
+      {
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      },
+    );
+
+    expect(result).toEqual({ fulfillmentId: "existing-fulfillment" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET");
+  });
+
+  it("does not POST when the idempotency preflight cannot read eBay fulfillments", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("upstream unavailable", { status: 503 }),
+    );
+
+    await expect(
+      makeClient().createShippingFulfillment("22-14563-95067", {
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      }),
+    ).rejects.toThrow("refusing fulfillment POST without idempotency read");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET");
+  });
+
+  it("does not repeat an ambiguous POST inside the same attempt", async () => {
+    const ambiguousNetworkError = Object.assign(new Error("fetch failed"), {
+      code: "ECONNRESET",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          total: 0,
+          fulfillments: [],
+        }),
+      )
+      .mockRejectedValueOnce(ambiguousNetworkError);
+
+    await expect(
+      makeClient().createShippingFulfillment("22-14563-95067", {
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      }),
+    ).rejects.toThrow("fetch failed");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe("POST");
+  });
+
   it("throws when eBay returns 201 but the fulfillment cannot be read back", async () => {
     vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          total: 0,
+          fulfillments: [],
+        }),
+      )
       .mockResolvedValueOnce(
         new Response("", {
           status: 201,

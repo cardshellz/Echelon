@@ -10,6 +10,7 @@ import {
   type ControlTowerSourceAdapter,
   type ProjectedControlTowerWorkItem,
 } from "./control-tower-v2.domain";
+import { EBAY_TRACKING_CONFLICT_RULE } from "../oms/channel-fulfillment-conflict";
 
 const CHANNEL_PUSH_PENDING_THRESHOLD_MINUTES = 15;
 
@@ -455,7 +456,9 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
     const trackingNumber = stringOrNull(
       rule === "shipstation_unmapped_physical_shipment"
         ? details.trackingNumber ?? row.tracking_number
-        : row.tracking_number ?? details.trackingNumber,
+        : rule === EBAY_TRACKING_CONFLICT_RULE
+          ? details.currentTrackingNumber ?? row.tracking_number
+          : row.tracking_number ?? details.trackingNumber,
     );
     const entityType = shipmentId ? "wms_shipment" : wmsOrderId ? "wms_order" : "external_order";
     const entityId = String(shipmentId ?? wmsOrderId ?? row.external_order_ref ?? id);
@@ -497,7 +500,9 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       entityRef,
       correlationId: stringOrNull(row.idempotency_key),
       rootCauseGroupKey: `wms:${rule}`,
-      title: humanizeControlTowerCode(rule),
+      title: rule === EBAY_TRACKING_CONFLICT_RULE
+        ? "eBay tracking changed after fulfillment"
+        : humanizeControlTowerCode(rule),
       summary,
       expectedState: "OMS, WMS, shipment, and provider evidence must agree before fulfillment state changes.",
       actualState,
@@ -511,7 +516,9 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
         ? `Open ${orderNumber ? `order ${orderNumber}` : "the WMS order list"}, verify whether this exact provider shipment is now linked, and replay the provider callback only if fulfillment is still missing.`
         : rule === "shipstation_unmapped_physical_shipment"
           ? "Use the physical-package evidence and merchant intent to classify it. Adopt an actual replacement as a reship; ignore it only with proof that the label was duplicate, voided, or unused."
-          : "Review the reconciliation evidence and resolve the underlying source workflow. Do not overwrite fulfillment state manually.",
+          : rule === EBAY_TRACKING_CONFLICT_RULE
+            ? "Compare the original eBay fulfillment with the later physical package. Classify the later package as a replacement or duplicate before resolving this item; do not resend tracking to eBay."
+            : "Review the reconciliation evidence and resolve the underlying source workflow. Do not overwrite fulfillment state manually.",
       responseDueAt: null,
       firstSeenAt,
       lastSeenAt,

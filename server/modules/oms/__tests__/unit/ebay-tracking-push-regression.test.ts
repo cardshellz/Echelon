@@ -44,8 +44,14 @@ function makeMockDb(opts: {
   shippedShipmentIds?: number[];
   shipment?: any;
   shipmentLines?: Array<{ external_line_item_id: string | null; quantity: number }>;
+  priorTrackingPush?: {
+    id: number;
+    fulfillment_id: string | null;
+    tracking_number: string;
+  };
 }) {
   const insertedEvents: any[] = [];
+  const executedSql: string[] = [];
 
   // Helper: creates a thenable (array that is also awaitable) to mimic
   // Drizzle's "awaitable chain" pattern.
@@ -83,6 +89,7 @@ function makeMockDb(opts: {
     select: vi.fn().mockReturnValue(selectBuilder),
     execute: vi.fn().mockImplementation(async (query: any) => {
       const queryText = sqlText(query);
+      executedSql.push(queryText);
       if (
         queryText.includes("FROM wms.outbound_shipments os") &&
         queryText.includes("JOIN wms.orders w ON w.id = os.order_id") &&
@@ -98,7 +105,7 @@ function makeMockDb(opts: {
         return { rows: opts.shipment ? [opts.shipment] : [] };
       }
       if (queryText.includes("FROM oms.oms_order_events")) {
-        return { rows: [] };
+        return { rows: opts.priorTrackingPush ? [opts.priorTrackingPush] : [] };
       }
       if (queryText.includes("FROM wms.outbound_shipment_items si")) {
         return { rows: opts.shipmentLines ?? [] };
@@ -113,7 +120,7 @@ function makeMockDb(opts: {
     })),
   };
 
-  return { db, insertedEvents };
+  return { db, insertedEvents, executedSql };
 }
 
 function sqlText(query: any): string {
@@ -373,6 +380,77 @@ describe("eBay tracking push regression (2026-04-14)", () => {
         trackingNumber: TRACKING,
       }),
     }));
+  });
+
+  it("treats the same prior shipment tracking push as idempotent", async () => {
+    const { db } = makeMockDb({
+      shipment: {
+        shipment_id: 501,
+        shipment_status: "shipped",
+        carrier: "usps",
+        tracking_number: TRACKING,
+        shipped_at: new Date("2026-04-14T16:00:00Z"),
+        wms_order_id: 9001,
+        oms_order_id: ORDER_ID,
+        external_order_id: EBAY_ORDER_ID,
+        ordered_at: new Date("2026-04-14T12:00:00Z"),
+        oms_created_at: new Date("2026-04-14T12:05:00Z"),
+        raw_payload: {},
+        tags: null,
+        provider: "ebay",
+      },
+      priorTrackingPush: {
+        id: 7001,
+        fulfillment_id: "existing-fulfillment",
+        tracking_number: TRACKING,
+      },
+    });
+    const svc = createFulfillmentPushService(db as any, mockEbayClient);
+
+    await expect(svc.pushTrackingForShipment(501)).resolves.toBe(true);
+
+    expect(mockEbayClient.createShippingFulfillment).not.toHaveBeenCalled();
+  });
+
+  it("blocks a second eBay fulfillment when the same WMS shipment has different prior tracking", async () => {
+    const { db, executedSql } = makeMockDb({
+      shipment: {
+        shipment_id: 501,
+        shipment_status: "shipped",
+        carrier: "usps",
+        tracking_number: TRACKING,
+        shipped_at: new Date("2026-04-14T16:00:00Z"),
+        wms_order_id: 9001,
+        oms_order_id: ORDER_ID,
+        external_order_id: EBAY_ORDER_ID,
+        ordered_at: new Date("2026-04-14T12:00:00Z"),
+        oms_created_at: new Date("2026-04-14T12:05:00Z"),
+        raw_payload: {},
+        tags: null,
+        provider: "ebay",
+      },
+      priorTrackingPush: {
+        id: 7001,
+        fulfillment_id: "original-fulfillment",
+        tracking_number: "9400150106151192500000",
+      },
+    });
+    const svc = createFulfillmentPushService(db as any, mockEbayClient);
+
+    await expect(svc.pushTrackingForShipment(501)).rejects.toMatchObject({
+      name: "EbayTrackingConflictError",
+      context: expect.objectContaining({
+        code: "ebay_tracking_conflict",
+        shipmentId: 501,
+        priorTrackingNumber: "9400150106151192500000",
+        currentTrackingNumber: TRACKING,
+      }),
+    });
+
+    expect(mockEbayClient.createShippingFulfillment).not.toHaveBeenCalled();
+    expect(executedSql.some((text) =>
+      text.includes("INSERT INTO wms.reconciliation_exceptions")
+    )).toBe(true);
   });
 
   it("does not send eBay a shippedDate before the eBay order exists", async () => {

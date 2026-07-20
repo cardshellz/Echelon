@@ -24,6 +24,10 @@ import type {
   ShopifyUserError,
 } from "../shopify/admin-gql-client";
 import { normalizeEbayTrackingNumber } from "../channels/adapters/ebay/ebay-fulfillment.util";
+import {
+  EbayTrackingConflictError,
+  recordEbayTrackingConflict,
+} from "./channel-fulfillment-conflict";
 
 // ---------------------------------------------------------------------------
 // Carrier code mapping: WMS/internal → eBay carrier codes
@@ -706,16 +710,41 @@ export function createFulfillmentPushService(
     }
 
     const priorPush: any = await db.execute(sql`
-      SELECT id
+      SELECT
+        id,
+        NULLIF(details->>'fulfillmentId', '') AS fulfillment_id,
+        NULLIF(details->>'trackingNumber', '') AS tracking_number
       FROM oms.oms_order_events
       WHERE order_id = ${omsOrderId}
         AND event_type = 'tracking_pushed'
         AND details->>'provider' = 'ebay'
         AND details->>'wmsShipmentId' = ${String(shipmentId)}
-        AND details->>'trackingNumber' = ${trackingNumber}
+        AND NULLIF(details->>'trackingNumber', '') IS NOT NULL
+      ORDER BY created_at DESC, id DESC
       LIMIT 1
     `);
-    if (priorPush?.rows?.[0]) {
+    const priorPushRow = priorPush?.rows?.[0];
+    if (priorPushRow) {
+      const priorTrackingNumber = normalizeEbayTrackingNumber(
+        String(priorPushRow.tracking_number),
+      );
+      const currentTrackingNumber = normalizeEbayTrackingNumber(trackingNumber);
+      if (priorTrackingNumber !== currentTrackingNumber) {
+        const conflictInput = {
+          omsOrderId,
+          wmsOrderId: Number(shipment.wms_order_id),
+          wmsShipmentId: shipmentId,
+          externalOrderId: String(shipment.external_order_id),
+          priorEventId: Number(priorPushRow.id),
+          priorFulfillmentId: priorPushRow.fulfillment_id
+            ? String(priorPushRow.fulfillment_id)
+            : null,
+          priorTrackingNumber,
+          currentTrackingNumber,
+        };
+        await recordEbayTrackingConflict(db, conflictInput);
+        throw new EbayTrackingConflictError(conflictInput);
+      }
       console.log(`[FulfillmentPush] eBay tracking already pushed for shipment ${shipmentId}; idempotent skip`);
       return true;
     }

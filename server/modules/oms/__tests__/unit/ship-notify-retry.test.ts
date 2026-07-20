@@ -80,6 +80,7 @@ import {
   dispatchEbayWebhookRetry,
 } from "../../webhook-retry.worker";
 import { ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../shipstation.service";
+import { EbayTrackingConflictError } from "../../channel-fulfillment-conflict";
 
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
   resolve(__dirname, "../../webhook-retry.worker.ts"),
@@ -2046,6 +2047,38 @@ describe("dispatchShopifyFulfillmentRetry :: service not wired", () => {
     expect(pushTrackingForShipment).toHaveBeenCalledWith(501);
     expect(pushTracking).not.toHaveBeenCalled();
     expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("routes an eBay tracking identity conflict to reconciliation without retrying", async () => {
+    const conflict = new EbayTrackingConflictError({
+      omsOrderId: 77,
+      wmsOrderId: 88,
+      wmsShipmentId: 501,
+      externalOrderId: "07-14878-86923",
+      priorEventId: 7001,
+      priorFulfillmentId: "9400150206217770309995",
+      priorTrackingNumber: "9400150206217770309995",
+      currentTrackingNumber: "9400150206217777402897",
+    });
+    const pushTrackingForShipment = vi.fn(async () => {
+      throw conflict;
+    });
+    const { db, updates } = makeDb({
+      fulfillmentPush: { pushTrackingForShipment } as any,
+    });
+
+    const outcome = await dispatchDelayedTrackingPush(db, {
+      id: 116718,
+      provider: "internal",
+      topic: "delayed_tracking_push",
+      payload: { orderId: 77, shipmentId: 501 },
+      attempts: 4,
+    });
+
+    expect(outcome).toBe("success");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("success");
+    expect(updates[0]!.set.attempts).toBeUndefined();
   });
 });
 
