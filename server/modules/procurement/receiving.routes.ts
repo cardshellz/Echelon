@@ -112,33 +112,24 @@ export function registerReceivingRoutes(app: Express) {
   });
   
   app.post("/api/receiving", requirePermission("inventory", "adjust"), async (req, res) => {
-    let receiptNumber = "(unassigned)";
     try {
       const { sourceType, vendorId, warehouseId, poNumber, asnNumber, expectedDate, notes } = req.body;
-      
-      receiptNumber = await storage.generateReceiptNumber();
-      const userId = req.session.user?.id || null;
-      
-      const order = await storage.createReceivingOrder({
-        receiptNumber,
-        sourceType: sourceType || "blind",
-        vendorId: vendorId || null,
-        warehouseId: warehouseId || null,
-        poNumber: poNumber || null,
-        asnNumber: asnNumber || null,
-        expectedDate: expectedDate ? new Date(expectedDate) : null,
-        notes: notes || null,
-        status: "draft",
-        createdBy: userId,
-      });
+      const { receiving: rcvService } = req.app.locals.services;
+      const order = await rcvService.createOrder({
+        sourceType,
+        vendorId,
+        warehouseId,
+        poNumber,
+        asnNumber,
+        expectedDate,
+        notes,
+      }, req.session.user?.id || null);
       
       res.status(201).json(order);
     } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error creating receiving order:", error?.message || error);
       if (error?.stack) console.error(error.stack);
-      if (error?.code === "23505") {
-        return res.status(409).json({ error: `Receipt number '${receiptNumber}' already in use by an active record.` });
-      }
       res.status(500).json({ error: "Failed to create receiving order", details: error?.message });
     }
   });

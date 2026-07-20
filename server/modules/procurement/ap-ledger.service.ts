@@ -25,7 +25,7 @@ import {
   detectOverpaid,
   detectPastDue,
 } from "./po-exceptions.service";
-import { COGSService } from "../inventory/cogs.service";
+import { COGSService } from "../inventory";
 
 // ── Error class ─────────────────────────────────────────────────────
 

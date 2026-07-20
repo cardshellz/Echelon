@@ -12,6 +12,9 @@ import { registerShopifyRoutes } from "./routes/shopify.routes";
 import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
 import { registerProductRoutes } from "./modules/catalog/catalog.routes";
 import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
+import { registerReplenishmentRoutes } from "./modules/inventory";
+import { registerNotificationRoutes } from "./modules/notifications";
+import { registerFinanceAnalyticsRoutes } from "./modules/oms/finance-analytics.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPickZoneRoutes } from "./modules/warehouse/pick-zones.routes";
@@ -116,10 +119,12 @@ export async function registerRoutes(
   registerWarehouseRoutes(app);
   await registerProductRoutes(app);
   registerInventoryRoutes(app);
+  registerReplenishmentRoutes(app);
   registerChannelRoutes(app);
   registerSettingsRoutes(app);
   registerPickZoneRoutes(app);
   registerPurchasingRoutes(app);
+  registerNotificationRoutes(app);
   registerEbayOAuthRoutes(app);
   registerEbaySettingsRoutes(app);
   registerEbayListingRulesRoutes(app);
@@ -130,6 +135,7 @@ export async function registerRoutes(
   app.use(ebayPoliciesRouter);
   registerSyncControlRoutes(app);
   registerOmsRoutes(app);
+  registerFinanceAnalyticsRoutes(app);
 
   // Dropship V2 routes register after the new use-case layer replaces the Phase 0 prototype.
   registerSubscriptionRoutes(app);     // Subscription admin routes (behind auth)

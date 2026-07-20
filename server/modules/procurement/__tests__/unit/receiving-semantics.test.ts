@@ -102,6 +102,56 @@ describe("ReceivingService - completeAllLines semantics", () => {
 });
 
 describe("ReceivingService - mutation integrity", () => {
+  it("creates a validated receiving header and receipt number in one transaction", async () => {
+    const tx = {};
+    const storage = {
+      generateReceiptNumber: vi.fn().mockResolvedValue("RCV-20260720-001"),
+      createReceivingOrder: vi.fn().mockResolvedValue({
+        id: 50,
+        receiptNumber: "RCV-20260720-001",
+        status: "draft",
+      }),
+    };
+    const db = { transaction: vi.fn(async (fn) => fn(tx)) };
+    const service = new ReceivingService(db as any, {} as any, {} as any, storage as any);
+
+    const result = await service.createOrder({
+      sourceType: "blind",
+      vendorId: "7",
+      warehouseId: 1,
+      poNumber: " PO-EXT-1 ",
+      expectedDate: "2026-07-31T00:00:00.000Z",
+      notes: " Dock 2 ",
+    }, "user-1");
+
+    expect(db.transaction).toHaveBeenCalledOnce();
+    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx);
+    expect(storage.createReceivingOrder).toHaveBeenCalledWith({
+      receiptNumber: "RCV-20260720-001",
+      sourceType: "blind",
+      vendorId: 7,
+      warehouseId: 1,
+      poNumber: "PO-EXT-1",
+      asnNumber: null,
+      expectedDate: new Date("2026-07-31T00:00:00.000Z"),
+      notes: "Dock 2",
+      status: "draft",
+      createdBy: "user-1",
+    }, tx);
+    expect(result).toMatchObject({ id: 50, receiptNumber: "RCV-20260720-001" });
+  });
+
+  it("rejects unsupported receiving source types before opening a transaction", async () => {
+    const db = { transaction: vi.fn() };
+    const service = new ReceivingService(db as any, {} as any, {} as any, {} as any);
+
+    await expect(service.createOrder({ sourceType: "shipment" }, "user-1")).rejects.toMatchObject({
+      statusCode: 400,
+      details: expect.objectContaining({ code: "INVALID_RECEIVING_SOURCE_TYPE" }),
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   it("rejects every mutation command once a receiving order is closed", async () => {
     const tx = {
       execute: vi.fn(async (query: any) => {

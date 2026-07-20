@@ -132,6 +132,7 @@ describe("receiving routes", () => {
 
   it("delegates order and line writes to the receiving command service", async () => {
     const receiving = {
+      createOrder: vi.fn().mockResolvedValue({ id: 19, receiptNumber: "RCV-19" }),
       updateOrderDetails: vi.fn().mockResolvedValue({ id: 20, notes: "dock 2" }),
       addLine: vi.fn().mockResolvedValue({ id: 20, lines: [{ id: 7 }] }),
       updateLine: vi.fn().mockResolvedValue({ id: 7, receivedQty: 3 }),
@@ -140,6 +141,12 @@ describe("receiving routes", () => {
     };
     server = await startServer(buildApp({ receiving }));
 
+    const orderCreate = await requestJson(server.url, "POST", "/api/receiving", {
+      sourceType: "blind",
+      vendorId: 3,
+      warehouseId: 1,
+      notes: "dock 1",
+    });
     const orderPatch = await requestJson(server.url, "PATCH", "/api/receiving/20", {
       notes: "dock 2",
     });
@@ -154,11 +161,21 @@ describe("receiving routes", () => {
     const lineDelete = await requestJson(server.url, "DELETE", "/api/receiving/lines/7");
     const orderDelete = await requestJson(server.url, "DELETE", "/api/receiving/20");
 
+    expect(orderCreate.status).toBe(201);
     expect(orderPatch.status).toBe(200);
     expect(lineCreate.status).toBe(201);
     expect(linePatch.status).toBe(200);
     expect(lineDelete.status).toBe(200);
     expect(orderDelete.status).toBe(200);
+    expect(receiving.createOrder).toHaveBeenCalledWith({
+      sourceType: "blind",
+      vendorId: 3,
+      warehouseId: 1,
+      poNumber: undefined,
+      asnNumber: undefined,
+      expectedDate: undefined,
+      notes: "dock 1",
+    }, "test-user");
     expect(receiving.updateOrderDetails).toHaveBeenCalledWith(20, { notes: "dock 2" });
     expect(receiving.addLine).toHaveBeenCalledWith(20, expect.objectContaining({
       sku: "SKU-1",

@@ -23,7 +23,7 @@ import type {
 } from "@shared/schema";
 import { inboundShipmentLines, inboundFreightCosts, vendors } from "@shared/schema";
 import { centsToMills, millsToCents, perUnitMills } from "@shared/utils/money";
-import { createCOGSService } from "../inventory/cogs.service";
+import { createCOGSService } from "../inventory";
 import { Decimal } from "decimal.js";
 import { eq, sql as sqlTag } from "drizzle-orm";
 
@@ -151,8 +151,6 @@ interface Storage {
   // Product variant + product lookups
   getProductVariantById(id: number, executor?: any): Promise<any>;
   getProductById(id: number): Promise<any>;
-  // Inventory lots
-  updateInventoryLot(id: number, updates: any): Promise<any>;
 }
 
 interface LotCostRevalueService {

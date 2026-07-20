@@ -11,10 +11,6 @@ import {
   outboundShipments,
   outboundShipmentItems,
   warehouseLocations,
-  purchaseOrderLines,
-  inboundShipmentLines,
-  receivingLines,
-  vendorInvoiceLines,
   orderItems,
   pickingLogs,
   orderItemFinancials,
@@ -39,22 +35,22 @@ import type {
 
 export interface IProductStorage {
   getAllProducts(includeInactive?: boolean): Promise<Product[]>;
-  getProductById(id: number): Promise<Product | undefined>;
+  getProductById(id: number, executor?: any): Promise<Product | undefined>;
   getProductBySku(sku: string): Promise<Product | undefined>;
   getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined>;
   createProduct(product: InsertProduct): Promise<Product>;
-  updateProduct(id: number, updates: Partial<InsertProduct>): Promise<Product | null>;
+  updateProduct(id: number, updates: Partial<InsertProduct>, executor?: any): Promise<Product | null>;
   deleteProduct(id: number): Promise<boolean>;
 
   getAllProductVariants(includeInactive?: boolean): Promise<ProductVariant[]>;
   getProductVariantById(id: number, executor?: any): Promise<ProductVariant | undefined>;
   getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
   getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined>;
-  getProductVariantsByProductId(productId: number): Promise<ProductVariant[]>;
+  getProductVariantsByProductId(productId: number, executor?: any): Promise<ProductVariant[]>;
   getProductVariantsByIds(ids: number[]): Promise<ProductVariant[]>;
   getProductsByIds(ids: number[]): Promise<Product[]>;
   createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
-  updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null>;
+  updateProductVariant(id: number, updates: Partial<InsertProductVariant>, executor?: any): Promise<ProductVariant | null>;
   deleteProductVariant(id: number): Promise<boolean>;
 
   getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]>;
@@ -102,7 +98,7 @@ export interface IProductStorage {
 
   getProductInventoryByProductId(productId: number): Promise<Record<string, unknown>[]>;
 
-  cascadeSkuRename(variantId: number, oldSku: string, newSku: string): Promise<void>;
+  cascadeOperationalSkuRename(variantId: number, oldSku: string, newSku: string, executor?: any): Promise<void>;
 
   reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number>;
 
@@ -137,8 +133,8 @@ export const productMethods: IProductStorage = {
     return await db.select().from(products).where(eq(products.isActive, true)).orderBy(asc(products.name));
   },
 
-  async getProductById(id: number): Promise<Product | undefined> {
-    const result = await db.select().from(products).where(eq(products.id, id));
+  async getProductById(id: number, executor: any = db): Promise<Product | undefined> {
+    const result = await executor.select().from(products).where(eq(products.id, id));
     return result[0];
   },
 
@@ -158,8 +154,8 @@ export const productMethods: IProductStorage = {
     return result[0];
   },
 
-  async updateProduct(id: number, updates: Partial<InsertProduct>): Promise<Product | null> {
-    const result = await db.update(products)
+  async updateProduct(id: number, updates: Partial<InsertProduct>, executor: any = db): Promise<Product | null> {
+    const result = await executor.update(products)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(products.id, id))
       .returning();
@@ -196,8 +192,8 @@ export const productMethods: IProductStorage = {
     return result[0];
   },
 
-  async getProductVariantsByProductId(productId: number): Promise<ProductVariant[]> {
-    return await db.select().from(productVariants)
+  async getProductVariantsByProductId(productId: number, executor: any = db): Promise<ProductVariant[]> {
+    return await executor.select().from(productVariants)
       .where(eq(productVariants.productId, productId))
       .orderBy(asc(productVariants.hierarchyLevel));
   },
@@ -217,8 +213,8 @@ export const productMethods: IProductStorage = {
     return result[0];
   },
 
-  async updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null> {
-    const result = await db.update(productVariants)
+  async updateProductVariant(id: number, updates: Partial<InsertProductVariant>, executor: any = db): Promise<ProductVariant | null> {
+    const result = await executor.update(productVariants)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(productVariants.id, id))
       .returning();
@@ -452,23 +448,16 @@ export const productMethods: IProductStorage = {
     return result.rows as Record<string, unknown>[];
   },
 
-  async cascadeSkuRename(variantId: number, oldSku: string, newSku: string): Promise<void> {
+  async cascadeOperationalSkuRename(variantId: number, oldSku: string, newSku: string, executor: any = db): Promise<void> {
     const now = new Date();
-    // Cross-system write: SKU rename cascades to OMS (order_items, order_item_financials),
-    // WMS (picking_logs, product_locations), and Procurement tables. This is a data consistency
-    // correction — SKU is a reference key across systems and must remain consistent. The
-    // alternative (leaving stale SKUs) would break reporting, picks, and PO matching.
-    // Tables with productVariantId FK — match by variant ID
-    await db.update(purchaseOrderLines).set({ sku: newSku }).where(eq(purchaseOrderLines.productVariantId, variantId));
-    await db.update(inboundShipmentLines).set({ sku: newSku, updatedAt: now }).where(eq(inboundShipmentLines.productVariantId, variantId));
-    await db.update(receivingLines).set({ sku: newSku }).where(eq(receivingLines.productVariantId, variantId));
-    await db.update(productLocations).set({ sku: newSku }).where(eq(productLocations.productVariantId, variantId));
-    await db.update(vendorInvoiceLines).set({ sku: newSku, updatedAt: now }).where(eq(vendorInvoiceLines.productVariantId, variantId));
+    // Procurement references are updated through Procurement's published command.
+    // These remaining operational caches stay in the caller's transaction.
+    await executor.update(productLocations).set({ sku: newSku, updatedAt: now }).where(eq(productLocations.productVariantId, variantId));
 
     // Tables without productVariantId FK — match by old SKU string
-    await db.update(orderItems).set({ sku: newSku }).where(eq(orderItems.sku, oldSku));
-    await db.update(pickingLogs).set({ sku: newSku }).where(eq(pickingLogs.sku, oldSku));
-    await db.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
+    await executor.update(orderItems).set({ sku: newSku }).where(eq(orderItems.sku, oldSku));
+    await executor.update(pickingLogs).set({ sku: newSku }).where(eq(pickingLogs.sku, oldSku));
+    await executor.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
   },
 
   async reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number> {

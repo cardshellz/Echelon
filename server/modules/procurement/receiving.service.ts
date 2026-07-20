@@ -103,6 +103,8 @@ interface Storage {
   // Receiving orders
   getReceivingOrderById(id: number, tx?: any): Promise<any>;
   getReceivingLines(orderId: number, tx?: any): Promise<any[]>;
+  generateReceiptNumber(tx?: any): Promise<string>;
+  createReceivingOrder(data: any, tx?: any): Promise<any>;
   getReceivingLineById(lineId: number, tx?: any): Promise<any>;
   createReceivingLine(data: any, tx?: any): Promise<any>;
   deleteReceivingLine(lineId: number, tx?: any): Promise<boolean>;
@@ -159,6 +161,18 @@ const RECEIVING_ORDER_EDITABLE_FIELDS = new Set([
   "notes",
 ]);
 
+const RECEIVING_ORDER_CREATE_FIELDS = new Set([
+  "sourceType",
+  "vendorId",
+  "warehouseId",
+  "poNumber",
+  "asnNumber",
+  "expectedDate",
+  "notes",
+]);
+
+const RECEIVING_SOURCE_TYPES = new Set(["po", "asn", "blind", "initial_load"]);
+
 const RECEIVING_LINE_EDITABLE_FIELDS = new Set([
   "sku",
   "productName",
@@ -212,6 +226,27 @@ function normalizeOptionalPositiveId(value: unknown, field: string): number | nu
     });
   }
   return parsed;
+}
+
+function normalizeOptionalString(value: unknown, field: string, maxLength?: number): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") {
+    throw new ReceivingError(`${field} must be a string or null`, 400, {
+      code: "INVALID_RECEIVING_TEXT",
+      field,
+      value,
+    });
+  }
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (maxLength !== undefined && normalized.length > maxLength) {
+    throw new ReceivingError(`${field} cannot exceed ${maxLength} characters`, 400, {
+      code: "INVALID_RECEIVING_TEXT",
+      field,
+      maxLength,
+    });
+  }
+  return normalized;
 }
 
 // ── Helper: resolve receiving-line unit cost (mills authoritative) ──
@@ -704,7 +739,57 @@ export class ReceivingService {
     });
   }
 
-  // ─── Open ─────────────────────────────────────────────────────
+  // ─── Create and edit ──────────────────────────────────────────
+
+  async createOrder(input: Record<string, unknown>, userId?: string | null) {
+    assertOnlyAllowedFields(input, RECEIVING_ORDER_CREATE_FIELDS, "Receiving order create");
+
+    const sourceType = normalizeOptionalString(input.sourceType, "sourceType", 20) ?? "blind";
+    if (!RECEIVING_SOURCE_TYPES.has(sourceType)) {
+      throw new ReceivingError(`Unsupported receiving source type: ${sourceType}`, 400, {
+        code: "INVALID_RECEIVING_SOURCE_TYPE",
+        sourceType,
+      });
+    }
+
+    const expectedDate = input.expectedDate === null || input.expectedDate === undefined || input.expectedDate === ""
+      ? null
+      : new Date(input.expectedDate as any);
+    if (expectedDate && Number.isNaN(expectedDate.getTime())) {
+      throw new ReceivingError("expectedDate must be a valid date", 400);
+    }
+
+    const normalized = {
+      sourceType,
+      vendorId: normalizeOptionalPositiveId(input.vendorId, "vendorId"),
+      warehouseId: normalizeOptionalPositiveId(input.warehouseId, "warehouseId"),
+      poNumber: normalizeOptionalString(input.poNumber, "poNumber", 100),
+      asnNumber: normalizeOptionalString(input.asnNumber, "asnNumber", 100),
+      expectedDate,
+      notes: normalizeOptionalString(input.notes, "notes"),
+      status: "draft",
+      createdBy: userId ?? null,
+    };
+
+    let receiptNumber: string | null = null;
+    try {
+      return await this.db.transaction(async (tx) => {
+        receiptNumber = await this.storage.generateReceiptNumber(tx);
+        return await this.storage.createReceivingOrder({
+          receiptNumber,
+          ...normalized,
+        }, tx);
+      });
+    } catch (error: any) {
+      if (error?.code === "23505" || error?.cause?.code === "23505") {
+        throw new ReceivingError("Receiving order creation conflicted with an existing active receipt", 409, {
+          code: "RECEIVING_ORDER_CREATE_CONFLICT",
+          receiptNumber,
+        });
+      }
+      throw error;
+    }
+  }
 
   async updateOrderDetails(orderId: number, input: Record<string, unknown>) {
     assertOnlyAllowedFields(input, RECEIVING_ORDER_EDITABLE_FIELDS, "Receiving order update");

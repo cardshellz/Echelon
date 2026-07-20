@@ -22,11 +22,6 @@ import {
   type InsertPoReceipt,
   type PurchasingRecommendationPoHandoff,
   type InventoryLot,
-  type InsertInventoryLot,
-  type OrderItemCost,
-  type InsertOrderItemCost,
-  type OrderItemFinancial,
-  type InsertOrderItemFinancial,
   type InboundShipment,
   type InsertInboundShipment,
   type InboundShipmentLine,
@@ -47,8 +42,6 @@ import {
   poRevisions,
   poReceipts,
   inventoryLots,
-  orderItemCosts,
-  orderItemFinancials,
   inboundShipments,
   inboundShipmentLines,
   inboundFreightCosts,
@@ -72,11 +65,10 @@ import { normalizePurchasingForecastPolicy } from "./purchasing-forecast-policy"
 
 export interface IProcurementStorage {
   getAllVendors(): Promise<Vendor[]>;
-  getVendorById(id: number): Promise<Vendor | undefined>;
-  getVendorByCode(code: string): Promise<Vendor | undefined>;
-  createVendor(data: InsertVendor): Promise<Vendor>;
-  updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor | null>;
-  deleteVendor(id: number): Promise<boolean>;
+  getVendorById(id: number, executor?: any): Promise<Vendor | undefined>;
+  getVendorByCode(code: string, executor?: any): Promise<Vendor | undefined>;
+  createVendor(data: InsertVendor, executor?: any): Promise<Vendor>;
+  updateVendor(id: number, updates: Partial<InsertVendor>, executor?: any): Promise<Vendor | null>;
   getAllReceivingOrders(): Promise<ReceivingOrder[]>;
   getReceivingOrderById(id: number, executor?: any): Promise<ReceivingOrder | undefined>;
   getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined>;
@@ -176,17 +168,6 @@ export interface IProcurementStorage {
     lineUpdates: Partial<InsertPurchaseOrderLine>;
     receipt: InsertPoReceipt;
   }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
-  getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]>;
-  getInventoryLotById(id: number): Promise<InventoryLot | undefined>;
-  createInventoryLot(data: InsertInventoryLot): Promise<InventoryLot>;
-  updateInventoryLot(id: number, updates: Partial<InsertInventoryLot>): Promise<InventoryLot | null>;
-  getFifoLots(productVariantId: number, warehouseLocationId: number): Promise<InventoryLot[]>;
-  generateLotNumber(): Promise<string>;
-  createOrderItemCost(data: InsertOrderItemCost): Promise<OrderItemCost>;
-  getOrderItemCosts(orderItemId: number): Promise<OrderItemCost[]>;
-  getOrderItemCostsByOrder(orderId: number): Promise<OrderItemCost[]>;
-  createOrderItemFinancial(data: InsertOrderItemFinancial): Promise<OrderItemFinancial>;
-  getOrderItemFinancials(orderId: number): Promise<OrderItemFinancial[]>;
   getInboundShipments(filters?: any): Promise<InboundShipment[]>;
   getInboundShipmentsCount(filters?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
@@ -257,37 +238,32 @@ export const procurementMethods: IProcurementStorage = {
     return await db.select().from(vendors).orderBy(asc(vendors.name));
   },
 
-  async getVendorById(id: number): Promise<Vendor | undefined> {
-    const result = await db.select().from(vendors).where(eq(vendors.id, id)).limit(1);
+  async getVendorById(id: number, executor: any = db): Promise<Vendor | undefined> {
+    const result = await executor.select().from(vendors).where(eq(vendors.id, id)).limit(1);
     return result[0];
   },
 
-  async getVendorByCode(code: string): Promise<Vendor | undefined> {
-    const result = await db.select().from(vendors).where(eq(vendors.code, code.toUpperCase())).limit(1);
+  async getVendorByCode(code: string, executor: any = db): Promise<Vendor | undefined> {
+    const result = await executor.select().from(vendors).where(eq(vendors.code, code.toUpperCase())).limit(1);
     return result[0];
   },
 
-  async createVendor(data: InsertVendor): Promise<Vendor> {
-    const result = await db.insert(vendors).values({
+  async createVendor(data: InsertVendor, executor: any = db): Promise<Vendor> {
+    const result = await executor.insert(vendors).values({
       ...data,
       code: data.code.toUpperCase(),
     }).returning();
     return result[0];
   },
 
-  async updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor | null> {
+  async updateVendor(id: number, updates: Partial<InsertVendor>, executor: any = db): Promise<Vendor | null> {
     const updateData: any = { ...updates, updatedAt: new Date() };
     if (updates.code) updateData.code = updates.code.toUpperCase();
-    const result = await db.update(vendors)
+    const result = await executor.update(vendors)
       .set(updateData)
       .where(eq(vendors.id, id))
       .returning();
     return result[0] || null;
-  },
-
-  async deleteVendor(id: number): Promise<boolean> {
-    const result = await db.delete(vendors).where(eq(vendors.id, id));
-    return (result.rowCount ?? 0) > 0;
   },
 
   async getAllReceivingOrders(): Promise<ReceivingOrder[]> {
@@ -1046,94 +1022,6 @@ export const procurementMethods: IProcurementStorage = {
 
       throw error;
     }
-  },
-
-  async getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]> {
-    const conditions: any[] = [];
-    if (filters?.productVariantId) conditions.push(eq(inventoryLots.productVariantId, filters.productVariantId));
-    if (filters?.warehouseLocationId) conditions.push(eq(inventoryLots.warehouseLocationId, filters.warehouseLocationId));
-    if (filters?.status) conditions.push(eq(inventoryLots.status, filters.status));
-
-    let query = db.select().from(inventoryLots).orderBy(asc(inventoryLots.receivedAt));
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions)) as typeof query;
-    }
-    if (filters?.limit) query = query.limit(filters.limit) as typeof query;
-    if (filters?.offset) query = query.offset(filters.offset) as typeof query;
-    return await query;
-  },
-
-  async getInventoryLotById(id: number): Promise<InventoryLot | undefined> {
-    const result = await db.select().from(inventoryLots).where(eq(inventoryLots.id, id)).limit(1);
-    return result[0];
-  },
-
-  async createInventoryLot(data: InsertInventoryLot): Promise<InventoryLot> {
-    const result = await db.insert(inventoryLots).values(data).returning();
-    return result[0];
-  },
-
-  async updateInventoryLot(id: number, updates: Partial<InsertInventoryLot>): Promise<InventoryLot | null> {
-    const result = await db.update(inventoryLots)
-      .set(updates)
-      .where(eq(inventoryLots.id, id))
-      .returning();
-    return result[0] || null;
-  },
-
-  async getFifoLots(productVariantId: number, warehouseLocationId: number): Promise<InventoryLot[]> {
-    return await db.select().from(inventoryLots)
-      .where(and(
-        eq(inventoryLots.productVariantId, productVariantId),
-        eq(inventoryLots.warehouseLocationId, warehouseLocationId),
-        eq(inventoryLots.status, 'active'),
-      ))
-      .orderBy(asc(inventoryLots.receivedAt));
-  },
-
-  async generateLotNumber(): Promise<string> {
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-    const prefix = `LOT-${dateStr}-`;
-
-    const existing = await db.select({ lotNumber: inventoryLots.lotNumber })
-      .from(inventoryLots)
-      .where(like(inventoryLots.lotNumber, `${prefix}%`))
-      .orderBy(desc(inventoryLots.lotNumber))
-      .limit(1);
-
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].lotNumber) {
-      const lastNum = parseInt(existing[0].lotNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
-  },
-
-  async createOrderItemCost(data: InsertOrderItemCost): Promise<OrderItemCost> {
-    const result = await db.insert(orderItemCosts).values(data).returning();
-    return result[0];
-  },
-
-  async getOrderItemCosts(orderItemId: number): Promise<OrderItemCost[]> {
-    return await db.select().from(orderItemCosts)
-      .where(eq(orderItemCosts.orderItemId, orderItemId));
-  },
-
-  async getOrderItemCostsByOrder(orderId: number): Promise<OrderItemCost[]> {
-    return await db.select().from(orderItemCosts)
-      .where(eq(orderItemCosts.orderId, orderId));
-  },
-
-  async createOrderItemFinancial(data: InsertOrderItemFinancial): Promise<OrderItemFinancial> {
-    const result = await db.insert(orderItemFinancials).values(data).returning();
-    return result[0];
-  },
-
-  async getOrderItemFinancials(orderId: number): Promise<OrderItemFinancial[]> {
-    return await db.select().from(orderItemFinancials)
-      .where(eq(orderItemFinancials.orderId, orderId));
   },
 
   async getInboundShipments(filters?: any): Promise<InboundShipment[]> {
