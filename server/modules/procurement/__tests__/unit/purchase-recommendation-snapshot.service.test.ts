@@ -61,6 +61,33 @@ describe("purchase recommendation snapshot service", () => {
     });
   });
 
+  it("does not double-count skipped recommendations that are also visible", () => {
+    const skipped = recommendation({ skippedReason: "no_vendor" });
+    const input = buildPurchaseRecommendationRunInput({
+      recommendationResult: {
+        items: [skipped],
+        skippedItems: [skipped],
+        summary: { totalProducts: 1 },
+      },
+      settings: { autoDraftMode: "review_only", skipNoVendor: true },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-20T12:00:00.000Z"),
+      source: "manual",
+    });
+
+    expect(input.inputSummary).toMatchObject({ candidateCount: 1, evaluatedCount: 1 });
+  });
+
+  it("rejects an invalid explicit evaluated count", () => {
+    expect(() => buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [], skippedItems: [], summary: {} },
+      settings: { autoDraftMode: "review_only" },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-20T12:00:00.000Z"),
+      evaluatedCount: -1,
+    })).toThrow("evaluatedCount must be a non-negative integer");
+  });
+
   it("requires a durable source key for automated runs", async () => {
     const service = createPurchaseRecommendationSnapshotService({ select: vi.fn(), transaction: vi.fn() });
     await expect(service.createRun({
