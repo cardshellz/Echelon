@@ -2,7 +2,6 @@ import type { Express } from "express";
 import { db } from "../../db";
 import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
-  auditEvents,
   channelConnections,
   channelFeeds,
   channelListings,
@@ -13,6 +12,7 @@ import {
   productVariants,
   shippingGroups,
 } from "@shared/schema";
+import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { catalogStorage } from "../catalog";
 import { createImageSyncService } from "./image-sync.service";
 import { duplicateProduct, ProductDuplicateError } from "./product-duplicate.service";
@@ -2047,7 +2047,7 @@ export async function registerProductRoutes(app: Express) {
           listingIds = insertedListings.map((row) => row.id);
         }
 
-        await tx.insert(auditEvents).values({
+        await persistAuditEvent(tx, {
           actor: `user:${req.session.user?.id || req.session.user?.username || "unknown"}`,
           action: "catalog.shopify_variant_linked",
           target: `catalog.product_variant:${id}`,

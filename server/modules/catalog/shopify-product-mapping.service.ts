@@ -1,6 +1,5 @@
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import {
-  auditEvents,
   channelConnections,
   channelFeeds,
   channelListings,
@@ -10,6 +9,7 @@ import {
   shippingGroups,
 } from "@shared/schema";
 import { db } from "../../db";
+import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import {
   buildShopifyProductMappingSummary,
   collectMappedShopifyVariantIds,
@@ -503,7 +503,7 @@ export function createShopifyProductMappingService() {
         updatedListingCount = updatedListings.length;
       }
 
-      await tx.insert(auditEvents).values({
+      await persistAuditEvent(tx, {
         actor: input.actor,
         action: "catalog.shopify_product_mapping_repaired",
         target: `catalog.product:${input.productId}`,
