@@ -19,11 +19,14 @@ function source(input: Partial<ShopifyProductMappingSource> = {}): ShopifyProduc
       variantId: 59,
       sku: "SHLZ-MAG-STND-P5",
       isActive: true,
+      catalogBarcode: null,
       catalogVariantId: "gid://shopify/ProductVariant/42926954709151",
+      catalogInventoryItemId: "45068358877343",
       feedId: 100,
       feedIsActive: true,
       feedProductId: "7626813735071",
       feedVariantId: "42926954709151",
+      feedInventoryItemId: "45068358877343",
       listingId: 200,
       listingProductId: "gid://shopify/Product/7626813735071",
       listingVariantId: "42926954709151",
@@ -118,6 +121,88 @@ describe("buildShopifyProductMappingSummary", () => {
     }));
     expect(collectMappedShopifyVariantIds(summary)).toEqual(["1", "2", "3"]);
   });
+
+  it("excludes archived variants from product evidence and variant verification", () => {
+    const original = source();
+    const summary = buildShopifyProductMappingSummary(source({
+      variants: [
+        original.variants[0],
+        {
+          ...original.variants[0],
+          variantId: 60,
+          sku: "SHLZ-MAG-STND-B100",
+          isActive: false,
+          catalogVariantId: "44505488916639",
+          catalogInventoryItemId: null,
+          feedId: 101,
+          feedIsActive: false,
+          feedProductId: "9999999999999",
+          feedVariantId: "44505488916639",
+          feedInventoryItemId: null,
+          listingId: null,
+          listingProductId: null,
+          listingVariantId: null,
+        },
+      ],
+    }));
+
+    expect(summary.evidenceProductIds).toEqual(["7626813735071"]);
+    expect(summary.archivedVariantCount).toBe(1);
+    expect(collectMappedShopifyVariantIds(summary)).toEqual(["42926954709151"]);
+  });
+
+  it("marks a product incomplete when an active variant lacks child mappings", () => {
+    const original = source();
+    const summary = buildShopifyProductMappingSummary(source({
+      catalogProductId: "7626813735071",
+      variants: [
+        original.variants[0],
+        {
+          ...original.variants[0],
+          variantId: 219,
+          sku: "SHLZ-MAG-STND-C200",
+          catalogVariantId: null,
+          catalogInventoryItemId: null,
+          feedId: null,
+          feedIsActive: null,
+          feedProductId: null,
+          feedVariantId: null,
+          feedInventoryItemId: null,
+          listingId: null,
+          listingProductId: null,
+          listingVariantId: null,
+        },
+      ],
+    }));
+
+    expect(summary.status).toBe("incomplete");
+    expect(summary.activeVariantIssueIds).toEqual([219]);
+    expect(summary.recommendedProductId).toBe("7626813735071");
+    expect(summary.repairable).toBe(true);
+  });
+
+  it("changes the optimistic-lock fingerprint when matching inputs change", () => {
+    const baseline = buildShopifyProductMappingSummary(source());
+    const skuChanged = buildShopifyProductMappingSummary(source({
+      variants: [{ ...source().variants[0], sku: "SHLZ-MAG-STND-P5-RENAMED" }],
+    }));
+    const activationChanged = buildShopifyProductMappingSummary(source({
+      variants: [{ ...source().variants[0], isActive: false }],
+    }));
+
+    expect(skuChanged.fingerprint).not.toBe(baseline.fingerprint);
+    expect(activationChanged.fingerprint).not.toBe(baseline.fingerprint);
+  });
+
+  it("does not offer automatic repair when no active variants remain", () => {
+    const summary = buildShopifyProductMappingSummary(source({
+      variants: [{ ...source().variants[0], isActive: false }],
+    }));
+
+    expect(summary.activeVariantCount).toBe(0);
+    expect(summary.archivedVariantCount).toBe(1);
+    expect(summary.repairable).toBe(false);
+  });
 });
 
 describe("evaluateShopifyProductMappingRepair", () => {
@@ -126,11 +211,25 @@ describe("evaluateShopifyProductMappingRepair", () => {
     expect(evaluateShopifyProductMappingRepair({
       summary,
       requestedProductId: "7626813735071",
-      verifiedRemoteVariantIds: ["42926954709151"],
+      verifiedRemoteVariants: [{
+        id: "42926954709151",
+        sku: "SHLZ-MAG-STND-P5",
+        inventoryItemId: "45068358877343",
+      }],
     })).toEqual({
       ok: true,
       targetProductId: "7626813735071",
       mappedVariantIds: ["42926954709151"],
+      variantMappings: [{
+        variantId: 59,
+        sku: "SHLZ-MAG-STND-P5",
+        remoteSku: "SHLZ-MAG-STND-P5",
+        remoteBarcode: null,
+        remoteVariantId: "42926954709151",
+        remoteInventoryItemId: "45068358877343",
+        matchedBy: "existing_id",
+        replacedVariantIds: [],
+      }],
     });
   });
 
@@ -139,25 +238,29 @@ describe("evaluateShopifyProductMappingRepair", () => {
     const result = evaluateShopifyProductMappingRepair({
       summary,
       requestedProductId: "1111111111111",
-      verifiedRemoteVariantIds: ["42926954709151"],
+      verifiedRemoteVariants: [],
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("SHOPIFY_MAPPING_NOT_REPAIRABLE");
   });
 
-  it("rejects a repair when a linked variant is absent from the live Shopify product", () => {
+  it("rejects a repair when an active linked variant cannot be resolved on the live product", () => {
     const summary = buildShopifyProductMappingSummary(source());
     const result = evaluateShopifyProductMappingRepair({
       summary,
       requestedProductId: "7626813735071",
-      verifiedRemoteVariantIds: ["999"],
+      verifiedRemoteVariants: [{ id: "999", sku: "OTHER-SKU", inventoryItemId: "1000" }],
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.code).toBe("SHOPIFY_VARIANTS_OUTSIDE_TARGET_PRODUCT");
-      expect(result.context).toEqual({
+      expect(result.code).toBe("SHOPIFY_ACTIVE_VARIANTS_UNRESOLVED");
+      expect(result.context).toMatchObject({
         targetProductId: "7626813735071",
-        foreignVariantIds: ["42926954709151"],
+        issues: [{
+          code: "EXACT_SKU_NOT_FOUND",
+          variantId: 59,
+          sku: "SHLZ-MAG-STND-P5",
+        }],
       });
     }
   });
@@ -169,11 +272,153 @@ describe("evaluateShopifyProductMappingRepair", () => {
     expect(evaluateShopifyProductMappingRepair({
       summary,
       requestedProductId: "7626813735071",
-      verifiedRemoteVariantIds: ["42926954709151"],
+      verifiedRemoteVariants: [{
+        id: "42926954709151",
+        sku: "SHLZ-MAG-STND-P5",
+        inventoryItemId: "45068358877343",
+      }],
     })).toEqual({
       ok: true,
       targetProductId: "7626813735071",
       mappedVariantIds: ["42926954709151"],
+      variantMappings: [{
+        variantId: 59,
+        sku: "SHLZ-MAG-STND-P5",
+        remoteSku: "SHLZ-MAG-STND-P5",
+        remoteBarcode: null,
+        remoteVariantId: "42926954709151",
+        remoteInventoryItemId: "45068358877343",
+        matchedBy: "existing_id",
+        replacedVariantIds: [],
+      }],
     });
+  });
+
+  it("maps an active unmapped variant by one exact Shopify SKU and ignores archived IDs", () => {
+    const original = source();
+    const summary = buildShopifyProductMappingSummary(source({
+      variants: [
+        original.variants[0],
+        {
+          ...original.variants[0],
+          variantId: 60,
+          sku: "SHLZ-MAG-STND-B100",
+          isActive: false,
+          catalogVariantId: "44505488916639",
+          catalogInventoryItemId: null,
+        },
+        {
+          ...original.variants[0],
+          variantId: 219,
+          sku: "SHLZ-MAG-STND-C200",
+          catalogVariantId: null,
+          catalogInventoryItemId: null,
+          feedId: null,
+          feedIsActive: null,
+          feedProductId: null,
+          feedVariantId: null,
+          feedInventoryItemId: null,
+          listingId: null,
+          listingProductId: null,
+          listingVariantId: null,
+        },
+      ],
+    }));
+    const result = evaluateShopifyProductMappingRepair({
+      summary,
+      requestedProductId: "7626813735071",
+      verifiedRemoteVariants: [
+        {
+          id: "42926954709151",
+          sku: "SHLZ-MAG-STND-P5",
+          inventoryItemId: "45068358877343",
+        },
+        {
+          id: "62784043745439",
+          sku: "SHLZ-MAG-STND-C200",
+          inventoryItemId: "59937879064735",
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.mappedVariantIds).toEqual(["42926954709151", "62784043745439"]);
+    expect(result.variantMappings[1]).toEqual({
+      variantId: 219,
+      sku: "SHLZ-MAG-STND-C200",
+      remoteSku: "SHLZ-MAG-STND-C200",
+      remoteBarcode: null,
+      remoteVariantId: "62784043745439",
+      remoteInventoryItemId: "59937879064735",
+      matchedBy: "exact_sku",
+      replacedVariantIds: [],
+    });
+  });
+
+  it("refuses to guess when an active SKU is duplicated on Shopify", () => {
+    const original = source();
+    const summary = buildShopifyProductMappingSummary(source({
+      catalogProductId: "7626813735071",
+      variants: [{
+        ...original.variants[0],
+        catalogVariantId: null,
+        catalogInventoryItemId: null,
+        feedId: null,
+        feedIsActive: null,
+        feedProductId: null,
+        feedVariantId: null,
+        feedInventoryItemId: null,
+        listingId: null,
+        listingProductId: null,
+        listingVariantId: null,
+      }],
+    }));
+    const result = evaluateShopifyProductMappingRepair({
+      summary,
+      requestedProductId: "7626813735071",
+      verifiedRemoteVariants: [
+        { id: "1", sku: "SHLZ-MAG-STND-P5", inventoryItemId: "10" },
+        { id: "2", sku: "shlz-mag-stnd-p5", inventoryItemId: "20" },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("SHOPIFY_ACTIVE_VARIANTS_UNRESOLVED");
+      expect(result.context).toMatchObject({
+        issues: [{ code: "EXACT_SKU_AMBIGUOUS", variantId: 59 }],
+      });
+    }
+  });
+
+  it("refuses a product remap when the selected variant is not the verified resolution", () => {
+    const summary = buildShopifyProductMappingSummary(source());
+    const result = evaluateShopifyProductMappingRepair({
+      summary,
+      requestedProductId: "7626813735071",
+      verifiedRemoteVariants: [{
+        id: "42926954709151",
+        sku: "SHLZ-MAG-STND-P5",
+        inventoryItemId: "45068358877343",
+      }],
+      expectedVariant: {
+        variantId: 59,
+        remoteVariantId: "62784043745439",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("SHOPIFY_ACTIVE_VARIANTS_UNRESOLVED");
+      expect(result.context).toMatchObject({
+        issues: [{
+          code: "SELECTED_VARIANT_MISMATCH",
+          variantId: 59,
+          selectedRemoteVariantId: "62784043745439",
+          resolvedRemoteVariantId: "42926954709151",
+        }],
+      });
+    }
   });
 });

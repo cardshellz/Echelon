@@ -45,6 +45,7 @@ import {
   type VariantPackageInput,
   type VariantPackagePayload,
 } from "@/lib/variant-package";
+import { formatShopifyMappingRepairError } from "@/lib/shopify-product-mapping";
 
 interface Product {
   id: number;
@@ -339,7 +340,7 @@ export default function Variants() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(body?.error || "Failed to link Shopify variant");
+        throw new Error(formatShopifyMappingRepairError(body, "Failed to link Shopify variant"));
       }
       return body;
     },
