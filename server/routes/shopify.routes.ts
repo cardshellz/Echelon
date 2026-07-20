@@ -875,6 +875,7 @@ export function registerShopifyRoutes(app: Express) {
           assets: contentResult.assets,
           skuMatched: contentResult.skuMatched,
           skuNotFound: contentResult.skuNotFound,
+          mappingConflicts: contentResult.mappingConflicts,
         },
       });
     } catch (error: any) {

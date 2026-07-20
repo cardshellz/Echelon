@@ -699,6 +699,222 @@ function formatRelativeListedSince(iso: string | null): string {
   return formatDistanceToNow(d, { addSuffix: true });
 }
 
+type ShopifyProductMappingStatus =
+  | "unmapped"
+  | "catalog_only"
+  | "channel_only"
+  | "consistent"
+  | "mismatch"
+  | "conflict";
+
+interface ShopifyProductMappingDto {
+  productId: number;
+  productName: string;
+  productSku: string | null;
+  catalogProductId: string | null;
+  channel: { id: number; name: string };
+  status: ShopifyProductMappingStatus;
+  evidenceProductIds: string[];
+  recommendedProductId: string | null;
+  repairable: boolean;
+  variants: Array<{
+    variantId: number;
+    sku: string | null;
+    isActive: boolean;
+    catalogVariantId: string | null;
+    feedId: number | null;
+    feedIsActive: boolean | null;
+    feedProductId: string | null;
+    feedVariantId: string | null;
+    listingId: number | null;
+    listingProductId: string | null;
+    listingVariantId: string | null;
+  }>;
+}
+
+const SHOPIFY_MAPPING_STATUS: Record<ShopifyProductMappingStatus, {
+  label: string;
+  className: string;
+  detail: string;
+}> = {
+  consistent: {
+    label: "Consistent",
+    className: "bg-green-50 text-green-700 border-green-300",
+    detail: "The catalog and channel records point to the same Shopify product.",
+  },
+  mismatch: {
+    label: "Mismatch",
+    className: "bg-red-50 text-red-700 border-red-300",
+    detail: "The catalog parent differs from the product recorded on channel mappings.",
+  },
+  conflict: {
+    label: "Conflict",
+    className: "bg-red-50 text-red-700 border-red-300",
+    detail: "Channel records point to multiple Shopify products. This requires manual review.",
+  },
+  channel_only: {
+    label: "Catalog missing",
+    className: "bg-amber-50 text-amber-700 border-amber-300",
+    detail: "Channel records agree, but the catalog parent mapping is empty.",
+  },
+  catalog_only: {
+    label: "Catalog only",
+    className: "bg-amber-50 text-amber-700 border-amber-300",
+    detail: "The catalog has a Shopify product ID, but no channel product evidence is present.",
+  },
+  unmapped: {
+    label: "Unmapped",
+    className: "bg-slate-50 text-slate-700 border-slate-300",
+    detail: "No Shopify parent product mapping exists yet.",
+  },
+};
+
+function ShopifyProductMappingPanel({ productId, enabled }: { productId: number; enabled: boolean }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [confirmTargetId, setConfirmTargetId] = useState<string | null>(null);
+  const queryKey = [`/api/products/${productId}/shopify-mapping`];
+  const { data, isLoading, isError, error } = useQuery<ShopifyProductMappingDto>({
+    queryKey,
+    enabled,
+  });
+
+  const repairMutation = useMutation({
+    mutationFn: async (targetProductId: string) => {
+      const response = await fetch(`/api/products/${productId}/shopify-mapping/repair`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelId: data?.channel.id, targetProductId }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.error || "Failed to repair Shopify product mapping");
+      return body as { alreadyConsistent: boolean; shippingGroupMetafieldQueued: boolean };
+    },
+    onSuccess: async (result) => {
+      setConfirmTargetId(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey }),
+        queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-listings`] }),
+        queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-status`] }),
+      ]);
+      toast({
+        title: result.alreadyConsistent ? "Shopify mapping already consistent" : "Shopify mapping repaired",
+        description: result.shippingGroupMetafieldQueued
+          ? "The parent and channel mappings now agree. Shipping-group sync was queued."
+          : "The live Shopify product and linked variants were verified; no additional write was needed.",
+      });
+    },
+    onError: (mutationError: Error) => {
+      toast({ title: "Mapping repair failed", description: mutationError.message, variant: "destructive" });
+    },
+  });
+
+  const status = data ? SHOPIFY_MAPPING_STATUS[data.status] : null;
+  return (
+    <>
+      <Card data-testid="shopify-product-mapping-panel">
+        <CardHeader className="p-3 md:p-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-base md:text-lg">Shopify Product Mapping</CardTitle>
+              <CardDescription className="text-xs md:text-sm">
+                Parent identity used for product metafields and channel synchronization
+              </CardDescription>
+            </div>
+            {status && <Badge variant="outline" className={status.className}>{status.label}</Badge>}
+          </div>
+        </CardHeader>
+        <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+          {isLoading ? (
+            <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading Shopify mapping...
+            </div>
+          ) : isError ? (
+            <div className="py-4 text-sm text-destructive">
+              Failed to load Shopify mapping{error instanceof Error ? `: ${error.message}` : ""}
+            </div>
+          ) : data && status ? (
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">{status.detail}</p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <p className="text-xs text-muted-foreground">Catalog parent product ID</p>
+                  <p className="font-mono text-sm mt-1">{data.catalogProductId ?? "Not mapped"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">{data.channel.name} product evidence</p>
+                  <p className="font-mono text-sm mt-1">
+                    {data.evidenceProductIds.length > 0 ? data.evidenceProductIds.join(", ") : "No channel evidence"}
+                  </p>
+                </div>
+              </div>
+
+              {data.repairable && data.recommendedProductId && (
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+                  <p className="text-sm">
+                    Proposed repair target: <span className="font-mono">{data.recommendedProductId}</span>
+                  </p>
+                  <Button size="sm" onClick={() => setConfirmTargetId(data.recommendedProductId)} disabled={repairMutation.isPending}>
+                    <ArrowRightLeft className="h-4 w-4 mr-2" /> Repair mapping
+                  </Button>
+                </div>
+              )}
+
+              {data.variants.length > 0 && (
+                <div className="overflow-x-auto border-t pt-4">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>SKU</TableHead>
+                        <TableHead>Variant ID</TableHead>
+                        <TableHead>Feed product</TableHead>
+                        <TableHead>Listing product</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.variants.map((variant) => (
+                        <TableRow key={variant.variantId}>
+                          <TableCell className="font-mono text-xs">{variant.sku ?? "-"}</TableCell>
+                          <TableCell className="font-mono text-xs">{variant.catalogVariantId ?? "-"}</TableCell>
+                          <TableCell className="font-mono text-xs">{variant.feedProductId ?? "-"}</TableCell>
+                          <TableCell className="font-mono text-xs">{variant.listingProductId ?? "-"}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Dialog open={confirmTargetId !== null} onOpenChange={(open) => !open && setConfirmTargetId(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Repair Shopify product mapping?</DialogTitle>
+            <DialogDescription>
+              Shopify will be checked before any write. If every linked variant belongs to product {confirmTargetId},
+              the catalog, feed, and listing parent IDs will be updated together and the shipping-group metafield will be queued.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmTargetId(null)} disabled={repairMutation.isPending}>Cancel</Button>
+            <Button onClick={() => confirmTargetId && repairMutation.mutate(confirmTargetId)} disabled={!confirmTargetId || repairMutation.isPending}>
+              {repairMutation.isPending
+                ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                : <ArrowRightLeft className="h-4 w-4 mr-2" />}
+              Verify and repair
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 function ChannelListingsPanel({ productId, enabled }: { productId: number; enabled: boolean }) {
   const { data, isLoading, isError, error } = useQuery<{ listings: ChannelListingDto[] }>({
     queryKey: [`/api/products/${productId}/channel-listings`],
@@ -3151,6 +3367,11 @@ export default function ProductDetail() {
                   Always rendered (independent of allocationData) so operators
                   can see/copy listing IDs and jump to channel admin pages even
                   when no channels are configured for allocation. */}
+              <ShopifyProductMappingPanel
+                productId={product!.productId}
+                enabled={!!product?.productId && activeTab === "channels"}
+              />
+
               <ChannelListingsPanel
                 productId={product!.productId}
                 enabled={!!product?.productId && activeTab === "channels"}

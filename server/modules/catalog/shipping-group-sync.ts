@@ -20,7 +20,7 @@
  */
 import { db } from "../../db";
 import { products, shippingGroups } from "@shared/schema";
-import { eq, inArray, sql } from "drizzle-orm";
+import { eq, inArray, sql, type SQL } from "drizzle-orm";
 
 const NAMESPACE = "cardshellz";
 const KEY = "shipping_group";
@@ -29,6 +29,49 @@ function toProductGid(shopifyProductId: string): string {
   return shopifyProductId.startsWith("gid://")
     ? shopifyProductId
     : `gid://shopify/Product/${shopifyProductId}`;
+}
+
+interface SqlExecutor {
+  execute(query: SQL): PromiseLike<unknown>;
+}
+
+export interface ShippingGroupMetafieldWrite {
+  shopifyProductId: string;
+  shippingGroupCode: string | null;
+}
+
+/**
+ * Transaction-compatible primitive used by mapping repair. Unlike the public
+ * best-effort wrapper, this throws so the catalog identity, audit event, and
+ * outbox command either commit together or roll back together.
+ */
+export async function enqueueShippingGroupMetafieldWrite(
+  executor: SqlExecutor,
+  input: ShippingGroupMetafieldWrite,
+): Promise<void> {
+  const gid = toProductGid(input.shopifyProductId);
+  const dedupeKey = `product:${gid}:${NAMESPACE}:${KEY}`;
+  const operation = input.shippingGroupCode === null ? "delete" : "set";
+  const valueJson = input.shippingGroupCode === null
+    ? null
+    : JSON.stringify(input.shippingGroupCode);
+
+  await executor.execute(sql`
+    INSERT INTO membership.shopify_metafield_outbox
+      (target_type, target_id, namespace, key, value, operation, dedupe_key, scheduled_for)
+    VALUES (
+      'product', ${gid}, ${NAMESPACE}, ${KEY},
+      ${valueJson === null ? sql`NULL` : sql`${valueJson}::jsonb`},
+      ${operation}, ${dedupeKey}, now()
+    )
+    ON CONFLICT (dedupe_key) WHERE status = 'pending'
+    DO UPDATE SET
+      value         = EXCLUDED.value,
+      operation     = EXCLUDED.operation,
+      scheduled_for = EXCLUDED.scheduled_for,
+      attempts      = 0,
+      last_error    = NULL
+  `);
 }
 
 /**
@@ -51,28 +94,10 @@ export async function enqueueShippingGroupMetafields(productIds: number[]): Prom
 
     for (const row of rows) {
       if (!row.shopifyProductId) continue; // not on Shopify yet
-      const gid = toProductGid(row.shopifyProductId);
-      const dedupeKey = `product:${gid}:${NAMESPACE}:${KEY}`;
-      const isSet = row.code != null;
-      const operation = isSet ? "set" : "delete";
-      const valueJson = isSet ? JSON.stringify(row.code) : null;
-
-      await db.execute(sql`
-        INSERT INTO membership.shopify_metafield_outbox
-          (target_type, target_id, namespace, key, value, operation, dedupe_key, scheduled_for)
-        VALUES (
-          'product', ${gid}, ${NAMESPACE}, ${KEY},
-          ${valueJson === null ? sql`NULL` : sql`${valueJson}::jsonb`},
-          ${operation}, ${dedupeKey}, now()
-        )
-        ON CONFLICT (dedupe_key) WHERE status = 'pending'
-        DO UPDATE SET
-          value         = EXCLUDED.value,
-          operation     = EXCLUDED.operation,
-          scheduled_for = EXCLUDED.scheduled_for,
-          attempts      = 0,
-          last_error    = NULL
-      `);
+      await enqueueShippingGroupMetafieldWrite(db, {
+        shopifyProductId: row.shopifyProductId,
+        shippingGroupCode: row.code,
+      });
     }
   } catch (err) {
     // Never fail the catalog write because the cross-app enqueue failed (e.g. a

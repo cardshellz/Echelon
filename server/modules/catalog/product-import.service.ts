@@ -14,6 +14,7 @@ import { warehouseStorage } from "../warehouse";
 const storage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
 import { db, productCategories, eq, and } from "../../storage/base";
+import { decideImportedShopifyProductMapping } from "./shopify-product-mapping.domain";
 
 // ---------------------------------------------------------------------------
 // Shopify product_type → Echelon product_type slug mapping
@@ -104,6 +105,7 @@ export interface ContentSyncResult {
   assets: number;
   totalProducts: number;
   totalVariants: number;
+  mappingConflicts: ShopifyImportMappingConflict[];
 }
 
 export interface ProductSyncResult {
@@ -113,6 +115,20 @@ export interface ProductSyncResult {
   baseSkusWithVariants: number;
   standaloneProducts: number;
   totalShopifyVariants: number;
+  mappingConflicts: ShopifyImportMappingConflict[];
+}
+
+export interface ShopifyImportMappingConflict {
+  code:
+    | "SHOPIFY_PRODUCT_MAPPING_CONFLICT"
+    | "SHOPIFY_PRODUCT_SKUS_SPLIT"
+    | "SHOPIFY_BASE_SKU_SPLIT_ACROSS_PRODUCTS";
+  source: "content_sync" | "multi_uom_sync";
+  echelonProductId: number | null;
+  echelonSku: string | null;
+  existingShopifyProductId: string | null;
+  incomingShopifyProductId: string;
+  matchedEchelonProductIds?: number[];
 }
 
 // SKU parsing pattern: BASE-SKU-[P|B|C]###
@@ -147,19 +163,23 @@ export function createProductImportService() {
     let assetsCreated = 0;
     let skuNotFound = 0;
     const unmatchedSkus: string[] = [];
+    const mappingConflicts: ShopifyImportMappingConflict[] = [];
 
     for (const [shopifyProductId, variants] of productGroups) {
       const firstVariant = variants[0];
 
-      // Resolve the Echelon product by matching any variant SKU or by shopifyProductId
-      let echelonProduct = await storage.getProductByShopifyProductId(String(shopifyProductId));
+      // A Shopify parent may be adopted only when every SKU resolves to the same
+      // Echelon parent. Split SKU ownership is an operator conflict, not an
+      // invitation to let the last matched SKU silently choose the parent.
+      const matchedProducts = new Map<number, Awaited<ReturnType<typeof storage.getProductById>>>();
+      const mappedByShopifyId = await storage.getProductByShopifyProductId(String(shopifyProductId));
+      if (mappedByShopifyId) matchedProducts.set(mappedByShopifyId.id, mappedByShopifyId);
       for (const variant of variants) {
         if (variant.sku) {
           const pv = await storage.getProductVariantBySku(variant.sku);
           if (pv) {
-            if (!echelonProduct) {
-              echelonProduct = await storage.getProductById(pv.productId);
-            }
+            const matchedProduct = await storage.getProductById(pv.productId);
+            if (matchedProduct) matchedProducts.set(matchedProduct.id, matchedProduct);
             variantsUpdated++;
           } else {
             skuNotFound++;
@@ -171,7 +191,53 @@ export function createProductImportService() {
         }
       }
 
+      if (matchedProducts.size > 1) {
+        const matchedEchelonProductIds = [...matchedProducts.keys()].sort((left, right) => left - right);
+        mappingConflicts.push({
+          code: "SHOPIFY_PRODUCT_SKUS_SPLIT",
+          source: "content_sync",
+          echelonProductId: null,
+          echelonSku: null,
+          existingShopifyProductId: null,
+          incomingShopifyProductId: String(shopifyProductId),
+          matchedEchelonProductIds,
+        });
+        console.warn(JSON.stringify({
+          event: "shopify_import_mapping_conflict",
+          code: "SHOPIFY_PRODUCT_SKUS_SPLIT",
+          incomingShopifyProductId: String(shopifyProductId),
+          matchedEchelonProductIds,
+        }));
+        continue;
+      }
+
+      const echelonProduct = [...matchedProducts.values()][0];
+
       if (echelonProduct) {
+        const mappingDecision = decideImportedShopifyProductMapping(
+          echelonProduct.shopifyProductId,
+          shopifyProductId,
+        );
+        if (mappingDecision.action === "conflict") {
+          mappingConflicts.push({
+            code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
+            source: "content_sync",
+            echelonProductId: echelonProduct.id,
+            echelonSku: echelonProduct.sku,
+            existingShopifyProductId: mappingDecision.existingProductId,
+            incomingShopifyProductId: mappingDecision.incomingProductId,
+          });
+          console.warn(JSON.stringify({
+            event: "shopify_import_mapping_conflict",
+            code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
+            source: "content_sync",
+            echelonProductId: echelonProduct.id,
+            echelonSku: echelonProduct.sku,
+            existingShopifyProductId: mappingDecision.existingProductId,
+            incomingShopifyProductId: mappingDecision.incomingProductId,
+          }));
+          continue;
+        }
         const productCategory = await resolveImportedProductCategory(firstVariant.productType);
 
         // Update content fields
@@ -184,7 +250,7 @@ export function createProductImportService() {
           productType: resolveProductTypeSlug(firstVariant.productType, firstVariant.sku),
           tags: firstVariant.tags || undefined,
           status: firstVariant.status || undefined,
-          shopifyProductId: String(shopifyProductId),
+          shopifyProductId: mappingDecision.productId,
         });
         productsUpdated++;
 
@@ -243,6 +309,7 @@ export function createProductImportService() {
       assets: assetsCreated,
       totalProducts: productGroups.size,
       totalVariants: shopifyProducts.length,
+      mappingConflicts,
     };
   }
 
@@ -293,6 +360,9 @@ export function createProductImportService() {
       imageUrl: string | null;
     }> = [];
 
+    const mappingConflicts: ShopifyImportMappingConflict[] = [];
+    const ambiguousBaseSkus = new Set<string>();
+
     for (const variant of shopifyProducts) {
       if (!variant.sku) continue;
 
@@ -302,6 +372,24 @@ export function createProductImportService() {
         const baseSku = match[1];
         const variantType = match[2].toUpperCase();
         const unitsPerVariant = parseInt(match[3], 10);
+
+        const existingGroup = baseSkuMap[baseSku];
+        if (existingGroup && existingGroup.shopifyProductId !== variant.shopifyProductId) {
+          ambiguousBaseSkus.add(baseSku);
+          if (!mappingConflicts.some((conflict) =>
+            conflict.code === "SHOPIFY_BASE_SKU_SPLIT_ACROSS_PRODUCTS" && conflict.echelonSku === baseSku
+          )) {
+            mappingConflicts.push({
+              code: "SHOPIFY_BASE_SKU_SPLIT_ACROSS_PRODUCTS",
+              source: "multi_uom_sync",
+              echelonProductId: null,
+              echelonSku: baseSku,
+              existingShopifyProductId: String(existingGroup.shopifyProductId),
+              incomingShopifyProductId: String(variant.shopifyProductId),
+            });
+          }
+          continue;
+        }
 
         if (!baseSkuMap[baseSku]) {
           let baseName = variant.productTitle || variant.title;
@@ -357,10 +445,43 @@ export function createProductImportService() {
 
     // Process base SKUs with variants
     for (const [baseSku, data] of Object.entries(baseSkuMap)) {
+      if (ambiguousBaseSkus.has(baseSku)) {
+        console.warn(JSON.stringify({
+          event: "shopify_import_mapping_conflict",
+          code: "SHOPIFY_BASE_SKU_SPLIT_ACROSS_PRODUCTS",
+          source: "multi_uom_sync",
+          baseSku,
+        }));
+        continue;
+      }
       let product = await storage.getProductBySku(baseSku);
       const productCategory = await resolveImportedProductCategory(data.productType);
 
       if (product) {
+        const mappingDecision = decideImportedShopifyProductMapping(
+          product.shopifyProductId,
+          data.shopifyProductId,
+        );
+        if (mappingDecision.action === "conflict") {
+          mappingConflicts.push({
+            code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
+            source: "multi_uom_sync",
+            echelonProductId: product.id,
+            echelonSku: product.sku,
+            existingShopifyProductId: mappingDecision.existingProductId,
+            incomingShopifyProductId: mappingDecision.incomingProductId,
+          });
+          console.warn(JSON.stringify({
+            event: "shopify_import_mapping_conflict",
+            code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
+            source: "multi_uom_sync",
+            echelonProductId: product.id,
+            echelonSku: product.sku,
+            existingShopifyProductId: mappingDecision.existingProductId,
+            incomingShopifyProductId: mappingDecision.incomingProductId,
+          }));
+          continue;
+        }
         await storage.updateProduct(product.id, {
           name: data.baseName,
           categoryId: productCategory.categoryId,
@@ -368,7 +489,7 @@ export function createProductImportService() {
           productType: resolveProductTypeSlug(data.productType, baseSku),
           brand: data.vendor,
           description: data.description,
-          shopifyProductId: String(data.shopifyProductId),
+          shopifyProductId: mappingDecision.productId,
         });
         productsUpdated++;
       } else {
@@ -427,13 +548,37 @@ export function createProductImportService() {
       const productCategory = await resolveImportedProductCategory(sv.productType);
 
       if (product) {
+        const mappingDecision = decideImportedShopifyProductMapping(
+          product.shopifyProductId,
+          sv.shopifyProductId,
+        );
+        if (mappingDecision.action === "conflict") {
+          mappingConflicts.push({
+            code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
+            source: "multi_uom_sync",
+            echelonProductId: product.id,
+            echelonSku: product.sku,
+            existingShopifyProductId: mappingDecision.existingProductId,
+            incomingShopifyProductId: mappingDecision.incomingProductId,
+          });
+          console.warn(JSON.stringify({
+            event: "shopify_import_mapping_conflict",
+            code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
+            source: "multi_uom_sync",
+            echelonProductId: product.id,
+            echelonSku: product.sku,
+            existingShopifyProductId: mappingDecision.existingProductId,
+            incomingShopifyProductId: mappingDecision.incomingProductId,
+          }));
+          continue;
+        }
         await storage.updateProduct(product.id, {
           name: sv.name,
           categoryId: productCategory.categoryId,
           category: productCategory.category,
           brand: sv.vendor,
           description: sv.description,
-          shopifyProductId: String(sv.shopifyProductId),
+          shopifyProductId: mappingDecision.productId,
         });
         productsUpdated++;
       } else {
@@ -490,6 +635,7 @@ export function createProductImportService() {
       baseSkusWithVariants: Object.keys(baseSkuMap).length,
       standaloneProducts: standaloneVariants.length,
       totalShopifyVariants: shopifyProducts.length,
+      mappingConflicts,
     };
   }
 
