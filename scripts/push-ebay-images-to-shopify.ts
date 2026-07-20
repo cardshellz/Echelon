@@ -5,7 +5,7 @@
  * This restores images on Shopify that were lost during the bad sync.
  *
  * Usage:
- *   EXTERNAL_DATABASE_URL=... npx tsx scripts/push-ebay-images-to-shopify.ts [--dry-run]
+ *   DATABASE_URL=... npx tsx scripts/push-ebay-images-to-shopify.ts [--dry-run]
  *
  * Requires: SHOPIFY_ACCESS_TOKEN, SHOPIFY_SHOP_DOMAIN env vars
  */
@@ -13,9 +13,9 @@
 import { Pool } from "pg";
 
 const DRY_RUN = process.argv.includes("--dry-run");
-const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
-  console.error("Set EXTERNAL_DATABASE_URL or DATABASE_URL");
+  console.error("Set DATABASE_URL");
   process.exit(1);
 }
 

@@ -9,13 +9,14 @@ import { db as echelonDb } from "../../db";
 import { omsOrders } from "../../../shared/schema/oms.schema";
 import { eq, isNull } from "drizzle-orm";
 
-// Cross-database connection to Shellz Club
-// Uses same DATABASE_URL since both apps share the database
+// Shared-database connection to Shellz Club membership data.
 import { Pool } from "pg";
+import { databaseSsl, resolveDatabaseUrl } from "../../config/database";
 
+const shellzClubConnectionString = resolveDatabaseUrl();
 const shellzClubDb = new Pool({
-  connectionString: process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+  connectionString: shellzClubConnectionString,
+  ssl: databaseSsl(shellzClubConnectionString),
 });
 
 interface MemberTierLookup {

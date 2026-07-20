@@ -50,11 +50,10 @@ describeWithDisposableDb.sequential(
     beforeAll(async () => {
       const productionUrls = [
         process.env.DATABASE_URL,
-        process.env.EXTERNAL_DATABASE_URL,
-      ].filter((value): value is string => Boolean(value));
+          ].filter((value): value is string => Boolean(value));
       if (productionUrls.includes(TEST_DB_URL!)) {
         throw new Error(
-          "ECHELON_TEST_DATABASE_URL must not equal DATABASE_URL or EXTERNAL_DATABASE_URL",
+          "ECHELON_TEST_DATABASE_URL must not equal DATABASE_URL",
         );
       }
       if (!DISPOSABLE_DB) {

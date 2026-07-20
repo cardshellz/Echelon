@@ -158,7 +158,7 @@ Weaknesses of the seam:
 
 ## 7. UNKNOWNS
 
-- **Current prod reconciler state.** R3 predicts non-zero variance for picked→shipped cells; WMS-INVENTORY-REFACTOR claims zero on 2026-06-01. Cannot run `npm run wms:reconcile-ledger` here (read-only audit; prod DB via `EXTERNAL_DATABASE_URL`). Either the writer changed after the backfill or the 06-01 traffic was ship-before-pick — INSUFFICIENT EVIDENCE which; the run resolves it.
+- **Current prod reconciler state.** R3 predicts non-zero variance for picked→shipped cells; WMS-INVENTORY-REFACTOR claims zero on 2026-06-01. Cannot run `npm run wms:reconcile-ledger` here (read-only audit; prod DB via `DATABASE_URL`). Either the writer changed after the backfill or the 06-01 traffic was ship-before-pick — INSUFFICIENT EVIDENCE which; the run resolves it.
 - **Live-DB constraint state** (validation status of `chk_variant_qty_non_negative NOT VALID`, presence of 0577/0578 dedup indexes, whether `lot_number` has any unique index) — verified in code/migrations only, not against the running database.
 - Whether any runtime path invokes `reallocateOrphaned` WITHOUT `orphanedQty` (only the cycle-count caller was found, and it passes it) — determines whether R2 is latent or firing.
 - Contents of `scripts/fix-orphaned-reservations.{cjs,sql}` and `scripts/reserve-existing-orders.cjs` (not read; assumed raw reservation writers by name).

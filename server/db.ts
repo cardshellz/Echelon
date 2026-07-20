@@ -2,30 +2,22 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
+import { databaseSsl, resolveDatabaseUrl } from "./config/database";
 
-const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+const connectionString = resolveDatabaseUrl();
+const ssl = databaseSsl(connectionString);
 
-if (!connectionString && !process.env.VITEST) {
-  throw new Error(
-    "Database connection string must be set. Provide EXTERNAL_DATABASE_URL or DATABASE_URL.",
-  );
-}
-
-// Always use SSL for external/production databases
-// Heroku and most cloud databases require SSL connections
-const useSSL = process.env.EXTERNAL_DATABASE_URL || (process.env.DATABASE_URL && process.env.DATABASE_URL.includes("amazonaws.com"));
-
-// In test environments without a DB connection, create a stub pool so
-// modules that import db.ts don't crash at load time. Actual DB calls
-// will fail at runtime (tests should mock them).
+// Unit tests without TEST_DATABASE_URL receive a deterministic localhost URL.
+// The pool connects lazily, so mocked tests can import this module without
+// consulting inherited libpq defaults or accidentally using DATABASE_URL.
 const poolConfig = {
-  connectionString: connectionString || "postgresql://stub:stub@localhost:5432/stub",
-  ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+  connectionString,
+  ssl,
   // Pool size per process. The old max:3 throttled the app to 3 connections and made
   // the reconcile sweep saturate and throw "timeout exceeded when trying to connect"
   // (the pool-acquire timeout). Heroku PG allows 200 (≈19 in use, single web dyno), so
   // there's ample headroom. Env-overridable (PG_POOL_MAX) for tuning; default 20.
-  max: connectionString ? (Number(process.env.PG_POOL_MAX) || 20) : 0,
+  max: Number(process.env.PG_POOL_MAX) || 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 };
@@ -47,7 +39,7 @@ export async function runStartupMigrations(): Promise<void> {
   // Use a SEPARATE connection so it doesn't block the shared pool
   const migrationsPool = new Pool({
     connectionString,
-    ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+    ssl,
     max: 1,
     idleTimeoutMillis: 10000,
     connectionTimeoutMillis: 15000,

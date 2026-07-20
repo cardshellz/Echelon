@@ -42,7 +42,7 @@
  *                                                  # see planArchive() for the two safety gates
  *   npx tsx scripts/relink-shopify-variant-ids.ts --apply         # WRITE (combine with flags above)
  *
- * Connection: EXTERNAL_DATABASE_URL (per CLAUDE.md), falling back to DATABASE_URL.
+ * Connection: DATABASE_URL.
  * Verify after apply: re-run without --apply (expect zero RELINK rows), then
  * watch the next sync sweep — the 404 group should clear.
  */
@@ -355,9 +355,9 @@ async function fetchAllShopifyProducts(creds: ShopifyCreds): Promise<any[]> {
 
 async function main(): Promise<void> {
   const opts = parseCli(process.argv.slice(2));
-  const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
-    console.error("Set EXTERNAL_DATABASE_URL (or DATABASE_URL).");
+    console.error("Set DATABASE_URL.");
     process.exit(1);
   }
   // rejectUnauthorized:false is the repo-wide script convention (P4.5 tracks proper CA verification)

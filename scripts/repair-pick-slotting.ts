@@ -46,7 +46,7 @@ async function loadDotenvIfAvailable() {
   if (!fs.existsSync(envPath)) return;
 
   const env = fs.readFileSync(envPath, "utf8").replace(/\0/g, "");
-  for (const key of ["EXTERNAL_DATABASE_URL", "DATABASE_URL"]) {
+  for (const key of ["DATABASE_URL"]) {
     const line = env.split(/\r?\n/).find((entry) => entry.startsWith(`${key}=`));
     if (!line) continue;
     let value = line.slice(key.length + 1).trim();
@@ -75,8 +75,8 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   await loadDotenvIfAvailable();
 
-  if (!process.env.DATABASE_URL && !process.env.EXTERNAL_DATABASE_URL) {
-    throw new Error("DATABASE_URL or EXTERNAL_DATABASE_URL is required");
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL is required");
   }
 
   const { db, pool } = await import("../server/db");

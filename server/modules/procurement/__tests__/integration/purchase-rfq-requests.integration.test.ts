@@ -40,7 +40,7 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
   let recommendationLineId: number;
 
   beforeAll(async () => {
-    const productionUrls = [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean);
+    const productionUrls = [process.env.DATABASE_URL].filter(Boolean);
     if (productionUrls.includes(TEST_DB_URL!)) throw new Error("ECHELON_TEST_DATABASE_URL must not equal a production database URL");
     pool = new pg.Pool({ connectionString: TEST_DB_URL, ssl: sslConfig(TEST_DB_URL!) });
     await pool.query("CREATE SCHEMA catalog; CREATE SCHEMA procurement; CREATE SCHEMA warehouse;");

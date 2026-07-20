@@ -34,13 +34,13 @@
  *     --limit   cap number of orders scanned (default: all) — for a smoke run
  *     --sample  rows printed per flagged bucket to console (default: 25)
  *
- * Run against prod (this machine): EXTERNAL_DATABASE_URL in .env is used by
+ * Run against prod (this machine): DATABASE_URL in .env is used by
  * server/db. Importing `db` does NOT run migrations (runStartupMigrations is
  * only called from the server bootstrap), so this stays read-only.
  */
 
 // Load .env BEFORE importing ../server/db — server/db reads
-// EXTERNAL_DATABASE_URL at module-load time. On Heroku the env is already
+// DATABASE_URL at module-load time. On Heroku the env is already
 // injected; locally it comes from .env. This import must stay first.
 import "dotenv/config";
 import { mkdirSync, writeFileSync } from "node:fs";

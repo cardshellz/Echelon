@@ -2,8 +2,8 @@ const pkg = require('pg');
 const { Pool } = pkg;
 require('dotenv').config();
 
-const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
-const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "production";
+const connectionString = process.env.DATABASE_URL;
+const useSSL = process.env.NODE_ENV === "production";
 
 const pool = new Pool({
   connectionString,

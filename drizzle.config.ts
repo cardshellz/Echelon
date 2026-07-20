@@ -12,7 +12,7 @@ export default defineConfig({
     url: process.env.DATABASE_URL!.includes("amazonaws.com") && !process.env.DATABASE_URL!.includes("sslmode=")
       ? `${process.env.DATABASE_URL}?sslmode=require`
       : process.env.DATABASE_URL!,
-    ssl: process.env.DATABASE_URL!.includes("amazonaws.com") || process.env.EXTERNAL_DATABASE_URL ? true : false,
+    ssl: process.env.DATABASE_URL!.includes("amazonaws.com") ? true : false,
   },
   // SAFEGUARD: drizzle-kit must never manage the `membership` schema. It is
   // owned by shellz-club-app (same shared Postgres); Echelon's Drizzle

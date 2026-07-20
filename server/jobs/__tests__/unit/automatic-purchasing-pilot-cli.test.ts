@@ -11,7 +11,6 @@ import {
 
 describe("automatic purchasing pilot CLI", () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;
-  const originalExternalDatabaseUrl = process.env.EXTERNAL_DATABASE_URL;
 
   beforeEach(() => {
     mocks.dotenvConfig.mockReset();
@@ -20,8 +19,6 @@ describe("automatic purchasing pilot CLI", () => {
   afterEach(() => {
     if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = originalDatabaseUrl;
-    if (originalExternalDatabaseUrl === undefined) delete process.env.EXTERNAL_DATABASE_URL;
-    else process.env.EXTERNAL_DATABASE_URL = originalExternalDatabaseUrl;
   });
 
   it("defaults to read-only preflight", () => {
@@ -99,7 +96,6 @@ describe("automatic purchasing pilot CLI", () => {
 
   it("does not load the optional local dotenv package when the runtime provides a database URL", async () => {
     process.env.DATABASE_URL = "postgresql://runtime-provided";
-    delete process.env.EXTERNAL_DATABASE_URL;
 
     await loadLocalEnvironmentIfNeeded();
 
@@ -108,7 +104,6 @@ describe("automatic purchasing pilot CLI", () => {
 
   it("loads local dotenv configuration only when no runtime database URL exists", async () => {
     delete process.env.DATABASE_URL;
-    delete process.env.EXTERNAL_DATABASE_URL;
 
     await loadLocalEnvironmentIfNeeded();
 

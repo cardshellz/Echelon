@@ -72,7 +72,7 @@ export function parseHistoricalSupplierEvidenceArgs(
 }
 
 async function loadLocalEnvironmentIfNeeded(): Promise<void> {
-  if (process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL) return;
+  if (process.env.DATABASE_URL) return;
   try {
     const dotenv = await import("dotenv");
     dotenv.config({ quiet: true });
@@ -85,14 +85,14 @@ async function main(): Promise<void> {
   const options = parseHistoricalSupplierEvidenceArgs(process.argv.slice(2));
   await loadLocalEnvironmentIfNeeded();
   const connectionString =
-    process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+    process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error("EXTERNAL_DATABASE_URL or DATABASE_URL is required");
+    throw new Error("DATABASE_URL is required");
   }
   const pg = await import("pg");
   const Pool = pg.default.Pool;
   const useSsl = Boolean(
-    process.env.EXTERNAL_DATABASE_URL || connectionString.includes("amazonaws.com"),
+    connectionString.includes("amazonaws.com"),
   );
   const pool = new Pool({
     connectionString,

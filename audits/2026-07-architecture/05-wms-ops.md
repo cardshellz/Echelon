@@ -170,7 +170,7 @@ Bypass writers:
 
 ## 7. UNKNOWNS
 
-- **Production schema drift:** whether `wms.orders.status` exists as a legacy column in the production DB (schema file lacks it; if the column exists remotely, W11 silently writes a dead column instead of erroring). I cannot verify from the repo — needs a `\d wms.orders` against `EXTERNAL_DATABASE_URL`.
+- **Production schema drift:** whether `wms.orders.status` exists as a legacy column in the production DB (schema file lacks it; if the column exists remotely, W11 silently writes a dead column instead of erroring). I cannot verify from the repo — needs a `\d wms.orders` against `DATABASE_URL`.
 - **Whether any scheduler auto-pushes `planned` shipments** (which determines how fast C1 turns into an actual wrong shipment vs. just destroyed intent). `pushShipment` is invoked from retry-queue and sync paths; I did not trace every enqueue site. HYPOTHESIS: the wms-sync/reconcile sweeps re-push planned shipments, making C1 ship-affecting within one sweep interval.
 - **`fulfillment.service.confirmShipment` live callers:** `processShopifyFulfillment` calls the internal variant (fulfillment.service.ts:462); I did not enumerate whether any route still calls `confirmShipment`/`markDelivered` directly — their guard gaps (S5/S6) matter proportionally to caller traffic.
 - **eBay/other channel fan-out** into these writers (only Shopify paths were traced end-to-end).

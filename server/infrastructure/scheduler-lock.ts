@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import pg from "pg";
+import { databaseSsl, resolveDatabaseUrl } from "../config/database";
 
 const { Pool } = pg;
 
@@ -67,19 +68,11 @@ function envPositiveInteger(name: string, fallback: number): number {
 function getLockPool(): AdvisoryLockPool {
   if (lockPool) return lockPool;
 
-  const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
-  const useSSL = process.env.EXTERNAL_DATABASE_URL
-    || (process.env.DATABASE_URL && process.env.DATABASE_URL.includes("amazonaws.com"));
-
-  if (!connectionString) {
-    throw new Error(
-      "Database connection string must be set. Provide EXTERNAL_DATABASE_URL or DATABASE_URL.",
-    );
-  }
+  const connectionString = resolveDatabaseUrl();
 
   const pgPool = new Pool({
     connectionString,
-    ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+    ssl: databaseSsl(connectionString),
     max: envPositiveInteger("SCHEDULER_LOCK_POOL_MAX", 2),
     idleTimeoutMillis: envPositiveInteger("SCHEDULER_LOCK_IDLE_TIMEOUT_MS", 30_000),
     connectionTimeoutMillis: envPositiveInteger("SCHEDULER_LOCK_CONNECTION_TIMEOUT_MS", 10_000),

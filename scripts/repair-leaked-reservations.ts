@@ -44,7 +44,7 @@
  *   npx tsx scripts/repair-leaked-reservations.ts --variant=207  # scope to one variant
  *   npx tsx scripts/repair-leaked-reservations.ts --picked=max --apply  # WRITE second tranche
  *
- * Connection: EXTERNAL_DATABASE_URL (per CLAUDE.md), falling back to DATABASE_URL.
+ * Connection: DATABASE_URL.
  * Verify after apply: re-run without --apply (expect zero drift rows).
  */
 
@@ -139,9 +139,9 @@ export function buildDriftSql(measure: PickedMeasure): string {
 
 async function main(): Promise<void> {
   const opts = parseCli(process.argv.slice(2));
-  const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
-    console.error("EXTERNAL_DATABASE_URL / DATABASE_URL not set");
+    console.error("DATABASE_URL not set");
     process.exit(1);
   }
   // ssl matches the repo's other pools/scripts (see db.ts, remediate-lot-drift):

@@ -3,7 +3,7 @@
 --   could not create unique index "uq_inventory_transactions_ship_dedup"
 --
 -- READ-ONLY. Run against the database where 0570 failed (prod = Heroku
--- cardshellz-echelon, EXTERNAL_DATABASE_URL). Makes NO changes.
+-- cardshellz-echelon, DATABASE_URL). Makes NO changes.
 --
 -- The intended invariant: one 'ship' transaction per (reference_id, order_item_id).
 -- Existing rows violate it. Because recordShipment() decrements inventory_levels

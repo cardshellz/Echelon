@@ -6,5 +6,8 @@ server/public
 vite.config.ts.*
 *.tar.gz.env.test
 .env.test
+*.log
+*_logs.txt
+conns.txt
 
 .claude/settings.local.json

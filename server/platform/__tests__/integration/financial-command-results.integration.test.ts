@@ -115,11 +115,10 @@ describeWithDb.sequential("financial command PostgreSQL transactions", () => {
   beforeAll(async () => {
     const productionUrls = [
       process.env.DATABASE_URL,
-      process.env.EXTERNAL_DATABASE_URL,
-    ].filter((value): value is string => Boolean(value));
+      ].filter((value): value is string => Boolean(value));
     if (productionUrls.includes(TEST_DB_URL!)) {
       throw new Error(
-        "ECHELON_TEST_DATABASE_URL must not equal DATABASE_URL or EXTERNAL_DATABASE_URL",
+        "ECHELON_TEST_DATABASE_URL must not equal DATABASE_URL",
       );
     }
 
@@ -141,9 +140,7 @@ describeWithDb.sequential("financial command PostgreSQL transactions", () => {
     // repository. Hide every production connection variable while importing
     // it, then inject the dedicated test database below.
     const databaseUrl = process.env.DATABASE_URL;
-    const externalDatabaseUrl = process.env.EXTERNAL_DATABASE_URL;
     delete process.env.DATABASE_URL;
-    delete process.env.EXTERNAL_DATABASE_URL;
     try {
       const [{ createDrizzleFinancialCommandRepository }, databaseModule] = await Promise.all([
         import("../../commands/command-results.repository"),
@@ -156,8 +153,6 @@ describeWithDb.sequential("financial command PostgreSQL transactions", () => {
     } finally {
       if (databaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = databaseUrl;
-      if (externalDatabaseUrl === undefined) delete process.env.EXTERNAL_DATABASE_URL;
-      else process.env.EXTERNAL_DATABASE_URL = externalDatabaseUrl;
     }
   });
 

@@ -13,9 +13,9 @@
  *   - oms.oms_order_events.order_id
  *
  * Usage:
- *   EXTERNAL_DATABASE_URL=... npx tsx scripts/dedup-oms-orders-duplicate-external-order-number.ts              # dry-run (default)
- *   EXTERNAL_DATABASE_URL=... npx tsx scripts/dedup-oms-orders-duplicate-external-order-number.ts --execute     # for real
- *   EXTERNAL_DATABASE_URL=... npx tsx scripts/dedup-oms-orders-duplicate-external-order-number.ts --limit=10    # cap groups
+ *   DATABASE_URL=... npx tsx scripts/dedup-oms-orders-duplicate-external-order-number.ts              # dry-run (default)
+ *   DATABASE_URL=... npx tsx scripts/dedup-oms-orders-duplicate-external-order-number.ts --execute     # for real
+ *   DATABASE_URL=... npx tsx scripts/dedup-oms-orders-duplicate-external-order-number.ts --limit=10    # cap groups
  */
 
 import { Pool } from "pg";
@@ -49,9 +49,9 @@ interface DuplicateGroup {
 async function main(argv = process.argv.slice(2)) {
   const { execute, dryRun, limit } = parseFlags(argv);
 
-  const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
-    console.error("Set EXTERNAL_DATABASE_URL or DATABASE_URL");
+    console.error("Set DATABASE_URL");
     process.exit(1);
   }
 
