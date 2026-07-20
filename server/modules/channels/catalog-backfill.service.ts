@@ -41,6 +41,7 @@ import {
   type Channel,
   type Warehouse,
 } from "@shared/schema";
+import { decideImportedShopifyProductMapping } from "../catalog/shopify-product-mapping.domain";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -108,6 +109,12 @@ export interface BackfillResult {
     noShopifyData: number;
   };
   errors: string[];
+  mappingConflicts: Array<{
+    echelonProductId: number;
+    echelonSku: string | null;
+    existingShopifyProductId: string;
+    incomingShopifyProductId: string;
+  }>;
   /** Products that were processed, with ID mappings */
   mappings: Array<{
     shopifyProductId: string;
@@ -190,6 +197,7 @@ class CatalogBackfillService {
       assets: { created: 0 },
       inventory: { imported: 0, skipped: 0, noShopifyData: 0 },
       errors: [],
+      mappingConflicts: [],
       mappings: [],
       reconciliation: [],
     };
@@ -358,6 +366,32 @@ class CatalogBackfillService {
     const existing = existingByShopifyId || existingBySku;
 
     if (existing) {
+      const mappingDecision = decideImportedShopifyProductMapping(
+        existing.shopifyProductId,
+        shopifyProductId,
+      );
+      if (mappingDecision.action === "conflict") {
+        const conflict = {
+          echelonProductId: existing.id,
+          echelonSku: existing.sku,
+          existingShopifyProductId: mappingDecision.existingProductId,
+          incomingShopifyProductId: mappingDecision.incomingProductId,
+        };
+        result.mappingConflicts.push(conflict);
+        result.products.skipped++;
+        result.errors.push(
+          `Shopify mapping conflict for Echelon product ${existing.id}: ` +
+          `${mappingDecision.existingProductId} cannot be replaced by ${mappingDecision.incomingProductId} during backfill`,
+        );
+        console.warn(JSON.stringify({
+          event: "shopify_import_mapping_conflict",
+          code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
+          source: "catalog_backfill",
+          ...conflict,
+        }));
+        return null;
+      }
+
       // Update existing product
       if (!isDryRun) {
         const [updated] = await this.db
@@ -369,7 +403,7 @@ class CatalogBackfillService {
             category: shopifyProduct.product_type,
             tags: tags,
             status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
-            shopifyProductId: shopifyProductId,
+            shopifyProductId: mappingDecision.productId,
             updatedAt: new Date(),
           })
           .where(eq(products.id, existing.id))
@@ -416,6 +450,7 @@ class CatalogBackfillService {
     for (const muv of multiUomVariants) {
       const mapping = await this.processVariant(
         echelonProduct.id,
+        shopifyProductId,
         muv.raw,
         channelId,
         isDryRun,
@@ -431,6 +466,7 @@ class CatalogBackfillService {
     for (const sv of standaloneVariants) {
       const mapping = await this.processVariant(
         echelonProduct.id,
+        shopifyProductId,
         sv,
         channelId,
         isDryRun,
@@ -459,6 +495,7 @@ class CatalogBackfillService {
    */
   private async processVariant(
     productId: number,
+    shopifyProductId: string,
     shopifyVariant: ShopifyProductRaw["variants"][0],
     channelId: number,
     isDryRun: boolean,
@@ -509,6 +546,22 @@ class CatalogBackfillService {
     const existingVariant = existingByShopifyId || existingBySku;
 
     if (existingVariant) {
+      if (existingVariant.productId !== productId) {
+        result.variants.skipped++;
+        result.errors.push(
+          `Shopify variant ${shopifyVariantId} (${sku}) is already assigned to ` +
+          `Echelon product ${existingVariant.productId}, not product ${productId}`,
+        );
+        console.warn(JSON.stringify({
+          event: "shopify_variant_parent_conflict",
+          code: "SHOPIFY_VARIANT_ALREADY_ASSIGNED_TO_DIFFERENT_PRODUCT",
+          shopifyVariantId,
+          sku,
+          existingEchelonProductId: existingVariant.productId,
+          requestedEchelonProductId: productId,
+        }));
+        return null;
+      }
       if (!isDryRun) {
         const [updated] = await this.db
           .update(productVariants)
@@ -584,6 +637,7 @@ class CatalogBackfillService {
           .update(channelFeeds)
           .set({
             channelVariantId: shopifyVariantId,
+            channelProductId: shopifyProductId,
             channelSku: sku,
             isActive: 1,
             updatedAt: new Date(),
@@ -596,6 +650,7 @@ class CatalogBackfillService {
           productVariantId: echelonVariant.id,
           channelType: "shopify",
           channelVariantId: shopifyVariantId,
+          channelProductId: shopifyProductId,
           channelSku: sku,
           isActive: 1,
         });
@@ -618,6 +673,7 @@ class CatalogBackfillService {
         await this.db
           .update(channelListings)
           .set({
+            externalProductId: shopifyProductId,
             externalVariantId: shopifyVariantId,
             externalSku: sku,
             syncStatus: "synced",
@@ -627,17 +683,10 @@ class CatalogBackfillService {
           .where(eq(channelListings.id, existingListing.id));
         result.listings.updated++;
       } else {
-        // We need the Shopify product ID for the listing
-        const [product] = await this.db
-          .select({ shopifyProductId: products.shopifyProductId })
-          .from(products)
-          .where(eq(products.id, productId))
-          .limit(1);
-
         await this.db.insert(channelListings).values({
           channelId,
           productVariantId: echelonVariant.id,
-          externalProductId: product?.shopifyProductId || null,
+          externalProductId: shopifyProductId,
           externalVariantId: shopifyVariantId,
           externalSku: sku,
           lastSyncedPrice: priceCents,

@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { db } from "../../db";
 import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
+  auditEvents,
   channelConnections,
   channelFeeds,
   channelListings,
@@ -19,7 +20,14 @@ import {
   type ShopifyProductSearchResult,
   fetchShopifyProductsForSearch,
 } from "./shopify-product-search";
-import { enqueueShippingGroupMetafields } from "./shipping-group-sync";
+import {
+  enqueueShippingGroupMetafieldWrite,
+  enqueueShippingGroupMetafields,
+} from "./shipping-group-sync";
+import {
+  createShopifyProductMappingService,
+  ShopifyProductMappingError,
+} from "./shopify-product-mapping.service";
 import {
   coercePackageAttributesOnVariantPayload,
   parsePackageAttributeBulkRows,
@@ -246,6 +254,7 @@ async function resolveProductCategory(input: { categoryId?: number | string | nu
 }
 
 export async function registerProductRoutes(app: Express) {
+  const shopifyProductMapping = createShopifyProductMappingService();
   // ============================================================================
   // Products API (Master Catalog)
   // ============================================================================
@@ -650,6 +659,61 @@ export async function registerProductRoutes(app: Express) {
     }
   });
 
+  app.get("/api/products/:id/shopify-mapping", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const productId = Number(req.params.id);
+      const channelId = req.query.channelId === undefined ? null : Number(req.query.channelId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id", code: "INVALID_PRODUCT_ID" });
+      }
+      if (channelId !== null && (!Number.isInteger(channelId) || channelId <= 0)) {
+        return res.status(400).json({ error: "Invalid channel id", code: "INVALID_CHANNEL_ID" });
+      }
+      res.json(await shopifyProductMapping.getSummary(productId, channelId));
+    } catch (error: unknown) {
+      if (error instanceof ShopifyProductMappingError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          context: error.context,
+        });
+      }
+      console.error("Error loading Shopify product mapping:", error);
+      res.status(500).json({ error: "Failed to load Shopify product mapping" });
+    }
+  });
+
+  app.post("/api/products/:id/shopify-mapping/repair", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const productId = Number(req.params.id);
+      const channelId = req.body?.channelId === undefined ? null : Number(req.body.channelId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "Invalid product id", code: "INVALID_PRODUCT_ID" });
+      }
+      if (channelId !== null && (!Number.isInteger(channelId) || channelId <= 0)) {
+        return res.status(400).json({ error: "Invalid channel id", code: "INVALID_CHANNEL_ID" });
+      }
+      const actorId = req.session.user?.id || req.session.user?.username || "unknown";
+      const result = await shopifyProductMapping.repair({
+        productId,
+        channelId,
+        targetProductId: req.body?.targetProductId,
+        actor: `user:${actorId}`,
+      });
+      res.json(result);
+    } catch (error: unknown) {
+      if (error instanceof ShopifyProductMappingError) {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          code: error.code,
+          context: error.context,
+        });
+      }
+      console.error("Error repairing Shopify product mapping:", error);
+      res.status(500).json({ error: "Failed to repair Shopify product mapping" });
+    }
+  });
+
   app.post("/api/products", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const { variants, ...productData } = req.body;
@@ -702,6 +766,26 @@ export async function registerProductRoutes(app: Express) {
     try {
       const id = parseInt(req.params.id);
       const { variants, ...updates } = req.body;
+
+      if (Object.prototype.hasOwnProperty.call(updates, "shopifyProductId")) {
+        const existing = await storage.getProductById(id);
+        if (!existing) return res.status(404).json({ error: "Product not found" });
+        const requestedMapping = normalizeShopifyNumericId(updates.shopifyProductId);
+        const existingMapping = normalizeShopifyNumericId(existing.shopifyProductId);
+        if (updates.shopifyProductId !== null && !requestedMapping) {
+          return res.status(400).json({
+            error: "Invalid Shopify product ID",
+            code: "INVALID_SHOPIFY_PRODUCT_ID",
+          });
+        }
+        if (requestedMapping !== existingMapping) {
+          return res.status(400).json({
+            error: "Shopify product identity must be changed through the Shopify mapping repair workflow",
+            code: "SHOPIFY_PRODUCT_MAPPING_WRITE_RESTRICTED",
+          });
+        }
+        delete updates.shopifyProductId;
+      }
 
       // Check for SKU conflict when SKU is being changed
       let oldProductSku: string | null = null;
@@ -1657,6 +1741,7 @@ export async function registerProductRoutes(app: Express) {
 
       const existingProductShopifyId = normalizeShopifyNumericId(product.shopifyProductId);
       const productRemapRequested = req.body?.allowProductRemap === true;
+      const productIdentityWillChange = existingProductShopifyId !== shopifyProductId;
       if (existingProductShopifyId && existingProductShopifyId !== shopifyProductId && !productRemapRequested) {
         return res.status(409).json({
           error: "Shopify variant belongs to a different Shopify product",
@@ -1668,7 +1753,7 @@ export async function registerProductRoutes(app: Express) {
         });
       }
 
-      if (existingProductShopifyId && existingProductShopifyId !== shopifyProductId && productRemapRequested) {
+      if (productIdentityWillChange) {
         const siblingConflicts = await db
           .select({
             variantId: productVariants.id,
@@ -1704,6 +1789,54 @@ export async function registerProductRoutes(app: Express) {
             catalogShopifyProductId: existingProductShopifyId,
             shopifyVariantProductId: shopifyProductId,
             siblingConflicts,
+          });
+        }
+
+        const targetProductData = await fetchShopifyJson(credentials, `/products/${shopifyProductId}.json`);
+        const targetVariantIds = new Set<string>(
+          (targetProductData?.product?.variants || [])
+            .map((targetVariant: any) => normalizeShopifyNumericId(targetVariant.id))
+            .filter((targetVariantId: string | null): targetVariantId is string => targetVariantId !== null),
+        );
+        const siblingVariantMappings = await db
+          .select({
+            variantId: productVariants.id,
+            sku: productVariants.sku,
+            catalogVariantId: productVariants.shopifyVariantId,
+            feedVariantId: channelFeeds.channelVariantId,
+            listingVariantId: channelListings.externalVariantId,
+          })
+          .from(productVariants)
+          .leftJoin(channelFeeds, and(
+            eq(channelFeeds.productVariantId, productVariants.id),
+            eq(channelFeeds.channelId, channel.id),
+            eq(channelFeeds.channelType, "shopify"),
+          ))
+          .leftJoin(channelListings, and(
+            eq(channelListings.productVariantId, productVariants.id),
+            eq(channelListings.channelId, channel.id),
+          ))
+          .where(eq(productVariants.productId, product.id));
+        const outsideTargetVariants = siblingVariantMappings.flatMap((mapping) => {
+          const mappedIds = [
+            mapping.catalogVariantId,
+            mapping.feedVariantId,
+            mapping.listingVariantId,
+          ]
+            .map(normalizeShopifyNumericId)
+            .filter((mappedId): mappedId is string => mappedId !== null);
+          const foreignIds = [...new Set(mappedIds)].filter((mappedId) => !targetVariantIds.has(mappedId));
+          return foreignIds.length > 0
+            ? [{ variantId: mapping.variantId, sku: mapping.sku, foreignShopifyVariantIds: foreignIds }]
+            : [];
+        });
+        if (outsideTargetVariants.length > 0) {
+          return res.status(409).json({
+            error: "Cannot remap this product because linked sibling variants do not belong to the target Shopify product",
+            code: "SHOPIFY_PRODUCT_REMAP_VARIANT_CONFLICT",
+            catalogShopifyProductId: existingProductShopifyId,
+            shopifyVariantProductId: shopifyProductId,
+            outsideTargetVariants,
           });
         }
       }
@@ -1789,11 +1922,45 @@ export async function registerProductRoutes(app: Express) {
       }
 
       const result = await db.transaction(async (tx) => {
-        if (!existingProductShopifyId || productRemapRequested) {
+        if (productIdentityWillChange) {
           await tx
             .update(products)
             .set({ shopifyProductId, updatedAt: new Date() })
             .where(eq(products.id, product.id));
+
+          const siblingVariants = await tx
+            .select({ id: productVariants.id })
+            .from(productVariants)
+            .where(eq(productVariants.productId, product.id));
+          const siblingVariantIds = siblingVariants.map((sibling) => sibling.id);
+          if (siblingVariantIds.length > 0) {
+            await tx
+              .update(channelFeeds)
+              .set({ channelProductId: shopifyProductId, updatedAt: new Date() })
+              .where(and(
+                eq(channelFeeds.channelId, channel.id),
+                eq(channelFeeds.channelType, "shopify"),
+                inArray(channelFeeds.productVariantId, siblingVariantIds),
+              ));
+            await tx
+              .update(channelListings)
+              .set({ externalProductId: shopifyProductId, updatedAt: new Date() })
+              .where(and(
+                eq(channelListings.channelId, channel.id),
+                inArray(channelListings.productVariantId, siblingVariantIds),
+              ));
+          }
+
+          const [shippingGroup] = await tx
+            .select({ code: shippingGroups.code })
+            .from(products)
+            .leftJoin(shippingGroups, eq(products.shippingGroupId, shippingGroups.id))
+            .where(eq(products.id, product.id))
+            .limit(1);
+          await enqueueShippingGroupMetafieldWrite(tx, {
+            shopifyProductId,
+            shippingGroupCode: shippingGroup?.code ?? null,
+          });
         }
 
         const variantUpdates: Partial<typeof productVariants.$inferInsert> = {
@@ -1879,6 +2046,32 @@ export async function registerProductRoutes(app: Express) {
             .returning({ id: channelListings.id });
           listingIds = insertedListings.map((row) => row.id);
         }
+
+        await tx.insert(auditEvents).values({
+          actor: `user:${req.session.user?.id || req.session.user?.username || "unknown"}`,
+          action: "catalog.shopify_variant_linked",
+          target: `catalog.product_variant:${id}`,
+          changes: {
+            before: {
+              catalogProductId: existingProductShopifyId,
+              catalogVariantId: normalizeShopifyNumericId(variant.shopifyVariantId),
+              catalogInventoryItemId: normalizeShopifyNumericId(variant.shopifyInventoryItemId),
+            },
+            after: {
+              catalogProductId: shopifyProductId,
+              catalogVariantId: shopifyVariantId,
+              catalogInventoryItemId: shopifyInventoryItemId,
+            },
+          },
+          context: {
+            channelId: channel.id,
+            channelName: channel.name,
+            productIdentityChanged: productIdentityWillChange,
+            productRemapRequested,
+            feedIds,
+            listingIds,
+          },
+        });
 
         return { updatedVariant, feedIds, listingIds };
       });
