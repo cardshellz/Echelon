@@ -27,6 +27,7 @@ import { parseProviderAmountCents } from "../shipping/types";
 import {
   SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
   recordShipStationUnmappedPhysicalException,
+  resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
 
@@ -2639,6 +2640,21 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         `[ShipStation Webhook V2] No actionable event for ShipStation shipment ${shipment.shipmentId ?? "unknown"} (SS order ${shipment.orderId ?? "unknown"}) - skipping`,
       );
       return { processed: false, fallback: false, handled: true };
+    }
+
+    if (event.kind === "voided") {
+      try {
+        await resolveShipStationUnmappedPhysicalExceptionForVoidedLabel(db, {
+          shipment,
+          resolvedBy: "system:shipstation_webhook",
+        });
+      } catch (exceptionErr: any) {
+        console.error(
+          `[ShipStation Webhook V2] Could not resolve the prior unmapped-package ` +
+          `exception for voided provider shipment ${shipment.shipmentId}: ` +
+          `${exceptionErr?.message ?? String(exceptionErr)}`,
+        );
+      }
     }
 
     const resolved = await resolveWmsShipmentForShipNotify(shipment);
