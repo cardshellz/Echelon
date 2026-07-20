@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  CircleOff,
   CircleDot,
   Clock3,
   ExternalLink,
@@ -671,6 +672,7 @@ function ShipStationReshipAdoptionDialog(props: {
   ))
     && Boolean(preview?.providerShipment.shipDate)
     && !preview?.providerShipment.voidDate;
+  const isVoidedProviderShipment = Boolean(preview?.providerShipment.voidDate);
 
   useEffect(() => {
     setReason("");
@@ -833,13 +835,48 @@ function ShipStationReshipAdoptionDialog(props: {
     },
   });
 
+  const voidedResolutionMutation = useMutation({
+    mutationFn: async () => {
+      if (!props.target || !preview?.providerShipment.voidDate) {
+        throw new Error("Voided ShipStation evidence is unavailable");
+      }
+      const body: Record<string, unknown> = {
+        ...("exceptionId" in props.target ? { exceptionId: props.target.exceptionId } : {}),
+        ...("shipmentId" in props.target ? { shipmentId: props.target.shipmentId } : {}),
+      };
+      const response = await apiRequest(
+        "POST",
+        "/api/oms/ops/shipstation-unmapped/resolve-voided",
+        body,
+      );
+      return response.json();
+    },
+    onSuccess: async () => {
+      toast({
+        title: "Voided label resolved",
+        description: "No shipment was recorded and no inventory was deducted.",
+      });
+      await props.onCompleted();
+      props.onClose();
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Could not resolve voided label",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   return (
     <Dialog open={props.target !== null} onOpenChange={(open) => { if (!open) props.onClose(); }}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader className="text-left">
-          <DialogTitle>Record replacement shipment</DialogTitle>
+          <DialogTitle>{isVoidedProviderShipment ? "Resolve voided label" : "Review shipment"}</DialogTitle>
           <DialogDescription>
-            {props.target?.label}: confirm what was replaced and what was resent.
+            {isVoidedProviderShipment
+              ? `${props.target?.label}: confirm the voided label requires no inventory action.`
+              : `${props.target?.label}: determine whether this was a replacement shipment.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -854,6 +891,42 @@ function ShipStationReshipAdoptionDialog(props: {
             <Button className="mt-3" size="sm" variant="outline" onClick={() => previewQuery.refetch()}>Retry live evidence</Button>
           </div>
         ) : preview ? (
+          isVoidedProviderShipment ? (
+            <div className="space-y-5">
+              <section className="border-y py-4">
+                <div className="flex gap-3">
+                  <CircleOff className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
+                  <div>
+                    <div className="font-medium">ShipStation voided this label</div>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      This label is retained in ShipStation shipment history even when its order no longer appears in the normal order view.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
+                  <div className="border-t pt-3">
+                    <div className="text-xs font-semibold uppercase text-muted-foreground">Voided tracking</div>
+                    <div className="mt-1 break-all font-medium">{preview.providerShipment.trackingNumber || "Tracking unavailable"}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">ShipStation shipment {preview.providerShipment.shipmentId}</div>
+                  </div>
+                  <div className="border-t pt-3">
+                    <div className="text-xs font-semibold uppercase text-muted-foreground">Voided</div>
+                    <div className="mt-1 font-medium">{formatTimestamp(preview.providerShipment.voidDate)}</div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="border-y py-4">
+                <div className="font-semibold">What will happen</div>
+                <div className="mt-3 space-y-2 text-sm">
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The original shipment and tracking remain unchanged.</span></div>
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>No replacement shipment is created.</span></div>
+                  <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>No inventory or customer fulfillment is changed.</span></div>
+                </div>
+              </section>
+            </div>
+          ) : (
           <div className="space-y-5">
             <section className="border-y py-4">
               <div className="flex gap-3">
@@ -1116,14 +1189,25 @@ function ShipStationReshipAdoptionDialog(props: {
             </section>
             {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to record this shipment.</p>}
           </div>
+          )
         ) : null}
 
         <DialogFooter>
           <Button variant="outline" onClick={props.onClose}>Cancel</Button>
-          <Button disabled={!preview || !actionValid || mutation.isPending} onClick={() => mutation.mutate()}>
-            {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Record shipment
-          </Button>
+          {isVoidedProviderShipment ? (
+            <Button
+              disabled={!preview || voidedResolutionMutation.isPending}
+              onClick={() => voidedResolutionMutation.mutate()}
+            >
+              {voidedResolutionMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Resolve voided label
+            </Button>
+          ) : (
+            <Button disabled={!preview || !actionValid || mutation.isPending} onClick={() => mutation.mutate()}>
+              {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Record shipment
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -2119,8 +2203,8 @@ function FlowOverview(props: {
                                       size="sm"
                                       onClick={() => setUnmappedTarget(classificationTarget)}
                                     >
-                                      <PackagePlus className="mr-2 h-3.5 w-3.5" />
-                                      Adopt as reship
+                                      <PackageCheck className="mr-2 h-3.5 w-3.5" />
+                                      Review shipment
                                     </Button>
                                   )}
                                   {replayAction && (

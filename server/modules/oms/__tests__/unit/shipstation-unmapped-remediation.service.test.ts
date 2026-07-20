@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
+  resolveShipStationUnmappedPhysicalAsVoided,
 } from "../../shipstation-unmapped-remediation.service";
 
 function queryText(query: any): string {
@@ -1235,5 +1236,43 @@ describe("ShipStation unmapped physical remediation", () => {
       },
     )).rejects.toThrow("voided ShipStation shipment cannot be adopted");
     expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves an exact voided package without changing shipment or inventory state", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [contextRow] };
+        }
+        if (text.includes("UPDATE wms.reconciliation_exceptions")) {
+          expect(text).toContain("provider_physical_shipment_voided");
+          return {
+            rows: [{ exception_id: 77, external_shipment_ref: "900" }],
+          };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+
+    const result = await resolveShipStationUnmappedPhysicalAsVoided(
+      db,
+      shipStation({
+        getShipmentById: vi.fn(async () => ({
+          ...providerShipment,
+          voidDate: "2026-07-17T08:51:25.473Z",
+        })),
+      }),
+      { exceptionId: 77, operator: "ops:test" },
+    );
+
+    expect(result).toMatchObject({
+      resolved: true,
+      exceptionId: 77,
+      providerShipmentId: 900,
+      inventoryChanged: false,
+      fulfillmentChanged: false,
+    });
+    expect(db.execute).toHaveBeenCalledTimes(2);
   });
 });

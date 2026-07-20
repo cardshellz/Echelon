@@ -7,7 +7,10 @@ import { ShopifyFulfillmentReconciler } from "./reconcilers/shopify.reconciler";
 import type { FulfillmentReconciler } from "./reconcilers/reconciler.interface";
 import { applyChannelFulfillment } from "./channel-fulfillment.service";
 import { findChannelWritebackCandidates } from "./channel-writeback.service";
-import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
+import {
+  resolveRecoveredShipNotifyNoMatchExceptions,
+  resolveVoidedShipStationUnmappedPhysicalExceptions,
+} from "./ship-notify-reconciliation.service";
 
 const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 200;
@@ -44,6 +47,34 @@ export async function runFulfillmentSweep(dbArg: any = db) {
       console.error(
         `${LOG_PREFIX} SHIP_NOTIFY exception recovery failed: ${error?.message ?? String(error)}`,
       );
+    }
+
+    const shipStation = dbArg?.__shipStationService;
+    if (typeof shipStation?.getShipmentById === "function") {
+      try {
+        const voidedRecovery = await resolveVoidedShipStationUnmappedPhysicalExceptions(
+          dbArg,
+          shipStation,
+          {
+            limit: 100,
+            resolvedBy: "system:fulfillment_sweeper",
+          },
+        );
+        if (voidedRecovery.resolvedCount > 0) {
+          console.log(
+            `${LOG_PREFIX} Auto-resolved ${voidedRecovery.resolvedCount} voided ShipStation package exception(s).`,
+          );
+        }
+        for (const failure of voidedRecovery.failures) {
+          console.error(
+            `${LOG_PREFIX} Could not re-check ShipStation exception ${failure.exceptionId}: ${failure.message}`,
+          );
+        }
+      } catch (error: any) {
+        console.error(
+          `${LOG_PREFIX} Voided ShipStation exception recovery failed: ${error?.message ?? String(error)}`,
+        );
+      }
     }
 
     // Shipment scope is required here: an order can be partially shipped, and

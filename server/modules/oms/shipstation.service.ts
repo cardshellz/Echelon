@@ -22,7 +22,10 @@ import {
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { deriveOmsFromWms, type WmsWarehouseStatus } from "@shared/enums/order-status";
 import { maybeGetPackInstruction } from "../cartonization/application/wms-pack-plan.service";
-import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
+import {
+  resolveRecoveredShipNotifyNoMatchExceptions,
+  resolveVoidedShipStationUnmappedPhysicalException,
+} from "./ship-notify-reconciliation.service";
 import { parseProviderAmountCents } from "../shipping/types";
 import {
   SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
@@ -3690,10 +3693,44 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     }
   }
 
+  async function resolveVoidedUnmappedPhysicalException(
+    shipment: ShipStationShipment,
+  ): Promise<void> {
+    if (!shipment.voidDate) return;
+    try {
+      const resolution = await resolveVoidedShipStationUnmappedPhysicalException(
+        db,
+        { shipmentId: shipment.shipmentId, voidDate: shipment.voidDate },
+        { resolvedBy: "system:shipstation_webhook" },
+      );
+      if (resolution) {
+        console.log(JSON.stringify({
+          level: "info",
+          action: "shipstation_unmapped_physical_resolved",
+          outcome: "provider_shipment_voided",
+          exception_id: resolution.exceptionId,
+          ss_shipment_id: shipment.shipmentId,
+          ss_order_id: shipment.orderId ?? null,
+          provider_void_date: resolution.providerVoidDate,
+        }));
+      }
+    } catch (error: any) {
+      console.error(JSON.stringify({
+        level: "error",
+        action: "shipstation_unmapped_physical_void_resolve_failed",
+        outcome: "error",
+        ss_shipment_id: shipment.shipmentId,
+        ss_order_id: shipment.orderId ?? null,
+        error: error?.message ?? String(error),
+      }));
+    }
+  }
+
   async function processShipmentNotification(
     shipment: ShipStationShipment,
   ): Promise<{ processed: boolean }> {
     const v2Result = await processShipNotifyV2(shipment);
+    await resolveVoidedUnmappedPhysicalException(shipment);
     if (v2Result.processed) {
       await resolveRecoveredNoMatchException(shipment);
       return { processed: true };
