@@ -18,6 +18,7 @@ export interface ShipStationUnmappedPhysicalEvidence {
   carrierCode?: string | null;
   serviceCode?: string | null;
   shipDate?: string | null;
+  voidDate?: string | null;
   shipmentItems?: Array<{
     orderItemId?: number | null;
     lineItemKey?: string | null;
@@ -113,6 +114,7 @@ export async function recordShipStationUnmappedPhysicalException(
     carrierCode: input.shipment.carrierCode ?? null,
     serviceCode: input.shipment.serviceCode ?? null,
     shipDate: input.shipment.shipDate ?? null,
+    voidDate: input.shipment.voidDate ?? null,
     shipmentItems: Array.isArray(input.shipment.shipmentItems)
       ? input.shipment.shipmentItems.map((item) => ({
           orderItemId: item.orderItemId ?? null,
@@ -172,4 +174,54 @@ export async function recordShipStationUnmappedPhysicalException(
       summary = EXCLUDED.summary,
       details = wms.reconciliation_exceptions.details || EXCLUDED.details
   `);
+}
+
+export async function resolveShipStationUnmappedPhysicalExceptionForVoidedLabel(
+  db: QueryExecutor,
+  input: {
+    shipment: ShipStationUnmappedPhysicalEvidence;
+    resolvedBy: string;
+    notes?: string | null;
+  },
+): Promise<boolean> {
+  const shipmentRef = positiveReference(input.shipment.shipmentId);
+  const voidDateText = nullableExternalRef(input.shipment.voidDate);
+  const resolvedBy = nullableExternalRef(input.resolvedBy);
+  if (!shipmentRef || !voidDateText || !resolvedBy || resolvedBy.length > 120) {
+    return false;
+  }
+  const voidDate = new Date(voidDateText);
+  if (Number.isNaN(voidDate.getTime())) return false;
+
+  const resolution =
+    "ShipStation confirmed that the additional provider label was voided. " +
+    "No WMS shipment, inventory, customer fulfillment, or channel fulfillment state changed.";
+  const details = JSON.stringify({
+    remediationAction: "resolve_voided_label",
+    remediationNotes: nullableExternalRef(input.notes),
+    providerShipmentId: Number(shipmentRef),
+    providerOrderId: input.shipment.orderId ?? null,
+    providerOrderKey: input.shipment.orderKey ?? null,
+    providerTrackingNumber: input.shipment.trackingNumber ?? null,
+    providerVoidDate: voidDate.toISOString(),
+    fulfillmentMutationBlocked: true,
+    inventoryMutationBlocked: true,
+    channelWritebackBlocked: true,
+  });
+  const result: any = await db.execute(sql`
+    UPDATE wms.reconciliation_exceptions
+    SET classification = 'provider_voided_label',
+        status = 'resolved',
+        severity = 'info',
+        details = details || ${details}::jsonb,
+        resolved_at = NOW(),
+        resolved_by = ${resolvedBy},
+        resolution = ${resolution},
+        updated_at = NOW()
+    WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+      AND idempotency_key = ${buildShipStationUnmappedPhysicalIdempotencyKey(input.shipment)}
+      AND status IN ('open', 'acknowledged')
+    RETURNING id
+  `);
+  return Array.isArray(result?.rows) && result.rows.length > 0;
 }

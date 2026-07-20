@@ -783,6 +783,7 @@ async function loadRecommendationReviewQueueData() {
 
   return {
     configuredLookback,
+    evaluatedCount: rawRows.length,
     settings,
     recommendationResult,
     queue: buildRecommendationReviewQueue(recommendationResult, settings),
@@ -1117,7 +1118,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       if (!purchasing?.snapshotPurchaseRecommendations) {
         return res.status(503).json({ error: "Purchasing recommendation service is unavailable" });
       }
-      const { configuredLookback, settings, recommendationResult } = await loadRecommendationReviewQueueData();
+      const { configuredLookback, evaluatedCount, settings, recommendationResult } = await loadRecommendationReviewQueueData();
       const userId = (req as any).user?.id ?? req.session?.user?.id ?? null;
       const asOf = new Date();
       const result = await purchasing.snapshotPurchaseRecommendations(buildPurchaseRecommendationRunInput({
@@ -1126,6 +1127,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         lookbackDays: configuredLookback,
         asOf,
         source: "manual",
+        evaluatedCount,
       }), userId);
       res.status(201).json({ run: result.run, lineCount: result.lines.length });
     } catch (error) {

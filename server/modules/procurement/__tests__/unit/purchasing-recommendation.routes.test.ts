@@ -596,6 +596,7 @@ describe("purchasing recommendation routes", () => {
     });
     expect(input.lines[0].recommendedPieces).toBeGreaterThan(0);
     expect(input.lines[0]).not.toHaveProperty("estimatedCostMills");
+    expect(input.inputSummary).toMatchObject({ candidateCount: 1, evaluatedCount: 1 });
   });
 
   it("returns the latest durable recommendation run with allocated and remaining quantities", async () => {

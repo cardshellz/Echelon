@@ -346,6 +346,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     });
 
     const mock = makeDb([
+      // Resolve any prior unmapped-package exception for the voided label.
+      { rows: [] },
       // shipstation_order_id lookup
       {
         rows: [
@@ -1239,6 +1241,8 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
 
     // Reuse the void-path execute queue from the existing void test.
     const mock = makeDb([
+      // Resolve any prior unmapped-package exception for the voided label.
+      { rows: [] },
       { rows: [{ id: 501, order_id: 42, status: "shipped" }] },
       {
         rows: [
@@ -1892,10 +1896,12 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     const orderIdLookupPos = fnBlock.indexOf(
       "WHERE shipstation_order_id = ${ssOrderId}",
     );
-    const resolverPos = fnBlock.indexOf(
-      "resolveShipmentByOrderKey(\n          Number(existing.id),",
-      orderIdLookupPos,
+    const resolverMatch = /resolveShipmentByOrderKey\(\s*Number\(existing\.id\),/.exec(
+      fnBlock.slice(orderIdLookupPos),
     );
+    const resolverPos = resolverMatch
+      ? orderIdLookupPos + (resolverMatch.index ?? 0)
+      : -1;
 
     expect(orderIdLookupPos).toBeGreaterThan(-1);
     expect(resolverPos).toBeGreaterThan(orderIdLookupPos);

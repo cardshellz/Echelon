@@ -5,6 +5,7 @@ import {
   buildShipStationUnmappedPhysicalIdempotencyKey,
   buildShipStationUnmappedPhysicalSummary,
   recordShipStationUnmappedPhysicalException,
+  resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "../../shipstation-unmapped-physical";
 
@@ -71,5 +72,55 @@ describe("ShipStation unmapped physical shipment evidence", () => {
     expect(statement).toContain("ON CONFLICT (idempotency_key)");
     expect(statement).toContain("occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1");
     expect(statement).toContain("summary = EXCLUDED.summary");
+  });
+
+  it("closes the exact exception when a later provider event proves the label was voided", async () => {
+    const execute = vi.fn(async () => ({ rows: [{ id: 62 }] }));
+
+    const changed = await resolveShipStationUnmappedPhysicalExceptionForVoidedLabel(
+      { execute },
+      {
+        shipment: {
+          shipmentId: 446343015,
+          orderId: 763878471,
+          orderKey: "echelon-wms-shp-4209",
+          orderNumber: "#59384",
+          trackingNumber: "9434650106151107463789",
+          voidDate: "2026-07-17T08:51:25.473Z",
+        },
+        resolvedBy: "system:shipstation_webhook",
+      },
+    );
+
+    expect(changed).toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+    const statement = sqlText(execute.mock.calls[0][0]);
+    expect(statement).toContain("UPDATE wms.reconciliation_exceptions");
+    expect(statement).toContain("classification = 'provider_voided_label'");
+    expect(statement).toContain("status = 'resolved'");
+    expect(statement).toContain("status IN ('open', 'acknowledged')");
+    expect(statement).not.toContain("wms.outbound_shipments");
+    expect(statement).not.toContain("inventory.inventory_transactions");
+  });
+
+  it("does nothing when the provider evidence does not contain a valid void timestamp", async () => {
+    const execute = vi.fn();
+
+    const changed = await resolveShipStationUnmappedPhysicalExceptionForVoidedLabel(
+      { execute },
+      {
+        shipment: {
+          shipmentId: 446343015,
+          orderId: 763878471,
+          orderKey: "echelon-wms-shp-4209",
+          trackingNumber: "9434650106151107463789",
+          voidDate: "not-a-date",
+        },
+        resolvedBy: "system:shipstation_webhook",
+      },
+    );
+
+    expect(changed).toBe(false);
+    expect(execute).not.toHaveBeenCalled();
   });
 });

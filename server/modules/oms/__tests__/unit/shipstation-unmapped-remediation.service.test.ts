@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
+  resolveShipStationUnmappedPhysicalAsVoidedLabel,
 } from "../../shipstation-unmapped-remediation.service";
 
 function queryText(query: any): string {
@@ -1235,5 +1236,357 @@ describe("ShipStation unmapped physical remediation", () => {
       },
     )).rejects.toThrow("voided ShipStation shipment cannot be adopted");
     expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves a provider-voided label without creating shipment or inventory authority", async () => {
+    const calls: string[] = [];
+    const voidedProviderShipment = {
+      ...providerShipment,
+      shipmentId: 446343015,
+      orderId: 763878471,
+      orderKey: "echelon-wms-shp-4209",
+      orderNumber: "#59384",
+      trackingNumber: "9434650106151107463789",
+      shipDate: "2026-07-17T00:00:00Z",
+      voidDate: "2026-07-17T08:51:25.473Z",
+      shipmentItems: [],
+    };
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (
+          text.includes("details->>'remediationAction' AS remediation_action")
+          && text.includes("LIMIT 1")
+          && !text.includes("FOR UPDATE")
+        ) {
+          return { rows: [] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [{
+            ...contextRow,
+            wms_order_id: 204468,
+            order_number: "#59384",
+            authority_shipment_id: 4209,
+            candidate_shipment_id: null,
+            external_shipment_ref: "446343015",
+            tracking_number: "9434650106151107463789",
+            authority_external_fulfillment_id: "shipstation_shipment:441686703",
+            authority_tracking_number: "9434650106151096136985",
+          }] };
+        }
+        if (text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: 77,
+            status: "open",
+            classification: "manual_review",
+            remediation_action: null,
+          }] };
+        }
+        if (text.includes("UPDATE wms.reconciliation_exceptions")) {
+          return { rows: [{ id: 77 }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const service = shipStation({
+      getShipmentById: vi.fn(async () => voidedProviderShipment),
+    });
+
+    const result = await resolveShipStationUnmappedPhysicalAsVoidedLabel(
+      db,
+      service,
+      { exceptionId: 77, operator: "ops:test", notes: "Unused label." },
+    );
+
+    expect(result).toMatchObject({
+      changed: true,
+      exceptionId: 77,
+      candidateShipmentId: null,
+      providerShipmentId: 446343015,
+      providerVoidDate: "2026-07-17T08:51:25.473Z",
+    });
+    expect(service.getShipmentById).toHaveBeenCalledWith(446343015);
+    expect(service.getShipments).not.toHaveBeenCalled();
+    const allSql = calls.join("\n");
+    expect(allSql).toContain("classification = 'provider_voided_label'");
+    expect(allSql).not.toContain("UPDATE wms.outbound_shipments");
+    expect(allSql).not.toContain("inventory.inventory_transactions");
+  });
+
+  it("retires an exact empty candidate row while leaving fulfillment and inventory untouched", async () => {
+    const calls: string[] = [];
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (
+          text.includes("details->>'remediationAction' AS remediation_action")
+          && !text.includes("FOR UPDATE")
+        ) return { rows: [] };
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [contextRow] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions") && text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: 77,
+            status: "open",
+            classification: "manual_review",
+            remediation_action: null,
+          }] };
+        }
+        if (text.includes("FROM wms.outbound_shipments") && text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: 20,
+            order_id: 42,
+            status: "queued",
+            external_fulfillment_id: "shipstation_shipment:900",
+          }] };
+        }
+        if (text.includes("inventory_ship_count")) {
+          return { rows: [{ count: 0, inventory_ship_count: 0 }] };
+        }
+        if (text.includes("UPDATE wms.outbound_shipments")) return { rows: [] };
+        if (text.includes("UPDATE wms.reconciliation_exceptions")) {
+          return { rows: [{ id: 77 }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const service = shipStation({
+      getShipmentById: vi.fn(async () => ({
+        ...providerShipment,
+        voidDate: "2026-07-14T10:00:00Z",
+      })),
+    });
+
+    const result = await resolveShipStationUnmappedPhysicalAsVoidedLabel(
+      db,
+      service,
+      { exceptionId: 77, operator: "ops:test" },
+    );
+
+    expect(result).toMatchObject({
+      changed: true,
+      exceptionId: 77,
+      candidateShipmentId: 20,
+      providerShipmentId: 900,
+    });
+    const allSql = calls.join("\n");
+    expect(allSql).toContain("SET status = 'voided'");
+    expect(allSql).toContain("requires_review = false");
+    expect(allSql).toContain("review_reason = NULL");
+    expect(allSql).not.toContain("INSERT INTO wms.outbound_shipment_items");
+    expect(allSql).not.toMatch(/(?:INSERT INTO|UPDATE) inventory\./);
+  });
+
+  it("returns the existing voided-label resolution on an idempotent retry", async () => {
+    const db = {
+      execute: vi.fn(async () => ({
+        rows: [{
+          id: 77,
+          status: "resolved",
+          classification: "provider_voided_label",
+          remediation_action: "resolve_voided_label",
+          candidate_shipment_id: null,
+          provider_shipment_id: "446343015",
+          provider_void_date: "2026-07-17T08:51:25.473Z",
+          resolved_by: "ops:first",
+        }],
+      })),
+    };
+    const service = shipStation();
+
+    const result = await resolveShipStationUnmappedPhysicalAsVoidedLabel(
+      db,
+      service,
+      { exceptionId: 77, operator: "ops:retry" },
+    );
+
+    expect(result).toEqual({
+      changed: false,
+      exceptionId: 77,
+      candidateShipmentId: null,
+      operator: "ops:first",
+      providerShipmentId: 446343015,
+      providerVoidDate: "2026-07-17T08:51:25.473Z",
+    });
+    expect(db.execute).toHaveBeenCalledOnce();
+    expect(service.getShipmentById).not.toHaveBeenCalled();
+  });
+
+  it("returns the winning resolution when a concurrent request closes the exception first", async () => {
+    const calls: string[] = [];
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (
+          text.includes("details->>'remediationAction' AS remediation_action")
+          && !text.includes("FOR UPDATE")
+        ) return { rows: [] };
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [{ ...contextRow, candidate_shipment_id: null }] };
+        }
+        if (text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: 77,
+            status: "resolved",
+            classification: "provider_voided_label",
+            remediation_action: "resolve_voided_label",
+            candidate_shipment_id: null,
+            provider_shipment_id: "900",
+            provider_void_date: "2026-07-14T10:00:00.000Z",
+            resolved_by: "ops:winner",
+          }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const service = shipStation({
+      getShipmentById: vi.fn(async () => ({
+        ...providerShipment,
+        voidDate: "2026-07-14T10:00:00Z",
+      })),
+    });
+
+    const result = await resolveShipStationUnmappedPhysicalAsVoidedLabel(
+      db,
+      service,
+      { exceptionId: 77, operator: "ops:loser" },
+    );
+
+    expect(result).toEqual({
+      changed: false,
+      exceptionId: 77,
+      candidateShipmentId: null,
+      operator: "ops:winner",
+      providerShipmentId: 900,
+      providerVoidDate: "2026-07-14T10:00:00.000Z",
+    });
+    expect(calls.join("\n")).not.toContain("UPDATE wms.reconciliation_exceptions");
+    expect(calls.join("\n")).not.toContain("UPDATE wms.outbound_shipments");
+  });
+
+  it("rechecks idempotency when the exception resolves between the initial read and context load", async () => {
+    let priorReadCount = 0;
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("details->>'remediationAction' AS remediation_action")) {
+          priorReadCount += 1;
+          return priorReadCount === 1
+            ? { rows: [] }
+            : { rows: [{
+                id: 77,
+                status: "resolved",
+                classification: "provider_voided_label",
+                remediation_action: "resolve_voided_label",
+                candidate_shipment_id: null,
+                provider_shipment_id: "900",
+                provider_void_date: "2026-07-14T10:00:00.000Z",
+                resolved_by: "ops:winner",
+              }] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const service = shipStation();
+
+    const result = await resolveShipStationUnmappedPhysicalAsVoidedLabel(
+      db,
+      service,
+      { exceptionId: 77, operator: "ops:loser" },
+    );
+
+    expect(result).toMatchObject({
+      changed: false,
+      exceptionId: 77,
+      operator: "ops:winner",
+      providerShipmentId: 900,
+    });
+    expect(db.execute).toHaveBeenCalledTimes(3);
+    expect(service.getShipmentById).not.toHaveBeenCalled();
+  });
+
+  it("refuses the close-only disposition when ShipStation does not report a void", async () => {
+    const db = {
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        if (text.includes("details->>'remediationAction' AS remediation_action")) {
+          return { rows: [] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [{ ...contextRow, candidate_shipment_id: null }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const service = shipStation();
+
+    await expect(resolveShipStationUnmappedPhysicalAsVoidedLabel(
+      db,
+      service,
+      { exceptionId: 77, operator: "ops:test" },
+    )).rejects.toThrow("does not report this provider label as voided");
+    expect(db.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses to retire a voided candidate that already owns package or inventory authority", async () => {
+    const calls: string[] = [];
+    const db: any = {
+      transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
+      execute: vi.fn(async (query: any) => {
+        const text = queryText(query);
+        calls.push(text);
+        if (
+          text.includes("details->>'remediationAction' AS remediation_action")
+          && !text.includes("FOR UPDATE")
+        ) return { rows: [] };
+        if (text.includes("FROM wms.reconciliation_exceptions exception")) {
+          return { rows: [contextRow] };
+        }
+        if (text.includes("FROM wms.reconciliation_exceptions") && text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: 77,
+            status: "open",
+            classification: "manual_review",
+            remediation_action: null,
+          }] };
+        }
+        if (text.includes("FROM wms.outbound_shipments") && text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: 20,
+            order_id: 42,
+            status: "queued",
+            external_fulfillment_id: "shipstation_shipment:900",
+          }] };
+        }
+        if (text.includes("inventory_ship_count")) {
+          return { rows: [{ count: 1, inventory_ship_count: 0 }] };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      }),
+    };
+    const service = shipStation({
+      getShipmentById: vi.fn(async () => ({
+        ...providerShipment,
+        voidDate: "2026-07-14T10:00:00Z",
+      })),
+    });
+
+    await expect(resolveShipStationUnmappedPhysicalAsVoidedLabel(
+      db,
+      service,
+      { exceptionId: 77, operator: "ops:test" },
+    )).rejects.toThrow("already owns WMS or inventory authority");
+    expect(calls.join("\n")).not.toContain("UPDATE wms.outbound_shipments");
+    expect(calls.join("\n")).not.toContain("UPDATE wms.reconciliation_exceptions");
   });
 });

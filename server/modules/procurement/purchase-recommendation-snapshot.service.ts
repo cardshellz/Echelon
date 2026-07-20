@@ -81,6 +81,25 @@ function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
   return { source, sourceRunKey };
 }
 
+function resolveEvaluatedCount(input: {
+  recommendationResult: { items: PurchasingRecommendationItem[]; skippedItems: PurchasingRecommendationItem[] };
+  evaluatedCount?: number;
+}): number {
+  if (input.evaluatedCount !== undefined) {
+    if (!Number.isSafeInteger(input.evaluatedCount) || input.evaluatedCount < 0) {
+      throw new RangeError("evaluatedCount must be a non-negative integer");
+    }
+    return input.evaluatedCount;
+  }
+
+  const recommendationIds = new Set<string>();
+  for (const item of [...input.recommendationResult.items, ...input.recommendationResult.skippedItems]) {
+    const recommendationId = item.recommendationId?.trim();
+    if (recommendationId) recommendationIds.add(recommendationId);
+  }
+  return recommendationIds.size;
+}
+
 export function buildPurchaseRecommendationRunInput(input: {
   recommendationResult: { items: PurchasingRecommendationItem[]; skippedItems: PurchasingRecommendationItem[]; summary: unknown };
   settings: AutoDraftRecommendationSettings;
@@ -91,6 +110,7 @@ export function buildPurchaseRecommendationRunInput(input: {
   evaluatedCount?: number;
 }): CreatePurchaseRecommendationRunInput {
   const candidates = buildPurchasingRfqQueue(input.recommendationResult);
+  const evaluatedCount = resolveEvaluatedCount(input);
   return {
     calculationVersion: "purchasing-recommendation-v2",
     source: input.source ?? "manual",
@@ -100,7 +120,7 @@ export function buildPurchaseRecommendationRunInput(input: {
     policySnapshot: { ...input.settings },
     inputSummary: {
       candidateCount: candidates.length,
-      evaluatedCount: input.evaluatedCount ?? input.recommendationResult.items.length + input.recommendationResult.skippedItems.length,
+      evaluatedCount,
       summary: input.recommendationResult.summary,
     },
     lines: candidates.map((item) => ({
