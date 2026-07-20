@@ -78,20 +78,20 @@ export interface IProcurementStorage {
   updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor | null>;
   deleteVendor(id: number): Promise<boolean>;
   getAllReceivingOrders(): Promise<ReceivingOrder[]>;
-  getReceivingOrderById(id: number): Promise<ReceivingOrder | undefined>;
+  getReceivingOrderById(id: number, executor?: any): Promise<ReceivingOrder | undefined>;
   getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined>;
   getReceivingOrdersForPurchaseOrder(purchaseOrderId: number): Promise<ReceivingOrder[]>;
   getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]>;
-  createReceivingOrder(data: InsertReceivingOrder): Promise<ReceivingOrder>;
-  updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>): Promise<ReceivingOrder | null>;
-  deleteReceivingOrder(id: number): Promise<boolean>;
+  createReceivingOrder(data: InsertReceivingOrder, executor?: any): Promise<ReceivingOrder>;
+  updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor?: any): Promise<ReceivingOrder | null>;
+  deleteReceivingOrder(id: number, executor?: any): Promise<boolean>;
   generateReceiptNumber(): Promise<string>;
-  getReceivingLines(receivingOrderId: number): Promise<ReceivingLine[]>;
-  getReceivingLineById(id: number): Promise<ReceivingLine | undefined>;
-  createReceivingLine(data: InsertReceivingLine): Promise<ReceivingLine>;
-  updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>): Promise<ReceivingLine | null>;
-  deleteReceivingLine(id: number): Promise<boolean>;
-  bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]>;
+  getReceivingLines(receivingOrderId: number, executor?: any): Promise<ReceivingLine[]>;
+  getReceivingLineById(id: number, executor?: any): Promise<ReceivingLine | undefined>;
+  createReceivingLine(data: InsertReceivingLine, executor?: any): Promise<ReceivingLine>;
+  updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>, executor?: any): Promise<ReceivingLine | null>;
+  deleteReceivingLine(id: number, executor?: any): Promise<boolean>;
+  bulkCreateReceivingLines(lines: InsertReceivingLine[], executor?: any): Promise<ReceivingLine[]>;
   getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]>;
   getVendorProductsByProductIds(productIds: number[]): Promise<VendorProduct[]>;
   getVendorProductById(id: number): Promise<VendorProduct | undefined>;
@@ -157,7 +157,7 @@ export interface IProcurementStorage {
   deletePurchaseOrder(id: number): Promise<boolean>;
   generatePoNumber(): Promise<string>;
   getPurchaseOrderLines(purchaseOrderId: number): Promise<PurchaseOrderLine[]>;
-  getPurchaseOrderLineById(id: number): Promise<PurchaseOrderLine | undefined>;
+  getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
   createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
   bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]>;
   updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>): Promise<PurchaseOrderLine | null>;
@@ -294,8 +294,8 @@ export const procurementMethods: IProcurementStorage = {
     return await db.select().from(receivingOrders).orderBy(desc(receivingOrders.createdAt));
   },
 
-  async getReceivingOrderById(id: number): Promise<ReceivingOrder | undefined> {
-    const result = await db.select().from(receivingOrders).where(eq(receivingOrders.id, id)).limit(1);
+  async getReceivingOrderById(id: number, executor: any = db): Promise<ReceivingOrder | undefined> {
+    const result = await executor.select().from(receivingOrders).where(eq(receivingOrders.id, id)).limit(1);
     return result[0];
   },
 
@@ -316,21 +316,21 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(desc(receivingOrders.createdAt));
   },
 
-  async createReceivingOrder(data: InsertReceivingOrder): Promise<ReceivingOrder> {
-    const result = await db.insert(receivingOrders).values(data).returning();
+  async createReceivingOrder(data: InsertReceivingOrder, executor: any = db): Promise<ReceivingOrder> {
+    const result = await executor.insert(receivingOrders).values(data).returning();
     return result[0];
   },
 
-  async updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>): Promise<ReceivingOrder | null> {
-    const result = await db.update(receivingOrders)
+  async updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor: any = db): Promise<ReceivingOrder | null> {
+    const result = await executor.update(receivingOrders)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(receivingOrders.id, id))
       .returning();
     return result[0] || null;
   },
 
-  async deleteReceivingOrder(id: number): Promise<boolean> {
-    const result = await db.delete(receivingOrders).where(eq(receivingOrders.id, id));
+  async deleteReceivingOrder(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(receivingOrders).where(eq(receivingOrders.id, id));
     return (result.rowCount ?? 0) > 0;
   },
 
@@ -354,38 +354,38 @@ export const procurementMethods: IProcurementStorage = {
     return `${prefix}${String(nextNum).padStart(3, '0')}`;
   },
 
-  async getReceivingLines(receivingOrderId: number): Promise<ReceivingLine[]> {
-    return await db.select().from(receivingLines)
+  async getReceivingLines(receivingOrderId: number, executor: any = db): Promise<ReceivingLine[]> {
+    return await executor.select().from(receivingLines)
       .where(eq(receivingLines.receivingOrderId, receivingOrderId))
       .orderBy(asc(receivingLines.id));
   },
 
-  async getReceivingLineById(id: number): Promise<ReceivingLine | undefined> {
-    const result = await db.select().from(receivingLines).where(eq(receivingLines.id, id)).limit(1);
+  async getReceivingLineById(id: number, executor: any = db): Promise<ReceivingLine | undefined> {
+    const result = await executor.select().from(receivingLines).where(eq(receivingLines.id, id)).limit(1);
     return result[0];
   },
 
-  async createReceivingLine(data: InsertReceivingLine): Promise<ReceivingLine> {
-    const result = await db.insert(receivingLines).values(data).returning();
+  async createReceivingLine(data: InsertReceivingLine, executor: any = db): Promise<ReceivingLine> {
+    const result = await executor.insert(receivingLines).values(data).returning();
     return result[0];
   },
 
-  async updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>): Promise<ReceivingLine | null> {
-    const result = await db.update(receivingLines)
+  async updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>, executor: any = db): Promise<ReceivingLine | null> {
+    const result = await executor.update(receivingLines)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(receivingLines.id, id))
       .returning();
     return result[0] || null;
   },
 
-  async deleteReceivingLine(id: number): Promise<boolean> {
-    const result = await db.delete(receivingLines).where(eq(receivingLines.id, id));
+  async deleteReceivingLine(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(receivingLines).where(eq(receivingLines.id, id));
     return (result.rowCount ?? 0) > 0;
   },
 
-  async bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]> {
+  async bulkCreateReceivingLines(lines: InsertReceivingLine[], executor: any = db): Promise<ReceivingLine[]> {
     if (lines.length === 0) return [];
-    return await db.insert(receivingLines).values(lines).returning();
+    return await executor.insert(receivingLines).values(lines).returning();
   },
 
   async getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]> {
@@ -886,8 +886,8 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(asc(purchaseOrderLines.lineNumber));
   },
 
-  async getPurchaseOrderLineById(id: number): Promise<PurchaseOrderLine | undefined> {
-    const result = await db.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.id, id)).limit(1);
+  async getPurchaseOrderLineById(id: number, executor: any = db): Promise<PurchaseOrderLine | undefined> {
+    const result = await executor.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.id, id)).limit(1);
     return result[0];
   },
 

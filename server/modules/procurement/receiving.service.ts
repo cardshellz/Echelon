@@ -44,6 +44,7 @@ interface InventoryCore {
     packagingCostMills?: number;
     landedCostMills?: number;
     receivingOrderId?: number;
+    receivingLineId?: number;
     purchaseOrderId?: number;
     purchaseOrderLineId?: number;
     inboundShipmentId?: number;
@@ -100,16 +101,19 @@ interface ShipmentTracking {
 
 interface Storage {
   // Receiving orders
-  getReceivingOrderById(id: number): Promise<any>;
-  getReceivingLines(orderId: number): Promise<any[]>;
-  getReceivingLineById(lineId: number): Promise<any>;
+  getReceivingOrderById(id: number, tx?: any): Promise<any>;
+  getReceivingLines(orderId: number, tx?: any): Promise<any[]>;
+  getReceivingLineById(lineId: number, tx?: any): Promise<any>;
+  createReceivingLine(data: any, tx?: any): Promise<any>;
+  deleteReceivingLine(lineId: number, tx?: any): Promise<boolean>;
+  deleteReceivingOrder(orderId: number, tx?: any): Promise<boolean>;
   updateReceivingOrder(id: number, updates: any, tx?: any): Promise<any>;
   updateReceivingLine(lineId: number, updates: any, tx?: any): Promise<any>;
   bulkCreateReceivingLines(lines: any[], tx?: any): Promise<any[]>;
   // PO line lookup — used to pull the 4-decimal unit_cost_mills when
   // stamping per-unit cost on lots/receipts, so receive-time precision
   // matches the PO line (spec 2026-04-22).
-  getPurchaseOrderLineById?(id: number): Promise<any>;
+  getPurchaseOrderLineById?(id: number, tx?: any): Promise<any>;
   getVendorById(id: number): Promise<any>;
   // Inventory lookups
   getProductVariantBySku(sku: string): Promise<any>;
@@ -146,6 +150,68 @@ export class ReceivingReconciliationError extends ReceivingError {
     super(message, 409, details);
     this.name = "ReceivingReconciliationError";
   }
+}
+
+const RECEIVING_ORDER_EDITABLE_FIELDS = new Set([
+  "warehouseId",
+  "receivingLocationId",
+  "expectedDate",
+  "notes",
+]);
+
+const RECEIVING_LINE_EDITABLE_FIELDS = new Set([
+  "sku",
+  "productName",
+  "expectedQty",
+  "receivedQty",
+  "damagedQty",
+  "productVariantId",
+  "productId",
+  "barcode",
+  "unitCost",
+  "unitCostMills",
+  "putawayLocationId",
+  "notes",
+]);
+
+function assertOnlyAllowedFields(
+  input: Record<string, unknown>,
+  allowed: Set<string>,
+  subject: string,
+): void {
+  const rejected = Object.keys(input).filter((key) => !allowed.has(key));
+  if (rejected.length > 0) {
+    throw new ReceivingError(
+      `${subject} contains fields that cannot be changed: ${rejected.join(", ")}`,
+      400,
+      { code: "INVALID_RECEIVING_MUTATION_FIELDS", rejectedFields: rejected },
+    );
+  }
+}
+
+function requireNonNegativeInteger(value: unknown, field: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new ReceivingError(`${field} must be a non-negative integer`, 400, {
+      code: "INVALID_RECEIVING_QUANTITY",
+      field,
+      value,
+    });
+  }
+  return parsed;
+}
+
+function normalizeOptionalPositiveId(value: unknown, field: string): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new ReceivingError(`${field} must be a positive integer or null`, 400, {
+      code: "INVALID_RECEIVING_REFERENCE",
+      field,
+      value,
+    });
+  }
+  return parsed;
 }
 
 // ── Helper: resolve receiving-line unit cost (mills authoritative) ──
@@ -302,6 +368,81 @@ export class ReceivingService {
     private reconciliationFailureReporter: ReceivingReconciliationFailureReporter | null = null,
   ) {}
 
+  private async lockReceivingOrder(tx: any, orderId: number): Promise<any> {
+    const lockResult = await tx.execute(sql`
+      SELECT id
+      FROM procurement.receiving_orders
+      WHERE id = ${orderId}
+      FOR UPDATE
+    `);
+    if (!lockResult.rows?.[0]) {
+      throw new ReceivingError("Receiving order not found", 404);
+    }
+
+    const order = await this.storage.getReceivingOrderById(orderId, tx);
+    if (!order) {
+      throw new ReceivingError("Receiving order not found", 404);
+    }
+    return order;
+  }
+
+  private assertReceivingOrderMutable(order: any): void {
+    if (order.status === "closed" || order.status === "cancelled") {
+      throw new ReceivingError(
+        `Receiving order in '${order.status}' status is immutable`,
+        409,
+        { code: "RECEIVING_ORDER_IMMUTABLE", receivingOrderId: order.id, status: order.status },
+      );
+    }
+  }
+
+  private async lockReceivingLineAndOrder(tx: any, lineId: number): Promise<{ line: any; order: any }> {
+    const identityResult = await tx.execute(sql`
+      SELECT receiving_order_id
+      FROM procurement.receiving_lines
+      WHERE id = ${lineId}
+    `);
+    const receivingOrderId = Number(identityResult.rows?.[0]?.receiving_order_id);
+    if (!Number.isInteger(receivingOrderId) || receivingOrderId <= 0) {
+      throw new ReceivingError("Receiving line not found", 404);
+    }
+
+    const order = await this.lockReceivingOrder(tx, receivingOrderId);
+    this.assertReceivingOrderMutable(order);
+    const lineLockResult = await tx.execute(sql`
+      SELECT id
+      FROM procurement.receiving_lines
+      WHERE id = ${lineId}
+        AND receiving_order_id = ${receivingOrderId}
+      FOR UPDATE
+    `);
+    if (!lineLockResult.rows?.[0]) {
+      throw new ReceivingError("Receiving line not found", 404);
+    }
+    const line = await this.storage.getReceivingLineById(lineId, tx);
+    if (!line) {
+      throw new ReceivingError("Receiving line not found", 404);
+    }
+    return { line, order };
+  }
+
+  private async updateReceivingOrderTotals(orderId: number, tx: any): Promise<any[]> {
+    const lines = await this.storage.getReceivingLines(orderId, tx);
+    await this.storage.updateReceivingOrder(orderId, {
+      expectedLineCount: lines.length,
+      receivedLineCount: lines.filter((line: any) => (Number(line.receivedQty) || 0) > 0).length,
+      expectedTotalUnits: lines.reduce(
+        (sum: number, line: any) => sum + (Number(line.expectedQty) || 0),
+        0,
+      ),
+      receivedTotalUnits: lines.reduce(
+        (sum: number, line: any) => sum + (Number(line.receivedQty) || 0),
+        0,
+      ),
+    }, tx);
+    return lines;
+  }
+
   private async reconcileLinkedPurchaseOrder(orderId: number, order: any, lines: any[], userId?: string | null) {
     return await reconcileLinkedPurchaseOrder({
       receivingOrderId: orderId,
@@ -392,24 +533,22 @@ export class ReceivingService {
     receivingOrderId: number,
     userId?: string,
   ): Promise<void> {
-    // 1. Verify order exists and is still a draft
-    const order = await this.storage.getReceivingOrderById(receivingOrderId);
-    if (!order) throw new ReceivingError("Receiving order not found", 404);
-    if (order.status !== "draft") {
-      throw new ReceivingError("Cannot discard a started receipt", 409);
-    }
-
-    // 2. Verify no lines carry actual received quantity
-    const lines = await this.storage.getReceivingLines(receivingOrderId);
-    if (lines.some((l: any) => (l.receivedQty ?? 0) > 0)) {
-      throw new ReceivingError(
-        "Receipt has received quantities; cannot discard",
-        409,
-      );
-    }
-
-    // 3 + 4. Atomic: delete lines, delete order, write audit row
+    // Lock, validate, delete, and audit as one transaction so a concurrent
+    // open or line receipt cannot pass the checks and then be deleted.
     await this.db.transaction(async (tx) => {
+      const order = await this.lockReceivingOrder(tx, receivingOrderId);
+      if (order.status !== "draft") {
+        throw new ReceivingError("Cannot discard a started receipt", 409);
+      }
+
+      const lines = await this.storage.getReceivingLines(receivingOrderId, tx);
+      if (lines.some((line: any) => (Number(line.receivedQty) || 0) > 0)) {
+        throw new ReceivingError(
+          "Receipt has received quantities; cannot discard",
+          409,
+        );
+      }
+
       // Explicit line deletion before order (defense-in-depth; the DB
       // schema also has ON DELETE CASCADE but we make the intent clear).
       await tx.execute(sql`
@@ -567,15 +706,151 @@ export class ReceivingService {
 
   // ─── Open ─────────────────────────────────────────────────────
 
-  async open(orderId: number, userId: string | null) {
-    const order = await this.storage.getReceivingOrderById(orderId);
-    if (!order) throw new ReceivingError("Receiving order not found", 404);
-    if (order.status !== "draft") throw new ReceivingError("Can only open orders in draft status");
+  async updateOrderDetails(orderId: number, input: Record<string, unknown>) {
+    assertOnlyAllowedFields(input, RECEIVING_ORDER_EDITABLE_FIELDS, "Receiving order update");
+    if (Object.keys(input).length === 0) {
+      throw new ReceivingError("Receiving order update requires at least one field", 400);
+    }
 
-    const updated = await this.storage.updateReceivingOrder(orderId, {
-      status: "open",
-      receivedBy: userId,
-      receivedDate: new Date(),
+    const updates: Record<string, unknown> = { ...input };
+    if ("warehouseId" in updates) {
+      updates.warehouseId = normalizeOptionalPositiveId(updates.warehouseId, "warehouseId");
+    }
+    if ("receivingLocationId" in updates) {
+      updates.receivingLocationId = normalizeOptionalPositiveId(
+        updates.receivingLocationId,
+        "receivingLocationId",
+      );
+    }
+    if (typeof updates.expectedDate === "string") {
+      const expectedDate = new Date(updates.expectedDate);
+      if (Number.isNaN(expectedDate.getTime())) {
+        throw new ReceivingError("expectedDate must be a valid date", 400);
+      }
+      updates.expectedDate = expectedDate;
+    }
+
+    return await this.db.transaction(async (tx) => {
+      const order = await this.lockReceivingOrder(tx, orderId);
+      this.assertReceivingOrderMutable(order);
+      return await this.storage.updateReceivingOrder(orderId, updates, tx);
+    });
+  }
+
+  async addLine(orderId: number, input: Record<string, unknown>) {
+    assertOnlyAllowedFields(input, RECEIVING_LINE_EDITABLE_FIELDS, "Receiving line create");
+    const lineData = this.normalizeLineMutation(input, null);
+
+    const result = await this.db.transaction(async (tx) => {
+      const order = await this.lockReceivingOrder(tx, orderId);
+      this.assertReceivingOrderMutable(order);
+      const line = await this.storage.createReceivingLine({
+        ...lineData,
+        receivingOrderId: orderId,
+        status: this.receivingLineStatus(
+          Number(lineData.receivedQty) || 0,
+          Number(lineData.expectedQty) || 0,
+        ),
+      }, tx);
+      const lines = await this.updateReceivingOrderTotals(orderId, tx);
+      const updatedOrder = await this.storage.getReceivingOrderById(orderId, tx);
+      return { order: updatedOrder, lines, line };
+    });
+
+    const vendor = result.order?.vendorId
+      ? await this.storage.getVendorById(result.order.vendorId)
+      : null;
+    return { ...result.order, lines: result.lines, vendor };
+  }
+
+  async updateLine(lineId: number, input: Record<string, unknown>) {
+    assertOnlyAllowedFields(input, RECEIVING_LINE_EDITABLE_FIELDS, "Receiving line update");
+    if (Object.keys(input).length === 0) {
+      throw new ReceivingError("Receiving line update requires at least one field", 400);
+    }
+
+    return await this.db.transaction(async (tx) => {
+      const { line } = await this.lockReceivingLineAndOrder(tx, lineId);
+      const updates = this.normalizeLineMutation(input, line);
+      if ("receivedQty" in updates || "expectedQty" in updates) {
+        updates.status = this.receivingLineStatus(
+          Number(updates.receivedQty ?? line.receivedQty) || 0,
+          Number(updates.expectedQty ?? line.expectedQty) || 0,
+        );
+      }
+      const updated = await this.storage.updateReceivingLine(lineId, updates, tx);
+      await this.updateReceivingOrderTotals(line.receivingOrderId, tx);
+      return updated;
+    });
+  }
+
+  async deleteLine(lineId: number): Promise<boolean> {
+    return await this.db.transaction(async (tx) => {
+      const { line } = await this.lockReceivingLineAndOrder(tx, lineId);
+      const deleted = await this.storage.deleteReceivingLine(lineId, tx);
+      if (deleted) {
+        await this.updateReceivingOrderTotals(line.receivingOrderId, tx);
+      }
+      return deleted;
+    });
+  }
+
+  async deleteOrder(orderId: number): Promise<boolean> {
+    return await this.db.transaction(async (tx) => {
+      const order = await this.lockReceivingOrder(tx, orderId);
+      this.assertReceivingOrderMutable(order);
+      return await this.storage.deleteReceivingOrder(orderId, tx);
+    });
+  }
+
+  private normalizeLineMutation(
+    input: Record<string, unknown>,
+    existing: Record<string, unknown> | null,
+  ): Record<string, unknown> {
+    const normalized: Record<string, unknown> = { ...input };
+    for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) {
+      if (field in normalized) {
+        normalized[field] = requireNonNegativeInteger(normalized[field], field);
+      }
+    }
+    for (const field of ["productVariantId", "productId", "putawayLocationId"] as const) {
+      if (field in normalized) {
+        normalized[field] = normalizeOptionalPositiveId(normalized[field], field);
+      }
+    }
+    for (const field of ["unitCost", "unitCostMills"] as const) {
+      if (field in normalized && normalized[field] !== null) {
+        normalized[field] = requireNonNegativeInteger(normalized[field], field);
+      }
+    }
+    if (existing && "productVariantId" in normalized && existing.putawayComplete === 1) {
+      throw new ReceivingError("A put-away receiving line cannot change its product variant", 409, {
+        code: "PUTAWAY_RECEIVING_LINE_IMMUTABLE",
+        receivingLineId: existing.id,
+      });
+    }
+    return normalized;
+  }
+
+  private receivingLineStatus(receivedQty: number, expectedQty: number): string {
+    if (receivedQty === 0) return "pending";
+    if (receivedQty < expectedQty) return "partial";
+    if (receivedQty === expectedQty) return "complete";
+    return "overage";
+  }
+
+  async open(orderId: number, userId: string | null) {
+    const { order, updated } = await this.db.transaction(async (tx) => {
+      const lockedOrder = await this.lockReceivingOrder(tx, orderId);
+      if (lockedOrder.status !== "draft") {
+        throw new ReceivingError("Can only open orders in draft status");
+      }
+      const opened = await this.storage.updateReceivingOrder(orderId, {
+        status: "open",
+        receivedBy: userId,
+        receivedDate: new Date(),
+      }, tx);
+      return { order: lockedOrder, updated: opened };
     });
 
     const lines = await this.storage.getReceivingLines(orderId);
@@ -586,7 +861,7 @@ export class ReceivingService {
   // ─── Close ────────────────────────────────────────────────────
 
   async close(orderId: number, userId: string | null, options: { allowOverReceipt?: boolean } = {}) {
-    const order = await this.storage.getReceivingOrderById(orderId);
+    let order = await this.storage.getReceivingOrderById(orderId);
     if (!order) throw new ReceivingError("Receiving order not found", 404);
     if (order.status === "cancelled") {
       throw new ReceivingError("Order already cancelled");
@@ -598,7 +873,7 @@ export class ReceivingService {
       return this.buildCloseResult(order, closedLines, undefined, poReconciliation);
     }
 
-    const lines = await this.storage.getReceivingLines(orderId);
+    let lines = await this.storage.getReceivingLines(orderId);
     if (
       order.sourceType === "shipment" &&
       lines.length > 0 &&
@@ -649,11 +924,17 @@ export class ReceivingService {
       if (line.receivedQty > 0 && !line.productVariantId && line.sku) {
         const variant = await this.storage.getProductVariantBySku(line.sku);
         if (variant) {
-          await this.storage.updateReceivingLine(line.id, { productVariantId: variant.id });
+          await this.updateLine(line.id, { productVariantId: variant.id });
           (line as any).productVariantId = variant.id;
         }
       }
     }
+
+    // Auto-resolution above may have changed line identity. Refresh the close
+    // snapshot before entering the transaction so the locked comparison below
+    // can detect only genuinely concurrent edits.
+    order = await this.storage.getReceivingOrderById(orderId);
+    lines = await this.storage.getReceivingLines(orderId);
 
     // Block close if any received lines are still missing required data
     const unresolvable = lines.filter((l: any) => l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId));
@@ -678,7 +959,35 @@ export class ReceivingService {
     const receivedVariantIds = new Set<number>();
     const putawayLocationIds = new Set<number>();
 
-    const updated = await this.db.transaction(async (tx) => {
+    const closeResult = await this.db.transaction(async (tx) => {
+      const lockedOrder = await this.lockReceivingOrder(tx, orderId);
+      if (lockedOrder.status === "cancelled") {
+        throw new ReceivingError("Order already cancelled");
+      }
+      if (lockedOrder.status === "closed") {
+        return { updated: lockedOrder, replayed: true };
+      }
+      if (new Date(order.updatedAt).getTime() !== new Date(lockedOrder.updatedAt).getTime()) {
+        throw new ReceivingError(
+          "Receiving order changed while close was starting. Review the current receipt and retry.",
+          409,
+          { code: "RECEIVING_CLOSE_SNAPSHOT_CHANGED", receivingOrderId: orderId },
+        );
+      }
+      order = lockedOrder;
+
+      const lockedLines = await this.storage.getReceivingLines(orderId, tx);
+      const snapshotVersion = lines.map((line: any) => `${line.id}:${new Date(line.updatedAt).getTime()}`).join("|");
+      const lockedVersion = lockedLines.map((line: any) => `${line.id}:${new Date(line.updatedAt).getTime()}`).join("|");
+      if (snapshotVersion !== lockedVersion) {
+        throw new ReceivingError(
+          "Receiving lines changed while close was starting. Review the current receipt and retry.",
+          409,
+          { code: "RECEIVING_CLOSE_SNAPSHOT_CHANGED", receivingOrderId: orderId },
+        );
+      }
+      lines = lockedLines;
+
       for (const line of lines) {
       if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
         const qtyToAdd = line.receivedQty;
@@ -850,6 +1159,7 @@ export class ReceivingService {
           unitCostMills: lotUnitCostMills,
           packagingCostMills: lotPackagingCostMills,
           receivingOrderId: orderId,
+          receivingLineId: line.id,
           purchaseOrderId: order.purchaseOrderId || undefined,
           purchaseOrderLineId: line.purchaseOrderLineId || undefined,
           inboundShipmentId,
@@ -901,22 +1211,27 @@ export class ReceivingService {
     // physical events driven through break-assembly.use-cases.ts, not a side
     // effect of receiving.
 
-    // Fire channel sync for all received variants (fire-and-forget)
-    for (const variantId of Array.from(receivedVariantIds)) {
-      this.channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-        console.warn(`[ChannelSync] Post-receive sync failed for variant ${variantId}:`, err),
-      );
-    }
-
       // Update order totals and close
-      return await this.storage.updateReceivingOrder(orderId, {
+      const updated = await this.storage.updateReceivingOrder(orderId, {
         status: "closed",
         closedDate: new Date(),
         closedBy: userId,
         receivedLineCount: linesReceived,
         receivedTotalUnits: totalReceived,
       }, tx);
+      return { updated, replayed: false };
     });
+
+    const updated = closeResult.updated;
+
+    // Queue channel publication only after the inventory/receiving transaction
+    // commits. The durable inventory ledger remains authoritative if a channel
+    // enqueue fails and the operator-visible sync monitor can retry it.
+    for (const variantId of Array.from(receivedVariantIds)) {
+      this.channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
+        console.warn(`[ChannelSync] Post-receive sync failed for variant ${variantId}:`, err),
+      );
+    }
 
     const closedLines = await this.storage.getReceivingLines(orderId);
     const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, updated, closedLines, userId);
@@ -932,36 +1247,34 @@ export class ReceivingService {
   // ─── Complete All Lines ───────────────────────────────────────
 
   async completeAllLines(orderId: number) {
-    const lines = await this.storage.getReceivingLines(orderId);
-    if (!lines || lines.length === 0) {
-      throw new ReceivingError("No lines found for this order", 404);
-    }
-
-    let updated = 0;
-    for (const line of lines) {
-      if (line.status !== "complete") {
-        // For untouched lines (receivedQty is 0 or null), set to expected qty.
-        // For partially entered lines, keep what the user entered.
-        const effectiveQty = (line.receivedQty != null && line.receivedQty > 0)
-          ? line.receivedQty
-          : (line.expectedQty || 0);
-        await this.storage.updateReceivingLine(line.id, {
-          receivedQty: effectiveQty,
-          status: "complete",
-        });
-        updated++;
+    const { updated, updatedLines, order } = await this.db.transaction(async (tx) => {
+      const lockedOrder = await this.lockReceivingOrder(tx, orderId);
+      this.assertReceivingOrderMutable(lockedOrder);
+      const lines = await this.storage.getReceivingLines(orderId, tx);
+      if (!lines || lines.length === 0) {
+        throw new ReceivingError("No lines found for this order", 404);
       }
-    }
 
-    // Update order received totals
-    const updatedLines = await this.storage.getReceivingLines(orderId);
-    await this.storage.updateReceivingOrder(orderId, {
-      receivedLineCount: updatedLines.filter((l: any) => l.status === "complete").length,
-      receivedTotalUnits: updatedLines.reduce((sum: number, l: any) => sum + (l.receivedQty || 0), 0),
+      let updatedCount = 0;
+      for (const line of lines) {
+        if (line.status !== "complete") {
+          const effectiveQty = (line.receivedQty != null && line.receivedQty > 0)
+            ? line.receivedQty
+            : (line.expectedQty || 0);
+          await this.storage.updateReceivingLine(line.id, {
+            receivedQty: effectiveQty,
+            status: "complete",
+          }, tx);
+          updatedCount++;
+        }
+      }
+
+      const currentLines = await this.updateReceivingOrderTotals(orderId, tx);
+      const currentOrder = await this.storage.getReceivingOrderById(orderId, tx);
+      return { updated: updatedCount, updatedLines: currentLines, order: currentOrder };
     });
 
     // Return enriched order
-    const order = await this.storage.getReceivingOrderById(orderId);
     const vendor = order?.vendorId ? await this.storage.getVendorById(order.vendorId) : null;
     return { message: `Completed ${updated} lines`, updated, order: { ...order, lines: updatedLines, vendor } };
   }
@@ -969,7 +1282,10 @@ export class ReceivingService {
   // ─── Create Variant From Line ─────────────────────────────────
 
   async createVariantFromLine(lineId: number) {
-    const line = await this.storage.getReceivingLineById(lineId);
+    const line = await this.db.transaction(async (tx) => {
+      const locked = await this.lockReceivingLineAndOrder(tx, lineId);
+      return locked.line;
+    });
     if (!line) throw new ReceivingError("Receiving line not found", 404);
     if (!line.sku) throw new ReceivingError("Line has no SKU");
     if (line.productVariantId) throw new ReceivingError("Line already has a linked product variant");
@@ -1027,7 +1343,7 @@ export class ReceivingService {
     }
 
     // Link the variant to the receiving line
-    const updatedLine = await this.storage.updateReceivingLine(lineId, {
+    const updatedLine = await this.updateLine(lineId, {
       productVariantId: variant.id,
       productName: `${product.name} — ${variantName}`,
     });
@@ -1086,6 +1402,10 @@ export class ReceivingService {
 
     // Get the receipt's warehouseId to filter locations
     const receipt = await this.storage.getReceivingOrderById(orderId);
+    if (!receipt) {
+      throw new ReceivingError("Receiving order not found", 404);
+    }
+    this.assertReceivingOrderMutable(receipt);
     const receiptWarehouseId = receipt?.warehouseId ?? null;
 
     // Pre-fetch warehouse locations — filter by receipt's warehouse when set
@@ -1296,21 +1616,23 @@ export class ReceivingService {
       }
     }
 
-    // Update existing lines
-    for (const item of linesToUpdate) {
-      await this.storage.updateReceivingLine(item.id, item.updates);
-    }
+    const created = await this.db.transaction(async (tx) => {
+      const lockedOrder = await this.lockReceivingOrder(tx, orderId);
+      this.assertReceivingOrderMutable(lockedOrder);
+      if (new Date(lockedOrder.updatedAt).getTime() !== new Date(receipt.updatedAt).getTime()) {
+        throw new ReceivingError(
+          "Receiving order changed while the import was being prepared. Review the current receipt and retry.",
+          409,
+          { code: "RECEIVING_IMPORT_SNAPSHOT_CHANGED", receivingOrderId: orderId },
+        );
+      }
 
-    // Create new lines
-    const created = await this.storage.bulkCreateReceivingLines(linesToCreate);
-
-    // Update order totals
-    const allLines = await this.storage.getReceivingLines(orderId);
-    await this.storage.updateReceivingOrder(orderId, {
-      expectedLineCount: allLines.length,
-      receivedLineCount: allLines.filter((l: any) => l.receivedQty > 0).length,
-      expectedTotalUnits: allLines.reduce((sum: number, l: any) => sum + (l.expectedQty || 0), 0),
-      receivedTotalUnits: allLines.reduce((sum: number, l: any) => sum + (l.receivedQty || 0), 0),
+      for (const item of linesToUpdate) {
+        await this.storage.updateReceivingLine(item.id, item.updates, tx);
+      }
+      const inserted = await this.storage.bulkCreateReceivingLines(linesToCreate, tx);
+      await this.updateReceivingOrderTotals(orderId, tx);
+      return inserted;
     });
 
     return {

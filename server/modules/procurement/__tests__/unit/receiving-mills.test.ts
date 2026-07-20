@@ -145,6 +145,8 @@ function buildService(
     unitsPerVariant?: number;
   } = {},
 ) {
+  const updatedAt = new Date("2026-07-20T12:00:00.000Z");
+  const versionedLines = lines.map((line) => ({ ...line, updatedAt }));
   const updateReceivingLineCalls: Array<{ id: number; updates: any }> = [];
   const receiveInventoryCalls: Array<any> = [];
 
@@ -157,8 +159,9 @@ function buildService(
         vendorId: null,
         purchaseOrderId: 123,
         inboundShipmentId: opts.inboundShipmentId ?? null,
+        updatedAt,
       }),
-    getReceivingLines: vi.fn().mockResolvedValue(lines),
+    getReceivingLines: vi.fn().mockResolvedValue(versionedLines),
     updateReceivingOrder: vi.fn().mockResolvedValue({}),
     updateReceivingLine: vi.fn((id: number, updates: any) => {
       updateReceivingLineCalls.push({ id, updates });

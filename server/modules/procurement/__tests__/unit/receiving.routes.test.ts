@@ -129,4 +129,45 @@ describe("receiving routes", () => {
     expect(replenishment.checkReplenForLocation).toHaveBeenCalledWith(44);
     expect(replenishment.checkReplenForLocation).toHaveBeenCalledWith(55);
   });
+
+  it("delegates order and line writes to the receiving command service", async () => {
+    const receiving = {
+      updateOrderDetails: vi.fn().mockResolvedValue({ id: 20, notes: "dock 2" }),
+      addLine: vi.fn().mockResolvedValue({ id: 20, lines: [{ id: 7 }] }),
+      updateLine: vi.fn().mockResolvedValue({ id: 7, receivedQty: 3 }),
+      deleteLine: vi.fn().mockResolvedValue(true),
+      deleteOrder: vi.fn().mockResolvedValue(true),
+    };
+    server = await startServer(buildApp({ receiving }));
+
+    const orderPatch = await requestJson(server.url, "PATCH", "/api/receiving/20", {
+      notes: "dock 2",
+    });
+    const lineCreate = await requestJson(server.url, "POST", "/api/receiving/20/lines", {
+      sku: "SKU-1",
+      expectedQty: 5,
+      unit_cost_mills: 125,
+    });
+    const linePatch = await requestJson(server.url, "PATCH", "/api/receiving/lines/7", {
+      receivedQty: 3,
+    });
+    const lineDelete = await requestJson(server.url, "DELETE", "/api/receiving/lines/7");
+    const orderDelete = await requestJson(server.url, "DELETE", "/api/receiving/20");
+
+    expect(orderPatch.status).toBe(200);
+    expect(lineCreate.status).toBe(201);
+    expect(linePatch.status).toBe(200);
+    expect(lineDelete.status).toBe(200);
+    expect(orderDelete.status).toBe(200);
+    expect(receiving.updateOrderDetails).toHaveBeenCalledWith(20, { notes: "dock 2" });
+    expect(receiving.addLine).toHaveBeenCalledWith(20, expect.objectContaining({
+      sku: "SKU-1",
+      expectedQty: 5,
+      unitCost: 1,
+      unitCostMills: 125,
+    }));
+    expect(receiving.updateLine).toHaveBeenCalledWith(7, { receivedQty: 3 });
+    expect(receiving.deleteLine).toHaveBeenCalledWith(7);
+    expect(receiving.deleteOrder).toHaveBeenCalledWith(20);
+  });
 });

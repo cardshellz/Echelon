@@ -31,8 +31,13 @@ function sqlToStr(query: any): string {
 function makeTx(poRows: any[] = []) {
   return {
     execute: vi.fn().mockImplementation(async (query: any) => {
-      // For the SELECT on purchase_orders we return the supplied rows;
-      // all other executes (DELETE + INSERT) return empty.
+      const text = sqlToStr(query);
+      if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
+        return { rows: [{ id: 1 }] };
+      }
+      if (text.includes("from procurement.purchase_orders")) {
+        return { rows: poRows };
+      }
       return { rows: poRows };
     }),
   };
@@ -92,8 +97,7 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
         statusCode: 409,
       });
 
-      // Must not enter the transaction
-      expect(db.transaction).not.toHaveBeenCalled();
+      expect(db.transaction).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -114,7 +118,7 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
         statusCode: 409,
       });
 
-      expect(db.transaction).not.toHaveBeenCalled();
+      expect(db.transaction).toHaveBeenCalledTimes(1);
     });
 
     it("allows discard when all lines have receivedQty = 0 or null", async () => {
@@ -146,7 +150,11 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
       const executeCalls: string[] = [];
       const tx = {
         execute: vi.fn().mockImplementation(async (q: any) => {
-          executeCalls.push(sqlToStr(q));
+          const text = sqlToStr(q);
+          executeCalls.push(text);
+          if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
+            return { rows: [{ id: order.id }] };
+          }
           return { rows: [] };
         }),
       };
@@ -163,8 +171,12 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
       expect(db.transaction).toHaveBeenCalledTimes(1);
 
       // Lines deleted first, then order
-      const lineDeleteIdx = executeCalls.findIndex((s) => s.includes("receiving_lines"));
-      const orderDeleteIdx = executeCalls.findIndex((s) => s.includes("receiving_orders"));
+      const lineDeleteIdx = executeCalls.findIndex((s) =>
+        s.includes("delete from procurement.receiving_lines"),
+      );
+      const orderDeleteIdx = executeCalls.findIndex((s) =>
+        s.includes("delete from procurement.receiving_orders"),
+      );
       expect(lineDeleteIdx).toBeGreaterThanOrEqual(0);
       expect(orderDeleteIdx).toBeGreaterThan(lineDeleteIdx);
     });
@@ -187,6 +199,9 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
       const tx = {
         execute: vi.fn().mockImplementation(async (q: any) => {
           const queryStr = sqlToStr(q);
+          if (queryStr.includes("from procurement.receiving_orders") && queryStr.includes("for update")) {
+            return { rows: [{ id: order.id }] };
+          }
           if (queryStr.includes("select")) {
             selectCallCount++;
             return { rows: selectRows };
@@ -227,6 +242,9 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
       const tx = {
         execute: vi.fn().mockImplementation(async (q: any) => {
           const queryStr = sqlToStr(q);
+          if (queryStr.includes("from procurement.receiving_orders") && queryStr.includes("for update")) {
+            return { rows: [{ id: order.id }] };
+          }
           if (queryStr.includes("insert")) {
             insertCalls.push(queryStr);
           }

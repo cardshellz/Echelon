@@ -82,6 +82,7 @@ export class InventoryUseCases {
     packagingCostMills?: number;
     landedCostMills?: number;
     receivingOrderId?: number;
+    receivingLineId?: number;
     purchaseOrderId?: number;
     purchaseOrderLineId?: number;
     inboundShipmentId?: number;
@@ -92,9 +93,28 @@ export class InventoryUseCases {
     const doWork = async (tx: any) => {
       await this.assertNotFrozen(params.warehouseLocationId, tx);
 
-      // Receipt idempotency: if this receiving order already has a receipt
-      // row for this variant+location, skip (prevents double-receive on replay).
-      if (params.receivingOrderId) {
+      // Serialize and replay-check the exact receiving line before any balance
+      // or lot mutation. Legacy callers without a line identity retain the
+      // order+variant+location replay key.
+      if (params.receivingLineId) {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            hashtext('inventory.receive_inventory.receiving_line'),
+            ${params.receivingLineId}
+          )
+        `);
+        const existing = await tx.execute(sql`
+          SELECT id
+          FROM inventory.inventory_transactions
+          WHERE transaction_type = 'receipt'
+            AND receiving_line_id = ${params.receivingLineId}
+            AND voided_at IS NULL
+          LIMIT 1
+        `);
+        if (existing.rows.length > 0) {
+          return;
+        }
+      } else if (params.receivingOrderId) {
         const existing = await tx.execute(sql`
           SELECT id
           FROM inventory.inventory_transactions
@@ -166,15 +186,15 @@ export class InventoryUseCases {
           referenceType: "receiving",
           referenceId: params.referenceId,
           receivingOrderId: params.receivingOrderId ?? null,
+          receivingLineId: params.receivingLineId ?? null,
           notes: params.notes ?? null,
           userId: params.userId ?? null,
           unitCostCents: params.unitCostCents ?? null,
           inventoryLotId: lotId ?? null,
         }, tx);
       } catch (err: any) {
-        if (err?.code === "23505" && String(err?.constraint ?? "").includes("receipt_dedup")) {
-          return;
-        }
+        // Inventory balance and lot writes already occurred in this transaction.
+        // Never convert a ledger uniqueness failure into a successful receive.
         throw err;
       }
     };

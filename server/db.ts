@@ -484,9 +484,17 @@ export async function runStartupMigrations(): Promise<void> {
     }
     // Phase 4: receipt dedup — one receipt ledger row per (receiving_order, variant, location)
     await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_receipt_dedup
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_receipt_line_dedup
+        ON inventory.inventory_transactions (receiving_line_id)
+        WHERE transaction_type = 'receipt'
+          AND receiving_line_id IS NOT NULL
+          AND voided_at IS NULL
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_receipt_legacy_dedup
         ON inventory.inventory_transactions (receiving_order_id, product_variant_id, to_location_id)
         WHERE transaction_type = 'receipt'
+          AND receiving_line_id IS NULL
           AND receiving_order_id IS NOT NULL
           AND product_variant_id IS NOT NULL
           AND to_location_id IS NOT NULL

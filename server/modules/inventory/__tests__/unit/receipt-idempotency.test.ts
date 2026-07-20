@@ -56,6 +56,7 @@ describe("Receipt idempotency (H4)", () => {
       qty: 10,
       referenceId: "RCV-1-batch",
       receivingOrderId: 100,
+      receivingLineId: 1001,
     });
 
     expect(mockStorage.adjustInventoryLevel).toHaveBeenCalledWith(
@@ -64,6 +65,10 @@ describe("Receipt idempotency (H4)", () => {
       expect.anything(),
     );
     expect(mockStorage.createInventoryTransaction).toHaveBeenCalledTimes(1);
+    expect(mockStorage.createInventoryTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ receivingOrderId: 100, receivingLineId: 1001 }),
+      expect.anything(),
+    );
   });
 
   it("skips mutation when receipt already exists (idempotent replay)", async () => {
@@ -76,6 +81,7 @@ describe("Receipt idempotency (H4)", () => {
       qty: 10,
       referenceId: "RCV-1-batch",
       receivingOrderId: 100,
+      receivingLineId: 1001,
     });
 
     expect(mockStorage.adjustInventoryLevel).not.toHaveBeenCalled();
@@ -95,13 +101,13 @@ describe("Receipt idempotency (H4)", () => {
     expect(mockStorage.adjustInventoryLevel).toHaveBeenCalled();
   });
 
-  it("catches 23505 receipt_dedup constraint as belt-and-suspenders", async () => {
+  it("rethrows a ledger uniqueness failure so prior mutations roll back", async () => {
     const { uc, mockStorage, setExistingRows } = makeHarness();
     setExistingRows([]);
 
     const dupError: any = new Error("duplicate key");
     dupError.code = "23505";
-    dupError.constraint = "uq_inventory_transactions_receipt_dedup";
+    dupError.constraint = "uq_inventory_transactions_receipt_line_dedup";
     mockStorage.createInventoryTransaction.mockRejectedValueOnce(dupError);
 
     await expect(
@@ -111,7 +117,24 @@ describe("Receipt idempotency (H4)", () => {
         qty: 10,
         referenceId: "RCV-1-batch",
         receivingOrderId: 100,
+        receivingLineId: 1001,
       }),
-    ).resolves.toBeUndefined();
+    ).rejects.toMatchObject({ code: "23505" });
+  });
+
+  it("retains legacy replay protection when receivingLineId is absent", async () => {
+    const { uc, mockStorage, setExistingRows } = makeHarness();
+    setExistingRows([{ id: 999 }]);
+
+    await uc.receiveInventory({
+      productVariantId: 1,
+      warehouseLocationId: 5,
+      qty: 10,
+      referenceId: "legacy-receive",
+      receivingOrderId: 100,
+    });
+
+    expect(mockStorage.adjustInventoryLevel).not.toHaveBeenCalled();
+    expect(mockStorage.createInventoryTransaction).not.toHaveBeenCalled();
   });
 });
