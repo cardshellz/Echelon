@@ -72,7 +72,7 @@ interface Purchasing {
     damagedQty?: number;
     unitCost?: number;
     unitCostMills?: number;
-  }>): Promise<ReceiptReconciliationResult | void>;
+  }>, userId?: string | null): Promise<ReceiptReconciliationResult | void>;
   // Typed-lines allocator (Option C, 2026-04-28). Returns per-product-line
   // landed unit cost after spreading non-product line totals
   // (discount / fee / tax / rebate / adjustment) across the product lines.

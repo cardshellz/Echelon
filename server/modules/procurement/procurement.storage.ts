@@ -80,12 +80,12 @@ export interface IProcurementStorage {
   getAllReceivingOrders(): Promise<ReceivingOrder[]>;
   getReceivingOrderById(id: number, executor?: any): Promise<ReceivingOrder | undefined>;
   getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined>;
-  getReceivingOrdersForPurchaseOrder(purchaseOrderId: number): Promise<ReceivingOrder[]>;
+  getReceivingOrdersForPurchaseOrder(purchaseOrderId: number, executor?: any): Promise<ReceivingOrder[]>;
   getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]>;
   createReceivingOrder(data: InsertReceivingOrder, executor?: any): Promise<ReceivingOrder>;
   updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor?: any): Promise<ReceivingOrder | null>;
   deleteReceivingOrder(id: number, executor?: any): Promise<boolean>;
-  generateReceiptNumber(): Promise<string>;
+  generateReceiptNumber(executor?: any): Promise<string>;
   getReceivingLines(receivingOrderId: number, executor?: any): Promise<ReceivingLine[]>;
   getReceivingLineById(id: number, executor?: any): Promise<ReceivingLine | undefined>;
   createReceivingLine(data: InsertReceivingLine, executor?: any): Promise<ReceivingLine>;
@@ -149,18 +149,18 @@ export interface IProcurementStorage {
   deletePoApprovalTier(id: number): Promise<boolean>;
   getPurchaseOrders(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]>;
   getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
-  getPurchaseOrderById(id: number): Promise<PurchaseOrder | undefined>;
+  getPurchaseOrderById(id: number, executor?: any): Promise<PurchaseOrder | undefined>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
   createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder>;
-  updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>): Promise<PurchaseOrder | null>;
-  updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>): Promise<PurchaseOrder | null>;
+  updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor?: any): Promise<PurchaseOrder | null>;
+  updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>, executor?: any): Promise<PurchaseOrder | null>;
   deletePurchaseOrder(id: number): Promise<boolean>;
   generatePoNumber(): Promise<string>;
-  getPurchaseOrderLines(purchaseOrderId: number): Promise<PurchaseOrderLine[]>;
+  getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<PurchaseOrderLine[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
   createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
   bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]>;
-  updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>): Promise<PurchaseOrderLine | null>;
+  updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>, executor?: any): Promise<PurchaseOrderLine | null>;
   deletePurchaseOrderLine(id: number): Promise<boolean>;
   getOpenPoLinesForVariant(productVariantId: number): Promise<PurchaseOrderLine[]>;
   createPoStatusHistory(data: InsertPoStatusHistory): Promise<PoStatusHistory>;
@@ -175,7 +175,7 @@ export interface IProcurementStorage {
     receivingLineId: number;
     lineUpdates: Partial<InsertPurchaseOrderLine>;
     receipt: InsertPoReceipt;
-  }): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
+  }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
   getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]>;
   getInventoryLotById(id: number): Promise<InventoryLot | undefined>;
   createInventoryLot(data: InsertInventoryLot): Promise<InventoryLot>;
@@ -304,8 +304,8 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async getReceivingOrdersForPurchaseOrder(purchaseOrderId: number): Promise<ReceivingOrder[]> {
-    return await db.select().from(receivingOrders)
+  async getReceivingOrdersForPurchaseOrder(purchaseOrderId: number, executor: any = db): Promise<ReceivingOrder[]> {
+    return await executor.select().from(receivingOrders)
       .where(eq(receivingOrders.purchaseOrderId, purchaseOrderId))
       .orderBy(desc(receivingOrders.createdAt));
   },
@@ -334,12 +334,17 @@ export const procurementMethods: IProcurementStorage = {
     return (result.rowCount ?? 0) > 0;
   },
 
-  async generateReceiptNumber(): Promise<string> {
+  async generateReceiptNumber(executor: any = db): Promise<string> {
+    if (executor !== db && typeof executor.execute === "function") {
+      await executor.execute(sql`
+        SELECT pg_advisory_xact_lock(hashtext('procurement.generate_receipt_number'))
+      `);
+    }
     const today = new Date();
     const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
     const prefix = `RCV-${dateStr}-`;
 
-    const existing = await db.select({ receiptNumber: receivingOrders.receiptNumber })
+    const existing = await executor.select({ receiptNumber: receivingOrders.receiptNumber })
       .from(receivingOrders)
       .where(like(receivingOrders.receiptNumber, `${prefix}%`))
       .orderBy(desc(receivingOrders.receiptNumber))
@@ -797,8 +802,8 @@ export const procurementMethods: IProcurementStorage = {
     return Number(result[0]?.count ?? 0);
   },
 
-  async getPurchaseOrderById(id: number): Promise<PurchaseOrder | undefined> {
-    const result = await db.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
+  async getPurchaseOrderById(id: number, executor: any = db): Promise<PurchaseOrder | undefined> {
+    const result = await executor.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
     return result[0];
   },
 
@@ -812,15 +817,20 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>): Promise<PurchaseOrder | null> {
-    const result = await db.update(purchaseOrders)
+  async updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor: any = db): Promise<PurchaseOrder | null> {
+    const result = await executor.update(purchaseOrders)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(purchaseOrders.id, id))
       .returning();
     return result[0] || null;
   },
 
-  async updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>): Promise<PurchaseOrder | null> {
+  async updatePurchaseOrderStatusWithHistory(
+    id: number,
+    updates: Partial<InsertPurchaseOrder>,
+    historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>,
+    executor?: any,
+  ): Promise<PurchaseOrder | null> {
     // Defensive validation: this helper writes to po_status_history, which
     // has to_status NOT NULL. Callers must supply valid historyData with at
     // least `toStatus`. If you just need to update PO fields without a
@@ -838,7 +848,7 @@ export const procurementMethods: IProcurementStorage = {
       );
     }
 
-    return await db.transaction(async (tx) => {
+    const applyUpdate = async (tx: any) => {
       const result = await tx.update(purchaseOrders)
         .set({ ...updates, updatedAt: new Date() })
         .where(eq(purchaseOrders.id, id))
@@ -852,7 +862,9 @@ export const procurementMethods: IProcurementStorage = {
         });
       }
       return updatedPo;
-    });
+    };
+
+    return executor ? await applyUpdate(executor) : await db.transaction(applyUpdate);
   },
 
   async deletePurchaseOrder(id: number): Promise<boolean> {
@@ -880,8 +892,8 @@ export const procurementMethods: IProcurementStorage = {
     return `${prefix}${String(nextNum).padStart(3, '0')}`;
   },
 
-  async getPurchaseOrderLines(purchaseOrderId: number): Promise<PurchaseOrderLine[]> {
-    return await db.select().from(purchaseOrderLines)
+  async getPurchaseOrderLines(purchaseOrderId: number, executor: any = db): Promise<PurchaseOrderLine[]> {
+    return await executor.select().from(purchaseOrderLines)
       .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId))
       .orderBy(asc(purchaseOrderLines.lineNumber));
   },
@@ -901,8 +913,8 @@ export const procurementMethods: IProcurementStorage = {
     return await db.insert(purchaseOrderLines).values(lines).returning();
   },
 
-  async updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>): Promise<PurchaseOrderLine | null> {
-    const result = await db.update(purchaseOrderLines)
+  async updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>, executor: any = db): Promise<PurchaseOrderLine | null> {
+    const result = await executor.update(purchaseOrderLines)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(purchaseOrderLines.id, id))
       .returning();
@@ -978,36 +990,45 @@ export const procurementMethods: IProcurementStorage = {
     receivingLineId: number;
     lineUpdates: Partial<InsertPurchaseOrderLine>;
     receipt: InsertPoReceipt;
-  }): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }> {
+  }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }> {
+    const applyReconciliation = async (tx: any) => {
+      const existingReceipt = await tx.select()
+        .from(poReceipts)
+        .where(and(
+          eq(poReceipts.purchaseOrderLineId, input.purchaseOrderLineId),
+          eq(poReceipts.receivingLineId, input.receivingLineId),
+        ))
+        .limit(1);
+
+      if (existingReceipt[0]) {
+        return { applied: false, receipt: existingReceipt[0] };
+      }
+
+      const updatedLines = await tx.update(purchaseOrderLines)
+        .set({ ...input.lineUpdates, updatedAt: new Date() })
+        .where(eq(purchaseOrderLines.id, input.purchaseOrderLineId))
+        .returning();
+      if (!updatedLines[0]) {
+        return { applied: false };
+      }
+
+      const insertedReceipts = await tx.insert(poReceipts)
+        .values(input.receipt)
+        .returning();
+
+      return {
+        applied: true,
+        purchaseOrderLine: updatedLines[0],
+        receipt: insertedReceipts[0],
+      };
+    };
+
+    if (executor) {
+      return await applyReconciliation(executor);
+    }
+
     try {
-      return await db.transaction(async (tx) => {
-        const existingReceipt = await tx.select()
-          .from(poReceipts)
-          .where(and(
-            eq(poReceipts.purchaseOrderLineId, input.purchaseOrderLineId),
-            eq(poReceipts.receivingLineId, input.receivingLineId),
-          ))
-          .limit(1);
-
-        if (existingReceipt[0]) {
-          return { applied: false, receipt: existingReceipt[0] };
-        }
-
-        const updatedLines = await tx.update(purchaseOrderLines)
-          .set({ ...input.lineUpdates, updatedAt: new Date() })
-          .where(eq(purchaseOrderLines.id, input.purchaseOrderLineId))
-          .returning();
-
-        const insertedReceipts = await tx.insert(poReceipts)
-          .values(input.receipt)
-          .returning();
-
-        return {
-          applied: true,
-          purchaseOrderLine: updatedLines[0] || null,
-          receipt: insertedReceipts[0],
-        };
-      });
+      return await db.transaction(applyReconciliation);
     } catch (error: any) {
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         const existingReceipt = await db.select()

@@ -7,6 +7,7 @@ export type ReceivingOrchestrationPurchasing = {
   onReceivingOrderClosed(
     receivingOrderId: number,
     receivingLines: ReceivingReconciliationLine[],
+    userId?: string | null,
   ): Promise<ReceiptReconciliationResult | void>;
 };
 
@@ -98,6 +99,7 @@ export async function reconcileLinkedPurchaseOrder(params: {
     result = await purchasing.onReceivingOrderClosed(
       receivingOrderId,
       reconciliationLines,
+      userId,
     );
   } catch (error: any) {
     return await failReconciliation({

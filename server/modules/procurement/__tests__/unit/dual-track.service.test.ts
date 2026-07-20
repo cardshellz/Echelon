@@ -352,6 +352,7 @@ describe("createReceiptFromPO — receipt idempotency", () => {
     });
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
     expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
+    expect(storage.getReceivingOrdersForPurchaseOrder).toHaveBeenCalledWith(1, mockDb);
   });
 
   it("serializes receipt creation with a PO-scoped advisory transaction lock", async () => {
@@ -383,10 +384,12 @@ describe("createReceiptFromPO — receipt idempotency", () => {
     const result = await svc.createReceiptFromPO(1, "user-1");
 
     expect(mockDb.transaction).toHaveBeenCalledOnce();
-    expect(mockDb.execute).toHaveBeenCalledOnce();
+    expect(mockDb.execute).toHaveBeenCalledTimes(2);
     expect((mockDb.execute as any).mock.invocationCallOrder[0]).toBeLessThan(
       (storage.createReceivingOrder as any).mock.invocationCallOrder[0],
     );
+    expect(storage.createReceivingOrder).toHaveBeenCalledWith(expect.any(Object), mockDb);
+    expect(storage.bulkCreateReceivingLines).toHaveBeenCalledWith(expect.any(Array), mockDb);
     expect(result).toMatchObject({
       id: 88,
       receiptNumber: "RCV-TEST-001",
@@ -654,23 +657,27 @@ describe("onReceivingOrderClosed — auto-match", () => {
     await svc.onReceivingOrderClosed(99, receivingLines);
 
     expect(storage.reconcilePoReceiptLine).toHaveBeenCalledOnce();
-    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledWith(expect.objectContaining({
-      purchaseOrderLineId: 100,
-      receivingLineId: 201,
-      lineUpdates: expect.objectContaining({
-        receivedQty: 3,
-        status: "partially_received",
-      }),
-      receipt: expect.objectContaining({
-        purchaseOrderId: 1,
+    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledWith(
+      expect.objectContaining({
         purchaseOrderLineId: 100,
-        receivingOrderId: 99,
         receivingLineId: 201,
-        qtyReceived: 3,
-        actualUnitCostCents: 0,
-        varianceCents: -500,
+        lineUpdates: expect.objectContaining({
+          receivedQty: 3,
+          status: "partially_received",
+        }),
+        receipt: expect.objectContaining({
+          purchaseOrderId: 1,
+          purchaseOrderLineId: 100,
+          receivingOrderId: 99,
+          receivingLineId: 201,
+          qtyReceived: 3,
+          actualUnitCostCents: 0,
+          varianceCents: -500,
+        }),
       }),
-    }));
+      expect.any(Object),
+    );
+    expect(receivingLines[0].purchaseOrderLineId).toBeUndefined();
   });
 
   it("keeps PO physical status aligned when a partial receipt reconciles", async () => {
@@ -720,6 +727,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
         fromStatus: "sent",
         toStatus: "partially_received",
       }),
+      expect.any(Object),
     );
     expect(mockDetectQtyVariance).not.toHaveBeenCalled();
   });
@@ -772,6 +780,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
         fromStatus: "sent",
         toStatus: "received",
       }),
+      expect.any(Object),
     );
     expect(mockDetectQtyVariance).toHaveBeenCalledWith(1);
   });
@@ -826,7 +835,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
     });
   });
 
-  it("(9) leaves unlinked when no open PO lines match the product_id", async () => {
+  it("(9) rejects the reconciliation when no open PO line matches the product_id", async () => {
     const unrelatedPoLine = {
       id: 100,
       purchaseOrderId: 1,
@@ -848,12 +857,15 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getReceivingLineById.mockResolvedValue({ id: 201, productId: 42, productVariantId: 5 });
 
     const receivingLines = [{ receivingLineId: 201, receivedQty: 3, purchaseOrderLineId: undefined }];
-    await svc.onReceivingOrderClosed(99, receivingLines);
+    await expect(svc.onReceivingOrderClosed(99, receivingLines)).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({ expectedReceiptLines: 1, reconciledLines: 0 }),
+    });
 
     expect(storage.reconcilePoReceiptLine).not.toHaveBeenCalled();
   });
 
-  it("(10) leaves unlinked when multiple open PO lines match product_id (ambiguous)", async () => {
+  it("(10) rejects the reconciliation when multiple PO lines make the match ambiguous", async () => {
     const productId = 42;
     const line1 = { id: 100, purchaseOrderId: 1, productId, lineType: "product", status: "open", orderQty: 5, receivedQty: 0, cancelledQty: 0, unitCostCents: 500, discountPercent: 0, taxRatePercent: 0, lineTotalCents: 2500 };
     const line2 = { id: 101, purchaseOrderId: 1, productId, lineType: "product", status: "open", orderQty: 5, receivedQty: 0, cancelledQty: 0, unitCostCents: 500, discountPercent: 0, taxRatePercent: 0, lineTotalCents: 2500 };
@@ -864,7 +876,10 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getReceivingLineById.mockResolvedValue({ id: 201, productId, productVariantId: 5 });
 
     const receivingLines = [{ receivingLineId: 201, receivedQty: 3, purchaseOrderLineId: undefined }];
-    await svc.onReceivingOrderClosed(99, receivingLines);
+    await expect(svc.onReceivingOrderClosed(99, receivingLines)).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({ expectedReceiptLines: 1, reconciledLines: 0 }),
+    });
 
     expect(storage.reconcilePoReceiptLine).not.toHaveBeenCalled();
   });

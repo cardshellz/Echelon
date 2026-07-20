@@ -404,15 +404,17 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const result = await service.close(9, "user-1");
 
     expect(inventoryCore.receiveInventory).not.toHaveBeenCalled();
-    expect(purchasing.onReceivingOrderClosed).toHaveBeenCalledWith(9, [
-      {
+    expect(purchasing.onReceivingOrderClosed).toHaveBeenCalledWith(
+      9,
+      [expect.objectContaining({
         receivingLineId: 501,
         purchaseOrderLineId: 100,
         receivedQty: 3,
         damagedQty: 0,
         unitCost: 500,
-      },
-    ]);
+      })],
+      "user-1",
+    );
     expect(result).toMatchObject({
       success: true,
       linesProcessed: 1,

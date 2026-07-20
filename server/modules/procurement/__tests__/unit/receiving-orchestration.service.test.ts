@@ -52,13 +52,15 @@ describe("receiving-orchestration.service", () => {
       purchasing,
     });
 
-    expect(purchasing.onReceivingOrderClosed).toHaveBeenCalledWith(9, [
-      expect.objectContaining({
+    expect(purchasing.onReceivingOrderClosed).toHaveBeenCalledWith(
+      9,
+      [expect.objectContaining({
         receivingLineId: 10,
         purchaseOrderLineId: 20,
         receivedQty: 3,
-      }),
-    ]);
+      })],
+      undefined,
+    );
     expect(result).toMatchObject({
       required: true,
       purchaseOrderId: 1,

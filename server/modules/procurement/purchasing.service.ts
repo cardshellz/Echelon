@@ -142,21 +142,21 @@ interface Storage {
   // Purchase Orders
   getPurchaseOrders(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<any[]>;
   getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
-  getPurchaseOrderById(id: number): Promise<any>;
+  getPurchaseOrderById(id: number, executor?: any): Promise<any>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<any>;
   createPurchaseOrder(data: any, historyData?: any): Promise<any>;
-  updatePurchaseOrder(id: number, updates: any, historyData?: any): Promise<any>;
-  updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData?: any): Promise<any>;
+  updatePurchaseOrder(id: number, updates: any, executor?: any): Promise<any>;
+  updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData: any, executor?: any): Promise<any>;
   deletePurchaseOrder(id: number): Promise<boolean>;
   getRecommendationPoHandoffForPo(purchaseOrderId: number): Promise<any | undefined>;
   generatePoNumber(): Promise<string>;
 
   // PO Lines
-  getPurchaseOrderLines(purchaseOrderId: number): Promise<any[]>;
-  getPurchaseOrderLineById(id: number): Promise<any>;
+  getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<any[]>;
+  getPurchaseOrderLineById(id: number, executor?: any): Promise<any>;
   createPurchaseOrderLine(data: any): Promise<any>;
   bulkCreatePurchaseOrderLines(lines: any[]): Promise<any[]>;
-  updatePurchaseOrderLine(id: number, updates: any): Promise<any>;
+  updatePurchaseOrderLine(id: number, updates: any, executor?: any): Promise<any>;
   deletePurchaseOrderLine(id: number): Promise<boolean>;
   getRecommendationPoHandoffForLine(purchaseOrderLineId: number): Promise<any | undefined>;
   getOpenPoLinesForVariant(productVariantId: number): Promise<any[]>;
@@ -178,7 +178,7 @@ interface Storage {
     receivingLineId: number;
     lineUpdates: Record<string, unknown>;
     receipt: Record<string, unknown>;
-  }): Promise<{ applied: boolean; receipt?: any; purchaseOrderLine?: any }>;
+  }, executor?: any): Promise<{ applied: boolean; receipt?: any; purchaseOrderLine?: any }>;
 
   // Approval Tiers
   getAllPoApprovalTiers(): Promise<any[]>;
@@ -194,19 +194,19 @@ interface Storage {
   getVendorById(id: number): Promise<any>;
 
   // Products
-  getProductVariantById(id: number): Promise<any>;
+  getProductVariantById(id: number, executor?: any): Promise<any>;
   getProductVariantsByProductId?(productId: number): Promise<any[]>;
   getProductById(id: number): Promise<any>;
 
   // Receiving
-  createReceivingOrder(data: any): Promise<any>;
-  getReceivingOrdersForPurchaseOrder?(purchaseOrderId: number): Promise<any[]>;
-  getReceivingLines?(receivingOrderId: number): Promise<any[]>;
-  deleteReceivingOrder?(id: number): Promise<boolean>;
-  generateReceiptNumber(): Promise<string>;
-  bulkCreateReceivingLines(lines: any[]): Promise<any[]>;
-  getReceivingLineById(id: number): Promise<any>;
-  getReceivingOrderById(id: number): Promise<any>;
+  createReceivingOrder(data: any, executor?: any): Promise<any>;
+  getReceivingOrdersForPurchaseOrder?(purchaseOrderId: number, executor?: any): Promise<any[]>;
+  getReceivingLines?(receivingOrderId: number, executor?: any): Promise<any[]>;
+  deleteReceivingOrder?(id: number, executor?: any): Promise<boolean>;
+  generateReceiptNumber(executor?: any): Promise<string>;
+  bulkCreateReceivingLines(lines: any[], executor?: any): Promise<any[]>;
+  getReceivingLineById(id: number, executor?: any): Promise<any>;
+  getReceivingOrderById(id: number, executor?: any): Promise<any>;
 
   // Inbound shipments
   getInboundShipmentById(id: number): Promise<any>;
@@ -799,8 +799,8 @@ export function createPurchasingService(
     return sign === -1 ? -rounded : rounded;
   }
 
-  async function recalculateTotals(purchaseOrderId: number, userId?: string): Promise<any> {
-    const lines = await storage.getPurchaseOrderLines(purchaseOrderId);
+  async function recalculateTotals(purchaseOrderId: number, userId?: string, executor?: any): Promise<any> {
+    const lines = await storage.getPurchaseOrderLines(purchaseOrderId, executor);
     let subtotalCents = BigInt(0);
     let lineCount = 0;
     let receivedLineCount = 0;
@@ -818,11 +818,11 @@ export function createPurchasingService(
           lineTotalCents: costs.lineTotalCents,
           discountCents: costs.discountCents,
           taxCents: costs.taxCents,
-        });
+        }, executor);
       }
     }
 
-    const po = await storage.getPurchaseOrderById(purchaseOrderId);
+    const po = await storage.getPurchaseOrderById(purchaseOrderId, executor);
     const headerDiscount = BigInt(po?.discountCents || 0);
     const headerTax = BigInt(po?.taxCents || 0);
     const headerShipping = BigInt(po?.shippingCostCents || 0);
@@ -839,7 +839,7 @@ export function createPurchasingService(
       lineCount,
       receivedLineCount,
       updatedBy: userId,
-    });
+    }, executor);
   }
 
   type LifecycleExpectation = {
@@ -3133,23 +3133,42 @@ export function createPurchasingService(
   // ── RECEIVING INTEGRATION ───────────────────────────────────────
 
   async function createReceiptFromPO(purchaseOrderId: number, userId?: string) {
-    return await db.transaction(async (tx: any) => {
-      if (typeof tx.execute === "function") {
-        await tx.execute(sql`
-          SELECT pg_advisory_xact_lock(
-            hashtext('procurement.create_receipt_from_po'),
-            ${purchaseOrderId}
-          )
-        `);
+    try {
+      return await db.transaction(async (tx: any) => {
+        if (typeof tx.execute === "function") {
+          await tx.execute(sql`
+            SELECT pg_advisory_xact_lock(
+              hashtext('procurement.create_receipt_from_po'),
+              ${purchaseOrderId}
+            )
+          `);
+          await tx.execute(sql`
+            SELECT id
+            FROM procurement.purchase_orders
+            WHERE id = ${purchaseOrderId}
+            FOR UPDATE
+          `);
+        }
+        return await createReceiptFromPOUnlocked(purchaseOrderId, userId, tx);
+      });
+    } catch (error: any) {
+      if (error?.code === "23505" || error?.cause?.code === "23505") {
+        const conflictReceipt = await getReusableReceiptForPO(purchaseOrderId);
+        if (conflictReceipt) {
+          return { ...conflictReceipt, reusedExisting: true };
+        }
+        throw new PurchasingError("Receipt creation conflicted with another active receipt", 409, {
+          purchaseOrderId,
+        });
       }
-      return await createReceiptFromPOUnlocked(purchaseOrderId, userId);
-    });
+      throw error;
+    }
   }
 
-  async function getReusableReceiptForPO(purchaseOrderId: number) {
+  async function getReusableReceiptForPO(purchaseOrderId: number, executor?: any) {
     const existingReceipts =
       typeof storage.getReceivingOrdersForPurchaseOrder === "function"
-        ? await storage.getReceivingOrdersForPurchaseOrder(purchaseOrderId)
+        ? await storage.getReceivingOrdersForPurchaseOrder(purchaseOrderId, executor)
         : [];
 
     return existingReceipts.find((receipt: any) =>
@@ -3157,8 +3176,8 @@ export function createPurchasingService(
     );
   }
 
-  async function createReceiptFromPOUnlocked(purchaseOrderId: number, userId?: string) {
-    const po = await storage.getPurchaseOrderById(purchaseOrderId);
+  async function createReceiptFromPOUnlocked(purchaseOrderId: number, userId: string | undefined, executor: any) {
+    const po = await storage.getPurchaseOrderById(purchaseOrderId, executor);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
 
     const openStatuses = ["sent", "acknowledged", "partially_received"];
@@ -3166,12 +3185,12 @@ export function createPurchasingService(
       throw new PurchasingError(`Cannot create receipt for PO in '${po.status}' status`, 400);
     }
 
-    const reusableReceipt = await getReusableReceiptForPO(purchaseOrderId);
+    const reusableReceipt = await getReusableReceiptForPO(purchaseOrderId, executor);
     if (reusableReceipt) {
       return { ...reusableReceipt, reusedExisting: true };
     }
 
-    const lines = await storage.getPurchaseOrderLines(purchaseOrderId);
+    const lines = await storage.getPurchaseOrderLines(purchaseOrderId, executor);
     const receivableLines = lines.filter((l: any) =>
       // Only product lines are physically received. Discount/fee/tax/rebate/
       // adjustment lines are accounting-only and never create inventory.
@@ -3186,34 +3205,18 @@ export function createPurchasingService(
     }
 
     // Create receiving order
-    const receiptNumber = await storage.generateReceiptNumber();
-    let receivingOrder;
-    try {
-      receivingOrder = await storage.createReceivingOrder({
-        receiptNumber,
-        poNumber: po.poNumber,
-        purchaseOrderId: po.id,
-        sourceType: "po",
-        vendorId: po.vendorId,
-        warehouseId: po.warehouseId,
-        status: "draft",
-        expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
-        createdBy: userId,
-      });
-    } catch (error: any) {
-      if (error?.code === "23505") {
-        const conflictReceipt = await getReusableReceiptForPO(purchaseOrderId);
-        if (conflictReceipt) {
-          return { ...conflictReceipt, reusedExisting: true };
-        }
-
-        throw new PurchasingError(
-          `Receipt number '${receiptNumber}' already in use by an active record.`,
-          409,
-        );
-      }
-      throw error;
-    }
+    const receiptNumber = await storage.generateReceiptNumber(executor);
+    const receivingOrder = await storage.createReceivingOrder({
+      receiptNumber,
+      poNumber: po.poNumber,
+      purchaseOrderId: po.id,
+      sourceType: "po",
+      vendorId: po.vendorId,
+      warehouseId: po.warehouseId,
+      status: "draft",
+      expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
+      createdBy: userId,
+    }, executor);
 
     // Auto-assign putaway locations from product_locations if available
     let productLocationMap = new Map<number, number>(); // productVariantId → warehouseLocationId
@@ -3246,7 +3249,7 @@ export function createPurchasingService(
       const variantId = poLine.expectedReceiveVariantId ?? poLine.productVariantId ?? null;
       if (variantId && !poUnitsPerVariantById.has(variantId)) {
         try {
-          const variant = await storage.getProductVariantById(variantId);
+          const variant = await storage.getProductVariantById(variantId, executor);
           if (variant) {
             poUnitsPerVariantById.set(variantId, Math.max(1, variant.unitsPerVariant || 1));
           }
@@ -3303,7 +3306,7 @@ export function createPurchasingService(
       };
     });
 
-    await storage.bulkCreateReceivingLines(receivingLineData);
+    await storage.bulkCreateReceivingLines(receivingLineData, executor);
     return receivingOrder;
   }
 
@@ -4283,25 +4286,62 @@ export function createPurchasingService(
       0,
     );
 
-    const receiptNumber = await storage.generateReceiptNumber();
-    let receivingOrder;
     try {
-      receivingOrder = await storage.createReceivingOrder({
-        receiptNumber,
-        poNumber: po.poNumber,
-        purchaseOrderId: po.id,
-        inboundShipmentId,
-        sourceType: "shipment",
-        vendorId: po.vendorId,
-        warehouseId: po.warehouseId,
-        status: "draft",
-        expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
-        expectedLineCount,
-        expectedTotalUnits,
-        createdBy: userId,
+      return await db.transaction(async (tx: any) => {
+        if (typeof tx.execute === "function") {
+          await tx.execute(sql`
+            SELECT pg_advisory_xact_lock(
+              hashtext('procurement.create_receipt_from_shipment'),
+              ${inboundShipmentId}
+            )
+          `);
+        }
+
+        const lockedExistingReceipt = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
+        if (lockedExistingReceipt.kind === "active") {
+          return { ...lockedExistingReceipt.receipt, reusedExisting: true };
+        }
+        if (lockedExistingReceipt.kind === "empty_active") {
+          throw emptyShipmentReceiptError(lockedExistingReceipt.receipt, purchaseOrderId, inboundShipmentId);
+        }
+        if (lockedExistingReceipt.kind === "zero_post_closed") {
+          throw new PurchasingError(
+            "A closed zero-post receipt already exists for this shipment and PO. Void that receipt, then receive the shipment again.",
+            409,
+            {
+              code: "ZERO_POST_SHIPMENT_RECEIPT",
+              receivingOrderId: lockedExistingReceipt.receipt.id,
+              purchaseOrderId,
+              inboundShipmentId,
+            },
+          );
+        }
+
+        const receiptNumber = await storage.generateReceiptNumber(tx);
+        const receivingOrder = await storage.createReceivingOrder({
+          receiptNumber,
+          poNumber: po.poNumber,
+          purchaseOrderId: po.id,
+          inboundShipmentId,
+          sourceType: "shipment",
+          vendorId: po.vendorId,
+          warehouseId: po.warehouseId,
+          status: "draft",
+          expectedDate: po.expectedDeliveryDate || po.confirmedDeliveryDate,
+          expectedLineCount,
+          expectedTotalUnits,
+          createdBy: userId,
+        }, tx);
+
+        const receivingLinesToCreate = receivingLineData.map((line: any) => ({
+          ...line,
+          receivingOrderId: receivingOrder.id,
+        }));
+        await storage.bulkCreateReceivingLines(receivingLinesToCreate as any, tx);
+        return receivingOrder;
       });
     } catch (error: any) {
-      if (error?.code === "23505") {
+      if (error?.code === "23505" || error?.cause?.code === "23505") {
         const conflict = await getReceiptForShipmentPo(purchaseOrderId, inboundShipmentId);
         if (conflict.kind === "active") return { ...conflict.receipt, reusedExisting: true };
         if (conflict.kind === "empty_active") {
@@ -4326,33 +4366,13 @@ export function createPurchasingService(
             { receivingOrderId: conflict.receipt.id, purchaseOrderId, inboundShipmentId },
           );
         }
-        throw new PurchasingError(`Receipt number '${receiptNumber}' already in use by an active record.`, 409);
+        throw new PurchasingError("Shipment receipt creation conflicted with another active receipt", 409, {
+          purchaseOrderId,
+          inboundShipmentId,
+        });
       }
       throw error;
     }
-
-    const receivingLinesToCreate = receivingLineData.map((line: any) => ({
-      ...line,
-      receivingOrderId: receivingOrder.id,
-    }));
-    try {
-      await storage.bulkCreateReceivingLines(receivingLinesToCreate as any);
-    } catch (error) {
-      if (typeof storage.deleteReceivingOrder === "function") {
-        try {
-          await storage.deleteReceivingOrder(receivingOrder.id);
-        } catch (cleanupError) {
-          console.error("[Purchasing] Failed to clean up shipment receipt header after line creation failed:", {
-            receivingOrderId: receivingOrder.id,
-            inboundShipmentId,
-            purchaseOrderId,
-            cleanupError,
-          });
-        }
-      }
-      throw error;
-    }
-    return receivingOrder;
   }
 
   /**
@@ -4377,12 +4397,65 @@ export function createPurchasingService(
   async function onReceivingOrderClosed(
     receivingOrderId: number,
     receivingLines: ReceivingReconciliationLine[],
+    userId?: string | null,
   ) {
-    const result = await reconcilePurchaseOrderReceipt({
-      storage,
-      receivingOrderId,
-      receivingLines,
-      recalculateTotals,
+    const result = await db.transaction(async (tx: any) => {
+      const receivingOrder = await storage.getReceivingOrderById(receivingOrderId, tx);
+      let purchaseOrderId = parsePositiveInteger(receivingOrder?.purchaseOrderId);
+      if (!purchaseOrderId) {
+        const linkedLineId = receivingLines
+          .map((line) => parsePositiveInteger(line.purchaseOrderLineId))
+          .find((lineId): lineId is number => lineId !== null);
+        if (linkedLineId) {
+          const linkedPoLine = await storage.getPurchaseOrderLineById(linkedLineId, tx);
+          purchaseOrderId = parsePositiveInteger(linkedPoLine?.purchaseOrderId);
+        }
+      }
+      if (purchaseOrderId && typeof tx.execute === "function") {
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            hashtext('procurement.reconcile_po_receipt'),
+            ${purchaseOrderId}
+          )
+        `);
+        await tx.execute(sql`
+          SELECT id
+          FROM procurement.purchase_orders
+          WHERE id = ${purchaseOrderId}
+          FOR UPDATE
+        `);
+      }
+
+      const reconciliation = await reconcilePurchaseOrderReceipt({
+        storage,
+        receivingOrderId,
+        receivingLines,
+        recalculateTotals: async (poId, executor) => {
+          await recalculateTotals(poId, userId ?? undefined, executor);
+        },
+        executor: tx,
+        changedBy: userId ?? undefined,
+      });
+
+      const expectedReceiptLines = receivingLines.filter(
+        (line) => (Number(line.receivedQty) || 0) > 0 || (Number(line.damagedQty) || 0) > 0,
+      ).length;
+      const reconciledLines = reconciliation.appliedLines + reconciliation.existingReceiptLines;
+      if (
+        reconciliation.skippedLines > 0 ||
+        reconciliation.issues.length > 0 ||
+        reconciledLines < expectedReceiptLines
+      ) {
+        throw new PurchasingError("PO receipt reconciliation is incomplete", 409, {
+          receivingOrderId,
+          purchaseOrderId: reconciliation.purchaseOrderId,
+          expectedReceiptLines,
+          reconciledLines,
+          reconciliation,
+        });
+      }
+
+      return reconciliation;
     });
 
     if (result.purchaseOrderId && result.poStatusUpdate?.legacyStatus === "received") {

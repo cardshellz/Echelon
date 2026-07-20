@@ -10,19 +10,19 @@ export type ReceivingReconciliationLine = {
 };
 
 export type PoReceiptReconciliationStorage = {
-  getPurchaseOrderById(id: number): Promise<any>;
-  getPurchaseOrderLines(purchaseOrderId: number): Promise<any[]>;
-  getPurchaseOrderLineById(id: number): Promise<any>;
-  getReceivingOrderById(id: number): Promise<any>;
-  getReceivingLineById(id: number): Promise<any>;
-  getProductVariantById(id: number): Promise<any>;
+  getPurchaseOrderById(id: number, executor?: any): Promise<any>;
+  getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<any[]>;
+  getPurchaseOrderLineById(id: number, executor?: any): Promise<any>;
+  getReceivingOrderById(id: number, executor?: any): Promise<any>;
+  getReceivingLineById(id: number, executor?: any): Promise<any>;
+  getProductVariantById(id: number, executor?: any): Promise<any>;
   reconcilePoReceiptLine(input: {
     purchaseOrderLineId: number;
     receivingLineId: number;
     lineUpdates: Record<string, unknown>;
     receipt: Record<string, unknown>;
-  }): Promise<{ applied: boolean; receipt?: any; purchaseOrderLine?: any }>;
-  updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData: any): Promise<any>;
+  }, executor?: any): Promise<{ applied: boolean; receipt?: any; purchaseOrderLine?: any }>;
+  updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData: any, executor?: any): Promise<any>;
 };
 
 export type ReceiptReconciliationIssueReason =
@@ -32,6 +32,7 @@ export type ReceiptReconciliationIssueReason =
   | "unlinked_receiving_line"
   | "invalid_purchase_order_line"
   | "missing_receiving_line"
+  | "invalid_receive_configuration"
   | "receipt_not_applied";
 
 export type ReceiptReconciliationIssue = {
@@ -54,12 +55,23 @@ export type ReceiptReconciliationResult = {
   } | null;
 };
 
+function nonNegativeSafeInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function positiveSafeInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 export async function findOpenPoLineByProduct(
   storage: Pick<PoReceiptReconciliationStorage, "getPurchaseOrderLines">,
   poId: number,
   productId: number,
+  executor?: any,
 ): Promise<any | null> {
-  const lines = await storage.getPurchaseOrderLines(poId);
+  const lines = await storage.getPurchaseOrderLines(poId, executor);
   const candidates = lines.filter((line: any) => {
     if ((line.lineType ?? "product") !== "product") return false;
     if (line.productId !== productId) return false;
@@ -78,11 +90,25 @@ export async function reconcilePurchaseOrderReceipt(params: {
   storage: PoReceiptReconciliationStorage;
   receivingOrderId: number;
   receivingLines: ReceivingReconciliationLine[];
-  recalculateTotals: (purchaseOrderId: number) => Promise<void>;
+  recalculateTotals: (purchaseOrderId: number, executor?: any) => Promise<void>;
+  executor?: any;
+  changedBy?: string;
+  now?: () => Date;
   logger?: Pick<Console, "info" | "warn">;
 }): Promise<ReceiptReconciliationResult> {
-  const { storage, receivingOrderId, receivingLines, recalculateTotals, logger = console } = params;
-  const poId = await resolvePurchaseOrderId(storage, receivingOrderId, receivingLines);
+  const {
+    storage,
+    receivingOrderId,
+    receivingLines,
+    recalculateTotals,
+    executor,
+    changedBy,
+    now = () => new Date(),
+    logger = console,
+  } = params;
+  const resolvedReceivingLines = receivingLines.map((line) => ({ ...line }));
+  const reconciledAt = now();
+  const poId = await resolvePurchaseOrderId(storage, receivingOrderId, resolvedReceivingLines, executor);
 
   if (!poId) {
     return {
@@ -95,13 +121,13 @@ export async function reconcilePurchaseOrderReceipt(params: {
     };
   }
 
-  const po = await storage.getPurchaseOrderById(poId);
+  const po = await storage.getPurchaseOrderById(poId, executor);
   if (!po) {
     return {
       purchaseOrderId: poId,
       appliedLines: 0,
       existingReceiptLines: 0,
-      skippedLines: receivingLines.length,
+      skippedLines: resolvedReceivingLines.length,
       autoMatchedLines: 0,
       issues: [{
         reason: "purchase_order_not_found",
@@ -112,15 +138,15 @@ export async function reconcilePurchaseOrderReceipt(params: {
 
   let autoMatchedLines = 0;
   const issues: ReceiptReconciliationIssue[] = [];
-  for (const receivingLine of receivingLines) {
+  for (const receivingLine of resolvedReceivingLines) {
     if (receivingLine.purchaseOrderLineId) continue;
 
-    const receivingLineRecord = await storage.getReceivingLineById(receivingLine.receivingLineId);
+    const receivingLineRecord = await storage.getReceivingLineById(receivingLine.receivingLineId, executor);
     if (!receivingLineRecord) continue;
 
     let productId: number | null = receivingLineRecord.productId ?? null;
     if (!productId && receivingLineRecord.productVariantId) {
-      const variant = await storage.getProductVariantById(receivingLineRecord.productVariantId);
+      const variant = await storage.getProductVariantById(receivingLineRecord.productVariantId, executor);
       productId = variant?.productId ?? null;
     }
 
@@ -136,7 +162,7 @@ export async function reconcilePurchaseOrderReceipt(params: {
       continue;
     }
 
-    const matchedLine = await findOpenPoLineByProduct(storage, poId, productId);
+    const matchedLine = await findOpenPoLineByProduct(storage, poId, productId, executor);
     if (matchedLine) {
       receivingLine.purchaseOrderLineId = matchedLine.id;
       autoMatchedLines++;
@@ -160,7 +186,7 @@ export async function reconcilePurchaseOrderReceipt(params: {
   let existingReceiptLines = 0;
   let skippedLines = 0;
 
-  for (const receivingLine of receivingLines) {
+  for (const receivingLine of resolvedReceivingLines) {
     if (!receivingLine.purchaseOrderLineId) {
       skippedLines++;
       issues.push({
@@ -171,7 +197,7 @@ export async function reconcilePurchaseOrderReceipt(params: {
       continue;
     }
 
-    const poLine = await storage.getPurchaseOrderLineById(receivingLine.purchaseOrderLineId);
+    const poLine = await storage.getPurchaseOrderLineById(receivingLine.purchaseOrderLineId, executor);
     if (!poLine || (poLine.lineType ?? "product") !== "product") {
       skippedLines++;
       issues.push({
@@ -183,7 +209,7 @@ export async function reconcilePurchaseOrderReceipt(params: {
       continue;
     }
 
-    const receivingLineRecord = await storage.getReceivingLineById(receivingLine.receivingLineId);
+    const receivingLineRecord = await storage.getReceivingLineById(receivingLine.receivingLineId, executor);
     if (!receivingLineRecord) {
       skippedLines++;
       issues.push({
@@ -195,33 +221,78 @@ export async function reconcilePurchaseOrderReceipt(params: {
       continue;
     }
 
-    const receivedVariant = await storage.getProductVariantById(receivingLineRecord.productVariantId as number);
+    const receivedQty = nonNegativeSafeInteger(receivingLine.receivedQty);
+    const damagedQty = nonNegativeSafeInteger(receivingLine.damagedQty ?? 0);
+    const productVariantId = positiveSafeInteger(receivingLineRecord.productVariantId);
+    const receivedVariant = productVariantId
+      ? await storage.getProductVariantById(productVariantId, executor)
+      : null;
+    const receivedUnitsPerVariant = positiveSafeInteger(receivedVariant?.unitsPerVariant);
+    if (receivedQty === null || damagedQty === null || !productVariantId || !receivedVariant || !receivedUnitsPerVariant) {
+      skippedLines++;
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        purchaseOrderLineId: receivingLine.purchaseOrderLineId,
+        reason: "invalid_receive_configuration",
+        detail: `Receiving line ${receivingLine.receivingLineId} has invalid quantity or receive-variant configuration`,
+      });
+      continue;
+    }
 
-    const receivedUnitsPerVariant = receivedVariant?.unitsPerVariant || 1;
-
-    const baseUnitsReceived = receivingLine.receivedQty * receivedUnitsPerVariant;
-    const damagedBaseUnits = (receivingLine.damagedQty || 0) * receivedUnitsPerVariant;
+    const baseUnitsReceived = receivedQty * receivedUnitsPerVariant;
+    const damagedBaseUnits = damagedQty * receivedUnitsPerVariant;
+    const currentReceivedQty = nonNegativeSafeInteger(poLine.receivedQty ?? 0);
+    const currentDamagedQty = nonNegativeSafeInteger(poLine.damagedQty ?? 0);
+    const orderQty = nonNegativeSafeInteger(poLine.orderQty);
+    const cancelledQty = nonNegativeSafeInteger(poLine.cancelledQty ?? 0);
+    if (
+      !Number.isSafeInteger(baseUnitsReceived) ||
+      !Number.isSafeInteger(damagedBaseUnits) ||
+      currentReceivedQty === null ||
+      currentDamagedQty === null ||
+      orderQty === null ||
+      cancelledQty === null
+    ) {
+      skippedLines++;
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        purchaseOrderLineId: receivingLine.purchaseOrderLineId,
+        reason: "invalid_receive_configuration",
+        detail: `Receiving line ${receivingLine.receivingLineId} exceeds safe quantity limits or references invalid PO quantities`,
+      });
+      continue;
+    }
 
     const poLineUnitsReceived = baseUnitsReceived;
     const poLineDamagedReceived = damagedBaseUnits;
 
-    const newReceivedQty = (poLine.receivedQty || 0) + poLineUnitsReceived;
-    const newDamagedQty = (poLine.damagedQty || 0) + poLineDamagedReceived;
-    const remaining = poLine.orderQty - newReceivedQty - (poLine.cancelledQty || 0);
+    const newReceivedQty = currentReceivedQty + poLineUnitsReceived;
+    const newDamagedQty = currentDamagedQty + poLineDamagedReceived;
+    const remaining = orderQty - newReceivedQty - cancelledQty;
+    if (!Number.isSafeInteger(newReceivedQty) || !Number.isSafeInteger(newDamagedQty) || !Number.isSafeInteger(remaining)) {
+      skippedLines++;
+      issues.push({
+        receivingLineId: receivingLine.receivingLineId,
+        purchaseOrderLineId: receivingLine.purchaseOrderLineId,
+        reason: "invalid_receive_configuration",
+        detail: `Receiving line ${receivingLine.receivingLineId} would overflow PO receipt quantities`,
+      });
+      continue;
+    }
 
     const lineUpdates: Record<string, unknown> = {
       receivedQty: newReceivedQty,
       damagedQty: newDamagedQty,
-      lastReceivedAt: new Date(),
+      lastReceivedAt: reconciledAt,
     };
 
     if (!poLine.receivedDate) {
-      lineUpdates.receivedDate = new Date();
+      lineUpdates.receivedDate = reconciledAt;
     }
 
     if (remaining <= 0) {
       lineUpdates.status = "received";
-      lineUpdates.fullyReceivedDate = new Date();
+      lineUpdates.fullyReceivedDate = reconciledAt;
     } else if (newReceivedQty > 0) {
       lineUpdates.status = "partially_received";
     }
@@ -243,7 +314,7 @@ export async function reconcilePurchaseOrderReceipt(params: {
         actualUnitCostMills: unitCosts.actualUnitCostMills,
         varianceCents: unitCosts.actualUnitCostCents - unitCosts.poUnitCostCents,
       },
-    });
+    }, executor);
 
     if (result.applied) {
       appliedLines++;
@@ -260,8 +331,15 @@ export async function reconcilePurchaseOrderReceipt(params: {
     }
   }
 
-  await recalculateTotals(poId);
-  const poStatusUpdate = await updatePurchaseOrderReceiptStatus(storage, poId, po);
+  await recalculateTotals(poId, executor);
+  const poStatusUpdate = await updatePurchaseOrderReceiptStatus(
+    storage,
+    poId,
+    po,
+    executor,
+    reconciledAt,
+    changedBy,
+  );
 
   return {
     purchaseOrderId: poId,
@@ -312,17 +390,18 @@ async function resolvePurchaseOrderId(
   storage: Pick<PoReceiptReconciliationStorage, "getPurchaseOrderLineById" | "getReceivingOrderById">,
   receivingOrderId: number,
   receivingLines: ReceivingReconciliationLine[],
+  executor?: any,
 ): Promise<number | null> {
   const poLineIds = receivingLines
     .map((line) => line.purchaseOrderLineId)
     .filter(Boolean) as number[];
 
   if (poLineIds.length > 0) {
-    const firstPoLine = await storage.getPurchaseOrderLineById(poLineIds[0]);
+    const firstPoLine = await storage.getPurchaseOrderLineById(poLineIds[0], executor);
     if (firstPoLine) return firstPoLine.purchaseOrderId;
   }
 
-  const receivingOrder = await storage.getReceivingOrderById(receivingOrderId);
+  const receivingOrder = await storage.getReceivingOrderById(receivingOrderId, executor);
   return receivingOrder?.purchaseOrderId ?? null;
 }
 
@@ -330,8 +409,11 @@ async function updatePurchaseOrderReceiptStatus(
   storage: PoReceiptReconciliationStorage,
   poId: number,
   po: any,
+  executor: any,
+  reconciledAt: Date,
+  changedBy?: string,
 ): Promise<ReceiptReconciliationResult["poStatusUpdate"]> {
-  const allLines = await storage.getPurchaseOrderLines(poId);
+  const allLines = await storage.getPurchaseOrderLines(poId, executor);
   const activeLines = allLines.filter(
     (line: any) =>
       line.status !== "cancelled" && ((line.lineType ?? "product") === "product"),
@@ -351,13 +433,13 @@ async function updatePurchaseOrderReceiptStatus(
     await storage.updatePurchaseOrderStatusWithHistory(poId, {
       status: "received",
       physicalStatus: "received",
-      actualDeliveryDate: new Date(),
+      actualDeliveryDate: reconciledAt,
     }, {
       fromStatus: po.status,
       toStatus: "received",
-      changedBy: undefined,
+      changedBy,
       notes: "All lines fully received",
-    });
+    }, executor);
     return { legacyStatus: "received", physicalStatus: "received" };
   }
 
@@ -375,9 +457,9 @@ async function updatePurchaseOrderReceiptStatus(
     }, {
       fromStatus: po.status,
       toStatus: "partially_received",
-      changedBy: undefined,
+      changedBy,
       notes: "Partial receipt",
-    });
+    }, executor);
     return { legacyStatus: "partially_received", physicalStatus: "receiving" };
   }
 
