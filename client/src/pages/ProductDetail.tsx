@@ -55,6 +55,7 @@ import { formatDistanceToNow } from "date-fns";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
+import { formatShopifyMappingRepairError } from "@/lib/shopify-product-mapping";
 import { Link } from "wouter";
 import {
   VendorCatalogQuoteEditor,
@@ -704,6 +705,7 @@ type ShopifyProductMappingStatus =
   | "catalog_only"
   | "channel_only"
   | "consistent"
+  | "incomplete"
   | "mismatch"
   | "conflict";
 
@@ -717,6 +719,9 @@ interface ShopifyProductMappingDto {
   evidenceProductIds: string[];
   recommendedProductId: string | null;
   repairable: boolean;
+  activeVariantCount: number;
+  archivedVariantCount: number;
+  activeVariantIssueIds: number[];
   variants: Array<{
     variantId: number;
     sku: string | null;
@@ -741,6 +746,11 @@ const SHOPIFY_MAPPING_STATUS: Record<ShopifyProductMappingStatus, {
     label: "Consistent",
     className: "bg-green-50 text-green-700 border-green-300",
     detail: "The catalog and channel records point to the same Shopify product.",
+  },
+  incomplete: {
+    label: "Active variants incomplete",
+    className: "bg-amber-50 text-amber-700 border-amber-300",
+    detail: "The parent product agrees, but one or more active variants are missing a complete catalog, feed, or listing identity.",
   },
   mismatch: {
     label: "Mismatch",
@@ -788,7 +798,7 @@ function ShopifyProductMappingPanel({ productId, enabled }: { productId: number;
         body: JSON.stringify({ channelId: data?.channel.id, targetProductId }),
       });
       const body = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(body?.error || "Failed to repair Shopify product mapping");
+      if (!response.ok) throw new Error(formatShopifyMappingRepairError(body));
       return body as { alreadyConsistent: boolean; shippingGroupMetafieldQueued: boolean };
     },
     onSuccess: async (result) => {
@@ -862,21 +872,38 @@ function ShopifyProductMappingPanel({ productId, enabled }: { productId: number;
                 </div>
               )}
 
-              {data.variants.length > 0 && (
+              {data.activeVariantCount > 0 && (
                 <div className="overflow-x-auto border-t pt-4">
+                  {data.archivedVariantCount > 0 && (
+                    <p className="mb-3 text-xs text-muted-foreground">
+                      {data.archivedVariantCount} archived {data.archivedVariantCount === 1 ? "variant is" : "variants are"} excluded from mapping repair and channel sync.
+                    </p>
+                  )}
                   <Table>
                     <TableHeader>
                       <TableRow>
                         <TableHead>SKU</TableHead>
+                        <TableHead>Status</TableHead>
                         <TableHead>Variant ID</TableHead>
                         <TableHead>Feed product</TableHead>
                         <TableHead>Listing product</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.variants.map((variant) => (
+                      {data.variants.filter((variant) => variant.isActive).map((variant) => (
                         <TableRow key={variant.variantId}>
                           <TableCell className="font-mono text-xs">{variant.sku ?? "-"}</TableCell>
+                          <TableCell>
+                            {data.activeVariantIssueIds.includes(variant.variantId) ? (
+                              <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-300">
+                                Needs mapping
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300">
+                                Mapped
+                              </Badge>
+                            )}
+                          </TableCell>
                           <TableCell className="font-mono text-xs">{variant.catalogVariantId ?? "-"}</TableCell>
                           <TableCell className="font-mono text-xs">{variant.feedProductId ?? "-"}</TableCell>
                           <TableCell className="font-mono text-xs">{variant.listingProductId ?? "-"}</TableCell>
@@ -896,8 +923,9 @@ function ShopifyProductMappingPanel({ productId, enabled }: { productId: number;
           <DialogHeader>
             <DialogTitle>Repair Shopify product mapping?</DialogTitle>
             <DialogDescription>
-              Shopify will be checked before any write. If every linked variant belongs to product {confirmTargetId},
-              the catalog, feed, and listing parent IDs will be updated together and the shipping-group metafield will be queued.
+              Shopify will be checked before any write. Active variants will be resolved from a verified existing ID or one exact unique SKU.
+              Archived variants are excluded. The catalog, feed, and listing mappings will be updated together for product {confirmTargetId},
+              then the shipping-group metafield will be queued.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
