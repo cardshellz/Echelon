@@ -35,6 +35,12 @@ export interface ShipStationUnmappedReshipAdoptionInput
   lineMappings: ShipStationUnmappedLineMapping[];
 }
 
+export interface ShipStationUnmappedVoidedLabelResolutionInput
+  extends ShipStationUnmappedLocator {
+  operator: string;
+  notes?: string;
+}
+
 interface RemediationContext {
   exceptionId: number | null;
   wmsOrderId: number;
@@ -45,6 +51,14 @@ interface RemediationContext {
   trackingNumber: string | null;
   authorityExternalShipmentRef: string | null;
   authorityTrackingNumber: string | null;
+}
+
+interface VoidedLabelResolution {
+  exceptionId: number;
+  candidateShipmentId: number | null;
+  operator: string;
+  providerShipmentId: number | null;
+  providerVoidDate: string | null;
 }
 
 export interface ShipStationProviderIdentityRepair {
@@ -135,6 +149,14 @@ const RESHIP_REASONS = new Set([
   "concession",
   "other",
 ]);
+const VOIDABLE_UNUSED_LABEL_STATUSES = new Set([
+  "planned",
+  "queued",
+  "labeled",
+  "on_hold",
+  "cancelled",
+  "voided",
+]);
 function resultRows(result: any): any[] {
   return Array.isArray(result?.rows) ? result.rows : [];
 }
@@ -179,6 +201,72 @@ function locator(input: ShipStationUnmappedLocator): Required<ShipStationUnmappe
     throw new Error("exactly one of exceptionId or shipmentId is required");
   }
   return { exceptionId, shipmentId };
+}
+
+function voidedLabelResolutionFromRow(row: any): VoidedLabelResolution | null {
+  if (
+    !row
+    || String(row.status) !== "resolved"
+    || String(row.classification) !== "provider_voided_label"
+    || String(row.remediation_action) !== "resolve_voided_label"
+  ) {
+    return null;
+  }
+  return {
+    exceptionId: positiveInteger(row.id, "exceptionId"),
+    candidateShipmentId: optionalPositiveInteger(row.candidate_shipment_id),
+    operator: String(row.resolved_by ?? "system:unknown"),
+    providerShipmentId: optionalPositiveInteger(row.provider_shipment_id),
+    providerVoidDate: row.provider_void_date == null
+      ? null
+      : String(row.provider_void_date),
+  };
+}
+
+async function loadPriorVoidedLabelResolution(
+  db: any,
+  input: ShipStationUnmappedLocator,
+): Promise<VoidedLabelResolution | null> {
+  const target = locator(input);
+  const result: any = target.exceptionId > 0
+    ? await db.execute(sql`
+        SELECT
+          id,
+          status,
+          classification,
+          details->>'remediationAction' AS remediation_action,
+          details->>'candidateShipmentId' AS candidate_shipment_id,
+          details->>'providerShipmentId' AS provider_shipment_id,
+          details->>'providerVoidDate' AS provider_void_date,
+          resolved_by
+        FROM wms.reconciliation_exceptions
+        WHERE id = ${target.exceptionId}
+          AND rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+        LIMIT 1
+      `)
+    : await db.execute(sql`
+        SELECT
+          id,
+          status,
+          classification,
+          details->>'remediationAction' AS remediation_action,
+          details->>'candidateShipmentId' AS candidate_shipment_id,
+          details->>'providerShipmentId' AS provider_shipment_id,
+          details->>'providerVoidDate' AS provider_void_date,
+          resolved_by
+        FROM wms.reconciliation_exceptions
+        WHERE rule = ${SHIPSTATION_UNMAPPED_PHYSICAL_RULE}
+          AND status = 'resolved'
+          AND classification = 'provider_voided_label'
+          AND details->>'remediationAction' = 'resolve_voided_label'
+          AND (
+            wms_shipment_id = ${target.shipmentId}
+            OR details->>'candidateShipmentId' = ${String(target.shipmentId)}
+          )
+        ORDER BY resolved_at DESC NULLS LAST, id DESC
+        LIMIT 1
+      `);
+  return voidedLabelResolutionFromRow(resultRows(result)[0]);
 }
 
 async function withOptionalTransaction<T>(
@@ -1623,4 +1711,151 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     providerIdentityRepaired: identityRepair !== null,
     originalPackageIdentityRepaired: originalPackageIdentityRepair !== null,
   };
+}
+
+export async function resolveShipStationUnmappedPhysicalAsVoidedLabel(
+  db: any,
+  shipStation: ShipStationService,
+  input: ShipStationUnmappedVoidedLabelResolutionInput,
+): Promise<Record<string, unknown>> {
+  const operator = requiredOperator(input.operator);
+  const notes = optionalNotes(input.notes);
+  const priorResolution = await loadPriorVoidedLabelResolution(db, input);
+  if (priorResolution) {
+    return { changed: false, ...priorResolution };
+  }
+
+  let initialContext: RemediationContext;
+  try {
+    initialContext = await loadContext(db, input);
+  } catch (contextErr) {
+    const concurrentResolution = await loadPriorVoidedLabelResolution(db, input);
+    if (concurrentResolution) {
+      return { changed: false, ...concurrentResolution };
+    }
+    throw contextErr;
+  }
+  const providerShipmentId = positiveInteger(
+    initialContext.externalShipmentRef,
+    "externalShipmentRef",
+  );
+  const shipment = await shipStation.getShipmentById(providerShipmentId);
+  if (!shipment) {
+    throw new Error(`ShipStation physical shipment ${providerShipmentId} was not found`);
+  }
+  const voidDate = new Date(String(shipment.voidDate ?? ""));
+  if (!shipment.voidDate || Number.isNaN(voidDate.getTime())) {
+    throw new Error("ShipStation does not report this provider label as voided");
+  }
+
+  const exceptionId = await ensureException(db, initialContext, shipment);
+  const result = await withOptionalTransaction(db, async (tx) => {
+    const exceptionResult: any = await tx.execute(sql`
+      SELECT
+        id,
+        status,
+        classification,
+        details->>'remediationAction' AS remediation_action,
+        details->>'candidateShipmentId' AS candidate_shipment_id,
+        details->>'providerShipmentId' AS provider_shipment_id,
+        details->>'providerVoidDate' AS provider_void_date,
+        resolved_by
+      FROM wms.reconciliation_exceptions
+      WHERE id = ${exceptionId}
+      FOR UPDATE
+    `);
+    const exceptionRow = resultRows(exceptionResult)[0];
+    if (!exceptionRow) {
+      throw new Error("unmapped ShipStation exception no longer exists");
+    }
+    const concurrentResolution = voidedLabelResolutionFromRow(exceptionRow);
+    if (concurrentResolution) {
+      return { changed: false, ...concurrentResolution };
+    }
+    if (!["open", "acknowledged"].includes(String(exceptionRow.status))) {
+      throw new Error("unmapped ShipStation exception changed before it could be resolved");
+    }
+
+    if (initialContext.candidateShipmentId !== null) {
+      const candidateResult: any = await tx.execute(sql`
+        SELECT id, order_id, status, external_fulfillment_id
+        FROM wms.outbound_shipments
+        WHERE id = ${initialContext.candidateShipmentId}
+        FOR UPDATE
+      `);
+      const candidate = resultRows(candidateResult)[0];
+      if (
+        !candidate
+        || Number(candidate.order_id) !== initialContext.wmsOrderId
+        || String(candidate.external_fulfillment_id) !==
+          `shipstation_shipment:${shipment.shipmentId}`
+      ) {
+        throw new Error("the voided provider label no longer matches its WMS candidate");
+      }
+      if (!VOIDABLE_UNUSED_LABEL_STATUSES.has(String(candidate.status))) {
+        throw new Error(`candidate shipment is ${candidate.status} and cannot be resolved as an unused label`);
+      }
+      const authority = await loadShipmentAuthorityCounts(
+        tx,
+        initialContext.candidateShipmentId,
+      );
+      if (authority.itemCount > 0 || authority.inventoryShipCount > 0) {
+        throw new Error("the voided provider label already owns WMS or inventory authority");
+      }
+      await tx.execute(sql`
+        UPDATE wms.outbound_shipments
+        SET status = 'voided',
+            voided_at = COALESCE(voided_at, ${voidDate}),
+            voided_reason = COALESCE(voided_reason, 'shipstation_provider_label_voided'),
+            requires_review = false,
+            review_reason = NULL,
+            updated_at = NOW()
+        WHERE id = ${initialContext.candidateShipmentId}
+      `);
+    }
+
+    const resolution =
+      "ShipStation confirmed that the additional provider label was voided. " +
+      "No inventory, customer fulfillment, or channel fulfillment state changed.";
+    const details = JSON.stringify({
+      remediationAction: "resolve_voided_label",
+      remediationNotes: notes,
+      providerShipmentId: shipment.shipmentId,
+      providerOrderId: shipment.orderId,
+      providerOrderKey: shipment.orderKey,
+      providerTrackingNumber: shipment.trackingNumber,
+      providerVoidDate: voidDate.toISOString(),
+      candidateShipmentId: initialContext.candidateShipmentId,
+      fulfillmentMutationBlocked: true,
+      inventoryMutationBlocked: true,
+      channelWritebackBlocked: true,
+    });
+    const updated: any = await tx.execute(sql`
+      UPDATE wms.reconciliation_exceptions
+      SET classification = 'provider_voided_label',
+          status = 'resolved',
+          severity = 'info',
+          details = details || ${details}::jsonb,
+          resolved_at = NOW(),
+          resolved_by = ${operator},
+          resolution = ${resolution},
+          updated_at = NOW()
+      WHERE id = ${exceptionId}
+        AND status IN ('open', 'acknowledged')
+      RETURNING id
+    `);
+    if (resultRows(updated).length !== 1) {
+      throw new Error("unmapped ShipStation exception changed before it could be resolved");
+    }
+    return {
+      changed: true,
+      exceptionId,
+      candidateShipmentId: initialContext.candidateShipmentId,
+      operator,
+      providerShipmentId: shipment.shipmentId,
+      providerVoidDate: voidDate.toISOString(),
+    };
+  });
+
+  return result;
 }

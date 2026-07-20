@@ -398,7 +398,7 @@ interface ShipStationUnmappedTarget {
   label: string;
 }
 
-interface ShipStationReshipAdoptionResponse {
+interface ShipStationPackageClassificationResponse {
   changed: boolean;
   exceptionId: number;
   candidateShipmentId?: number | null;
@@ -613,8 +613,9 @@ function shipStationUnmappedTarget(
   return null;
 }
 
-function ShipStationReshipAdoptionDialog(props: {
+function ShipStationPackageClassificationDialog(props: {
   target: ShipStationUnmappedTarget | null;
+  canTriage: boolean;
   canAdjustInventory: boolean;
   onClose: () => void;
   onCompleted: () => Promise<void>;
@@ -666,6 +667,7 @@ function ShipStationReshipAdoptionDialog(props: {
     String(item.sku ?? "").trim().length > 0 && Number.isSafeInteger(Number(item.quantity)) && Number(item.quantity) > 0
   )), [rawProviderItems]);
   const providerItemsMissing = rawProviderItems.length === 0;
+  const providerVoided = Boolean(preview?.providerShipment.voidDate);
   const providerEvidenceValid = (providerItemsMissing || (
     providerItems.length > 0 && providerItems.length === rawProviderItems.length
   ))
@@ -786,6 +788,7 @@ function ShipStationReshipAdoptionDialog(props: {
     && mappingsComplete
     && positiveFlowId(originalShipmentId) !== null
     && (isCatalogConcession || reason.length > 0);
+  const voidResolutionValid = props.canTriage && providerVoided;
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -816,7 +819,7 @@ function ShipStationReshipAdoptionDialog(props: {
           })),
       };
       const response = await apiRequest("POST", "/api/oms/ops/shipstation-unmapped/adopt-reship", body);
-      return response.json() as Promise<ShipStationReshipAdoptionResponse>;
+      return response.json() as Promise<ShipStationPackageClassificationResponse>;
     },
     onSuccess: async (result) => {
       toast({
@@ -833,13 +836,45 @@ function ShipStationReshipAdoptionDialog(props: {
     },
   });
 
+  const voidResolutionMutation = useMutation({
+    mutationFn: async () => {
+      if (!props.target || !preview) throw new Error("Voided-label evidence is unavailable");
+      const body: Record<string, unknown> = {
+        ...("exceptionId" in props.target ? { exceptionId: props.target.exceptionId } : {}),
+        ...("shipmentId" in props.target ? { shipmentId: props.target.shipmentId } : {}),
+        notes: notes.trim() || undefined,
+      };
+      const response = await apiRequest(
+        "POST",
+        "/api/oms/ops/shipstation-unmapped/resolve-voided-label",
+        body,
+      );
+      return response.json() as Promise<ShipStationPackageClassificationResponse>;
+    },
+    onSuccess: async () => {
+      toast({
+        title: "Voided label resolved",
+        description: "The exception was closed without changing inventory or fulfillment.",
+      });
+      await props.onCompleted();
+      props.onClose();
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Could not resolve voided label",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   return (
     <Dialog open={props.target !== null} onOpenChange={(open) => { if (!open) props.onClose(); }}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
         <DialogHeader className="text-left">
-          <DialogTitle>Record replacement shipment</DialogTitle>
+          <DialogTitle>Classify additional ShipStation package</DialogTitle>
           <DialogDescription>
-            {props.target?.label}: confirm what was replaced and what was resent.
+            {props.target?.label}: review current provider evidence before changing any fulfillment state.
           </DialogDescription>
         </DialogHeader>
 
@@ -859,9 +894,13 @@ function ShipStationReshipAdoptionDialog(props: {
               <div className="flex gap-3">
                 <PackageCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-700" />
                 <div>
-                  <div className="font-medium">A replacement package was shipped</div>
+                  <div className="font-medium">
+                    {providerVoided ? "ShipStation reports a voided label" : "An additional package needs classification"}
+                  </div>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {providerItemsMissing
+                    {providerVoided
+                      ? "This label is historical provider evidence, not proof that another package left the warehouse."
+                      : providerItemsMissing
                       ? "ShipStation did not list the package contents. Confirm whether ordered items or different/free items were sent."
                       : "Confirm which original package it replaces and why the replacement was sent."}
                   </p>
@@ -875,20 +914,27 @@ function ShipStationReshipAdoptionDialog(props: {
                   {selectedOriginalShipment && <div className="mt-1 text-xs text-muted-foreground">Shipment {selectedOriginalShipment.id}</div>}
                 </div>
                 <div className="border-t pt-3">
-                  <div className="text-xs font-semibold uppercase text-muted-foreground">Replacement package</div>
+                  <div className="text-xs font-semibold uppercase text-muted-foreground">Additional provider label</div>
                   <div className="mt-1 break-all font-medium">{preview.providerShipment.trackingNumber || "Tracking unavailable"}</div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     Shipped {formatTimestamp(preview.providerShipment.shipDate)}{replacementServiceLabel ? ` via ${replacementServiceLabel}` : ""}
                   </div>
+                  {preview.providerShipment.voidDate && (
+                    <div className="mt-1 text-xs font-medium text-amber-800">
+                      Voided {formatTimestamp(preview.providerShipment.voidDate)}
+                    </div>
+                  )}
                 </div>
               </div>
 
               <p className="mt-4 border-t pt-3 text-sm text-muted-foreground">
-                Echelon will keep these as two separate packages and deduct inventory only for the items confirmed below. The customer order will remain fulfilled once.
+                {providerVoided
+                  ? "Resolving this as a voided label closes the exception only. The original package remains authoritative, and no inventory, fulfillment, or channel state changes."
+                  : "Echelon will keep these as two separate packages and deduct inventory only for the items confirmed below. The customer order will remain fulfilled once."}
               </p>
             </section>
 
-            <section className="grid gap-4 border-t pt-4 sm:grid-cols-2">
+            <section className={cn("grid gap-4 border-t pt-4 sm:grid-cols-2", providerVoided && "hidden")}>
               <div className="space-y-2">
                 <Label>Which package was replaced?</Label>
                 {validOriginalShipments.length === 1 && selectedOriginalShipment ? (
@@ -934,9 +980,9 @@ function ShipStationReshipAdoptionDialog(props: {
                 )}
               </div>
             </section>
-            {validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No shipped original package is available for this replacement.</p>}
+            {!providerVoided && validOriginalShipments.length === 0 && <p className="text-sm text-red-800">No shipped original package is available for this replacement.</p>}
 
-            <section className="border-t pt-4">
+            <section className={cn("border-t pt-4", providerVoided && "hidden")}>
               <div className="font-semibold">What was sent?</div>
               {providerItemsMissing && (
                 <ToggleGroup
@@ -1094,12 +1140,11 @@ function ShipStationReshipAdoptionDialog(props: {
                   })}
                 </div>
               )}
-              {preview.providerShipment.voidDate && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because ShipStation reports it as voided.</p>}
               {!preview.providerShipment.shipDate && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because ShipStation has no shipped date.</p>}
               {!providerItemsMissing && providerItems.length !== rawProviderItems.length && <p className="mt-2 text-sm text-red-800">This package cannot be adopted because one or more ShipStation package lines are invalid.</p>}
             </section>
 
-            <section className="border-t pt-4">
+            <section className={cn("border-t pt-4", providerVoided && "hidden")}>
               <div className="font-semibold">What will happen</div>
               <div className="mt-3 space-y-2 text-sm">
                 <div className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-green-700" /><span>The original package stays under tracking {selectedOriginalTracking || "shown above"}.</span></div>
@@ -1111,18 +1156,22 @@ function ShipStationReshipAdoptionDialog(props: {
             <section className="border-t pt-4">
               <div className="space-y-2">
                 <Label htmlFor="shipstation-remediation-notes">Notes (optional)</Label>
-                <Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder="Add any useful context for the audit trail." />
+                <Textarea id="shipstation-remediation-notes" value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={1000} placeholder={providerVoided ? "Add context about why the unused label was created or voided." : "Add any useful context for the audit trail."} />
               </div>
             </section>
-            {!props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to record this shipment.</p>}
+            {providerVoided && !props.canTriage && <p className="text-xs text-amber-800">Operations triage permission is required to resolve this label.</p>}
+            {!providerVoided && !props.canAdjustInventory && <p className="text-xs text-amber-800">Inventory adjustment permission is required to record this shipment.</p>}
           </div>
         ) : null}
 
         <DialogFooter>
           <Button variant="outline" onClick={props.onClose}>Cancel</Button>
-          <Button disabled={!preview || !actionValid || mutation.isPending} onClick={() => mutation.mutate()}>
-            {mutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Record shipment
+          <Button
+            disabled={!preview || (providerVoided ? !voidResolutionValid : !actionValid) || mutation.isPending || voidResolutionMutation.isPending}
+            onClick={() => { if (providerVoided) voidResolutionMutation.mutate(); else mutation.mutate(); }}
+          >
+            {(mutation.isPending || voidResolutionMutation.isPending) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {providerVoided ? "Resolve as voided label" : "Record shipment"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -2120,7 +2169,7 @@ function FlowOverview(props: {
                                       onClick={() => setUnmappedTarget(classificationTarget)}
                                     >
                                       <PackagePlus className="mr-2 h-3.5 w-3.5" />
-                                      Adopt as reship
+                                      Classify package
                                     </Button>
                                   )}
                                   {replayAction && (
@@ -2170,8 +2219,9 @@ function FlowOverview(props: {
           </div>
         </DialogContent>
       </Dialog>
-      <ShipStationReshipAdoptionDialog
+      <ShipStationPackageClassificationDialog
         target={unmappedTarget}
+        canTriage={props.canReplay}
         canAdjustInventory={props.canAdjustInventory}
         onClose={() => setUnmappedTarget(null)}
         onCompleted={async () => { await bucketQuery.refetch(); }}

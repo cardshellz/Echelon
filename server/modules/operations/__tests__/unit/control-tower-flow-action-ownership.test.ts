@@ -58,11 +58,13 @@ describe("Control Tower flow action ownership", () => {
     );
   });
 
-  it("offers only verified reship adoption for unmapped physical shipments", () => {
+  it("classifies unmapped physical shipments without assuming every label is a reship", () => {
     expect(FLOW_MONITOR_SOURCE).toContain('selectedIssue.code === "UNMAPPED_ENGINE_SPLIT"');
-    expect(FLOW_MONITOR_SOURCE).toContain("Adopt as reship");
+    expect(FLOW_MONITOR_SOURCE).toContain("Classify package");
+    expect(FLOW_MONITOR_SOURCE).toContain("Resolve as voided label");
+    expect(FLOW_MONITOR_SOURCE).toContain("Record shipment");
+    expect(FLOW_MONITOR_SOURCE).not.toContain("A replacement package was shipped");
     expect(FLOW_MONITOR_SOURCE).not.toContain("Match remaining fulfillment");
-    expect(FLOW_MONITOR_SOURCE).not.toContain("Ignore duplicate or unused label");
     expect(FLOW_MONITOR_SOURCE).not.toContain("Keep under review");
     expect(FLOW_MONITOR_SOURCE).toContain('hasPermission("inventory", "adjust")');
   });
@@ -73,6 +75,15 @@ describe("Control Tower flow action ownership", () => {
     );
     expect(OMS_ROUTES_SOURCE).toContain('hasPermission(userId, "inventory", "adjust")');
     expect(OMS_ROUTES_SOURCE).toContain('error: "Permission denied: inventory:adjust"');
+  });
+
+  it("uses triage-only authority for the verified no-inventory voided-label disposition", () => {
+    expect(OMS_ROUTES_SOURCE).toMatch(
+      /shipstation-unmapped\/resolve-voided-label"[\s\S]{0,180}requirePermission\("operations", "triage"\)/,
+    );
+    expect(FLOW_MONITOR_SOURCE).toContain(
+      "The exception was closed without changing inventory or fulfillment.",
+    );
   });
 
   it("keeps replacement inventory lineage outside customer fulfillment authority", () => {
