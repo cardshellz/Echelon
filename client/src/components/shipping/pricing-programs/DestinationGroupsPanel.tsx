@@ -198,7 +198,8 @@ export function DestinationGroupsPanel({
         <p className="text-sm font-medium">No destination groups yet</p>
         <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
           A destination group applies one set of {pricingBasis === "pallet_count" ? "pallet" : "weight"} bands
-          to the states you choose, with optional ZIP-prefix exceptions.
+          to the states you choose, with optional ZIP-prefix exceptions. Create separate groups
+          when states need different prices.
         </p>
         <Button className="mt-4" onClick={addGroup}>
           <Plus className="mr-2 h-4 w-4" />
@@ -209,9 +210,16 @@ export function DestinationGroupsPanel({
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+    <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
       {/* Left: group list */}
-      <div className="space-y-2">
+      <div className="min-w-0 space-y-2">
+        <div className="px-1 pb-1">
+          <h3 className="text-sm font-semibold">Destination groups</h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            States in one group share this option's weight schedule. Put Pennsylvania and
+            California in separate groups when their prices differ.
+          </p>
+        </div>
         {groups.map((group, index) => {
           const issues = issueMessagesByGroup.get(group.id) ?? [];
           const isSelected = selectedGroup?.id === group.id;
@@ -258,7 +266,7 @@ export function DestinationGroupsPanel({
 
       {/* Right: selected group detail */}
       {selectedGroup && (
-        <div className="space-y-5 rounded-md border p-4">
+        <div className="min-w-0 space-y-5 rounded-md border p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-52 flex-1">
               <Label htmlFor={`group-name-${selectedGroup.id}`} className="text-xs text-muted-foreground">

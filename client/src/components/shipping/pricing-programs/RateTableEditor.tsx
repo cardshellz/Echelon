@@ -226,7 +226,9 @@ export function RateTableEditor({
   };
 
   const stepIndex: Record<EditorStep, number> = { context: 0, rates: 1, review: 2 };
-  const contextComplete = rateBookCode !== "" && serviceLevelCode !== "";
+  const contextComplete = rateBookCode !== ""
+    && serviceLevelCode !== ""
+    && selectedLevel?.isActive === true;
 
   return (
     <div className="space-y-5 pb-24">
@@ -553,15 +555,18 @@ function ContextStep({
         <div className="grid gap-2 sm:grid-cols-2">
           {serviceLevels.map((level) => {
             const selected = level.code === serviceLevelCode;
+            const configurable = level.isActive;
             return (
               <button
                 key={level.id}
                 type="button"
-                onClick={() => onSelectLevel(level.code)}
+                disabled={!configurable}
+                onClick={() => configurable && onSelectLevel(level.code)}
                 aria-pressed={selected}
                 className={cn(
                   "rounded-md border px-3 py-2.5 text-left transition-colors",
                   selected ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:bg-muted/50",
+                  !configurable && "cursor-not-allowed bg-muted/20 opacity-70 hover:bg-muted/20",
                 )}
               >
                 <div className="flex items-center justify-between gap-2">
@@ -570,8 +575,8 @@ function ContextStep({
                     <Badge variant="outline" className="text-[10px] uppercase">
                       {level.fulfillmentMode === "freight" ? "Freight" : "Parcel"}
                     </Badge>
-                    {!level.isActive && (
-                      <Badge variant="secondary" className="text-[10px]">Inactive</Badge>
+                    {!configurable && (
+                      <Badge variant="secondary" className="text-[10px]">Future</Badge>
                     )}
                   </span>
                 </div>
@@ -589,11 +594,10 @@ function ContextStep({
             );
           })}
         </div>
-        {serviceLevels.find((level) => level.code === serviceLevelCode)?.isActive === false && (
+        {serviceLevels.some((level) => !level.isActive) && (
           <p className="flex items-start gap-1.5 text-xs text-amber-700">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            This option is currently inactive: you can prepare and activate rates now, but they
-            will not quote until the option itself is activated on the Shipping options tab.
+            Future options become configurable after their fulfillment methods are mapped.
           </p>
         )}
       </div>

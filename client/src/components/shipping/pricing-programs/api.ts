@@ -257,11 +257,38 @@ const PURPOSE_LABEL: Record<string, string> = {
   vendor_fulfillment_charge: "Vendor fulfillment charge",
 };
 
-export const CHANNEL_CHOICES = Object.entries(CHANNEL_LABEL)
-  .map(([value, label]) => ({ value, label }));
+export interface PricingFlowChoice {
+  value: string;
+  label: string;
+  pricingChannel: string;
+  ratePurpose: string;
+}
 
-export const PURPOSE_CHOICES = Object.entries(PURPOSE_LABEL)
-  .map(([value, label]) => ({ value, label }));
+/**
+ * Operator-facing business flows backed by runtime shipping quotes. The raw
+ * channel/purpose pair remains the persisted contract, but operators should
+ * not have to assemble valid pairs themselves.
+ */
+export const PRICING_FLOW_CHOICES: readonly PricingFlowChoice[] = [
+  {
+    value: "shopify:customer_checkout",
+    label: "Shopify checkout",
+    pricingChannel: "shopify",
+    ratePurpose: "customer_checkout",
+  },
+  {
+    value: "internal:customer_checkout",
+    label: "Internal website checkout",
+    pricingChannel: "internal",
+    ratePurpose: "customer_checkout",
+  },
+  {
+    value: "dropship:vendor_fulfillment_charge",
+    label: "Dropship vendor fulfillment",
+    pricingChannel: "dropship",
+    ratePurpose: "vendor_fulfillment_charge",
+  },
+] as const;
 
 export function channelLabel(channel: string): string {
   return CHANNEL_LABEL[channel] ?? titleCase(channel);
@@ -271,8 +298,21 @@ export function purposeLabel(purpose: string): string {
   return PURPOSE_LABEL[purpose] ?? titleCase(purpose);
 }
 
+export function pricingFlowKey(
+  assignment: Pick<RateBookAssignment, "pricingChannel" | "ratePurpose">,
+): string {
+  return `${assignment.pricingChannel}:${assignment.ratePurpose}`;
+}
+
+export function pricingFlowLabel(
+  assignment: Pick<RateBookAssignment, "pricingChannel" | "ratePurpose">,
+): string {
+  return PRICING_FLOW_CHOICES.find((choice) => choice.value === pricingFlowKey(assignment))?.label
+    ?? `${channelLabel(assignment.pricingChannel)} ${purposeLabel(assignment.ratePurpose).toLowerCase()}`;
+}
+
 export function assignmentLabel(assignment: RateBookAssignment): string {
-  const base = `${channelLabel(assignment.pricingChannel)} · ${purposeLabel(assignment.ratePurpose)}`;
+  const base = pricingFlowLabel(assignment);
   return assignment.originWarehouseName === null
     ? base
     : `${base} · ${assignment.originWarehouseName}`;

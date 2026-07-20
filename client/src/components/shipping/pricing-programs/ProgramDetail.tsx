@@ -146,7 +146,7 @@ export function ProgramDetail({
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
               <Settings2 className="mr-1.5 h-3.5 w-3.5" />
-              Name & assignments
+              Manage assignments
             </Button>
             <Button
               variant="outline"
@@ -162,8 +162,16 @@ export function ProgramDetail({
       </div>
 
       {/* Shipping options */}
-      <section className="overflow-hidden rounded-md border">
-        <Table>
+      <section className="space-y-2">
+        <div>
+          <h3 className="text-sm font-semibold">Shipping options</h3>
+          <p className="text-xs text-muted-foreground">
+            Each option owns its destination groups and weight bands inside this program.
+            Future options remain visible but cannot be priced until their fulfillment methods are mapped.
+          </p>
+        </div>
+        <div className="overflow-hidden rounded-md border">
+          <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Shipping option</TableHead>
@@ -187,7 +195,8 @@ export function ProgramDetail({
               />
             ))}
           </TableBody>
-        </Table>
+          </Table>
+        </div>
       </section>
 
       {/* Revision history */}
@@ -293,8 +302,9 @@ function OptionRow({
   onStartRates: (serviceLevelCode: string) => void;
 }) {
   const { serviceLevel, active, draft } = option;
+  const configurable = serviceLevel.isActive;
   return (
-    <TableRow>
+    <TableRow className={!configurable ? "bg-muted/20" : undefined}>
       <TableCell>
         <div className="text-sm font-medium">{serviceLevel.displayName}</div>
         <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -308,8 +318,8 @@ function OptionRow({
                 : `${serviceLevel.promiseMinBusinessDays}–${serviceLevel.promiseMaxBusinessDays} business days`}
             </span>
           )}
-          {!serviceLevel.isActive && (
-            <Badge variant="secondary" className="px-1 py-0 text-[10px]">Option inactive</Badge>
+          {!configurable && (
+            <Badge variant="secondary" className="px-1 py-0 text-[10px]">Future</Badge>
           )}
         </div>
       </TableCell>
@@ -328,7 +338,9 @@ function OptionRow({
             </span>
           </button>
         ) : (
-          <span className="text-xs text-muted-foreground">No live rates</span>
+          <span className="text-xs text-muted-foreground">
+            {configurable ? "No live rates" : "Available after method mapping"}
+          </span>
         )}
       </TableCell>
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -338,13 +350,19 @@ function OptionRow({
       </TableCell>
       <TableCell>
         {draft ? (
-          <button
-            type="button"
-            onClick={() => onContinueDraft(draft.id)}
-            className="text-left text-xs text-amber-700 hover:underline"
-          >
-            In progress · {draft.rowCount.toLocaleString()} rows
-          </button>
+          configurable ? (
+            <button
+              type="button"
+              onClick={() => onContinueDraft(draft.id)}
+              className="text-left text-xs text-amber-700 hover:underline"
+            >
+              In progress · {draft.rowCount.toLocaleString()} rows
+            </button>
+          ) : (
+            <span className="text-xs text-muted-foreground">
+              Preserved · available after method mapping
+            </span>
+          )
         ) : (
           <span className="text-xs text-muted-foreground">—</span>
         )}
@@ -357,7 +375,10 @@ function OptionRow({
               View
             </Button>
           )}
-          {!programRetired && (draft ? (
+          {!programRetired && !configurable && !active && (
+            <Badge variant="secondary" className="font-normal">Future feature</Badge>
+          )}
+          {!programRetired && configurable && (draft ? (
             <Button size="sm" variant="outline" onClick={() => onContinueDraft(draft.id)}>
               <Pencil className="mr-1 h-3.5 w-3.5" />
               Continue draft
