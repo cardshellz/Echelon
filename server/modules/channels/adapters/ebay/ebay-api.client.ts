@@ -341,19 +341,32 @@ export class EbayApiClient {
     const accessToken = await this.authService.getAccessToken(this.channelId);
     const url = `${this.baseUrl}${path}`;
 
+    const existing = await this.findShippingFulfillment(
+      orderId,
+      accessToken,
+      fulfillment.trackingNumber,
+    );
+    if (existing) {
+      console.log(
+        `[EbayApi] Shipping fulfillment already exists for order ${orderId} ` +
+          `and tracking ${fulfillment.trackingNumber}; skipping POST`,
+      );
+      return { fulfillmentId: existing.fulfillmentId };
+    }
+
     const result = await this.createShippingFulfillmentWithRetry(
       path,
       url,
       accessToken,
       fulfillment,
     );
-    await this.verifyShippingFulfillmentCreated(
+    const verified = await this.verifyShippingFulfillmentCreated(
       orderId,
       accessToken,
       fulfillment,
       result.fulfillmentId,
     );
-    return result;
+    return { fulfillmentId: result.fulfillmentId || verified.fulfillmentId };
   }
 
   private async createShippingFulfillmentWithRetry(
@@ -390,13 +403,12 @@ export class EbayApiClient {
         }
 
         const errorBody = await response.text();
-        if (response.status >= 500 && attempt < MAX_RETRIES) {
-          const delay = this.getRetryDelay(attempt);
-          console.warn(
-            `[EbayApi] Server error ${response.status} on POST ${path}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
+        if (response.status >= 500) {
+          throw new Error(
+            `eBay API POST ${path} returned ${response.status}; ` +
+              `deferring retry so fulfillment can be verified before another POST: ` +
+              this.formatEbayError(errorBody),
           );
-          await this.delay(delay);
-          continue;
         }
 
         throw new Error(
@@ -404,18 +416,15 @@ export class EbayApiClient {
         );
       } catch (err: any) {
         if (
-          attempt < MAX_RETRIES &&
-          (err.code === "ECONNRESET" ||
-            err.code === "ETIMEDOUT" ||
-            err.code === "ENOTFOUND" ||
-            err.message?.includes("fetch failed"))
+          err.code === "ECONNRESET" ||
+          err.code === "ETIMEDOUT" ||
+          err.code === "ENOTFOUND" ||
+          err.message?.includes("fetch failed")
         ) {
-          const delay = this.getRetryDelay(attempt);
           console.warn(
-            `[EbayApi] Network error on POST ${path}: ${err.message}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
+            `[EbayApi] Ambiguous network error on POST ${path}: ${err.message}; ` +
+              "deferring retry so the next attempt verifies existing fulfillments first",
           );
-          await this.delay(delay);
-          continue;
         }
         throw err;
       }
@@ -449,7 +458,7 @@ export class EbayApiClient {
     accessToken: string,
     fulfillment: EbayShippingFulfillmentRequest,
     fulfillmentId?: string | null,
-  ): Promise<void> {
+  ): Promise<EbayShippingFulfillmentResponse> {
     const path = buildEbayShippingFulfillmentPath(orderId);
     const expectedTracking = fulfillment.trackingNumber;
 
@@ -458,40 +467,15 @@ export class EbayApiClient {
         await this.delay(delayMs);
       }
 
-      const listUrl = `${this.baseUrl}${path}`;
-      const response = await fetch(listUrl, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json",
-          "Accept-Language": EBAY_US_LOCALE,
-          "X-EBAY-C-MARKETPLACE-ID": EBAY_US_MARKETPLACE_ID,
-        },
-      });
-
-      if (!response.ok) {
-        continue;
-      }
-
-      const body = await response.json().catch(() => null);
-      const fulfillments: any[] = Array.isArray(body?.fulfillments)
-        ? body.fulfillments
-        : [];
-      const matched = fulfillments.some((item) => {
-        const itemFulfillmentId =
-          typeof item?.fulfillmentId === "string" ? item.fulfillmentId : "";
-        const itemTracking =
-          typeof item?.shipmentTrackingNumber === "string"
-            ? item.shipmentTrackingNumber
-            : "";
-        return (
-          (fulfillmentId && itemFulfillmentId === fulfillmentId) ||
-          itemTracking === expectedTracking
-        );
-      });
-
+      const matched = await this.findShippingFulfillment(
+        orderId,
+        accessToken,
+        expectedTracking,
+        fulfillmentId,
+        true,
+      );
       if (matched) {
-        return;
+        return { fulfillmentId: matched.fulfillmentId };
       }
     }
 
@@ -499,6 +483,56 @@ export class EbayApiClient {
       `eBay API POST ${path} returned success but fulfillment was not readable after verification; ` +
         `tracking=${expectedTracking}, fulfillmentId=${fulfillmentId ?? "none"}`,
     );
+  }
+
+  private async findShippingFulfillment(
+    orderId: string,
+    accessToken: string,
+    expectedTracking: string,
+    expectedFulfillmentId?: string | null,
+    tolerateReadFailure = false,
+  ): Promise<{ fulfillmentId: string; trackingNumber: string } | null> {
+    const path = buildEbayShippingFulfillmentPath(orderId);
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+        "Accept-Language": EBAY_US_LOCALE,
+        "X-EBAY-C-MARKETPLACE-ID": EBAY_US_MARKETPLACE_ID,
+      },
+    });
+    if (!response.ok) {
+      if (tolerateReadFailure) return null;
+      const errorBody = await response.text();
+      throw new Error(
+        `eBay API GET ${path} failed (${response.status}); refusing fulfillment POST without idempotency read: ` +
+          this.formatEbayError(errorBody),
+      );
+    }
+
+    const body = await response.json().catch(() => null);
+    const fulfillments: any[] = Array.isArray(body?.fulfillments)
+      ? body.fulfillments
+      : [];
+    for (const item of fulfillments) {
+      const itemFulfillmentId =
+        typeof item?.fulfillmentId === "string" ? item.fulfillmentId.trim() : "";
+      const itemTracking =
+        typeof item?.shipmentTrackingNumber === "string"
+          ? item.shipmentTrackingNumber.trim()
+          : "";
+      const matches =
+        (expectedFulfillmentId && itemFulfillmentId === expectedFulfillmentId) ||
+        itemTracking === expectedTracking;
+      if (matches && itemFulfillmentId) {
+        return {
+          fulfillmentId: itemFulfillmentId,
+          trackingNumber: itemTracking,
+        };
+      }
+    }
+    return null;
   }
 
   private formatEbayError(errorBody: string): string {

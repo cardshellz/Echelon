@@ -214,6 +214,8 @@ describe("getFlowWaterfall", () => {
     expect(taxonomyBlock).toContain("rq.last_error LIKE '%no items with positive quantity%' THEN 'SHOPIFY_PUSH_NO_POSITIVE_QTY'");
     expect(taxonomyBlock).toContain("rq.last_error LIKE '%no fulfillment-order line item%' THEN 'SHOPIFY_PUSH_SKU_NOT_ON_FO'");
     expect(taxonomyBlock).toContain("rq.last_error LIKE '%fulfillment push returned false%' THEN 'CHANNEL_PUSH_RETURNED_FALSE'");
+    expect(taxonomyBlock).toContain("THEN 'EBAY_FULFILLMENT_VERIFY_CONFLICT'");
+    expect(taxonomyBlock).toContain("returned success but fulfillment was not readable after verification");
     expect(taxonomyBlock).toContain("rq.last_error LIKE '%status ''cancelled'' is not pushable%' THEN 'SHIPMENT_NOT_PUSHABLE_CANCELLED'");
     expect(taxonomyBlock).not.toContain("rq.topic = 'shopify_fulfillment_push' AND rq.last_error LIKE '%no items with positive quantity%'");
     expect(taxonomyBlock).not.toContain("rq.topic = 'shopify_fulfillment_push' AND rq.last_error LIKE '%no fulfillment-order line item%'");

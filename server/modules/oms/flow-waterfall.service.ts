@@ -205,6 +205,13 @@ const DEAD_LETTER_REASON_CODE = sql`CASE
   WHEN rq.last_error LIKE '%no items with positive quantity%' THEN 'SHOPIFY_PUSH_NO_POSITIVE_QTY'
   WHEN rq.last_error LIKE '%no fulfillment-order line item%' THEN 'SHOPIFY_PUSH_SKU_NOT_ON_FO'
   WHEN rq.last_error LIKE '%fulfillment push returned false%' THEN 'CHANNEL_PUSH_RETURNED_FALSE'
+  WHEN rq.provider = 'internal'
+    AND rq.topic = 'delayed_tracking_push'
+    AND (
+      rq.last_error LIKE 'eBay API POST %returned success but fulfillment was not readable after verification%'
+      OR rq.last_error LIKE 'eBay tracking conflict for shipment%'
+    )
+    THEN 'EBAY_FULFILLMENT_VERIFY_CONFLICT'
   WHEN rq.last_error LIKE '%status ''cancelled'' is not pushable%' THEN 'SHIPMENT_NOT_PUSHABLE_CANCELLED'
   WHEN rq.topic = 'oms_wms_sync' AND rq.last_error LIKE '%no WMS order%' THEN 'OMS_WMS_SYNC_NO_ORDER'
   WHEN rq.last_error LIKE '%2 character country code%' THEN 'SHIPSTATION_COUNTRY_CODE'
@@ -255,6 +262,7 @@ const DEAD_LETTER_LABELS: Record<string, string> = {
   SHOPIFY_PUSH_NO_POSITIVE_QTY: "Tracking push — shipment had no items",
   SHOPIFY_PUSH_SKU_NOT_ON_FO: "Tracking push — item not on the order",
   CHANNEL_PUSH_RETURNED_FALSE: "Tracking push — provider did not accept update",
+  EBAY_FULFILLMENT_VERIFY_CONFLICT: "eBay tracking conflicts with an existing fulfillment",
   SHIPMENT_NOT_PUSHABLE_CANCELLED: "Shipment push — cancelled shipment",
   OMS_WMS_SYNC_NO_ORDER: "Hand-off — no warehouse order was created",
   SHIPSTATION_COUNTRY_CODE: "Push — country code must be 2 letters",
@@ -956,6 +964,10 @@ const DEAD_LETTER_REASONS: DeadLetterReasonDef[] = [
   { code: "CHANNEL_PUSH_RETURNED_FALSE", stage: "writeback", severity: "warning",
     message: "Tracking push did not confirm",
     why: "The channel writeback returned false instead of confirming the tracking update. Do not blind-retry this bucket; verify the provider order and the physical shipment first, then repair the owning OMS/WMS state or retry from the confirmed shipment.",
+    remediation: "MANUAL_REVIEW", replaySafe: false },
+  { code: "EBAY_FULFILLMENT_VERIFY_CONFLICT", stage: "writeback", severity: "warning",
+    message: "eBay already has different tracking for this shipment",
+    why: "This WMS shipment already produced a confirmed eBay fulfillment, but Echelon later received a different tracking number for the same shipment identity. Do not replay the eBay write. Classify the later physical package as a replacement or duplicate, then resolve the reconciliation item.",
     remediation: "MANUAL_REVIEW", replaySafe: false },
   { code: "SHIPMENT_NOT_PUSHABLE_CANCELLED", stage: "engine_push", severity: "info",
     message: "Cancelled shipment was sent to push",

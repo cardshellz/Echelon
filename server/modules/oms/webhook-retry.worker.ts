@@ -7,6 +7,7 @@ import { createShipmentForOrder } from "../wms/create-shipment";
 // Imported (not string-literal'd) so a rename stays in sync. shipstation.service
 // only imports this worker via dynamic import(), so this static import is cycle-safe.
 import { SS_PUSH_INVALID_SHIPMENT } from "./shipstation.service";
+import { isEbayTrackingConflictError } from "./channel-fulfillment-conflict";
 
 const MAX_ATTEMPTS = 5;
 const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
@@ -1504,6 +1505,14 @@ export async function dispatchDelayedTrackingPush(
     );
     return "success";
   } catch (err: any) {
+    if (isEbayTrackingConflictError(err)) {
+      await markRowSuccess(dbArg, item);
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) ` +
+          "was routed to reconciliation because eBay already has a different tracking fulfillment",
+      );
+      return "success";
+    }
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
       dbArg,
       item,

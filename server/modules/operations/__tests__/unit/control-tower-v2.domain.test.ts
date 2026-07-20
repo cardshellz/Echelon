@@ -362,6 +362,53 @@ describe("Control Tower V2 domain", () => {
     });
   });
 
+  it("gives eBay tracking conflicts a package-classification action", () => {
+    const item = wmsReconciliationSource.projectRow({
+      id: 60,
+      source: "channel_writeback",
+      classification: "manual_review",
+      rule: "ebay_tracking_changed_after_fulfillment",
+      status: "open",
+      severity: "review",
+      wms_order_id: 205216,
+      wms_shipment_id: 8802,
+      resolved_wms_order_id: 205216,
+      resolved_wms_shipment_id: 8802,
+      oms_order_id: 244780,
+      channel_order_number: "07-14878-86923",
+      wms_order_number: "07-14878-86923",
+      channel_provider: "ebay",
+      external_system: "ebay",
+      external_order_ref: "07-14878-86923",
+      external_shipment_ref: "9400150206217770309995",
+      idempotency_key:
+        "channel_writeback:ebay_tracking_changed_after_fulfillment:shipment:8802",
+      summary: "eBay already has a different tracking fulfillment.",
+      details: {
+        priorTrackingNumber: "9400150206217770309995",
+        currentTrackingNumber: "9400150206217777402897",
+      },
+      first_seen_at: "2026-07-20T12:00:00.000Z",
+      last_seen_at: "2026-07-20T12:00:00.000Z",
+      occurrence_count: 1,
+      updated_at: "2026-07-20T12:00:00.000Z",
+      tracking_number: "9400150206217777402897",
+      shipping_engine: "shipstation",
+      engine_order_ref: "762526158",
+    }, new Date("2026-07-20T14:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      title: "eBay tracking changed after fulfillment",
+      entityRef: "Order 07-14878-86923",
+      recommendedAction: expect.stringContaining(
+        "Classify the later package as a replacement or duplicate",
+      ),
+      evidenceSummary: expect.objectContaining({
+        trackingNumber: "9400150206217777402897",
+      }),
+    });
+  });
+
   it("labels provider ids explicitly when no channel order number is known", () => {
     const item = wmsReconciliationSource.projectRow({
       id: 2,
