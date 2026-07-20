@@ -89,17 +89,9 @@ export function PricingProgramsTab() {
     queryFn: () => getJson<WarehouseOption[]>("/api/warehouses"),
   });
 
-  const initialRolloutData = useMemo<RateTablesResponse | undefined>(() => {
-    if (!data) return undefined;
-    return {
-      ...data,
-      serviceLevels: data.serviceLevels.filter((level) => level.code === "standard"),
-    };
-  }, [data]);
-
   const programs = useMemo(
-    () => initialRolloutData ? buildProgramOverviews(initialRolloutData) : [],
-    [initialRolloutData],
+    () => data ? buildProgramOverviews(data) : [],
+    [data],
   );
 
   const filteredPrograms = useMemo(() => {
@@ -181,14 +173,14 @@ export function PricingProgramsTab() {
     );
   }
 
-  if (view.kind === "editor" && initialRolloutData) {
+  if (view.kind === "editor" && data) {
     return (
       <RateTableEditor
         launch={view.launch}
-        rateBooks={initialRolloutData.rateBooks}
-        serviceLevels={initialRolloutData.serviceLevels}
+        rateBooks={data.rateBooks}
+        serviceLevels={data.serviceLevels}
         warehouses={warehouses}
-        rateTables={initialRolloutData.rateTables}
+        rateTables={data.rateTables}
         onExit={() => setView(view.returnTo)}
       />
     );

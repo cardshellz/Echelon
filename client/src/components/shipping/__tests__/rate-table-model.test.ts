@@ -92,6 +92,33 @@ describe("validateRateGroups", () => {
     });
   });
 
+  it("supports different state schedules inside one shipping option", () => {
+    const result = validateRateGroups([
+      group({
+        id: "pa-rates",
+        name: "Pennsylvania",
+        regions: ["PA"],
+        bands: [
+          { id: "pa-1lb", maxMeasure: "1", rateUsd: "5.99", maxShipmentWeightLb: "" },
+        ],
+      }),
+      group({
+        id: "ca-rates",
+        name: "California",
+        regions: ["CA"],
+        bands: [
+          { id: "ca-1lb", maxMeasure: "1", rateUsd: "8.99", maxShipmentWeightLb: "" },
+        ],
+      }),
+    ], "shipment_weight");
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows).toEqual([
+      expect.objectContaining({ destinationRegion: "PA", rateCents: 599 }),
+      expect.objectContaining({ destinationRegion: "CA", rateCents: 899 }),
+    ]);
+  });
+
   it("builds contiguous pallet bands with an optional total-weight ceiling", () => {
     const result = validateRateGroups([
       group({

@@ -1,7 +1,7 @@
 /**
  * Create / edit a pricing program: business name plus explicit "Used by"
- * assignments (channel · purpose · warehouse scope). Cross-program conflicts
- * come back from the API as actionable 409s and render inline.
+ * assignments (business flow + warehouse scope). The persisted channel and
+ * purpose remain explicit, while the UI only offers valid combinations.
  */
 
 import { useEffect, useState } from "react";
@@ -27,11 +27,13 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import {
-  CHANNEL_CHOICES,
-  PURPOSE_CHOICES,
+  PRICING_FLOW_CHOICES,
   invalidateShippingAdmin,
   postJson,
+  pricingFlowKey,
+  pricingFlowLabel,
   putJson,
+  type PricingFlowChoice,
   type RateBookSummary,
   type WarehouseOption,
 } from "./api";
@@ -113,13 +115,26 @@ export function ProgramFormDialog({
   });
 
   const addAssignment = () => {
+    const defaultFlow = PRICING_FLOW_CHOICES[0];
     setAssignments((current) => [...current, {
       key: nextKey(),
-      pricingChannel: "shopify",
-      ratePurpose: "customer_checkout",
+      pricingChannel: defaultFlow.pricingChannel,
+      ratePurpose: defaultFlow.ratePurpose,
       originWarehouseId: null,
     }]);
   };
+
+  const flowChoices: PricingFlowChoice[] = [...PRICING_FLOW_CHOICES];
+  for (const assignment of assignments) {
+    const value = pricingFlowKey(assignment);
+    if (flowChoices.some((choice) => choice.value === value)) continue;
+    flowChoices.push({
+      value,
+      label: pricingFlowLabel(assignment),
+      pricingChannel: assignment.pricingChannel,
+      ratePurpose: assignment.ratePurpose,
+    });
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -150,8 +165,8 @@ export function ProgramFormDialog({
             <div>
               <Label>Used by</Label>
               <p className="text-xs text-muted-foreground">
-                Each scope (channel · purpose · warehouse) can be served by exactly one program
-                at a time.
+                Assign this complete set of shipping prices to one or more checkout or
+                fulfillment flows. Each flow and warehouse scope can use one active program.
               </p>
             </div>
             {assignments.length === 0 && (
@@ -162,28 +177,26 @@ export function ProgramFormDialog({
             {assignments.map((assignment) => (
               <div
                 key={assignment.key}
-                className="grid gap-2 sm:grid-cols-[1fr_1.4fr_1fr_auto]"
+                className="grid gap-2 sm:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_auto]"
               >
                 <Select
-                  value={assignment.pricingChannel}
-                  onValueChange={(value) => setAssignments((current) => current.map((item) =>
-                    item.key === assignment.key ? { ...item, pricingChannel: value } : item))}
+                  value={pricingFlowKey(assignment)}
+                  onValueChange={(value) => {
+                    const flow = flowChoices.find((choice) => choice.value === value);
+                    if (!flow) return;
+                    setAssignments((current) => current.map((item) =>
+                      item.key === assignment.key
+                        ? {
+                            ...item,
+                            pricingChannel: flow.pricingChannel,
+                            ratePurpose: flow.ratePurpose,
+                          }
+                        : item));
+                  }}
                 >
-                  <SelectTrigger className="h-9" aria-label="Channel"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="h-9" aria-label="Business flow"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {CHANNEL_CHOICES.map((choice) => (
-                      <SelectItem key={choice.value} value={choice.value}>{choice.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={assignment.ratePurpose}
-                  onValueChange={(value) => setAssignments((current) => current.map((item) =>
-                    item.key === assignment.key ? { ...item, ratePurpose: value } : item))}
-                >
-                  <SelectTrigger className="h-9" aria-label="Purpose"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {PURPOSE_CHOICES.map((choice) => (
+                    {flowChoices.map((choice) => (
                       <SelectItem key={choice.value} value={choice.value}>{choice.label}</SelectItem>
                     ))}
                   </SelectContent>
