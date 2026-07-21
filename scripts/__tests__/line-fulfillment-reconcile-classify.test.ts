@@ -53,8 +53,10 @@ describe("deriveCurrentModel mirrors production deriveWmsFromShipments", () => {
   it("no shipment rows → 'ready'", () => {
     expect(deriveCurrentModel(row({ n_ship: 0, n_shipped: 0 }))).toBe("ready");
   });
-  it("any on_hold shipment → 'on_hold'", () => {
-    expect(deriveCurrentModel(row({ n_ship: 2, n_shipped: 1, n_onhold: 1 }))).toBe("on_hold");
+  it("treats retired on_hold shipment status as open while hold remains orthogonal", () => {
+    expect(deriveCurrentModel(row({ n_ship: 2, n_shipped: 1, n_onhold: 1 }))).toBe(
+      "partially_shipped",
+    );
   });
 });
 

@@ -81,7 +81,52 @@ describe("ShipStation tracking webhook registration", () => {
     });
 
     expect(result.status).toBe("already_configured");
+    expect(result).toMatchObject({
+      webhook: { authenticationReadback: "verified" },
+    });
     expect(api.createWebhook).not.toHaveBeenCalled();
+  });
+
+  it("accepts ShipStation's masked persisted secret readback without claiming value verification", async () => {
+    const api = client([webhook({
+      headers: [{
+        key: "x-echelon-shipstation-tracking-secret",
+        value: "*****",
+      }],
+    })]);
+
+    await expect(configureShipStationTrackingWebhook({
+      client: api,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: true,
+    })).resolves.toMatchObject({
+      status: "already_configured",
+      webhook: {
+        headerNames: ["x-echelon-shipstation-tracking-secret"],
+        authenticationReadback: "masked_unverifiable",
+      },
+    });
+    expect(api.createWebhook).not.toHaveBeenCalled();
+  });
+
+  it("rejects a readable authentication value that does not match the configured secret", async () => {
+    const api = client([webhook({
+      headers: [{
+        key: "x-echelon-shipstation-tracking-secret",
+        value: "different-readable-secret-value",
+      }],
+    })]);
+
+    await expect(configureShipStationTrackingWebhook({
+      client: api,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: true,
+    })).resolves.toMatchObject({
+      status: "conflict",
+      trackingWebhooks: [{ authenticationReadback: "mismatched" }],
+    });
   });
 
   it("plans creation in dry-run and creates exactly once in execute mode", async () => {
@@ -163,7 +208,13 @@ describe("ShipStation tracking webhook registration", () => {
     const executeApi = client([existing]);
     executeApi.listWebhooks
       .mockResolvedValueOnce([existing])
-      .mockResolvedValueOnce([webhook({ webhook_id: "43350" })]);
+      .mockResolvedValueOnce([webhook({
+        webhook_id: "43350",
+        headers: [{
+          key: "x-echelon-shipstation-tracking-secret",
+          value: "*****",
+        }],
+      })]);
     await expect(configureShipStationTrackingWebhook({
       client: executeApi,
       targetUrl: TARGET,
@@ -172,7 +223,11 @@ describe("ShipStation tracking webhook registration", () => {
       takeover: { webhookId: "43350", currentUrl: legacyUrl },
     })).resolves.toMatchObject({
       status: "taken_over",
-      webhook: { webhookId: "43350", url: TARGET },
+      webhook: {
+        webhookId: "43350",
+        url: TARGET,
+        authenticationReadback: "masked_unverifiable",
+      },
     });
     expect(executeApi.updateWebhook).toHaveBeenCalledWith("43350", {
       name: "Echelon carrier tracking",

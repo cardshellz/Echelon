@@ -8,7 +8,7 @@ const MIGRATION_SOURCE = readFileSync(
     "../../../../../migrations/0589_outbound_shipment_item_purpose_authority.sql",
   ),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 describe("outbound shipment item purpose authority migration", () => {
   it("replaces the obsolete all-lines-require-order-item constraint", () => {

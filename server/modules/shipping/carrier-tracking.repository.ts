@@ -1198,7 +1198,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             last_link_reconciled_at = ${reconciledAt},
             next_link_reconcile_at = CASE
               WHEN ${totalLinks}::integer > 0 THEN NULL
-              ELSE ${reconciledAt} + INTERVAL '30 minutes'
+              ELSE ${reconciledAt}::timestamptz + INTERVAL '30 minutes'
             END,
             link_reconcile_attempts = CASE
               WHEN ${totalLinks}::integer > 0 THEN 0
