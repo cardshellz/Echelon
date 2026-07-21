@@ -6,6 +6,8 @@
  * SHADOW-SAFE BY CONSTRUCTION:
  *   - 404s unless SHIPPING_CALLBACK_TOKEN is set AND the path token matches
  *     (constant-time compare) — with no env var the endpoint does not exist.
+ *   - SHOPIFY_CHECKOUT_RATE_MODE defaults to off. Test mode requires every
+ *     cart SKU to match SHOPIFY_CHECKOUT_RATE_TEST_SKUS before quoting.
  *   - Quotes require an ACTIVE shipping.service_level and matching ACTIVE
  *     local rate table. Provider-method routing is a later capability and is
  *     not consulted by checkout quoting in the initial rollout.
@@ -39,6 +41,13 @@ import { quoteShipment } from "../../application/shipment-quote.service";
 import { localRateTableShippingRateProvider } from "../../application/shipping-rate-provider";
 import { resolveShipmentLineWeights } from "../../application/shipment-weight.service";
 import { weightOnlyParcelProvider } from "../../application/weight-only-parcel.provider";
+import {
+  parseCheckoutRateRolloutPolicy,
+  resolveCheckoutRateRollout,
+  type CheckoutRateRolloutDecision,
+  type CheckoutRateRolloutPolicy,
+} from "../../domain/checkout-rate-rollout-policy";
+import { resolveShopifyCheckoutRateOwnership } from "../../domain/destination-rate-ownership";
 import { normalizeUsPostalRegion } from "../../domain/us-geography";
 import { loadCatalogWeightsBySku } from "../../infrastructure/catalog-weight.repository";
 
@@ -150,6 +159,21 @@ export interface ShopifyRate {
   max_delivery_date?: string;
 }
 
+function callbackRateRolloutPolicy(): CheckoutRateRolloutPolicy {
+  return parseCheckoutRateRolloutPolicy({
+    mode: process.env.SHOPIFY_CHECKOUT_RATE_MODE,
+    testSkus: process.env.SHOPIFY_CHECKOUT_RATE_TEST_SKUS,
+  });
+}
+
+export type CheckoutRateDisposition =
+  | "invalid_request"
+  | "shopify_managed_destination"
+  | "rollout_disabled"
+  | "rollout_test_bypassed"
+  | "echelon_quote_unavailable"
+  | "echelon_quoted";
+
 /**
  * Map Card Shellz-owned service-level quotes directly to Shopify rates.
  * Delivery estimates are keyed by service-level id. Missing promises omit
@@ -214,24 +238,121 @@ export function registerCarrierCallbackRoutes(app: Express): void {
  * with a console.error, and every request gets a best-effort snapshot
  * (source 'checkout') regardless of outcome.
  */
-async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
+export interface PersistCheckoutSnapshotInput {
+  body: unknown;
+  request: ParsedRateRequest | null;
+  parcelPlan: unknown | null;
+  rates: RateQuoteResult | null;
+  shopifyRates: ShopifyRate[];
+  warnings: string[];
+  disposition: CheckoutRateDisposition;
+  rolloutDecision: CheckoutRateRolloutDecision | null;
+}
+
+export interface CheckoutRateDependencies {
+  originWarehouseId: () => number;
+  rolloutPolicy: () => CheckoutRateRolloutPolicy;
+  loadCatalogWeightsBySku: typeof loadCatalogWeightsBySku;
+  quoteShipment: typeof quoteShipment;
+  loadDeliveryEstimates: typeof loadDeliveryEstimates;
+  persistSnapshot: typeof persistCheckoutSnapshot;
+}
+
+const DEFAULT_CHECKOUT_RATE_DEPENDENCIES: CheckoutRateDependencies = {
+  originWarehouseId: callbackOriginWarehouseId,
+  rolloutPolicy: callbackRateRolloutPolicy,
+  loadCatalogWeightsBySku,
+  quoteShipment,
+  loadDeliveryEstimates,
+  persistSnapshot: persistCheckoutSnapshot,
+};
+
+export async function computeCheckoutRates(
+  body: unknown,
+  dependencies: CheckoutRateDependencies = DEFAULT_CHECKOUT_RATE_DEPENDENCIES,
+): Promise<ShopifyRate[]> {
   const parsed = parseShopifyRateRequest(body);
   if (!parsed.ok) {
     console.error(`[CarrierCallback] ${parsed.error}`);
-    await persistCheckoutSnapshot({
+    await dependencies.persistSnapshot({
       body, request: null, parcelPlan: null, rates: null,
-      shopifyRates: [], warnings: [parsed.error],
+      shopifyRates: [], warnings: [parsed.error], disposition: "invalid_request",
+      rolloutDecision: null,
     });
     return [];
   }
   const request = parsed.request;
   const warnings: string[] = [];
 
+  const ownership = resolveShopifyCheckoutRateOwnership(request.destCountry);
+  if (!ownership.ok) {
+    console.error(`[CarrierCallback] ${ownership.message}`);
+    await dependencies.persistSnapshot({
+      body,
+      request,
+      parcelPlan: null,
+      rates: null,
+      shopifyRates: [],
+      warnings: [ownership.message],
+      disposition: "invalid_request",
+      rolloutDecision: null,
+    });
+    return [];
+  }
+  if (ownership.owner === "shopify") {
+    const warning = `${ownership.countryCode} checkout rates are managed by Shopify; Echelon did not quote this destination.`;
+    console.info(JSON.stringify({
+      code: "SHIPPING_CHECKOUT_DESTINATION_DELEGATED",
+      destinationCountry: ownership.countryCode,
+      rateOwner: ownership.owner,
+    }));
+    await dependencies.persistSnapshot({
+      body,
+      request,
+      parcelPlan: null,
+      rates: null,
+      shopifyRates: [],
+      warnings: [warning],
+      disposition: "shopify_managed_destination",
+      rolloutDecision: null,
+    });
+    return [];
+  }
+
+  const rolloutDecision = resolveCheckoutRateRollout(
+    dependencies.rolloutPolicy(),
+    request.items.map((item) => item.sku),
+  );
+  if (!rolloutDecision.shouldQuote) {
+    console.info(JSON.stringify({
+      code: "SHOPIFY_CHECKOUT_RATE_ROLLOUT_BYPASSED",
+      mode: rolloutDecision.mode,
+      reasonCode: rolloutDecision.reasonCode,
+      destinationCountry: request.destCountry,
+      ...(rolloutDecision.deniedSkus
+        ? { deniedSkus: rolloutDecision.deniedSkus }
+        : {}),
+    }));
+    await dependencies.persistSnapshot({
+      body,
+      request,
+      parcelPlan: null,
+      rates: null,
+      shopifyRates: [],
+      warnings: [rolloutDecision.message],
+      disposition: rolloutDecision.mode === "test"
+        ? "rollout_test_bypassed"
+        : "rollout_disabled",
+      rolloutDecision,
+    });
+    return [];
+  }
+
   try {
-    const originWarehouseId = callbackOriginWarehouseId();
+    const originWarehouseId = dependencies.originWarehouseId();
     let catalogWeightBySku = new Map<string, number | null>();
     try {
-      catalogWeightBySku = await loadCatalogWeightsBySku(
+      catalogWeightBySku = await dependencies.loadCatalogWeightsBySku(
         request.items.flatMap((line) => line.sku ? [line.sku] : []),
       );
     } catch (error) {
@@ -246,7 +367,7 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
       })),
       catalogWeightBySku,
     );
-    const shipmentQuote = await quoteShipment({
+    const shipmentQuote = await dependencies.quoteShipment({
       channel: "shopify",
       originWarehouseId,
       destination: {
@@ -261,9 +382,10 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
     });
     if (!shipmentQuote.ok) {
       warnings.push(...shipmentQuote.errors);
-      await persistCheckoutSnapshot({
+      await dependencies.persistSnapshot({
         body, request, parcelPlan: null, rates: null,
-        shopifyRates: [], warnings,
+        shopifyRates: [], warnings, disposition: "echelon_quote_unavailable",
+        rolloutDecision,
       });
       return [];
     }
@@ -273,7 +395,11 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
     // promise. Carrier-method enforcement remains a fulfillment concern.
     let deliveryEstimates: Map<number, DeliveryWindow> = new Map();
     try {
-      deliveryEstimates = await loadDeliveryEstimates(originWarehouseId, rates.quotes, new Date());
+      deliveryEstimates = await dependencies.loadDeliveryEstimates(
+        originWarehouseId,
+        rates.quotes,
+        new Date(),
+      );
     } catch (error) {
       console.error("[CarrierCallback] promise lookup failed; rates returned without delivery dates:", error);
       warnings.push(`promise lookup failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -282,18 +408,26 @@ async function computeCheckoutRates(body: unknown): Promise<ShopifyRate[]> {
     const shopifyRates = mapQuotesToShopifyRates(rates.quotes, deliveryEstimates);
     warnings.push(...parcelPlan.warnings, ...rates.warnings);
 
-    await persistCheckoutSnapshot({
+    await dependencies.persistSnapshot({
       body, request,
       parcelPlan,
       rates,
-      shopifyRates, warnings,
+      shopifyRates, warnings, disposition: "echelon_quoted",
+      rolloutDecision,
     });
     return shopifyRates;
   } catch (error) {
     console.error("[CarrierCallback] quote pipeline failed:", error);
     warnings.push(`quote pipeline failed: ${error instanceof Error ? error.message : String(error)}`);
-    await persistCheckoutSnapshot({
-      body, request, parcelPlan: null, rates: null, shopifyRates: [], warnings,
+    await dependencies.persistSnapshot({
+      body,
+      request,
+      parcelPlan: null,
+      rates: null,
+      shopifyRates: [],
+      warnings,
+      disposition: "echelon_quote_unavailable",
+      rolloutDecision,
     });
     return [];
   }
@@ -338,17 +472,15 @@ async function loadDeliveryEstimates(
 }
 
 /** Best-effort snapshot — a persistence failure must never affect checkout. */
-async function persistCheckoutSnapshot(input: {
-  body: unknown;
-  request: ParsedRateRequest | null;
-  parcelPlan: unknown | null;
-  rates: RateQuoteResult | null;
-  shopifyRates: ShopifyRate[];
-  warnings: string[];
-}): Promise<void> {
+async function persistCheckoutSnapshot(input: PersistCheckoutSnapshotInput): Promise<void> {
   try {
     const requestPayload = input.request
-      ? { destPostal: input.request.destPostal, destCountry: input.request.destCountry, items: input.request.items }
+      ? {
+          destPostal: input.request.destPostal,
+          destCountry: input.request.destCountry,
+          destRegion: input.request.destRegion,
+          items: input.request.items,
+        }
       : { unparsedBody: safeJsonable(input.body) };
     await db.insert(shippingQuoteSnapshots).values({
       source: "checkout",
@@ -367,6 +499,8 @@ async function persistCheckoutSnapshot(input: {
           }
         : null,
       metadata: {
+        disposition: input.disposition,
+        rolloutDecision: input.rolloutDecision,
         shopifyRates: input.shopifyRates,
         ratesReturned: input.shopifyRates.length,
         warnings: input.warnings,

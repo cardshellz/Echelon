@@ -125,26 +125,35 @@ Variant fulfillment data lives on the catalog (`ProductDetail → Fulfillment ch
 
 ## 6 · Activation runbook — path to cutover
 
-Each step is independently reversible; nothing reaches customers until step 5.
+Each step is independently reversible; only allowlisted test carts can receive Echelon rates in step 6, and normal customer traffic remains untouched until step 7.
 
 1. **DONE — Separate shipping from packing and prices:** shared shipment, Echelon-weight resolver, parcel/rate providers, pricing context, zone sets, and independently assigned rate books are in place. eBay shopper checkout remains policy-owned.
 2. **NEXT — Improve Echelon weight coverage:** resolve active variants with no `catalog.product_variants.weight_grams` and verify representative carts. Shopify weight is a warned fallback during transition; missing both sources is recorded and underquoted by policy, not blocked.
 3. **NEXT — Finish base-rate configuration:** create internal service-level tables for Standard, Priority, Overnight, and any Pallet Freight programs needed by assigned rate books. Keep tables and service levels inactive.
-4. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
-5. **Go live (Standard only):**
-   - Set Heroku config `SHIPPING_CALLBACK_TOKEN` (random secret) and, if origin ≠ warehouse 1, `SHIPPING_CALLBACK_ORIGIN_WAREHOUSE_ID`.
-   - Register the CarrierService in Shopify pointing at `POST /api/shipping/rates-callback/<token>`.
+4. **NEXT — Verify active US rates:** activate one reviewed rate-table revision, open its Pricing Program detail, and use `Test live US rates` with representative warehouses, states, ZIPs, and weights. This calls the production assignment selector and active tables, persists a `manual` quote snapshot, and reports if a different program owns the route. Drafts are never included.
+5. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
+6. **Controlled Shopify checkout validation:**
+   - Set Heroku config `SHIPPING_CALLBACK_TOKEN` (random secret), `SHOPIFY_CHECKOUT_RATE_MODE=off`, and, if origin ≠ warehouse 1, `SHIPPING_CALLBACK_ORIGIN_WAREHOUSE_ID`.
+   - Deploy the callback, then register the CarrierService in Shopify pointing at `POST /api/shipping/rates-callback/<token>`. Re-audit delivery-zone assignments immediately; `off` must return no Echelon rates even if Shopify attaches the service unexpectedly.
+   - Create an isolated Shopify test shipping profile with hidden test variants and US-only zones. Attach Echelon only to that profile; leave Parcelify and the two production profiles unchanged.
+   - Set exact test variant SKUs in `SHOPIFY_CHECKOUT_RATE_TEST_SKUS`, then change `SHOPIFY_CHECKOUT_RATE_MODE=test`. Every cart line must be allowlisted or Echelon returns no rates.
+   - Use the unpublished theme to exercise representative Lower-48 and HIPRAK addresses. Verify callback snapshots and quoted prices before proceeding; the theme is a test entry point, not the isolation boundary.
+7. **Go live (Standard only):**
    - Activate the `standard` service level and its reviewed rate table.
-   - Attach the new carrier service to the US zones in the delivery profiles alongside Parcelify; verify rate parity in a real checkout; then remove Parcelify from the zones.
+   - Return `SHOPIFY_CHECKOUT_RATE_MODE` to `off`, attach Echelon alongside Parcelify to the four audited US zones in General profile and Storage Boxes, and verify that Echelon remains silent.
+   - During a controlled window, set `SHOPIFY_CHECKOUT_RATE_MODE=live`, verify real checkout parity, then remove Parcelify from those US zones. Do not alter Shopify-managed international zones.
    - **Open item before uninstalling Parcelify entirely:** confirm how CarrierService (third-party calculated rates) is enabled on the current Shopify plan — Parcelify being installed may be what grants it today.
-6. **Decommission Parcelify** once the engine has served checkout cleanly for an agreed soak period.
-7. **After checkout is stable:** expose the runtime service to first-party websites, import dropship's distinct vendor rates into its own book, dual-run old/new dropship quotes before switching providers, keep eBay fulfillment-policy selection in its adapter, and advance cartonization through its separate test/shadow program.
+8. **Decommission Parcelify** once the engine has served checkout cleanly for an agreed soak period.
+9. **After checkout is stable:** expose the runtime service to first-party websites, import dropship's distinct vendor rates into its own book, dual-run old/new dropship quotes before switching providers, keep eBay fulfillment-policy selection in its adapter, and advance cartonization through its separate test/shadow program.
 
-> **Rollback at any point:** deactivate service levels (response becomes `{rates: []}`) or unset `SHIPPING_CALLBACK_TOKEN` (endpoint 404s) and re-attach Parcelify to the zones.
+> **Rollback at any point:** set `SHOPIFY_CHECKOUT_RATE_MODE=off` first, confirm Echelon returns no rates, and keep or re-attach Parcelify to the US zones. Deactivating service levels is a secondary rate-level stop; unsetting `SHIPPING_CALLBACK_TOKEN` makes the endpoint return 404 and is the final credential revocation step.
 
 ## 7 · Key mechanics & invariants (do not break)
 
 - **Fail-empty, never fail-wrong:** the callback returns `{rates: []}` on any parse/zone/band/timeout failure. An empty response blocks checkout for that address rather than mispricing it. Keep that property.
+- **Fail-closed rollout:** `SHOPIFY_CHECKOUT_RATE_MODE` accepts only `off`, `test`, or `live` and defaults to `off`; an invalid value also resolves to `off`. Test mode quotes only when every cart line has an exact SKU in `SHOPIFY_CHECKOUT_RATE_TEST_SKUS`. Bypassed requests never run weight lookup or rating and record their rollout reason in the checkout snapshot.
+- **One destination owner:** Echelon owns `US` Shopify checkout rates. Every valid non-US country is delegated to Shopify/Global-e by wildcard; it does not need an Echelon country row. The Echelon CarrierService must be attached only to US delivery zones. A non-US callback is defense-in-depth: it bypasses all Echelon weight/rating work, returns no competing rate, and snapshots disposition `shopify_managed_destination`.
+- **Completed Shopify orders are authoritative:** order intake preserves Shopify's destination country, currency, and shipping charge. It must not reject or re-rate an international order because Echelon lacks a local country configuration.
 - **Sale over perfect weight data:** every positive physical-line weight contributes `unitWeight × quantity`; SKU-less lines are retained. Missing weights contribute zero, produce snapshot warnings, and never block checkout by themselves. An all-missing cart uses a 1g rate-band floor.
 - **One rating engine, separate books:** Shopify checkout, first-party websites, and dropship vendor fulfillment use the shared runtime service but may resolve different prices. eBay shopper checkout remains external-policy managed. Dropship retains vendor-rate configuration plus post-quote insurance/handling/wallet behavior.
 - **Canonical weight order:** Echelon `catalog.product_variants.weight_grams` wins. Shopify request weight is a warned transition fallback. Missing both contributes zero and never blocks checkout by itself.
