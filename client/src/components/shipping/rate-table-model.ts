@@ -41,6 +41,92 @@ export const ALL_REGION_CODES = US_POSTAL_REGIONS.map(([code]) => code);
 export const CONTIGUOUS_US = ALL_REGION_CODES.filter((code) => !NON_CONTIGUOUS.has(code));
 export const ALL_US_STATES = ALL_REGION_CODES.filter((code) => !TERRITORIES.has(code));
 
+export interface DestinationGroupTemplate {
+  id: string;
+  name: string;
+  regions: readonly string[];
+}
+
+/** Broad coverage shortcuts that may intentionally overlap regional templates. */
+export const DESTINATION_COVERAGE_TEMPLATES: readonly DestinationGroupTemplate[] = [
+  { id: "contiguous-us", name: "Contiguous US", regions: CONTIGUOUS_US },
+  { id: "all-us-states", name: "All US states", regions: ALL_US_STATES },
+  { id: "states-and-territories", name: "States + territories", regions: ALL_REGION_CODES },
+];
+
+/**
+ * Editable shipping regions. Together these form one exhaustive,
+ * non-overlapping partition of every supported US state and territory.
+ */
+export const DESTINATION_REGION_TEMPLATES: readonly DestinationGroupTemplate[] = [
+  {
+    id: "northeast",
+    name: "Northeast",
+    regions: ["CT", "ME", "MA", "NH", "RI", "VT", "NJ", "NY", "PA"],
+  },
+  {
+    id: "mid-atlantic",
+    name: "Mid-Atlantic",
+    regions: ["DE", "DC", "MD", "VA", "WV"],
+  },
+  {
+    id: "southeast",
+    name: "Southeast",
+    regions: ["AL", "FL", "GA", "KY", "MS", "NC", "SC", "TN"],
+  },
+  {
+    id: "south-central",
+    name: "South Central",
+    regions: ["AR", "LA", "OK", "TX"],
+  },
+  {
+    id: "midwest",
+    name: "Midwest",
+    regions: ["IL", "IN", "IA", "KS", "MI", "MN", "MO", "NE", "ND", "OH", "SD", "WI"],
+  },
+  {
+    id: "mountain-west",
+    name: "Mountain West",
+    regions: ["AZ", "CO", "ID", "MT", "NV", "NM", "UT", "WY"],
+  },
+  {
+    id: "west-coast",
+    name: "West Coast",
+    regions: ["CA", "OR", "WA"],
+  },
+  {
+    id: "alaska-hawaii",
+    name: "Alaska and Hawaii",
+    regions: ["AK", "HI"],
+  },
+  {
+    id: "us-territories",
+    name: "US Territories",
+    regions: ["AS", "GU", "MP", "PR", "VI"],
+  },
+];
+
+export const DESTINATION_GROUP_TEMPLATES: readonly DestinationGroupTemplate[] = [
+  ...DESTINATION_COVERAGE_TEMPLATES,
+  ...DESTINATION_REGION_TEMPLATES,
+];
+
+export function destinationGroupTemplateById(
+  id: string,
+): DestinationGroupTemplate | null {
+  return DESTINATION_GROUP_TEMPLATES.find((template) => template.id === id) ?? null;
+}
+
+export function findDestinationGroupTemplate(
+  regions: readonly string[],
+): DestinationGroupTemplate | null {
+  const selected = new Set(regions);
+  return DESTINATION_GROUP_TEMPLATES.find((template) => (
+    selected.size === template.regions.length
+    && template.regions.every((region) => selected.has(region))
+  )) ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Editor state
 // ---------------------------------------------------------------------------
