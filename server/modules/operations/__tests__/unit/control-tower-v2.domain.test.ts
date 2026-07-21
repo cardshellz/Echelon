@@ -8,8 +8,10 @@ import {
   type ProjectedControlTowerWorkItem,
 } from "../../control-tower-v2.domain";
 import {
+  carrierTrackingSource,
   channelFulfillmentSource,
   inventoryIntegritySource,
+  resolveCarrierAcceptanceGraceMinutes,
   wmsReconciliationSource,
 } from "../../control-tower-v2.sources";
 
@@ -258,6 +260,269 @@ describe("Control Tower V2 domain", () => {
     expect(item.actualState).toContain("fulfillment order line unavailable");
   });
 
+  it("loads carrier authority gaps from labels, links, and immutable tracking evidence", async () => {
+    let queryText = "";
+    let queryValues: unknown[] | undefined;
+    const rows = await carrierTrackingSource.loadRows({
+      query: async (text, values) => {
+        queryText = text;
+        queryValues = values;
+        return { rows: [] };
+      },
+    }, new Date("2026-07-20T12:00:00.000Z"));
+
+    expect(rows).toEqual([]);
+    expect(queryText).toContain("wms.shipping_provider_labels");
+    expect(queryText).toContain("wms.shipping_provider_label_links");
+    expect(queryText).toContain("wms.carrier_tracking_events");
+    expect(queryText).toContain("wms.carrier_tracking_webhook_receipts");
+    expect(queryText).toContain("wms.carrier_tracking_webhook_receipt_parses");
+    expect(queryText).toContain("wms.carrier_tracking_webhook_hydrations");
+    expect(queryText).toContain("wms.carrier_tracking_subscriptions");
+    expect(queryText).toContain("wms.carrier_tracking_subscription_labels");
+    expect(queryText).toContain("carrier_tracking_carrier_missing");
+    expect(queryText).toContain("carrier_tracking_subscription_not_active");
+    expect(queryText).toContain("carrier_tracking_subscription_review");
+    expect(queryText).toContain("voided_label_carrier_movement");
+    expect(queryText).toContain("carrier_acceptance_overdue");
+    expect(queryText).toContain("carrier_tracking_receipt_missing");
+    expect(queryText).toContain("carrier_tracking_payload_rejected");
+    expect(queryText).toContain("carrier_tracking_receipt_unparsed");
+    expect(queryText).toContain("carrier_tracking_hydration_not_complete");
+    expect(queryText).toContain("carrier_tracking_hydration_review");
+    expect(queryText).toContain("acceptance_subscription.activated_at");
+    expect(queryText).toContain("latest_confirmed_label_event");
+    expect(queryText).toContain("JOIN latest_confirmed_label_event AS confirmed");
+    expect(queryText).toContain(
+      "GREATEST(label.first_observed_at, acceptance_subscription.activated_at)",
+    );
+    expect(queryValues).toEqual(["2026-07-20T12:00:00.000Z", 15, 1080]);
+  });
+
+  it("validates the configurable carrier-acceptance window", () => {
+    expect(resolveCarrierAcceptanceGraceMinutes(undefined)).toBe(1080);
+    expect(resolveCarrierAcceptanceGraceMinutes("240")).toBe(240);
+    expect(() => resolveCarrierAcceptanceGraceMinutes("59")).toThrow(
+      "CARRIER_ACCEPTANCE_GRACE_MINUTES",
+    );
+    expect(() => resolveCarrierAcceptanceGraceMinutes("10081")).toThrow(
+      "CARRIER_ACCEPTANCE_GRACE_MINUTES",
+    );
+    expect(() => resolveCarrierAcceptanceGraceMinutes("1.5")).toThrow(
+      "CARRIER_ACCEPTANCE_GRACE_MINUTES",
+    );
+  });
+
+  it("projects an exhausted webhook hydration as an actionable review issue", () => {
+    const item = carrierTrackingSource.projectRow({
+      source_key: "receipt:301:hydration_review",
+      issue_code: "carrier_tracking_hydration_review",
+      label_id: null,
+      event_id: null,
+      receipt_id: 301,
+      provider: "shipstation",
+      provider_label_id: null,
+      tracking_number: "1Z999AA10123456784",
+      label_status: null,
+      link_count: 0,
+      wms_order_id: null,
+      order_number: null,
+      order_numbers: [],
+      provider_status_code: null,
+      canonical_status: null,
+      dispatch_evidence: null,
+      match_status: "review",
+      reason_code: "SHIPSTATION_TRACKING_HYDRATION_INVALID_RESPONSE",
+      first_seen_at: "2026-07-20T11:00:00.000Z",
+      last_seen_at: "2026-07-20T11:05:00.000Z",
+    }, new Date("2026-07-20T12:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      code: "carrier_tracking_hydration_review",
+      entityType: "carrier_tracking_webhook_receipt",
+      entityId: "301",
+      entityRef: "Tracking 1Z999AA10123456784",
+      severity: "high",
+    });
+    expect(item.actualState).toContain("SHIPSTATION_TRACKING_HYDRATION_INVALID_RESPONSE");
+  });
+
+  it("projects a permanently rejected tracking subscription with its provider error", () => {
+    const item = carrierTrackingSource.projectRow({
+      source_key: "label:12:subscription_review",
+      issue_code: "carrier_tracking_subscription_review",
+      label_id: 12,
+      event_id: null,
+      receipt_id: null,
+      provider: "shipstation",
+      provider_label_id: "442000003",
+      tracking_number: "1Z999AA10123456785",
+      label_status: "active",
+      link_count: 1,
+      wms_order_id: 204_901,
+      order_number: "#60002",
+      order_numbers: ["#60002"],
+      provider_status_code: null,
+      canonical_status: null,
+      dispatch_evidence: null,
+      match_status: "review",
+      reason_code: "SHIPSTATION_TRACKING_HTTP",
+      first_seen_at: "2026-07-20T11:00:00.000Z",
+      last_seen_at: "2026-07-20T11:05:00.000Z",
+    }, new Date("2026-07-20T12:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      code: "carrier_tracking_subscription_review",
+      entityType: "shipping_provider_label",
+      entityId: "12",
+      entityRef: "Order #60002 / 1Z999AA10123456785",
+      severity: "high",
+    });
+    expect(item.actualState).toContain("match review");
+    expect(item.actualState).toContain("SHIPSTATION_TRACKING_HTTP");
+  });
+
+  it("projects an overdue carrier acceptance scan as a shipping exception", () => {
+    const item = carrierTrackingSource.projectRow({
+      source_key: "label:10:acceptance_overdue",
+      issue_code: "carrier_acceptance_overdue",
+      label_id: 10,
+      event_id: null,
+      provider: "shipstation",
+      provider_label_id: "442000001",
+      tracking_number: "1Z999AA10123456784",
+      label_status: "active",
+      link_count: 2,
+      wms_order_id: 204_900,
+      order_number: "#60001",
+      order_numbers: ["#60001"],
+      provider_status_code: "NY",
+      canonical_status: "pre_transit",
+      dispatch_evidence: "not_confirmed",
+      match_status: "matched",
+      reason_code: "single_active_label_candidate",
+      first_seen_at: "2026-07-19T12:00:00.000Z",
+      last_seen_at: "2026-07-19T12:05:00.000Z",
+    }, new Date("2026-07-20T12:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      domain: "shipping",
+      code: "carrier_acceptance_overdue",
+      entityType: "shipping_provider_label",
+      entityId: "10",
+      entityRef: "Order #60001 / 1Z999AA10123456784",
+      severity: "medium",
+      urgency: "overdue",
+      detailLocator: {
+        wmsOrderId: 204_900,
+        links: [{ label: "Open #60001", href: "/orders?orderId=204900" }],
+      },
+    });
+    expect(item.actualState).toContain("dispatch evidence not_confirmed");
+  });
+
+  it("projects confirmed movement on a voided label as a blocker", () => {
+    const item = carrierTrackingSource.projectRow({
+      source_key: "label:11:voided_movement",
+      issue_code: "voided_label_carrier_movement",
+      label_id: 11,
+      event_id: 91,
+      provider: "shipstation",
+      provider_label_id: "442000002",
+      tracking_number: "9400111899560000000000",
+      label_status: "voided",
+      link_count: 1,
+      wms_order_id: null,
+      order_number: null,
+      order_numbers: [],
+      provider_status_code: "IT",
+      canonical_status: "in_transit",
+      dispatch_evidence: "confirmed",
+      match_status: "voided_label",
+      reason_code: "tracking_matches_voided_label",
+      first_seen_at: "2026-07-19T12:00:00.000Z",
+      last_seen_at: "2026-07-20T11:00:00.000Z",
+    }, new Date("2026-07-20T12:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      code: "voided_label_carrier_movement",
+      severity: "blocker",
+      urgency: "overdue",
+    });
+  });
+
+  it("projects missing signed webhook evidence as an ingestion blocker", () => {
+    const item = carrierTrackingSource.projectRow({
+      source_key: "event:92:receipt_missing",
+      issue_code: "carrier_tracking_receipt_missing",
+      label_id: null,
+      event_id: 92,
+      receipt_id: null,
+      provider: "shipstation",
+      provider_label_id: null,
+      tracking_number: "1Z999AA10123456784",
+      label_status: null,
+      link_count: 0,
+      wms_order_id: null,
+      order_number: null,
+      order_numbers: [],
+      provider_status_code: "AC",
+      canonical_status: "accepted",
+      dispatch_evidence: "confirmed",
+      match_status: null,
+      reason_code: "verified_webhook_receipt_missing",
+      first_seen_at: "2026-07-20T11:00:00.000Z",
+      last_seen_at: "2026-07-20T11:00:00.000Z",
+    }, new Date("2026-07-20T12:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      code: "carrier_tracking_receipt_missing",
+      entityType: "carrier_tracking_event",
+      entityId: "92",
+      severity: "blocker",
+      urgency: "overdue",
+    });
+  });
+
+  it("projects a retained but rejected signed payload as an actionable shipping issue", () => {
+    const item = carrierTrackingSource.projectRow({
+      source_key: "receipt:93:payload_rejected",
+      issue_code: "carrier_tracking_payload_rejected",
+      label_id: null,
+      event_id: null,
+      receipt_id: 93,
+      provider: "shipstation",
+      provider_label_id: null,
+      tracking_number: null,
+      label_status: null,
+      link_count: 0,
+      wms_order_id: null,
+      order_number: null,
+      order_numbers: [],
+      provider_status_code: null,
+      canonical_status: null,
+      dispatch_evidence: null,
+      match_status: null,
+      reason_code: "INVALID_CARRIER_TRACKING_PAYLOAD",
+      first_seen_at: "2026-07-20T11:00:00.000Z",
+      last_seen_at: "2026-07-20T11:00:01.000Z",
+    }, new Date("2026-07-20T12:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      code: "carrier_tracking_payload_rejected",
+      entityType: "carrier_tracking_webhook_receipt",
+      entityId: "93",
+      entityRef: "Webhook receipt 93",
+      severity: "high",
+      urgency: "overdue",
+      detailLocator: {
+        sourceTable: "wms.carrier_tracking_webhook_receipts",
+        sourceId: 93,
+      },
+    });
+    expect(item.actualState).toContain("INVALID_CARRIER_TRACKING_PAYLOAD");
+  });
+
   it("uses the sales-channel order number for WMS reconciliation work", () => {
     const item = wmsReconciliationSource.projectRow({
       id: 1,
@@ -312,7 +577,7 @@ describe("Control Tower V2 domain", () => {
     });
   });
 
-  it("explains an unclassified physical package without internal authority language", () => {
+  it("does not describe an unmapped provider record as a physical reship without carrier evidence", () => {
     const item = wmsReconciliationSource.projectRow({
       id: 59,
       source: "shipstation_notify",
@@ -349,12 +614,15 @@ describe("Control Tower V2 domain", () => {
     }, new Date("2026-07-17T14:00:00.000Z"));
 
     expect(item.summary).toBe(
-      "ShipStation reported another package for order 24-14838-80207 with " +
-      "tracking 1Z8X330WYN43653055. Echelon did not change fulfillment or " +
-      "inventory because the package has not been confirmed as an intentional " +
-      "replacement or a duplicate.",
+      "ShipStation reported an unmapped shipment or label record for order " +
+      "24-14838-80207 with tracking 1Z8X330WYN43653055. Echelon did not change " +
+      "fulfillment or inventory because carrier possession and merchant intent " +
+      "are not yet confirmed.",
     );
-    expect(item.summary).not.toMatch(/authority|mutation|WMS lines/i);
+    expect(item.summary).not.toMatch(/authority|mutation|WMS lines|another package|reship/i);
+    expect(item.recommendedAction).toContain(
+      "Classify a replacement only after physical carrier movement is confirmed",
+    );
     expect(item.evidenceSummary).toMatchObject({
       trackingNumber: "1Z8X330WYN43653055",
       externalOrderRef: "763385590",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  envBoundedPositiveInteger,
   envFlagEnabled,
   envPositiveInteger,
   getSchedulerDisableReason,
@@ -25,6 +26,19 @@ describe("scheduler-config", () => {
     expect(envPositiveInteger("LIMIT", 25, { LIMIT: "50" })).toBe(50);
     expect(envPositiveInteger("LIMIT", 25, { LIMIT: "0" })).toBe(25);
     expect(envPositiveInteger("LIMIT", 25, { LIMIT: "abc" })).toBe(25);
+  });
+
+  it("parses bounded positive integer config with a safe fallback", () => {
+    expect(envBoundedPositiveInteger("LIMIT", 100, 500, { LIMIT: "250" })).toBe(250);
+    expect(envBoundedPositiveInteger("LIMIT", 100, 500, { LIMIT: "501" })).toBe(100);
+    expect(envBoundedPositiveInteger("LIMIT", 100, 500, { LIMIT: "0" })).toBe(100);
+    expect(envBoundedPositiveInteger("LIMIT", 100, 500, { LIMIT: "abc" })).toBe(100);
+  });
+
+  it("rejects invalid bounded integer defaults", () => {
+    expect(() => envBoundedPositiveInteger("LIMIT", 501, 500, {})).toThrow(
+      "Fallback for LIMIT must be an integer between 1 and 500",
+    );
   });
 
   it("requires exact true for boolean flags", () => {

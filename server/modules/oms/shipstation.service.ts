@@ -30,6 +30,7 @@ import {
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
+import type { ShippingProviderLabelObserver } from "../shipping/carrier-tracking.service";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -919,7 +920,11 @@ export function redactSensitiveUrl(rawUrl: string): string {
 // Service Factory
 // ---------------------------------------------------------------------------
 
-export function createShipStationService(db: any, inventoryCore?: any) {
+export function createShipStationService(
+  db: any,
+  inventoryCore?: any,
+  dependencies: { providerLabelObserver?: ShippingProviderLabelObserver } = {},
+) {
   const baseUrl = "https://ssapi.shipstation.com";
   const apiKey = process.env.SHIPSTATION_API_KEY;
   const apiSecret = process.env.SHIPSTATION_API_SECRET;
@@ -3754,6 +3759,30 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     return { processed: false };
   }
 
+  async function observeProviderLabelShadow(shipment: ShipStationShipment): Promise<void> {
+    if (!dependencies.providerLabelObserver) return;
+    try {
+      await dependencies.providerLabelObserver.observeShipStationLabel(shipment);
+    } catch (error) {
+      // Shadow ingestion must not alter the established SHIP_NOTIFY result. It
+      // remains observational until carrier authority passes production validation.
+      console.error(JSON.stringify({
+        level: "error",
+        action: "shipping_provider_label_observation_failed",
+        outcome: "shadow_error",
+        provider: "shipstation",
+        provider_label_id: shipment.shipmentId ?? null,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
+  }
+
+  async function observeProviderLabelsShadow(shipments: ShipStationShipment[]): Promise<void> {
+    for (const shipment of shipments) {
+      await observeProviderLabelShadow(shipment);
+    }
+  }
+
   async function processShipNotify(resourceUrl: string): Promise<number> {
     // Fetch the actual shipment data from ShipStation
     const data = await apiRequest<{ shipments: ShipStationShipment[] }>(
@@ -3766,6 +3795,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     const failures: Array<{ shipmentId: number | null; message: string }> = [];
 
     for (const shipment of shipments) {
+      await observeProviderLabelShadow(shipment);
       try {
         const result = await processShipmentNotification(shipment);
         if (result.processed) processed++;
@@ -4761,6 +4791,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
     getOrderByNumber,
     processShipmentNotification,
     processShipNotify,
+    observeProviderLabelsShadow,
     registerWebhook,
     isConfigured,
     putOrderOnHold,
