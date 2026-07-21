@@ -135,7 +135,7 @@ export interface NormalizedCarrierTrackingEvent {
 export interface VerifiedCarrierWebhookReceipt {
   provider: "shipstation";
   receiptHash: string;
-  signatureAlgorithm: "RSA-SHA256";
+  signatureAlgorithm: "RSA-SHA256" | "HMAC-SHA256";
   signatureKeyId: string;
   signatureTimestampRaw: string;
   signatureTimestampAt: Date;

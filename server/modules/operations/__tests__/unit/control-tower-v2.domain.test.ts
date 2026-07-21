@@ -451,7 +451,7 @@ describe("Control Tower V2 domain", () => {
     });
   });
 
-  it("projects missing signed webhook evidence as an ingestion blocker", () => {
+  it("projects missing authenticated webhook evidence as an ingestion blocker", () => {
     const item = carrierTrackingSource.projectRow({
       source_key: "event:92:receipt_missing",
       issue_code: "carrier_tracking_receipt_missing",
@@ -484,7 +484,7 @@ describe("Control Tower V2 domain", () => {
     });
   });
 
-  it("projects a retained but rejected signed payload as an actionable shipping issue", () => {
+  it("projects a retained but rejected authenticated payload as an actionable shipping issue", () => {
     const item = carrierTrackingSource.projectRow({
       source_key: "receipt:93:payload_rejected",
       issue_code: "carrier_tracking_payload_rejected",

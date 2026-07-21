@@ -3,14 +3,26 @@ import type {
   ShipStationTrackingWebhooksClient,
 } from "./shipstation-tracking-webhooks.client";
 import { ShipStationTrackingWebhooksClientError } from "./shipstation-tracking-webhooks.client";
+import {
+  assertValidShipStationTrackingWebhookSecret,
+  SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER,
+} from "./shipstation-tracking-api-config";
 
 const TRACKING_WEBHOOK_NAME = "Echelon carrier tracking";
+
+export interface ShipStationTrackingWebhookSummary {
+  webhookId: string;
+  name: string | null;
+  event: string;
+  url: string;
+  headerNames: string[];
+}
 
 export type ShipStationTrackingWebhookRegistrationResult =
   | {
     status: "already_configured";
     targetUrl: string;
-    webhook: ShipStationTrackingWebhook;
+    webhook: ShipStationTrackingWebhookSummary;
   }
   | {
     status: "create_planned";
@@ -19,17 +31,18 @@ export type ShipStationTrackingWebhookRegistrationResult =
   | {
     status: "created";
     targetUrl: string;
-    webhook: ShipStationTrackingWebhook;
+    webhook: ShipStationTrackingWebhookSummary;
   }
   | {
     status: "conflict";
     targetUrl: string;
-    trackingWebhooks: ShipStationTrackingWebhook[];
+    trackingWebhooks: ShipStationTrackingWebhookSummary[];
   };
 
 export interface ConfigureShipStationTrackingWebhookInput {
   client: ShipStationTrackingWebhooksClient;
   targetUrl: string;
+  webhookSecret: string;
   execute: boolean;
 }
 
@@ -64,20 +77,22 @@ function normalizedProviderUrl(value: string): string | null {
 function classifyExistingTrackingWebhooks(
   webhooks: ShipStationTrackingWebhook[],
   targetUrl: string,
+  webhookSecret: string,
 ): Extract<
   ShipStationTrackingWebhookRegistrationResult,
   { status: "already_configured" | "conflict" }
 > | null {
   const trackingWebhooks = webhooks.filter((webhook) => webhook.event.toLowerCase() === "track");
   const exactMatches = trackingWebhooks.filter(
-    (webhook) => normalizedProviderUrl(webhook.url) === targetUrl,
+    (webhook) => normalizedProviderUrl(webhook.url) === targetUrl
+      && hasExpectedAuthenticationHeader(webhook, webhookSecret),
   );
 
   if (trackingWebhooks.length === 1 && exactMatches.length === 1) {
     return {
       status: "already_configured",
       targetUrl,
-      webhook: exactMatches[0],
+      webhook: summarizeWebhook(exactMatches[0]),
     };
   }
 
@@ -85,7 +100,7 @@ function classifyExistingTrackingWebhooks(
     return {
       status: "conflict",
       targetUrl,
-      trackingWebhooks,
+      trackingWebhooks: trackingWebhooks.map(summarizeWebhook),
     };
   }
 
@@ -102,8 +117,10 @@ export async function configureShipStationTrackingWebhook(
   input: ConfigureShipStationTrackingWebhookInput,
 ): Promise<ShipStationTrackingWebhookRegistrationResult> {
   const targetUrl = normalizeTrackingWebhookTargetUrl(input.targetUrl);
+  const webhookSecret = input.webhookSecret.trim();
+  assertValidShipStationTrackingWebhookSecret(webhookSecret);
   const webhooks = await input.client.listWebhooks();
-  const currentState = classifyExistingTrackingWebhooks(webhooks, targetUrl);
+  const currentState = classifyExistingTrackingWebhooks(webhooks, targetUrl, webhookSecret);
   if (currentState) return currentState;
 
   if (!input.execute) {
@@ -116,6 +133,10 @@ export async function configureShipStationTrackingWebhook(
       name: TRACKING_WEBHOOK_NAME,
       event: "track",
       url: targetUrl,
+      headers: [{
+        key: SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER,
+        value: webhookSecret,
+      }],
     });
   } catch (error) {
     if (!isAlreadyExistsConflict(error)) throw error;
@@ -123,12 +144,37 @@ export async function configureShipStationTrackingWebhook(
     const racedState = classifyExistingTrackingWebhooks(
       await input.client.listWebhooks(),
       targetUrl,
+      webhookSecret,
     );
     if (racedState) return racedState;
     throw error;
   }
-  if (webhook.event.toLowerCase() !== "track" || normalizedProviderUrl(webhook.url) !== targetUrl) {
+  if (webhook.event.toLowerCase() !== "track"
+      || normalizedProviderUrl(webhook.url) !== targetUrl
+      || !hasExpectedAuthenticationHeader(webhook, webhookSecret)) {
     throw new Error("ShipStation created a webhook that does not match the requested tracking subscription");
   }
-  return { status: "created", targetUrl, webhook };
+  return { status: "created", targetUrl, webhook: summarizeWebhook(webhook) };
+}
+
+function hasExpectedAuthenticationHeader(
+  webhook: ShipStationTrackingWebhook,
+  webhookSecret: string,
+): boolean {
+  const matchingHeaders = (webhook.headers ?? []).filter(
+    (header) => header.key.trim().toLowerCase() === SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER,
+  );
+  return matchingHeaders.length === 1 && matchingHeaders[0].value === webhookSecret;
+}
+
+function summarizeWebhook(webhook: ShipStationTrackingWebhook): ShipStationTrackingWebhookSummary {
+  return {
+    webhookId: webhook.webhook_id,
+    name: webhook.name?.trim() || null,
+    event: webhook.event,
+    url: webhook.url,
+    headerNames: [...new Set((webhook.headers ?? []).map((header) => header.key.trim()))]
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right)),
+  };
 }

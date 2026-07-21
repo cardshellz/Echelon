@@ -7,7 +7,7 @@ import {
   ShipStationTrackingEventsError,
 } from "../../shipstation-tracking-events.client";
 
-const resourceUrl = "https://api.shipengine.com/v1/tracking"
+const resourceUrl = "https://api.shipstation.com/v2/tracking"
   + "?carrier_code=ups&tracking_number=1Z999AA10123456784";
 
 describe("ShipStation tracking event hydration client", () => {
@@ -20,12 +20,12 @@ describe("ShipStation tracking event hydration client", () => {
     });
 
     const rejected = [
-      "http://api.shipengine.com/v1/tracking?carrier_code=ups&tracking_number=1Z1",
-      "https://example.com/v1/tracking?carrier_code=ups&tracking_number=1Z1",
-      "https://user:secret@api.shipengine.com/v1/tracking?carrier_code=ups&tracking_number=1Z1",
-      "https://api.shipengine.com/v1/labels?carrier_code=ups&tracking_number=1Z1",
-      "https://api.shipengine.com/v1/tracking?carrier_code=ups",
-      "https://api.shipengine.com/v1/tracking?carrier_code=ups&carrier_code=fedex&tracking_number=1Z1",
+      "http://api.shipstation.com/v2/tracking?carrier_code=ups&tracking_number=1Z1",
+      "https://example.com/v2/tracking?carrier_code=ups&tracking_number=1Z1",
+      "https://user:secret@api.shipstation.com/v2/tracking?carrier_code=ups&tracking_number=1Z1",
+      "https://api.shipstation.com/v2/labels?carrier_code=ups&tracking_number=1Z1",
+      "https://api.shipstation.com/v2/tracking?carrier_code=ups",
+      "https://api.shipstation.com/v2/tracking?carrier_code=ups&carrier_code=fedex&tracking_number=1Z1",
     ];
     for (const candidate of rejected) {
       expect(() => parseShipStationTrackingResourceUrl(candidate)).toThrow(
@@ -54,7 +54,7 @@ describe("ShipStation tracking event hydration client", () => {
       payload: { tracking_number: "1Z999AA10123456784" },
     });
     expect(fetchImpl).toHaveBeenCalledWith(
-      "https://api.shipengine.com/v1/tracking"
+      "https://api.shipstation.com/v2/tracking"
         + "?carrier_code=ups&tracking_number=1Z999AA10123456784",
       expect.objectContaining({
         method: "GET",
@@ -94,7 +94,7 @@ describe("ShipStation tracking event hydration client", () => {
     })).toThrowError(ShipStationTrackingEventsError);
     expect(() => createShipStationTrackingEventsClient({
       apiKey: "secret",
-      baseUrl: "http://api.shipengine.test/v1",
+      baseUrl: "http://api.shipstation.test/v2",
     })).toThrow(/HTTPS/);
   });
 

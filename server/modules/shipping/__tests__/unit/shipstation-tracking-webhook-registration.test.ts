@@ -12,6 +12,7 @@ import {
 } from "../../shipstation-tracking-webhooks.client";
 
 const TARGET = "https://echelon.example.com/api/shipping/webhooks/shipstation/track";
+const WEBHOOK_SECRET = "w".repeat(32);
 
 function webhook(overrides: Partial<ShipStationTrackingWebhook> = {}): ShipStationTrackingWebhook {
   return {
@@ -19,6 +20,10 @@ function webhook(overrides: Partial<ShipStationTrackingWebhook> = {}): ShipStati
     name: "Echelon carrier tracking",
     event: "track",
     url: TARGET,
+    headers: [{
+      key: "x-echelon-shipstation-tracking-secret",
+      value: WEBHOOK_SECRET,
+    }],
     ...overrides,
   };
 }
@@ -60,6 +65,7 @@ describe("ShipStation tracking webhook registration", () => {
     const result = await configureShipStationTrackingWebhook({
       client: api,
       targetUrl: `${TARGET}/`,
+      webhookSecret: WEBHOOK_SECRET,
       execute: true,
     });
 
@@ -72,6 +78,7 @@ describe("ShipStation tracking webhook registration", () => {
     await expect(configureShipStationTrackingWebhook({
       client: dryRunApi,
       targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
       execute: false,
     })).resolves.toEqual({ status: "create_planned", targetUrl: TARGET });
     expect(dryRunApi.createWebhook).not.toHaveBeenCalled();
@@ -80,6 +87,7 @@ describe("ShipStation tracking webhook registration", () => {
     const result = await configureShipStationTrackingWebhook({
       client: executeApi,
       targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
       execute: true,
     });
     expect(result.status).toBe("created");
@@ -88,6 +96,10 @@ describe("ShipStation tracking webhook registration", () => {
       name: "Echelon carrier tracking",
       event: "track",
       url: TARGET,
+      headers: [{
+        key: "x-echelon-shipstation-tracking-secret",
+        value: WEBHOOK_SECRET,
+      }],
     });
   });
 
@@ -96,6 +108,7 @@ describe("ShipStation tracking webhook registration", () => {
     const differentResult = await configureShipStationTrackingWebhook({
       client: different,
       targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
       execute: true,
     });
     expect(differentResult.status).toBe("conflict");
@@ -108,6 +121,7 @@ describe("ShipStation tracking webhook registration", () => {
     const duplicateResult = await configureShipStationTrackingWebhook({
       client: duplicate,
       targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
       execute: true,
     });
     expect(duplicateResult.status).toBe("conflict");
@@ -128,10 +142,11 @@ describe("ShipStation tracking webhook registration", () => {
     await expect(configureShipStationTrackingWebhook({
       client: api,
       targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
       execute: true,
     })).resolves.toMatchObject({
       status: "already_configured",
-      webhook: { webhook_id: "se-raced" },
+      webhook: { webhookId: "se-raced" },
     });
     expect(api.listWebhooks).toHaveBeenCalledTimes(2);
     expect(api.createWebhook).toHaveBeenCalledOnce();
@@ -154,16 +169,46 @@ describe("ShipStation tracking webhook registration", () => {
     await expect(configureShipStationTrackingWebhook({
       client: api,
       targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
       execute: true,
     })).resolves.toMatchObject({
       status: "conflict",
-      trackingWebhooks: [{ webhook_id: "se-other" }],
+      trackingWebhooks: [{ webhookId: "se-other" }],
+    });
+  });
+
+  it("treats a matching URL without the required secret header as a conflict", async () => {
+    const api = client([webhook({ headers: [] })]);
+
+    await expect(configureShipStationTrackingWebhook({
+      client: api,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: true,
+    })).resolves.toMatchObject({ status: "conflict" });
+    expect(api.createWebhook).not.toHaveBeenCalled();
+  });
+
+  it("never exposes webhook header values in registration results", async () => {
+    const api = client([webhook()]);
+
+    const result = await configureShipStationTrackingWebhook({
+      client: api,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: true,
+    });
+
+    expect(JSON.stringify(result)).not.toContain(WEBHOOK_SECRET);
+    expect(result).toMatchObject({
+      status: "already_configured",
+      webhook: { headerNames: ["x-echelon-shipstation-tracking-secret"] },
     });
   });
 });
 
 describe("ShipStation tracking webhooks client", () => {
-  it("uses the documented ShipEngine V1 API-Key contract and validates list responses", async () => {
+  it("uses the documented ShipStation V2 API-Key contract and validates list responses", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify([webhook()]), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -175,7 +220,7 @@ describe("ShipStation tracking webhooks client", () => {
 
     await expect(api.listWebhooks()).resolves.toEqual([webhook()]);
     expect(fetchImpl).toHaveBeenCalledWith(
-      "https://api.shipengine.com/v1/environment/webhooks",
+      "https://api.shipstation.com/v2/environment/webhooks",
       expect.objectContaining({
         method: "GET",
         headers: expect.objectContaining({ "API-Key": "test-key" }),
@@ -200,7 +245,7 @@ describe("ShipStation tracking webhooks client", () => {
   it("refuses an insecure provider API base URL before sending credentials", () => {
     expect(() => createShipStationTrackingWebhooksClient({
       apiKey: "test-key",
-      baseUrl: "http://api.shipengine.test/v1",
+      baseUrl: "http://api.shipstation.test/v2",
     })).toThrow(/HTTPS/);
   });
 });

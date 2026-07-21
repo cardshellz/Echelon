@@ -8,9 +8,13 @@ const migration = readFileSync(
   join(here, "..", "..", "..", "migrations", "154_carrier_tracking_event_authority.sql"),
   "utf8",
 );
+const v2WebhookAuthMigration = readFileSync(
+  join(here, "..", "..", "..", "migrations", "155_carrier_tracking_v2_webhook_auth.sql"),
+  "utf8",
+);
 
 describe("carrier tracking authority migration", () => {
-  it("separates labels, label links, label events, signed receipts, parse attempts, carrier events, and match attempts", () => {
+  it("separates labels, label links, label events, authenticated receipts, parse attempts, carrier events, and match attempts", () => {
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS wms.shipping_provider_labels");
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS wms.shipping_provider_label_links");
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS wms.shipping_provider_label_events");
@@ -82,5 +86,12 @@ describe("carrier tracking authority migration", () => {
     expect(migration).not.toMatch(/UPDATE\s+(?:oms|wms|inventory)\./i);
     expect(migration).not.toContain("inventory_levels");
     expect(migration).not.toContain("fulfillment_status");
+  });
+
+  it("accepts V2 HMAC receipts while preserving historical RSA receipt evidence", () => {
+    expect(v2WebhookAuthMigration).toContain("signature_algorithm IN ('RSA-SHA256', 'HMAC-SHA256')");
+    expect(v2WebhookAuthMigration).not.toMatch(/UPDATE\s+(?:oms|wms|inventory)\./i);
+    expect(v2WebhookAuthMigration).not.toContain("inventory_levels");
+    expect(v2WebhookAuthMigration).not.toContain("fulfillment_status");
   });
 });

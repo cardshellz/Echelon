@@ -46,7 +46,7 @@ import {
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,
 } from "./modules/shipping/shipstation-tracking-webhook.routes";
-import { createDefaultShipStationWebhookSignatureVerifier } from "./modules/shipping/shipstation-webhook-auth";
+import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-webhook-auth";
 import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
 import type { SafeUser } from "@shared/schema";
 import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
@@ -448,12 +448,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // Start Echelon sync scheduler (replaces old channelSync scheduler)
   startEchelonSyncScheduler(services, db);
 
-  // Signed ShipStation carrier-status observations. This public endpoint is
-  // registered before session-protected application routes and authenticates
-  // the exact raw body with ShipEngine's rotating RSA keys.
+  // Authenticated ShipStation V2 carrier-status observations. This public
+  // endpoint is registered before session-protected application routes and
+  // verifies the dedicated custom-header secret before retaining exact bytes.
   registerShipStationTrackingWebhook(app, {
     service: services.carrierTracking,
-    signatureVerifier: createDefaultShipStationWebhookSignatureVerifier(),
+    webhookVerifier: createDefaultShipStationV2WebhookVerifier(),
     logger: services.carrierTrackingLogger,
   });
 

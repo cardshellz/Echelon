@@ -270,7 +270,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
     };
     this.dependencies.logger.info({
       code: "CARRIER_TRACKING_WEBHOOK_INGESTED",
-      message: "Signed carrier tracking evidence was durably recorded for asynchronous reconciliation.",
+      message: "Authenticated carrier tracking evidence was durably recorded for asynchronous reconciliation.",
       context: {
         provider: event.provider,
         trackingSuffix: trackingSuffix(event.normalizedTrackingNumber),

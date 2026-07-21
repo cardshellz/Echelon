@@ -32,6 +32,7 @@ export interface ShipStationTrackingWebhooksClient {
     name: string;
     event: "track";
     url: string;
+    headers: Array<{ key: string; value: string }>;
   }): Promise<ShipStationTrackingWebhook>;
 }
 
@@ -72,7 +73,7 @@ export function createShipStationTrackingWebhooksClient(
   if (!apiKey) {
     throw new ShipStationTrackingWebhooksClientError(
       "CONFIGURATION",
-      "SHIPSTATION_TRACKING_API_KEY is required to inspect or configure tracking webhooks",
+      "SHIPSTATION_V2_API_KEY is required to inspect or configure tracking webhooks",
     );
   }
   if (!Number.isSafeInteger(requestTimeoutMs)

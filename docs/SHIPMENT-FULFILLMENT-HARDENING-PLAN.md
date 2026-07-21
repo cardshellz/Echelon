@@ -171,7 +171,7 @@ A carrier event may match only a known provider label. Tracking intake cannot in
 
 ### Carrier Tracking Event
 
-A carrier tracking event is provider-signed evidence about a label lifecycle. Only an unambiguous event that proves carrier possession or later movement may become dispatch authority after a separately approved cutover.
+A carrier tracking event is provider-authenticated evidence about a label lifecycle. Only an unambiguous event that proves carrier possession or later movement may become dispatch authority after a separately approved cutover.
 
 Label creation, shipment information sent, electronic advice, and awaiting pickup are pre-dispatch states.
 
@@ -304,7 +304,7 @@ The exact schema should be finalized in migrations during implementation, but th
 - One label may have immutable links to multiple shipment requests, engine orders, physical shipments, or legacy rows.
 - Label observations are append-only lifecycle evidence.
 - Carrier events are append-only normalized provider evidence, unique by `(provider, event_hash)`.
-- Every authenticated carrier webhook records an immutable receipt containing the exact request bytes, signature, key id, timestamp, and their hashes before payload normalization begins.
+- Every authenticated carrier webhook records an immutable receipt containing the exact request bytes, authentication attestation, key identifier, verification timestamp, and their hashes before payload normalization begins.
 - Each parser run appends an immutable normalized or rejected outcome. A receipt remains recoverable even if normalization or event persistence fails later.
 - Match attempts are append-only; an unmatched event remains durable and is retried by reconciliation without provider redelivery.
 
@@ -353,7 +353,7 @@ Required database constraints:
 - Unique `shipping_provider_labels(provider, provider_label_id)`.
 - Exactly one target per provider-label link row while allowing one label to have many link rows.
 - Unique immutable carrier event identity `(provider, event_hash)`.
-- Immutable provider-label events, provider-label links, signed webhook receipts, carrier events, and carrier match attempts.
+- Immutable provider-label events, provider-label links, authenticated webhook receipts, carrier events, and carrier match attempts.
 
 The current active uniqueness on ShipStation order id/key should not be the physical-shipment idempotency boundary after cutover.
 
@@ -465,8 +465,8 @@ Goal: make SHIP_NOTIFY idempotent at the package/tracking level.
 Rules:
 
 - Record provider label creation separately from physical dispatch.
-- Ingest ShipStation `track` webhooks through exact raw-body RSA-SHA256 verification.
-- Persist the exact signed request receipt before normalization, then append the parser outcome and normalized carrier event transactionally before acknowledging the webhook.
+- Ingest ShipStation `track` webhooks through the dedicated custom-header secret and retain a deterministic HMAC attestation over the exact raw request bytes.
+- Persist the exact authenticated request receipt before normalization, then append the parser outcome and normalized carrier event transactionally before acknowledging the webhook.
 - Reconcile the durable event to provider labels asynchronously; a matching failure must not cause loss or repeated delivery of already verified evidence.
 - Match by exact provider label identity first and normalized tracking only as a fallback.
 - Do not create provider labels from carrier events.
@@ -481,16 +481,16 @@ Rules:
 
 Deliverables:
 
-- Append-only provider-label, label-link, signed-webhook-receipt, carrier-event, and match-attempt tables.
+- Append-only provider-label, label-link, authenticated-webhook-receipt, carrier-event, and match-attempt tables.
 - Shadow ingestion and reconciliation that cannot change live fulfillment or inventory state.
-- Control Tower exceptions for unlinked labels, unmatched or ambiguous events, unparsed or rejected signed receipts, voided-label movement, uncertain dispatch, and labels without acceptance scans.
+- Control Tower exceptions for unlinked labels, unmatched or ambiguous events, unparsed or rejected authenticated receipts, voided-label movement, uncertain dispatch, and labels without acceptance scans.
 - ShipStation SHIP_NOTIFY writes `physical_shipments`.
 - Split shipments create multiple physical shipments under one shipping-engine order.
 - Existing `wms.outbound_shipments` tracking mutation becomes compatibility state only.
 
 Exit gate:
 
-- Signed webhook replay is idempotent, exact signed bytes remain independently auditable, and malformed or unsigned requests are rejected.
+- Authenticated webhook replay is idempotent, exact request bytes remain independently auditable, and malformed or unauthenticated requests are rejected.
 - Shadow evidence agrees with known provider and carrier outcomes for a defined observation window.
 - A separate reviewed cutover makes confirmed carrier movement authoritative; this phase does not silently flip authority.
 - Duplicate webhook replay is a no-op.
@@ -633,14 +633,14 @@ Required dashboards:
 - Provider events classified as review exceptions.
 - Active linked labels without confirmed carrier possession after the configured operating threshold.
 - Carrier events that are unmatched, ambiguous, or tied to a voided label.
-- Carrier events missing their immutable signed ingress receipt.
+- Carrier events missing their immutable authenticated ingress receipt.
 - Authenticated webhook receipts with no parse outcome or a rejected latest parse.
 
 ## Carrier Tracking Rollout
 
-1. Deploy the additive tables, signed endpoint, provider-label observation, reconciliation sweep, and Control Tower projections in shadow mode.
-2. Configure ShipStation's `track` webhook to the Echelon signed endpoint after the deployment is healthy.
-3. Observe signature failures, signed-receipt completeness, label-link coverage, match ambiguity, and carrier status classification without changing fulfillment or inventory.
+1. Deploy the additive tables, authenticated endpoint, provider-label observation, reconciliation sweep, and Control Tower projections in shadow mode.
+2. Configure ShipStation's `track` webhook to the authenticated Echelon endpoint after the deployment is healthy.
+3. Observe authentication failures, immutable-receipt completeness, label-link coverage, match ambiguity, and carrier status classification without changing fulfillment or inventory.
 4. Compare shadow carrier evidence with known handoffs and delivered packages for a defined observation window.
 5. Approve a separate authority-cutover change that derives dispatch from confirmed carrier possession.
 6. Keep a Control Tower exception for active labels that lack carrier acceptance after the configured operating threshold.
@@ -649,15 +649,15 @@ The shadow deployment intentionally leaves existing `SHIP_NOTIFY` fulfillment be
 
 ### ShipStation activation contract
 
-The existing ShipStation V1 integration uses `ssapi.shipstation.com`, Basic authentication, and the `SHIP_NOTIFY` webhook. That webhook reports shipment creation/completion; it does not provide the signed carrier-movement stream required for physical-dispatch authority.
+The existing ShipStation V1 integration uses `ssapi.shipstation.com`, Basic authentication, and the `SHIP_NOTIFY` webhook. That webhook reports shipment creation/completion; it does not provide the authenticated carrier-movement stream required for physical-dispatch authority.
 
-Carrier movement uses the separate standalone ShipStation API (formerly ShipEngine) `track` webhook contract. That API calls Echelon at:
+Carrier movement uses the ShipStation application V2 API `track` webhook contract under the same production ShipStation account. That API calls Echelon at:
 
 `/api/shipping/webhooks/shipstation/track`
 
-The endpoint verifies `x-shipengine-rsa-sha256-key-id`, `x-shipengine-rsa-sha256-signature`, and `x-shipengine-timestamp` against ShipEngine's rotating JWKS before retaining any evidence.
+ShipStation V2 supports operator-defined webhook headers. Registration configures a dedicated `x-echelon-shipstation-tracking-secret` header. Echelon compares that value in constant time, then records a deterministic HMAC of the exact request bytes. Neither the webhook secret nor the full-access V2 API key is persisted in the receipt or emitted by the configuration command.
 
-ShipStation documents the `data` object on an `API_TRACK` envelope as optional. If it is absent, Echelon retains the exact signed receipt, validates that `resource_url` identifies the configured HTTPS `/v1/tracking` endpoint, and schedules an authenticated hydration lookup. The webhook request never waits for that provider lookup. A leased scheduler fetches the direct tracking snapshot, enforces the signed carrier/tracking identity, appends the normalized event and hydration attempt atomically, and applies bounded retry or review state. Echelon never follows an arbitrary callback URL and never infers dispatch from the URL alone.
+ShipStation documents the `data` object on an `API_TRACK` envelope as optional. If it is absent, Echelon retains the exact authenticated receipt, validates that `resource_url` identifies the configured HTTPS `/v2/tracking` endpoint, and schedules an authenticated hydration lookup. The webhook request never waits for that provider lookup. A leased scheduler fetches the direct tracking snapshot, enforces the authenticated carrier/tracking identity, appends the normalized event and hydration attempt atomically, and applies bounded retry or review state. Echelon never follows an arbitrary callback URL and never infers dispatch from the URL alone.
 
 After deploying this shadow implementation, configure the subscription explicitly:
 
@@ -667,9 +667,9 @@ heroku run "npx tsx scripts/configure-shipstation-tracking-webhook.ts --dry-run"
 heroku run "npx tsx scripts/configure-shipstation-tracking-webhook.ts --execute" -a cardshellz-echelon
 ```
 
-`SHIPSTATION_TRACKING_API_KEY` must already be present. It is intentionally separate from `SHIPSTATION_V2_API_KEY`: ShipStation documents the standalone ShipStation API (formerly ShipEngine) and the ShipStation application V2 API as separate products and does not document their credentials as interchangeable. Both webhook registration and per-label enrollment use the same documented `https://api.shipengine.com/v1` environment. ShipStation currently documents tracking as an Advanced-plan-or-higher capability. For labels created outside this standalone API, each carrier must also be connected to the same account before tracking enrollment is expected to work. Treat both conditions as deployment gates and verify them in the production account before executing the enrollment backfill. The configuration script is dry-run by default, creates only when no `track` subscription exists, and refuses to delete or overwrite a different or duplicate subscription. A conflict requires operator review in ShipStation before rerunning the script.
+`SHIPSTATION_V2_API_KEY` and `SHIPSTATION_TRACKING_WEBHOOK_SECRET` must already be present in Heroku config. Generate the V2 key from the production ShipStation account's **Settings -> Account -> API Settings -> V2** page. Generate the webhook secret independently with at least 32 random printable characters; never reuse or transmit the V2 API key as a callback header. ShipStation currently documents the V2 key as full account access, so neither value belongs in source control, command output, or support messages. Both webhook registration and per-label enrollment use the documented `https://api.shipstation.com/v2` environment. The configuration script is dry-run by default, creates only when no exact authenticated `track` subscription exists, redacts all header values from output, and refuses to delete or overwrite a different, unauthenticated, or duplicate subscription. A conflict requires operator review in ShipStation before rerunning the script.
 
-Configuring the global `track` webhook is necessary but is not enough for labels created through ShipStation UI or the existing V1 integration. Each active `(carrier_code, tracking_number)` tuple must also be enrolled through `POST /v1/tracking/start`; the provider confirms enrollment only with HTTP 204. Echelon performs that enrollment through the leased subscription state machine above. It never guesses a carrier from tracking-number syntax.
+Configuring the global `track` webhook is necessary but is not enough for existing labels. Each active `(carrier_code, tracking_number)` tuple must also be enrolled through `POST /v2/tracking/start`; the provider confirms enrollment only with HTTP 204. Echelon performs that enrollment through the leased subscription state machine above. It never guesses a carrier from tracking-number syntax.
 
 The five-minute reconciliation scheduler first hydrates missing webhook payloads, then prepares and enrolls at most 25 due subscriptions per sweep. Provider work uses row leases, append-only attempt ledgers, deterministic retry, and a batch lease long enough to cover the bounded serialized request workload. Existing labels can be inspected and enrolled with the bounded operator command:
 
@@ -678,15 +678,13 @@ heroku run "npx tsx scripts/enroll-shipstation-carrier-tracking.ts --dry-run" -a
 heroku run "npx tsx scripts/enroll-shipstation-carrier-tracking.ts --execute --limit=25 --batches=10" -a cardshellz-echelon
 ```
 
-The command is dry-run by default, refuses execute mode without a tracking API key, paces provider requests, and cannot change fulfillment or inventory. Control Tower separately exposes missing carrier codes, missing or delayed enrollment, exhausted enrollment failures, delayed or exhausted webhook hydration, unsigned or rejected webhook evidence, ambiguous matches, voided-label movement, and active labels with no carrier acceptance after the configured window. `CARRIER_ACCEPTANCE_GRACE_MINUTES` defaults to `1080` (18 hours), accepts 60 through 10080 minutes, and starts from the later of label observation or successful tracking enrollment so rollout delay does not create false exceptions.
-
-ShipStation also exposes an account-level `track_event_v2` event. It is intentionally not enabled here because its outgoing payload and signature-verification contract have not been proven from the documented integration used by Echelon. Adding it without that proof would create a second unverified ingress path.
+The command is dry-run by default, refuses execute mode without the V2 API key, paces provider requests, and cannot change fulfillment or inventory. Control Tower separately exposes missing carrier codes, missing or delayed enrollment, exhausted enrollment failures, delayed or exhausted webhook hydration, unauthenticated or rejected webhook evidence, ambiguous matches, voided-label movement, and active labels with no carrier acceptance after the configured window. `CARRIER_ACCEPTANCE_GRACE_MINUTES` defaults to `1080` (18 hours), accepts 60 through 10080 minutes, and starts from the later of label observation or successful tracking enrollment so rollout delay does not create false exceptions.
 
 Activation is proven only after all of these are true:
 
 1. The registration command reports `created` or `already_configured` for the exact Echelon URL.
-2. Signed receipts and normalized parse outcomes appear for live tracking callbacks.
-3. Control Tower shows no sustained receipt, signature, parser, label-link, or ambiguity failures.
+2. Authenticated receipts and normalized parse outcomes appear for live tracking callbacks.
+3. Control Tower shows no sustained receipt, authentication, parser, label-link, or ambiguity failures.
 4. Shadow classifications agree with known carrier pickups for the agreed observation window.
 
 ## Immediate Next PR

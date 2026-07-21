@@ -207,7 +207,7 @@ export function createShipStationTrackingEventsClient(
       if (!apiKey) {
         throw new ShipStationTrackingEventsError(
           "CONFIGURATION",
-          "SHIPSTATION_TRACKING_API_KEY is required to hydrate carrier tracking events",
+          "SHIPSTATION_V2_API_KEY is required to hydrate carrier tracking events",
         );
       }
       const validated = parseShipStationTrackingResourceUrl(input.resourceUrl, baseUrlText);
