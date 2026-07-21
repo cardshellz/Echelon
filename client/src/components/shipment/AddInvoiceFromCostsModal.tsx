@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
+import { dollarsToCents } from "@shared/utils/money";
 
 import { format } from "date-fns";
 import { ArrowLeft, Loader2 } from "lucide-react";
@@ -205,7 +206,7 @@ export function AddInvoiceFromCostsModal({
   };
 
   const handleAmountChange = (costId: number, amountStr: string) => {
-    const cents = Math.round(parseFloat(amountStr || "0") * 100) || 0;
+    const cents = dollarsToCents(amountStr || "0");
     setLines((prev) =>
       prev.map((l) => (l.costId === costId ? { ...l, invoiceAmountCents: cents } : l)),
     );

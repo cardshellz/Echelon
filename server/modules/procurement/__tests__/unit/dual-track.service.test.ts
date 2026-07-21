@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockDetectQtyVariance = vi.hoisted(() => vi.fn());
+const mockRecomputePoFinancialAggregates = vi.hoisted(() => vi.fn());
 
 vi.mock("../../po-exceptions.service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../po-exceptions.service")>();
@@ -9,6 +10,10 @@ vi.mock("../../po-exceptions.service", async (importOriginal) => {
     detectQtyVariance: (...args: any[]) => mockDetectQtyVariance(...args),
   };
 });
+
+vi.mock("../../ap-ledger.service", () => ({
+  recomputePoFinancialAggregates: (...args: any[]) => mockRecomputePoFinancialAggregates(...args),
+}));
 
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
@@ -20,9 +25,7 @@ import { createPurchasingService, PurchasingError } from "../../purchasing.servi
 //   2.  transitionPhysical — invalid transitions rejected
 //   3.  transitionFinancial — valid transitions accepted
 //   4.  transitionFinancial — invalid transitions rejected
-//   5.  recomputeFinancialAggregates — correctly sums invoices and payments
-//   6.  recomputeFinancialAggregates — stays "disputed" if currently disputed
-//   7.  recomputeFinancialAggregates — correctly derives financial_status values
+//   5.  recomputeFinancialAggregates — delegates to the AP-owned audited writer
 //   8.  onReceivingOrderClosed — auto-match by product_id when single open line
 //   9.  onReceivingOrderClosed — leaves unlinked when zero matching lines
 //   10. onReceivingOrderClosed — leaves unlinked when multiple open lines (ambiguous)
@@ -515,96 +518,22 @@ describe("createReceiptFromPO — expected-qty pack conversion (RCV-20260710-003
 });
 
 describe("recomputeFinancialAggregates", () => {
-  let db: ReturnType<typeof buildMockDb>;
-  let storage: ReturnType<typeof buildMockStorage>;
-  let svc: ReturnType<typeof createPurchasingService>;
-
   beforeEach(() => {
-    db = buildMockDb();
-    storage = buildMockStorage();
-    svc = createPurchasingService(db, storage);
+    mockRecomputePoFinancialAggregates.mockReset();
+    mockRecomputePoFinancialAggregates.mockResolvedValue(undefined);
   });
 
-  it("(5) correctly sums invoiced and paid amounts from linked invoices", async () => {
-    const po = makePo({ financialStatus: "unbilled" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    // Two invoices: one fully paid, one partially paid
-    db._invoiceRows = [
-      { invoicedAmountCents: 10000, paidAmountCents: 10000 },
-      { invoicedAmountCents: 5000, paidAmountCents: 2500 },
-    ];
-    db._poState = { financialStatus: "unbilled", firstInvoicedAt: null, firstPaidAt: null, fullyPaidAt: null };
+  it("delegates compatibility calls to the AP-owned audited recompute", async () => {
+    const db = buildMockDb();
+    const storage = buildMockStorage();
+    const svc = createPurchasingService(db, storage);
 
     await svc.recomputeFinancialAggregates(1);
 
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.invoicedTotalCents).toBe(15000);
-    expect(updateCall.paidTotalCents).toBe(12500);
-    expect(updateCall.outstandingCents).toBe(2500);
-    expect(updateCall.financialStatus).toBe("partially_paid");
-  });
-
-  it("(6) stays disputed if currently disputed", async () => {
-    const po = makePo({ financialStatus: "disputed" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    db._invoiceRows = [
-      { invoicedAmountCents: 5000, paidAmountCents: 0 },
-    ];
-    db._poState = { financialStatus: "disputed", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null };
-
-    await svc.recomputeFinancialAggregates(1);
-
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.financialStatus).toBe("disputed");
-  });
-
-  it("(7) derives unbilled when no invoices linked", async () => {
-    const po = makePo({ financialStatus: "unbilled" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    db._invoiceRows = [];
-    db._poState = { financialStatus: "unbilled", firstInvoicedAt: null, firstPaidAt: null, fullyPaidAt: null };
-
-    await svc.recomputeFinancialAggregates(1);
-
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.financialStatus).toBe("unbilled");
-    expect(updateCall.invoicedTotalCents).toBe(0);
-    expect(updateCall.outstandingCents).toBe(0);
-  });
-
-  it("(7b) derives paid when all invoices fully paid", async () => {
-    const po = makePo({ financialStatus: "invoiced" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    db._invoiceRows = [
-      { invoicedAmountCents: 8000, paidAmountCents: 8000 },
-    ];
-    db._poState = { financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null };
-
-    await svc.recomputeFinancialAggregates(1);
-
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.financialStatus).toBe("paid");
-    expect(updateCall.fullyPaidAt).toBeInstanceOf(Date);
-  });
-
-  it("(7c) outstanding_cents is always non-negative", async () => {
-    const po = makePo({ financialStatus: "invoiced" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    // Overpayment edge case (shouldn't happen but must not go negative)
-    db._invoiceRows = [
-      { invoicedAmountCents: 1000, paidAmountCents: 1500 },
-    ];
-    db._poState = { financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null };
-
-    await svc.recomputeFinancialAggregates(1);
-
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.outstandingCents).toBe(0); // clamped to 0
+    expect(mockRecomputePoFinancialAggregates).toHaveBeenCalledWith(1, {
+      reason: "Compatibility recompute requested through PurchasingService.",
+    });
+    expect(storage.updatePurchaseOrder).not.toHaveBeenCalled();
   });
 });
 

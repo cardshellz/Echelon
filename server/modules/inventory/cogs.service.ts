@@ -133,8 +133,8 @@ export class COGSService {
   constructor(private readonly db: DrizzleDb) {}
 
   private assertNonNegativeMills(value: number, field: string) {
-    if (!Number.isInteger(value) || value < 0) {
-      throw new Error(`${field} must be a non-negative integer mills value`);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${field} must be a non-negative safe integer mills value`);
     }
   }
 
@@ -213,8 +213,8 @@ export class COGSService {
     preserveExistingCostSourceUnlessPo?: boolean;
     clearProvisional?: boolean;
     requiredCostSource?: string;
-  }): Promise<LotCostRevalueResult | null> {
-    return this.runInTransaction(async (tx) => {
+  }, client?: any): Promise<LotCostRevalueResult | null> {
+    const revalue = async (tx: any): Promise<LotCostRevalueResult | null> => {
       const result = await tx.execute(sql`
         SELECT
           il.id,
@@ -321,7 +321,8 @@ export class COGSService {
         cogsRowsUpdated: cascade.rowsUpdated,
         totalCogsDeltaCents: cascade.totalDeltaCents,
       };
-    });
+    };
+    return client ? revalue(client) : this.runInTransaction(revalue);
   }
 
   // ---------------------------------------------------------------------------
@@ -532,73 +533,100 @@ export class COGSService {
   async reconcileInvoiceVariance(params: {
     purchaseOrderId: number;
     productVariantId: number;
-    invoiceUnitCostCents: number;
+    invoiceUnitCostCents?: number;
+    invoiceUnitCostMills?: number;
     invoiceNumber?: string;
-  }): Promise<{ lotsUpdated: number; cogsRowsUpdated: number; totalCogsDeltaCents: number }> {
-    const { purchaseOrderId, productVariantId, invoiceUnitCostCents } = params;
-    const invoiceUnitCostMills = centsToMills(invoiceUnitCostCents);
-
-    // Find lots linked to this PO + variant
-    const affectedLots = await this.db.execute(sql`
-      SELECT
-        id,
-        unit_cost_cents,
-        landed_cost_cents,
-        total_unit_cost_cents,
-        COALESCE(NULLIF(po_unit_cost_mills, 0), ROUND(COALESCE(po_unit_cost_cents, 0)::numeric * 100)::bigint, 0) AS product_mills,
-        COALESCE(NULLIF(packaging_cost_mills, 0), ROUND(COALESCE(packaging_cost_cents, 0)::numeric * 100)::bigint, 0) AS packaging_mills,
-        COALESCE(NULLIF(landed_cost_mills, 0), ROUND(COALESCE(landed_cost_cents, 0)::numeric * 100)::bigint, 0) AS landed_mills,
-        COALESCE(
-          NULLIF(total_unit_cost_mills, 0),
-          NULLIF(unit_cost_mills, 0),
-          ROUND(COALESCE(NULLIF(total_unit_cost_cents, 0), unit_cost_cents, 0)::numeric * 100)::bigint,
-          0
-        ) AS total_mills
-      FROM inventory.inventory_lots
-      WHERE purchase_order_id = ${purchaseOrderId}
-        AND product_variant_id = ${productVariantId}
-    `);
-
-    const lots = affectedLots.rows || [];
-    if (lots.length === 0) {
-      return { lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0 };
+  }, client?: any): Promise<{ lotsUpdated: number; cogsRowsUpdated: number; totalCogsDeltaCents: number }> {
+    const { purchaseOrderId, productVariantId } = params;
+    if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) {
+      throw new Error("purchaseOrderId must be a positive integer");
+    }
+    if (!Number.isSafeInteger(productVariantId) || productVariantId <= 0) {
+      throw new Error("productVariantId must be a positive integer");
+    }
+    if (params.invoiceUnitCostCents === undefined && params.invoiceUnitCostMills === undefined) {
+      throw new Error("invoiceUnitCostCents or invoiceUnitCostMills is required");
+    }
+    const invoiceUnitCostMills = params.invoiceUnitCostMills === undefined
+      ? centsToMills(params.invoiceUnitCostCents as number)
+      : params.invoiceUnitCostMills;
+    this.assertNonNegativeMills(invoiceUnitCostMills, "invoiceUnitCostMills");
+    if (
+      params.invoiceUnitCostCents !== undefined &&
+      millsToCents(invoiceUnitCostMills) !== params.invoiceUnitCostCents
+    ) {
+      throw new Error("invoiceUnitCostCents and invoiceUnitCostMills disagree");
     }
 
-    let lotsUpdated = 0;
-    let cogsRowsUpdated = 0;
-    let totalCogsDeltaCents = 0;
+    const reconcile = async (tx: any) => {
+      // Lock every affected lot before revaluing any of them. Deterministic
+      // ordering prevents concurrent invoice approvals from deadlocking.
+      const affectedLots = await tx.execute(sql`
+        SELECT
+          id,
+          unit_cost_cents,
+          landed_cost_cents,
+          total_unit_cost_cents,
+          COALESCE(NULLIF(po_unit_cost_mills, 0), ROUND(COALESCE(po_unit_cost_cents, 0)::numeric * 100)::bigint, 0) AS product_mills,
+          COALESCE(NULLIF(packaging_cost_mills, 0), ROUND(COALESCE(packaging_cost_cents, 0)::numeric * 100)::bigint, 0) AS packaging_mills,
+          COALESCE(NULLIF(landed_cost_mills, 0), ROUND(COALESCE(landed_cost_cents, 0)::numeric * 100)::bigint, 0) AS landed_mills,
+          COALESCE(
+            NULLIF(total_unit_cost_mills, 0),
+            NULLIF(unit_cost_mills, 0),
+            ROUND(COALESCE(NULLIF(total_unit_cost_cents, 0), unit_cost_cents, 0)::numeric * 100)::bigint,
+            0
+          ) AS total_mills
+        FROM inventory.inventory_lots
+        WHERE purchase_order_id = ${purchaseOrderId}
+          AND product_variant_id = ${productVariantId}
+        ORDER BY id
+        FOR UPDATE
+      `);
 
-    for (const lot of lots) {
-      const packagingMills = Number(lot.packaging_mills) || 0;
-      const landedMills = Number(lot.landed_mills) || centsToMills(Number(lot.landed_cost_cents) || 0);
-      const newTotalMills = invoiceUnitCostMills + packagingMills + landedMills;
-      const currentProductMills = Number(lot.product_mills) || centsToMills(Number(lot.unit_cost_cents) || 0);
-      const currentTotalMills =
-        Number(lot.total_mills)
-        || centsToMills(Number(lot.total_unit_cost_cents) || Number(lot.unit_cost_cents) || 0);
-
-      if (currentProductMills === invoiceUnitCostMills && currentTotalMills === newTotalMills) {
-        continue; // Already at the right cost
+      const lots = affectedLots.rows || [];
+      if (lots.length === 0) {
+        return { lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0 };
       }
 
-      const reason = params.invoiceNumber
-        ? `invoice_variance:${params.invoiceNumber}`
-        : "invoice_variance";
+      let lotsUpdated = 0;
+      let cogsRowsUpdated = 0;
+      let totalCogsDeltaCents = 0;
 
-      const revalue = await this.revalueLotCostMills({
-        lotId: Number(lot.id),
-        productCostMills: invoiceUnitCostMills,
-        costSource: "invoice",
-        reason,
-      });
-      if (!revalue) continue;
+      for (const lot of lots) {
+        const packagingMills = Number(lot.packaging_mills) || 0;
+        const landedMills = Number(lot.landed_mills) || centsToMills(Number(lot.landed_cost_cents) || 0);
+        const newTotalMills = invoiceUnitCostMills + packagingMills + landedMills;
+        this.assertNonNegativeMills(newTotalMills, "totalUnitCostMills");
+        const currentProductMills = Number(lot.product_mills) || centsToMills(Number(lot.unit_cost_cents) || 0);
+        const currentTotalMills =
+          Number(lot.total_mills)
+          || centsToMills(Number(lot.total_unit_cost_cents) || Number(lot.unit_cost_cents) || 0);
 
-      cogsRowsUpdated += revalue.cogsRowsUpdated;
-      totalCogsDeltaCents += revalue.totalCogsDeltaCents;
-      lotsUpdated++;
-    }
+        if (currentProductMills === invoiceUnitCostMills && currentTotalMills === newTotalMills) {
+          continue;
+        }
 
-    return { lotsUpdated, cogsRowsUpdated, totalCogsDeltaCents };
+        const reason = params.invoiceNumber
+          ? `invoice_variance:${params.invoiceNumber}`
+          : "invoice_variance";
+
+        const revalue = await this.revalueLotCostMills({
+          lotId: Number(lot.id),
+          productCostMills: invoiceUnitCostMills,
+          costSource: "invoice",
+          reason,
+        }, tx);
+        if (!revalue) continue;
+
+        cogsRowsUpdated += revalue.cogsRowsUpdated;
+        totalCogsDeltaCents += revalue.totalCogsDeltaCents;
+        lotsUpdated++;
+      }
+
+      return { lotsUpdated, cogsRowsUpdated, totalCogsDeltaCents };
+    };
+
+    return client ? reconcile(client) : this.runInTransaction(reconcile);
   }
 
   // ---------------------------------------------------------------------------

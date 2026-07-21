@@ -1,4 +1,4 @@
-import { dollarsToCents } from "@shared/utils/money";
+import { centsToMills, dollarsToCents, dollarsToMills, formatMills } from "@shared/utils/money";
 import React, { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, Link, useLocation } from "wouter";
@@ -54,17 +54,14 @@ function formatCents(cents: number | null | undefined): string {
   return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** Show full precision for unit costs (fractional cents like $0.039369) */
-function formatUnitCostCents(cents: number | null | undefined): string {
-  if (!cents && cents !== 0) return "$0.00";
-  const dollars = Number(cents) / 100;
-  // Show up to 6 decimal places, strip trailing zeros, but keep min 2
-  const full = dollars.toFixed(6).replace(/0+$/, "");
-  // Ensure at least 2 decimal places
-  const parts = full.split(".");
-  const decimals = parts[1] || "";
-  const padded = decimals.length < 2 ? decimals.padEnd(2, "0") : decimals;
-  return `$${Number(parts[0]).toLocaleString("en-US")}.${padded}`;
+function formatUnitCost(
+  mills: number | null | undefined,
+  cents: number | null | undefined,
+): string {
+  const authoritativeMills = mills === null || mills === undefined
+    ? centsToMills(Number(cents ?? 0))
+    : Number(mills);
+  return formatMills(authoritativeMills);
 }
 
 function formatDate(d: string | null | undefined) {
@@ -405,7 +402,7 @@ export default function APInvoiceDetail() {
           productName: newLine.productName || undefined,
           description: newLine.description || undefined,
           qtyInvoiced: parseInt(newLine.qtyInvoiced) || 1,
-          unitCostCents: dollarsToCents(newLine.unitCostDollars || "0"),
+          unitCostMills: dollarsToMills(newLine.unitCostDollars || "0"),
         }),
       }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
     },
@@ -673,7 +670,7 @@ export default function APInvoiceDetail() {
                           <TableCell className="text-right font-mono">{line.qtyInvoiced}</TableCell>
                           <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">{line.qtyOrdered ?? "—"}</TableCell>
                           <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">{line.qtyReceived ?? "—"}</TableCell>
-                          <TableCell className="text-right font-mono text-sm">{formatUnitCostCents(line.unitCostCents)}</TableCell>
+                          <TableCell className="text-right font-mono text-sm">{formatUnitCost(line.unitCostMills, line.unitCostCents)}</TableCell>
                           <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
                           <TableCell>
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
@@ -984,7 +981,7 @@ export default function APInvoiceDetail() {
               </div>
               <div className="space-y-2">
                 <Label>Unit Cost ($) *</Label>
-                <Input type="number" step="0.01" min="0" value={newLine.unitCostDollars} onChange={e => setNewLine(f => ({ ...f, unitCostDollars: e.target.value }))} placeholder="0.00" />
+                <Input type="number" step="0.0001" min="0" value={newLine.unitCostDollars} onChange={e => setNewLine(f => ({ ...f, unitCostDollars: e.target.value }))} placeholder="0.0000" />
               </div>
             </div>
             <div className="flex gap-2 justify-end">

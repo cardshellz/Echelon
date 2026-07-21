@@ -102,6 +102,7 @@ import {
   type CreatePurchaseRecommendationRunInput,
 } from "./purchase-recommendation-snapshot.service";
 import type { FinancialCommandDescriptor } from "../../platform/commands/transactional-command.service";
+import { recomputePoFinancialAggregates } from "./ap-ledger.service";
 
 const PG_INTEGER_MAX = 2_147_483_647;
 const MAX_INLINE_PO_LINES = 2_000;
@@ -1460,97 +1461,11 @@ export function createPurchasingService(
     );
   }
 
-  /**
-   * Recompute financial aggregates for a PO from source-of-truth tables.
-   *
-   * Sums invoiced_amount_cents and paid_amount_cents from non-voided
-   * vendor_invoices linked via vendor_invoice_po_links. Updates
-   * invoicedTotalCents, paidTotalCents, outstandingCents, and derives
-   * a new financialStatus.
-   *
-   * This is a pure recompute — idempotent, safe to call multiple times
-   * (Rule #6). Uses direct DB query for accuracy (the storage interface
-   * doesn't expose invoice aggregates).
-   *
-   * Rule #3: all arithmetic in BigInt cents. No floats.
-   */
+  /** @deprecated AP ledger owns invoice-derived PO financial aggregates. */
   async function recomputeFinancialAggregates(poId: number): Promise<void> {
-    const po = await storage.getPurchaseOrderById(poId);
-    if (!po) return;
-
-    // Sum invoiced and paid amounts from non-voided invoices linked to this PO.
-    const invoiceRows = await db
-      .select({
-        invoicedAmountCents: vendorInvoicesTable.invoicedAmountCents,
-        paidAmountCents: vendorInvoicesTable.paidAmountCents,
-      })
-      .from(vendorInvoicePoLinksTable)
-      .innerJoin(
-        vendorInvoicesTable,
-        eq(vendorInvoicePoLinksTable.vendorInvoiceId, vendorInvoicesTable.id),
-      )
-      .where(
-        and(
-          eq(vendorInvoicePoLinksTable.purchaseOrderId, poId),
-          ne(vendorInvoicesTable.status, "voided"),
-        ),
-      );
-
-    // Integer-only arithmetic (Rule #3).
-    let invoicedTotal = BigInt(0);
-    let paidTotal = BigInt(0);
-    for (const row of invoiceRows) {
-      invoicedTotal += BigInt(Number(row.invoicedAmountCents) || 0);
-      paidTotal += BigInt(Number(row.paidAmountCents) || 0);
-    }
-    const outstanding = invoicedTotal > paidTotal ? invoicedTotal - paidTotal : BigInt(0);
-
-    // Derive the new financial status from the computed aggregates.
-    const currentFinancial = (po.financialStatus ?? "unbilled") as PoFinancialStatus;
-    let newFinancial: PoFinancialStatus;
-
-    if (currentFinancial === "disputed") {
-      // Disputed stays disputed until explicitly resolved.
-      newFinancial = "disputed";
-    } else if (invoicedTotal === BigInt(0)) {
-      newFinancial = "unbilled";
-    } else if (paidTotal >= invoicedTotal) {
-      newFinancial = "paid";
-    } else if (paidTotal > BigInt(0)) {
-      newFinancial = "partially_paid";
-    } else {
-      newFinancial = "invoiced";
-    }
-
-    const now = new Date();
-    const patch: Record<string, any> = {
-      invoicedTotalCents: Number(invoicedTotal),
-      paidTotalCents: Number(paidTotal),
-      outstandingCents: Number(outstanding),
-      financialStatus: newFinancial,
-      updatedBy: undefined, // system recompute — no actor
-    };
-
-    // Stamp first-invoiced timestamp when transitioning out of unbilled.
-    if (currentFinancial === "unbilled" && newFinancial !== "unbilled" && !po.firstInvoicedAt) {
-      patch.firstInvoicedAt = now;
-    }
-    // Stamp first-paid timestamp.
-    if (
-      (currentFinancial === "unbilled" || currentFinancial === "invoiced") &&
-      (newFinancial === "partially_paid" || newFinancial === "paid") &&
-      !po.firstPaidAt
-    ) {
-      patch.firstPaidAt = now;
-    }
-    // Stamp fully-paid timestamp.
-    if (newFinancial === "paid" && !po.fullyPaidAt) {
-      patch.fullyPaidAt = now;
-    }
-
-    // Use plain update (no status-history row) — this is a system recompute,
-    // not a business event. The financial status change is implicit.
-    await storage.updatePurchaseOrder(poId, patch);
+    await recomputePoFinancialAggregates(poId, {
+      reason: "Compatibility recompute requested through PurchasingService.",
+    });
   }
 
   // ── PO CRUD ─────────────────────────────────────────────────────
