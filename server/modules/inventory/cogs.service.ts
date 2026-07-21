@@ -234,7 +234,7 @@ export class COGSService {
         FROM inventory.inventory_lots il
         LEFT JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
         WHERE il.id = ${params.lotId}
-        FOR UPDATE
+        FOR UPDATE OF il
       `);
       const lot = result.rows?.[0];
       if (!lot) return null;
