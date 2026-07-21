@@ -9,7 +9,7 @@ const migration = readFileSync(
   "utf8",
 );
 const v2WebhookAuthMigration = readFileSync(
-  join(here, "..", "..", "..", "migrations", "155_carrier_tracking_v2_webhook_auth.sql"),
+  join(here, "..", "..", "..", "migrations", "0591_carrier_tracking_v2_webhook_auth.sql"),
   "utf8",
 );
 
