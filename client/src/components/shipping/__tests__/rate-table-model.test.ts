@@ -16,6 +16,7 @@ import {
   CONTIGUOUS_US,
   DESTINATION_GROUP_TEMPLATES,
   DESTINATION_REGION_TEMPLATES,
+  HIPRAK_REGIONS,
   type DraftRow,
   type RateGroup,
 } from "../rate-table-model";
@@ -55,6 +56,18 @@ describe("destination group templates", () => {
       .toBe("mountain-west");
     expect(findDestinationGroupTemplate(["PA", "CA"])).toBeNull();
     expect(destinationGroupTemplateById("unknown")).toBeNull();
+  });
+
+  it("provides the exact destination set supported by the HIPRAK zone rules", () => {
+    const hiprak = destinationGroupTemplateById("hiprak");
+
+    expect(hiprak).not.toBeNull();
+    expect(hiprak?.name).toBe("HIPRAK (AK, HI, PR, VI)");
+    expect(hiprak?.regions).toEqual(HIPRAK_REGIONS);
+    expect(hiprak?.regions).not.toContain("AS");
+    expect(hiprak?.regions).not.toContain("GU");
+    expect(hiprak?.regions).not.toContain("MP");
+    expect(findDestinationGroupTemplate(["VI", "PR", "HI", "AK"])?.id).toBe("hiprak");
   });
 });
 

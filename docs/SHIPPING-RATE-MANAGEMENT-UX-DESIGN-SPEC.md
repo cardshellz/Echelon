@@ -317,7 +317,7 @@ Support:
 
 - Searchable multi-select.
 - Checkboxes with state name and abbreviation.
-- Presets: Contiguous US, All US states, States and territories, Clear.
+- Presets: Contiguous US, HIPRAK (AK, HI, PR, VI), All US states, States and territories, Clear.
 - Selected-state chips or a compact count summary.
 - Immediate warning when a state is already assigned to another group at the same warehouse scope.
 

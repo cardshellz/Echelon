@@ -40,6 +40,7 @@ const TERRITORIES = new Set(["AS", "GU", "MP", "PR", "VI"]);
 export const ALL_REGION_CODES = US_POSTAL_REGIONS.map(([code]) => code);
 export const CONTIGUOUS_US = ALL_REGION_CODES.filter((code) => !NON_CONTIGUOUS.has(code));
 export const ALL_US_STATES = ALL_REGION_CODES.filter((code) => !TERRITORIES.has(code));
+export const HIPRAK_REGIONS = ["AK", "HI", "PR", "VI"] as const;
 
 export interface DestinationGroupTemplate {
   id: string;
@@ -50,6 +51,7 @@ export interface DestinationGroupTemplate {
 /** Broad coverage shortcuts that may intentionally overlap regional templates. */
 export const DESTINATION_COVERAGE_TEMPLATES: readonly DestinationGroupTemplate[] = [
   { id: "contiguous-us", name: "Contiguous US", regions: CONTIGUOUS_US },
+  { id: "hiprak", name: "HIPRAK (AK, HI, PR, VI)", regions: HIPRAK_REGIONS },
   { id: "all-us-states", name: "All US states", regions: ALL_US_STATES },
   { id: "states-and-territories", name: "States + territories", regions: ALL_REGION_CODES },
 ];
