@@ -585,7 +585,7 @@ export class COGSService {
         WHERE il.purchase_order_id = ${purchaseOrderId}
           AND il.po_line_id = ${purchaseOrderLineId}
         ORDER BY il.id
-        FOR UPDATE
+        FOR UPDATE OF il
       `);
 
       const lots = affectedLots.rows || [];
