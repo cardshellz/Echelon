@@ -1,6 +1,6 @@
 /**
- * Enroll existing ShipStation label artifacts in the documented ShipEngine
- * carrier-tracking webhook feed.
+ * Enroll existing ShipStation label artifacts in the documented ShipStation
+ * V2 carrier-tracking webhook feed.
  *
  * This command is shadow-only. It writes tracking subscription state and calls
  * the provider enrollment endpoint; it never changes fulfillment or inventory.
@@ -74,7 +74,7 @@ export function usage(): string {
     "",
     "Environment:",
     "  DATABASE_URL or EXTERNAL_DATABASE_URL",
-    "  SHIPSTATION_TRACKING_API_KEY",
+    "  SHIPSTATION_V2_API_KEY",
     "",
     "Execute mode is shadow-only: it cannot update fulfillment or inventory.",
   ].join("\n");
@@ -193,7 +193,7 @@ export async function runTrackingEnrollment(
     };
   }
   if (!dependencies.isProviderConfigured()) {
-    throw new Error("SHIPSTATION_TRACKING_API_KEY is required before execute mode can write enrollment state");
+    throw new Error("SHIPSTATION_V2_API_KEY is required before execute mode can write enrollment state");
   }
 
   let batchesRun = 0;

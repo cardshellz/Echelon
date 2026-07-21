@@ -30,7 +30,7 @@ function verifiedReceipt() {
 function payload() {
   return {
     resource_type: "API_TRACK",
-    resource_url: "https://api.shipengine.com/v1/tracking?tracking_number=1Z999AA10123456784",
+    resource_url: "https://api.shipstation.com/v2/tracking?tracking_number=1Z999AA10123456784",
     data: {
       tracking_number: "1Z999AA10123456784",
       status_code: "AC",
@@ -249,7 +249,7 @@ describe("CarrierTrackingService", () => {
     );
   });
 
-  it("durably records signed ingress and defers matching without inventing a label", async () => {
+  it("durably records authenticated ingress and defers matching without inventing a label", async () => {
     const { repository, appendMatchAttempt } = repositoryWithCandidates([]);
     const service = new CarrierTrackingService({
       repository,
@@ -283,7 +283,7 @@ describe("CarrierTrackingService", () => {
     expect(appendMatchAttempt).not.toHaveBeenCalled();
   });
 
-  it("retains signed bytes before classifying an unexpected payload for review", async () => {
+  it("retains authenticated bytes before classifying an unexpected payload for review", async () => {
     const { repository } = repositoryWithCandidates([]);
     const service = new CarrierTrackingService({
       repository,
@@ -320,7 +320,7 @@ describe("CarrierTrackingService", () => {
     expect(repository.persistNormalizedWebhookEvent).not.toHaveBeenCalled();
   });
 
-  it("schedules asynchronous hydration when a signed API_TRACK callback omits optional data", async () => {
+  it("schedules asynchronous hydration when an authenticated API_TRACK callback omits optional data", async () => {
     const { repository } = repositoryWithCandidates([]);
     vi.mocked(repository.persistRejectedWebhookPayload).mockResolvedValue({
       id: 402,
@@ -334,7 +334,7 @@ describe("CarrierTrackingService", () => {
       logger: logger(),
       trackingEventsClient: { isConfigured: () => true, getTrackingSnapshot },
     });
-    const resourceUrl = "https://api.shipengine.com/v1/tracking"
+    const resourceUrl = "https://api.shipstation.com/v2/tracking"
       + "?carrier_code=ups&tracking_number=1Z999AA10123456784";
 
     const result = await service.ingestShipStationWebhook({
@@ -363,9 +363,9 @@ describe("CarrierTrackingService", () => {
     expect(getTrackingSnapshot).not.toHaveBeenCalled();
   });
 
-  it("hydrates a signed resource URL asynchronously and appends normalized evidence", async () => {
+  it("hydrates an authenticated resource URL asynchronously and appends normalized evidence", async () => {
     const { repository } = repositoryWithCandidates([]);
-    const resourceUrl = "https://api.shipengine.com/v1/tracking"
+    const resourceUrl = "https://api.shipstation.com/v2/tracking"
       + "?carrier_code=ups&tracking_number=1Z999AA10123456784";
     vi.mocked(repository.claimWebhookHydrations).mockResolvedValue([{
       receiptId: 301,
@@ -442,7 +442,7 @@ describe("CarrierTrackingService", () => {
     const { repository } = repositoryWithCandidates([]);
     vi.mocked(repository.claimWebhookHydrations).mockResolvedValue([{
       receiptId: 302,
-      resourceUrl: "https://api.shipengine.com/v1/tracking"
+      resourceUrl: "https://api.shipstation.com/v2/tracking"
         + "?carrier_code=ups&tracking_number=1Z999AA10123456784",
       carrierCode: "ups",
       trackingNumber: "1Z999AA10123456784",
@@ -482,11 +482,11 @@ describe("CarrierTrackingService", () => {
     );
   });
 
-  it("requires review when hydrated evidence changes the signed tracking identity", async () => {
+  it("requires review when hydrated evidence changes the authenticated tracking identity", async () => {
     const { repository } = repositoryWithCandidates([]);
     vi.mocked(repository.claimWebhookHydrations).mockResolvedValue([{
       receiptId: 303,
-      resourceUrl: "https://api.shipengine.com/v1/tracking"
+      resourceUrl: "https://api.shipstation.com/v2/tracking"
         + "?carrier_code=ups&tracking_number=1Z999AA10123456784",
       carrierCode: "ups",
       trackingNumber: "1Z999AA10123456784",

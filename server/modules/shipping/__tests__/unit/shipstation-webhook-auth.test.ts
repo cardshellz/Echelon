@@ -1,141 +1,103 @@
-import { createHash, createSign, generateKeyPairSync } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
-  CachedShipStationJwksProvider,
-  ShipStationWebhookAuthError,
-  createShipStationWebhookSignatureVerifier,
+  createDefaultShipStationV2WebhookVerifier,
+  createShipStationV2WebhookVerifier,
 } from "../../shipstation-webhook-auth";
+import { SHIPSTATION_TRACKING_WEBHOOK_SECRET_KEY_ID } from "../../shipstation-tracking-api-config";
 
 const now = new Date("2026-07-20T12:00:00.000Z");
-const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-
-function signature(timestamp: string, rawBody: Buffer): string {
-  const signer = createSign("RSA-SHA256");
-  signer.update(Buffer.concat([Buffer.from(`${timestamp}.`, "utf8"), rawBody]));
-  signer.end();
-  return signer.sign(privateKey, "base64");
-}
+const sharedSecret = "s".repeat(32);
 
 function verifier() {
-  return createShipStationWebhookSignatureVerifier({
+  return createShipStationV2WebhookVerifier({
+    sharedSecret,
     now: () => new Date(now),
-    jwksProvider: {
-      getPublicKey: async (keyId) => keyId === "test-key" ? publicKey : null,
-    },
   });
 }
 
-describe("ShipStation tracking webhook authentication", () => {
-  it("verifies the exact timestamp and raw request bytes", async () => {
+describe("ShipStation V2 tracking webhook authentication", () => {
+  it("authenticates the configured custom header without persisting the secret", async () => {
     const rawBody = Buffer.from('{"resource_type":"API_TRACK"}', "utf8");
-    const timestamp = now.toISOString();
-    const signed = signature(timestamp, rawBody);
-    await expect(verifier().verify({
-      headers: { keyId: "test-key", timestamp, signature: signed },
+    const authenticationCode = createHmac("sha256", sharedSecret).update(rawBody).digest();
+
+    const receipt = await verifier().verify({
+      headers: { sharedSecret },
       rawBody,
-    })).resolves.toMatchObject({
+    });
+
+    expect(receipt).toMatchObject({
       provider: "shipstation",
-      signatureAlgorithm: "RSA-SHA256",
-      signatureKeyId: "test-key",
-      signatureTimestampRaw: timestamp,
+      signatureAlgorithm: "HMAC-SHA256",
+      signatureKeyId: SHIPSTATION_TRACKING_WEBHOOK_SECRET_KEY_ID,
+      signatureTimestampRaw: now.toISOString(),
       signatureTimestampAt: now,
       rawBodyBase64: rawBody.toString("base64"),
-      rawBodyHash: createHash("sha256").update(rawBody).digest("hex"),
-      signatureBase64: signed,
-      signatureHash: createHash("sha256").update(signed, "utf8").digest("hex"),
+      signatureBase64: authenticationCode.toString("base64"),
+      signatureHash: createHash("sha256").update(authenticationCode).digest("hex"),
       verifiedAt: now,
     });
+    expect(JSON.stringify(receipt)).not.toContain(sharedSecret);
   });
 
-  it("rejects a body changed after signing", async () => {
-    const signedBody = Buffer.from('{"resource_type":"API_TRACK"}', "utf8");
-    const receivedBody = Buffer.from('{"resource_type":"API_TRACK","changed":true}', "utf8");
-    const timestamp = now.toISOString();
-    await expect(verifier().verify({
-      headers: { keyId: "test-key", timestamp, signature: signature(timestamp, signedBody) },
-      rawBody: receivedBody,
-    })).rejects.toMatchObject<Partial<ShipStationWebhookAuthError>>({
-      code: "SHIPSTATION_WEBHOOK_SIGNATURE_INVALID",
-      httpStatus: 401,
-    });
+  it("is idempotent across exact provider redelivery times", async () => {
+    const rawBody = Buffer.from('{"resource_type":"API_TRACK"}', "utf8");
+    const first = await verifier().verify({ headers: { sharedSecret }, rawBody });
+    const later = await createShipStationV2WebhookVerifier({
+      sharedSecret,
+      now: () => new Date("2026-07-20T12:30:00.000Z"),
+    }).verify({ headers: { sharedSecret }, rawBody });
+
+    expect(later.receiptHash).toBe(first.receiptHash);
   });
 
-  it("rejects replayed timestamps outside the accepted window", async () => {
+  it("fails closed for missing, incorrect, or weak secrets", async () => {
     const rawBody = Buffer.from("{}", "utf8");
-    const timestamp = "2026-07-20T11:54:59.000Z";
     await expect(verifier().verify({
-      headers: { keyId: "test-key", timestamp, signature: signature(timestamp, rawBody) },
+      headers: { sharedSecret: null },
       rawBody,
-    })).rejects.toMatchObject<Partial<ShipStationWebhookAuthError>>({
-      code: "SHIPSTATION_WEBHOOK_TIMESTAMP_OUT_OF_RANGE",
-      httpStatus: 400,
-    });
-  });
-
-  it("returns not-found semantics when signature headers are absent", async () => {
-    await expect(verifier().verify({
-      headers: { keyId: null, timestamp: null, signature: null },
-      rawBody: Buffer.from("{}"),
-    })).rejects.toMatchObject<Partial<ShipStationWebhookAuthError>>({
-      code: "SHIPSTATION_WEBHOOK_SIGNATURE_HEADERS_MISSING",
+    })).rejects.toMatchObject({
+      code: "SHIPSTATION_WEBHOOK_SHARED_SECRET_MISSING",
       httpStatus: 404,
     });
+    await expect(verifier().verify({
+      headers: { sharedSecret: "x".repeat(32) },
+      rawBody,
+    })).rejects.toMatchObject({
+      code: "SHIPSTATION_WEBHOOK_SHARED_SECRET_INVALID",
+      httpStatus: 401,
+    });
+    expect(() => createShipStationV2WebhookVerifier({
+      sharedSecret: "too-short",
+      now: () => new Date(now),
+    })).toThrow(/32/);
   });
 
-  it("rejects oversized or malformed signature headers before key lookup", async () => {
-    const rawBody = Buffer.from("{}", "utf8");
-    const timestamp = now.toISOString();
+  it("rejects authenticated requests when exact raw bytes are unavailable", async () => {
     await expect(verifier().verify({
-      headers: { keyId: "test-key", timestamp, signature: "not base64!" },
-      rawBody,
-    })).rejects.toMatchObject<Partial<ShipStationWebhookAuthError>>({
-      code: "SHIPSTATION_WEBHOOK_SIGNATURE_HEADERS_INVALID",
-      httpStatus: 400,
-    });
-    await expect(verifier().verify({
-      headers: { keyId: "x".repeat(501), timestamp, signature: "AAAA" },
-      rawBody,
-    })).rejects.toMatchObject<Partial<ShipStationWebhookAuthError>>({
-      code: "SHIPSTATION_WEBHOOK_SIGNATURE_HEADERS_INVALID",
-      httpStatus: 400,
-    });
-  });
-
-  it("rejects verification when the exact raw body is unavailable", async () => {
-    const timestamp = now.toISOString();
-    await expect(verifier().verify({
-      headers: { keyId: "test-key", timestamp, signature: "unused" },
+      headers: { sharedSecret },
       rawBody: undefined,
-    })).rejects.toMatchObject<Partial<ShipStationWebhookAuthError>>({
+    })).rejects.toMatchObject({
       code: "SHIPSTATION_WEBHOOK_RAW_BODY_MISSING",
       httpStatus: 400,
     });
   });
-});
 
-describe("ShipStation JWKS caching", () => {
-  it("bounds forced refreshes for changing unknown key ids", async () => {
-    const publicJwk = publicKey.export({ format: "jwk" });
-    let fetchCount = 0;
-    const provider = new CachedShipStationJwksProvider({
-      now: () => new Date(now),
-      unknownKeyRefreshIntervalMs: 60_000,
-      fetch: async () => {
-        fetchCount += 1;
-        return new Response(JSON.stringify({
-          keys: [{ ...publicJwk, kid: "known-key", alg: "RS256", use: "sig" }],
-        }), {
-          status: 200,
-          headers: { "content-type": "application/json", etag: `\"keys-${fetchCount}\"` },
-        });
-      },
-    });
-
-    await expect(provider.getPublicKey("known-key")).resolves.not.toBeNull();
-    await expect(provider.getPublicKey("unknown-one")).resolves.toBeNull();
-    await expect(provider.getPublicKey("unknown-two")).resolves.toBeNull();
-
-    expect(fetchCount).toBe(2);
+  it("hides the route when the webhook secret is not configured", async () => {
+    const original = process.env.SHIPSTATION_TRACKING_WEBHOOK_SECRET;
+    delete process.env.SHIPSTATION_TRACKING_WEBHOOK_SECRET;
+    try {
+      await expect(createDefaultShipStationV2WebhookVerifier(() => new Date(now)).verify({
+        headers: { sharedSecret },
+        rawBody: Buffer.from("{}"),
+      })).rejects.toMatchObject({
+        code: "SHIPSTATION_WEBHOOK_SHARED_SECRET_NOT_CONFIGURED",
+        httpStatus: 404,
+      });
+    } finally {
+      if (original === undefined) delete process.env.SHIPSTATION_TRACKING_WEBHOOK_SECRET;
+      else process.env.SHIPSTATION_TRACKING_WEBHOOK_SECRET = original;
+    }
   });
 });

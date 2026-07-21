@@ -118,7 +118,7 @@ export function createShipStationTrackingSubscriptionsClient(
       if (!apiKey) {
         throw new ShipStationTrackingSubscriptionError(
           "CONFIGURATION",
-          "SHIPSTATION_TRACKING_API_KEY is required to subscribe provider labels to carrier tracking",
+          "SHIPSTATION_V2_API_KEY is required to subscribe provider labels to carrier tracking",
         );
       }
       if (!carrierCode || carrierCode.length > 100) {

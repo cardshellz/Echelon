@@ -14,8 +14,8 @@ const openServers: http.Server[] = [];
 const receipt = {
   provider: "shipstation" as const,
   receiptHash: "a".repeat(64),
-  signatureAlgorithm: "RSA-SHA256" as const,
-  signatureKeyId: "test-key",
+  signatureAlgorithm: "HMAC-SHA256" as const,
+  signatureKeyId: "echelon-shipstation-v2-track-v1",
   signatureTimestampRaw: "2026-07-20T12:00:00.000Z",
   signatureTimestampAt: new Date("2026-07-20T12:00:00.000Z"),
   rawBodyBase64: Buffer.from("{}").toString("base64"),
@@ -41,7 +41,7 @@ function buildApp(input: { verify: ReturnType<typeof vi.fn>; ingest: ReturnType<
     },
   }));
   registerShipStationTrackingWebhook(app, {
-    signatureVerifier: { verify: input.verify },
+    webhookVerifier: { verify: input.verify },
     service: { ingestShipStationWebhook: input.ingest },
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   });
@@ -56,9 +56,10 @@ afterEach(async () => {
 describe("ShipStation tracking webhook route", () => {
   it("authenticates exact request bytes before ingesting evidence", async () => {
     const order: string[] = [];
-    const verify = vi.fn(async ({ rawBody }) => {
+    const verify = vi.fn(async ({ headers, rawBody }) => {
       order.push("verify");
       expect(Buffer.isBuffer(rawBody)).toBe(true);
+      expect(headers.sharedSecret).toBe("webhook-secret");
       return receipt;
     });
     const ingest = vi.fn(async (_payload, verifiedReceipt) => {
@@ -80,7 +81,10 @@ describe("ShipStation tracking webhook route", () => {
 
     const response = await fetch(`${baseUrl}${SHIPSTATION_TRACKING_WEBHOOK_PATH}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-echelon-shipstation-tracking-secret": "webhook-secret",
+      },
       body: JSON.stringify({ resource_type: "API_TRACK" }),
     });
 
@@ -95,10 +99,10 @@ describe("ShipStation tracking webhook route", () => {
     expect(order).toEqual(["verify", "ingest"]);
   });
 
-  it("does not reveal the endpoint when signature headers are absent", async () => {
+  it("does not reveal the endpoint when authentication headers are absent", async () => {
     const verify = vi.fn(async () => {
       throw new ShipStationWebhookAuthError(
-        "SHIPSTATION_WEBHOOK_SIGNATURE_HEADERS_MISSING",
+        "SHIPSTATION_WEBHOOK_SHARED_SECRET_MISSING",
         "missing",
         404,
       );
@@ -145,7 +149,7 @@ describe("ShipStation tracking webhook route", () => {
     });
   });
 
-  it("retains exact signed bytes even when the provider body is not valid JSON", async () => {
+  it("retains exact authenticated bytes even when the provider body is not valid JSON", async () => {
     const invalidJson = Buffer.from('{"resource_type":"API_TRACK"', "utf8");
     const verify = vi.fn(async ({ rawBody }) => {
       expect(rawBody).toEqual(invalidJson);

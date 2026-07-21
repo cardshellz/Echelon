@@ -11,7 +11,7 @@ describe("ShipStation tracking subscriptions client", () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     const client = createShipStationTrackingSubscriptionsClient({
       apiKey: "test-key",
-      baseUrl: "https://api.shipengine.test/v1/",
+      baseUrl: "https://api.shipstation.test/v2/",
       fetchImpl,
     });
 
@@ -21,7 +21,7 @@ describe("ShipStation tracking subscriptions client", () => {
     })).resolves.toEqual({ httpStatus: 204 });
 
     expect(fetchImpl).toHaveBeenCalledWith(
-      "https://api.shipengine.test/v1/tracking/start?carrier_code=stamps_com&tracking_number=9400+123",
+      "https://api.shipstation.test/v2/tracking/start?carrier_code=stamps_com&tracking_number=9400+123",
       expect.objectContaining({
         method: "POST",
         headers: { "API-Key": "test-key" },
@@ -45,7 +45,7 @@ describe("ShipStation tracking subscriptions client", () => {
   it("refuses an insecure API base URL before sending credentials", () => {
     expect(() => createShipStationTrackingSubscriptionsClient({
       apiKey: "test-key",
-      baseUrl: "http://api.shipengine.test/v1",
+      baseUrl: "http://api.shipstation.test/v2",
     })).toThrow(/HTTPS/);
   });
 

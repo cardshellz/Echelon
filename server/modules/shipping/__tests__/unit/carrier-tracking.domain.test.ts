@@ -15,7 +15,7 @@ const receivedAt = new Date("2026-07-20T12:00:00.000Z");
 function trackingPayload(overrides: Record<string, unknown> = {}) {
   return {
     resource_type: "API_TRACK",
-    resource_url: "https://api.shipengine.com/v1/tracking?carrier_code=ups&tracking_number=1Z999AA10123456784",
+    resource_url: "https://api.shipstation.com/v2/tracking?carrier_code=ups&tracking_number=1Z999AA10123456784",
     data: {
       tracking_number: "1Z999AA10123456784",
       status_code: "AC",
@@ -154,7 +154,7 @@ describe("carrier tracking normalization", () => {
     const ups = normalizeShipStationTrackingWebhook(trackingPayload(), receivedAt);
     const fedex = normalizeShipStationTrackingWebhook({
       ...trackingPayload(),
-      resource_url: "https://api.shipengine.com/v1/tracking?carrier_code=fedex&tracking_number=1Z999AA10123456784",
+      resource_url: "https://api.shipstation.com/v2/tracking?carrier_code=fedex&tracking_number=1Z999AA10123456784",
     }, receivedAt);
 
     expect(ups.carrier).toBe("ups");
@@ -192,7 +192,7 @@ describe("carrier tracking normalization", () => {
     try {
       normalizeShipStationTrackingWebhook({
         resource_type: "API_TRACK",
-        resource_url: "https://api.shipengine.com/v1/tracking?carrier_code=ups&tracking_number=1Z999AA10123456784",
+        resource_url: "https://api.shipstation.com/v2/tracking?carrier_code=ups&tracking_number=1Z999AA10123456784",
       }, receivedAt);
       throw new Error("Expected tracking normalization to reject a missing data object");
     } catch (error) {

@@ -675,7 +675,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               attemptCount: 0,
               consecutiveFailureCount: 0,
               nextAttemptAt: input.createdAt,
-              metadata: { shadowOnly: true, source: "signed_webhook_resource_url" },
+              metadata: { shadowOnly: true, source: "authenticated_webhook_resource_url" },
               createdAt: input.createdAt,
               updatedAt: input.createdAt,
             })

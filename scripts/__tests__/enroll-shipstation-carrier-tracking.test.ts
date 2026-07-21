@@ -79,7 +79,7 @@ describe("ShipStation carrier tracking enrollment script", () => {
     const deps = dependencies(false);
 
     await expect(runTrackingEnrollment(parseFlags(["--execute"]), deps))
-      .rejects.toThrow(/SHIPSTATION_TRACKING_API_KEY/);
+      .rejects.toThrow(/SHIPSTATION_V2_API_KEY/);
     expect(deps.sweep).not.toHaveBeenCalled();
   });
 

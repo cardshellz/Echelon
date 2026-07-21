@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { configureShipStationTrackingWebhook } from "../server/modules/shipping/shipstation-tracking-webhook-registration";
 import { createShipStationTrackingWebhooksClient } from "../server/modules/shipping/shipstation-tracking-webhooks.client";
+import { resolveShipStationTrackingWebhookSecret } from "../server/modules/shipping/shipstation-tracking-api-config";
 
 interface Flags {
   help: boolean;
@@ -16,7 +17,8 @@ export function usage(): string {
     "  npx tsx scripts/configure-shipstation-tracking-webhook.ts --execute --target-url=https://example.com/api/shipping/webhooks/shipstation/track",
     "",
     "Environment:",
-    "  SHIPSTATION_TRACKING_API_KEY           Dedicated ShipStation API (formerly ShipEngine) key.",
+    "  SHIPSTATION_V2_API_KEY                 Production ShipStation V2 API key.",
+    "  SHIPSTATION_TRACKING_WEBHOOK_SECRET    Dedicated callback secret (32-512 printable characters).",
     "  SHIPSTATION_TRACKING_WEBHOOK_URL       Used when --target-url is omitted.",
     "",
     "Dry-run is the default. Conflicting or duplicate track subscriptions are never overwritten.",
@@ -54,6 +56,7 @@ export async function main(): Promise<void> {
   const result = await configureShipStationTrackingWebhook({
     client: createShipStationTrackingWebhooksClient(),
     targetUrl,
+    webhookSecret: resolveShipStationTrackingWebhookSecret(),
     execute: flags.execute,
   });
   console.log(JSON.stringify({ mode: flags.execute ? "execute" : "dry-run", ...result }, null, 2));

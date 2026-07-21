@@ -3,17 +3,19 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import type { CarrierTrackingLogger, CarrierTrackingService } from "./carrier-tracking.service";
 import {
   ShipStationWebhookAuthError,
-  type ShipStationWebhookSignatureHeaders,
-  type ShipStationWebhookSignatureVerifier,
+  type ShipStationWebhookAuthenticationHeaders,
+  type ShipStationWebhookVerifier,
 } from "./shipstation-webhook-auth";
+import { SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER } from "./shipstation-tracking-api-config";
 
 export const SHIPSTATION_TRACKING_WEBHOOK_PATH = "/api/shipping/webhooks/shipstation/track";
 export const SHIPSTATION_TRACKING_WEBHOOK_BODY_LIMIT = "1mb";
 
 /**
- * Install before the application's general JSON parser. Signature verification
- * requires the exact bytes received from ShipStation, and a signed payload must
- * still reach the evidence ledger when its JSON cannot be normalized.
+ * Install before the application's general JSON parser. Authentication and
+ * receipt attestation require the exact bytes received from ShipStation, and
+ * an authenticated payload must still reach the evidence ledger when its JSON
+ * cannot be normalized.
  */
 export function installShipStationTrackingRawBodyCapture(app: Express): void {
   app.use(
@@ -32,7 +34,7 @@ export function installShipStationTrackingRawBodyCapture(app: Express): void {
         request.body = JSON.parse(rawBody.toString("utf8"));
       } catch {
         // Authentication and receipt persistence still run. The domain parser
-        // records an immutable rejection after the signed bytes are retained.
+        // records an immutable rejection after the authenticated bytes are retained.
         request.body = null;
       }
       return next();
@@ -44,14 +46,14 @@ export function registerShipStationTrackingWebhook(
   app: Express,
   dependencies: {
     service: Pick<CarrierTrackingService, "ingestShipStationWebhook">;
-    signatureVerifier: ShipStationWebhookSignatureVerifier;
+    webhookVerifier: ShipStationWebhookVerifier;
     logger: CarrierTrackingLogger;
   },
 ): void {
   app.post(SHIPSTATION_TRACKING_WEBHOOK_PATH, async (request, response) => {
     try {
-      const receipt = await dependencies.signatureVerifier.verify({
-        headers: signatureHeaders(request),
+      const receipt = await dependencies.webhookVerifier.verify({
+        headers: authenticationHeaders(request),
         rawBody: request.rawBody,
       });
       const result = await dependencies.service.ingestShipStationWebhook(request.body, receipt);
@@ -93,11 +95,9 @@ export function registerShipStationTrackingWebhook(
   });
 }
 
-function signatureHeaders(request: Request): ShipStationWebhookSignatureHeaders {
+function authenticationHeaders(request: Request): ShipStationWebhookAuthenticationHeaders {
   return {
-    keyId: headerValue(request, "x-shipengine-rsa-sha256-key-id"),
-    signature: headerValue(request, "x-shipengine-rsa-sha256-signature"),
-    timestamp: headerValue(request, "x-shipengine-timestamp"),
+    sharedSecret: headerValue(request, SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER),
   };
 }
 
