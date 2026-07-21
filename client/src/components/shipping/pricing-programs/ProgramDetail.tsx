@@ -10,9 +10,11 @@ import {
   AlertTriangle,
   Archive,
   ArrowLeft,
+  Calculator,
   ChevronDown,
   ChevronRight,
   Eye,
+  Globe2,
   Loader2,
   Pencil,
   Plus,
@@ -54,6 +56,7 @@ import {
   type WarehouseOption,
 } from "./api";
 import { ProgramFormDialog } from "./ProgramFormDialog";
+import { RateTestDialog } from "./RateTestDialog";
 import { programStatusBadge, revisionStatusBadge } from "./status";
 
 interface ProgramDetailProps {
@@ -78,11 +81,16 @@ export function ProgramDetail({
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
+  const [rateTestOpen, setRateTestOpen] = useState(false);
   const [confirmRetire, setConfirmRetire] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const { book, options, activeAssignments } = program;
   const retired = book.status === "retired";
+  const servesShopifyCheckout = activeAssignments.some(
+    (assignment) => assignment.pricingChannel === "shopify"
+      && assignment.ratePurpose === "customer_checkout",
+  );
 
   const retireMutation = useMutation({
     mutationFn: () => postJson(`/api/shipping/admin/rate-books/${book.id}/retire`, {}),
@@ -144,6 +152,15 @@ export function ProgramDetail({
         </div>
         {!retired && (
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setRateTestOpen(true)}
+              disabled={activeAssignments.length === 0 || warehouses.length === 0}
+            >
+              <Calculator className="mr-1.5 h-3.5 w-3.5" />
+              Test live rates
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
               <Settings2 className="mr-1.5 h-3.5 w-3.5" />
               Manage assignments
@@ -160,6 +177,42 @@ export function ProgramDetail({
           </div>
         )}
       </div>
+
+      {servesShopifyCheckout && (
+        <section className="space-y-2">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-semibold">
+              <Globe2 className="h-4 w-4" />
+              Shopify destination ownership
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Each destination has one rate owner, so Shopify availability never depends on a duplicate Echelon country list.
+            </p>
+          </div>
+          <div className="grid overflow-hidden rounded-md border sm:grid-cols-2 sm:divide-x">
+            <div className="p-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">United States</span>
+                <Badge variant="outline" className="border-emerald-300 bg-emerald-50 text-emerald-800">
+                  Echelon rates
+                </Badge>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Active state, ZIP, warehouse, and weight rules in this program determine checkout prices.
+              </p>
+            </div>
+            <div className="border-t p-3 sm:border-t-0">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">International</span>
+                <Badge variant="outline">Shopify / Global-e</Badge>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Echelon returns no competing rate and does not maintain an international allowlist.
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Shipping options */}
       <section className="space-y-2">
@@ -257,6 +310,13 @@ export function ProgramDetail({
         warehouses={warehouses}
         program={book}
         onSaved={() => undefined}
+      />
+
+      <RateTestDialog
+        open={rateTestOpen}
+        onOpenChange={setRateTestOpen}
+        program={program}
+        warehouses={warehouses}
       />
 
       <AlertDialog open={confirmRetire} onOpenChange={setConfirmRetire}>

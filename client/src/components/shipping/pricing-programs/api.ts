@@ -129,6 +129,34 @@ export interface SaveDraftResponse {
   analysis: RateTableAnalysis;
 }
 
+export interface ManualRateQuoteResponse {
+  outcome: "quoted" | "no_rate" | "rate_book_mismatch";
+  testedAt: string;
+  rateOwner: "echelon";
+  destination: {
+    country: string;
+    region: string;
+    postalCode: string;
+  };
+  rateBook: { id: number; code: string } | null;
+  zone: string | null;
+  quotes: Array<{
+    serviceLevelId: number;
+    serviceLevelCode: string;
+    displayName: string;
+    description: string | null;
+    fulfillmentMode: "parcel" | "freight";
+    pricingBasis: PricingBasis;
+    totalCents: number;
+    currency: string;
+    promiseMinBusinessDays: number | null;
+    promiseMaxBusinessDays: number | null;
+    ratedMeasure: number;
+    maxShipmentWeightGrams: number | null;
+  }>;
+  warnings: string[];
+}
+
 export const RATE_TABLES_KEY = "/api/shipping/admin/rate-tables";
 
 export function rateTableDetailKey(id: number): string {
