@@ -9,6 +9,13 @@ import {
 } from "./shipstation-tracking-api-config";
 
 const TRACKING_WEBHOOK_NAME = "Echelon carrier tracking";
+const SHIPSTATION_MASKED_WEBHOOK_HEADER_VALUE = "*****";
+
+export type ShipStationTrackingWebhookAuthenticationReadback =
+  | "verified"
+  | "masked_unverifiable"
+  | "missing"
+  | "mismatched";
 
 export interface ShipStationTrackingWebhookSummary {
   webhookId: string;
@@ -16,6 +23,7 @@ export interface ShipStationTrackingWebhookSummary {
   event: string;
   url: string;
   headerNames: string[];
+  authenticationReadback: ShipStationTrackingWebhookAuthenticationReadback;
 }
 
 export type ShipStationTrackingWebhookRegistrationResult =
@@ -109,7 +117,7 @@ function classifyExistingTrackingWebhooks(
     return {
       status: "already_configured",
       targetUrl,
-      webhook: summarizeWebhook(exactMatches[0]),
+      webhook: summarizeWebhook(exactMatches[0], webhookSecret),
     };
   }
 
@@ -117,7 +125,9 @@ function classifyExistingTrackingWebhooks(
     return {
       status: "conflict",
       targetUrl,
-      trackingWebhooks: trackingWebhooks.map(summarizeWebhook),
+      trackingWebhooks: trackingWebhooks.map(
+        (webhook) => summarizeWebhook(webhook, webhookSecret),
+      ),
     };
   }
 
@@ -161,7 +171,7 @@ export async function configureShipStationTrackingWebhook(
       return {
         status: "takeover_planned",
         targetUrl,
-        webhook: summarizeWebhook(current),
+        webhook: summarizeWebhook(current, webhookSecret),
       };
     }
 
@@ -224,20 +234,39 @@ export async function configureShipStationTrackingWebhook(
       || !hasExpectedAuthenticationHeader(webhook, webhookSecret)) {
     throw new Error("ShipStation created a webhook that does not match the requested tracking subscription");
   }
-  return { status: "created", targetUrl, webhook: summarizeWebhook(webhook) };
+  return { status: "created", targetUrl, webhook: summarizeWebhook(webhook, webhookSecret) };
 }
 
 function hasExpectedAuthenticationHeader(
   webhook: ShipStationTrackingWebhook,
   webhookSecret: string,
 ): boolean {
+  const readback = authenticationHeaderReadback(webhook, webhookSecret);
+  return readback === "verified" || readback === "masked_unverifiable";
+}
+
+function authenticationHeaderReadback(
+  webhook: ShipStationTrackingWebhook,
+  webhookSecret: string,
+): ShipStationTrackingWebhookAuthenticationReadback {
   const matchingHeaders = (webhook.headers ?? []).filter(
     (header) => header.key.trim().toLowerCase() === SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER,
   );
-  return matchingHeaders.length === 1 && matchingHeaders[0].value === webhookSecret;
+  if (matchingHeaders.length === 0) return "missing";
+  if (matchingHeaders.length !== 1) return "mismatched";
+  if (matchingHeaders[0].value === webhookSecret) return "verified";
+  if (matchingHeaders[0].value === SHIPSTATION_MASKED_WEBHOOK_HEADER_VALUE) {
+    // ShipStation masks persisted custom header values on readback. Delivery of
+    // a successfully authenticated callback remains the end-to-end proof.
+    return "masked_unverifiable";
+  }
+  return "mismatched";
 }
 
-function summarizeWebhook(webhook: ShipStationTrackingWebhook): ShipStationTrackingWebhookSummary {
+function summarizeWebhook(
+  webhook: ShipStationTrackingWebhook,
+  webhookSecret: string,
+): ShipStationTrackingWebhookSummary {
   return {
     webhookId: webhook.webhook_id,
     name: webhook.name?.trim() || null,
@@ -246,5 +275,6 @@ function summarizeWebhook(webhook: ShipStationTrackingWebhook): ShipStationTrack
     headerNames: [...new Set((webhook.headers ?? []).map((header) => header.key.trim()))]
       .filter(Boolean)
       .sort((left, right) => left.localeCompare(right)),
+    authenticationReadback: authenticationHeaderReadback(webhook, webhookSecret),
   };
 }

@@ -7,7 +7,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repositorySource = readFileSync(
   join(here, "..", "..", "carrier-tracking.repository.ts"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 describe("carrier tracking repository concurrency contract", () => {
   it("serializes provider-label observation on tracking identity before label identity", () => {
@@ -63,6 +63,12 @@ describe("carrier tracking repository concurrency contract", () => {
 
     expect(matchSource).toContain(
       "AND label.normalized_tracking_number = ${event.normalizedTrackingNumber}",
+    );
+  });
+
+  it("casts the provider-label retry timestamp before interval arithmetic", () => {
+    expect(repositorySource).toContain(
+      "ELSE ${reconciledAt}::timestamptz + INTERVAL '30 minutes'",
     );
   });
 
