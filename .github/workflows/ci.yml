@@ -76,6 +76,10 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/legacy-po-receive-config-remediation.integration.test.ts
+      - name: Invoice variance and COGS PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts
       - name: Named-schema channel and inventory guarantees
         run: >-
           npx vitest run --no-file-parallelism
