@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   describeMeasureRange,
+  destinationGroupTemplateById,
   diffRateRows,
   emitDraftRows,
+  findDestinationGroupTemplate,
   groupDisplayName,
   groupsFromLayout,
   groupsFromRows,
@@ -10,7 +12,10 @@ import {
   poundsFromGrams,
   serializeRowsToCsv,
   validateRateGroups,
+  ALL_REGION_CODES,
   CONTIGUOUS_US,
+  DESTINATION_GROUP_TEMPLATES,
+  DESTINATION_REGION_TEMPLATES,
   type DraftRow,
   type RateGroup,
 } from "../rate-table-model";
@@ -29,6 +34,27 @@ describe("pound formatting", () => {
 
   it("preserves common ounce increments", () => {
     expect(poundsFromGrams(Math.round(0.125 * GRAMS_PER_POUND))).toBe("0.125");
+  });
+});
+
+describe("destination group templates", () => {
+  it("partitions every supported US state and territory exactly once", () => {
+    const assigned = DESTINATION_REGION_TEMPLATES.flatMap((template) => template.regions);
+
+    expect(new Set(assigned).size).toBe(assigned.length);
+    expect([...assigned].sort()).toEqual([...ALL_REGION_CODES].sort());
+  });
+
+  it("uses stable unique IDs and finds templates independent of state order", () => {
+    const ids = DESTINATION_GROUP_TEMPLATES.map((template) => template.id);
+    const mountainWest = destinationGroupTemplateById("mountain-west");
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(mountainWest).not.toBeNull();
+    expect(findDestinationGroupTemplate([...mountainWest!.regions].reverse())?.id)
+      .toBe("mountain-west");
+    expect(findDestinationGroupTemplate(["PA", "CA"])).toBeNull();
+    expect(destinationGroupTemplateById("unknown")).toBeNull();
   });
 });
 
