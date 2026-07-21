@@ -6,7 +6,7 @@ function readNormalizedSource(...segments: string[]): string {
   return readFileSync(join(process.cwd(), ...segments), "utf8").replace(/\r\n/g, "\n");
 }
 
-const migration = readNormalizedSource("migrations", "154_receipt_line_idempotency.sql");
+const migration = readNormalizedSource("migrations", "155_receipt_line_idempotency.sql");
 const schema = readNormalizedSource("shared", "schema", "inventory.schema.ts");
 const receiveUseCase = readNormalizedSource(
   "server",

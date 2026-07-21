@@ -8,7 +8,7 @@ function readNormalizedSource(...segments: string[]): string {
 
 const migration = readNormalizedSource(
   "migrations",
-  "156_procurement_usd_financial_authority.sql",
+  "157_procurement_usd_financial_authority.sql",
 );
 const schema = readNormalizedSource("shared", "schema", "procurement.schema.ts");
 

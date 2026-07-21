@@ -6,7 +6,7 @@ function readNormalizedSource(...segments: string[]): string {
   return readFileSync(join(process.cwd(), ...segments), "utf8").replace(/\r\n/g, "\n");
 }
 
-const migration = readNormalizedSource("migrations", "155_landed_cost_current_row_uniqueness.sql");
+const migration = readNormalizedSource("migrations", "156_landed_cost_current_row_uniqueness.sql");
 const schema = readNormalizedSource("shared", "schema", "procurement.schema.ts");
 
 describe("landed cost current-row uniqueness migration", () => {
