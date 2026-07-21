@@ -6,6 +6,10 @@ import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
 import * as notificationService from "../notifications/notifications.service";
 
+function getActorId(req: any): string | undefined {
+  return req.user?.id ?? req.session?.user?.id;
+}
+
 export function registerInboundShipmentRoutes(app: Express) {
   const { shipmentTracking } = app.locals.services;
 
@@ -319,7 +323,8 @@ export function registerInboundShipmentRoutes(app: Express) {
           costRowIds,
           lineOverrides,
           notes,
-        }
+        },
+        getActorId(req),
       );
       res.json(invoice);
     } catch (error: any) {
@@ -371,18 +376,27 @@ export function registerInboundShipmentRoutes(app: Express) {
     try {
       const { vendorInvoiceId } = req.body;
       if (!vendorInvoiceId) return res.status(400).json({ error: "vendorInvoiceId required" });
-      const result = await apLedger.linkCostToInvoice(Number(req.params.costId), vendorInvoiceId);
+      const result = await apLedger.linkCostToInvoice(
+        Number(req.params.costId),
+        vendorInvoiceId,
+        getActorId(req),
+      );
       res.json(result);
     } catch (error: any) {
+      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
     }
   });
 
   app.post("/api/inbound-shipments/costs/:costId/unlink-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      await apLedger.unlinkCostFromInvoice(Number(req.params.costId));
-      res.json({ success: true });
+      const result = await apLedger.unlinkCostFromInvoice(
+        Number(req.params.costId),
+        getActorId(req),
+      );
+      res.json({ success: true, ...result });
     } catch (error: any) {
+      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
     }
   });

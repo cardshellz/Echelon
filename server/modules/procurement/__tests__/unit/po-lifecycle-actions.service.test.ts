@@ -206,13 +206,14 @@ describe("PO lifecycle actions", () => {
   });
 
   it("physical lifecycle transition writes a mapped event", async () => {
-    const db = buildMockDb();
+    const po = {
+      id: 3,
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
+    };
+    const db = buildMockDb([[po]]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 3,
-        status: "acknowledged",
-        physicalStatus: "acknowledged",
-      }),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
     });
     const svc = createPurchasingService(db, storage);
 
@@ -249,13 +250,14 @@ describe("PO lifecycle actions", () => {
   });
 
   it("dispatches physical movement through the lifecycle command boundary", async () => {
-    const db = buildMockDb();
+    const po = {
+      id: 33,
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
+    };
+    const db = buildMockDb([[po]]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 33,
-        status: "acknowledged",
-        physicalStatus: "acknowledged",
-      }),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
     });
     const svc = createPurchasingService(db, storage);
 
@@ -288,13 +290,14 @@ describe("PO lifecycle actions", () => {
 
   it("dispatches acknowledge data through the lifecycle command boundary", async () => {
     const confirmedDeliveryDate = new Date("2026-05-21T00:00:00.000Z");
-    const db = buildMockDb();
+    const po = {
+      id: 34,
+      status: "sent",
+      physicalStatus: "sent",
+    };
+    const db = buildMockDb([[po]]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 34,
-        status: "sent",
-        physicalStatus: "sent",
-      }),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
     });
     const svc = createPurchasingService(db, storage);
 
@@ -333,15 +336,16 @@ describe("PO lifecycle actions", () => {
   });
 
   it("rejects vendor confirmed delivery before the PO submission date", async () => {
-    const db = buildMockDb();
+    const po = {
+      id: 35,
+      status: "sent",
+      physicalStatus: "sent",
+      sentToVendorAt: new Date("2026-05-10T18:00:00.000Z"),
+      orderDate: new Date("2026-05-10T18:00:00.000Z"),
+    };
+    const db = buildMockDb([[po]]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 35,
-        status: "sent",
-        physicalStatus: "sent",
-        sentToVendorAt: new Date("2026-05-10T18:00:00.000Z"),
-        orderDate: new Date("2026-05-10T18:00:00.000Z"),
-      }),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
     });
     const svc = createPurchasingService(db, storage);
 
@@ -353,7 +357,9 @@ describe("PO lifecycle actions", () => {
       statusCode: 400,
       details: expect.objectContaining({ code: "CONFIRMED_DELIVERY_BEFORE_PO" }),
     });
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.updateCalls).toHaveLength(0);
+    expect(db.insertedRows).toHaveLength(0);
   });
 
   it("updates a nonterminal delivery schedule with history and event audit", async () => {
@@ -422,17 +428,19 @@ describe("PO lifecycle actions", () => {
   });
 
   it("cancel writes line cancellations, status history, and event in one transaction", async () => {
-    const db = buildMockDb();
+    const po = {
+      id: 5,
+      status: "approved",
+      physicalStatus: "draft",
+    };
+    const lines = [
+      { id: 50, status: "open", orderQty: 12 },
+      { id: 51, status: "received", orderQty: 2 },
+    ];
+    const db = buildMockDb([[po], lines]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 5,
-        status: "approved",
-        physicalStatus: "draft",
-      }),
-      getPurchaseOrderLines: vi.fn().mockResolvedValue([
-        { id: 50, status: "open", orderQty: 12 },
-        { id: 51, status: "received", orderQty: 2 },
-      ]),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
+      getPurchaseOrderLines: vi.fn().mockResolvedValue(lines),
     });
     const svc = createPurchasingService(db, storage);
 
@@ -476,24 +484,26 @@ describe("PO lifecycle actions", () => {
   });
 
   it("close-short writes line patches, status history, and event in one transaction", async () => {
-    const db = buildMockDb();
+    const po = {
+      id: 4,
+      status: "partially_received",
+      physicalStatus: "receiving",
+    };
+    const lines = [{ id: 40, status: "open", orderQty: 10 }];
+    const db = buildMockDb([[po], lines]);
     const storage = buildMockStorage({
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 4,
-        status: "partially_received",
-        physicalStatus: "receiving",
-      }),
-      getPurchaseOrderLines: vi.fn().mockResolvedValue([
-        { id: 40, status: "open", orderQty: 10 },
-      ]),
+      getPurchaseOrderById: vi.fn().mockResolvedValue(po),
+      getPurchaseOrderLines: vi.fn().mockResolvedValue(lines),
     });
-    const svc = createPurchasingService(db, storage);
+    const reconcileApprovedInvoiceCost = vi.fn().mockResolvedValue(undefined);
+    const svc = createPurchasingService(db, storage, { reconcileApprovedInvoiceCost });
 
     await svc.closeShort(4, "vendor short-shipped", "user-4");
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(storage.updatePurchaseOrderLine).not.toHaveBeenCalled();
     expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    expect(reconcileApprovedInvoiceCost).toHaveBeenCalledWith(40, db, "user-4");
     expect(db.updateCalls).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

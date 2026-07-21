@@ -51,10 +51,12 @@ import { createChannelProductPushService } from "../modules/channels/product-pus
 import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
+import { createVendorService } from "../modules/procurement/vendor.service";
 import { createRecommendationPoHandoffService } from "../modules/procurement/recommendation-po-handoff.service";
 import { createDrizzleRecommendationPoHandoffRepository } from "../modules/procurement/recommendation-po-handoff.repository";
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
 import { recordReceivingReconciliationFailure } from "../modules/procurement/po-exceptions.service";
+import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "../modules/procurement/ap-ledger.service";
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { createShipStationService } from "../modules/oms/shipstation.service";
@@ -135,7 +137,18 @@ export function createServices(db: any) {
     ...procurementStorage,
     ...catalogStorage,
     ...warehouseStorage,
+  }, {
+    reconcileApprovedInvoiceCost: (
+      purchaseOrderLineId,
+      tx,
+      actorId,
+    ) => reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(
+      purchaseOrderLineId,
+      tx,
+      actorId,
+    ),
   });
+  const vendor = createVendorService(db, procurementStorage);
   const recommendationPoHandoff = createRecommendationPoHandoffService(
     createDrizzleRecommendationPoHandoffRepository(db),
   );
@@ -159,6 +172,16 @@ export function createServices(db: any) {
       message: input.message,
       details: input.details,
     });
+  }, {
+    reconcilePurchaseOrderLine: (
+      purchaseOrderLineId,
+      tx,
+      actorId,
+    ) => reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(
+      purchaseOrderLineId,
+      tx,
+      actorId,
+    ),
   });
 
   // Standalone (imports from Shopify)
@@ -306,6 +329,7 @@ export function createServices(db: any) {
     channelProductPush,
     binAssignment,
     purchasing,
+    vendor,
     recommendationPoHandoff,
     shipmentTracking,
     syncSettings,
@@ -359,6 +383,8 @@ export { createBinAssignmentService } from "../modules/warehouse/bin-assignment.
 export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "../modules/warehouse/bin-assignment.service";
 export { createPurchasingService } from "../modules/procurement/purchasing.service";
 export type { PurchasingService, PurchasingError } from "../modules/procurement/purchasing.service";
+export { createVendorService } from "../modules/procurement/vendor.service";
+export type { VendorService, VendorServiceError } from "../modules/procurement/vendor.service";
 export { createRecommendationPoHandoffService } from "../modules/procurement/recommendation-po-handoff.service";
 export type { RecommendationPoHandoffService, RecommendationPoHandoffError } from "../modules/procurement/recommendation-po-handoff.service";
 export { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";

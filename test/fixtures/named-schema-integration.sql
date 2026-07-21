@@ -216,6 +216,7 @@ CREATE TABLE inventory.inventory_transactions (
   order_id integer REFERENCES wms.orders(id),
   order_item_id integer REFERENCES wms.order_items(id),
   receiving_order_id integer,
+  receiving_line_id integer,
   cycle_count_id integer,
   shipment_id integer,
   shipment_item_id integer,

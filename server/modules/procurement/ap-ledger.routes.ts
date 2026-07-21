@@ -78,11 +78,11 @@ export function registerApLedgerRoutes(app: Express) {
         ...body,
         invoiceDate: body.invoiceDate ? new Date(body.invoiceDate) : undefined,
         dueDate: body.dueDate ? new Date(body.dueDate) : undefined,
-        createdBy: (req as any).user?.id,
+        createdBy: getUserId(req),
       });
       res.status(201).json(invoice);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
@@ -102,11 +102,10 @@ export function registerApLedgerRoutes(app: Express) {
         ...req.body,
         invoiceDate: req.body.invoiceDate ? new Date(req.body.invoiceDate) : undefined,
         dueDate: req.body.dueDate ? new Date(req.body.dueDate) : undefined,
-        updatedBy: (req as any).user?.id,
-      });
+      }, getUserId(req));
       res.json(invoice);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
@@ -175,19 +174,29 @@ export function registerApLedgerRoutes(app: Express) {
     try {
       const { purchaseOrderId, allocatedAmountCents, notes } = req.body;
       if (!purchaseOrderId) return res.status(400).json({ error: "purchaseOrderId is required" });
-      const link = await apLedger.linkPoToInvoice(Number(req.params.id), purchaseOrderId, allocatedAmountCents, notes);
+      const link = await apLedger.linkPoToInvoice(
+        Number(req.params.id),
+        purchaseOrderId,
+        allocatedAmountCents,
+        notes,
+        getUserId(req),
+      );
       res.status(201).json(link);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
   app.delete("/api/vendor-invoices/:id/po-links/:poId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      await apLedger.unlinkPoFromInvoice(Number(req.params.id), Number(req.params.poId));
-      res.json({ ok: true });
+      const result = await apLedger.unlinkPoFromInvoice(
+        Number(req.params.id),
+        Number(req.params.poId),
+        getUserId(req),
+      );
+      res.json(result);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
@@ -206,52 +215,65 @@ export function registerApLedgerRoutes(app: Express) {
     try {
       const { purchaseOrderId } = req.body;
       if (!purchaseOrderId) return res.status(400).json({ error: "purchaseOrderId is required" });
-      const lines = await apLedger.importLinesFromPO(Number(req.params.id), purchaseOrderId);
+      const lines = await apLedger.importLinesFromPO(
+        Number(req.params.id),
+        purchaseOrderId,
+        getUserId(req),
+      );
       res.status(201).json({ lines });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
   app.post("/api/vendor-invoices/:id/lines", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
     try {
-      const line = await apLedger.addInvoiceLine(Number(req.params.id), req.body);
+      const line = await apLedger.addInvoiceLine(
+        Number(req.params.id),
+        req.body,
+        getUserId(req),
+      );
       res.status(201).json(line);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
   app.patch("/api/vendor-invoice-lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const line = await apLedger.updateInvoiceLine(Number(req.params.lineId), req.body);
+      const line = await apLedger.updateInvoiceLine(
+        Number(req.params.lineId),
+        req.body,
+        getUserId(req),
+      );
       res.json(line);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
   app.delete("/api/vendor-invoice-lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      await apLedger.removeInvoiceLine(Number(req.params.lineId));
+      await apLedger.removeInvoiceLine(Number(req.params.lineId), getUserId(req));
       res.json({ ok: true });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
   app.post("/api/vendor-invoices/:id/match", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const lines = await apLedger.runInvoiceMatch(Number(req.params.id));
+      const lines = await apLedger.runInvoiceMatch(Number(req.params.id), getUserId(req));
       res.json({ lines });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 
   // Invoice attachments
 
   app.post("/api/vendor-invoices/:id/attachments", requirePermission("purchasing", "edit"), upload.single("file"), async (req, res) => {
+    let writtenFilePath: string | undefined;
     try {
       const invoiceId = Number(req.params.id);
       const file = req.file;
@@ -266,18 +288,24 @@ export function registerApLedgerRoutes(app: Express) {
       const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
       const filePath = path.join(dir, `${Date.now()}_${safeName}`);
       fs.writeFileSync(filePath, file.buffer);
+      writtenFilePath = filePath;
 
       const attachment = await apLedger.addAttachment(invoiceId, {
         fileName: file.originalname,
         fileType: file.mimetype,
         fileSizeBytes: file.size,
         filePath,
-        uploadedBy: (req as any).user?.id,
+        uploadedBy: getUserId(req),
         notes: req.body.notes,
       });
+      writtenFilePath = undefined;
       res.status(201).json(attachment);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      if (writtenFilePath) {
+        const fs = await import("fs");
+        try { fs.unlinkSync(writtenFilePath); } catch {}
+      }
+      handleApLedgerError(res, err, 500);
     }
   });
 
@@ -306,15 +334,24 @@ export function registerApLedgerRoutes(app: Express) {
 
   app.delete("/api/vendor-invoice-attachments/:id", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const attachment = await apLedger.getAttachmentById(Number(req.params.id));
+      const attachment = await apLedger.removeAttachment(Number(req.params.id), getUserId(req));
       if (attachment) {
         const fs = await import("fs");
-        try { fs.unlinkSync(attachment.filePath); } catch {}
+        try {
+          fs.unlinkSync(attachment.filePath);
+        } catch (error: any) {
+          if (error?.code !== "ENOENT") {
+            console.error("[AP Ledger] Failed to delete invoice attachment file after database removal", {
+              attachmentId: attachment.id,
+              filePath: attachment.filePath,
+              error: error?.message,
+            });
+          }
+        }
       }
-      await apLedger.removeAttachment(Number(req.params.id));
-      res.json({ ok: true });
+      res.json({ ok: true, removed: Boolean(attachment) });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      handleApLedgerError(res, err, 500);
     }
   });
 

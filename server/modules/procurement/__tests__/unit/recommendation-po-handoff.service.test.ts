@@ -582,6 +582,24 @@ describe("recommendation PO handoff service", () => {
     expect(harness.state.pos).toHaveLength(0);
   });
 
+  it("rejects non-USD recommendation handoff before creating a PO", async () => {
+    const state = baseState();
+    state.vendors[0].currency = "EUR";
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+
+    await expect(service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({
+      statusCode: 422,
+      code: "PO_FX_RATE_REQUIRED",
+      context: {
+        vendorId: 7,
+        currency: "EUR",
+        reportingCurrency: "USD",
+      },
+    } satisfies Partial<RecommendationPoHandoffError>);
+    expect(harness.state.pos).toHaveLength(0);
+  });
+
   it("rejects a changed quote basis even when normalized per-piece mills are unchanged", async () => {
     const state = baseState();
     Object.assign(state.vendorProducts[0], {

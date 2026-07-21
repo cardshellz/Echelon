@@ -319,8 +319,7 @@
     "server/scripts/fix_orphaned_picks.ts"
   ],
   "inventory.inventory_lots": [
-    "modules/inventory",
-    "modules/procurement"
+    "modules/inventory"
   ],
   "inventory.inventory_transactions": [
     "modules/channels",
@@ -401,12 +400,10 @@
     "server/index.ts"
   ],
   "oms.order_item_costs": [
-    "modules/inventory",
-    "modules/procurement"
+    "modules/inventory"
   ],
   "oms.order_item_financials": [
-    "modules/catalog",
-    "modules/procurement"
+    "modules/catalog"
   ],
   "oms.order_line_adjustments": [
     "modules/oms"
@@ -452,7 +449,6 @@
     "modules/procurement"
   ],
   "procurement.inbound_shipment_lines": [
-    "modules/catalog",
     "modules/procurement"
   ],
   "procurement.inbound_shipment_status_history": [
@@ -489,7 +485,6 @@
     "modules/procurement"
   ],
   "procurement.purchase_order_lines": [
-    "modules/catalog",
     "modules/procurement"
   ],
   "procurement.purchase_orders": [
@@ -508,7 +503,6 @@
     "modules/procurement"
   ],
   "procurement.receiving_lines": [
-    "modules/catalog",
     "modules/procurement"
   ],
   "procurement.receiving_orders": [
@@ -524,7 +518,6 @@
     "modules/procurement"
   ],
   "procurement.vendor_invoice_lines": [
-    "modules/catalog",
     "modules/procurement"
   ],
   "procurement.vendor_invoice_po_links": [

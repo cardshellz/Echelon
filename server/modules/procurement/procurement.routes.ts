@@ -5,9 +5,7 @@ import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
-import { requirePermission, requireAuth, requireInternalApiKey } from "../../routes/middleware";
-import { registerReplenishmentRoutes } from "../inventory/replenishment.routes";
-import { registerNotificationRoutes } from "../notifications/notifications.routes";
+import { requirePermission, requireInternalApiKey } from "../../routes/middleware";
 import { registerReceivingRoutes } from "./receiving.routes";
 import { registerPurchaseOrderRoutes } from "./purchase-order.routes";
 import { registerPurchasingAdminRoutes } from "./purchasing-admin.routes";
@@ -21,12 +19,11 @@ import {
 } from "./purchasing-recommendation.routes";
 import { registerDemandEventRoutes } from "./demand-events.routes";
 import { registerEnterpriseDashboardRoutes } from "./enterprise-dashboard.routes";
-import { registerFinanceAnalyticsRoutes } from "../oms/finance-analytics.routes";
 
 export function registerPurchasingRoutes(app: Express) {
   // ===== VENDORS API =====
   
-  app.get("/api/vendors", requireAuth, async (req, res) => {
+  app.get("/api/vendors", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const vendors = await storage.getAllVendors();
       res.json(vendors);
@@ -36,7 +33,7 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/vendors/:id", requireAuth, async (req, res) => {
+  app.get("/api/vendors/:id", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const vendor = await storage.getVendorById(id);
@@ -50,66 +47,43 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
   
-  app.post("/api/vendors", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/vendors", requirePermission("purchasing", "create"), async (req, res) => {
     try {
-      const { code, name, contactName, email, phone, address, notes } = req.body;
-      if (!code || !name) {
-        return res.status(400).json({ error: "Code and name are required" });
-      }
-      
-      const existing = await storage.getVendorByCode(code);
-      if (existing) {
-        return res.status(400).json({ error: "Vendor code already exists" });
-      }
-      
-      const vendor = await storage.createVendor({
-        code,
-        name,
-        contactName,
-        email,
-        phone,
-        address,
-        notes,
-      });
+      const { vendor: vendorService } = req.app.locals.services;
+      const vendor = await vendorService.create(req.body ?? {}, req.session.user?.id);
       res.status(201).json(vendor);
-    } catch (error) {
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error creating vendor:", error);
       res.status(500).json({ error: "Failed to create vendor" });
     }
   });
   
-  app.patch("/api/vendors/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.patch("/api/vendors/:id", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const updates = req.body;
-      const vendor = await storage.updateVendor(id, updates);
-      if (!vendor) {
-        return res.status(404).json({ error: "Vendor not found" });
-      }
+      const { vendor: vendorService } = req.app.locals.services;
+      const vendor = await vendorService.update(req.params.id, req.body ?? {}, req.session.user?.id);
       res.json(vendor);
-    } catch (error) {
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error updating vendor:", error);
       res.status(500).json({ error: "Failed to update vendor" });
     }
   });
   
-  app.delete("/api/vendors/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.delete("/api/vendors/:id", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const deleted = await storage.deleteVendor(id);
-      if (!deleted) {
-        return res.status(404).json({ error: "Vendor not found" });
-      }
-      res.json({ success: true });
-    } catch (error) {
+      const { vendor: vendorService } = req.app.locals.services;
+      const vendor = await vendorService.deactivate(req.params.id, req.session.user?.id);
+      res.json({ success: true, vendor });
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error deleting vendor:", error);
-      res.status(500).json({ error: "Failed to delete vendor" });
+      res.status(500).json({ error: "Failed to deactivate vendor" });
     }
   });
   
   registerReceivingRoutes(app);
-
-  registerReplenishmentRoutes(app);
 
   // --- SLA Monitoring ---
 
@@ -356,12 +330,9 @@ export function registerPurchasingRoutes(app: Express) {
 
   registerApLedgerRoutes(app);
 
-  registerNotificationRoutes(app);
-
   registerPurchasingRecommendationAdminRoutes(app);
 
   registerDemandEventRoutes(app);
 
   registerEnterpriseDashboardRoutes(app);
-  registerFinanceAnalyticsRoutes(app);
 }

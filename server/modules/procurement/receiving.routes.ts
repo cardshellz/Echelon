@@ -112,33 +112,24 @@ export function registerReceivingRoutes(app: Express) {
   });
   
   app.post("/api/receiving", requirePermission("inventory", "adjust"), async (req, res) => {
-    let receiptNumber = "(unassigned)";
     try {
       const { sourceType, vendorId, warehouseId, poNumber, asnNumber, expectedDate, notes } = req.body;
-      
-      receiptNumber = await storage.generateReceiptNumber();
-      const userId = req.session.user?.id || null;
-      
-      const order = await storage.createReceivingOrder({
-        receiptNumber,
-        sourceType: sourceType || "blind",
-        vendorId: vendorId || null,
-        warehouseId: warehouseId || null,
-        poNumber: poNumber || null,
-        asnNumber: asnNumber || null,
-        expectedDate: expectedDate ? new Date(expectedDate) : null,
-        notes: notes || null,
-        status: "draft",
-        createdBy: userId,
-      });
+      const { receiving: rcvService } = req.app.locals.services;
+      const order = await rcvService.createOrder({
+        sourceType,
+        vendorId,
+        warehouseId,
+        poNumber,
+        asnNumber,
+        expectedDate,
+        notes,
+      }, req.session.user?.id || null);
       
       res.status(201).json(order);
     } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error creating receiving order:", error?.message || error);
       if (error?.stack) console.error(error.stack);
-      if (error?.code === "23505") {
-        return res.status(409).json({ error: `Receipt number '${receiptNumber}' already in use by an active record.` });
-      }
       res.status(500).json({ error: "Failed to create receiving order", details: error?.message });
     }
   });
@@ -146,14 +137,14 @@ export function registerReceivingRoutes(app: Express) {
   app.patch("/api/receiving/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const updates = req.body;
-      
-      const order = await storage.updateReceivingOrder(id, updates);
+      const { receiving: rcvService } = req.app.locals.services;
+      const order = await rcvService.updateOrderDetails(id, req.body ?? {});
       if (!order) {
         return res.status(404).json({ error: "Receiving order not found" });
       }
       res.json(order);
-    } catch (error) {
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error updating receiving order:", error);
       res.status(500).json({ error: "Failed to update receiving order" });
     }
@@ -162,12 +153,14 @@ export function registerReceivingRoutes(app: Express) {
   app.delete("/api/receiving/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const deleted = await storage.deleteReceivingOrder(id);
+      const { receiving: rcvService } = req.app.locals.services;
+      const deleted = await rcvService.deleteOrder(id);
       if (!deleted) {
         return res.status(404).json({ error: "Receiving order not found" });
       }
       res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error deleting receiving order:", error);
       res.status(500).json({ error: "Failed to delete receiving order" });
     }
@@ -234,7 +227,6 @@ export function registerReceivingRoutes(app: Express) {
         productName,
         expectedQty,
         receivedQty,
-        status,
         productVariantId,
         productId,
         barcode,
@@ -256,8 +248,8 @@ export function registerReceivingRoutes(app: Express) {
         return res.status(400).json({ error: resolved.error });
       }
 
-      await storage.createReceivingLine({
-        receivingOrderId: orderId,
+      const { receiving: rcvService } = req.app.locals.services;
+      const updatedOrder = await rcvService.addLine(orderId, {
         sku: sku || null,
         productName: productName || null,
         expectedQty: expectedQty || 0,
@@ -269,21 +261,10 @@ export function registerReceivingRoutes(app: Express) {
         unitCost: resolved.cents,
         unitCostMills: resolved.mills,
         putawayLocationId: putawayLocationId || null,
-        status: status || "pending",
       });
-      
-      // Update order line count
-      const lines = await storage.getReceivingLines(orderId);
-      await storage.updateReceivingOrder(orderId, {
-        expectedLineCount: lines.length,
-        expectedTotalUnits: lines.reduce((sum, l) => sum + (l.expectedQty || 0), 0),
-      });
-      
-      // Return updated order with lines and vendor (matching GET pattern)
-      const order = await storage.getReceivingOrderById(orderId);
-      const vendor = order?.vendorId ? await storage.getVendorById(order.vendorId) : null;
-      res.status(201).json({ ...order, lines, vendor });
-    } catch (error) {
+      res.status(201).json(updatedOrder);
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error creating receiving line:", error);
       res.status(500).json({ error: "Failed to create receiving line" });
     }
@@ -315,34 +296,14 @@ export function registerReceivingRoutes(app: Express) {
         updates.unitCostMills = resolved.mills ?? null;
       }
 
-      // Calculate status based on quantities
-      if (updates.receivedQty !== undefined) {
-        const line = await storage.getReceivingLineById(lineId);
-        if (line) {
-          const expectedQty = updates.expectedQty ?? line.expectedQty ?? 0;
-          const receivedQty = updates.receivedQty ?? line.receivedQty ?? 0;
-          
-          if (receivedQty === 0) {
-            updates.status = "pending";
-          } else if (receivedQty < expectedQty) {
-            updates.status = "partial";
-          } else if (receivedQty === expectedQty) {
-            updates.status = "complete";
-          } else if (receivedQty > expectedQty) {
-            updates.status = "overage";
-            
-            // Soft-Flag: Tolerance limits are kept for reporting/financial dashboards 
-            // but no longer block operational receiving on the floor.
-          }
-        }
-      }
-      
-      const line = await storage.updateReceivingLine(lineId, updates);
+      const { receiving: rcvService } = req.app.locals.services;
+      const line = await rcvService.updateLine(lineId, updates);
       if (!line) {
         return res.status(404).json({ error: "Receiving line not found" });
       }
       res.json(line);
-    } catch (error) {
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error updating receiving line:", error);
       res.status(500).json({ error: "Failed to update receiving line" });
     }
@@ -362,28 +323,6 @@ export function registerReceivingRoutes(app: Express) {
     }
   });
 
-  // Delete a receiving order (only if not closed)
-  app.delete("/api/receiving/:orderId", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const orderId = parseInt(req.params.orderId);
-      const order = await storage.getReceivingOrderById(orderId);
-
-      if (!order) {
-        return res.status(404).json({ error: "Receiving order not found" });
-      }
-
-      if (order.status === "closed") {
-        return res.status(400).json({ error: "Cannot delete a closed receiving order" });
-      }
-
-      await storage.deleteReceivingOrder(orderId);
-      res.json({ success: true });
-    } catch (error) {
-      console.error("Error deleting receiving order:", error);
-      res.status(500).json({ error: "Failed to delete receiving order" });
-    }
-  });
-  
   // Bulk complete all lines in a receiving order
   app.post("/api/receiving/:orderId/complete-all", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
@@ -400,22 +339,11 @@ export function registerReceivingRoutes(app: Express) {
   app.delete("/api/receiving/lines/:lineId", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const lineId = parseInt(req.params.lineId);
-      const line = await storage.getReceivingLineById(lineId);
-      if (!line) {
-        return res.status(404).json({ error: "Receiving line not found" });
-      }
-      
-      const deleted = await storage.deleteReceivingLine(lineId);
-      
-      // Update order line count
-      const lines = await storage.getReceivingLines(line.receivingOrderId);
-      await storage.updateReceivingOrder(line.receivingOrderId, {
-        expectedLineCount: lines.length,
-        expectedTotalUnits: lines.reduce((sum, l) => sum + (l.expectedQty || 0), 0),
-      });
-      
+      const { receiving: rcvService } = req.app.locals.services;
+      await rcvService.deleteLine(lineId);
       res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error deleting receiving line:", error);
       res.status(500).json({ error: "Failed to delete receiving line" });
     }

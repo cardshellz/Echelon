@@ -32,6 +32,7 @@ import {
   type PoException,
 } from "@shared/schema";
 import { eq, and, inArray, sql, desc } from "drizzle-orm";
+import { computePurchaseOrderInvoiceMatchSourceFingerprint } from "./purchase-order-invoice-match";
 
 // ─── Error class ──────────────────────────────────────────────────────────────
 
@@ -96,6 +97,7 @@ export interface UpsertExceptionInput {
   message?: string;
   payload?: Record<string, unknown>;
   detectedBy?: string;
+  preserveResolved?: boolean;
 }
 
 export interface RecordReceivingReconciliationFailureInput {
@@ -142,18 +144,23 @@ export async function upsertException(
   const now = new Date();
 
   return await db.transaction(async (tx) => {
-    // Check for an existing open/acknowledged exception with the same hash.
+    const reusableStatuses: ExceptionStatus[] = input.preserveResolved
+      ? ["open", "acknowledged", "resolved"]
+      : ["open", "acknowledged"];
+    // Exact-source financial acceptances stay resolved. A changed source has a
+    // different payload hash and therefore creates a new open exception.
     const [existing] = await tx
       .select()
       .from(poExceptions)
       .where(
         and(
           eq(poExceptions.payloadHash, hash),
-          inArray(poExceptions.status, ["open", "acknowledged"] as ExceptionStatus[]),
+          inArray(poExceptions.status, reusableStatuses),
         ),
       );
 
     if (existing) {
+      if (existing.status === "resolved") return existing;
       // Update the timestamp so the user knows it was re-detected.
       const [updated] = await tx
         .update(poExceptions)
@@ -460,13 +467,16 @@ export async function detectQtyVariance(poId: number): Promise<void> {
  * any invoice line has a non-matched matchStatus.
  */
 export async function detectMatchMismatch(invoiceId: number): Promise<void> {
-  // Get invoice + its linked PO IDs.
   const [invoice] = await db
-    .select({ id: vendorInvoices.id, invoiceNumber: vendorInvoices.invoiceNumber })
+    .select({
+      id: vendorInvoices.id,
+      invoiceNumber: vendorInvoices.invoiceNumber,
+      status: vendorInvoices.status,
+    })
     .from(vendorInvoices)
     .where(eq(vendorInvoices.id, invoiceId));
 
-  if (!invoice) return;
+  if (!invoice || invoice.status === "voided") return;
 
   const poLinks = await db
     .select({ purchaseOrderId: vendorInvoicePoLinks.purchaseOrderId })
@@ -475,28 +485,54 @@ export async function detectMatchMismatch(invoiceId: number): Promise<void> {
 
   if (poLinks.length === 0) return;
 
-  // Get mismatched lines for this invoice.
-  const mismatchedLines = await db
-    .select({
-      id: vendorInvoiceLines.id,
-      matchStatus: vendorInvoiceLines.matchStatus,
-      qtyInvoiced: vendorInvoiceLines.qtyInvoiced,
-      unitCostCents: vendorInvoiceLines.unitCostCents,
-    })
-    .from(vendorInvoiceLines)
-    .where(
-      and(
-        eq(vendorInvoiceLines.vendorInvoiceId, invoiceId),
-        sql`${vendorInvoiceLines.matchStatus} != 'matched'`,
-        sql`${vendorInvoiceLines.matchStatus} != 'pending'`,
-      ),
-    );
-
-  if (mismatchedLines.length === 0) return;
-
   for (const poLink of poLinks) {
     const po = await _getPo(poLink.purchaseOrderId);
     if (!po || _isTerminalPo(po)) continue;
+
+    const poLines = await db
+      .select()
+      .from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, poLink.purchaseOrderId));
+    const allPoLinks = await db
+      .select({ vendorInvoiceId: vendorInvoicePoLinks.vendorInvoiceId })
+      .from(vendorInvoicePoLinks)
+      .where(eq(vendorInvoicePoLinks.purchaseOrderId, poLink.purchaseOrderId));
+    const linkedInvoiceIds = [...new Set(
+      allPoLinks.map((link) => Number(link.vendorInvoiceId)),
+    )].sort((left, right) => left - right);
+    const linkedInvoices = linkedInvoiceIds.length === 0
+      ? []
+      : await db
+        .select({ id: vendorInvoices.id, status: vendorInvoices.status })
+        .from(vendorInvoices)
+        .where(inArray(vendorInvoices.id, linkedInvoiceIds));
+    const activeInvoices = linkedInvoices
+      .filter((linkedInvoice) => linkedInvoice.status !== "voided")
+      .sort((left, right) => left.id - right.id);
+    const activeInvoiceIds = activeInvoices.map((linkedInvoice) => linkedInvoice.id);
+    const allActiveInvoiceLines = activeInvoiceIds.length === 0
+      ? []
+      : await db
+        .select()
+        .from(vendorInvoiceLines)
+        .where(inArray(vendorInvoiceLines.vendorInvoiceId, activeInvoiceIds));
+    const poLineIds = new Set(poLines.map((line) => Number(line.id)));
+    const scopedInvoiceLines = allActiveInvoiceLines.filter((line) =>
+      line.purchaseOrderLineId == null || poLineIds.has(Number(line.purchaseOrderLineId)),
+    );
+    const mismatchedLines = scopedInvoiceLines.filter((line) =>
+      Number(line.vendorInvoiceId) === invoiceId &&
+      line.matchStatus !== "matched" &&
+      line.matchStatus !== "pending",
+    );
+    if (mismatchedLines.length === 0) continue;
+
+    const sourceFingerprint = computePurchaseOrderInvoiceMatchSourceFingerprint({
+      purchaseOrderId: poLink.purchaseOrderId,
+      purchaseOrderLines: poLines,
+      activeInvoices,
+      invoiceLines: scopedInvoiceLines,
+    });
 
     await upsertException({
       poId: poLink.purchaseOrderId,
@@ -508,9 +544,15 @@ export async function detectMatchMismatch(invoiceId: number): Promise<void> {
         invoiceId,
         invoiceNumber: invoice.invoiceNumber,
         mismatchedLineCount: mismatchedLines.length,
+        mismatchedLineIds: mismatchedLines
+          .map((line) => Number(line.id))
+          .sort((left, right) => left - right),
         matchStatuses: [...new Set(mismatchedLines.map((l) => l.matchStatus))],
+        sourceFingerprint,
+        sourceVersion: 1,
       },
       detectedBy: "system",
+      preserveResolved: true,
     });
   }
 }

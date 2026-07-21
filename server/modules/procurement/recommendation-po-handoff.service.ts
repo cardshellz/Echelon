@@ -1181,6 +1181,19 @@ async function persistResolvedHandoffs(
   for (const vendorId of [...byVendor.keys()].sort((left, right) => left - right)) {
     const group = byVendor.get(vendorId)!;
     const vendor = group[0].vendor;
+    const currency = String(vendor.currency ?? "USD").trim().toUpperCase();
+    if (currency !== "USD") {
+      throw new RecommendationPoHandoffError(
+        "Non-USD purchase orders require an explicit foreign-exchange rate authority",
+        422,
+        "PO_FX_RATE_REQUIRED",
+        {
+          vendorId,
+          currency,
+          reportingCurrency: "USD",
+        },
+      );
+    }
     const subtotalCents = safeMoneySum(
       group.map((item) => item.lineTotalCents),
       "purchase order subtotal",
@@ -1192,7 +1205,7 @@ async function persistResolvedHandoffs(
       financialStatus: "unbilled",
       poType: "standard",
       priority: "normal",
-      currency: vendor.currency || "USD",
+      currency,
       paymentTermsDays: vendor.paymentTermsDays,
       paymentTermsType: vendor.paymentTermsType,
       shipFromAddress: vendor.shipFromAddress,

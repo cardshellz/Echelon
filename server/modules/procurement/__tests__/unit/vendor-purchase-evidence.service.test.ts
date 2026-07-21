@@ -30,32 +30,49 @@ describe("completed supplier purchase evidence", () => {
       isActive: 1,
       isPreferred: 1,
     };
+    const observedAt = new Date("2026-07-20T12:00:00.000Z");
+    const purchaseOrder = {
+      id: 1,
+      vendorId: 7,
+      status: "received",
+      physicalStatus: "received",
+      financialStatus: "unbilled",
+      poNumber: "PO-001",
+      updatedAt: observedAt,
+    };
+    const purchaseOrderLine = {
+      id: 44,
+      purchaseOrderId: 1,
+      status: "open",
+      orderQty: 12,
+      receivedQty: 12,
+      vendorProductId: 91,
+      unitCostCents: 263,
+      unitCostMills: 26_321,
+    };
 
     const select = vi.fn(() => {
       let table: unknown;
+      const rowsForTable = () => {
+        if (table === purchaseOrders) return [purchaseOrder];
+        if (table === vendorInvoicePoLinks) return [];
+        if (table === purchaseOrderLines) return [purchaseOrderLine];
+        if (table === vendorProducts) return [currentVendorProduct];
+        return [];
+      };
       const builder: any = {
         from: vi.fn((nextTable: unknown) => {
           table = nextTable;
           return builder;
         }),
         innerJoin: vi.fn(() => builder),
-        where: vi.fn(() => {
-          if (table === vendorInvoicePoLinks) return Promise.resolve([]);
-          if (table === purchaseOrderLines) {
-            return Promise.resolve([{
-              vendorProductId: 91,
-              unitCostCents: 263,
-              unitCostMills: 26_321,
-              receivedQty: 12,
-            }]);
-          }
-          if (table === vendorProducts) return builder;
-          return Promise.resolve([]);
-        }),
-        for: vi.fn(async () => (
-          table === vendorProducts ? [currentVendorProduct] : []
-        )),
+        where: vi.fn(() => builder),
+        orderBy: vi.fn(() => builder),
+        limit: vi.fn(() => builder),
+        for: vi.fn(async () => rowsForTable()),
       };
+      builder.then = (resolve: (rows: unknown[]) => unknown, reject: (reason: unknown) => unknown) =>
+        Promise.resolve(rowsForTable()).then(resolve, reject);
       return builder;
     });
 
@@ -88,10 +105,7 @@ describe("completed supplier purchase evidence", () => {
 
     const storage: any = {
       getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 1,
-        vendorId: 7,
-        status: "received",
-        poNumber: "PO-001",
+        ...purchaseOrder,
       }),
     };
     const service = createPurchasingService(db, storage);
