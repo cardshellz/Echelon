@@ -19,7 +19,7 @@ import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
 import { warehouses, warehouseLocations } from "./warehouse.schema";
 import { orders, orderItems, outboundShipmentItems, outboundShipments } from "./orders.schema";
-import { receivingOrders, purchaseOrders, inboundShipments } from "./procurement.schema";
+import { receivingLines, receivingOrders, purchaseOrders, inboundShipments } from "./procurement.schema";
 
 // Inventory levels per location - all quantities in variant units (e.g., 5 cases, 10 packs)
 // Base unit equivalents are computed at query time via: qty * product_variants.units_per_variant
@@ -169,6 +169,7 @@ export const inventoryTransactions = inventorySchema.table("inventory_transactio
   orderId: integer("order_id").references(() => orders.id),
   orderItemId: integer("order_item_id").references(() => orderItems.id),
   receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id), // Link to receiving
+  receivingLineId: integer("receiving_line_id").references(() => receivingLines.id), // Exact receiving command identity
   cycleCountId: integer("cycle_count_id").references(() => cycleCounts.id), // Link to cycle count
   shipmentId: integer("shipment_id").references(() => outboundShipments.id), // Link to shipment
   shipmentItemId: integer("shipment_item_id").references(() => outboundShipmentItems.id, { onDelete: "set null" }),

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockDetectQtyVariance = vi.hoisted(() => vi.fn());
+const mockRecomputePoFinancialAggregates = vi.hoisted(() => vi.fn());
 
 vi.mock("../../po-exceptions.service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../po-exceptions.service")>();
@@ -9,6 +10,10 @@ vi.mock("../../po-exceptions.service", async (importOriginal) => {
     detectQtyVariance: (...args: any[]) => mockDetectQtyVariance(...args),
   };
 });
+
+vi.mock("../../ap-ledger.service", () => ({
+  recomputePoFinancialAggregates: (...args: any[]) => mockRecomputePoFinancialAggregates(...args),
+}));
 
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
@@ -20,9 +25,7 @@ import { createPurchasingService, PurchasingError } from "../../purchasing.servi
 //   2.  transitionPhysical — invalid transitions rejected
 //   3.  transitionFinancial — valid transitions accepted
 //   4.  transitionFinancial — invalid transitions rejected
-//   5.  recomputeFinancialAggregates — correctly sums invoices and payments
-//   6.  recomputeFinancialAggregates — stays "disputed" if currently disputed
-//   7.  recomputeFinancialAggregates — correctly derives financial_status values
+//   5.  recomputeFinancialAggregates — delegates to the AP-owned audited writer
 //   8.  onReceivingOrderClosed — auto-match by product_id when single open line
 //   9.  onReceivingOrderClosed — leaves unlinked when zero matching lines
 //   10. onReceivingOrderClosed — leaves unlinked when multiple open lines (ambiguous)
@@ -65,19 +68,27 @@ function buildMockDb() {
           return chain;
         }),
         leftJoin: vi.fn().mockReturnThis(),
-        where: vi.fn().mockImplementation(() => {
-          if (isPoStateQuery) return Promise.resolve(mockDb._poState ? [mockDb._poState] : []);
-          if (isInvoiceQuery) return Promise.resolve(mockDb._invoiceRows);
-          return Promise.resolve([]);
-        }),
-        limit: vi.fn().mockResolvedValue([]),
+        where: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
         orderBy: vi.fn().mockReturnThis(),
+        for: vi.fn().mockImplementation(async () => {
+          if (isPoStateQuery) return mockDb._poState ? [mockDb._poState] : [];
+          if (isInvoiceQuery) return mockDb._invoiceRows;
+          return [];
+        }),
+        then: (resolve: any, reject: any) => {
+          const rows = isPoStateQuery
+            ? (mockDb._poState ? [mockDb._poState] : [])
+            : isInvoiceQuery
+              ? mockDb._invoiceRows
+              : [];
+          return Promise.resolve(rows).then(resolve, reject);
+        },
       };
 
       // Detect PO state query by inspecting shape (has financialStatus key)
       if (shape && "financialStatus" in shape) {
         isPoStateQuery = true;
-        chain.where = vi.fn().mockResolvedValue(mockDb._poState ? [mockDb._poState] : []);
       }
 
       return chain;
@@ -201,6 +212,7 @@ describe("transitionPhysical", () => {
   it("(1) accepts a valid physical transition: draft → sent", async () => {
     const po = makePo({ status: "approved", physicalStatus: "draft" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionPhysical(1, "sent", "user-1");
 
@@ -214,6 +226,7 @@ describe("transitionPhysical", () => {
   it("(2) rejects an invalid physical transition: draft → received", async () => {
     const po = makePo({ physicalStatus: "draft" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionPhysical(1, "received", "user-1"),
@@ -223,6 +236,7 @@ describe("transitionPhysical", () => {
   it("(2b) rejects a backward physical transition: acknowledged → sent", async () => {
     const po = makePo({ physicalStatus: "acknowledged" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionPhysical(1, "sent", "user-1"),
@@ -232,6 +246,7 @@ describe("transitionPhysical", () => {
   it("(11) legacy status is synced when transitioning to sent", async () => {
     const po = makePo({ status: "approved", physicalStatus: "draft" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionPhysical(1, "sent", "user-1");
 
@@ -242,6 +257,7 @@ describe("transitionPhysical", () => {
   it("(12) cancellation sets physicalStatus=cancelled", async () => {
     const po = makePo({ status: "sent", physicalStatus: "sent" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionPhysical(1, "cancelled", "user-1");
 
@@ -253,6 +269,7 @@ describe("transitionPhysical", () => {
   it("(13) rejects transition from terminal state: received → anything", async () => {
     const po = makePo({ physicalStatus: "received" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionPhysical(1, "receiving", "user-1"),
@@ -263,31 +280,35 @@ describe("transitionPhysical", () => {
 describe("transitionFinancial", () => {
   let svc: ReturnType<typeof createPurchasingService>;
   let storage: ReturnType<typeof buildMockStorage>;
+  let mockDb: ReturnType<typeof buildMockDb>;
 
   beforeEach(() => {
     mockDetectQtyVariance.mockReset();
     storage = buildMockStorage();
-    svc = createPurchasingService(buildMockDb(), storage);
+    mockDb = buildMockDb();
+    svc = createPurchasingService(mockDb, storage);
   });
 
   it("(3) accepts valid financial transition: unbilled → invoiced", async () => {
     const po = makePo({ financialStatus: "unbilled" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionFinancial(1, "invoiced", "user-1");
 
-    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledOnce();
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    const patch = mockDb._updateCalls[0];
     expect(patch.financialStatus).toBe("invoiced");
   });
 
   it("(3b) accepts valid financial transition: invoiced → paid", async () => {
     const po = makePo({ financialStatus: "invoiced" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionFinancial(1, "paid", "user-1");
 
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    const patch = mockDb._updateCalls[0];
     expect(patch.financialStatus).toBe("paid");
     expect(patch.fullyPaidAt).toBeInstanceOf(Date); // timestamp stamped
   });
@@ -295,16 +316,18 @@ describe("transitionFinancial", () => {
   it("(3c) accepts disputed → paid", async () => {
     const po = makePo({ financialStatus: "disputed" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionFinancial(1, "paid", "user-1");
 
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    const patch = mockDb._updateCalls[0];
     expect(patch.financialStatus).toBe("paid");
   });
 
   it("(4) rejects invalid financial transition: paid → invoiced", async () => {
     const po = makePo({ financialStatus: "paid" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionFinancial(1, "invoiced", "user-1"),
@@ -314,6 +337,7 @@ describe("transitionFinancial", () => {
   it("(14) rejects paid → unbilled (no backward transitions)", async () => {
     const po = makePo({ financialStatus: "paid" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionFinancial(1, "unbilled", "user-1"),
@@ -352,6 +376,7 @@ describe("createReceiptFromPO — receipt idempotency", () => {
     });
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
     expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
+    expect(storage.getReceivingOrdersForPurchaseOrder).toHaveBeenCalledWith(1, mockDb);
   });
 
   it("serializes receipt creation with a PO-scoped advisory transaction lock", async () => {
@@ -383,10 +408,12 @@ describe("createReceiptFromPO — receipt idempotency", () => {
     const result = await svc.createReceiptFromPO(1, "user-1");
 
     expect(mockDb.transaction).toHaveBeenCalledOnce();
-    expect(mockDb.execute).toHaveBeenCalledOnce();
+    expect(mockDb.execute).toHaveBeenCalledTimes(2);
     expect((mockDb.execute as any).mock.invocationCallOrder[0]).toBeLessThan(
       (storage.createReceivingOrder as any).mock.invocationCallOrder[0],
     );
+    expect(storage.createReceivingOrder).toHaveBeenCalledWith(expect.any(Object), mockDb);
+    expect(storage.bulkCreateReceivingLines).toHaveBeenCalledWith(expect.any(Array), mockDb);
     expect(result).toMatchObject({
       id: 88,
       receiptNumber: "RCV-TEST-001",
@@ -512,96 +539,22 @@ describe("createReceiptFromPO — expected-qty pack conversion (RCV-20260710-003
 });
 
 describe("recomputeFinancialAggregates", () => {
-  let db: ReturnType<typeof buildMockDb>;
-  let storage: ReturnType<typeof buildMockStorage>;
-  let svc: ReturnType<typeof createPurchasingService>;
-
   beforeEach(() => {
-    db = buildMockDb();
-    storage = buildMockStorage();
-    svc = createPurchasingService(db, storage);
+    mockRecomputePoFinancialAggregates.mockReset();
+    mockRecomputePoFinancialAggregates.mockResolvedValue(undefined);
   });
 
-  it("(5) correctly sums invoiced and paid amounts from linked invoices", async () => {
-    const po = makePo({ financialStatus: "unbilled" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    // Two invoices: one fully paid, one partially paid
-    db._invoiceRows = [
-      { invoicedAmountCents: 10000, paidAmountCents: 10000 },
-      { invoicedAmountCents: 5000, paidAmountCents: 2500 },
-    ];
-    db._poState = { financialStatus: "unbilled", firstInvoicedAt: null, firstPaidAt: null, fullyPaidAt: null };
+  it("delegates compatibility calls to the AP-owned audited recompute", async () => {
+    const db = buildMockDb();
+    const storage = buildMockStorage();
+    const svc = createPurchasingService(db, storage);
 
     await svc.recomputeFinancialAggregates(1);
 
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.invoicedTotalCents).toBe(15000);
-    expect(updateCall.paidTotalCents).toBe(12500);
-    expect(updateCall.outstandingCents).toBe(2500);
-    expect(updateCall.financialStatus).toBe("partially_paid");
-  });
-
-  it("(6) stays disputed if currently disputed", async () => {
-    const po = makePo({ financialStatus: "disputed" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    db._invoiceRows = [
-      { invoicedAmountCents: 5000, paidAmountCents: 0 },
-    ];
-    db._poState = { financialStatus: "disputed", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null };
-
-    await svc.recomputeFinancialAggregates(1);
-
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.financialStatus).toBe("disputed");
-  });
-
-  it("(7) derives unbilled when no invoices linked", async () => {
-    const po = makePo({ financialStatus: "unbilled" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    db._invoiceRows = [];
-    db._poState = { financialStatus: "unbilled", firstInvoicedAt: null, firstPaidAt: null, fullyPaidAt: null };
-
-    await svc.recomputeFinancialAggregates(1);
-
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.financialStatus).toBe("unbilled");
-    expect(updateCall.invoicedTotalCents).toBe(0);
-    expect(updateCall.outstandingCents).toBe(0);
-  });
-
-  it("(7b) derives paid when all invoices fully paid", async () => {
-    const po = makePo({ financialStatus: "invoiced" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    db._invoiceRows = [
-      { invoicedAmountCents: 8000, paidAmountCents: 8000 },
-    ];
-    db._poState = { financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null };
-
-    await svc.recomputeFinancialAggregates(1);
-
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.financialStatus).toBe("paid");
-    expect(updateCall.fullyPaidAt).toBeInstanceOf(Date);
-  });
-
-  it("(7c) outstanding_cents is always non-negative", async () => {
-    const po = makePo({ financialStatus: "invoiced" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-
-    // Overpayment edge case (shouldn't happen but must not go negative)
-    db._invoiceRows = [
-      { invoicedAmountCents: 1000, paidAmountCents: 1500 },
-    ];
-    db._poState = { financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null };
-
-    await svc.recomputeFinancialAggregates(1);
-
-    const updateCall = storage.updatePurchaseOrder.mock.calls[0][1];
-    expect(updateCall.outstandingCents).toBe(0); // clamped to 0
+    expect(mockRecomputePoFinancialAggregates).toHaveBeenCalledWith(1, {
+      reason: "Compatibility recompute requested through PurchasingService.",
+    });
+    expect(storage.updatePurchaseOrder).not.toHaveBeenCalled();
   });
 });
 
@@ -654,23 +607,27 @@ describe("onReceivingOrderClosed — auto-match", () => {
     await svc.onReceivingOrderClosed(99, receivingLines);
 
     expect(storage.reconcilePoReceiptLine).toHaveBeenCalledOnce();
-    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledWith(expect.objectContaining({
-      purchaseOrderLineId: 100,
-      receivingLineId: 201,
-      lineUpdates: expect.objectContaining({
-        receivedQty: 3,
-        status: "partially_received",
-      }),
-      receipt: expect.objectContaining({
-        purchaseOrderId: 1,
+    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledWith(
+      expect.objectContaining({
         purchaseOrderLineId: 100,
-        receivingOrderId: 99,
         receivingLineId: 201,
-        qtyReceived: 3,
-        actualUnitCostCents: 0,
-        varianceCents: -500,
+        lineUpdates: expect.objectContaining({
+          receivedQty: 3,
+          status: "partially_received",
+        }),
+        receipt: expect.objectContaining({
+          purchaseOrderId: 1,
+          purchaseOrderLineId: 100,
+          receivingOrderId: 99,
+          receivingLineId: 201,
+          qtyReceived: 3,
+          actualUnitCostCents: 0,
+          varianceCents: -500,
+        }),
       }),
-    }));
+      expect.any(Object),
+    );
+    expect(receivingLines[0].purchaseOrderLineId).toBeUndefined();
   });
 
   it("keeps PO physical status aligned when a partial receipt reconciles", async () => {
@@ -720,6 +677,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
         fromStatus: "sent",
         toStatus: "partially_received",
       }),
+      expect.any(Object),
     );
     expect(mockDetectQtyVariance).not.toHaveBeenCalled();
   });
@@ -772,6 +730,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
         fromStatus: "sent",
         toStatus: "received",
       }),
+      expect.any(Object),
     );
     expect(mockDetectQtyVariance).toHaveBeenCalledWith(1);
   });
@@ -826,7 +785,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
     });
   });
 
-  it("(9) leaves unlinked when no open PO lines match the product_id", async () => {
+  it("(9) rejects the reconciliation when no open PO line matches the product_id", async () => {
     const unrelatedPoLine = {
       id: 100,
       purchaseOrderId: 1,
@@ -848,12 +807,15 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getReceivingLineById.mockResolvedValue({ id: 201, productId: 42, productVariantId: 5 });
 
     const receivingLines = [{ receivingLineId: 201, receivedQty: 3, purchaseOrderLineId: undefined }];
-    await svc.onReceivingOrderClosed(99, receivingLines);
+    await expect(svc.onReceivingOrderClosed(99, receivingLines)).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({ expectedReceiptLines: 1, reconciledLines: 0 }),
+    });
 
     expect(storage.reconcilePoReceiptLine).not.toHaveBeenCalled();
   });
 
-  it("(10) leaves unlinked when multiple open PO lines match product_id (ambiguous)", async () => {
+  it("(10) rejects the reconciliation when multiple PO lines make the match ambiguous", async () => {
     const productId = 42;
     const line1 = { id: 100, purchaseOrderId: 1, productId, lineType: "product", status: "open", orderQty: 5, receivedQty: 0, cancelledQty: 0, unitCostCents: 500, discountPercent: 0, taxRatePercent: 0, lineTotalCents: 2500 };
     const line2 = { id: 101, purchaseOrderId: 1, productId, lineType: "product", status: "open", orderQty: 5, receivedQty: 0, cancelledQty: 0, unitCostCents: 500, discountPercent: 0, taxRatePercent: 0, lineTotalCents: 2500 };
@@ -864,7 +826,10 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getReceivingLineById.mockResolvedValue({ id: 201, productId, productVariantId: 5 });
 
     const receivingLines = [{ receivingLineId: 201, receivedQty: 3, purchaseOrderLineId: undefined }];
-    await svc.onReceivingOrderClosed(99, receivingLines);
+    await expect(svc.onReceivingOrderClosed(99, receivingLines)).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({ expectedReceiptLines: 1, reconciledLines: 0 }),
+    });
 
     expect(storage.reconcilePoReceiptLine).not.toHaveBeenCalled();
   });

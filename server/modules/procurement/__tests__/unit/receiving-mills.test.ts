@@ -143,8 +143,11 @@ function buildService(
     shipmentLandedCostError?: Error;
     inboundShipmentId?: number | null;
     unitsPerVariant?: number;
+    approvedInvoiceCostReconciler?: { reconcilePurchaseOrderLine: ReturnType<typeof vi.fn> };
   } = {},
 ) {
+  const updatedAt = new Date("2026-07-20T12:00:00.000Z");
+  const versionedLines = lines.map((line) => ({ ...line, updatedAt }));
   const updateReceivingLineCalls: Array<{ id: number; updates: any }> = [];
   const receiveInventoryCalls: Array<any> = [];
 
@@ -157,8 +160,9 @@ function buildService(
         vendorId: null,
         purchaseOrderId: 123,
         inboundShipmentId: opts.inboundShipmentId ?? null,
+        updatedAt,
       }),
-    getReceivingLines: vi.fn().mockResolvedValue(lines),
+    getReceivingLines: vi.fn().mockResolvedValue(versionedLines),
     updateReceivingOrder: vi.fn().mockResolvedValue({}),
     updateReceivingLine: vi.fn((id: number, updates: any) => {
       updateReceivingLineCalls.push({ id, updates });
@@ -175,9 +179,10 @@ function buildService(
   // The close runs SELECT units_per_variant via tx.execute when scaling cost to the
   // lot's variant unit; return a row so the per-unit × pack-size math has a value.
   const upvRows = { rows: [{ units_per_variant: opts.unitsPerVariant ?? 1 }] };
+  const transactionClient = { execute: vi.fn().mockResolvedValue(upvRows) };
   const db = {
     transaction: vi.fn(async (fn: any) =>
-      fn({ execute: vi.fn().mockResolvedValue(upvRows) }),
+      fn(transactionClient),
     ),
     execute: vi.fn().mockResolvedValue(upvRows),
   } as any;
@@ -213,8 +218,17 @@ function buildService(
         }
       : null;
 
-  const svc = new ReceivingService(db, inventoryCore, channelSync, storage, null, shipmentTracking as any);
-  return { svc, updateReceivingLineCalls, receiveInventoryCalls, storage };
+  const svc = new ReceivingService(
+    db,
+    inventoryCore,
+    channelSync,
+    storage,
+    null,
+    shipmentTracking as any,
+    null,
+    opts.approvedInvoiceCostReconciler as any,
+  );
+  return { svc, updateReceivingLineCalls, receiveInventoryCalls, storage, transactionClient };
 }
 
 describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => {
@@ -243,6 +257,45 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     expect(putaway).toBeTruthy();
     expect(putaway!.updates.unitCost).toBe(4);
     expect(putaway!.updates.unitCostMills).toBe(375);
+  });
+
+  it("replays approved invoice cost for each received PO line in the receiving transaction", async () => {
+    const reconcilePurchaseOrderLine = vi.fn().mockResolvedValue({ state: "invoice_actual" });
+    const { svc, transactionClient } = buildService(
+      [{
+        id: 500,
+        receivedQty: 100,
+        productVariantId: 11,
+        putawayLocationId: 22,
+        purchaseOrderLineId: 42,
+      }],
+      { 42: { unitCostMills: 375 } },
+      { approvedInvoiceCostReconciler: { reconcilePurchaseOrderLine } },
+    );
+
+    await svc.close(1, "u1");
+
+    expect(reconcilePurchaseOrderLine).toHaveBeenCalledOnce();
+    expect(reconcilePurchaseOrderLine).toHaveBeenCalledWith(42, transactionClient, "u1");
+  });
+
+  it("does not close the receipt when approved invoice cost replay fails", async () => {
+    const reconcilePurchaseOrderLine = vi.fn().mockRejectedValue(new Error("COGS replay failed"));
+    const { svc, storage } = buildService(
+      [{
+        id: 500,
+        receivedQty: 100,
+        productVariantId: 11,
+        putawayLocationId: 22,
+        purchaseOrderLineId: 42,
+      }],
+      { 42: { unitCostMills: 375 } },
+      { approvedInvoiceCostReconciler: { reconcilePurchaseOrderLine } },
+    );
+
+    await expect(svc.close(1, "u1")).rejects.toThrow("COGS replay failed");
+
+    expect(storage.updateReceivingOrder).not.toHaveBeenCalled();
   });
 
   it("manual override on receiving line round-trips (mills authoritative)", async () => {

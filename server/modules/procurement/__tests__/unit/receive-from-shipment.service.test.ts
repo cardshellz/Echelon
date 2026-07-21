@@ -45,12 +45,13 @@ function shipmentReceiptDbRows(input: {
 
 function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, any> = {}) {
   const captured: { order: any; lines: any } = { order: null, lines: null };
+  const tx = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
   const db: any = {
     execute: vi.fn(),
     select: vi.fn(),
     insert: vi.fn(),
     update: vi.fn(),
-    transaction: vi.fn(async (fn: any) => fn({ execute: vi.fn() })),
+    transaction: vi.fn(async (fn: any) => fn(tx)),
     ...dbOverrides,
   };
   const storage: any = {
@@ -85,12 +86,12 @@ function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, 
     ...overrides,
   };
   const svc = createPurchasingService(db, storage as any);
-  return { svc, storage, captured, db };
+  return { svc, storage, captured, db, tx };
 }
 
 describe("createReceiptFromShipment", () => {
   it("creates a shipment-linked draft receipt with lines from qtyShipped (scaled to the case)", async () => {
-    const { svc, captured } = build();
+    const { svc, storage, captured, db, tx } = build();
     const order: any = await svc.createReceiptFromShipment(84, "u1");
 
     expect(order).toMatchObject({ id: 999 });
@@ -110,6 +111,25 @@ describe("createReceiptFromShipment", () => {
     expect(captured.lines[1]).toMatchObject({
       productVariantId: 471, purchaseOrderLineId: 229, expectedQty: 3, unitCostMills: 7867, unitCost: 79,
     });
+    expect(db.transaction).toHaveBeenCalledOnce();
+    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx);
+    expect(storage.createReceivingOrder).toHaveBeenCalledWith(expect.any(Object), tx);
+    expect(storage.bulkCreateReceivingLines).toHaveBeenCalledWith(expect.any(Array), tx);
+    expect(storage.deleteReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("keeps shipment receipt header and line creation in one rollback boundary", async () => {
+    const lineFailure = new Error("line insert failed");
+    const { svc, storage, db, tx } = build({
+      bulkCreateReceivingLines: vi.fn().mockRejectedValue(lineFailure),
+    });
+
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toBe(lineFailure);
+
+    expect(db.transaction).toHaveBeenCalledOnce();
+    expect(storage.createReceivingOrder).toHaveBeenCalledWith(expect.any(Object), tx);
+    expect(storage.bulkCreateReceivingLines).toHaveBeenCalledWith(expect.any(Array), tx);
+    expect(storage.deleteReceivingOrder).not.toHaveBeenCalled();
   });
 
   it("reuses an open receipt already linked to the shipment (idempotent)", async () => {
