@@ -630,6 +630,36 @@
   "wms.allocation_exceptions": [
     "modules/orders"
   ],
+  "wms.carrier_tracking_event_matches": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_events": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_reconciliation_state": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_subscription_attempts": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_subscription_labels": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_subscriptions": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_webhook_hydration_attempts": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_webhook_hydrations": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_webhook_receipt_parses": [
+    "modules/shipping"
+  ],
+  "wms.carrier_tracking_webhook_receipts": [
+    "modules/shipping"
+  ],
   "wms.combined_order_groups": [
     "modules/orders"
   ],
@@ -677,5 +707,14 @@
   ],
   "wms.shipment_tracking_history": [
     "modules/orders"
+  ],
+  "wms.shipping_provider_label_events": [
+    "modules/shipping"
+  ],
+  "wms.shipping_provider_label_links": [
+    "modules/shipping"
+  ],
+  "wms.shipping_provider_labels": [
+    "modules/shipping"
   ]
 }

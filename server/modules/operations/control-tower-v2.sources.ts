@@ -13,6 +13,28 @@ import {
 import { EBAY_TRACKING_CONFLICT_RULE } from "../oms/channel-fulfillment-conflict";
 
 const CHANNEL_PUSH_PENDING_THRESHOLD_MINUTES = 15;
+// Link reconciliation runs every five minutes. Allow multiple sweeps so a
+// deployment, transient database error, or timer boundary does not create a
+// short-lived operator exception.
+const CARRIER_LABEL_LINK_GRACE_MINUTES = 15;
+const DEFAULT_CARRIER_ACCEPTANCE_GRACE_MINUTES = 18 * 60;
+
+export function resolveCarrierAcceptanceGraceMinutes(
+  rawValue: string | undefined = process.env.CARRIER_ACCEPTANCE_GRACE_MINUTES,
+): number {
+  if (rawValue === undefined || rawValue.trim() === "") {
+    return DEFAULT_CARRIER_ACCEPTANCE_GRACE_MINUTES;
+  }
+  const parsed = Number(rawValue);
+  if (!Number.isSafeInteger(parsed) || parsed < 60 || parsed > 7 * 24 * 60) {
+    throw new Error(
+      "CARRIER_ACCEPTANCE_GRACE_MINUTES must be an integer from 60 through 10080",
+    );
+  }
+  return parsed;
+}
+
+const CARRIER_ACCEPTANCE_GRACE_MINUTES = resolveCarrierAcceptanceGraceMinutes();
 
 const INVENTORY_SYSTEM_CONTROL_CHECKS = new Set([
   "inventory_level_constraint_gap",
@@ -472,7 +494,7 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
     const summary = rule === "ship_notify_no_match"
       ? `${provider} shipment ${providerShipmentRef ?? "unknown"} did not match a WMS shipment${orderNumber ? ` for order ${orderNumber}` : ""}.`
       : rule === "shipstation_unmapped_physical_shipment"
-        ? `${provider} reported another package${orderNumber ? ` for order ${orderNumber}` : ""}${trackingNumber ? ` with tracking ${trackingNumber}` : ""}. Echelon did not change fulfillment or inventory because the package has not been confirmed as an intentional replacement or a duplicate.`
+        ? `${provider} reported an unmapped shipment or label record${orderNumber ? ` for order ${orderNumber}` : ""}${trackingNumber ? ` with tracking ${trackingNumber}` : ""}. Echelon did not change fulfillment or inventory because carrier possession and merchant intent are not yet confirmed.`
         : String(row.summary ?? humanizeControlTowerCode(rule)).trim();
     const actualState = rule === "ship_notify_no_match"
       ? [
@@ -515,7 +537,7 @@ export const wmsReconciliationSource: ControlTowerSourceAdapter<Record<string, u
       recommendedAction: rule === "ship_notify_no_match"
         ? `Open ${orderNumber ? `order ${orderNumber}` : "the WMS order list"}, verify whether this exact provider shipment is now linked, and replay the provider callback only if fulfillment is still missing.`
         : rule === "shipstation_unmapped_physical_shipment"
-          ? "Use the physical-package evidence and merchant intent to classify it. Adopt an actual replacement as a reship; ignore it only with proof that the label was duplicate, voided, or unused."
+          ? "Review the provider label, carrier-tracking evidence, and merchant intent. Classify a replacement only after physical carrier movement is confirmed; otherwise resolve it as an unused, voided, duplicate, or still-pending label."
           : rule === EBAY_TRACKING_CONFLICT_RULE
             ? "Compare the original eBay fulfillment with the later physical package. Classify the later package as a replacement or duplicate before resolving this item; do not resend tracking to eBay."
             : "Review the reconciliation evidence and resolve the underlying source workflow. Do not overwrite fulfillment state manually.",
@@ -800,11 +822,799 @@ export const channelFulfillmentSource: ControlTowerSourceAdapter<Record<string, 
   },
 };
 
+const CARRIER_EVIDENCE_CONTENT: Record<string, {
+  title: string;
+  expected: string;
+  action: string;
+  severity: ControlTowerSeverity;
+}> = {
+  carrier_label_unlinked: {
+    title: "Shipping label is not linked to shipment work",
+    expected: "Every provider label must link to at least one authorized shipment request or shipment record.",
+    action: "Open the shipment and verify its provider identity. Do not change fulfillment or inventory from the label alone.",
+    severity: "high",
+  },
+  carrier_tracking_carrier_missing: {
+    title: "Tracking subscription is missing a carrier code",
+    expected: "Every provider label must include the carrier code required to subscribe its tracking number to carrier updates.",
+    action: "Inspect the provider label ingestion and carrier mapping. Correct the source carrier code; do not guess a carrier from the tracking number.",
+    severity: "high",
+  },
+  carrier_tracking_subscription_not_active: {
+    title: "Carrier tracking subscription is not active",
+    expected: "Every observed provider label with a carrier and tracking number must have an active carrier-tracking subscription.",
+    action: "Inspect the subscription status and last provider error. Transient failures retry automatically; correct configuration or provider availability before replaying a permanent failure.",
+    severity: "medium",
+  },
+  carrier_tracking_subscription_review: {
+    title: "Carrier tracking subscription requires review",
+    expected: "The tracking provider must accept every valid carrier and tracking-number subscription or return an actionable permanent error.",
+    action: "Review the retained carrier code, tracking number, and provider response. Correct the provider/carrier configuration, then explicitly requeue the subscription.",
+    severity: "high",
+  },
+  carrier_tracking_unmatched: {
+    title: "Carrier tracking event has no label match",
+    expected: "Every carrier tracking event must match one known provider label before it affects dispatch state.",
+    action: "Verify that the provider label was ingested and that its tracking number is correct. The reconciliation sweep will retry automatically.",
+    severity: "high",
+  },
+  carrier_tracking_receipt_missing: {
+    title: "Carrier tracking event lacks signed ingress evidence",
+    expected: "Every ShipStation carrier tracking event must retain the verified signature, timestamp, and exact signed request bytes.",
+    action: "Treat this as an ingestion integrity defect. Inspect the webhook route and receipt transaction before trusting or replaying the event.",
+    severity: "blocker",
+  },
+  carrier_tracking_payload_rejected: {
+    title: "Signed carrier update could not be understood",
+    expected: "Every authenticated carrier update must normalize into immutable tracking evidence or remain visible for operator review.",
+    action: "Inspect the retained signed request and parser reason. Update the parser for a valid provider shape, then reprocess the receipt; do not infer dispatch manually.",
+    severity: "high",
+  },
+  carrier_tracking_hydration_not_complete: {
+    title: "Carrier update detail retrieval is not complete",
+    expected: "A signed carrier callback without inline data must be hydrated from its authenticated provider resource URL.",
+    action: "Inspect the retained hydration status and provider error. Automatic retries are lease-protected; correct provider credentials or availability before manually requeueing work.",
+    severity: "medium",
+  },
+  carrier_tracking_hydration_review: {
+    title: "Carrier update detail retrieval requires review",
+    expected: "A signed carrier callback without inline data must produce one validated tracking snapshot or an actionable permanent provider error.",
+    action: "Review the retained resource identity and provider response. Correct the configuration or valid provider shape before explicitly requeueing hydration.",
+    severity: "high",
+  },
+  carrier_tracking_receipt_unparsed: {
+    title: "Signed carrier update was not processed",
+    expected: "Every authenticated carrier callback must have an immutable normalization or rejection result.",
+    action: "Inspect the ingestion failure and reprocess the retained signed receipt after correcting the underlying database or parser fault.",
+    severity: "blocker",
+  },
+  carrier_tracking_ambiguous: {
+    title: "Carrier tracking event matches multiple labels",
+    expected: "A carrier tracking event must identify one provider label unambiguously.",
+    action: "Compare the provider label identities that share this tracking number and resolve the duplicate label data at its source.",
+    severity: "high",
+  },
+  voided_label_carrier_movement: {
+    title: "Carrier moved a package tied to a voided label",
+    expected: "A voided label must never receive confirmed carrier-possession evidence.",
+    action: "Escalate immediately: confirm the physical package and provider void state before changing fulfillment or inventory.",
+    severity: "blocker",
+  },
+  carrier_dispatch_uncertain: {
+    title: "Carrier evidence cannot confirm dispatch",
+    expected: "Dispatch requires an unambiguous carrier event that proves physical possession or later movement.",
+    action: "Review the carrier status detail. Do not classify label creation or electronic advice as warehouse dispatch.",
+    severity: "high",
+  },
+  carrier_acceptance_overdue: {
+    title: "Label has no carrier acceptance scan",
+    expected: "A linked active label should receive confirmed carrier-possession evidence within the configured carrier-acceptance window.",
+    action: "Locate the package or confirm carrier pickup. Void and replace an unused label through the shipping provider workflow.",
+    severity: "medium",
+  },
+};
+
+export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unknown>> = {
+  name: "carrier_tracking_evidence",
+  sourceNamespace: "wms.carrier_tracking_authority",
+  sourceType: "carrier_tracking_exception",
+  projectionVersion: 1,
+  async loadRows(client, now) {
+    const result = await client.query(`
+      WITH label_link_targets AS (
+        SELECT
+          link.id AS link_id,
+          link.shipping_provider_label_id,
+          COALESCE(
+            direct_request.wms_order_id,
+            engine_request.wms_order_id,
+            physical_request.wms_order_id,
+            legacy.order_id
+          ) AS wms_order_id
+        FROM wms.shipping_provider_label_links AS link
+        LEFT JOIN wms.shipment_requests AS direct_request
+          ON direct_request.id = link.shipment_request_id
+        LEFT JOIN wms.shipping_engine_orders AS engine_order
+          ON engine_order.id = link.shipping_engine_order_id
+        LEFT JOIN wms.shipment_requests AS engine_request
+          ON engine_request.id = engine_order.shipment_request_id
+        LEFT JOIN wms.physical_shipments AS physical
+          ON physical.id = link.physical_shipment_id
+        LEFT JOIN wms.shipment_requests AS physical_request
+          ON physical_request.id = physical.shipment_request_id
+        LEFT JOIN wms.outbound_shipments AS legacy
+          ON legacy.id = link.legacy_wms_shipment_id
+      ),
+      label_context AS (
+        SELECT
+          label.*,
+          COUNT(DISTINCT target.link_id)::integer AS link_count,
+          MIN(wms_order.id) AS wms_order_id,
+          MIN(COALESCE(oms_order.external_order_number, wms_order.order_number)) AS order_number,
+          ARRAY_REMOVE(
+            ARRAY_AGG(DISTINCT COALESCE(oms_order.external_order_number, wms_order.order_number)),
+            NULL
+          ) AS order_numbers
+        FROM wms.shipping_provider_labels AS label
+        LEFT JOIN label_link_targets AS target
+          ON target.shipping_provider_label_id = label.id
+        LEFT JOIN wms.orders AS wms_order
+          ON wms_order.id = target.wms_order_id
+        LEFT JOIN oms.oms_orders AS oms_order
+          ON oms_order.id = CASE
+            WHEN wms_order.source IN ('oms', 'ebay')
+             AND wms_order.oms_fulfillment_order_id ~ '^[1-9][0-9]{0,17}$'
+            THEN wms_order.oms_fulfillment_order_id::bigint
+            WHEN wms_order.source_table_id ~ '^[1-9][0-9]{0,17}$'
+            THEN wms_order.source_table_id::bigint
+            ELSE NULL
+          END
+        GROUP BY label.id
+      ),
+      latest_event_match AS (
+        SELECT DISTINCT ON (match.carrier_tracking_event_id)
+          match.carrier_tracking_event_id,
+          match.shipping_provider_label_id,
+          match.match_status,
+          match.reason_code,
+          match.created_at
+        FROM wms.carrier_tracking_event_matches AS match
+        ORDER BY match.carrier_tracking_event_id, match.created_at DESC, match.id DESC
+      ),
+      latest_receipt_parse AS (
+        SELECT DISTINCT ON (parse.carrier_tracking_webhook_receipt_id)
+          parse.carrier_tracking_webhook_receipt_id,
+          parse.carrier_tracking_event_id,
+          parse.outcome,
+          parse.reason_code,
+          parse.created_at
+        FROM wms.carrier_tracking_webhook_receipt_parses AS parse
+        ORDER BY
+          parse.carrier_tracking_webhook_receipt_id,
+          parse.created_at DESC,
+          parse.id DESC
+      ),
+      webhook_hydration AS (
+        SELECT
+          hydration.carrier_tracking_webhook_receipt_id,
+          hydration.tracking_number,
+          hydration.hydration_status,
+          hydration.next_attempt_at,
+          hydration.lease_expires_at,
+          hydration.last_error_code,
+          hydration.created_at,
+          hydration.updated_at
+        FROM wms.carrier_tracking_webhook_hydrations AS hydration
+      ),
+      latest_label_event AS (
+        SELECT DISTINCT ON (match.shipping_provider_label_id)
+          match.shipping_provider_label_id,
+          event.id AS event_id,
+          event.provider_status_code,
+          event.canonical_status,
+          event.dispatch_evidence,
+          event.event_occurred_at,
+          event.received_at,
+          match.match_status,
+          match.reason_code
+        FROM latest_event_match AS match
+        JOIN wms.carrier_tracking_events AS event
+          ON event.id = match.carrier_tracking_event_id
+        WHERE match.shipping_provider_label_id IS NOT NULL
+        ORDER BY
+          match.shipping_provider_label_id,
+          COALESCE(event.event_occurred_at, event.received_at) DESC,
+          event.id DESC
+      ),
+      latest_confirmed_label_event AS (
+        SELECT DISTINCT ON (match.shipping_provider_label_id)
+          match.shipping_provider_label_id,
+          event.id AS event_id,
+          event.provider_status_code,
+          event.canonical_status,
+          event.dispatch_evidence,
+          event.event_occurred_at,
+          event.received_at,
+          match.match_status,
+          match.reason_code
+        FROM latest_event_match AS match
+        JOIN wms.carrier_tracking_events AS event
+          ON event.id = match.carrier_tracking_event_id
+        WHERE match.shipping_provider_label_id IS NOT NULL
+          AND event.dispatch_evidence = 'confirmed'
+        ORDER BY
+          match.shipping_provider_label_id,
+          COALESCE(event.event_occurred_at, event.received_at) DESC,
+          event.id DESC
+      ),
+      latest_label_subscription AS (
+        SELECT DISTINCT ON (subscription_label.shipping_provider_label_id)
+          subscription_label.shipping_provider_label_id,
+          subscription.id AS subscription_id,
+          subscription.subscription_status,
+          subscription.next_attempt_at,
+          subscription.lease_expires_at,
+          subscription.last_error_code,
+          subscription.last_error_message,
+          subscription.activated_at,
+          subscription.updated_at
+        FROM wms.carrier_tracking_subscription_labels AS subscription_label
+        JOIN wms.carrier_tracking_subscriptions AS subscription
+          ON subscription.id = subscription_label.carrier_tracking_subscription_id
+        ORDER BY
+          subscription_label.shipping_provider_label_id,
+          subscription_label.created_at DESC,
+          subscription_label.id DESC
+      ),
+      issues AS (
+        SELECT
+          'label:' || label.id || ':unlinked' AS source_key,
+          'carrier_label_unlinked' AS issue_code,
+          label.id AS label_id,
+          NULL::bigint AS event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          NULL::text AS match_status,
+          NULL::text AS reason_code,
+          label.first_observed_at AS first_seen_at,
+          label.last_observed_at AS last_seen_at
+        FROM label_context AS label
+        WHERE label.link_count = 0
+          AND label.first_observed_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+
+        UNION ALL
+
+        SELECT
+          'label:' || label.id || ':carrier_missing' AS source_key,
+          'carrier_tracking_carrier_missing' AS issue_code,
+          label.id AS label_id,
+          NULL::bigint AS event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          NULL::text AS match_status,
+          'provider_carrier_code_missing'::text AS reason_code,
+          label.first_observed_at AS first_seen_at,
+          label.last_observed_at AS last_seen_at
+        FROM label_context AS label
+        WHERE NULLIF(BTRIM(label.carrier), '') IS NULL
+          AND label.label_status IN ('active', 'unknown')
+          AND label.first_observed_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+
+        UNION ALL
+
+        SELECT
+          'label:' || label.id || ':subscription_not_active' AS source_key,
+          'carrier_tracking_subscription_not_active' AS issue_code,
+          label.id AS label_id,
+          NULL::bigint AS event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          subscription.subscription_status AS match_status,
+          COALESCE(
+            subscription.last_error_code,
+            CASE
+              WHEN subscription.subscription_id IS NULL THEN 'tracking_subscription_missing'
+              ELSE 'tracking_subscription_' || subscription.subscription_status
+            END
+          ) AS reason_code,
+          label.first_observed_at AS first_seen_at,
+          COALESCE(subscription.updated_at, label.last_observed_at) AS last_seen_at
+        FROM label_context AS label
+        LEFT JOIN latest_label_subscription AS subscription
+          ON subscription.shipping_provider_label_id = label.id
+        WHERE NULLIF(BTRIM(label.carrier), '') IS NOT NULL
+          AND label.label_status IN ('active', 'unknown')
+          AND (
+            subscription.subscription_id IS NULL
+            OR subscription.subscription_status IN ('pending', 'retry')
+            OR (
+              subscription.subscription_status = 'processing'
+              AND subscription.lease_expires_at <= $1::timestamptz
+            )
+          )
+          AND label.first_observed_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+
+        UNION ALL
+
+        SELECT
+          'label:' || label.id || ':subscription_review' AS source_key,
+          'carrier_tracking_subscription_review' AS issue_code,
+          label.id AS label_id,
+          NULL::bigint AS event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          subscription.subscription_status AS match_status,
+          subscription.last_error_code AS reason_code,
+          label.first_observed_at AS first_seen_at,
+          subscription.updated_at AS last_seen_at
+        FROM label_context AS label
+        JOIN latest_label_subscription AS subscription
+          ON subscription.shipping_provider_label_id = label.id
+        WHERE subscription.subscription_status = 'review'
+          AND label.label_status IN ('active', 'unknown')
+
+        UNION ALL
+
+        SELECT
+          'event:' || event.id || ':' || match.match_status AS source_key,
+          CASE
+            WHEN match.match_status = 'ambiguous' THEN 'carrier_tracking_ambiguous'
+            ELSE 'carrier_tracking_unmatched'
+          END AS issue_code,
+          NULL::bigint AS label_id,
+          event.id AS event_id,
+          NULL::bigint AS receipt_id,
+          event.provider,
+          event.provider_label_id,
+          event.tracking_number,
+          NULL::text AS label_status,
+          0::integer AS link_count,
+          NULL::integer AS wms_order_id,
+          NULL::text AS order_number,
+          ARRAY[]::text[] AS order_numbers,
+          event.provider_status_code,
+          event.canonical_status,
+          event.dispatch_evidence,
+          match.match_status,
+          match.reason_code,
+          event.received_at AS first_seen_at,
+          event.received_at AS last_seen_at
+        FROM wms.carrier_tracking_events AS event
+        JOIN latest_event_match AS match
+          ON match.carrier_tracking_event_id = event.id
+        WHERE match.match_status IN ('unmatched', 'ambiguous')
+          AND event.received_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+
+        UNION ALL
+
+        SELECT
+          'event:' || event.id || ':receipt_missing' AS source_key,
+          'carrier_tracking_receipt_missing' AS issue_code,
+          NULL::bigint AS label_id,
+          event.id AS event_id,
+          NULL::bigint AS receipt_id,
+          event.provider,
+          event.provider_label_id,
+          event.tracking_number,
+          NULL::text AS label_status,
+          0::integer AS link_count,
+          NULL::integer AS wms_order_id,
+          NULL::text AS order_number,
+          ARRAY[]::text[] AS order_numbers,
+          event.provider_status_code,
+          event.canonical_status,
+          event.dispatch_evidence,
+          NULL::text AS match_status,
+          'verified_webhook_receipt_missing'::text AS reason_code,
+          event.received_at AS first_seen_at,
+          event.received_at AS last_seen_at
+        FROM wms.carrier_tracking_events AS event
+        WHERE event.received_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.carrier_tracking_webhook_receipt_parses AS parse
+            WHERE parse.carrier_tracking_event_id = event.id
+              AND parse.outcome = 'normalized'
+          )
+
+        UNION ALL
+
+        SELECT
+          'receipt:' || receipt.id || ':unparsed' AS source_key,
+          'carrier_tracking_receipt_unparsed' AS issue_code,
+          NULL::bigint AS label_id,
+          NULL::bigint AS event_id,
+          receipt.id AS receipt_id,
+          receipt.provider,
+          NULL::text AS provider_label_id,
+          NULL::text AS tracking_number,
+          NULL::text AS label_status,
+          0::integer AS link_count,
+          NULL::integer AS wms_order_id,
+          NULL::text AS order_number,
+          ARRAY[]::text[] AS order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          NULL::text AS match_status,
+          'verified_receipt_not_parsed'::text AS reason_code,
+          receipt.verified_at AS first_seen_at,
+          receipt.verified_at AS last_seen_at
+        FROM wms.carrier_tracking_webhook_receipts AS receipt
+        WHERE receipt.verified_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM wms.carrier_tracking_webhook_receipt_parses AS parse
+            WHERE parse.carrier_tracking_webhook_receipt_id = receipt.id
+          )
+
+        UNION ALL
+
+        SELECT
+          'receipt:' || receipt.id || ':payload_rejected' AS source_key,
+          'carrier_tracking_payload_rejected' AS issue_code,
+          NULL::bigint AS label_id,
+          NULL::bigint AS event_id,
+          receipt.id AS receipt_id,
+          receipt.provider,
+          NULL::text AS provider_label_id,
+          NULL::text AS tracking_number,
+          NULL::text AS label_status,
+          0::integer AS link_count,
+          NULL::integer AS wms_order_id,
+          NULL::text AS order_number,
+          ARRAY[]::text[] AS order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          NULL::text AS match_status,
+          parse.reason_code,
+          receipt.verified_at AS first_seen_at,
+          parse.created_at AS last_seen_at
+        FROM wms.carrier_tracking_webhook_receipts AS receipt
+        JOIN latest_receipt_parse AS parse
+          ON parse.carrier_tracking_webhook_receipt_id = receipt.id
+        LEFT JOIN webhook_hydration AS hydration
+          ON hydration.carrier_tracking_webhook_receipt_id = receipt.id
+        WHERE parse.outcome = 'rejected'
+          AND parse.created_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+          AND NOT (
+            parse.reason_code = 'SHIPSTATION_TRACKING_DATA_MISSING'
+            AND hydration.carrier_tracking_webhook_receipt_id IS NOT NULL
+          )
+
+        UNION ALL
+
+        SELECT
+          'receipt:' || receipt.id || ':hydration_not_complete' AS source_key,
+          'carrier_tracking_hydration_not_complete' AS issue_code,
+          NULL::bigint AS label_id,
+          NULL::bigint AS event_id,
+          receipt.id AS receipt_id,
+          receipt.provider,
+          NULL::text AS provider_label_id,
+          hydration.tracking_number,
+          NULL::text AS label_status,
+          0::integer AS link_count,
+          NULL::integer AS wms_order_id,
+          NULL::text AS order_number,
+          ARRAY[]::text[] AS order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          hydration.hydration_status AS match_status,
+          COALESCE(
+            hydration.last_error_code,
+            'tracking_hydration_' || hydration.hydration_status
+          ) AS reason_code,
+          receipt.verified_at AS first_seen_at,
+          hydration.updated_at AS last_seen_at
+        FROM wms.carrier_tracking_webhook_receipts AS receipt
+        JOIN webhook_hydration AS hydration
+          ON hydration.carrier_tracking_webhook_receipt_id = receipt.id
+        WHERE (
+            hydration.hydration_status IN ('pending', 'retry')
+            OR (
+              hydration.hydration_status = 'processing'
+              AND hydration.lease_expires_at <= $1::timestamptz
+            )
+          )
+          AND hydration.created_at <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+
+        UNION ALL
+
+        SELECT
+          'receipt:' || receipt.id || ':hydration_review' AS source_key,
+          'carrier_tracking_hydration_review' AS issue_code,
+          NULL::bigint AS label_id,
+          NULL::bigint AS event_id,
+          receipt.id AS receipt_id,
+          receipt.provider,
+          NULL::text AS provider_label_id,
+          hydration.tracking_number,
+          NULL::text AS label_status,
+          0::integer AS link_count,
+          NULL::integer AS wms_order_id,
+          NULL::text AS order_number,
+          ARRAY[]::text[] AS order_numbers,
+          NULL::text AS provider_status_code,
+          NULL::text AS canonical_status,
+          NULL::text AS dispatch_evidence,
+          hydration.hydration_status AS match_status,
+          hydration.last_error_code AS reason_code,
+          receipt.verified_at AS first_seen_at,
+          hydration.updated_at AS last_seen_at
+        FROM wms.carrier_tracking_webhook_receipts AS receipt
+        JOIN webhook_hydration AS hydration
+          ON hydration.carrier_tracking_webhook_receipt_id = receipt.id
+        WHERE hydration.hydration_status = 'review'
+
+        UNION ALL
+
+        SELECT
+          'label:' || label.id || ':voided_movement' AS source_key,
+          'voided_label_carrier_movement' AS issue_code,
+          label.id AS label_id,
+          confirmed.event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          confirmed.provider_status_code,
+          confirmed.canonical_status,
+          confirmed.dispatch_evidence,
+          confirmed.match_status,
+          confirmed.reason_code,
+          label.first_observed_at AS first_seen_at,
+          confirmed.received_at AS last_seen_at
+        FROM label_context AS label
+        JOIN latest_confirmed_label_event AS confirmed
+          ON confirmed.shipping_provider_label_id = label.id
+        WHERE label.label_status IN ('voided', 'superseded')
+
+        UNION ALL
+
+        SELECT
+          'label:' || label.id || ':dispatch_review' AS source_key,
+          'carrier_dispatch_uncertain' AS issue_code,
+          label.id AS label_id,
+          latest.event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          latest.provider_status_code,
+          latest.canonical_status,
+          latest.dispatch_evidence,
+          latest.match_status,
+          latest.reason_code,
+          label.first_observed_at AS first_seen_at,
+          latest.received_at AS last_seen_at
+        FROM label_context AS label
+        JOIN latest_label_event AS latest
+          ON latest.shipping_provider_label_id = label.id
+        WHERE latest.dispatch_evidence = 'review'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM latest_confirmed_label_event AS confirmed
+            WHERE confirmed.shipping_provider_label_id = label.id
+          )
+
+        UNION ALL
+
+        SELECT
+          'label:' || label.id || ':acceptance_overdue' AS source_key,
+          'carrier_acceptance_overdue' AS issue_code,
+          label.id AS label_id,
+          latest.event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          latest.provider_status_code,
+          latest.canonical_status,
+          latest.dispatch_evidence,
+          latest.match_status,
+          latest.reason_code,
+          GREATEST(label.first_observed_at, acceptance_subscription.activated_at) AS first_seen_at,
+          COALESCE(latest.received_at, label.last_observed_at) AS last_seen_at
+        FROM label_context AS label
+        LEFT JOIN latest_label_event AS latest
+          ON latest.shipping_provider_label_id = label.id
+        JOIN latest_label_subscription AS acceptance_subscription
+          ON acceptance_subscription.shipping_provider_label_id = label.id
+         AND acceptance_subscription.subscription_status = 'active'
+        WHERE label.label_status IN ('active', 'unknown')
+          AND label.link_count > 0
+          AND GREATEST(label.first_observed_at, acceptance_subscription.activated_at)
+            <= $1::timestamptz - ($3::integer * INTERVAL '1 minute')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM latest_confirmed_label_event AS confirmed
+            WHERE confirmed.shipping_provider_label_id = label.id
+          )
+      )
+      SELECT *
+      FROM issues
+      ORDER BY first_seen_at, source_key
+    `, [now.toISOString(), CARRIER_LABEL_LINK_GRACE_MINUTES, CARRIER_ACCEPTANCE_GRACE_MINUTES]);
+    return result.rows;
+  },
+  projectRow(row) {
+    const code = String(row.issue_code ?? "").trim();
+    const content = CARRIER_EVIDENCE_CONTENT[code];
+    if (!content) throw new Error(`Unsupported carrier tracking issue code: ${code || "missing"}`);
+    const sourceKey = String(row.source_key ?? "").trim();
+    if (!sourceKey) throw new Error("Carrier tracking source_key is required");
+    const labelId = row.label_id == null ? null : positiveInteger(row.label_id, "provider label id");
+    const eventId = row.event_id == null ? null : positiveInteger(row.event_id, "carrier tracking event id");
+    const receiptId = row.receipt_id == null ? null : positiveInteger(row.receipt_id, "carrier tracking webhook receipt id");
+    const trackingNumber = stringOrNull(row.tracking_number);
+    const orderNumber = stringOrNull(row.order_number);
+    const wmsOrderId = row.wms_order_id == null ? null : positiveInteger(row.wms_order_id, "wms_order_id");
+    const firstSeenAt = isoTimestamp(row.first_seen_at, "carrier tracking first_seen_at");
+    const lastSeenAt = isoTimestamp(row.last_seen_at, "carrier tracking last_seen_at");
+    const entityRef = orderNumber
+      ? `Order ${orderNumber}${trackingNumber ? ` / ${trackingNumber}` : ""}`
+      : trackingNumber
+        ? `Tracking ${trackingNumber}`
+        : receiptId
+          ? `Webhook receipt ${receiptId}`
+          : `Provider label ${String(row.provider_label_id ?? labelId ?? "unknown")}`;
+    const statusEvidence = [
+      stringOrNull(row.provider_status_code) ? `Provider status ${row.provider_status_code}` : null,
+      stringOrNull(row.canonical_status) ? `canonical ${row.canonical_status}` : null,
+      stringOrNull(row.dispatch_evidence) ? `dispatch evidence ${row.dispatch_evidence}` : null,
+      stringOrNull(row.match_status) ? `match ${row.match_status}` : null,
+      stringOrNull(row.reason_code) ? `reason ${row.reason_code}` : null,
+    ].filter(Boolean).join(", ");
+    const summary = `${content.title}${orderNumber ? ` for ${orderNumber}` : ""}${trackingNumber ? ` (${trackingNumber})` : ""}.`;
+    const primaryHref = wmsOrderId
+      ? `/orders?orderId=${wmsOrderId}`
+      : trackingNumber
+        ? `/shipping?search=${encodeURIComponent(trackingNumber)}`
+        : "/shipping";
+
+    return withFingerprint({
+      sourceNamespace: "wms.carrier_tracking_authority",
+      sourceType: "carrier_tracking_exception",
+      sourceKey,
+      projectionVersion: 1,
+      domain: "shipping",
+      code,
+      entityType: labelId
+        ? "shipping_provider_label"
+        : eventId
+          ? "carrier_tracking_event"
+          : "carrier_tracking_webhook_receipt",
+      entityId: String(labelId ?? eventId ?? receiptId),
+      entityRef,
+      correlationId: null,
+      rootCauseGroupKey: `shipping:${code}`,
+      title: content.title,
+      summary,
+      expectedState: content.expected,
+      actualState: statusEvidence || "The expected carrier or label linkage evidence is absent.",
+      severity: content.severity,
+      urgency: code === "voided_label_carrier_movement"
+        || code === "carrier_acceptance_overdue"
+        || code === "carrier_tracking_receipt_missing"
+        || code === "carrier_tracking_payload_rejected"
+        || code === "carrier_tracking_receipt_unparsed"
+        || code === "carrier_tracking_hydration_review"
+        ? "overdue"
+        : "normal",
+      impactTags: ["shipping", "dispatch_authority"],
+      actionability: "investigate",
+      sourceStatus: "open",
+      ownerTeam: "Warehouse",
+      recommendedAction: content.action,
+      responseDueAt: null,
+      firstSeenAt,
+      lastSeenAt,
+      lastChangedAt: lastSeenAt,
+      occurrenceCount: 1,
+      recurrenceCount: 0,
+      worsenedCount: 0,
+      evidenceSummary: {
+        provider: row.provider,
+        providerLabelId: row.provider_label_id,
+        shippingProviderLabelId: labelId,
+        carrierTrackingEventId: eventId,
+        carrierTrackingWebhookReceiptId: receiptId,
+        trackingNumber,
+        labelStatus: row.label_status,
+        linkCount: row.link_count,
+        orderNumbers: row.order_numbers,
+        providerStatusCode: row.provider_status_code,
+        canonicalStatus: row.canonical_status,
+        dispatchEvidence: row.dispatch_evidence,
+        matchStatus: row.match_status,
+        reasonCode: row.reason_code,
+      },
+      detailLocator: {
+        sourceTable: labelId
+          ? "wms.shipping_provider_labels"
+          : eventId
+            ? "wms.carrier_tracking_events"
+            : "wms.carrier_tracking_webhook_receipts",
+        sourceId: labelId ?? eventId ?? receiptId,
+        wmsOrderId,
+        links: [{ label: orderNumber ? `Open ${orderNumber}` : "Open shipping", href: primaryHref }],
+      },
+      availableActions: [{
+        code: "open_source",
+        kind: "navigate",
+        label: orderNumber ? `Open ${orderNumber}` : "Open shipping",
+        href: primaryHref,
+      }],
+      sourceUpdatedAt: lastSeenAt,
+      observedMetric: "1",
+    });
+  },
+};
+
 export const CONTROL_TOWER_SOURCE_ADAPTERS = [
   inventoryIntegritySource,
   wmsReconciliationSource,
   procurementExceptionsSource,
   channelFulfillmentSource,
+  carrierTrackingSource,
 ] as const;
 
 export function getControlTowerSourceAdapter(name: string) {

@@ -156,6 +156,25 @@ Authority:
 
 This is the source for channel tracking pushes.
 
+### Shipping Provider Label
+
+A provider label proves that a carrier label exists. It does not prove that a package left the warehouse.
+
+Authority:
+
+- Stable identity `(provider, provider_label_id)`.
+- Provider order id/key and normalized tracking number.
+- Append-only label observations and void evidence.
+- Many-to-many links to authorized shipment requests, engine orders, physical shipments, or legacy shipment rows.
+
+A carrier event may match only a known provider label. Tracking intake cannot invent a label.
+
+### Carrier Tracking Event
+
+A carrier tracking event is provider-signed evidence about a label lifecycle. Only an unambiguous event that proves carrier possession or later movement may become dispatch authority after a separately approved cutover.
+
+Label creation, shipment information sent, electronic advice, and awaiting pickup are pre-dispatch states.
+
 ### Channel Fulfillment Push
 
 Tracking update sent back to Shopify, eBay, or another sales channel.
@@ -183,6 +202,9 @@ Authority:
 11. The planner is the only code path that can create shipment requests.
 12. Shipping adapters can confirm, void, label, or ship requested work, but cannot create commercial authority.
 13. Every critical state transition must preserve who, what, when, before state, after state, and idempotency key.
+14. Label creation is not physical dispatch.
+15. Verified webhook receipts, carrier events, label links, and match attempts are immutable evidence.
+16. Carrier tracking cannot create or infer an unknown provider label.
 
 ## Proposed Tables
 
@@ -276,6 +298,25 @@ The exact schema should be finalized in migrations during implementation, but th
 - `provider_line_item_id`
 - `provider_line_item_key`
 
+### `wms.shipping_provider_labels` and evidence ledgers
+
+- Provider labels are unique by `(provider, provider_label_id)` and remain separate from dispatch.
+- One label may have immutable links to multiple shipment requests, engine orders, physical shipments, or legacy rows.
+- Label observations are append-only lifecycle evidence.
+- Carrier events are append-only normalized provider evidence, unique by `(provider, event_hash)`.
+- Every authenticated carrier webhook records an immutable receipt containing the exact request bytes, signature, key id, timestamp, and their hashes before payload normalization begins.
+- Each parser run appends an immutable normalized or rejected outcome. A receipt remains recoverable even if normalization or event persistence fails later.
+- Match attempts are append-only; an unmatched event remains durable and is retried by reconciliation without provider redelivery.
+
+### `wms.carrier_tracking_subscriptions` and enrollment attempts
+
+- Tracking enrollment is unique by `(tracking_provider, carrier_code, normalized_tracking_number)`, not by order or label.
+- Multiple provider labels may link to one tracking subscription because duplicate label artifacts can refer to the same parcel identity.
+- Only active or unknown ShipStation labels with a provider-supplied carrier code are eligible. Voided and superseded labels are not enrolled.
+- The mutable subscription projection uses `pending`, `processing`, `active`, `retry`, and `review` states with a lease for concurrent workers.
+- Every provider attempt is append-only and records its request evidence, bounded response evidence, exact outcome, timestamps, and HTTP status.
+- Retry delay is deterministic exponential backoff. Exhausted or non-retryable failures require review instead of being silently discarded.
+
 ### `oms.channel_fulfillment_pushes`
 
 - `id`
@@ -309,6 +350,10 @@ Required database constraints:
 - Unique `channel_fulfillment_pushes(channel_provider, physical_shipment_id)`.
 - Check constraints preventing non-positive requested or shipped quantities.
 - Check constraints preventing shipped quantity from exceeding authorized quantity unless explicitly exceptioned.
+- Unique `shipping_provider_labels(provider, provider_label_id)`.
+- Exactly one target per provider-label link row while allowing one label to have many link rows.
+- Unique immutable carrier event identity `(provider, event_hash)`.
+- Immutable provider-label events, provider-label links, signed webhook receipts, carrier events, and carrier match attempts.
 
 The current active uniqueness on ShipStation order id/key should not be the physical-shipment idempotency boundary after cutover.
 
@@ -419,6 +464,14 @@ Goal: make SHIP_NOTIFY idempotent at the package/tracking level.
 
 Rules:
 
+- Record provider label creation separately from physical dispatch.
+- Ingest ShipStation `track` webhooks through exact raw-body RSA-SHA256 verification.
+- Persist the exact signed request receipt before normalization, then append the parser outcome and normalized carrier event transactionally before acknowledging the webhook.
+- Reconcile the durable event to provider labels asynchronously; a matching failure must not cause loss or repeated delivery of already verified evidence.
+- Match by exact provider label identity first and normalized tracking only as a fallback.
+- Do not create provider labels from carrier events.
+- Treat label creation and electronic advice as not dispatched.
+- Treat confirmed carrier possession or later movement as dispatch evidence.
 - Resolve physical shipment by `(provider, provider_physical_shipment_id)`.
 - If found, update idempotently.
 - If not found, resolve its shipping-engine order and shipment request.
@@ -428,12 +481,18 @@ Rules:
 
 Deliverables:
 
+- Append-only provider-label, label-link, signed-webhook-receipt, carrier-event, and match-attempt tables.
+- Shadow ingestion and reconciliation that cannot change live fulfillment or inventory state.
+- Control Tower exceptions for unlinked labels, unmatched or ambiguous events, unparsed or rejected signed receipts, voided-label movement, uncertain dispatch, and labels without acceptance scans.
 - ShipStation SHIP_NOTIFY writes `physical_shipments`.
 - Split shipments create multiple physical shipments under one shipping-engine order.
 - Existing `wms.outbound_shipments` tracking mutation becomes compatibility state only.
 
 Exit gate:
 
+- Signed webhook replay is idempotent, exact signed bytes remain independently auditable, and malformed or unsigned requests are rejected.
+- Shadow evidence agrees with known provider and carrier outcomes for a defined observation window.
+- A separate reviewed cutover makes confirmed carrier movement authoritative; this phase does not silently flip authority.
 - Duplicate webhook replay is a no-op.
 - Multiple tracking numbers from one ShipStation order are accepted.
 - Same SKU split across packages is handled by request-item references, not SKU guessing.
@@ -572,6 +631,63 @@ Required dashboards:
 - Shipment requests with no shipping-engine order after threshold.
 - Shipping-engine orders with multiple physical shipments.
 - Provider events classified as review exceptions.
+- Active linked labels without confirmed carrier possession after the configured operating threshold.
+- Carrier events that are unmatched, ambiguous, or tied to a voided label.
+- Carrier events missing their immutable signed ingress receipt.
+- Authenticated webhook receipts with no parse outcome or a rejected latest parse.
+
+## Carrier Tracking Rollout
+
+1. Deploy the additive tables, signed endpoint, provider-label observation, reconciliation sweep, and Control Tower projections in shadow mode.
+2. Configure ShipStation's `track` webhook to the Echelon signed endpoint after the deployment is healthy.
+3. Observe signature failures, signed-receipt completeness, label-link coverage, match ambiguity, and carrier status classification without changing fulfillment or inventory.
+4. Compare shadow carrier evidence with known handoffs and delivered packages for a defined observation window.
+5. Approve a separate authority-cutover change that derives dispatch from confirmed carrier possession.
+6. Keep a Control Tower exception for active labels that lack carrier acceptance after the configured operating threshold.
+
+The shadow deployment intentionally leaves existing `SHIP_NOTIFY` fulfillment behavior unchanged. That preserves backward compatibility while the new evidence path is proven.
+
+### ShipStation activation contract
+
+The existing ShipStation V1 integration uses `ssapi.shipstation.com`, Basic authentication, and the `SHIP_NOTIFY` webhook. That webhook reports shipment creation/completion; it does not provide the signed carrier-movement stream required for physical-dispatch authority.
+
+Carrier movement uses the separate standalone ShipStation API (formerly ShipEngine) `track` webhook contract. That API calls Echelon at:
+
+`/api/shipping/webhooks/shipstation/track`
+
+The endpoint verifies `x-shipengine-rsa-sha256-key-id`, `x-shipengine-rsa-sha256-signature`, and `x-shipengine-timestamp` against ShipEngine's rotating JWKS before retaining any evidence.
+
+ShipStation documents the `data` object on an `API_TRACK` envelope as optional. If it is absent, Echelon retains the exact signed receipt, validates that `resource_url` identifies the configured HTTPS `/v1/tracking` endpoint, and schedules an authenticated hydration lookup. The webhook request never waits for that provider lookup. A leased scheduler fetches the direct tracking snapshot, enforces the signed carrier/tracking identity, appends the normalized event and hydration attempt atomically, and applies bounded retry or review state. Echelon never follows an arbitrary callback URL and never infers dispatch from the URL alone.
+
+After deploying this shadow implementation, configure the subscription explicitly:
+
+```powershell
+heroku config:set SHIPSTATION_TRACKING_WEBHOOK_URL=https://cardshellz-echelon-f21ea7da3008.herokuapp.com/api/shipping/webhooks/shipstation/track -a cardshellz-echelon
+heroku run "npx tsx scripts/configure-shipstation-tracking-webhook.ts --dry-run" -a cardshellz-echelon
+heroku run "npx tsx scripts/configure-shipstation-tracking-webhook.ts --execute" -a cardshellz-echelon
+```
+
+`SHIPSTATION_TRACKING_API_KEY` must already be present. It is intentionally separate from `SHIPSTATION_V2_API_KEY`: ShipStation documents the standalone ShipStation API (formerly ShipEngine) and the ShipStation application V2 API as separate products and does not document their credentials as interchangeable. Both webhook registration and per-label enrollment use the same documented `https://api.shipengine.com/v1` environment. ShipStation currently documents tracking as an Advanced-plan-or-higher capability. For labels created outside this standalone API, each carrier must also be connected to the same account before tracking enrollment is expected to work. Treat both conditions as deployment gates and verify them in the production account before executing the enrollment backfill. The configuration script is dry-run by default, creates only when no `track` subscription exists, and refuses to delete or overwrite a different or duplicate subscription. A conflict requires operator review in ShipStation before rerunning the script.
+
+Configuring the global `track` webhook is necessary but is not enough for labels created through ShipStation UI or the existing V1 integration. Each active `(carrier_code, tracking_number)` tuple must also be enrolled through `POST /v1/tracking/start`; the provider confirms enrollment only with HTTP 204. Echelon performs that enrollment through the leased subscription state machine above. It never guesses a carrier from tracking-number syntax.
+
+The five-minute reconciliation scheduler first hydrates missing webhook payloads, then prepares and enrolls at most 25 due subscriptions per sweep. Provider work uses row leases, append-only attempt ledgers, deterministic retry, and a batch lease long enough to cover the bounded serialized request workload. Existing labels can be inspected and enrolled with the bounded operator command:
+
+```powershell
+heroku run "npx tsx scripts/enroll-shipstation-carrier-tracking.ts --dry-run" -a cardshellz-echelon
+heroku run "npx tsx scripts/enroll-shipstation-carrier-tracking.ts --execute --limit=25 --batches=10" -a cardshellz-echelon
+```
+
+The command is dry-run by default, refuses execute mode without a tracking API key, paces provider requests, and cannot change fulfillment or inventory. Control Tower separately exposes missing carrier codes, missing or delayed enrollment, exhausted enrollment failures, delayed or exhausted webhook hydration, unsigned or rejected webhook evidence, ambiguous matches, voided-label movement, and active labels with no carrier acceptance after the configured window. `CARRIER_ACCEPTANCE_GRACE_MINUTES` defaults to `1080` (18 hours), accepts 60 through 10080 minutes, and starts from the later of label observation or successful tracking enrollment so rollout delay does not create false exceptions.
+
+ShipStation also exposes an account-level `track_event_v2` event. It is intentionally not enabled here because its outgoing payload and signature-verification contract have not been proven from the documented integration used by Echelon. Adding it without that proof would create a second unverified ingress path.
+
+Activation is proven only after all of these are true:
+
+1. The registration command reports `created` or `already_configured` for the exact Echelon URL.
+2. Signed receipts and normalized parse outcomes appear for live tracking callbacks.
+3. Control Tower shows no sustained receipt, signature, parser, label-link, or ambiguity failures.
+4. Shadow classifications agree with known carrier pickups for the agreed observation window.
 
 ## Immediate Next PR
 

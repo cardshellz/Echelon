@@ -59,6 +59,14 @@ import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { createShipStationService } from "../modules/oms/shipstation.service";
 import { createShipStationEngine } from "../modules/shipping";
+import { createDrizzleCarrierTrackingRepository } from "../modules/shipping/carrier-tracking.repository";
+import {
+  CarrierTrackingService,
+  makeCarrierTrackingLogger,
+  systemCarrierTrackingClock,
+} from "../modules/shipping/carrier-tracking.service";
+import { createShipStationTrackingSubscriptionsClient } from "../modules/shipping/shipstation-tracking-subscriptions.client";
+import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-events.client";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
@@ -245,7 +253,17 @@ export function createServices(db: any) {
   fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
 
   // ShipStation — order push + webhook integration
-  const shipStation = createShipStationService(db, inventoryCore as any);
+  const carrierTrackingLogger = makeCarrierTrackingLogger();
+  const carrierTracking = new CarrierTrackingService({
+    repository: createDrizzleCarrierTrackingRepository(db),
+    clock: systemCarrierTrackingClock,
+    logger: carrierTrackingLogger,
+    subscriptionClient: createShipStationTrackingSubscriptionsClient(),
+    trackingEventsClient: createShipStationTrackingEventsClient(),
+  });
+  const shipStation = createShipStationService(db, inventoryCore as any, {
+    providerLabelObserver: carrierTracking,
+  });
 
   // C9 ShippingEngine — engine-agnostic port over ShipStation (adapter #1)
   const shippingEngine = createShipStationEngine(shipStation);
@@ -296,6 +314,8 @@ export function createServices(db: any) {
     fulfillmentPush,
     shipStation,
     shippingEngine,
+    carrierTracking,
+    carrierTrackingLogger,
     wmsSync,
     syncRecovery,
   };

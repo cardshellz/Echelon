@@ -41,6 +41,12 @@ import { cancelOrder, markOrderShipped, completeOrder } from "./modules/orders/o
 import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
 import { setPickQueueReservationService } from "./modules/orders/orders.storage";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
+import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
+import {
+  installShipStationTrackingRawBodyCapture,
+  registerShipStationTrackingWebhook,
+} from "./modules/shipping/shipstation-tracking-webhook.routes";
+import { createDefaultShipStationWebhookSignatureVerifier } from "./modules/shipping/shipstation-webhook-auth";
 import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
 import type { SafeUser } from "@shared/schema";
 import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
@@ -50,6 +56,7 @@ import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapte
 import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
 import { requireAuth } from "./routes/middleware";
 import {
+  envBoundedPositiveInteger,
   envFlagEnabled,
   envPositiveInteger,
   getSchedulerDisableReason,
@@ -73,6 +80,8 @@ declare module "http" {
     rawBody: unknown;
   }
 }
+
+installShipStationTrackingRawBodyCapture(app);
 
 app.use(
   express.json({
@@ -438,6 +447,15 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
   // Start Echelon sync scheduler (replaces old channelSync scheduler)
   startEchelonSyncScheduler(services, db);
+
+  // Signed ShipStation carrier-status observations. This public endpoint is
+  // registered before session-protected application routes and authenticates
+  // the exact raw body with ShipEngine's rotating RSA keys.
+  registerShipStationTrackingWebhook(app, {
+    service: services.carrierTracking,
+    signatureVerifier: createDefaultShipStationWebhookSignatureVerifier(),
+    logger: services.carrierTrackingLogger,
+  });
 
   // --- ShipStation SHIP_NOTIFY webhook (BEFORE auth middleware; shared-secret verified) ---
   app.post("/api/shipstation/webhooks/ship-notify", async (req, res) => {
@@ -846,6 +864,34 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         startControlTowerProjectionScheduler();
       } else {
         logSchedulerDisabled("scheduler", "Operations Control Tower projector", "CONTROL_TOWER_PROJECTOR_DISABLED");
+      }
+
+      if (!schedulersDisabled("CARRIER_TRACKING_RECONCILIATION_DISABLED")) {
+        startCarrierTrackingReconciliationScheduler(
+          services.carrierTracking,
+          services.carrierTrackingLogger,
+          {
+            intervalMs: envPositiveInteger(
+              "CARRIER_TRACKING_RECONCILIATION_INTERVAL_MS",
+              5 * 60 * 1_000,
+            ),
+            initialDelayMs: envPositiveInteger(
+              "CARRIER_TRACKING_RECONCILIATION_INITIAL_DELAY_MS",
+              60 * 1_000,
+            ),
+            batchLimit: envBoundedPositiveInteger(
+              "CARRIER_TRACKING_RECONCILIATION_BATCH_LIMIT",
+              100,
+              500,
+            ),
+          },
+        );
+      } else {
+        logSchedulerDisabled(
+          "scheduler",
+          "Carrier tracking reconciliation",
+          "CARRIER_TRACKING_RECONCILIATION_DISABLED",
+        );
       }
 
       if (!schedulersDisabled()) {

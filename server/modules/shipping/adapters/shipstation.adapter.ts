@@ -96,6 +96,7 @@ export type ShipStationServiceHandle = {
   updateSortRankSingle(shipstationOrderId: number, sortRank: string): Promise<void>;
   getOrderById(shipstationOrderId: number): Promise<any | null>;
   getShipments(orderId: number, opts?: { orderNumber?: string }): Promise<any[]>;
+  observeProviderLabelsShadow(shipments: any[]): Promise<void>;
   processShipNotify(resourceUrl: string): Promise<number>;
   registerWebhook(targetUrl: string): Promise<void>;
 };
@@ -184,6 +185,7 @@ export function createShipStationEngine(
         ssOrderId,
         orderNumber ? { orderNumber } : undefined,
       );
+      await ss.observeProviderLabelsShadow(ssShipments);
 
       return ssShipments.map((s: any) => {
         if (s.voidDate) {
