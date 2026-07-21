@@ -1192,8 +1192,16 @@ export async function updateInvoice(
         );
       }
       const amount = requireNonnegativeInteger(data.invoicedAmountCents, "invoicedAmountCents");
+      const paidAmount = databaseMoneyToBigInt(
+        invoice.paidAmountCents,
+        `invoice[${invoiceId}].paidAmountCents`,
+      );
+      const balance = BigInt(amount) - paidAmount;
       patch.invoicedAmountCents = amount;
-      patch.balanceCents = Math.max(0, amount - Number(invoice.paidAmountCents));
+      patch.balanceCents = bigintMoneyToNumber(
+        balance > BigInt(0) ? balance : BigInt(0),
+        `invoice[${invoiceId}].balanceCents`,
+      );
     }
 
     let updated: any;
@@ -1701,7 +1709,11 @@ async function lockAndValidatePaymentInvoices(
         code: "AP_PAYMENT_ALLOCATION_INVOICE_NOT_PAYABLE",
       });
     }
-    if (allocation.appliedAmountCents > Number(invoice.balanceCents)) {
+    const balanceCents = databaseMoneyToBigInt(
+      invoice.balanceCents,
+      `invoice[${invoice.id}].balanceCents`,
+    );
+    if (BigInt(allocation.appliedAmountCents) > balanceCents) {
       throw new ApLedgerError("Payment allocation exceeds the invoice's open balance", 409, {
         code: "AP_PAYMENT_ALLOCATION_EXCEEDS_BALANCE",
       });

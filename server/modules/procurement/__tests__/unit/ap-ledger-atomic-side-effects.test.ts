@@ -349,6 +349,64 @@ describe("AP ledger atomic side effects", () => {
     expect(tx.insert).not.toHaveBeenCalled();
   });
 
+  it("rejects unsafe invoice balance values before inserting cash movement", async () => {
+    const { recordPayment } = await import("../../ap-ledger.service");
+    const tx = buildTx([[
+      {
+        id: 12,
+        vendorId: 4,
+        status: "approved",
+        balanceCents: Number.MAX_SAFE_INTEGER + 1,
+      },
+    ]]);
+    mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
+
+    await expect(recordPayment({
+      vendorId: 4,
+      paymentDate: new Date("2026-05-18T12:00:00Z"),
+      paymentMethod: "ach",
+      totalAmountCents: 2500,
+      allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+      createdBy: "ops-user",
+    })).rejects.toMatchObject({
+      name: "ApLedgerError",
+      statusCode: 500,
+      details: {
+        code: "AP_DATABASE_MONEY_INVALID",
+        field: "invoice[12].balanceCents",
+      },
+    });
+
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsafe paid totals before updating an invoice total", async () => {
+    const { updateInvoice } = await import("../../ap-ledger.service");
+    const tx = buildTx([
+      [{
+        id: 12,
+        vendorId: 4,
+        status: "received",
+        paidAmountCents: Number.MAX_SAFE_INTEGER + 1,
+      }],
+      [{ count: 0 }],
+    ]);
+    mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
+
+    await expect(updateInvoice(12, {
+      invoicedAmountCents: 2500,
+    }, "ops-user")).rejects.toMatchObject({
+      name: "ApLedgerError",
+      statusCode: 500,
+      details: {
+        code: "AP_DATABASE_MONEY_INVALID",
+        field: "invoice[12].paidAmountCents",
+      },
+    });
+
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
   it("requires AP command audit persistence inside the caller-owned payment transaction", async () => {
     const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
     const tx = buildTx([
