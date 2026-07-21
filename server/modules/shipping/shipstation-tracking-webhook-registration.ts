@@ -34,16 +34,33 @@ export type ShipStationTrackingWebhookRegistrationResult =
     webhook: ShipStationTrackingWebhookSummary;
   }
   | {
+    status: "takeover_planned";
+    targetUrl: string;
+    webhook: ShipStationTrackingWebhookSummary;
+  }
+  | {
+    status: "taken_over";
+    targetUrl: string;
+    webhook: ShipStationTrackingWebhookSummary;
+  }
+  | {
     status: "conflict";
     targetUrl: string;
     trackingWebhooks: ShipStationTrackingWebhookSummary[];
+    reason?: string;
   };
+
+export interface ShipStationTrackingWebhookTakeoverExpectation {
+  webhookId: string;
+  currentUrl: string;
+}
 
 export interface ConfigureShipStationTrackingWebhookInput {
   client: ShipStationTrackingWebhooksClient;
   targetUrl: string;
   webhookSecret: string;
   execute: boolean;
+  takeover?: ShipStationTrackingWebhookTakeoverExpectation | null;
 }
 
 export function normalizeTrackingWebhookTargetUrl(value: string): string {
@@ -121,6 +138,59 @@ export async function configureShipStationTrackingWebhook(
   assertValidShipStationTrackingWebhookSecret(webhookSecret);
   const webhooks = await input.client.listWebhooks();
   const currentState = classifyExistingTrackingWebhooks(webhooks, targetUrl, webhookSecret);
+  if (currentState?.status === "already_configured") return currentState;
+
+  if (currentState?.status === "conflict" && input.takeover) {
+    const expectedCurrentUrl = normalizeTrackingWebhookTargetUrl(input.takeover.currentUrl);
+    const expectedWebhookId = input.takeover.webhookId.trim();
+    const trackingWebhooks = webhooks.filter(
+      (webhook) => webhook.event.toLowerCase() === "track",
+    );
+    const current = trackingWebhooks[0];
+    const matchesExpectation = trackingWebhooks.length === 1
+      && current.webhook_id === expectedWebhookId
+      && normalizedProviderUrl(current.url) === expectedCurrentUrl
+      && (current.headers ?? []).length === 0;
+    if (!matchesExpectation) {
+      return {
+        ...currentState,
+        reason: "Existing tracking webhook does not exactly match the guarded takeover expectation",
+      };
+    }
+    if (!input.execute) {
+      return {
+        status: "takeover_planned",
+        targetUrl,
+        webhook: summarizeWebhook(current),
+      };
+    }
+
+    await input.client.updateWebhook(current.webhook_id, {
+      name: TRACKING_WEBHOOK_NAME,
+      url: targetUrl,
+      headers: [{
+        key: SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER,
+        value: webhookSecret,
+      }],
+    });
+    const verifiedState = classifyExistingTrackingWebhooks(
+      await input.client.listWebhooks(),
+      targetUrl,
+      webhookSecret,
+    );
+    if (verifiedState?.status !== "already_configured"
+        || verifiedState.webhook.webhookId !== current.webhook_id) {
+      throw new Error(
+        "ShipStation tracking webhook takeover could not be verified after the in-place update",
+      );
+    }
+    return {
+      status: "taken_over",
+      targetUrl,
+      webhook: verifiedState.webhook,
+    };
+  }
+
   if (currentState) return currentState;
 
   if (!input.execute) {

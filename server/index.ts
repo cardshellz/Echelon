@@ -47,6 +47,8 @@ import {
   registerShipStationTrackingWebhook,
 } from "./modules/shipping/shipstation-tracking-webhook.routes";
 import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-webhook-auth";
+import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-projection.repository";
+import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-projection.routes";
 import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
 import type { SafeUser } from "@shared/schema";
 import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
@@ -455,6 +457,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     service: services.carrierTracking,
     webhookVerifier: createDefaultShipStationV2WebhookVerifier(),
     logger: services.carrierTrackingLogger,
+  });
+  registerCarrierTrackingProjectionRoutes(app, {
+    reader: createCarrierTrackingProjectionReader(db),
   });
 
   // --- ShipStation SHIP_NOTIFY webhook (BEFORE auth middleware; shared-secret verified) ---
