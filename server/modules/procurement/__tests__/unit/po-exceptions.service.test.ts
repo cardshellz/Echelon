@@ -45,27 +45,21 @@ function makeChain(finalValue: any): any {
 // resolves to server/db.ts. We mock that real module path so any imports
 // of it (transitive included) get our stub.
 vi.mock("../../../../db", () => {
+  const mockDb: any = {
+    select: vi.fn(() => {
+      const next = dbState.selectChain.shift() ?? [];
+      return makeChain(next);
+    }),
+    insert: vi.fn(() => {
+      return makeChain(dbState.insertReturn ?? []);
+    }),
+    update: vi.fn(() => {
+      return makeChain(dbState.updateReturn ?? []);
+    }),
+  };
+  mockDb.transaction = vi.fn(async (cb: any) => cb(mockDb));
   return {
-    db: {
-      select: vi.fn(() => {
-        const next = dbState.selectChain.shift() ?? [];
-        return makeChain(next);
-      }),
-      insert: vi.fn(() => {
-        return makeChain(dbState.insertReturn ?? []);
-      }),
-      update: vi.fn(() => {
-        return makeChain(dbState.updateReturn ?? []);
-      }),
-      transaction: vi.fn(async (cb: any) => {
-        // Use the same db for tx; our chains don't care about tx context
-        return await cb({
-          select: (db as any).select,
-          insert: (db as any).insert,
-          update: (db as any).update,
-        });
-      }),
-    },
+    db: mockDb,
   };
 });
 
@@ -196,6 +190,39 @@ describe.skip("upsertException", () => {
 });
 
 // ─── acknowledge / resolve / dismiss ────────────────────────────────────────
+
+describe("source-bound exception acceptance", () => {
+  it("keeps an exact-source accepted match variance resolved on re-detection", async () => {
+    const accepted = {
+      id: 5,
+      poId: 123,
+      kind: "match_mismatch",
+      severity: "warn",
+      status: "resolved",
+      payloadHash: computePayloadHash(123, "match_mismatch", {
+        invoiceId: 10,
+        sourceFingerprint: "source-a",
+        sourceVersion: 1,
+      }),
+    };
+    dbState.selectChain.push([accepted]);
+
+    const result = await upsertException({
+      poId: 123,
+      kind: "match_mismatch",
+      severity: "warn",
+      title: "Accepted invoice variance",
+      payload: {
+        invoiceId: 10,
+        sourceFingerprint: "source-a",
+        sourceVersion: 1,
+      },
+      preserveResolved: true,
+    });
+
+    expect(result).toBe(accepted);
+  });
+});
 
 describe.skip("acknowledgeException", () => {
   it("transitions an open exception to acknowledged", async () => {

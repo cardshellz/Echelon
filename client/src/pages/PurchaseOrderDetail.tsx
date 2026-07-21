@@ -689,9 +689,12 @@ function ExceptionCard({
     const dt = new Date(ex.detectedAt);
     return `${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   })();
+  const isMatchMismatch = ex.kind === "match_mismatch";
   const handleResolve = () => {
     const note = window.prompt(
-      "Resolution note (required) — what fixed this exception?",
+      isMatchMismatch
+        ? "Acceptance reason (required). This acceptance applies only to the current PO, receipt, and invoice values; any edit requires a new acceptance."
+        : "Resolution note (required) — what fixed this exception?",
       "",
     );
     if (note === null) return; // user cancelled
@@ -752,7 +755,7 @@ function ExceptionCard({
                 disabled={busy}
                 data-testid={`resolve-exception-${ex.id}`}
               >
-                Mark resolved
+                {isMatchMismatch ? "Accept current variance" : "Mark resolved"}
               </Button>
               <Button
                 size="sm"

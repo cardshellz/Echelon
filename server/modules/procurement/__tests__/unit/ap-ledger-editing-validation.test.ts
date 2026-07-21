@@ -71,6 +71,47 @@ describe("AP invoice editing boundary validation", () => {
     expect(mocks.db.transaction).not.toHaveBeenCalled();
   });
 
+  it("rejects non-USD invoices until an FX authority exists", async () => {
+    const { createInvoice } = await import("../../ap-ledger.service");
+
+    await expect(createInvoice({
+      invoiceNumber: "INV-EUR-100",
+      vendorId: 4,
+      currency: "EUR",
+    })).rejects.toMatchObject({
+      name: "ApLedgerError",
+      statusCode: 422,
+      details: {
+        code: "AP_FX_RATE_REQUIRED",
+        currency: "EUR",
+        reportingCurrency: "USD",
+      },
+    });
+    expect(mocks.db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-USD payments before opening a transaction", async () => {
+    const { recordPayment } = await import("../../ap-ledger.service");
+
+    await expect(recordPayment({
+      vendorId: 4,
+      paymentDate: new Date("2026-07-20T12:00:00.000Z"),
+      paymentMethod: "wire",
+      totalAmountCents: 1_000,
+      currency: "EUR",
+      allocations: [],
+    })).rejects.toMatchObject({
+      name: "ApLedgerError",
+      statusCode: 422,
+      details: {
+        code: "AP_FX_RATE_REQUIRED",
+        currency: "EUR",
+        reportingCurrency: "USD",
+      },
+    });
+    expect(mocks.db.transaction).not.toHaveBeenCalled();
+  });
+
   it("rejects conflicting cent and mill line costs before opening a transaction", async () => {
     const { addInvoiceLine } = await import("../../ap-ledger.service");
 

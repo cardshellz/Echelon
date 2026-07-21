@@ -31,7 +31,10 @@ import {
   detectOverpaid,
   detectPastDue,
 } from "./po-exceptions.service";
-import { evaluatePurchaseOrderInvoiceMatches } from "./purchase-order-invoice-match";
+import {
+  computePurchaseOrderInvoiceMatchSourceFingerprint,
+  evaluatePurchaseOrderInvoiceMatches,
+} from "./purchase-order-invoice-match";
 import { COGSService } from "../inventory";
 
 // ── Error class ─────────────────────────────────────────────────────
@@ -73,6 +76,29 @@ function requireNonnegativeInteger(value: unknown, field: string): number {
     });
   }
   return normalized;
+}
+
+function requireUsdFinancialDocumentCurrency(value: unknown, field: string): string {
+  const currency = normalizeRequiredText(value ?? "USD", field, 3).toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw new ApLedgerError(`${field} must be a three-letter ISO code`, 400, {
+      code: "AP_INPUT_CURRENCY_INVALID",
+      field,
+    });
+  }
+  if (currency !== "USD") {
+    throw new ApLedgerError(
+      "Non-USD purchasing documents require an explicit foreign-exchange rate authority",
+      422,
+      {
+        code: "AP_FX_RATE_REQUIRED",
+        field,
+        currency,
+        reportingCurrency: "USD",
+      },
+    );
+  }
+  return "USD";
 }
 
 function databaseMoneyToBigInt(value: unknown, field: string): bigint {
@@ -562,6 +588,7 @@ async function lockMatchingPurchaseOrder(
       },
     );
   }
+  requireUsdFinancialDocumentCurrency(normalizedPoCurrency, "purchaseOrder.currency");
 }
 
 async function requireLinkedPoLine(
@@ -955,12 +982,7 @@ export async function createInvoice(data: {
     data.invoicedAmountCents ?? 0,
     "invoicedAmountCents",
   );
-  const currency = normalizeRequiredText(data.currency ?? "USD", "currency", 3).toUpperCase();
-  if (!/^[A-Z]{3}$/.test(currency)) {
-    throw new ApLedgerError("currency must be a three-letter ISO code", 400, {
-      code: "AP_INPUT_CURRENCY_INVALID",
-    });
-  }
+  const currency = requireUsdFinancialDocumentCurrency(data.currency, "currency");
   const paymentTermsDays = data.paymentTermsDays === undefined
     ? undefined
     : requireNonnegativeInteger(data.paymentTermsDays, "paymentTermsDays");
@@ -1230,13 +1252,7 @@ export async function updateInvoice(
       patch.dueDate = normalizeOptionalDate(data.dueDate, "dueDate");
     }
     if (data.currency !== undefined) {
-      const currency = normalizeRequiredText(data.currency, "currency", 3).toUpperCase();
-      if (!/^[A-Z]{3}$/.test(currency)) {
-        throw new ApLedgerError("currency must be a three-letter ISO code", 400, {
-          code: "AP_INPUT_CURRENCY_INVALID",
-        });
-      }
-      patch.currency = currency;
+      patch.currency = requireUsdFinancialDocumentCurrency(data.currency, "currency");
     }
     if (data.paymentTermsDays !== undefined) {
       patch.paymentTermsDays = requireNonnegativeInteger(data.paymentTermsDays, "paymentTermsDays");
@@ -1887,6 +1903,7 @@ type PaymentMutationResult<T> = {
 };
 
 function validateRecordPaymentInput(data: RecordApPaymentInput): void {
+  requireUsdFinancialDocumentCurrency(data.currency, "currency");
   if (!Number.isSafeInteger(data.vendorId) || data.vendorId <= 0) {
     throw new ApLedgerError("vendorId must be a positive integer", 400, {
       code: "AP_PAYMENT_VENDOR_INVALID",
@@ -1942,6 +1959,7 @@ function validateRecordPaymentInput(data: RecordApPaymentInput): void {
 async function lockAndValidatePaymentInvoices(
   tx: ApLedgerDbClient,
   data: RecordApPaymentInput,
+  paymentCurrency: string,
 ): Promise<void> {
   if (data.allocations.length === 0) return;
   const invoiceIds = data.allocations.map((allocation) => allocation.vendorInvoiceId);
@@ -1971,6 +1989,18 @@ async function lockAndValidatePaymentInvoices(
         code: "AP_PAYMENT_ALLOCATION_VENDOR_MISMATCH",
       });
     }
+    const invoiceCurrency = requireUsdFinancialDocumentCurrency(
+      invoice.currency,
+      `invoice[${invoice.id}].currency`,
+    );
+    if (invoiceCurrency !== paymentCurrency) {
+      throw new ApLedgerError("Payment currency must match every allocated invoice", 422, {
+        code: "AP_PAYMENT_ALLOCATION_CURRENCY_MISMATCH",
+        paymentCurrency,
+        invoiceCurrency,
+        invoiceId: invoice.id,
+      });
+    }
     if (!["approved", "partially_paid"].includes(invoice.status)) {
       throw new ApLedgerError("Payments may only be allocated to approved open invoices", 409, {
         code: "AP_PAYMENT_ALLOCATION_INVOICE_NOT_PAYABLE",
@@ -1993,7 +2023,8 @@ async function recordPaymentInTransaction(
   data: RecordApPaymentInput,
 ): Promise<PaymentMutationResult<any>> {
   validateRecordPaymentInput(data);
-  await lockAndValidatePaymentInvoices(tx, data);
+  const paymentCurrency = requireUsdFinancialDocumentCurrency(data.currency, "currency");
+  await lockAndValidatePaymentInvoices(tx, data, paymentCurrency);
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('ap_payment_number'))`);
   const paymentNumber = await generatePaymentNumber(tx);
   const affectedPoIds = new Set<number>();
@@ -2010,7 +2041,7 @@ async function recordPaymentInTransaction(
         checkNumber: data.checkNumber,
         bankAccountLabel: data.bankAccountLabel,
         totalAmountCents: data.totalAmountCents,
-        currency: data.currency ?? "USD",
+        currency: paymentCurrency,
         status: data.status ?? "completed",
         notes: data.notes,
         createdBy: data.createdBy,
@@ -2060,6 +2091,7 @@ async function recordPaymentInTransaction(
 }
 
 export async function recordPayment(data: RecordApPaymentInput) {
+  validateRecordPaymentInput(data);
   const result = await db.transaction((tx: ApLedgerDbClient) =>
     recordPaymentInTransaction(tx, data),
   );
@@ -2977,6 +3009,7 @@ export type PurchaseOrderInvoiceMatchTransactionResult = {
   purchaseOrderLineIds: number[];
   activeInvoiceIds: number[];
   invoiceNumbersById: Map<number, string>;
+  sourceFingerprint: string;
   results: PersistedInvoiceMatchResult[];
   invoicesWithoutMappedLines: number[];
 };
@@ -3013,6 +3046,12 @@ export async function recomputePurchaseOrderInvoiceMatchesInTransaction(
       purchaseOrderLineIds: poLines.map((line) => Number(line.id)),
       activeInvoiceIds: [],
       invoiceNumbersById: new Map(),
+      sourceFingerprint: computePurchaseOrderInvoiceMatchSourceFingerprint({
+        purchaseOrderId: normalizedPoId,
+        purchaseOrderLines: poLines,
+        activeInvoices: [],
+        invoiceLines: [],
+      }),
       results: [],
       invoicesWithoutMappedLines: [],
     };
@@ -3039,6 +3078,12 @@ export async function recomputePurchaseOrderInvoiceMatchesInTransaction(
       purchaseOrderLineIds: poLines.map((line) => Number(line.id)),
       activeInvoiceIds,
       invoiceNumbersById,
+      sourceFingerprint: computePurchaseOrderInvoiceMatchSourceFingerprint({
+        purchaseOrderId: normalizedPoId,
+        purchaseOrderLines: poLines,
+        activeInvoices,
+        invoiceLines: [],
+      }),
       results: [],
       invoicesWithoutMappedLines: [],
     };
@@ -3060,8 +3105,15 @@ export async function recomputePurchaseOrderInvoiceMatchesInTransaction(
     purchaseOrderLines: poLines,
     invoiceLines: scopedInvoiceLines,
   });
+  const sourceFingerprint = computePurchaseOrderInvoiceMatchSourceFingerprint({
+    purchaseOrderId: normalizedPoId,
+    purchaseOrderLines: poLines,
+    activeInvoices,
+    invoiceLines: scopedInvoiceLines,
+  });
   await persistInvoiceMatchResults(client, results, actorId, {
     purchaseOrderId: normalizedPoId,
+    sourceFingerprint,
     source: "purchase_order",
   });
 
@@ -3070,6 +3122,7 @@ export async function recomputePurchaseOrderInvoiceMatchesInTransaction(
     purchaseOrderLineIds: poLines.map((line) => Number(line.id)),
     activeInvoiceIds,
     invoiceNumbersById,
+    sourceFingerprint,
     results,
     invoicesWithoutMappedLines,
   };

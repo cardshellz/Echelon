@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { centsToMills } from "@shared/utils/money";
 
 export const PURCHASE_ORDER_INVOICE_MATCH_STATUSES = [
@@ -37,6 +38,11 @@ export type EvaluatedVendorInvoiceMatchLine = {
   matchStatus: PurchaseOrderInvoiceMatchStatus;
 };
 
+export type PurchaseOrderInvoiceMatchFingerprintInvoice = {
+  id: number;
+  status: string;
+};
+
 function requireSafeNonnegativeInteger(value: unknown, field: string): number {
   const normalized = Number(value);
   if (!Number.isSafeInteger(normalized) || normalized < 0) {
@@ -53,6 +59,101 @@ function authoritativeUnitCostMills(
     ? centsToMills(requireSafeNonnegativeInteger(value.unitCostCents ?? 0, `${field}.unitCostCents`))
     : requireSafeNonnegativeInteger(value.unitCostMills, `${field}.unitCostMills`);
   return requireSafeNonnegativeInteger(mills, `${field}.unitCostMills`);
+}
+
+/**
+ * Fingerprint every fact that can change a PO's aggregate three-way match.
+ * Arrays are normalized by stable IDs before hashing so database row order
+ * cannot change the result.
+ */
+export function computePurchaseOrderInvoiceMatchSourceFingerprint(input: {
+  purchaseOrderId: number;
+  purchaseOrderLines: PurchaseOrderMatchLine[];
+  activeInvoices: PurchaseOrderInvoiceMatchFingerprintInvoice[];
+  invoiceLines: VendorInvoiceMatchLine[];
+}): string {
+  const purchaseOrderId = requireSafeNonnegativeInteger(
+    input.purchaseOrderId,
+    "purchaseOrderId",
+  );
+  if (purchaseOrderId === 0) throw new Error("purchaseOrderId must be positive");
+
+  const purchaseOrderLines = input.purchaseOrderLines
+    .map((line) => {
+      const id = requireSafeNonnegativeInteger(line.id, "purchaseOrderLine.id");
+      if (id === 0) throw new Error("purchaseOrderLine.id must be positive");
+      return {
+        id,
+        orderQty: requireSafeNonnegativeInteger(
+          line.orderQty,
+          `purchaseOrderLine[${id}].orderQty`,
+        ),
+        receivedQty: requireSafeNonnegativeInteger(
+          line.receivedQty ?? 0,
+          `purchaseOrderLine[${id}].receivedQty`,
+        ),
+        unitCostMills: authoritativeUnitCostMills(
+          line,
+          `purchaseOrderLine[${id}]`,
+        ),
+      };
+    })
+    .sort((left, right) => left.id - right.id);
+
+  const activeInvoices = input.activeInvoices
+    .map((invoice) => {
+      const id = requireSafeNonnegativeInteger(invoice.id, "vendorInvoice.id");
+      if (id === 0) throw new Error("vendorInvoice.id must be positive");
+      return { id };
+    })
+    .sort((left, right) => left.id - right.id);
+
+  const invoiceLines = input.invoiceLines
+    .map((line) => {
+      const id = requireSafeNonnegativeInteger(line.id, "vendorInvoiceLine.id");
+      if (id === 0) throw new Error("vendorInvoiceLine.id must be positive");
+      const vendorInvoiceId = requireSafeNonnegativeInteger(
+        line.vendorInvoiceId,
+        `vendorInvoiceLine[${id}].vendorInvoiceId`,
+      );
+      if (vendorInvoiceId === 0) {
+        throw new Error(`vendorInvoiceLine[${id}].vendorInvoiceId must be positive`);
+      }
+      const purchaseOrderLineId = line.purchaseOrderLineId == null
+        ? null
+        : requireSafeNonnegativeInteger(
+          line.purchaseOrderLineId,
+          `vendorInvoiceLine[${id}].purchaseOrderLineId`,
+        );
+      if (purchaseOrderLineId === 0) {
+        throw new Error(`vendorInvoiceLine[${id}].purchaseOrderLineId must be positive`);
+      }
+      return {
+        id,
+        vendorInvoiceId,
+        purchaseOrderLineId,
+        qtyInvoiced: requireSafeNonnegativeInteger(
+          line.qtyInvoiced,
+          `vendorInvoiceLine[${id}].qtyInvoiced`,
+        ),
+        unitCostMills: authoritativeUnitCostMills(
+          line,
+          `vendorInvoiceLine[${id}]`,
+        ),
+      };
+    })
+    .sort((left, right) =>
+      left.vendorInvoiceId - right.vendorInvoiceId || left.id - right.id
+    );
+
+  const source = JSON.stringify({
+    version: 1,
+    purchaseOrderId,
+    purchaseOrderLines,
+    activeInvoices,
+    invoiceLines,
+  });
+  return createHash("sha256").update(source).digest("hex");
 }
 
 /**

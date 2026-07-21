@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   purchaseOrderLines,
   purchaseOrders,
+  poExceptions,
   vendorInvoiceLines,
   vendorInvoicePoLinks,
   vendorInvoices,
@@ -16,7 +17,7 @@ import { createPurchasingService, PurchasingError } from "../../purchasing.servi
 //   2. close() succeeds when linked invoices have all lines 'matched'.
 //   3. close() throws 409 while any linked invoice line remains 'pending'.
 //   4. close() throws 409 when any linked invoice line has a mismatch status
-//      (e.g. qty_mismatch, cost_mismatch).
+//      (e.g. qty_discrepancy, price_discrepancy).
 //   5. close() calls detectMatchMismatch() on each blocked invoice after
 //      throwing, so exceptions are freshly raised on the PO.
 //   6. closeShort() still works regardless of match status (no gate).
@@ -36,6 +37,7 @@ vi.mock("../../ap-ledger.service", () => ({
 
 let allPoLinks: any[] = [];
 let allInvoiceLines: any[] = [];
+let resolvedMatchExceptions: any[] = [];
 let lockedPo: any;
 
 function buildMockDb() {
@@ -55,6 +57,7 @@ function buildMockDb() {
       ])).values()];
     }
     if (table === purchaseOrderLines) return [];
+    if (table === poExceptions) return resolvedMatchExceptions;
     return [];
   };
   const tx: any = {
@@ -156,6 +159,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
   beforeEach(() => {
     allPoLinks = [];
     allInvoiceLines = [];
+    resolvedMatchExceptions = [];
     lockedPo = poReceived;
     mockDetectMatchMismatch.mockClear();
     mockDetectMatchMismatch.mockResolvedValue(undefined);
@@ -174,6 +178,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
           Number(line.invoiceId),
           String(line.invoiceNumber),
         ])),
+        sourceFingerprint: "current-match-source-fingerprint",
         results: allInvoiceLines.map((line, index) => ({
           id: Number(line.id ?? index + 1),
           vendorInvoiceId: Number(line.invoiceId),
@@ -270,11 +275,11 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     });
   });
 
-  it("throws 409 when invoice line has qty_mismatch", async () => {
+  it("throws 409 when invoice line has qty_discrepancy", async () => {
     storage.getPurchaseOrderById.mockResolvedValue(poReceived);
     allPoLinks = [{ vendorInvoiceId: 10 }];
     allInvoiceLines = [
-      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "qty_mismatch" },
+      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "qty_discrepancy" },
     ];
 
     await expect(svc.close(1, "user-1")).rejects.toMatchObject({
@@ -283,12 +288,84 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     });
   });
 
+  it("closes when an exact current price variance was resolved with a note", async () => {
+    storage.getPurchaseOrderById.mockResolvedValue(poReceived);
+    allPoLinks = [{ vendorInvoiceId: 10 }];
+    allInvoiceLines = [{
+      invoiceId: 10,
+      invoiceNumber: "INV-001",
+      matchStatus: "price_discrepancy",
+    }];
+    resolvedMatchExceptions = [{
+      payload: {
+        invoiceId: 10,
+        sourceVersion: 1,
+        sourceFingerprint: "current-match-source-fingerprint",
+      },
+    }];
+
+    const result = await svc.close(1, "user-1", "approved price variance");
+
+    expect(result).toMatchObject({ id: 1, status: "closed" });
+    expect(mockDetectMatchMismatch).not.toHaveBeenCalled();
+  });
+
+  it("blocks a previously resolved variance after its source facts change", async () => {
+    storage.getPurchaseOrderById.mockResolvedValue(poReceived);
+    allPoLinks = [{ vendorInvoiceId: 10 }];
+    allInvoiceLines = [{
+      invoiceId: 10,
+      invoiceNumber: "INV-001",
+      matchStatus: "qty_discrepancy",
+    }];
+    resolvedMatchExceptions = [{
+      payload: {
+        invoiceId: 10,
+        sourceVersion: 1,
+        sourceFingerprint: "stale-match-source-fingerprint",
+      },
+    }];
+
+    await expect(svc.close(1, "user-1")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({
+        code: "PO_CLOSE_3WAY_MATCH_BLOCKED",
+        invoiceIds: [10],
+      }),
+    });
+    expect(mockDetectMatchMismatch).toHaveBeenCalledWith(10);
+  });
+
+  it("never accepts a missing PO-line mapping", async () => {
+    storage.getPurchaseOrderById.mockResolvedValue(poReceived);
+    allPoLinks = [{ vendorInvoiceId: 10 }];
+    allInvoiceLines = [{
+      invoiceId: 10,
+      invoiceNumber: "INV-001",
+      matchStatus: "po_line_missing",
+    }];
+    resolvedMatchExceptions = [{
+      payload: {
+        invoiceId: 10,
+        sourceVersion: 1,
+        sourceFingerprint: "current-match-source-fingerprint",
+      },
+    }];
+
+    await expect(svc.close(1, "user-1")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({
+        statusCounts: { po_line_missing: 1 },
+      }),
+    });
+  });
+
   it("throws 409 with correct error message naming invoice and line count", async () => {
     storage.getPurchaseOrderById.mockResolvedValue(poReceived);
     allPoLinks = [{ vendorInvoiceId: 10 }];
     allInvoiceLines = [
-      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "qty_mismatch" },
-      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "cost_mismatch" },
+      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "qty_discrepancy" },
+      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "price_discrepancy" },
     ];
 
     try {
@@ -299,7 +376,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
       expect(err.statusCode).toBe(409);
       expect(err.message).toContain("INV-001");
       expect(err.message).toContain("2 unresolved invoice lines");
-      expect(err.message).toContain("Resolve every invoice line");
+      expect(err.message).toContain("resolve or accept current variances");
     }
   });
 
@@ -307,8 +384,8 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     storage.getPurchaseOrderById.mockResolvedValue(poReceived);
     allPoLinks = [{ vendorInvoiceId: 10 }, { vendorInvoiceId: 11 }];
     allInvoiceLines = [
-      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "qty_mismatch" },
-      { invoiceId: 11, invoiceNumber: "INV-002", matchStatus: "cost_mismatch" },
+      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "qty_discrepancy" },
+      { invoiceId: 11, invoiceNumber: "INV-002", matchStatus: "price_discrepancy" },
     ];
 
     try {
@@ -327,7 +404,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     storage.getPurchaseOrderById.mockResolvedValue(poReceived);
     allPoLinks = [{ vendorInvoiceId: 10 }, { vendorInvoiceId: 11 }];
     allInvoiceLines = [
-      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "qty_mismatch" },
+      { invoiceId: 10, invoiceNumber: "INV-001", matchStatus: "qty_discrepancy" },
       { invoiceId: 11, invoiceNumber: "INV-002", matchStatus: "matched" },
     ];
 

@@ -24,6 +24,7 @@ import {
   poApprovalTiers as poApprovalTiersTable,
   poStatusHistory as poStatusHistoryTable,
   poEvents as poEventsTable,
+  poExceptions as poExceptionsTable,
   purchasingRecommendationPoHandoffs as purchasingRecommendationPoHandoffsTable,
   auditEvents as auditEventsTable,
   products as productsTable,
@@ -110,6 +111,27 @@ const MAX_INLINE_PO_LINES = 2_000;
 const MAX_BULK_CATALOG_ENTRIES = 2_000;
 const MAX_QUOTE_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 const PO_NUMBER_ALLOCATION_ATTEMPTS = 5;
+const ACCEPTABLE_PO_MATCH_VARIANCE_STATUSES = new Set([
+  "price_discrepancy",
+  "qty_discrepancy",
+  "over_billed",
+]);
+
+function requireUsdPurchaseOrderCurrency(value: unknown): string {
+  const currency = String(value ?? "USD").trim().toUpperCase();
+  if (currency !== "USD") {
+    throw new PurchasingError(
+      "Non-USD purchase orders require an explicit foreign-exchange rate authority",
+      422,
+      {
+        code: "PO_FX_RATE_REQUIRED",
+        currency,
+        reportingCurrency: "USD",
+      },
+    );
+  }
+  return "USD";
+}
 const PO_NUMBER_UNIQUE_CONSTRAINTS = new Set([
   "purchase_orders_po_number_active_uidx",
   "purchase_orders_po_number_unique",
@@ -1519,6 +1541,7 @@ export function createPurchasingService(
     // Validate vendor
     const vendor = await storage.getVendorById(data.vendorId);
     if (!vendor) throw new PurchasingError("Vendor not found", 404);
+    const currency = requireUsdPurchaseOrderCurrency(vendor.currency);
 
     let lastConflictingPoNumber: string | null = null;
     for (let attempt = 1; attempt <= PO_NUMBER_ALLOCATION_ATTEMPTS; attempt++) {
@@ -1539,7 +1562,7 @@ export function createPurchasingService(
           vendorNotes: data.vendorNotes,
           internalNotes: data.internalNotes,
           source: data.source ?? "manual",
-          currency: vendor.currency || "USD",
+          currency,
           paymentTermsDays: vendor.paymentTermsDays,
           paymentTermsType: vendor.paymentTermsType,
           shipFromAddress: vendor.shipFromAddress,
@@ -2908,7 +2931,43 @@ export function createPurchasingService(
         tx,
         userId,
       );
-      const unresolvedLines = match.results.filter((line) => line.matchStatus !== "matched");
+      const varianceInvoiceIds = [...new Set(
+        match.results
+          .filter((line) => ACCEPTABLE_PO_MATCH_VARIANCE_STATUSES.has(line.matchStatus))
+          .map((line) => Number(line.vendorInvoiceId)),
+      )].sort((left, right) => left - right);
+      const acceptedVarianceInvoiceIds = new Set<number>();
+      if (varianceInvoiceIds.length > 0) {
+        const resolvedExceptions = await tx
+          .select({ payload: poExceptionsTable.payload })
+          .from(poExceptionsTable)
+          .where(
+            and(
+              eq(poExceptionsTable.poId, id),
+              eq(poExceptionsTable.kind, "match_mismatch"),
+              eq(poExceptionsTable.status, "resolved"),
+            ),
+          );
+        for (const exception of resolvedExceptions) {
+          const payload = exception.payload as Record<string, unknown> | null;
+          const resolvedInvoiceId = Number(payload?.invoiceId);
+          if (
+            Number.isSafeInteger(resolvedInvoiceId) &&
+            varianceInvoiceIds.includes(resolvedInvoiceId) &&
+            payload?.sourceVersion === 1 &&
+            payload?.sourceFingerprint === match.sourceFingerprint
+          ) {
+            acceptedVarianceInvoiceIds.add(resolvedInvoiceId);
+          }
+        }
+      }
+      const unresolvedLines = match.results.filter((line) =>
+        line.matchStatus !== "matched" &&
+        !(
+          ACCEPTABLE_PO_MATCH_VARIANCE_STATUSES.has(line.matchStatus) &&
+          acceptedVarianceInvoiceIds.has(Number(line.vendorInvoiceId))
+        ),
+      );
       if (unresolvedLines.length > 0 || match.invoicesWithoutMappedLines.length > 0) {
         const blockedInvoiceIds = [...new Set([
           ...unresolvedLines.map((line) => Number(line.vendorInvoiceId)),
@@ -2959,6 +3018,10 @@ export function createPurchasingService(
         from_status: change.history.fromStatus,
         to_status: change.history.toStatus,
         notes: notes ?? null,
+        accepted_match_variance_invoice_ids: [...acceptedVarianceInvoiceIds].sort(
+          (left, right) => left - right,
+        ),
+        match_source_fingerprint: match.sourceFingerprint,
       });
       await persistCompletedVendorPurchaseEvidenceTx(
         tx,
@@ -2979,8 +3042,8 @@ export function createPurchasingService(
       }
     }
     const nextAction = outcome.poStatus === "partially_received"
-      ? "Resolve every invoice line, or use close-short with a reason."
-      : "Resolve every invoice line before closing the PO.";
+      ? "Correct missing mappings, resolve or accept current variances, or use close-short with a reason."
+      : "Correct missing mappings and resolve or accept current variances before closing the PO.";
     const unresolvedParts: string[] = [];
     if (outcome.unresolvedLineCount > 0) {
       unresolvedParts.push(
@@ -5746,6 +5809,7 @@ export function createPurchasingService(
 
     const vendor = await storage.getVendorById(input.vendorId);
     if (!vendor) throw new PurchasingError("Vendor not found", 404);
+    requireUsdPurchaseOrderCurrency(vendor.currency);
     const resolvedLines = await resolvePurchaseOrderLines(input);
 
     const subtotalCentsBigInt = resolvedLines.reduce(
@@ -5784,7 +5848,7 @@ export function createPurchasingService(
           incoterms: input.incoterms ?? null,
           vendorNotes: input.vendorNotes ?? null,
           internalNotes: input.internalNotes ?? null,
-          currency: lockedVendor.currency || "USD",
+          currency: requireUsdPurchaseOrderCurrency(lockedVendor.currency),
           paymentTermsDays: lockedVendor.paymentTermsDays,
           paymentTermsType: lockedVendor.paymentTermsType,
           shipFromAddress: lockedVendor.shipFromAddress,
@@ -6140,7 +6204,9 @@ export function createPurchasingService(
         incoterms: input.incoterms ?? null,
         vendorNotes: input.vendorNotes ?? null,
         internalNotes: input.internalNotes ?? null,
-        currency: vendorChanged ? (lockedVendor.currency || "USD") : currentPo.currency,
+        currency: requireUsdPurchaseOrderCurrency(
+          vendorChanged ? lockedVendor.currency : currentPo.currency,
+        ),
         paymentTermsDays: vendorChanged ? lockedVendor.paymentTermsDays : currentPo.paymentTermsDays,
         paymentTermsType: vendorChanged ? lockedVendor.paymentTermsType : currentPo.paymentTermsType,
         shipFromAddress: vendorChanged ? lockedVendor.shipFromAddress : currentPo.shipFromAddress,
