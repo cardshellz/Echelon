@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
+import { createDatabasePoolConfig } from "./database-pool-config";
 
 const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
 
@@ -18,7 +19,7 @@ const useSSL = process.env.EXTERNAL_DATABASE_URL || (process.env.DATABASE_URL &&
 // In test environments without a DB connection, create a stub pool so
 // modules that import db.ts don't crash at load time. Actual DB calls
 // will fail at runtime (tests should mock them).
-const poolConfig = {
+const poolConfig = createDatabasePoolConfig({
   connectionString: connectionString || "postgresql://stub:stub@localhost:5432/stub",
   ssl: useSSL ? { rejectUnauthorized: false } : undefined,
   // Pool size per process. The old max:3 throttled the app to 3 connections and made
@@ -28,7 +29,7 @@ const poolConfig = {
   max: connectionString ? (Number(process.env.PG_POOL_MAX) || 20) : 0,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-};
+});
 
 export const pool = new Pool(poolConfig);
 
@@ -36,32 +37,22 @@ pool.on("error", (error) => {
   console.error("[DatabasePool] Unexpected idle client error:", error);
 });
 
-pool.on("connect", (client) => {
-  client.query('SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, operations, orders, procurement, warehouse, oms, membership, wms, dropship').catch(console.error);
-});
-
 export const db = drizzle(pool, { schema });
 
 // Run startup migrations to ensure schema is up to date
 export async function runStartupMigrations(): Promise<void> {
   // Use a SEPARATE connection so it doesn't block the shared pool
-  const migrationsPool = new Pool({
+  const migrationsPool = new Pool(createDatabasePoolConfig({
     connectionString,
     ssl: useSSL ? { rejectUnauthorized: false } : undefined,
     max: 1,
     idleTimeoutMillis: 10000,
     connectionTimeoutMillis: 15000,
-  });
+  }));
   const client = await migrationsPool.connect();
   try {
-    // Give the migration connection the SAME search_path the app's main pool uses
-    // (db.ts line ~36). migrationsPool has no on-connect handler, so its default
-    // search_path is just public — which silently made every UNQUALIFIED statement
-    // below depend on stray public.* shadow tables. With the empty shadows dropped,
-    // unqualified names now fall through public to the real schema tables (wms.*,
-    // inventory.*, …); public stays second so unqualified CREATE TABLE still lands in
-    // public (matching the app) and the remaining data tables resolve as the app sees them.
-    await client.query(`SET search_path TO "$user", public, catalog, channels, ebay, identity, inventory, notifications, operations, orders, procurement, warehouse, oms, membership, wms, dropship`);
+    // Both pools receive the same search_path in the PostgreSQL startup packet.
+    // Unqualified names therefore resolve consistently before any query can run.
 
     // Refund return lifecycle (REFUND_RESTOCK_DESIGN.md): run FIRST and in its own
     // try/catch. The rest of this function is one big try/catch, and a pre-existing
