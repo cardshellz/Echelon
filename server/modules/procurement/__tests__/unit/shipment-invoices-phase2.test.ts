@@ -37,6 +37,16 @@ vi.mock("../../../../db", () => ({
       mockDbTransactionCallCount.value++;
       const tx = {
         execute: mockTxExecute,
+        select: vi.fn().mockImplementation(() => {
+          const result = mockSelectResults.results.shift() || [];
+          const chain: any = {};
+          chain.from = vi.fn(() => chain);
+          chain.where = vi.fn(() => chain);
+          chain.for = vi.fn(() => chain);
+          chain.then = (resolve: (value: any[]) => unknown, reject: (reason: unknown) => unknown) =>
+            Promise.resolve(result).then(resolve, reject);
+          return chain;
+        }),
         insert: vi.fn().mockReturnValue({
           values: vi.fn().mockImplementation((vals: any) => {
             mockTxInsertCallCount.value++;
@@ -116,9 +126,17 @@ vi.mock("@shared/schema", () => ({
     productName: "productName",
     qtyInvoiced: "qtyInvoiced",
     unitCostCents: "unitCostCents",
+    unitCostMills: "unitCostMills",
     lineTotalCents: "lineTotalCents",
     matchStatus: "matchStatus",
   },
+  auditEvents: { id: "auditEventId" },
+  poStatusHistory: { id: "poStatusHistoryId" },
+  apPaymentAllocations: {},
+  apPayments: {},
+  purchaseOrderLines: {},
+  purchaseOrders: {},
+  vendorInvoiceAttachments: {},
 }));
 
 // ── Mock drizzle-orm ──
@@ -273,7 +291,7 @@ describe("createInvoiceFromShipmentCosts", () => {
         vendorId: 42,
         invoiceNumber: "",
       }),
-    ).rejects.toThrow("Invoice number is required");
+    ).rejects.toThrow("invoiceNumber is required");
   });
 
   it("applies lineOverrides for variance scenarios", async () => {

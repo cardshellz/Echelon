@@ -153,6 +153,50 @@ describe("getShipmentInvoicesSummary", () => {
     expect(result.summary.outstandingCents).toBe(0);
     expect(result.summary.invoiceCount).toBe(0);
   });
+
+  it("lists voided invoices but excludes them from financial totals", async () => {
+    const { db } = await import("../../../../db");
+    const { getShipmentInvoicesSummary } = await import("../../ap-ledger.service");
+
+    (db.select as any).mockReturnValue({
+      ...mockSelectChain,
+      where: vi.fn().mockReturnValue({
+        orderBy: vi.fn().mockResolvedValue([
+          {
+            invoice: {
+              id: 1,
+              status: "approved",
+              invoicedAmountCents: 50000,
+              paidAmountCents: 10000,
+            },
+            vendorName: "Freightos",
+            vendorCode: "FRT",
+          },
+          {
+            invoice: {
+              id: 2,
+              status: "voided",
+              invoicedAmountCents: 90000,
+              paidAmountCents: 0,
+            },
+            vendorName: "Freightos",
+            vendorCode: "FRT",
+          },
+        ]),
+      }),
+    });
+
+    const result = await getShipmentInvoicesSummary(42);
+
+    expect(result.invoices).toHaveLength(2);
+    expect(result.summary).toEqual({
+      totalInvoicedCents: 50000,
+      totalPaidCents: 10000,
+      outstandingCents: 40000,
+      invoiceCount: 2,
+      activeInvoiceCount: 1,
+    });
+  });
 });
 
 describe("listInvoices with inboundShipmentId filter", () => {
@@ -318,5 +362,95 @@ describe("enrichCostsWithInvoiceInfo", () => {
 
     expect(result[0].derivedStatus).toBe("unbilled");
     expect(result[0].linkedInvoice).not.toBeNull(); // linkedInvoice still present, but status is unbilled
+  });
+});
+
+describe("shipment cost payment allocation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("uses exact largest-remainder allocation without exceeding the invoice payment", async () => {
+    const { allocateProportionalPaidCents } = await import("../../ap-ledger.service");
+
+    const result = allocateProportionalPaidCents([
+      { id: 1, amountCents: 3 },
+      { id: 2, amountCents: 3 },
+      { id: 3, amountCents: 4 },
+    ], 5, 10);
+
+    expect([...result.entries()]).toEqual([[1, 2], [2, 1], [3, 2]]);
+    expect([...result.values()].reduce((sum, value) => sum + value, 0)).toBe(5);
+  });
+
+  it("uses invoice line amounts, preserves actual zero, and returns a payment checksum", async () => {
+    const { db } = await import("../../../../db");
+    const { getShipmentCostPaymentStatus } = await import("../../ap-ledger.service");
+
+    (db.select as any).mockReturnValue({
+      ...mockSelectChain,
+      where: vi.fn().mockResolvedValue([
+        {
+          costId: 1,
+          costType: "freight",
+          actualCents: 300,
+          estimatedCents: 300,
+          vendorInvoiceId: 10,
+          invoiceStatus: "partially_paid",
+          invoiceNumber: "INV-010",
+          invoicedAmountCents: 10,
+          paidAmountCents: 5,
+          invoiceLineTotalCents: 3,
+        },
+        {
+          costId: 2,
+          costType: "duty",
+          actualCents: 300,
+          estimatedCents: 300,
+          vendorInvoiceId: 10,
+          invoiceStatus: "partially_paid",
+          invoiceNumber: "INV-010",
+          invoicedAmountCents: 10,
+          paidAmountCents: 5,
+          invoiceLineTotalCents: 3,
+        },
+        {
+          costId: 3,
+          costType: "insurance",
+          actualCents: 400,
+          estimatedCents: 400,
+          vendorInvoiceId: 10,
+          invoiceStatus: "partially_paid",
+          invoiceNumber: "INV-010",
+          invoicedAmountCents: 10,
+          paidAmountCents: 5,
+          invoiceLineTotalCents: 4,
+        },
+        {
+          costId: 4,
+          costType: "other",
+          actualCents: 0,
+          estimatedCents: 999,
+          vendorInvoiceId: null,
+          invoiceStatus: null,
+          invoiceNumber: null,
+          invoicedAmountCents: null,
+          paidAmountCents: null,
+          invoiceLineTotalCents: null,
+        },
+      ]),
+    });
+
+    const result = await getShipmentCostPaymentStatus(42);
+
+    expect(result.costs.map((cost) => cost.paidCents)).toEqual([2, 1, 2, 0]);
+    expect(result.costs[3].amountCents).toBe(0);
+    expect(result.summary).toEqual({
+      totalCents: 10,
+      linkedCents: 10,
+      paidCents: 5,
+      outstandingCents: 5,
+    });
+    expect(result.summary.paidCents + result.summary.outstandingCents).toBe(result.summary.totalCents);
   });
 });

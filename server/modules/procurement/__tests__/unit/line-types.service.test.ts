@@ -157,6 +157,29 @@ function makeSvc() {
 
 describe("Typed PO lines — per-type validation", () => {
   // PRODUCT ---------------------------------------------------------------
+  it("rejects a non-USD vendor before creating a financial PO", async () => {
+    const { svc, storage, db } = makeSvc();
+    storage.getVendorById.mockResolvedValue({ id: 1, currency: "EUR" });
+
+    await expect(svc.createPurchaseOrderWithLines({
+      vendorId: 1,
+      lines: [{
+        productId: 101,
+        productVariantId: 101,
+        orderQty: 1,
+        unitCostMills: 1000,
+      }],
+    })).rejects.toMatchObject({
+      statusCode: 422,
+      details: {
+        code: "PO_FX_RATE_REQUIRED",
+        currency: "EUR",
+        reportingCurrency: "USD",
+      },
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   it("product line requires productId", async () => {
     const { svc } = makeSvc();
     await expect(

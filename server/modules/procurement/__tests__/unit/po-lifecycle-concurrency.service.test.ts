@@ -528,6 +528,81 @@ describe("purchase-order lifecycle concurrency", () => {
     expect(db.updatePatches).toHaveLength(0);
     expect(db.insertedRows).toHaveLength(0);
   });
+
+  it("rejects a stale physical transition before status history or event writes", async () => {
+    const observed = po({
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
+      updatedAt: new Date("2026-07-13T12:01:00.000Z"),
+    });
+    const locked = po({
+      status: "acknowledged",
+      physicalStatus: "acknowledged",
+      updatedAt: new Date("2026-07-13T12:02:00.000Z"),
+    });
+    const db = lifecycleDb({ lockedPo: locked, lines: [] });
+    const service = createPurchasingService(db, baseStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue(observed),
+    }));
+
+    await expect(service.transitionPhysical(1, "shipped", "buyer-7")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({ code: "PO_LIFECYCLE_CONFLICT" }),
+    });
+    expect(db.lockCalls).toContainEqual({ table: purchaseOrders, mode: "update" });
+    expect(db.updatePatches).toHaveLength(0);
+    expect(db.insertedRows).toHaveLength(0);
+  });
+
+  it("rejects stale cancel before locking or cancelling PO lines", async () => {
+    const observed = po({
+      status: "approved",
+      physicalStatus: "draft",
+      updatedAt: new Date("2026-07-13T12:01:00.000Z"),
+    });
+    const locked = po({
+      status: "sent",
+      physicalStatus: "sent",
+      updatedAt: new Date("2026-07-13T12:02:00.000Z"),
+    });
+    const db = lifecycleDb({ lockedPo: locked, lines: [exactLine()] });
+    const service = createPurchasingService(db, baseStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue(observed),
+    }));
+
+    await expect(service.cancel(1, "stale cancellation", "buyer-8")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({ code: "PO_LIFECYCLE_CONFLICT" }),
+    });
+    expect(db.lockCalls.some((call: any) => call.table === purchaseOrderLines)).toBe(false);
+    expect(db.updatePatches).toHaveLength(0);
+    expect(db.insertedRows).toHaveLength(0);
+  });
+
+  it("rejects stale close-short before changing open line quantities", async () => {
+    const observed = po({
+      status: "partially_received",
+      physicalStatus: "receiving",
+      updatedAt: new Date("2026-07-13T12:01:00.000Z"),
+    });
+    const locked = po({
+      status: "partially_received",
+      physicalStatus: "receiving",
+      updatedAt: new Date("2026-07-13T12:02:00.000Z"),
+    });
+    const db = lifecycleDb({ lockedPo: locked, lines: [exactLine()] });
+    const service = createPurchasingService(db, baseStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue(observed),
+    }));
+
+    await expect(service.closeShort(1, "vendor short", "buyer-9")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({ code: "PO_LIFECYCLE_CONFLICT" }),
+    });
+    expect(db.lockCalls.some((call: any) => call.table === purchaseOrderLines)).toBe(false);
+    expect(db.updatePatches).toHaveLength(0);
+    expect(db.insertedRows).toHaveLength(0);
+  });
 });
 
 function inlineRetryDb(vendor: any) {

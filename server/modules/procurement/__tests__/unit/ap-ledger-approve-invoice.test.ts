@@ -15,10 +15,14 @@ vi.mock("../../../../db", () => ({
     transaction: vi.fn(async (fn: any) => {
       const tx = {
         select: vi.fn(() => ({
-          from: vi.fn(() => ({
-            where: vi.fn(() => ({
-              for: vi.fn(async () => mockInvoiceRows.rows),
-            })),
+          from: vi.fn((table: any) => ({
+            where: vi.fn(() => {
+              const rows = table?.__table === "vendorInvoices" ? mockInvoiceRows.rows : [];
+              const result: any = Promise.resolve(rows);
+              result.for = vi.fn(async () => rows);
+              result.limit = vi.fn(async () => rows);
+              return result;
+            }),
           })),
         })),
         update: mockTxUpdate,
@@ -31,14 +35,16 @@ vi.mock("../../../../db", () => ({
 
 vi.mock("@shared/schema", () => ({
   vendorInvoices: {
+    __table: "vendorInvoices",
     id: "vendorInvoices.id",
     status: "vendorInvoices.status",
   },
   vendorInvoicePoLinks: {
+    __table: "vendorInvoicePoLinks",
     purchaseOrderId: "vendorInvoicePoLinks.purchaseOrderId",
     vendorInvoiceId: "vendorInvoicePoLinks.vendorInvoiceId",
   },
-  vendorInvoiceLines: {},
+  vendorInvoiceLines: { __table: "vendorInvoiceLines" },
   vendorInvoiceAttachments: {},
   apPayments: {},
   apPaymentAllocations: {},

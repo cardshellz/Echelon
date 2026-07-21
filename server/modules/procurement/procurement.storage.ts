@@ -22,11 +22,6 @@ import {
   type InsertPoReceipt,
   type PurchasingRecommendationPoHandoff,
   type InventoryLot,
-  type InsertInventoryLot,
-  type OrderItemCost,
-  type InsertOrderItemCost,
-  type OrderItemFinancial,
-  type InsertOrderItemFinancial,
   type InboundShipment,
   type InsertInboundShipment,
   type InboundShipmentLine,
@@ -47,8 +42,6 @@ import {
   poRevisions,
   poReceipts,
   inventoryLots,
-  orderItemCosts,
-  orderItemFinancials,
   inboundShipments,
   inboundShipmentLines,
   inboundFreightCosts,
@@ -72,26 +65,25 @@ import { normalizePurchasingForecastPolicy } from "./purchasing-forecast-policy"
 
 export interface IProcurementStorage {
   getAllVendors(): Promise<Vendor[]>;
-  getVendorById(id: number): Promise<Vendor | undefined>;
-  getVendorByCode(code: string): Promise<Vendor | undefined>;
-  createVendor(data: InsertVendor): Promise<Vendor>;
-  updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor | null>;
-  deleteVendor(id: number): Promise<boolean>;
+  getVendorById(id: number, executor?: any): Promise<Vendor | undefined>;
+  getVendorByCode(code: string, executor?: any): Promise<Vendor | undefined>;
+  createVendor(data: InsertVendor, executor?: any): Promise<Vendor>;
+  updateVendor(id: number, updates: Partial<InsertVendor>, executor?: any): Promise<Vendor | null>;
   getAllReceivingOrders(): Promise<ReceivingOrder[]>;
-  getReceivingOrderById(id: number): Promise<ReceivingOrder | undefined>;
+  getReceivingOrderById(id: number, executor?: any): Promise<ReceivingOrder | undefined>;
   getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined>;
-  getReceivingOrdersForPurchaseOrder(purchaseOrderId: number): Promise<ReceivingOrder[]>;
+  getReceivingOrdersForPurchaseOrder(purchaseOrderId: number, executor?: any): Promise<ReceivingOrder[]>;
   getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]>;
-  createReceivingOrder(data: InsertReceivingOrder): Promise<ReceivingOrder>;
-  updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>): Promise<ReceivingOrder | null>;
-  deleteReceivingOrder(id: number): Promise<boolean>;
-  generateReceiptNumber(): Promise<string>;
-  getReceivingLines(receivingOrderId: number): Promise<ReceivingLine[]>;
-  getReceivingLineById(id: number): Promise<ReceivingLine | undefined>;
-  createReceivingLine(data: InsertReceivingLine): Promise<ReceivingLine>;
-  updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>): Promise<ReceivingLine | null>;
-  deleteReceivingLine(id: number): Promise<boolean>;
-  bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]>;
+  createReceivingOrder(data: InsertReceivingOrder, executor?: any): Promise<ReceivingOrder>;
+  updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor?: any): Promise<ReceivingOrder | null>;
+  deleteReceivingOrder(id: number, executor?: any): Promise<boolean>;
+  generateReceiptNumber(executor?: any): Promise<string>;
+  getReceivingLines(receivingOrderId: number, executor?: any): Promise<ReceivingLine[]>;
+  getReceivingLineById(id: number, executor?: any): Promise<ReceivingLine | undefined>;
+  createReceivingLine(data: InsertReceivingLine, executor?: any): Promise<ReceivingLine>;
+  updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>, executor?: any): Promise<ReceivingLine | null>;
+  deleteReceivingLine(id: number, executor?: any): Promise<boolean>;
+  bulkCreateReceivingLines(lines: InsertReceivingLine[], executor?: any): Promise<ReceivingLine[]>;
   getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]>;
   getVendorProductsByProductIds(productIds: number[]): Promise<VendorProduct[]>;
   getVendorProductById(id: number): Promise<VendorProduct | undefined>;
@@ -149,18 +141,18 @@ export interface IProcurementStorage {
   deletePoApprovalTier(id: number): Promise<boolean>;
   getPurchaseOrders(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]>;
   getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
-  getPurchaseOrderById(id: number): Promise<PurchaseOrder | undefined>;
+  getPurchaseOrderById(id: number, executor?: any): Promise<PurchaseOrder | undefined>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
   createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder>;
-  updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>): Promise<PurchaseOrder | null>;
-  updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>): Promise<PurchaseOrder | null>;
+  updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor?: any): Promise<PurchaseOrder | null>;
+  updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>, executor?: any): Promise<PurchaseOrder | null>;
   deletePurchaseOrder(id: number): Promise<boolean>;
   generatePoNumber(): Promise<string>;
-  getPurchaseOrderLines(purchaseOrderId: number): Promise<PurchaseOrderLine[]>;
-  getPurchaseOrderLineById(id: number): Promise<PurchaseOrderLine | undefined>;
+  getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<PurchaseOrderLine[]>;
+  getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
   createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
   bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]>;
-  updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>): Promise<PurchaseOrderLine | null>;
+  updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>, executor?: any): Promise<PurchaseOrderLine | null>;
   deletePurchaseOrderLine(id: number): Promise<boolean>;
   getOpenPoLinesForVariant(productVariantId: number): Promise<PurchaseOrderLine[]>;
   createPoStatusHistory(data: InsertPoStatusHistory): Promise<PoStatusHistory>;
@@ -175,54 +167,43 @@ export interface IProcurementStorage {
     receivingLineId: number;
     lineUpdates: Partial<InsertPurchaseOrderLine>;
     receipt: InsertPoReceipt;
-  }): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
-  getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]>;
-  getInventoryLotById(id: number): Promise<InventoryLot | undefined>;
-  createInventoryLot(data: InsertInventoryLot): Promise<InventoryLot>;
-  updateInventoryLot(id: number, updates: Partial<InsertInventoryLot>): Promise<InventoryLot | null>;
-  getFifoLots(productVariantId: number, warehouseLocationId: number): Promise<InventoryLot[]>;
-  generateLotNumber(): Promise<string>;
-  createOrderItemCost(data: InsertOrderItemCost): Promise<OrderItemCost>;
-  getOrderItemCosts(orderItemId: number): Promise<OrderItemCost[]>;
-  getOrderItemCostsByOrder(orderId: number): Promise<OrderItemCost[]>;
-  createOrderItemFinancial(data: InsertOrderItemFinancial): Promise<OrderItemFinancial>;
-  getOrderItemFinancials(orderId: number): Promise<OrderItemFinancial[]>;
+  }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
   getInboundShipments(filters?: any): Promise<InboundShipment[]>;
   getInboundShipmentsCount(filters?: any): Promise<number>;
-  getInboundShipmentById(id: number): Promise<InboundShipment | undefined>;
+  getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
   createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
-  updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>): Promise<InboundShipment | null>;
+  updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number): Promise<boolean>;
   generateShipmentNumber(): Promise<string>;
-  getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]>;
+  getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
   getShippedQtyByPoLines(poLineIds: number[], executor?: any): Promise<Map<number, number>>;
   createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine>;
   bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]>;
-  updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null>;
+  updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor?: any): Promise<InboundShipmentLine | null>;
   deleteInboundShipmentLine(id: number): Promise<boolean>;
-  getInboundFreightCosts(inboundShipmentId: number): Promise<InboundFreightCost[]>;
-  getInboundFreightCostById(id: number): Promise<InboundFreightCost | undefined>;
-  createInboundFreightCost(data: InsertInboundFreightCost): Promise<InboundFreightCost>;
-  updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>): Promise<InboundFreightCost | null>;
-  deleteInboundFreightCost(id: number): Promise<boolean>;
-  getInboundFreightCostAllocations(inboundFreightCostId: number): Promise<any[]>;
-  getAllocationsForLine(inboundShipmentLineId: number): Promise<any[]>;
-  createInboundFreightCostAllocation(data: InsertInboundFreightAllocation): Promise<any>;
-  bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[]): Promise<any[]>;
-  deleteAllocationsForShipment(inboundShipmentId: number): Promise<void>;
-  getLandedCostSnapshots(inboundShipmentLineId: number): Promise<any[]>;
-  getLandedCostSnapshotByPoLine(purchaseOrderLineId: number): Promise<any>;
-  createLandedCostSnapshot(data: InsertLandedCostSnapshot): Promise<any>;
-  bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[]): Promise<any[]>;
-  deleteLandedCostSnapshotsForShipment(inboundShipmentId: number): Promise<void>;
-  createLandedCostAdjustment(data: any): Promise<any>;
+  getInboundFreightCosts(inboundShipmentId: number, executor?: any): Promise<InboundFreightCost[]>;
+  getInboundFreightCostById(id: number, executor?: any): Promise<InboundFreightCost | undefined>;
+  createInboundFreightCost(data: InsertInboundFreightCost, executor?: any): Promise<InboundFreightCost>;
+  updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>, executor?: any): Promise<InboundFreightCost | null>;
+  deleteInboundFreightCost(id: number, executor?: any): Promise<boolean>;
+  getInboundFreightCostAllocations(inboundFreightCostId: number, executor?: any): Promise<any[]>;
+  getAllocationsForLine(inboundShipmentLineId: number, executor?: any): Promise<any[]>;
+  createInboundFreightCostAllocation(data: InsertInboundFreightAllocation, executor?: any): Promise<any>;
+  bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[], executor?: any): Promise<any[]>;
+  deleteAllocationsForShipment(inboundShipmentId: number, executor?: any): Promise<void>;
+  getLandedCostSnapshots(inboundShipmentLineId: number, executor?: any): Promise<any[]>;
+  getLandedCostSnapshotByPoLine(purchaseOrderLineId: number, executor?: any): Promise<any>;
+  createLandedCostSnapshot(data: InsertLandedCostSnapshot, executor?: any): Promise<any>;
+  bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[], executor?: any): Promise<any[]>;
+  deleteLandedCostSnapshotsForShipment(inboundShipmentId: number, executor?: any): Promise<void>;
+  createLandedCostAdjustment(data: any, executor?: any): Promise<any>;
   createInboundShipmentStatusHistory(data: any): Promise<InboundShipmentStatusHistory>;
   getInboundShipmentStatusHistory(inboundShipmentId: number): Promise<InboundShipmentStatusHistory[]>;
   getInboundShipmentsByPo(purchaseOrderId: number): Promise<InboundShipment[]>;
-  getProvisionalLotsByShipment(inboundShipmentId: number): Promise<InventoryLot[]>;
+  getProvisionalLotsByShipment(inboundShipmentId: number, executor?: any): Promise<InventoryLot[]>;
   getReorderAnalysisData(lookbackDays: number): Promise<any[]>;
   getOrderProfitabilityReport(limit: number, offset: number): Promise<any[]>;
   getProductProfitabilityReport(limit: number, offset: number): Promise<any[]>;
@@ -257,45 +238,40 @@ export const procurementMethods: IProcurementStorage = {
     return await db.select().from(vendors).orderBy(asc(vendors.name));
   },
 
-  async getVendorById(id: number): Promise<Vendor | undefined> {
-    const result = await db.select().from(vendors).where(eq(vendors.id, id)).limit(1);
+  async getVendorById(id: number, executor: any = db): Promise<Vendor | undefined> {
+    const result = await executor.select().from(vendors).where(eq(vendors.id, id)).limit(1);
     return result[0];
   },
 
-  async getVendorByCode(code: string): Promise<Vendor | undefined> {
-    const result = await db.select().from(vendors).where(eq(vendors.code, code.toUpperCase())).limit(1);
+  async getVendorByCode(code: string, executor: any = db): Promise<Vendor | undefined> {
+    const result = await executor.select().from(vendors).where(eq(vendors.code, code.toUpperCase())).limit(1);
     return result[0];
   },
 
-  async createVendor(data: InsertVendor): Promise<Vendor> {
-    const result = await db.insert(vendors).values({
+  async createVendor(data: InsertVendor, executor: any = db): Promise<Vendor> {
+    const result = await executor.insert(vendors).values({
       ...data,
       code: data.code.toUpperCase(),
     }).returning();
     return result[0];
   },
 
-  async updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor | null> {
+  async updateVendor(id: number, updates: Partial<InsertVendor>, executor: any = db): Promise<Vendor | null> {
     const updateData: any = { ...updates, updatedAt: new Date() };
     if (updates.code) updateData.code = updates.code.toUpperCase();
-    const result = await db.update(vendors)
+    const result = await executor.update(vendors)
       .set(updateData)
       .where(eq(vendors.id, id))
       .returning();
     return result[0] || null;
   },
 
-  async deleteVendor(id: number): Promise<boolean> {
-    const result = await db.delete(vendors).where(eq(vendors.id, id));
-    return (result.rowCount ?? 0) > 0;
-  },
-
   async getAllReceivingOrders(): Promise<ReceivingOrder[]> {
     return await db.select().from(receivingOrders).orderBy(desc(receivingOrders.createdAt));
   },
 
-  async getReceivingOrderById(id: number): Promise<ReceivingOrder | undefined> {
-    const result = await db.select().from(receivingOrders).where(eq(receivingOrders.id, id)).limit(1);
+  async getReceivingOrderById(id: number, executor: any = db): Promise<ReceivingOrder | undefined> {
+    const result = await executor.select().from(receivingOrders).where(eq(receivingOrders.id, id)).limit(1);
     return result[0];
   },
 
@@ -304,8 +280,8 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async getReceivingOrdersForPurchaseOrder(purchaseOrderId: number): Promise<ReceivingOrder[]> {
-    return await db.select().from(receivingOrders)
+  async getReceivingOrdersForPurchaseOrder(purchaseOrderId: number, executor: any = db): Promise<ReceivingOrder[]> {
+    return await executor.select().from(receivingOrders)
       .where(eq(receivingOrders.purchaseOrderId, purchaseOrderId))
       .orderBy(desc(receivingOrders.createdAt));
   },
@@ -316,30 +292,35 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(desc(receivingOrders.createdAt));
   },
 
-  async createReceivingOrder(data: InsertReceivingOrder): Promise<ReceivingOrder> {
-    const result = await db.insert(receivingOrders).values(data).returning();
+  async createReceivingOrder(data: InsertReceivingOrder, executor: any = db): Promise<ReceivingOrder> {
+    const result = await executor.insert(receivingOrders).values(data).returning();
     return result[0];
   },
 
-  async updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>): Promise<ReceivingOrder | null> {
-    const result = await db.update(receivingOrders)
+  async updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor: any = db): Promise<ReceivingOrder | null> {
+    const result = await executor.update(receivingOrders)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(receivingOrders.id, id))
       .returning();
     return result[0] || null;
   },
 
-  async deleteReceivingOrder(id: number): Promise<boolean> {
-    const result = await db.delete(receivingOrders).where(eq(receivingOrders.id, id));
+  async deleteReceivingOrder(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(receivingOrders).where(eq(receivingOrders.id, id));
     return (result.rowCount ?? 0) > 0;
   },
 
-  async generateReceiptNumber(): Promise<string> {
+  async generateReceiptNumber(executor: any = db): Promise<string> {
+    if (executor !== db && typeof executor.execute === "function") {
+      await executor.execute(sql`
+        SELECT pg_advisory_xact_lock(hashtext('procurement.generate_receipt_number'))
+      `);
+    }
     const today = new Date();
     const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
     const prefix = `RCV-${dateStr}-`;
 
-    const existing = await db.select({ receiptNumber: receivingOrders.receiptNumber })
+    const existing = await executor.select({ receiptNumber: receivingOrders.receiptNumber })
       .from(receivingOrders)
       .where(like(receivingOrders.receiptNumber, `${prefix}%`))
       .orderBy(desc(receivingOrders.receiptNumber))
@@ -354,38 +335,38 @@ export const procurementMethods: IProcurementStorage = {
     return `${prefix}${String(nextNum).padStart(3, '0')}`;
   },
 
-  async getReceivingLines(receivingOrderId: number): Promise<ReceivingLine[]> {
-    return await db.select().from(receivingLines)
+  async getReceivingLines(receivingOrderId: number, executor: any = db): Promise<ReceivingLine[]> {
+    return await executor.select().from(receivingLines)
       .where(eq(receivingLines.receivingOrderId, receivingOrderId))
       .orderBy(asc(receivingLines.id));
   },
 
-  async getReceivingLineById(id: number): Promise<ReceivingLine | undefined> {
-    const result = await db.select().from(receivingLines).where(eq(receivingLines.id, id)).limit(1);
+  async getReceivingLineById(id: number, executor: any = db): Promise<ReceivingLine | undefined> {
+    const result = await executor.select().from(receivingLines).where(eq(receivingLines.id, id)).limit(1);
     return result[0];
   },
 
-  async createReceivingLine(data: InsertReceivingLine): Promise<ReceivingLine> {
-    const result = await db.insert(receivingLines).values(data).returning();
+  async createReceivingLine(data: InsertReceivingLine, executor: any = db): Promise<ReceivingLine> {
+    const result = await executor.insert(receivingLines).values(data).returning();
     return result[0];
   },
 
-  async updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>): Promise<ReceivingLine | null> {
-    const result = await db.update(receivingLines)
+  async updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>, executor: any = db): Promise<ReceivingLine | null> {
+    const result = await executor.update(receivingLines)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(receivingLines.id, id))
       .returning();
     return result[0] || null;
   },
 
-  async deleteReceivingLine(id: number): Promise<boolean> {
-    const result = await db.delete(receivingLines).where(eq(receivingLines.id, id));
+  async deleteReceivingLine(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(receivingLines).where(eq(receivingLines.id, id));
     return (result.rowCount ?? 0) > 0;
   },
 
-  async bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]> {
+  async bulkCreateReceivingLines(lines: InsertReceivingLine[], executor: any = db): Promise<ReceivingLine[]> {
     if (lines.length === 0) return [];
-    return await db.insert(receivingLines).values(lines).returning();
+    return await executor.insert(receivingLines).values(lines).returning();
   },
 
   async getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]> {
@@ -797,8 +778,8 @@ export const procurementMethods: IProcurementStorage = {
     return Number(result[0]?.count ?? 0);
   },
 
-  async getPurchaseOrderById(id: number): Promise<PurchaseOrder | undefined> {
-    const result = await db.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
+  async getPurchaseOrderById(id: number, executor: any = db): Promise<PurchaseOrder | undefined> {
+    const result = await executor.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
     return result[0];
   },
 
@@ -812,15 +793,20 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>): Promise<PurchaseOrder | null> {
-    const result = await db.update(purchaseOrders)
+  async updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor: any = db): Promise<PurchaseOrder | null> {
+    const result = await executor.update(purchaseOrders)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(purchaseOrders.id, id))
       .returning();
     return result[0] || null;
   },
 
-  async updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>): Promise<PurchaseOrder | null> {
+  async updatePurchaseOrderStatusWithHistory(
+    id: number,
+    updates: Partial<InsertPurchaseOrder>,
+    historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>,
+    executor?: any,
+  ): Promise<PurchaseOrder | null> {
     // Defensive validation: this helper writes to po_status_history, which
     // has to_status NOT NULL. Callers must supply valid historyData with at
     // least `toStatus`. If you just need to update PO fields without a
@@ -838,7 +824,7 @@ export const procurementMethods: IProcurementStorage = {
       );
     }
 
-    return await db.transaction(async (tx) => {
+    const applyUpdate = async (tx: any) => {
       const result = await tx.update(purchaseOrders)
         .set({ ...updates, updatedAt: new Date() })
         .where(eq(purchaseOrders.id, id))
@@ -852,7 +838,9 @@ export const procurementMethods: IProcurementStorage = {
         });
       }
       return updatedPo;
-    });
+    };
+
+    return executor ? await applyUpdate(executor) : await db.transaction(applyUpdate);
   },
 
   async deletePurchaseOrder(id: number): Promise<boolean> {
@@ -880,14 +868,14 @@ export const procurementMethods: IProcurementStorage = {
     return `${prefix}${String(nextNum).padStart(3, '0')}`;
   },
 
-  async getPurchaseOrderLines(purchaseOrderId: number): Promise<PurchaseOrderLine[]> {
-    return await db.select().from(purchaseOrderLines)
+  async getPurchaseOrderLines(purchaseOrderId: number, executor: any = db): Promise<PurchaseOrderLine[]> {
+    return await executor.select().from(purchaseOrderLines)
       .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId))
       .orderBy(asc(purchaseOrderLines.lineNumber));
   },
 
-  async getPurchaseOrderLineById(id: number): Promise<PurchaseOrderLine | undefined> {
-    const result = await db.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.id, id)).limit(1);
+  async getPurchaseOrderLineById(id: number, executor: any = db): Promise<PurchaseOrderLine | undefined> {
+    const result = await executor.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.id, id)).limit(1);
     return result[0];
   },
 
@@ -901,8 +889,8 @@ export const procurementMethods: IProcurementStorage = {
     return await db.insert(purchaseOrderLines).values(lines).returning();
   },
 
-  async updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>): Promise<PurchaseOrderLine | null> {
-    const result = await db.update(purchaseOrderLines)
+  async updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>, executor: any = db): Promise<PurchaseOrderLine | null> {
+    const result = await executor.update(purchaseOrderLines)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(purchaseOrderLines.id, id))
       .returning();
@@ -978,36 +966,45 @@ export const procurementMethods: IProcurementStorage = {
     receivingLineId: number;
     lineUpdates: Partial<InsertPurchaseOrderLine>;
     receipt: InsertPoReceipt;
-  }): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }> {
+  }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }> {
+    const applyReconciliation = async (tx: any) => {
+      const existingReceipt = await tx.select()
+        .from(poReceipts)
+        .where(and(
+          eq(poReceipts.purchaseOrderLineId, input.purchaseOrderLineId),
+          eq(poReceipts.receivingLineId, input.receivingLineId),
+        ))
+        .limit(1);
+
+      if (existingReceipt[0]) {
+        return { applied: false, receipt: existingReceipt[0] };
+      }
+
+      const updatedLines = await tx.update(purchaseOrderLines)
+        .set({ ...input.lineUpdates, updatedAt: new Date() })
+        .where(eq(purchaseOrderLines.id, input.purchaseOrderLineId))
+        .returning();
+      if (!updatedLines[0]) {
+        return { applied: false };
+      }
+
+      const insertedReceipts = await tx.insert(poReceipts)
+        .values(input.receipt)
+        .returning();
+
+      return {
+        applied: true,
+        purchaseOrderLine: updatedLines[0],
+        receipt: insertedReceipts[0],
+      };
+    };
+
+    if (executor) {
+      return await applyReconciliation(executor);
+    }
+
     try {
-      return await db.transaction(async (tx) => {
-        const existingReceipt = await tx.select()
-          .from(poReceipts)
-          .where(and(
-            eq(poReceipts.purchaseOrderLineId, input.purchaseOrderLineId),
-            eq(poReceipts.receivingLineId, input.receivingLineId),
-          ))
-          .limit(1);
-
-        if (existingReceipt[0]) {
-          return { applied: false, receipt: existingReceipt[0] };
-        }
-
-        const updatedLines = await tx.update(purchaseOrderLines)
-          .set({ ...input.lineUpdates, updatedAt: new Date() })
-          .where(eq(purchaseOrderLines.id, input.purchaseOrderLineId))
-          .returning();
-
-        const insertedReceipts = await tx.insert(poReceipts)
-          .values(input.receipt)
-          .returning();
-
-        return {
-          applied: true,
-          purchaseOrderLine: updatedLines[0] || null,
-          receipt: insertedReceipts[0],
-        };
-      });
+      return await db.transaction(applyReconciliation);
     } catch (error: any) {
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         const existingReceipt = await db.select()
@@ -1025,94 +1022,6 @@ export const procurementMethods: IProcurementStorage = {
 
       throw error;
     }
-  },
-
-  async getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]> {
-    const conditions: any[] = [];
-    if (filters?.productVariantId) conditions.push(eq(inventoryLots.productVariantId, filters.productVariantId));
-    if (filters?.warehouseLocationId) conditions.push(eq(inventoryLots.warehouseLocationId, filters.warehouseLocationId));
-    if (filters?.status) conditions.push(eq(inventoryLots.status, filters.status));
-
-    let query = db.select().from(inventoryLots).orderBy(asc(inventoryLots.receivedAt));
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions)) as typeof query;
-    }
-    if (filters?.limit) query = query.limit(filters.limit) as typeof query;
-    if (filters?.offset) query = query.offset(filters.offset) as typeof query;
-    return await query;
-  },
-
-  async getInventoryLotById(id: number): Promise<InventoryLot | undefined> {
-    const result = await db.select().from(inventoryLots).where(eq(inventoryLots.id, id)).limit(1);
-    return result[0];
-  },
-
-  async createInventoryLot(data: InsertInventoryLot): Promise<InventoryLot> {
-    const result = await db.insert(inventoryLots).values(data).returning();
-    return result[0];
-  },
-
-  async updateInventoryLot(id: number, updates: Partial<InsertInventoryLot>): Promise<InventoryLot | null> {
-    const result = await db.update(inventoryLots)
-      .set(updates)
-      .where(eq(inventoryLots.id, id))
-      .returning();
-    return result[0] || null;
-  },
-
-  async getFifoLots(productVariantId: number, warehouseLocationId: number): Promise<InventoryLot[]> {
-    return await db.select().from(inventoryLots)
-      .where(and(
-        eq(inventoryLots.productVariantId, productVariantId),
-        eq(inventoryLots.warehouseLocationId, warehouseLocationId),
-        eq(inventoryLots.status, 'active'),
-      ))
-      .orderBy(asc(inventoryLots.receivedAt));
-  },
-
-  async generateLotNumber(): Promise<string> {
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-    const prefix = `LOT-${dateStr}-`;
-
-    const existing = await db.select({ lotNumber: inventoryLots.lotNumber })
-      .from(inventoryLots)
-      .where(like(inventoryLots.lotNumber, `${prefix}%`))
-      .orderBy(desc(inventoryLots.lotNumber))
-      .limit(1);
-
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].lotNumber) {
-      const lastNum = parseInt(existing[0].lotNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
-  },
-
-  async createOrderItemCost(data: InsertOrderItemCost): Promise<OrderItemCost> {
-    const result = await db.insert(orderItemCosts).values(data).returning();
-    return result[0];
-  },
-
-  async getOrderItemCosts(orderItemId: number): Promise<OrderItemCost[]> {
-    return await db.select().from(orderItemCosts)
-      .where(eq(orderItemCosts.orderItemId, orderItemId));
-  },
-
-  async getOrderItemCostsByOrder(orderId: number): Promise<OrderItemCost[]> {
-    return await db.select().from(orderItemCosts)
-      .where(eq(orderItemCosts.orderId, orderId));
-  },
-
-  async createOrderItemFinancial(data: InsertOrderItemFinancial): Promise<OrderItemFinancial> {
-    const result = await db.insert(orderItemFinancials).values(data).returning();
-    return result[0];
-  },
-
-  async getOrderItemFinancials(orderId: number): Promise<OrderItemFinancial[]> {
-    return await db.select().from(orderItemFinancials)
-      .where(eq(orderItemFinancials.orderId, orderId));
   },
 
   async getInboundShipments(filters?: any): Promise<InboundShipment[]> {
@@ -1151,8 +1060,8 @@ export const procurementMethods: IProcurementStorage = {
     return Number(result[0]?.count || 0);
   },
 
-  async getInboundShipmentById(id: number): Promise<InboundShipment | undefined> {
-    const result = await db.select().from(inboundShipments).where(eq(inboundShipments.id, id)).limit(1);
+  async getInboundShipmentById(id: number, executor: any = db): Promise<InboundShipment | undefined> {
+    const result = await executor.select().from(inboundShipments).where(eq(inboundShipments.id, id)).limit(1);
     return result[0];
   },
 
@@ -1166,8 +1075,8 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>): Promise<InboundShipment | null> {
-    const result = await db.update(inboundShipments).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundShipments.id, id)).returning();
+  async updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor: any = db): Promise<InboundShipment | null> {
+    const result = await executor.update(inboundShipments).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundShipments.id, id)).returning();
     return result[0] || null;
   },
 
@@ -1193,8 +1102,8 @@ export const procurementMethods: IProcurementStorage = {
     return `${prefix}${String(nextNum).padStart(3, '0')}`;
   },
 
-  async getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]> {
-    return await db
+  async getInboundShipmentLines(inboundShipmentId: number, executor: any = db): Promise<InboundShipmentLine[]> {
+    return await executor
       .select()
       .from(inboundShipmentLines)
       .where(eq(inboundShipmentLines.inboundShipmentId, inboundShipmentId))
@@ -1256,8 +1165,8 @@ export const procurementMethods: IProcurementStorage = {
     return await db.insert(inboundShipmentLines).values(lines as any).returning();
   },
 
-  async updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null> {
-    const result = await db.update(inboundShipmentLines).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundShipmentLines.id, id)).returning();
+  async updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor: any = db): Promise<InboundShipmentLine | null> {
+    const result = await executor.update(inboundShipmentLines).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundShipmentLines.id, id)).returning();
     return result[0] || null;
   },
 
@@ -1266,83 +1175,83 @@ export const procurementMethods: IProcurementStorage = {
     return result.length > 0;
   },
 
-  async getInboundFreightCosts(inboundShipmentId: number): Promise<InboundFreightCost[]> {
-    return await db.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.inboundShipmentId, inboundShipmentId));
+  async getInboundFreightCosts(inboundShipmentId: number, executor: any = db): Promise<InboundFreightCost[]> {
+    return await executor.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.inboundShipmentId, inboundShipmentId));
   },
 
-  async getInboundFreightCostById(id: number): Promise<InboundFreightCost | undefined> {
-    const result = await db.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.id, id)).limit(1);
+  async getInboundFreightCostById(id: number, executor: any = db): Promise<InboundFreightCost | undefined> {
+    const result = await executor.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.id, id)).limit(1);
     return result[0];
   },
 
-  async createInboundFreightCost(data: InsertInboundFreightCost): Promise<InboundFreightCost> {
-    const result = await db.insert(inboundFreightCosts).values(data as any).returning();
+  async createInboundFreightCost(data: InsertInboundFreightCost, executor: any = db): Promise<InboundFreightCost> {
+    const result = await executor.insert(inboundFreightCosts).values(data as any).returning();
     return result[0];
   },
 
-  async updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>): Promise<InboundFreightCost | null> {
-    const result = await db.update(inboundFreightCosts).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundFreightCosts.id, id)).returning();
+  async updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>, executor: any = db): Promise<InboundFreightCost | null> {
+    const result = await executor.update(inboundFreightCosts).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundFreightCosts.id, id)).returning();
     return result[0] || null;
   },
 
-  async deleteInboundFreightCost(id: number): Promise<boolean> {
-    const result = await db.delete(inboundFreightCosts).where(eq(inboundFreightCosts.id, id)).returning();
+  async deleteInboundFreightCost(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(inboundFreightCosts).where(eq(inboundFreightCosts.id, id)).returning();
     return result.length > 0;
   },
 
-  async getInboundFreightCostAllocations(inboundFreightCostId: number): Promise<any[]> {
-    return await db.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.shipmentCostId, inboundFreightCostId));
+  async getInboundFreightCostAllocations(inboundFreightCostId: number, executor: any = db): Promise<any[]> {
+    return await executor.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.shipmentCostId, inboundFreightCostId));
   },
 
-  async getAllocationsForLine(inboundShipmentLineId: number): Promise<any[]> {
-    return await db.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.inboundShipmentLineId, inboundShipmentLineId));
+  async getAllocationsForLine(inboundShipmentLineId: number, executor: any = db): Promise<any[]> {
+    return await executor.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.inboundShipmentLineId, inboundShipmentLineId));
   },
 
-  async createInboundFreightCostAllocation(data: InsertInboundFreightAllocation): Promise<any> {
-    const result = await db.insert(inboundFreightAllocations).values(data as any).returning();
+  async createInboundFreightCostAllocation(data: InsertInboundFreightAllocation, executor: any = db): Promise<any> {
+    const result = await executor.insert(inboundFreightAllocations).values(data as any).returning();
     return result[0];
   },
 
-  async bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[]): Promise<any[]> {
+  async bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[], executor: any = db): Promise<any[]> {
     if (allocations.length === 0) return [];
-    return await db.insert(inboundFreightAllocations).values(allocations as any).returning();
+    return await executor.insert(inboundFreightAllocations).values(allocations as any).returning();
   },
 
-  async deleteAllocationsForShipment(inboundShipmentId: number): Promise<void> {
-    const costs = await this.getInboundFreightCosts(inboundShipmentId);
+  async deleteAllocationsForShipment(inboundShipmentId: number, executor: any = db): Promise<void> {
+    const costs = await this.getInboundFreightCosts(inboundShipmentId, executor);
     if (costs.length > 0) {
-      await db.delete(inboundFreightAllocations).where(inArray(inboundFreightAllocations.shipmentCostId, costs.map(c => c.id)));
+      await executor.delete(inboundFreightAllocations).where(inArray(inboundFreightAllocations.shipmentCostId, costs.map(c => c.id)));
     }
   },
 
-  async getLandedCostSnapshots(inboundShipmentLineId: number): Promise<any[]> {
-    return await db.select().from(landedCostSnapshots).where(eq(landedCostSnapshots.inboundShipmentLineId, inboundShipmentLineId));
+  async getLandedCostSnapshots(inboundShipmentLineId: number, executor: any = db): Promise<any[]> {
+    return await executor.select().from(landedCostSnapshots).where(eq(landedCostSnapshots.inboundShipmentLineId, inboundShipmentLineId));
   },
 
-  async getLandedCostSnapshotByPoLine(purchaseOrderLineId: number): Promise<any> {
-    const result = await db.select().from(landedCostSnapshots).where(eq(landedCostSnapshots.purchaseOrderLineId, purchaseOrderLineId)).limit(1);
+  async getLandedCostSnapshotByPoLine(purchaseOrderLineId: number, executor: any = db): Promise<any> {
+    const result = await executor.select().from(landedCostSnapshots).where(eq(landedCostSnapshots.purchaseOrderLineId, purchaseOrderLineId)).limit(1);
     return result[0];
   },
 
-  async createLandedCostSnapshot(data: InsertLandedCostSnapshot): Promise<any> {
-    const result = await db.insert(landedCostSnapshots).values(data as any).returning();
+  async createLandedCostSnapshot(data: InsertLandedCostSnapshot, executor: any = db): Promise<any> {
+    const result = await executor.insert(landedCostSnapshots).values(data as any).returning();
     return result[0];
   },
 
-  async createLandedCostAdjustment(data: any): Promise<any> {
-    const result = await db.insert(landedCostAdjustments).values(data).returning();
+  async createLandedCostAdjustment(data: any, executor: any = db): Promise<any> {
+    const result = await executor.insert(landedCostAdjustments).values(data).returning();
     return result[0];
   },
 
-  async bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[]): Promise<any[]> {
+  async bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[], executor: any = db): Promise<any[]> {
     if (snapshots.length === 0) return [];
-    return await db.insert(landedCostSnapshots).values(snapshots as any).returning();
+    return await executor.insert(landedCostSnapshots).values(snapshots as any).returning();
   },
 
-  async deleteLandedCostSnapshotsForShipment(inboundShipmentId: number): Promise<void> {
-    const lines = await this.getInboundShipmentLines(inboundShipmentId);
+  async deleteLandedCostSnapshotsForShipment(inboundShipmentId: number, executor: any = db): Promise<void> {
+    const lines = await this.getInboundShipmentLines(inboundShipmentId, executor);
     if (lines.length > 0) {
-      await db.delete(landedCostSnapshots).where(inArray(landedCostSnapshots.inboundShipmentLineId, lines.map(l => l.id)));
+      await executor.delete(landedCostSnapshots).where(inArray(landedCostSnapshots.inboundShipmentLineId, lines.map(l => l.id)));
     }
   },
 
@@ -1368,8 +1277,8 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(desc(inboundShipments.createdAt));
   },
 
-  async getProvisionalLotsByShipment(inboundShipmentId: number): Promise<InventoryLot[]> {
-    return await db.select().from(inventoryLots)
+  async getProvisionalLotsByShipment(inboundShipmentId: number, executor: any = db): Promise<InventoryLot[]> {
+    return await executor.select().from(inventoryLots)
       .where(and(
         eq((inventoryLots as any).inboundShipmentId, inboundShipmentId),
         eq((inventoryLots as any).costProvisional, 1)

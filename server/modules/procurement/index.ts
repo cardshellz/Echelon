@@ -40,6 +40,11 @@ export {
 } from "./receiving-orchestration.service";
 export { createReceivingService } from "./receiving.service";
 export { createShipmentTrackingService } from "./shipment-tracking.service";
+export { createVendorService, VendorService, VendorServiceError } from "./vendor.service";
+export {
+  ProcurementSkuReferenceError,
+  synchronizeProcurementSkuReferences,
+} from "./procurement-sku-reference.service";
 export { renderPoHtml } from "./po-document";
 
 // Service types
@@ -51,3 +56,7 @@ export type {
 export type { ReceivingOrchestrationPurchasing } from "./receiving-orchestration.service";
 export type { ReceivingService, ReceivingError } from "./receiving.service";
 export type { ShipmentTrackingService, ShipmentTrackingError } from "./shipment-tracking.service";
+export type {
+  ProcurementSkuReferenceRename,
+  ProcurementSkuReferenceRenameResult,
+} from "./procurement-sku-reference.service";

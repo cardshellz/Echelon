@@ -450,7 +450,7 @@ export const purchaseOrders = procurementSchema.table("purchase_orders", {
   actualDeliveryDate: timestamp("actual_delivery_date"), // When fully received
 
   // Financials
-  currency: varchar("currency", { length: 3 }).default("USD"),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
   subtotalCents: bigint("subtotal_cents", { mode: "number" }).default(0), // Sum of line totals
   discountCents: bigint("discount_cents", { mode: "number" }).default(0), // Header-level discount
   taxCents: bigint("tax_cents", { mode: "number" }).default(0),
@@ -532,6 +532,7 @@ export const purchaseOrders = procurementSchema.table("purchase_orders", {
   outstandingCents: bigint("outstanding_cents", { mode: "number" }).notNull().default(0),
 }, (table) => [
   uniqueIndex("purchase_orders_po_number_active_uidx").on(table.poNumber).where(sql`status <> 'cancelled'`),
+  check("purchase_orders_currency_usd_chk", sql`${table.currency} = 'USD'`),
 ]);
 
 export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders).omit({
@@ -1190,7 +1191,7 @@ export const vendorInvoices = procurementSchema.table("vendor_invoices", {
   paidAmountCents: bigint("paid_amount_cents", { mode: "number" }).notNull().default(0), // Denorm — updated on payment
   balanceCents: bigint("balance_cents", { mode: "number" }).notNull().default(0), // invoicedAmount - paidAmount
 
-  currency: varchar("currency", { length: 3 }).default("USD"),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
   paymentTermsDays: integer("payment_terms_days"), // Copied from PO/vendor at creation
   paymentTermsType: varchar("payment_terms_type", { length: 20 }),
 
@@ -1206,6 +1207,7 @@ export const vendorInvoices = procurementSchema.table("vendor_invoices", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("vendor_invoices_vendor_invoice_idx").on(table.vendorId, table.invoiceNumber),
+  check("vendor_invoices_currency_usd_chk", sql`${table.currency} = 'USD'`),
 ]);
 
 export const insertVendorInvoiceSchema = createInsertSchema(vendorInvoices).omit({
@@ -1266,7 +1268,10 @@ export const inboundFreightAllocations = procurementSchema.table("inbound_freigh
   sharePercent: numeric("share_percent", { precision: 8, scale: 4 }),
   allocatedCents: bigint("allocated_cents", { mode: "number" }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("inbound_freight_allocations_cost_line_uidx")
+    .on(table.shipmentCostId, table.inboundShipmentLineId),
+]);
 
 export const insertInboundFreightAllocationSchema = createInsertSchema(inboundFreightAllocations).omit({
   id: true,
@@ -1295,7 +1300,11 @@ export const landedCostSnapshots = procurementSchema.table("landed_cost_snapshot
   qty: integer("qty"),
   finalizedAt: timestamp("finalized_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("landed_cost_snapshots_shipment_line_uidx")
+    .on(table.inboundShipmentLineId)
+    .where(sql`${table.inboundShipmentLineId} IS NOT NULL`),
+]);
 
 export const insertLandedCostSnapshotSchema = createInsertSchema(landedCostSnapshots).omit({
   id: true,
@@ -1453,7 +1462,7 @@ export const apPayments = procurementSchema.table("ap_payments", {
   bankAccountLabel: varchar("bank_account_label", { length: 100 }), // e.g. "Chase Operating"
 
   totalAmountCents: bigint("total_amount_cents", { mode: "number" }).notNull(),
-  currency: varchar("currency", { length: 3 }).default("USD"),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
 
   status: varchar("status", { length: 20 }).notNull().default("completed"),
 
@@ -1469,6 +1478,7 @@ export const apPayments = procurementSchema.table("ap_payments", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("ap_payments_payment_number_active_uidx").on(table.paymentNumber).where(sql`voided_at IS NULL`),
+  check("ap_payments_currency_usd_chk", sql`${table.currency} = 'USD'`),
 ]);
 
 export const insertApPaymentSchema = createInsertSchema(apPayments).omit({

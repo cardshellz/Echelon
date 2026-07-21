@@ -188,6 +188,48 @@ describe("AP ledger routes", () => {
     expect(body).toEqual({ invoices: [{ id: 31, purchaseOrderId: 55 }] });
   });
 
+  it("propagates the authenticated actor to invoice and PO link mutations", async () => {
+    mocks.apLedger.linkPoToInvoice.mockResolvedValue({ id: 91, purchaseOrderId: 55 });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/vendor-invoices/12/po-links",
+      { purchaseOrderId: 55, allocatedAmountCents: 2500, notes: "primary PO" },
+    );
+
+    expect(status).toBe(201);
+    expect(mocks.apLedger.linkPoToInvoice).toHaveBeenCalledWith(
+      12,
+      55,
+      2500,
+      "primary PO",
+      "test-user",
+    );
+    expect(body).toEqual({ id: 91, purchaseOrderId: 55 });
+  });
+
+  it("propagates the authenticated actor to invoice line mutations", async () => {
+    mocks.apLedger.addInvoiceLine.mockResolvedValue({ id: 92, qtyInvoiced: 5 });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(
+      server.url,
+      "POST",
+      "/api/vendor-invoices/12/lines",
+      { qtyInvoiced: 5, unitCostMills: 55 },
+    );
+
+    expect(status).toBe(201);
+    expect(mocks.apLedger.addInvoiceLine).toHaveBeenCalledWith(
+      12,
+      { qtyInvoiced: 5, unitCostMills: 55 },
+      "test-user",
+    );
+    expect(body).toEqual({ id: 92, qtyInvoiced: 5 });
+  });
+
   it("dispatches invoice approval through the AP command boundary", async () => {
     const apLedgerOutcome = {
       command: "approve_invoice",

@@ -36,11 +36,22 @@ import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 import { warehouseStorage } from "../warehouse";
-import { procurementStorage } from "../procurement";
+import {
+  procurementStorage,
+  synchronizeProcurementSkuReferences,
+} from "../procurement";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
+
+function authenticatedActor(req: any): string {
+  const identity = req.session?.user?.id ?? req.session?.user?.username ?? req.user?.username;
+  if (identity === null || identity === undefined || String(identity).trim() === "") {
+    throw Object.assign(new Error("Authenticated user identity is required"), { statusCode: 401 });
+  }
+  return `user:${String(identity).trim()}`;
+}
 
 function normalizeShopDomain(value: string): string {
   const trimmed = value.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
@@ -789,7 +800,14 @@ export async function registerProductRoutes(app: Express) {
 
       // Check for SKU conflict when SKU is being changed
       let oldProductSku: string | null = null;
-      const newProductSku: string | undefined = updates.sku;
+      const requestedProductSku: unknown = updates.sku;
+      if (
+        requestedProductSku !== undefined &&
+        (typeof requestedProductSku !== "string" || !requestedProductSku.trim() || requestedProductSku.trim().length > 100)
+      ) {
+        return res.status(400).json({ error: "SKU must be a non-empty string of at most 100 characters" });
+      }
+      const newProductSku = typeof requestedProductSku === "string" ? requestedProductSku.trim() : undefined;
       if (newProductSku) {
         const existing = await storage.getProductById(id);
         if (existing) oldProductSku = existing.sku ?? null;
@@ -805,12 +823,79 @@ export async function registerProductRoutes(app: Express) {
       }
 
       const normalizedUpdates = { ...updates };
+      if (newProductSku) normalizedUpdates.sku = newProductSku;
       if ("categoryId" in updates || "category" in updates) {
         Object.assign(normalizedUpdates, await resolveProductCategory(updates));
       }
 
-      const product = await storage.updateProduct(id, normalizedUpdates);
-      if (!product) {
+      const actor = authenticatedActor(req);
+      const updateResult = await db.transaction(async (tx) => {
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.products
+          WHERE id = ${id}
+          FOR UPDATE
+        `);
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.product_variants
+          WHERE product_id = ${id}
+          ORDER BY id
+          FOR UPDATE
+        `);
+        const currentProduct = await storage.getProductById(id, tx);
+        if (!currentProduct) {
+          return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
+        }
+
+        const product = await storage.updateProduct(id, normalizedUpdates, tx);
+        if (!product) {
+          return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
+        }
+
+        let renamedVariants = 0;
+        const lockedOldSku = currentProduct.sku ?? null;
+        if (newProductSku && lockedOldSku && newProductSku !== lockedOldSku) {
+          const productVariantsList = await storage.getProductVariantsByProductId(id, tx);
+          for (const variant of productVariantsList) {
+            if (!variant.sku) continue;
+
+            let newVariantSku: string;
+            if (variant.sku === lockedOldSku) {
+              newVariantSku = newProductSku;
+            } else if (variant.sku.startsWith(lockedOldSku + "-")) {
+              newVariantSku = newProductSku + variant.sku.slice(lockedOldSku.length);
+            } else {
+              continue;
+            }
+
+            const oldVariantSku = variant.sku;
+            if (newVariantSku === oldVariantSku) continue;
+            if (newVariantSku.length > 100) {
+              throw Object.assign(new Error(`Derived variant SKU exceeds 100 characters: ${newVariantSku}`), {
+                statusCode: 400,
+              });
+            }
+
+            const updatedVariant = await storage.updateProductVariant(variant.id, { sku: newVariantSku }, tx);
+            if (!updatedVariant) {
+              throw new Error(`Variant ${variant.id} disappeared during SKU rename`);
+            }
+            await storage.cascadeOperationalSkuRename(variant.id, oldVariantSku, newVariantSku, tx);
+            await synchronizeProcurementSkuReferences({
+              productVariantId: variant.id,
+              oldSku: oldVariantSku,
+              newSku: newVariantSku,
+              actor,
+            }, { executor: tx });
+            renamedVariants++;
+          }
+        }
+
+        return { product, renamedVariants, renamedFrom: lockedOldSku };
+      });
+
+      if (!updateResult.product) {
         return res.status(404).json({ error: "Product not found" });
       }
 
@@ -819,46 +904,22 @@ export async function registerProductRoutes(app: Express) {
         await enqueueShippingGroupMetafields([id]);
       }
 
-      // Cascade base SKU rename to variants and all downstream tables
-      if (newProductSku && oldProductSku && newProductSku !== oldProductSku) {
-        const productVariantsList = await storage.getProductVariantsByProductId(id);
-
-        for (const v of productVariantsList) {
-          if (!v.sku) continue;
-
-          // Derive new variant SKU by replacing old base prefix with new one
-          let newVariantSku: string;
-          if (v.sku === oldProductSku) {
-            // Variant SKU matches base exactly (standalone product)
-            newVariantSku = newProductSku;
-          } else if (v.sku.startsWith(oldProductSku + "-")) {
-            // Variant SKU has suffix like -P25, -C1000
-            newVariantSku = newProductSku + v.sku.slice(oldProductSku.length);
-          } else {
-            // Variant SKU doesn't follow base pattern — skip
-            continue;
-          }
-
-          const oldVariantSku = v.sku;
-          if (newVariantSku === oldVariantSku) continue;
-
-          // Update the variant itself
-          await storage.updateProductVariant(v.id, { sku: newVariantSku });
-
-          // Cascade to downstream tables
-          try {
-            await storage.cascadeSkuRename(v.id, oldVariantSku, newVariantSku);
-          } catch (err: any) {
-            console.warn(`[SKU CASCADE] Partial failure renaming variant ${oldVariantSku} → ${newVariantSku}: ${err.message}`);
-          }
-        }
-
-        console.log(`[SKU CASCADE] Product base SKU ${oldProductSku} → ${newProductSku}, updated ${productVariantsList.length} variants + downstream`);
+      if (newProductSku && updateResult.renamedFrom && updateResult.renamedVariants > 0) {
+        console.log(
+          `[SKU CASCADE] Product base SKU ${updateResult.renamedFrom} -> ${newProductSku}, ` +
+          `updated ${updateResult.renamedVariants} variants and cached references atomically`,
+        );
       }
 
       const existingVariants = await storage.getProductVariantsByProductId(id);
-      res.json({ ...product, variants: existingVariants });
+      res.json({ ...updateResult.product, variants: existingVariants });
     } catch (error: any) {
+      if (error?.code === "23505" || error?.cause?.code === "23505") {
+        return res.status(409).json({ error: "SKU already exists" });
+      }
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
       if (error?.message?.includes("category")) {
         return res.status(400).json({ error: error.message });
       }
@@ -1295,10 +1356,14 @@ export async function registerProductRoutes(app: Express) {
         return res.status(400).json({ error: "Invalid variant id" });
       }
       const newSku: string | undefined = req.body.sku;
+      if (newSku !== undefined && (typeof newSku !== "string" || !newSku.trim() || newSku.trim().length > 100)) {
+        return res.status(400).json({ error: "SKU must be a non-empty string of at most 100 characters" });
+      }
+      const normalizedNewSku = newSku?.trim();
 
       // Check for SKU conflict when SKU is being changed
-      if (newSku) {
-        const conflict = await storage.getActiveVariantBySku(newSku, id);
+      if (normalizedNewSku) {
+        const conflict = await storage.getActiveVariantBySku(normalizedNewSku, id);
         if (conflict) {
           const conflictProduct = conflict.productId ? await storage.getProductById(conflict.productId) : null;
           return res.status(409).json({
@@ -1308,31 +1373,67 @@ export async function registerProductRoutes(app: Express) {
         }
       }
 
-      // Capture old SKU before update for cascade
-      let oldSku: string | null = null;
-      if (newSku) {
-        const existing = await storage.getProductVariantById(id);
-        if (existing) oldSku = existing.sku;
-      }
-
-      const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
-      const variant = await storage.updateProductVariant(id, { ...req.body, ...packageAttributes });
-      if (!variant) {
+      const targetVariant = await storage.getProductVariantById(id);
+      if (!targetVariant) {
         return res.status(404).json({ error: "Variant not found" });
       }
 
-      // Cascade SKU rename to all downstream tables with cached sku columns
-      if (newSku && oldSku && newSku !== oldSku) {
-        try {
-          await storage.cascadeSkuRename(id, oldSku, newSku);
-          console.log(`[SKU CASCADE] Renamed ${oldSku} → ${newSku} across all downstream tables`);
-        } catch (err: any) {
-          console.warn(`[SKU CASCADE] Partial failure renaming ${oldSku} → ${newSku}: ${err.message}`);
+      const packageAttributes = coercePackageAttributesOnVariantPayload(req.body);
+      const actor = authenticatedActor(req);
+      const updateResult = await db.transaction(async (tx) => {
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.products
+          WHERE id = ${targetVariant.productId}
+          FOR UPDATE
+        `);
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.product_variants
+          WHERE id = ${id}
+          FOR UPDATE
+        `);
+        const existing = await storage.getProductVariantById(id, tx);
+        if (!existing) return { variant: null, renamed: false };
+        if (existing.productId !== targetVariant.productId) {
+          throw Object.assign(new Error("Variant parent changed during SKU update"), { statusCode: 409 });
         }
+
+        const payload = {
+          ...req.body,
+          ...packageAttributes,
+          ...(normalizedNewSku ? { sku: normalizedNewSku } : {}),
+        };
+        const updatedVariant = await storage.updateProductVariant(id, payload, tx);
+        if (!updatedVariant) return { variant: null, renamed: false };
+
+        const oldSku = existing.sku;
+        let renamed = false;
+        if (normalizedNewSku && oldSku && normalizedNewSku !== oldSku) {
+          await storage.cascadeOperationalSkuRename(id, oldSku, normalizedNewSku, tx);
+          await synchronizeProcurementSkuReferences({
+            productVariantId: id,
+            oldSku,
+            newSku: normalizedNewSku,
+            actor,
+          }, { executor: tx });
+          renamed = true;
+        }
+        return { variant: updatedVariant, renamed };
+      });
+      if (!updateResult.variant) {
+        return res.status(404).json({ error: "Variant not found" });
       }
 
-      res.json(variant);
+      if (updateResult.renamed) {
+        console.log(`[SKU CASCADE] Variant ${id} cached references synchronized atomically`);
+      }
+
+      res.json(updateResult.variant);
     } catch (error: any) {
+      if (error?.code === "23505" || error?.cause?.code === "23505") {
+        return res.status(409).json({ error: "SKU already exists" });
+      }
       if (Number.isInteger(error?.statusCode)) {
         return res.status(error.statusCode).json({ error: error.message });
       }
