@@ -8,6 +8,8 @@ interface Flags {
   help: boolean;
   execute: boolean;
   targetUrl: string | null;
+  replaceWebhookId: string | null;
+  expectedCurrentUrl: string | null;
 }
 
 export function usage(): string {
@@ -15,13 +17,16 @@ export function usage(): string {
     "Usage:",
     "  npx tsx scripts/configure-shipstation-tracking-webhook.ts --dry-run --target-url=https://example.com/api/shipping/webhooks/shipstation/track",
     "  npx tsx scripts/configure-shipstation-tracking-webhook.ts --execute --target-url=https://example.com/api/shipping/webhooks/shipstation/track",
+    "  npx tsx scripts/configure-shipstation-tracking-webhook.ts --dry-run --replace-webhook-id=43350 --expected-current-url=https://legacy.example.com/tracking-webhook",
+    "  npx tsx scripts/configure-shipstation-tracking-webhook.ts --execute --replace-webhook-id=43350 --expected-current-url=https://legacy.example.com/tracking-webhook",
     "",
     "Environment:",
     "  SHIPSTATION_V2_API_KEY                 Production ShipStation V2 API key.",
     "  SHIPSTATION_TRACKING_WEBHOOK_SECRET    Dedicated callback secret (32-512 printable characters).",
     "  SHIPSTATION_TRACKING_WEBHOOK_URL       Used when --target-url is omitted.",
     "",
-    "Dry-run is the default. Conflicting or duplicate track subscriptions are never overwritten.",
+    "Dry-run is the default. A takeover requires the exact existing webhook id and URL;",
+    "the command also refuses duplicate track subscriptions or existing custom headers.",
   ].join("\n");
 }
 
@@ -29,6 +34,8 @@ export function parseFlags(argv: string[]): Flags {
   for (const arg of argv) {
     if (["--help", "-h", "--dry-run", "--execute"].includes(arg)) continue;
     if (arg.startsWith("--target-url=")) continue;
+    if (arg.startsWith("--replace-webhook-id=")) continue;
+    if (arg.startsWith("--expected-current-url=")) continue;
     throw new Error(`Unknown flag: ${arg}`);
   }
   if (argv.includes("--dry-run") && argv.includes("--execute")) {
@@ -36,10 +43,19 @@ export function parseFlags(argv: string[]): Flags {
   }
   const targetUrl = argv.find((arg) => arg.startsWith("--target-url="))
     ?.slice("--target-url=".length).trim() || null;
+  const replaceWebhookId = argv.find((arg) => arg.startsWith("--replace-webhook-id="))
+    ?.slice("--replace-webhook-id=".length).trim() || null;
+  const expectedCurrentUrl = argv.find((arg) => arg.startsWith("--expected-current-url="))
+    ?.slice("--expected-current-url=".length).trim() || null;
+  if (Boolean(replaceWebhookId) !== Boolean(expectedCurrentUrl)) {
+    throw new Error("--replace-webhook-id and --expected-current-url must be provided together");
+  }
   return {
     help: argv.includes("--help") || argv.includes("-h"),
     execute: argv.includes("--execute"),
     targetUrl,
+    replaceWebhookId,
+    expectedCurrentUrl,
   };
 }
 
@@ -58,6 +74,9 @@ export async function main(): Promise<void> {
     targetUrl,
     webhookSecret: resolveShipStationTrackingWebhookSecret(),
     execute: flags.execute,
+    takeover: flags.replaceWebhookId && flags.expectedCurrentUrl
+      ? { webhookId: flags.replaceWebhookId, currentUrl: flags.expectedCurrentUrl }
+      : null,
   });
   console.log(JSON.stringify({ mode: flags.execute ? "execute" : "dry-run", ...result }, null, 2));
   if (result.status === "conflict") process.exitCode = 2;

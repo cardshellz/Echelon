@@ -31,6 +31,7 @@ function webhook(overrides: Partial<ShipStationTrackingWebhook> = {}): ShipStati
 function client(existing: ShipStationTrackingWebhook[] = []): ShipStationTrackingWebhooksClient & {
   listWebhooks: ReturnType<typeof vi.fn>;
   createWebhook: ReturnType<typeof vi.fn>;
+  updateWebhook: ReturnType<typeof vi.fn>;
 } {
   return {
     listWebhooks: vi.fn().mockResolvedValue(existing),
@@ -38,19 +39,29 @@ function client(existing: ShipStationTrackingWebhook[] = []): ShipStationTrackin
       webhook_id: "se-created",
       ...input,
     })),
+    updateWebhook: vi.fn().mockResolvedValue(undefined),
   };
 }
 
 describe("ShipStation tracking webhook registration", () => {
   it("parses flags with a non-mutating default", () => {
-    expect(parseFlags([])).toEqual({ help: false, execute: false, targetUrl: null });
+    expect(parseFlags([])).toEqual({
+      help: false,
+      execute: false,
+      targetUrl: null,
+      replaceWebhookId: null,
+      expectedCurrentUrl: null,
+    });
     expect(parseFlags(["--execute", `--target-url=${TARGET}`])).toEqual({
       help: false,
       execute: true,
       targetUrl: TARGET,
+      replaceWebhookId: null,
+      expectedCurrentUrl: null,
     });
     expect(() => parseFlags(["--dry-run", "--execute"])).toThrow(/either/);
     expect(() => parseFlags(["--replace-existing"])).toThrow(/Unknown flag/);
+    expect(() => parseFlags(["--replace-webhook-id=43350"])).toThrow(/provided together/);
   });
 
   it("requires a credential-free HTTPS endpoint without query or fragment data", () => {
@@ -126,6 +137,89 @@ describe("ShipStation tracking webhook registration", () => {
     });
     expect(duplicateResult.status).toBe("conflict");
     expect(duplicate.createWebhook).not.toHaveBeenCalled();
+  });
+
+  it("plans and executes an in-place guarded takeover without deleting the webhook", async () => {
+    const legacyUrl = "https://archon.example.com/api/shipstation/tracking-webhook";
+    const existing = webhook({
+      webhook_id: "43350",
+      name: null,
+      url: legacyUrl,
+      headers: [],
+    });
+    const dryRunApi = client([existing]);
+    await expect(configureShipStationTrackingWebhook({
+      client: dryRunApi,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: false,
+      takeover: { webhookId: "43350", currentUrl: legacyUrl },
+    })).resolves.toMatchObject({
+      status: "takeover_planned",
+      webhook: { webhookId: "43350", url: legacyUrl },
+    });
+    expect(dryRunApi.updateWebhook).not.toHaveBeenCalled();
+
+    const executeApi = client([existing]);
+    executeApi.listWebhooks
+      .mockResolvedValueOnce([existing])
+      .mockResolvedValueOnce([webhook({ webhook_id: "43350" })]);
+    await expect(configureShipStationTrackingWebhook({
+      client: executeApi,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: true,
+      takeover: { webhookId: "43350", currentUrl: legacyUrl },
+    })).resolves.toMatchObject({
+      status: "taken_over",
+      webhook: { webhookId: "43350", url: TARGET },
+    });
+    expect(executeApi.updateWebhook).toHaveBeenCalledWith("43350", {
+      name: "Echelon carrier tracking",
+      url: TARGET,
+      headers: [{
+        key: "x-echelon-shipstation-tracking-secret",
+        value: WEBHOOK_SECRET,
+      }],
+    });
+  });
+
+  it("refuses takeover when identity, URL, cardinality, or headers drift", async () => {
+    const legacyUrl = "https://archon.example.com/api/shipstation/tracking-webhook";
+    for (const existing of [
+      [webhook({ webhook_id: "different", url: legacyUrl, headers: [] })],
+      [webhook({ webhook_id: "43350", url: "https://other.example.com/track", headers: [] })],
+      [webhook({ webhook_id: "43350", url: legacyUrl, headers: [{ key: "x-owner", value: "set" }] })],
+      [
+        webhook({ webhook_id: "43350", url: legacyUrl, headers: [] }),
+        webhook({ webhook_id: "second", url: legacyUrl, headers: [] }),
+      ],
+    ]) {
+      const api = client(existing);
+      await expect(configureShipStationTrackingWebhook({
+        client: api,
+        targetUrl: TARGET,
+        webhookSecret: WEBHOOK_SECRET,
+        execute: true,
+        takeover: { webhookId: "43350", currentUrl: legacyUrl },
+      })).resolves.toMatchObject({ status: "conflict", reason: expect.any(String) });
+      expect(api.updateWebhook).not.toHaveBeenCalled();
+    }
+  });
+
+  it("fails closed when ShipStation does not retain the takeover state", async () => {
+    const legacyUrl = "https://archon.example.com/api/shipstation/tracking-webhook";
+    const existing = webhook({ webhook_id: "43350", url: legacyUrl, headers: [] });
+    const api = client([existing]);
+    api.listWebhooks.mockResolvedValueOnce([existing]).mockResolvedValueOnce([existing]);
+
+    await expect(configureShipStationTrackingWebhook({
+      client: api,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: true,
+      takeover: { webhookId: "43350", currentUrl: legacyUrl },
+    })).rejects.toThrow(/could not be verified/);
   });
 
   it("converges when another actor creates the exact subscription during registration", async () => {
@@ -240,6 +334,24 @@ describe("ShipStation tracking webhooks client", () => {
       })) as typeof fetch,
     });
     await expect(api.listWebhooks()).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("updates a webhook in place using the documented PUT contract", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const api = createShipStationTrackingWebhooksClient({
+      apiKey: "test-key",
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    await expect(api.updateWebhook("43350", {
+      name: "Echelon carrier tracking",
+      url: TARGET,
+      headers: [{ key: "x-test", value: "secret" }],
+    })).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.shipstation.com/v2/environment/webhooks/43350",
+      expect.objectContaining({ method: "PUT" }),
+    );
   });
 
   it("refuses an insecure provider API base URL before sending credentials", () => {

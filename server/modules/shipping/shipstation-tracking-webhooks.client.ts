@@ -34,6 +34,11 @@ export interface ShipStationTrackingWebhooksClient {
     url: string;
     headers: Array<{ key: string; value: string }>;
   }): Promise<ShipStationTrackingWebhook>;
+  updateWebhook(webhookId: string, input: {
+    name: string;
+    url: string;
+    headers: Array<{ key: string; value: string }>;
+  }): Promise<void>;
 }
 
 export class ShipStationTrackingWebhooksClientError extends Error {
@@ -86,8 +91,11 @@ export function createShipStationTrackingWebhooksClient(
     );
   }
 
-  async function request(method: "GET" | "POST", body?: unknown): Promise<unknown> {
-    const path = "/environment/webhooks";
+  async function request(
+    method: "GET" | "POST" | "PUT",
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
     let response: Response;
@@ -140,6 +148,7 @@ export function createShipStationTrackingWebhooksClient(
         },
       );
     }
+    if (response.status === 204 || responseText.trim() === "") return null;
 
     try {
       return JSON.parse(responseText);
@@ -154,7 +163,9 @@ export function createShipStationTrackingWebhooksClient(
 
   return {
     async listWebhooks(): Promise<ShipStationTrackingWebhook[]> {
-      const parsed = z.array(shipStationTrackingWebhookSchema).safeParse(await request("GET"));
+      const parsed = z.array(shipStationTrackingWebhookSchema).safeParse(
+        await request("GET", "/environment/webhooks"),
+      );
       if (!parsed.success) {
         throw new ShipStationTrackingWebhooksClientError(
           "INVALID_RESPONSE",
@@ -166,7 +177,9 @@ export function createShipStationTrackingWebhooksClient(
     },
 
     async createWebhook(input): Promise<ShipStationTrackingWebhook> {
-      const parsed = shipStationTrackingWebhookSchema.safeParse(await request("POST", input));
+      const parsed = shipStationTrackingWebhookSchema.safeParse(
+        await request("POST", "/environment/webhooks", input),
+      );
       if (!parsed.success) {
         throw new ShipStationTrackingWebhooksClientError(
           "INVALID_RESPONSE",
@@ -175,6 +188,21 @@ export function createShipStationTrackingWebhooksClient(
         );
       }
       return parsed.data;
+    },
+
+    async updateWebhook(webhookId, input): Promise<void> {
+      const normalizedWebhookId = webhookId.trim();
+      if (!normalizedWebhookId || normalizedWebhookId.length > 100) {
+        throw new ShipStationTrackingWebhooksClientError(
+          "CONFIGURATION",
+          "ShipStation tracking webhook id must contain 1 through 100 characters",
+        );
+      }
+      await request(
+        "PUT",
+        `/environment/webhooks/${encodeURIComponent(normalizedWebhookId)}`,
+        input,
+      );
     },
   };
 }
