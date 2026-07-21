@@ -9,6 +9,7 @@ import { useMemo, useState } from "react";
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
   ChevronsUpDown,
   Copy,
   MapPin,
@@ -31,9 +32,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -53,11 +65,16 @@ import {
   ALL_REGION_CODES,
   ALL_US_STATES,
   CONTIGUOUS_US,
+  DESTINATION_COVERAGE_TEMPLATES,
+  DESTINATION_REGION_TEMPLATES,
   REGION_NAME,
   US_POSTAL_REGIONS,
+  destinationGroupTemplateById,
+  findDestinationGroupTemplate,
   groupDisplayName,
   newGroup,
   newId,
+  type DestinationGroupTemplate,
   type PricingBasis,
   type RateGroup,
 } from "../rate-table-model";
@@ -91,15 +108,33 @@ export function DestinationGroupsPanel({
   });
 
   const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null;
+  const selectedTemplate = selectedGroup === null
+    ? null
+    : findDestinationGroupTemplate(selectedGroup.regions);
 
   const updateGroup = (groupId: string, update: (group: RateGroup) => RateGroup) => {
     onChange(groups.map((group) => group.id === groupId ? update(group) : group));
   };
 
-  const addGroup = () => {
-    const group = newGroup(pricingBasis, []);
+  const addGroup = (template: DestinationGroupTemplate | null) => {
+    const group = newGroup(
+      pricingBasis,
+      template === null ? [] : [...template.regions],
+      template?.name ?? "",
+    );
     onChange([...groups, group]);
     onSelectGroup(group.id);
+  };
+
+  const applyTemplate = (templateId: string) => {
+    if (!selectedGroup || templateId === "custom") return;
+    const template = destinationGroupTemplateById(templateId);
+    if (template === null) return;
+    updateGroup(selectedGroup.id, (group) => ({
+      ...group,
+      name: template.name,
+      regions: [...template.regions],
+    }));
   };
 
   const duplicateGroup = (source: RateGroup) => {
@@ -201,10 +236,7 @@ export function DestinationGroupsPanel({
           to the states you choose, with optional ZIP-prefix exceptions. Create separate groups
           when states need different prices.
         </p>
-        <Button className="mt-4" onClick={addGroup}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add destination group
-        </Button>
+        <AddDestinationGroupMenu className="mt-4" onAdd={addGroup} />
       </div>
     );
   }
@@ -258,10 +290,7 @@ export function DestinationGroupsPanel({
             </button>
           );
         })}
-        <Button variant="outline" className="w-full" onClick={addGroup}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add destination group
-        </Button>
+        <AddDestinationGroupMenu variant="outline" className="w-full" onAdd={addGroup} />
       </div>
 
       {/* Right: selected group detail */}
@@ -351,16 +380,53 @@ export function DestinationGroupsPanel({
               </p>
             </div>
 
-            <div className="space-y-1.5">
-              <Label>Destination states</Label>
-              <StateMultiSelect
-                selected={selectedGroup.regions}
-                conflicted={conflictedRegions}
-                onChange={(regions) => updateGroup(selectedGroup.id, (group) => ({
-                  ...group,
-                  regions,
-                }))}
-              />
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label>Region template</Label>
+                <Select
+                  value={selectedTemplate?.id ?? "custom"}
+                  onValueChange={applyTemplate}
+                >
+                  <SelectTrigger className="h-9" aria-label="Region template">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="custom" disabled>Custom selection</SelectItem>
+                    <SelectGroup>
+                      <SelectLabel>Coverage</SelectLabel>
+                      {DESTINATION_COVERAGE_TEMPLATES.map((template) => (
+                        <SelectItem key={template.id} value={template.id}>
+                          {template.name} ({template.regions.length})
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                    <SelectSeparator />
+                    <SelectGroup>
+                      <SelectLabel>Regions</SelectLabel>
+                      {DESTINATION_REGION_TEMPLATES.map((template) => (
+                        <SelectItem key={template.id} value={template.id}>
+                          {template.name} ({template.regions.length})
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Applying a template replaces the selected states and group name. ZIP overrides are preserved.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Destination states</Label>
+                <StateMultiSelect
+                  selected={selectedGroup.regions}
+                  conflicted={conflictedRegions}
+                  onChange={(regions) => updateGroup(selectedGroup.id, (group) => ({
+                    ...group,
+                    regions,
+                  }))}
+                />
+              </div>
               {conflictedRegions.size > 0 && (
                 <p className="flex items-start gap-1 text-xs text-amber-700">
                   <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -508,6 +574,52 @@ export function DestinationGroupsPanel({
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+interface AddDestinationGroupMenuProps {
+  onAdd: (template: DestinationGroupTemplate | null) => void;
+  variant?: "default" | "outline";
+  className?: string;
+}
+
+function AddDestinationGroupMenu({
+  onAdd,
+  variant = "default",
+  className,
+}: AddDestinationGroupMenuProps) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button type="button" variant={variant} className={className}>
+          <Plus className="mr-2 h-4 w-4" />
+          Add destination group
+          <ChevronDown className="ml-auto h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-64">
+        <DropdownMenuItem onSelect={() => onAdd(null)}>
+          <span className="flex-1">Custom group</span>
+          <span className="text-xs text-muted-foreground">No states</span>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Coverage</DropdownMenuLabel>
+        {DESTINATION_COVERAGE_TEMPLATES.map((template) => (
+          <DropdownMenuItem key={template.id} onSelect={() => onAdd(template)}>
+            <span className="flex-1">{template.name}</span>
+            <span className="text-xs text-muted-foreground">{template.regions.length}</span>
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Regional templates</DropdownMenuLabel>
+        {DESTINATION_REGION_TEMPLATES.map((template) => (
+          <DropdownMenuItem key={template.id} onSelect={() => onAdd(template)}>
+            <span className="flex-1">{template.name}</span>
+            <span className="text-xs text-muted-foreground">{template.regions.length}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
