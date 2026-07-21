@@ -187,6 +187,45 @@ describe("Shopify Adapter", () => {
       expect(result).toBeNull();
     });
 
+    it("preserves a Shopify-managed international destination and shipping charge", async () => {
+      const db2 = createMockDb({
+        channelId: 1,
+        shopDomain: "test.myshopify.com",
+        accessToken: "token",
+        apiVersion: "2024-01",
+        webhookSecret: null,
+      });
+      const adapter2 = new ShopifyAdapter(db2 as any);
+
+      const result = await adapter2.receiveOrder(1, {
+        id: 789,
+        email: "buyer@example.dk",
+        created_at: "2026-07-20T12:00:00Z",
+        subtotal_price: "250.00",
+        total_tax: "0.00",
+        total_price: "349.00",
+        total_discounts: "0.00",
+        currency: "DKK",
+        shipping_address: {
+          name: "International Buyer",
+          address1: "Example Street 1",
+          city: "Copenhagen",
+          province: "Hovedstaden",
+          zip: "2100",
+          country_code: "DK",
+        },
+        shipping_lines: [{ price: "99.00", title: "Global-e International" }],
+        line_items: [],
+      }, {});
+
+      expect(result).not.toBeNull();
+      expect(result!.shippingAddress?.country).toBe("DK");
+      expect(result!.shippingAddress?.province).toBe("Hovedstaden");
+      expect(result!.shippingAddress?.zip).toBe("2100");
+      expect(result!.shippingCents).toBe(9900);
+      expect(result!.currency).toBe("DKK");
+    });
+
     it("should handle order with no shipping address", async () => {
       const order = {
         id: 123,

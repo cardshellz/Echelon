@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RateQuoteLine } from "../../application/rate-quote.service";
+import { parseCheckoutRateRolloutPolicy } from "../../domain/checkout-rate-rollout-policy";
 import type { DeliveryWindow } from "../../domain/eta";
+import { resolveShopifyCheckoutRateOwnership } from "../../domain/destination-rate-ownership";
 import {
+  computeCheckoutRates,
   isCallbackTokenAuthorized,
   mapQuotesToShopifyRates,
   parseShopifyRateRequest,
+  type CheckoutRateDependencies,
 } from "../../interfaces/http/carrier-callback.routes";
 
 describe("isCallbackTokenAuthorized", () => {
@@ -81,6 +85,172 @@ describe("parseShopifyRateRequest", () => {
     ]) {
       expect(parseShopifyRateRequest(body).ok).toBe(false);
     }
+  });
+});
+
+describe("Shopify checkout destination ownership", () => {
+  it("assigns US rates to Echelon and all valid non-US countries to Shopify", () => {
+    expect(resolveShopifyCheckoutRateOwnership("us")).toMatchObject({
+      ok: true,
+      countryCode: "US",
+      owner: "echelon",
+    });
+    expect(resolveShopifyCheckoutRateOwnership("dk")).toMatchObject({
+      ok: true,
+      countryCode: "DK",
+      owner: "shopify",
+    });
+    expect(resolveShopifyCheckoutRateOwnership("USA")).toMatchObject({
+      ok: false,
+      reasonCode: "INVALID_DESTINATION_COUNTRY",
+    });
+  });
+
+  it("bypasses every Echelon quote dependency for a Shopify-managed country", async () => {
+    const persistSnapshot = vi.fn(async () => undefined);
+    const dependencies: CheckoutRateDependencies = {
+      originWarehouseId: vi.fn(() => {
+        throw new Error("origin resolution must not run for Shopify-managed destinations");
+      }),
+      rolloutPolicy: vi.fn(() => {
+        throw new Error("rollout policy must not run for Shopify-managed destinations");
+      }),
+      loadCatalogWeightsBySku: vi.fn(async () => {
+        throw new Error("catalog lookup must not run for Shopify-managed destinations");
+      }),
+      quoteShipment: vi.fn(async () => {
+        throw new Error("Echelon quote must not run for Shopify-managed destinations");
+      }),
+      loadDeliveryEstimates: vi.fn(async () => new Map()),
+      persistSnapshot,
+    };
+
+    const rates = await computeCheckoutRates(shopifyBody({
+      destination: { postal_code: "2100", country: "DK", province: null },
+    }), dependencies);
+
+    expect(rates).toEqual([]);
+    expect(dependencies.originWarehouseId).not.toHaveBeenCalled();
+    expect(dependencies.rolloutPolicy).not.toHaveBeenCalled();
+    expect(dependencies.loadCatalogWeightsBySku).not.toHaveBeenCalled();
+    expect(dependencies.quoteShipment).not.toHaveBeenCalled();
+    expect(persistSnapshot).toHaveBeenCalledOnce();
+    expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "shopify_managed_destination",
+      request: expect.objectContaining({ destCountry: "DK" }),
+      shopifyRates: [],
+    }));
+  });
+
+  it("bypasses every quote dependency for US traffic while rollout is off", async () => {
+    const persistSnapshot = vi.fn(async () => undefined);
+    const dependencies: CheckoutRateDependencies = {
+      originWarehouseId: vi.fn(() => {
+        throw new Error("origin resolution must not run while rollout is off");
+      }),
+      rolloutPolicy: vi.fn(() => parseCheckoutRateRolloutPolicy({ mode: "off" })),
+      loadCatalogWeightsBySku: vi.fn(async () => {
+        throw new Error("catalog lookup must not run while rollout is off");
+      }),
+      quoteShipment: vi.fn(async () => {
+        throw new Error("Echelon quote must not run while rollout is off");
+      }),
+      loadDeliveryEstimates: vi.fn(async () => new Map()),
+      persistSnapshot,
+    };
+
+    const rates = await computeCheckoutRates(shopifyBody(), dependencies);
+
+    expect(rates).toEqual([]);
+    expect(dependencies.rolloutPolicy).toHaveBeenCalledOnce();
+    expect(dependencies.originWarehouseId).not.toHaveBeenCalled();
+    expect(dependencies.loadCatalogWeightsBySku).not.toHaveBeenCalled();
+    expect(dependencies.quoteShipment).not.toHaveBeenCalled();
+    expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "rollout_disabled",
+      rolloutDecision: expect.objectContaining({
+        shouldQuote: false,
+        reasonCode: "ROLLOUT_DISABLED",
+      }),
+      shopifyRates: [],
+    }));
+  });
+
+  it("bypasses the quote pipeline when a test cart contains a non-allowlisted SKU", async () => {
+    const persistSnapshot = vi.fn(async () => undefined);
+    const dependencies: CheckoutRateDependencies = {
+      originWarehouseId: vi.fn(() => {
+        throw new Error("origin resolution must not run for a blocked test cart");
+      }),
+      rolloutPolicy: vi.fn(() => parseCheckoutRateRolloutPolicy({
+        mode: "test",
+        testSkus: "SLV-100",
+      })),
+      loadCatalogWeightsBySku: vi.fn(async () => {
+        throw new Error("catalog lookup must not run for a blocked test cart");
+      }),
+      quoteShipment: vi.fn(async () => {
+        throw new Error("Echelon quote must not run for a blocked test cart");
+      }),
+      loadDeliveryEstimates: vi.fn(async () => new Map()),
+      persistSnapshot,
+    };
+
+    const rates = await computeCheckoutRates(shopifyBody(), dependencies);
+
+    expect(rates).toEqual([]);
+    expect(dependencies.originWarehouseId).not.toHaveBeenCalled();
+    expect(dependencies.loadCatalogWeightsBySku).not.toHaveBeenCalled();
+    expect(dependencies.quoteShipment).not.toHaveBeenCalled();
+    expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "rollout_test_bypassed",
+      rolloutDecision: expect.objectContaining({
+        shouldQuote: false,
+        reasonCode: "TEST_CART_SKU_NOT_ALLOWED",
+        deniedSkus: ["CASE-9"],
+      }),
+      shopifyRates: [],
+    }));
+  });
+
+  it("runs the quote pipeline when every test-cart SKU is allowlisted", async () => {
+    const persistSnapshot = vi.fn(async () => undefined);
+    const dependencies: CheckoutRateDependencies = {
+      originWarehouseId: vi.fn(() => 1),
+      rolloutPolicy: vi.fn(() => parseCheckoutRateRolloutPolicy({
+        mode: "test",
+        testSkus: "SLV-100,CASE-9",
+      })),
+      loadCatalogWeightsBySku: vi.fn(async () => new Map([
+        ["SLV-100", 120],
+        ["CASE-9", 2_500],
+      ])),
+      quoteShipment: vi.fn(async () => ({
+        ok: false as const,
+        code: "INVALID_SHIPMENT" as const,
+        errors: ["intentional test quote failure"],
+      })),
+      loadDeliveryEstimates: vi.fn(async () => new Map()),
+      persistSnapshot,
+    };
+
+    const rates = await computeCheckoutRates(shopifyBody(), dependencies);
+
+    expect(rates).toEqual([]);
+    expect(dependencies.originWarehouseId).toHaveBeenCalledOnce();
+    expect(dependencies.loadCatalogWeightsBySku).toHaveBeenCalledWith([
+      "SLV-100",
+      "CASE-9",
+    ]);
+    expect(dependencies.quoteShipment).toHaveBeenCalledOnce();
+    expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "echelon_quote_unavailable",
+      rolloutDecision: expect.objectContaining({
+        shouldQuote: true,
+        reasonCode: "TEST_CART_ALLOWED",
+      }),
+      shopifyRates: [],
+    }));
   });
 });
 

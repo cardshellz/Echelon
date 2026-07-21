@@ -36,6 +36,7 @@ An operations administrator must be able to:
 6. Configure pallet-freight prices by pallet count, with an optional total shipment-weight ceiling.
 7. Save incomplete work as a draft, review coverage and errors, and deliberately activate a valid revision.
 8. Return later and edit, clone, replace, retire, or inspect the configuration without re-importing it.
+9. Test an active US rate through the exact runtime assignment using a warehouse, state, ZIP, and shipment weight before checkout cutover.
 
 ## 3. Primary Users
 
@@ -138,6 +139,29 @@ Carrier products such as USPS Ground Advantage, UPS Ground, FedEx 2Day, or an LT
 
 Future fulfillment configuration will map eligible carrier methods to each Card Shellz shipping option. That later mapping must enforce that the WMS cannot buy a method slower than the option purchased at checkout.
 
+### 4.7 Destination Rate Ownership
+
+The initial Shopify retail boundary is explicit and exhaustive:
+
+| Destination | Rate owner | Echelon behavior |
+|---|---|---|
+| United States | Echelon shipping engine | Select an active program and rate-table revision by flow and warehouse |
+| Any valid non-US country | Shopify / Global-e | Return no competing Echelon rate; do not require a duplicate Echelon country allowlist |
+
+The Echelon CarrierService must be assigned only to United States delivery zones in Shopify. The non-US callback bypass is defense-in-depth, not a replacement for correct Shopify delivery-profile configuration. Future Echelon-owned international countries will require an explicit ownership-policy change plus country-aware region/postal validation; they must not be inferred from the presence of rate rows.
+
+### 4.8 Shopify Checkout Rollout Control
+
+Shopify themes do not isolate delivery-profile or CarrierService configuration. The Echelon callback therefore owns a separate fail-closed rollout policy:
+
+| Mode | Checkout behavior |
+|---|---|
+| `off` | Return no Echelon rates for US requests; this is the default and rollback state |
+| `test` | Quote only when every cart line has an exact SKU in the configured test allowlist |
+| `live` | Quote every otherwise valid Echelon-managed US request |
+
+Missing or invalid mode configuration resolves to `off`. Test mode with an empty allowlist, a SKU-less line, or any non-allowlisted SKU returns no rates before weight lookup or rating. Shopify registration and zone assignment must occur with the mode set to `off`; an unpublished theme is only a controlled path to a test cart, not a security or traffic boundary.
+
 ## 5. Experience Principles
 
 1. **Business language first.** Show names, purposes, states, warehouses, pounds, pallets, and dollars. Never ask for a database ID or provider service code.
@@ -204,6 +228,7 @@ The detail view must answer these questions without opening another modal:
 3. What destination and measure coverage exists?
 4. Which revision is live?
 5. What needs attention?
+6. Does an active runtime quote return the expected price for a representative US shipment?
 
 #### Program summary
 
@@ -424,6 +449,26 @@ Each issue must link to the exact group and field that resolves it. Do not show 
 - `Schedule activation` supports a future date and time.
 - If an active revision exists, state plainly that it will become superseded.
 - Activation requires a concise confirmation dialog showing the program, shipping option, and effective time.
+
+### 8.6 Test Live US Rates
+
+Program detail provides `Test live rates` after a program has at least one active assignment.
+
+Required inputs:
+
+- Pricing flow assignment.
+- Origin warehouse. A warehouse-specific assignment locks this field; an all-warehouse assignment requires the operator to choose a warehouse.
+- United States state or territory.
+- Five-digit ZIP code.
+- Total shipment weight in pounds.
+
+The test must call the same active assignment selector and active rate tables as runtime checkout. It must never read draft revisions. The result shows every returned shipping option and customer charge, warnings, and one explicit outcome:
+
+- `Live rate found`.
+- `No live rate found`.
+- `A different program owns this route`.
+
+Every test persists a `manual` quote snapshot for audit and calibration. International destinations are not accepted by this tester while Shopify/Global-e owns them.
 
 ## 9. CSV Import and Export
 
