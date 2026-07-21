@@ -99,6 +99,14 @@ interface ShipmentTracking {
   getLandedCostMillsForPoLine?(purchaseOrderLineId: number): Promise<number | null>;
 }
 
+interface ApprovedInvoiceCostReconciler {
+  reconcilePurchaseOrderLine(
+    purchaseOrderLineId: number,
+    tx: any,
+    actorId?: string,
+  ): Promise<unknown>;
+}
+
 interface Storage {
   // Receiving orders
   getReceivingOrderById(id: number, tx?: any): Promise<any>;
@@ -401,6 +409,7 @@ export class ReceivingService {
     private purchasing: Purchasing | null = null,
     private shipmentTracking: ShipmentTracking | null = null,
     private reconciliationFailureReporter: ReceivingReconciliationFailureReporter | null = null,
+    private approvedInvoiceCostReconciler: ApprovedInvoiceCostReconciler | null = null,
   ) {}
 
   private async lockReceivingOrder(tx: any, orderId: number): Promise<any> {
@@ -1043,6 +1052,7 @@ export class ReceivingService {
     let linesReceived = 0;
     const receivedVariantIds = new Set<number>();
     const putawayLocationIds = new Set<number>();
+    const receivedPurchaseOrderLineIds = new Set<number>();
 
     const closeResult = await this.db.transaction(async (tx) => {
       const lockedOrder = await this.lockReceivingOrder(tx, orderId);
@@ -1250,6 +1260,9 @@ export class ReceivingService {
           inboundShipmentId,
           costProvisional,
         }, tx);
+        if (line.purchaseOrderLineId) {
+          receivedPurchaseOrderLineIds.add(Number(line.purchaseOrderLineId));
+        }
 
         // Mark line as put away and persist the resolved PER-PIECE (base-unit) cost
         // on the receiving_line — that's the PO/AP unit, so the line still reconciles
@@ -1296,15 +1309,25 @@ export class ReceivingService {
     // physical events driven through break-assembly.use-cases.ts, not a side
     // effect of receiving.
 
-      // Update order totals and close
-      const updated = await this.storage.updateReceivingOrder(orderId, {
-        status: "closed",
-        closedDate: new Date(),
-        closedBy: userId,
-        receivedLineCount: linesReceived,
-        receivedTotalUnits: totalReceived,
-      }, tx);
-      return { updated, replayed: false };
+    if (this.approvedInvoiceCostReconciler) {
+      for (const purchaseOrderLineId of [...receivedPurchaseOrderLineIds].sort((left, right) => left - right)) {
+        await this.approvedInvoiceCostReconciler.reconcilePurchaseOrderLine(
+          purchaseOrderLineId,
+          tx,
+          userId || undefined,
+        );
+      }
+    }
+
+    // Update order totals and close
+    const updated = await this.storage.updateReceivingOrder(orderId, {
+      status: "closed",
+      closedDate: new Date(),
+      closedBy: userId,
+      receivedLineCount: linesReceived,
+      receivedTotalUnits: totalReceived,
+    }, tx);
+    return { updated, replayed: false };
     });
 
     const updated = closeResult.updated;
@@ -1740,6 +1763,7 @@ export function createReceivingService(
   purchasing?: Purchasing | null,
   shipmentTracking?: ShipmentTracking | null,
   reconciliationFailureReporter?: ReceivingReconciliationFailureReporter | null,
+  approvedInvoiceCostReconciler?: ApprovedInvoiceCostReconciler | null,
 ) {
   return new ReceivingService(
     db,
@@ -1749,5 +1773,6 @@ export function createReceivingService(
     purchasing ?? null,
     shipmentTracking ?? null,
     reconciliationFailureReporter ?? null,
+    approvedInvoiceCostReconciler ?? null,
   );
 }

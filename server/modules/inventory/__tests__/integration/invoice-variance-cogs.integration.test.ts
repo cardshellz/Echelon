@@ -52,7 +52,8 @@ describeWithDisposableDb.sequential("invoice variance COGS PostgreSQL transactio
 
       CREATE TABLE catalog.product_variants (
         id INTEGER PRIMARY KEY,
-        sku VARCHAR(100) NOT NULL
+        sku VARCHAR(100) NOT NULL,
+        units_per_variant INTEGER NOT NULL DEFAULT 1
       );
 
       CREATE TABLE inventory.inventory_lots (
@@ -60,6 +61,7 @@ describeWithDisposableDb.sequential("invoice variance COGS PostgreSQL transactio
         lot_number VARCHAR(50) NOT NULL,
         product_variant_id INTEGER NOT NULL,
         purchase_order_id INTEGER,
+        po_line_id INTEGER,
         unit_cost_cents BIGINT NOT NULL DEFAULT 0,
         po_unit_cost_cents BIGINT NOT NULL DEFAULT 0,
         packaging_cost_cents BIGINT NOT NULL DEFAULT 0,
@@ -97,8 +99,10 @@ describeWithDisposableDb.sequential("invoice variance COGS PostgreSQL transactio
         created_at TIMESTAMP NOT NULL
       );
 
-      INSERT INTO catalog.product_variants (id, sku)
-      VALUES (5, 'INVOICE-VARIANCE-TEST');
+      INSERT INTO catalog.product_variants (id, sku, units_per_variant)
+      VALUES
+        (5, 'INVOICE-VARIANCE-TEST', 1),
+        (6, 'INVOICE-VARIANCE-PACK-50', 50);
     `);
 
     service = new COGSService(drizzle(pool) as any);
@@ -127,14 +131,14 @@ describeWithDisposableDb.sequential("invoice variance COGS PostgreSQL transactio
   async function seedTwoLots() {
     const lots = await pool.query<{ id: number }>(`
       INSERT INTO inventory.inventory_lots (
-        lot_number, product_variant_id, purchase_order_id,
+        lot_number, product_variant_id, purchase_order_id, po_line_id,
         unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
         landed_cost_cents, total_unit_cost_cents,
         unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
         landed_cost_mills, total_unit_cost_mills, cost_source
       ) VALUES
-        ('LOT-001', 5, 100, 600, 500, 0, 100, 600, 60000, 50000, 0, 10000, 60000, 'po'),
-        ('LOT-002', 5, 100, 570, 500, 20, 50, 570, 57000, 50000, 2000, 5000, 57000, 'po')
+        ('LOT-001', 5, 100, 200, 600, 500, 0, 100, 600, 60000, 50000, 0, 10000, 60000, 'po'),
+        ('LOT-002', 5, 100, 200, 570, 500, 20, 50, 570, 57000, 50000, 2000, 5000, 57000, 'po')
       RETURNING id
     `);
     await pool.query(
@@ -154,7 +158,7 @@ describeWithDisposableDb.sequential("invoice variance COGS PostgreSQL transactio
 
     const result = await service.reconcileInvoiceVariance({
       purchaseOrderId: 100,
-      productVariantId: 5,
+      purchaseOrderLineId: 200,
       invoiceUnitCostCents: 551,
       invoiceUnitCostMills: 55055,
       invoiceNumber: "INV-PG-001",
@@ -220,6 +224,91 @@ describeWithDisposableDb.sequential("invoice variance COGS PostgreSQL transactio
     expect(adjustmentCount.rows[0].count).toBe("2");
   });
 
+  it("does not revalue another PO line for the same PO and variant", async () => {
+    await seedTwoLots();
+    const otherLineLot = await pool.query<{ id: number }>(`
+      INSERT INTO inventory.inventory_lots (
+        lot_number, product_variant_id, purchase_order_id, po_line_id,
+        unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
+        landed_cost_cents, total_unit_cost_cents,
+        unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
+        landed_cost_mills, total_unit_cost_mills, cost_source
+      ) VALUES
+        ('LOT-OTHER-LINE', 5, 100, 201, 700, 700, 0, 0, 700, 70000, 70000, 0, 0, 70000, 'po')
+      RETURNING id
+    `);
+
+    const result = await service.reconcileInvoiceVariance({
+      purchaseOrderId: 100,
+      purchaseOrderLineId: 200,
+      invoiceUnitCostCents: 551,
+      invoiceUnitCostMills: 55055,
+      invoiceNumber: "INV-PG-EXACT-LINE",
+    });
+
+    expect(result.lotsUpdated).toBe(2);
+    const untouched = await pool.query(`
+      SELECT po_unit_cost_mills, total_unit_cost_mills, cost_source
+      FROM inventory.inventory_lots
+      WHERE id = $1
+    `, [otherLineLot.rows[0].id]);
+    expect(untouched.rows[0]).toMatchObject({
+      po_unit_cost_mills: "70000",
+      total_unit_cost_mills: "70000",
+      cost_source: "po",
+    });
+  });
+
+  it("revalues every actual receipt configuration on the exact PO line", async () => {
+    await pool.query(`
+      INSERT INTO inventory.inventory_lots (
+        lot_number, product_variant_id, purchase_order_id, po_line_id,
+        unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
+        landed_cost_cents, total_unit_cost_cents,
+        unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
+        landed_cost_mills, total_unit_cost_mills, cost_source
+      ) VALUES
+        ('LOT-EACH', 5, 100, 200, 1, 1, 0, 0, 1, 100, 100, 0, 0, 100, 'po'),
+        ('LOT-PACK-50', 6, 100, 200, 50, 50, 0, 0, 50, 5000, 5000, 0, 0, 5000, 'po')
+    `);
+
+    const result = await service.reconcileInvoiceVariance({
+      purchaseOrderId: 100,
+      purchaseOrderLineId: 200,
+      invoiceUnitCostCents: 1,
+      invoiceUnitCostMills: 125,
+      invoiceNumber: "INV-PG-MIXED-RECEIPTS",
+    });
+
+    expect(result).toEqual({
+      lotsUpdated: 2,
+      cogsRowsUpdated: 0,
+      totalCogsDeltaCents: 0,
+    });
+    const lots = await pool.query(`
+      SELECT product_variant_id, po_unit_cost_mills, total_unit_cost_mills,
+             unit_cost_cents, cost_source
+      FROM inventory.inventory_lots
+      ORDER BY product_variant_id
+    `);
+    expect(lots.rows).toEqual([
+      {
+        product_variant_id: 5,
+        po_unit_cost_mills: "125",
+        total_unit_cost_mills: "125",
+        unit_cost_cents: "1",
+        cost_source: "invoice",
+      },
+      {
+        product_variant_id: 6,
+        po_unit_cost_mills: "6250",
+        total_unit_cost_mills: "6250",
+        unit_cost_cents: "63",
+        cost_source: "invoice",
+      },
+    ]);
+  });
+
   it("rolls back the first lot and COGS row when the second lot fails", async () => {
     const [, secondLotId] = await seedTwoLots();
     await pool.query(`
@@ -239,7 +328,7 @@ describeWithDisposableDb.sequential("invoice variance COGS PostgreSQL transactio
 
     await expect(service.reconcileInvoiceVariance({
       purchaseOrderId: 100,
-      productVariantId: 5,
+      purchaseOrderLineId: 200,
       invoiceUnitCostCents: 551,
       invoiceUnitCostMills: 55055,
       invoiceNumber: "INV-PG-ROLLBACK",

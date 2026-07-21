@@ -17,8 +17,6 @@ import {
   inboundShipmentLines,
   landedCostSnapshots,
   vendorInvoiceLines,
-  vendorInvoices as vendorInvoicesTable,
-  vendorInvoicePoLinks as vendorInvoicePoLinksTable,
   apPayments as apPaymentsTable,
   apPaymentAllocations as apPaymentAllocationsTable,
   purchaseOrders as purchaseOrdersTable,
@@ -102,7 +100,10 @@ import {
   type CreatePurchaseRecommendationRunInput,
 } from "./purchase-recommendation-snapshot.service";
 import type { FinancialCommandDescriptor } from "../../platform/commands/transactional-command.service";
-import { recomputePoFinancialAggregates } from "./ap-ledger.service";
+import {
+  recomputePoFinancialAggregates,
+  recomputePurchaseOrderInvoiceMatchesInTransaction,
+} from "./ap-ledger.service";
 
 const PG_INTEGER_MAX = 2_147_483_647;
 const MAX_INLINE_PO_LINES = 2_000;
@@ -345,9 +346,17 @@ export type PurchasingService = ReturnType<typeof createPurchasingService>;
 export function createPurchasingService(
   db: any,
   storage: Storage,
-  options: { now?: () => Date } = {},
+  options: {
+    now?: () => Date;
+    reconcileApprovedInvoiceCost?: (
+      purchaseOrderLineId: number,
+      tx: any,
+      actorId?: string,
+    ) => Promise<unknown>;
+  } = {},
 ) {
   const now = options.now ?? (() => new Date());
+  const reconcileApprovedInvoiceCost = options.reconcileApprovedInvoiceCost;
   const lineCommands = createPurchaseOrderLineCommands(db, {
     persistCatalogWrites: async (tx, vendorId, lines, userId) => {
       try {
@@ -859,16 +868,9 @@ export function createPurchasingService(
     correctedLegacyEconomics: boolean;
   };
 
-  async function observeLifecycleState(
-    id: number,
-    allowedStatuses: readonly string[],
-    invalidMessage: (status: string) => string,
-  ): Promise<LifecycleExpectation> {
+  async function observeLifecycleVersion(id: number): Promise<LifecycleExpectation> {
     const observed = await storage.getPurchaseOrderById(id);
     if (!observed) throw new PurchasingError("Purchase order not found", 404);
-    if (!allowedStatuses.includes(observed.status)) {
-      throw new PurchasingError(invalidMessage(observed.status), 400);
-    }
     const updatedAtMs = observed.updatedAt == null
       ? null
       : new Date(observed.updatedAt).getTime();
@@ -876,6 +878,18 @@ export function createPurchasingService(
       status: observed.status,
       updatedAtMs: Number.isNaN(updatedAtMs) ? null : updatedAtMs,
     };
+  }
+
+  async function observeLifecycleState(
+    id: number,
+    allowedStatuses: readonly string[],
+    invalidMessage: (status: string) => string,
+  ): Promise<LifecycleExpectation> {
+    const expectation = await observeLifecycleVersion(id);
+    if (!allowedStatuses.includes(expectation.status)) {
+      throw new PurchasingError(invalidMessage(expectation.status), 400);
+    }
+    return expectation;
   }
 
   function assertLifecycleExpectation(po: any, expectation: LifecycleExpectation): void {
@@ -896,13 +910,13 @@ export function createPurchasingService(
     }
   }
 
-  async function lockLifecycleEconomics(
+  async function lockLifecycleHeader(
     tx: any,
     id: number,
     expectation: LifecycleExpectation,
-  ): Promise<LockedLifecycleEconomics> {
+  ): Promise<any> {
     const headerRows = await tx
-      .select()
+      .select({ ...getTableColumns(purchaseOrdersTable) })
       .from(purchaseOrdersTable)
       .where(eq(purchaseOrdersTable.id, id))
       .limit(1)
@@ -910,6 +924,15 @@ export function createPurchasingService(
     const po = headerRows[0];
     if (!po) throw new PurchasingError("Purchase order not found", 404);
     assertLifecycleExpectation(po, expectation);
+    return po;
+  }
+
+  async function lockLifecycleEconomics(
+    tx: any,
+    id: number,
+    expectation: LifecycleExpectation,
+  ): Promise<LockedLifecycleEconomics> {
+    const po = await lockLifecycleHeader(tx, id, expectation);
 
     // Header-first lock ordering matches all hardened line commands. Once the
     // header is locked, no line writer can enter; locking every active line
@@ -1365,25 +1388,33 @@ export function createPurchasingService(
     extraPatch?: Record<string, any>,
     historyFromStatus?: string,
   ): Promise<any> {
-    const po = await storage.getPurchaseOrderById(poId);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-
-    const change = (() => {
-      try {
-        return buildPhysicalTransitionChange({
-          po,
-          target,
-          userId,
-          notes,
-          extraPatch,
-          historyFromStatus,
-        });
-      } catch (error) {
-        return toPurchasingError(error);
-      }
-    })();
+    const expectation = await observeLifecycleVersion(poId);
     const eventType = PHYSICAL_LIFECYCLE_EVENTS[target];
     const result = await db.transaction(async (tx: any) => {
+      const po = await lockLifecycleHeader(tx, poId, expectation);
+      if (extraPatch?.confirmedDeliveryDate !== undefined) {
+        const issues = validateDeliverySchedulePatch(po, {
+          confirmedDeliveryDate: extraPatch.confirmedDeliveryDate,
+        });
+        if (issues.length > 0) {
+          const issue = issues[0];
+          throw new PurchasingError(issue.message, 400, issue);
+        }
+      }
+      const change = (() => {
+        try {
+          return buildPhysicalTransitionChange({
+            po,
+            target,
+            userId,
+            notes,
+            extraPatch,
+            historyFromStatus,
+          });
+        } catch (error) {
+          return toPurchasingError(error);
+        }
+      })();
       const updated = await updatePurchaseOrderStatusWithHistoryTx(
         tx,
         poId,
@@ -1436,29 +1467,29 @@ export function createPurchasingService(
     notes?: string,
     extraPatch?: Record<string, any>,
   ): Promise<any> {
-    const po = await storage.getPurchaseOrderById(poId);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-
-    const change = (() => {
-      try {
-        return buildFinancialTransitionChange({
-          po,
-          target,
-          userId,
-          notes,
-          extraPatch,
-        });
-      } catch (error) {
-        return toPurchasingError(error);
-      }
-    })();
-    const patch = change.patch;
-
-    return await storage.updatePurchaseOrderStatusWithHistory(
-      poId,
-      patch,
-      change.history,
-    );
+    const expectation = await observeLifecycleVersion(poId);
+    return db.transaction(async (tx: any) => {
+      const po = await lockLifecycleHeader(tx, poId, expectation);
+      const change = (() => {
+        try {
+          return buildFinancialTransitionChange({
+            po,
+            target,
+            userId,
+            notes,
+            extraPatch,
+          });
+        } catch (error) {
+          return toPurchasingError(error);
+        }
+      })();
+      return updatePurchaseOrderStatusWithHistoryTx(
+        tx,
+        poId,
+        change.patch,
+        change.history,
+      );
+    });
   }
 
   /** @deprecated AP ledger owns invoice-derived PO financial aggregates. */
@@ -2657,20 +2688,6 @@ export function createPurchasingService(
   }
 
   async function acknowledge(id: number, data: { vendorRefNumber?: string; confirmedDeliveryDate?: Date }, userId?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-    assertTransition(po.status, "acknowledged");
-
-    if (data.confirmedDeliveryDate !== undefined) {
-      const issues = validateDeliverySchedulePatch(po, {
-        confirmedDeliveryDate: data.confirmedDeliveryDate,
-      });
-      if (issues.length > 0) {
-        const issue = issues[0];
-        throw new PurchasingError(issue.message, 400, issue);
-      }
-    }
-
     const result = await transitionPhysical(id, "acknowledged", userId, "Vendor acknowledged", {
       vendorAckDate: new Date(),
       vendorRefNumber: data.vendorRefNumber,
@@ -2681,31 +2698,33 @@ export function createPurchasingService(
   }
 
   async function cancel(id: number, reason: string, userId?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-
     if (!reason) throw new PurchasingError("Cancel reason is required", 400);
-
-    if (!CANCELLABLE_FROM.has(po.status) && !VOIDABLE_FROM.has(po.status)) {
-      throw new PurchasingError(`Cannot cancel/void PO in '${po.status}' status`, 400);
-    }
-
-    const lines = await storage.getPurchaseOrderLines(id);
-    const change = (() => {
-      try {
-        return buildPhysicalTransitionChange({
-          po,
-          target: "cancelled",
-          userId,
-          notes: reason,
-          extraPatch: { cancelReason: reason },
-        });
-      } catch (error) {
-        return toPurchasingError(error);
-      }
-    })();
+    const expectation = await observeLifecycleVersion(id);
 
     const result = await db.transaction(async (tx: any) => {
+      const po = await lockLifecycleHeader(tx, id, expectation);
+      if (!CANCELLABLE_FROM.has(po.status) && !VOIDABLE_FROM.has(po.status)) {
+        throw new PurchasingError(`Cannot cancel/void PO in '${po.status}' status`, 400);
+      }
+      const lines = await tx
+        .select()
+        .from(purchaseOrderLinesTable)
+        .where(eq(purchaseOrderLinesTable.purchaseOrderId, id))
+        .orderBy(purchaseOrderLinesTable.id)
+        .for("update");
+      const change = (() => {
+        try {
+          return buildPhysicalTransitionChange({
+            po,
+            target: "cancelled",
+            userId,
+            notes: reason,
+            extraPatch: { cancelReason: reason },
+          });
+        } catch (error) {
+          return toPurchasingError(error);
+        }
+      })();
       for (const line of lines) {
         if (line.status === "open") {
           await updatePurchaseOrderLineTx(tx, line.id, {
@@ -2742,9 +2761,8 @@ export function createPurchasingService(
   /**
    * Close a PO.
    *
-   * Before closing, checks for 3-way match discrepancies on any linked
-   * vendor invoices. If any invoice line has a match_status that is not
-   * 'matched' or 'pending', the close is refused with a 409 error.
+   * Before closing, checks every linked vendor-invoice line under the same
+   * transaction and refuses close unless every line is explicitly matched.
    *
    * There is no forceOverride flag on close(). To close despite mismatches,
    * use closeShort(reason) which records per-line close-short reasons and
@@ -2874,60 +2892,63 @@ export function createPurchasingService(
   }
 
   async function close(id: number, userId?: string, notes?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
+    const expectation = await observeLifecycleState(
+      id,
+      ["partially_received", "received"],
+      (status) => `Cannot close PO in '${status}' status`,
+    );
 
-    // ── 3-way match gate ────────────────────────────────────────────
-    // Check linked invoices for match discrepancies before allowing close.
-    // This replaces the former payment-time gate; receipts exist by close
-    // time so the match is actually possible.
-    const poLinks = await db
-      .select({ vendorInvoiceId: vendorInvoicePoLinksTable.vendorInvoiceId })
-      .from(vendorInvoicePoLinksTable)
-      .where(eq(vendorInvoicePoLinksTable.purchaseOrderId, id));
+    const outcome = await db.transaction(async (tx: any) => {
+      const po = await lockLifecycleHeader(tx, id, expectation);
 
-    if (poLinks.length > 0) {
-      const invoiceIds = [...new Set(poLinks.map((l: any) => l.vendorInvoiceId as number))] as number[];
-
-      const mismatchedLines: Array<{ invoiceId: number; invoiceNumber: string; matchStatus: string }> = await db
-        .select({
-          invoiceId: vendorInvoiceLines.vendorInvoiceId,
-          invoiceNumber: vendorInvoicesTable.invoiceNumber,
-          matchStatus: vendorInvoiceLines.matchStatus,
-        })
-        .from(vendorInvoiceLines)
-        .innerJoin(vendorInvoicesTable, eq(vendorInvoiceLines.vendorInvoiceId, vendorInvoicesTable.id))
-        .where(
-          and(
-            inArray(vendorInvoiceLines.vendorInvoiceId, invoiceIds),
-            sql`${vendorInvoiceLines.matchStatus} NOT IN ('matched', 'pending')`,
-          ),
-        );
-
-      if (mismatchedLines.length > 0) {
-        // Refresh exceptions on each linked invoice so the PO detail page
-        // shows the discrepancy before the user tries close-short.
-        for (const invId of invoiceIds) {
-          await detectMatchMismatch(invId as number);
+      // Receipts exist by close time, so derive the three-way match from the
+      // locked source rows instead of trusting previously persisted statuses.
+      const match = await recomputePurchaseOrderInvoiceMatchesInTransaction(
+        id,
+        tx,
+        userId,
+      );
+      const unresolvedLines = match.results.filter((line) => line.matchStatus !== "matched");
+      if (unresolvedLines.length > 0 || match.invoicesWithoutMappedLines.length > 0) {
+        const blockedInvoiceIds = [...new Set([
+          ...unresolvedLines.map((line) => Number(line.vendorInvoiceId)),
+          ...match.invoicesWithoutMappedLines,
+        ])].sort((left, right) => left - right);
+        const statusCounts = unresolvedLines.reduce<Record<string, number>>((counts, line) => {
+          counts[line.matchStatus] = (counts[line.matchStatus] ?? 0) + 1;
+          return counts;
+        }, {});
+        if (match.invoicesWithoutMappedLines.length > 0) {
+          statusCounts.unmapped_invoice = match.invoicesWithoutMappedLines.length;
         }
-
-        const invoiceNumbers = [...new Set(mismatchedLines.map((l) => l.invoiceNumber))];
-        throw new PurchasingError(
-          `Cannot close PO — 3-way match discrepancy. Invoice${invoiceNumbers.length !== 1 ? "s" : ""} ${invoiceNumbers.join(", ")} have ${mismatchedLines.length} line${mismatchedLines.length !== 1 ? "s" : ""} with match issues. Use close-short (with reason) to close anyway.`,
-          409,
-        );
+        return {
+          kind: "blocked" as const,
+          poStatus: po.status,
+          blockedInvoiceIds,
+          invoiceLabels: blockedInvoiceIds.map(
+            (invoiceId) => match.invoiceNumbersById.get(invoiceId) ?? `#${invoiceId}`,
+          ),
+          lineIds: unresolvedLines.map((line) => Number(line.id)),
+          statusCounts,
+          unresolvedLineCount: unresolvedLines.length,
+          unmappedInvoiceCount: match.invoicesWithoutMappedLines.length,
+        };
       }
-    }
 
-    const change = (() => {
-      try {
-        return buildPoCloseChange({ po, userId, notes });
-      } catch (error) {
-        return toPurchasingError(error);
+      if (reconcileApprovedInvoiceCost) {
+        for (const purchaseOrderLineId of match.purchaseOrderLineIds) {
+          await reconcileApprovedInvoiceCost(purchaseOrderLineId, tx, userId);
+        }
       }
-    })();
 
-    return db.transaction(async (tx: any) => {
+      const change = (() => {
+        try {
+          return buildPoCloseChange({ po, userId, notes });
+        } catch (error) {
+          return toPurchasingError(error);
+        }
+      })();
+
       const updated = await updatePurchaseOrderStatusWithHistoryTx(
         tx,
         id,
@@ -2945,31 +2966,78 @@ export function createPurchasingService(
         change.patch.closedAt instanceof Date ? change.patch.closedAt : now(),
         userId,
       );
-      return updated;
+      return { kind: "closed" as const, updated };
     });
+
+    if (outcome.kind === "closed") return outcome.updated;
+
+    for (const invoiceId of outcome.blockedInvoiceIds) {
+      try {
+        await detectMatchMismatch(invoiceId);
+      } catch (detectionError) {
+        console.error("[po-exceptions] close match detection failed:", detectionError);
+      }
+    }
+    const nextAction = outcome.poStatus === "partially_received"
+      ? "Resolve every invoice line, or use close-short with a reason."
+      : "Resolve every invoice line before closing the PO.";
+    const unresolvedParts: string[] = [];
+    if (outcome.unresolvedLineCount > 0) {
+      unresolvedParts.push(
+        `${outcome.unresolvedLineCount} unresolved invoice line${outcome.unresolvedLineCount === 1 ? "" : "s"}`,
+      );
+    }
+    if (outcome.unmappedInvoiceCount > 0) {
+      unresolvedParts.push(
+        `${outcome.unmappedInvoiceCount} invoice${outcome.unmappedInvoiceCount === 1 ? "" : "s"} without mapped PO lines`,
+      );
+    }
+    throw new PurchasingError(
+      `Cannot close PO: invoice${outcome.invoiceLabels.length === 1 ? "" : "s"} ${outcome.invoiceLabels.join(", ")} have ${unresolvedParts.join(" and ")}. ${nextAction}`,
+      409,
+      {
+        code: "PO_CLOSE_3WAY_MATCH_BLOCKED",
+        purchaseOrderId: id,
+        invoiceIds: outcome.blockedInvoiceIds,
+        lineIds: outcome.lineIds,
+        statusCounts: outcome.statusCounts,
+      },
+    );
   }
 
   async function closeShort(id: number, reason: string, userId?: string) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-
     if (!reason) throw new PurchasingError("Close-short reason is required", 400);
-
-    const lines = await storage.getPurchaseOrderLines(id);
-
-    const change = (() => {
-      try {
-        return buildPoCloseShortChange({ po, reason, userId });
-      } catch (error) {
-        return toPurchasingError(error);
-      }
-    })();
+    const expectation = await observeLifecycleState(
+      id,
+      ["partially_received"],
+      () => "Can only close-short a partially received PO",
+    );
 
     return db.transaction(async (tx: any) => {
+      const po = await lockLifecycleHeader(tx, id, expectation);
+      const lines = await tx
+        .select()
+        .from(purchaseOrderLinesTable)
+        .where(eq(purchaseOrderLinesTable.purchaseOrderId, id))
+        .orderBy(purchaseOrderLinesTable.id)
+        .for("update");
+      const change = (() => {
+        try {
+          return buildPoCloseShortChange({ po, reason, userId });
+        } catch (error) {
+          return toPurchasingError(error);
+        }
+      })();
       for (const line of lines) {
         const linePatch = buildPoCloseShortLinePatch(line, reason);
         if (linePatch) {
           await updatePurchaseOrderLineTx(tx, line.id, linePatch);
+        }
+      }
+
+      if (reconcileApprovedInvoiceCost) {
+        for (const line of lines) {
+          await reconcileApprovedInvoiceCost(Number(line.id), tx, userId);
         }
       }
 

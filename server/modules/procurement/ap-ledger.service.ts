@@ -31,6 +31,7 @@ import {
   detectOverpaid,
   detectPastDue,
 } from "./po-exceptions.service";
+import { evaluatePurchaseOrderInvoiceMatches } from "./purchase-order-invoice-match";
 import { COGSService } from "../inventory";
 
 // ── Error class ─────────────────────────────────────────────────────
@@ -446,6 +447,7 @@ async function appendApMutationAudit(
 type EditableInvoice = {
   id: number;
   vendorId: number;
+  currency: string | null;
   status: string;
   paidAmountCents: number;
 };
@@ -458,6 +460,7 @@ async function lockEditableInvoice(
     .select({
       id: vendorInvoices.id,
       vendorId: vendorInvoices.vendorId,
+      currency: vendorInvoices.currency,
       status: vendorInvoices.status,
       paidAmountCents: vendorInvoices.paidAmountCents,
     })
@@ -483,13 +486,46 @@ async function lockEditableInvoice(
   return invoice;
 }
 
+async function lockInvoiceForMatch(
+  client: ApLedgerDbClient,
+  invoiceId: number,
+): Promise<EditableInvoice> {
+  const [invoice] = await client
+    .select({
+      id: vendorInvoices.id,
+      vendorId: vendorInvoices.vendorId,
+      currency: vendorInvoices.currency,
+      status: vendorInvoices.status,
+      paidAmountCents: vendorInvoices.paidAmountCents,
+    })
+    .from(vendorInvoices)
+    .where(eq(vendorInvoices.id, invoiceId))
+    .for("update");
+
+  if (!invoice) {
+    throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
+  }
+  if (invoice.status === "voided") {
+    throw new ApLedgerError("Voided invoices cannot be matched", 409, {
+      code: "AP_INVOICE_MATCH_VOIDED",
+      invoiceId,
+    });
+  }
+  return invoice;
+}
+
 async function lockMatchingPurchaseOrder(
   client: ApLedgerDbClient,
   purchaseOrderId: number,
   vendorId: number,
+  invoiceCurrency: string | null | undefined,
 ): Promise<void> {
   const [po] = await client
-    .select({ id: purchaseOrders.id, vendorId: purchaseOrders.vendorId })
+    .select({
+      id: purchaseOrders.id,
+      vendorId: purchaseOrders.vendorId,
+      currency: purchaseOrders.currency,
+    })
     .from(purchaseOrders)
     .where(eq(purchaseOrders.id, purchaseOrderId))
     .for("update");
@@ -512,6 +548,20 @@ async function lockMatchingPurchaseOrder(
       },
     );
   }
+  const normalizedInvoiceCurrency = (invoiceCurrency ?? "USD").trim().toUpperCase();
+  const normalizedPoCurrency = (po.currency ?? "USD").trim().toUpperCase();
+  if (normalizedInvoiceCurrency !== normalizedPoCurrency) {
+    throw new ApLedgerError(
+      "Invoice and purchase order must use the same currency",
+      422,
+      {
+        code: "AP_INVOICE_PO_CURRENCY_MISMATCH",
+        purchaseOrderId,
+        invoiceCurrency: normalizedInvoiceCurrency,
+        purchaseOrderCurrency: normalizedPoCurrency,
+      },
+    );
+  }
 }
 
 async function requireLinkedPoLine(
@@ -519,14 +569,35 @@ async function requireLinkedPoLine(
   invoiceId: number,
   purchaseOrderLineId: number,
 ): Promise<void> {
+  const [lineReference] = await client
+    .select({ purchaseOrderId: purchaseOrderLines.purchaseOrderId })
+    .from(purchaseOrderLines)
+    .where(eq(purchaseOrderLines.id, purchaseOrderLineId));
+  if (!lineReference) {
+    throw new ApLedgerError("Purchase order line not found", 404, {
+      code: "AP_PURCHASE_ORDER_LINE_NOT_FOUND",
+      purchaseOrderLineId,
+    });
+  }
+  const [po] = await client
+    .select({ id: purchaseOrders.id })
+    .from(purchaseOrders)
+    .where(eq(purchaseOrders.id, lineReference.purchaseOrderId))
+    .for("update");
+  if (!po) {
+    throw new ApLedgerError("Purchase order not found", 404, {
+      code: "AP_PURCHASE_ORDER_NOT_FOUND",
+      purchaseOrderId: lineReference.purchaseOrderId,
+    });
+  }
   const [poLine] = await client
     .select({ purchaseOrderId: purchaseOrderLines.purchaseOrderId })
     .from(purchaseOrderLines)
     .where(eq(purchaseOrderLines.id, purchaseOrderLineId))
     .for("share");
-  if (!poLine) {
-    throw new ApLedgerError("Purchase order line not found", 404, {
-      code: "AP_PURCHASE_ORDER_LINE_NOT_FOUND",
+  if (!poLine || poLine.purchaseOrderId !== lineReference.purchaseOrderId) {
+    throw new ApLedgerError("Purchase order line changed while the invoice was being updated", 409, {
+      code: "AP_PURCHASE_ORDER_LINE_CONFLICT",
       purchaseOrderLineId,
     });
   }
@@ -536,7 +607,7 @@ async function requireLinkedPoLine(
     .from(vendorInvoicePoLinks)
     .where(and(
       eq(vendorInvoicePoLinks.vendorInvoiceId, invoiceId),
-      eq(vendorInvoicePoLinks.purchaseOrderId, poLine.purchaseOrderId),
+      eq(vendorInvoicePoLinks.purchaseOrderId, lineReference.purchaseOrderId),
     ));
   if (!link) {
     throw new ApLedgerError(
@@ -546,7 +617,7 @@ async function requireLinkedPoLine(
         code: "AP_INVOICE_LINE_PO_NOT_LINKED",
         invoiceId,
         purchaseOrderLineId,
-        purchaseOrderId: poLine.purchaseOrderId,
+        purchaseOrderId: lineReference.purchaseOrderId,
       },
     );
   }
@@ -938,7 +1009,7 @@ export async function createInvoice(data: {
     }
 
     for (const poId of poIds) {
-      await lockMatchingPurchaseOrder(tx, poId, vendorId);
+      await lockMatchingPurchaseOrder(tx, poId, vendorId, currency);
     }
     if (poIds.length > 0) {
       await tx.insert(vendorInvoicePoLinks).values(
@@ -1260,7 +1331,7 @@ async function approveInvoiceInTransaction(
     throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
   }
   if (["approved", "partially_paid", "paid"].includes(inv.status)) {
-    await reconcileApprovedInvoiceVariance(id, tx);
+    await reconcileApprovedInvoiceVariance(id, tx, userId);
     return {
       value: inv,
       affectedPoIds: await getPoIdsForInvoice(id, tx),
@@ -1284,48 +1355,241 @@ async function approveInvoiceInTransaction(
     reason: `Vendor invoice ${id} approved.`,
     resolveDispute: true,
   });
-  await reconcileApprovedInvoiceVariance(id, tx);
+  await reconcileApprovedInvoiceVariance(id, tx, userId);
   return { value: invoice, affectedPoIds, changed: true };
 }
 
 async function reconcileApprovedInvoiceVariance(
   id: number,
   client: ApLedgerDbClient,
+  actorId?: string,
 ): Promise<void> {
-  // Invoice approval and every resulting lot/COGS revaluation share the
-  // caller's transaction so financial state cannot commit partially.
   const invoiceLines = await client
-    .select()
+    .select({ purchaseOrderLineId: vendorInvoiceLines.purchaseOrderLineId })
     .from(vendorInvoiceLines)
     .where(eq(vendorInvoiceLines.vendorInvoiceId, id));
-
-  const [invoice] = await client
-    .select({ invoiceNumber: vendorInvoices.invoiceNumber })
-    .from(vendorInvoices)
-    .where(eq(vendorInvoices.id, id))
-    .limit(1);
-
-  const cogsSvc = new COGSService(client as any);
-
-  for (const line of invoiceLines) {
-    if (!line.purchaseOrderLineId || !line.productVariantId) continue;
-    if (line.matchStatus !== "price_discrepancy") continue;
-
-    const [poLine] = await client
-      .select({ purchaseOrderId: purchaseOrderLines.purchaseOrderId })
-      .from(purchaseOrderLines)
-      .where(eq(purchaseOrderLines.id, line.purchaseOrderLineId))
-      .limit(1);
-    if (!poLine?.purchaseOrderId) continue;
-
-    await cogsSvc.reconcileInvoiceVariance({
-      purchaseOrderId: poLine.purchaseOrderId,
-      productVariantId: line.productVariantId,
-      invoiceUnitCostCents: line.unitCostCents,
-      invoiceUnitCostMills: line.unitCostMills ?? centsToMills(line.unitCostCents),
-      invoiceNumber: invoice?.invoiceNumber ?? undefined,
-    }, client);
+  const purchaseOrderLineIds = uniqueNumbers(
+    invoiceLines.map((line) => line.purchaseOrderLineId),
+  ).sort((left, right) => left - right);
+  for (const purchaseOrderLineId of purchaseOrderLineIds) {
+    await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(
+      purchaseOrderLineId,
+      client,
+      actorId,
+    );
   }
+}
+
+export type ApprovedInvoiceVarianceReconciliationResult = {
+  purchaseOrderLineId: number;
+  state:
+    | "invoice_actual"
+    | "po_fallback_no_approved_invoice"
+    | "po_fallback_incomplete_invoice_quantity"
+    | "not_applicable_non_product";
+  authoritativeUnitCostMills: number | null;
+  approvedInvoiceIds: number[];
+  approvedQty: string;
+  lotsUpdated: number;
+  cogsRowsUpdated: number;
+  totalCogsDeltaCents: number;
+};
+
+/**
+ * Resolve the authoritative product cost for one PO line from all currently
+ * approved/paid invoice lines. Complete approved coverage uses the
+ * quantity-weighted invoice mills per base piece. Incomplete or absent coverage
+ * deterministically falls back to the PO cost until the evidence is complete.
+ */
+export async function reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(
+  purchaseOrderLineId: number,
+  client: ApLedgerDbClient,
+  actorId?: string,
+): Promise<ApprovedInvoiceVarianceReconciliationResult> {
+  const normalizedPoLineId = requireCommandId(purchaseOrderLineId, "purchaseOrderLineId");
+  const [poLine] = await client
+    .select({
+      id: purchaseOrderLines.id,
+      purchaseOrderId: purchaseOrderLines.purchaseOrderId,
+      lineType: purchaseOrderLines.lineType,
+      status: purchaseOrderLines.status,
+      orderQty: purchaseOrderLines.orderQty,
+      receivedQty: purchaseOrderLines.receivedQty,
+      unitCostCents: purchaseOrderLines.unitCostCents,
+      unitCostMills: purchaseOrderLines.unitCostMills,
+    })
+    .from(purchaseOrderLines)
+    .where(eq(purchaseOrderLines.id, normalizedPoLineId))
+    .for("update");
+  if (!poLine) {
+    throw new ApLedgerError("Purchase order line not found", 404, {
+      code: "AP_PURCHASE_ORDER_LINE_NOT_FOUND",
+      purchaseOrderLineId: normalizedPoLineId,
+    });
+  }
+
+  const orderQty = requireNonnegativeInteger(poLine.orderQty, "purchaseOrderLine.orderQty");
+  const poUnitCostMills = requireNonnegativeInteger(
+    poLine.unitCostMills ?? centsToMills(
+      requireNonnegativeInteger(poLine.unitCostCents ?? 0, "purchaseOrderLine.unitCostCents"),
+    ),
+    "purchaseOrderLine.unitCostMills",
+  );
+  const candidateLines = await client
+    .select({
+      id: vendorInvoiceLines.id,
+      vendorInvoiceId: vendorInvoiceLines.vendorInvoiceId,
+      qtyInvoiced: vendorInvoiceLines.qtyInvoiced,
+      unitCostCents: vendorInvoiceLines.unitCostCents,
+      unitCostMills: vendorInvoiceLines.unitCostMills,
+    })
+    .from(vendorInvoiceLines)
+    .where(eq(vendorInvoiceLines.purchaseOrderLineId, normalizedPoLineId))
+    .orderBy(asc(vendorInvoiceLines.vendorInvoiceId), asc(vendorInvoiceLines.id))
+    .for("share");
+  const candidateInvoiceIds = uniqueNumbers(
+    candidateLines.map((line) => line.vendorInvoiceId),
+  );
+  const invoiceRows = candidateInvoiceIds.length === 0
+    ? []
+    : await client
+      .select({
+        id: vendorInvoices.id,
+        invoiceNumber: vendorInvoices.invoiceNumber,
+        status: vendorInvoices.status,
+      })
+      .from(vendorInvoices)
+      .where(inArray(vendorInvoices.id, candidateInvoiceIds));
+  const approvedInvoiceRows = invoiceRows.filter((invoice) =>
+    ["approved", "partially_paid", "paid"].includes(invoice.status),
+  );
+  const approvedInvoiceIds = approvedInvoiceRows
+    .map((invoice) => invoice.id)
+    .sort((left, right) => left - right);
+  const approvedInvoiceIdSet = new Set(approvedInvoiceIds);
+  const approvedLines = candidateLines.filter((line) =>
+    approvedInvoiceIdSet.has(Number(line.vendorInvoiceId)),
+  );
+  const approvedQty = approvedLines.reduce(
+    (total, line) => total + BigInt(requireNonnegativeInteger(
+      line.qtyInvoiced,
+      `vendorInvoiceLine[${line.id}].qtyInvoiced`,
+    )),
+    BigInt(0),
+  );
+  const approvedExtendedCostMills = approvedLines.reduce(
+    (total, line) => {
+      const qty = BigInt(requireNonnegativeInteger(
+        line.qtyInvoiced,
+        `vendorInvoiceLine[${line.id}].qtyInvoiced`,
+      ));
+      const unitCostMills = BigInt(requireNonnegativeInteger(
+        line.unitCostMills ?? centsToMills(
+          requireNonnegativeInteger(line.unitCostCents, `vendorInvoiceLine[${line.id}].unitCostCents`),
+        ),
+        `vendorInvoiceLine[${line.id}].unitCostMills`,
+      ));
+      return total + (qty * unitCostMills);
+    },
+    BigInt(0),
+  );
+  const receivedQty = requireNonnegativeInteger(
+    poLine.receivedQty ?? 0,
+    "purchaseOrderLine.receivedQty",
+  );
+  const costCoverageQty = ["received", "closed"].includes(poLine.status)
+    ? receivedQty
+    : orderQty;
+
+  let state: ApprovedInvoiceVarianceReconciliationResult["state"];
+  let authoritativeUnitCostMills: number;
+  let costSource: "invoice" | "po";
+  if (approvedLines.length === 0) {
+    state = "po_fallback_no_approved_invoice";
+    authoritativeUnitCostMills = poUnitCostMills;
+    costSource = "po";
+  } else if (approvedQty === BigInt(0) || approvedQty !== BigInt(costCoverageQty)) {
+    state = "po_fallback_incomplete_invoice_quantity";
+    authoritativeUnitCostMills = poUnitCostMills;
+    costSource = "po";
+  } else {
+    state = "invoice_actual";
+    const roundedWeightedMills = (
+      (approvedExtendedCostMills * BigInt(2)) + approvedQty
+    ) / (approvedQty * BigInt(2));
+    authoritativeUnitCostMills = bigintMoneyToNumber(
+      roundedWeightedMills,
+      `purchaseOrderLine[${normalizedPoLineId}].approvedWeightedUnitCostMills`,
+    );
+    costSource = "invoice";
+  }
+
+  if (poLine.lineType !== "product") {
+    await appendApMutationAudit(
+      "po_line_cost_reconciliation_skipped",
+      `purchase_order_line:${normalizedPoLineId}`,
+      actorId,
+      {
+        purchaseOrderId: poLine.purchaseOrderId,
+        purchaseOrderLineId: normalizedPoLineId,
+        state: "not_applicable_non_product",
+        approvedInvoiceIds,
+        approvedQty: approvedQty.toString(),
+        orderQty,
+        receivedQty,
+        costCoverageQty,
+      },
+      client,
+    );
+    return {
+      purchaseOrderLineId: normalizedPoLineId,
+      state: "not_applicable_non_product",
+      authoritativeUnitCostMills: null,
+      approvedInvoiceIds,
+      approvedQty: approvedQty.toString(),
+      lotsUpdated: 0,
+      cogsRowsUpdated: 0,
+      totalCogsDeltaCents: 0,
+    };
+  }
+
+  const invoiceNumbers = approvedInvoiceRows.map((invoice) => invoice.invoiceNumber);
+  const cogsResult = await new COGSService(client as any).reconcileInvoiceVariance({
+    purchaseOrderId: poLine.purchaseOrderId,
+    purchaseOrderLineId: normalizedPoLineId,
+    invoiceUnitCostCents: millsToCents(authoritativeUnitCostMills),
+    invoiceUnitCostMills: authoritativeUnitCostMills,
+    invoiceNumber: invoiceNumbers.length > 0 ? invoiceNumbers.join(",") : undefined,
+    costSource,
+    reason: `po_line_cost_reconciliation:${state}`,
+  }, client);
+  await appendApMutationAudit(
+    "po_line_cost_reconciled",
+    `purchase_order_line:${normalizedPoLineId}`,
+    actorId,
+    {
+      purchaseOrderId: poLine.purchaseOrderId,
+      purchaseOrderLineId: normalizedPoLineId,
+      state,
+      authoritativeUnitCostMills,
+      approvedInvoiceIds,
+      approvedQty: approvedQty.toString(),
+      approvedExtendedCostMills: approvedExtendedCostMills.toString(),
+      orderQty,
+      receivedQty,
+      costCoverageQty,
+      ...cogsResult,
+    },
+    client,
+  );
+  return {
+    purchaseOrderLineId: normalizedPoLineId,
+    state,
+    authoritativeUnitCostMills,
+    approvedInvoiceIds,
+    approvedQty: approvedQty.toString(),
+    ...cogsResult,
+  };
 }
 
 export async function approveInvoice(id: number, userId?: string) {
@@ -1368,6 +1632,7 @@ async function disputeInvoiceInTransaction(
     actorId: userId,
     reason: `Vendor invoice ${id} disputed.`,
   });
+  await reconcileApprovedInvoiceVariance(id, tx, userId);
   return { value: invoice, affectedPoIds, changed: true };
 }
 
@@ -1417,6 +1682,7 @@ async function voidInvoiceInTransaction(
     reason: `Vendor invoice ${id} voided.`,
     resolveDispute: true,
   });
+  await reconcileApprovedInvoiceVariance(id, tx, userId);
   return { value: invoice, affectedPoIds, changed: true };
 }
 
@@ -1446,7 +1712,7 @@ export async function linkPoToInvoice(
 
   const link = await db.transaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
-    await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId);
+    await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
 
     const [upserted] = await tx
       .insert(vendorInvoicePoLinks)
@@ -1498,7 +1764,7 @@ export async function unlinkPoFromInvoice(
   const normalizedPoId = requireCommandId(purchaseOrderId, "purchaseOrderId");
   const changed = await db.transaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
-    await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId);
+    await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
     const [existingLink] = await tx
       .select({ id: vendorInvoicePoLinks.id })
       .from(vendorInvoicePoLinks)
@@ -1683,6 +1949,7 @@ async function lockAndValidatePaymentInvoices(
     .select({
       id: vendorInvoices.id,
       vendorId: vendorInvoices.vendorId,
+      currency: vendorInvoices.currency,
       status: vendorInvoices.status,
       balanceCents: vendorInvoices.balanceCents,
     })
@@ -2323,7 +2590,7 @@ export async function importLinesFromPO(
   const normalizedPoId = requireCommandId(purchaseOrderId, "purchaseOrderId");
   const lines = await db.transaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
-    await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId);
+    await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
 
     const [link] = await tx
       .select({ id: vendorInvoicePoLinks.id })
@@ -2477,7 +2744,10 @@ export async function updateInvoiceLine(lineId: number, data: {
   const normalizedLineId = requireCommandId(lineId, "lineId");
   const result = await db.transaction(async (tx: ApLedgerDbClient) => {
     const [lineReference] = await tx
-      .select({ vendorInvoiceId: vendorInvoiceLines.vendorInvoiceId })
+      .select({
+        vendorInvoiceId: vendorInvoiceLines.vendorInvoiceId,
+        purchaseOrderLineId: vendorInvoiceLines.purchaseOrderLineId,
+      })
       .from(vendorInvoiceLines)
       .where(eq(vendorInvoiceLines.id, normalizedLineId));
     if (!lineReference) {
@@ -2488,6 +2758,13 @@ export async function updateInvoiceLine(lineId: number, data: {
     }
 
     await lockEditableInvoice(tx, lineReference.vendorInvoiceId);
+    if (lineReference.purchaseOrderLineId != null) {
+      await requireLinkedPoLine(
+        tx,
+        lineReference.vendorInvoiceId,
+        lineReference.purchaseOrderLineId,
+      );
+    }
     const [existing] = await tx
       .select()
       .from(vendorInvoiceLines)
@@ -2555,7 +2832,10 @@ export async function removeInvoiceLine(lineId: number, actorId?: string) {
   const normalizedLineId = requireCommandId(lineId, "lineId");
   const affectedPoIds = await db.transaction(async (tx: ApLedgerDbClient) => {
     const [lineReference] = await tx
-      .select({ vendorInvoiceId: vendorInvoiceLines.vendorInvoiceId })
+      .select({
+        vendorInvoiceId: vendorInvoiceLines.vendorInvoiceId,
+        purchaseOrderLineId: vendorInvoiceLines.purchaseOrderLineId,
+      })
       .from(vendorInvoiceLines)
       .where(eq(vendorInvoiceLines.id, normalizedLineId));
     if (!lineReference) {
@@ -2566,6 +2846,13 @@ export async function removeInvoiceLine(lineId: number, actorId?: string) {
     }
 
     await lockEditableInvoice(tx, lineReference.vendorInvoiceId);
+    if (lineReference.purchaseOrderLineId != null) {
+      await requireLinkedPoLine(
+        tx,
+        lineReference.vendorInvoiceId,
+        lineReference.purchaseOrderLineId,
+      );
+    }
     const [existing] = await tx
       .select({ id: vendorInvoiceLines.id })
       .from(vendorInvoiceLines)
@@ -2640,79 +2927,223 @@ async function recalculateInvoiceFromLines(
 
 // ─── 3-Way Match ──────────────────────────────────────────────────────────────
 
+type PersistedInvoiceMatchResult = ReturnType<typeof evaluatePurchaseOrderInvoiceMatches>[number];
+
+async function persistInvoiceMatchResults(
+  client: ApLedgerDbClient,
+  results: PersistedInvoiceMatchResult[],
+  actorId?: string,
+  context: Record<string, unknown> = {},
+): Promise<void> {
+  const evaluatedAt = new Date();
+  for (const result of results) {
+    await client
+      .update(vendorInvoiceLines)
+      .set({
+        qtyReceived: result.qtyReceived,
+        matchStatus: result.matchStatus,
+        updatedAt: evaluatedAt,
+      })
+      .where(eq(vendorInvoiceLines.id, result.id));
+  }
+
+  const resultsByInvoiceId = new Map<number, PersistedInvoiceMatchResult[]>();
+  for (const result of results) {
+    const invoiceResults = resultsByInvoiceId.get(result.vendorInvoiceId) ?? [];
+    invoiceResults.push(result);
+    resultsByInvoiceId.set(result.vendorInvoiceId, invoiceResults);
+  }
+  for (const invoiceId of [...resultsByInvoiceId.keys()].sort((left, right) => left - right)) {
+    const invoiceResults = resultsByInvoiceId.get(invoiceId) ?? [];
+    await appendApMutationAudit(
+      "invoice_match_run",
+      `invoice:${invoiceId}`,
+      actorId,
+      {
+        invoiceId,
+        lineCount: invoiceResults.length,
+        mismatchLineIds: invoiceResults
+          .filter((line) => line.matchStatus !== "matched" && line.matchStatus !== "pending")
+          .map((line) => line.id),
+        ...context,
+      },
+      client,
+    );
+  }
+}
+
+export type PurchaseOrderInvoiceMatchTransactionResult = {
+  purchaseOrderId: number;
+  purchaseOrderLineIds: number[];
+  activeInvoiceIds: number[];
+  invoiceNumbersById: Map<number, string>;
+  results: PersistedInvoiceMatchResult[];
+  invoicesWithoutMappedLines: number[];
+};
+
+/**
+ * Recompute every non-voided invoice line linked to one PO. The caller must
+ * already hold the purchase-order header lock. PO-line locks serialize the
+ * derived match write with receiving and invoice-line insertion.
+ */
+export async function recomputePurchaseOrderInvoiceMatchesInTransaction(
+  purchaseOrderId: number,
+  client: ApLedgerDbClient,
+  actorId?: string,
+): Promise<PurchaseOrderInvoiceMatchTransactionResult> {
+  const normalizedPoId = requireCommandId(purchaseOrderId, "purchaseOrderId");
+  const poLines = await client
+    .select()
+    .from(purchaseOrderLines)
+    .where(eq(purchaseOrderLines.purchaseOrderId, normalizedPoId))
+    .orderBy(asc(purchaseOrderLines.id))
+    .for("update");
+  const links = await client
+    .select({ vendorInvoiceId: vendorInvoicePoLinks.vendorInvoiceId })
+    .from(vendorInvoicePoLinks)
+    .where(eq(vendorInvoicePoLinks.purchaseOrderId, normalizedPoId))
+    .orderBy(asc(vendorInvoicePoLinks.vendorInvoiceId));
+  const linkedInvoiceIds = uniqueNumbers(
+    links.map((link: { vendorInvoiceId: number }) => link.vendorInvoiceId),
+  ).sort((left, right) => left - right);
+
+  if (linkedInvoiceIds.length === 0) {
+    return {
+      purchaseOrderId: normalizedPoId,
+      purchaseOrderLineIds: poLines.map((line) => Number(line.id)),
+      activeInvoiceIds: [],
+      invoiceNumbersById: new Map(),
+      results: [],
+      invoicesWithoutMappedLines: [],
+    };
+  }
+
+  const invoiceRows = await client
+    .select({
+      id: vendorInvoices.id,
+      invoiceNumber: vendorInvoices.invoiceNumber,
+      status: vendorInvoices.status,
+    })
+    .from(vendorInvoices)
+    .where(inArray(vendorInvoices.id, linkedInvoiceIds));
+  const activeInvoices = invoiceRows
+    .filter((invoice) => invoice.status !== "voided")
+    .sort((left, right) => left.id - right.id);
+  const activeInvoiceIds = activeInvoices.map((invoice) => invoice.id);
+  const invoiceNumbersById = new Map(
+    activeInvoices.map((invoice) => [invoice.id, invoice.invoiceNumber]),
+  );
+  if (activeInvoiceIds.length === 0) {
+    return {
+      purchaseOrderId: normalizedPoId,
+      purchaseOrderLineIds: poLines.map((line) => Number(line.id)),
+      activeInvoiceIds,
+      invoiceNumbersById,
+      results: [],
+      invoicesWithoutMappedLines: [],
+    };
+  }
+
+  const allLinkedInvoiceLines = await client
+    .select()
+    .from(vendorInvoiceLines)
+    .where(inArray(vendorInvoiceLines.vendorInvoiceId, activeInvoiceIds))
+    .orderBy(asc(vendorInvoiceLines.vendorInvoiceId), asc(vendorInvoiceLines.id))
+    .for("update");
+  const poLineIds = new Set(poLines.map((line) => Number(line.id)));
+  const scopedInvoiceLines = allLinkedInvoiceLines.filter((line) =>
+    line.purchaseOrderLineId == null || poLineIds.has(Number(line.purchaseOrderLineId)),
+  );
+  const mappedInvoiceIds = new Set(scopedInvoiceLines.map((line) => Number(line.vendorInvoiceId)));
+  const invoicesWithoutMappedLines = activeInvoiceIds.filter((id) => !mappedInvoiceIds.has(id));
+  const results = evaluatePurchaseOrderInvoiceMatches({
+    purchaseOrderLines: poLines,
+    invoiceLines: scopedInvoiceLines,
+  });
+  await persistInvoiceMatchResults(client, results, actorId, {
+    purchaseOrderId: normalizedPoId,
+    source: "purchase_order",
+  });
+
+  return {
+    purchaseOrderId: normalizedPoId,
+    purchaseOrderLineIds: poLines.map((line) => Number(line.id)),
+    activeInvoiceIds,
+    invoiceNumbersById,
+    results,
+    invoicesWithoutMappedLines,
+  };
+}
+
 export async function runInvoiceMatch(invoiceId: number, actorId?: string) {
   const normalizedInvoiceId = requireCommandId(invoiceId, "invoiceId");
   const updatedLines = await db.transaction(async (tx: ApLedgerDbClient) => {
-    await lockEditableInvoice(tx, normalizedInvoiceId);
-    const lines = await tx
-      .select()
-      .from(vendorInvoiceLines)
-      .where(eq(vendorInvoiceLines.vendorInvoiceId, normalizedInvoiceId))
-      .orderBy(asc(vendorInvoiceLines.lineNumber))
-      .for("update");
-
-    for (const line of lines) {
-      let matchStatus = "pending";
-      let qtyReceived = line.qtyReceived ?? 0;
-      if (line.purchaseOrderLineId) {
-        const [poLine] = await tx
-          .select()
-          .from(purchaseOrderLines)
-          .where(eq(purchaseOrderLines.id, line.purchaseOrderLineId))
-          .for("share");
-
-        if (!poLine) {
-          matchStatus = "po_line_missing";
-        } else {
-          const poUnitCostMills = Number(
-            poLine.unitCostMills
-              ?? centsToMills(requireNonnegativeInteger(poLine.unitCostCents ?? 0, "poLine.unitCostCents")),
-          );
-          const invoiceUnitCostMills = Number(
-            line.unitCostMills
-              ?? centsToMills(requireNonnegativeInteger(line.unitCostCents ?? 0, "invoiceLine.unitCostCents")),
-          );
-          requireNonnegativeInteger(poUnitCostMills, "poLine.unitCostMills");
-          requireNonnegativeInteger(invoiceUnitCostMills, "invoiceLine.unitCostMills");
-          qtyReceived = poLine.receivedQty ?? 0;
-
-          if (invoiceUnitCostMills !== poUnitCostMills) {
-            matchStatus = "price_discrepancy";
-          } else if (line.qtyInvoiced > qtyReceived && qtyReceived > 0) {
-            matchStatus = "over_billed";
-          } else if (line.qtyInvoiced !== poLine.orderQty) {
-            matchStatus = "qty_discrepancy";
-          } else {
-            matchStatus = "matched";
-          }
-        }
-      }
-
-      await tx
-        .update(vendorInvoiceLines)
-        .set({ qtyReceived, matchStatus, updatedAt: new Date() })
-        .where(eq(vendorInvoiceLines.id, line.id));
-    }
-
-    const matchedLines = await tx
+    await lockInvoiceForMatch(tx, normalizedInvoiceId);
+    const initialLines = await tx
       .select()
       .from(vendorInvoiceLines)
       .where(eq(vendorInvoiceLines.vendorInvoiceId, normalizedInvoiceId))
       .orderBy(asc(vendorInvoiceLines.lineNumber));
-    await appendApMutationAudit(
-      "invoice_match_run",
-      `invoice:${normalizedInvoiceId}`,
-      actorId,
-      {
-        invoiceId: normalizedInvoiceId,
-        lineCount: matchedLines.length,
-        mismatchLineIds: matchedLines
-          .filter((line) => line.matchStatus !== "matched" && line.matchStatus !== "pending")
-          .map((line) => line.id),
-      },
-      tx,
+    const purchaseOrderLineIds = uniqueNumbers(
+      initialLines.map((line) => line.purchaseOrderLineId),
+    ).sort((left, right) => left - right);
+
+    if (purchaseOrderLineIds.length === 0) {
+      const lockedLines = await tx
+        .select()
+        .from(vendorInvoiceLines)
+        .where(eq(vendorInvoiceLines.vendorInvoiceId, normalizedInvoiceId))
+        .orderBy(asc(vendorInvoiceLines.lineNumber))
+        .for("update");
+      const results = evaluatePurchaseOrderInvoiceMatches({
+        purchaseOrderLines: [],
+        invoiceLines: lockedLines,
+      });
+      await persistInvoiceMatchResults(tx, results, actorId, { source: "invoice" });
+      const resultsById = new Map(results.map((result) => [result.id, result]));
+      return lockedLines.map((line) => ({ ...line, ...resultsById.get(line.id) }));
+    }
+
+    const poLines = await tx
+      .select()
+      .from(purchaseOrderLines)
+      .where(inArray(purchaseOrderLines.id, purchaseOrderLineIds))
+      .orderBy(asc(purchaseOrderLines.id))
+      .for("update");
+    const contributorLines = await tx
+      .select()
+      .from(vendorInvoiceLines)
+      .where(inArray(vendorInvoiceLines.purchaseOrderLineId, purchaseOrderLineIds))
+      .orderBy(asc(vendorInvoiceLines.vendorInvoiceId), asc(vendorInvoiceLines.id))
+      .for("update");
+    const contributorInvoiceIds = uniqueNumbers(
+      contributorLines.map((line) => line.vendorInvoiceId),
     );
-    return matchedLines;
+    const contributorInvoices = contributorInvoiceIds.length === 0
+      ? []
+      : await tx
+        .select({ id: vendorInvoices.id, status: vendorInvoices.status })
+        .from(vendorInvoices)
+        .where(inArray(vendorInvoices.id, contributorInvoiceIds));
+    const activeInvoiceIds = new Set(
+      contributorInvoices
+        .filter((invoice) => invoice.status !== "voided")
+        .map((invoice) => invoice.id),
+    );
+    const activeContributorLines = contributorLines.filter((line) =>
+      activeInvoiceIds.has(Number(line.vendorInvoiceId)),
+    );
+    const standaloneTargetLines = initialLines.filter((line) => line.purchaseOrderLineId == null);
+    const results = evaluatePurchaseOrderInvoiceMatches({
+      purchaseOrderLines: poLines,
+      invoiceLines: [...activeContributorLines, ...standaloneTargetLines],
+    });
+    await persistInvoiceMatchResults(tx, results, actorId, {
+      requestedInvoiceId: normalizedInvoiceId,
+      source: "invoice",
+    });
+    const resultsById = new Map(results.map((result) => [result.id, result]));
+    return initialLines.map((line) => ({ ...line, ...resultsById.get(line.id) }));
   });
 
   // ── Exception detection hook: match_mismatch ──────────────────────

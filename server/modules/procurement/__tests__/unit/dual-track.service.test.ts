@@ -68,19 +68,27 @@ function buildMockDb() {
           return chain;
         }),
         leftJoin: vi.fn().mockReturnThis(),
-        where: vi.fn().mockImplementation(() => {
-          if (isPoStateQuery) return Promise.resolve(mockDb._poState ? [mockDb._poState] : []);
-          if (isInvoiceQuery) return Promise.resolve(mockDb._invoiceRows);
-          return Promise.resolve([]);
-        }),
-        limit: vi.fn().mockResolvedValue([]),
+        where: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
         orderBy: vi.fn().mockReturnThis(),
+        for: vi.fn().mockImplementation(async () => {
+          if (isPoStateQuery) return mockDb._poState ? [mockDb._poState] : [];
+          if (isInvoiceQuery) return mockDb._invoiceRows;
+          return [];
+        }),
+        then: (resolve: any, reject: any) => {
+          const rows = isPoStateQuery
+            ? (mockDb._poState ? [mockDb._poState] : [])
+            : isInvoiceQuery
+              ? mockDb._invoiceRows
+              : [];
+          return Promise.resolve(rows).then(resolve, reject);
+        },
       };
 
       // Detect PO state query by inspecting shape (has financialStatus key)
       if (shape && "financialStatus" in shape) {
         isPoStateQuery = true;
-        chain.where = vi.fn().mockResolvedValue(mockDb._poState ? [mockDb._poState] : []);
       }
 
       return chain;
@@ -204,6 +212,7 @@ describe("transitionPhysical", () => {
   it("(1) accepts a valid physical transition: draft → sent", async () => {
     const po = makePo({ status: "approved", physicalStatus: "draft" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionPhysical(1, "sent", "user-1");
 
@@ -217,6 +226,7 @@ describe("transitionPhysical", () => {
   it("(2) rejects an invalid physical transition: draft → received", async () => {
     const po = makePo({ physicalStatus: "draft" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionPhysical(1, "received", "user-1"),
@@ -226,6 +236,7 @@ describe("transitionPhysical", () => {
   it("(2b) rejects a backward physical transition: acknowledged → sent", async () => {
     const po = makePo({ physicalStatus: "acknowledged" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionPhysical(1, "sent", "user-1"),
@@ -235,6 +246,7 @@ describe("transitionPhysical", () => {
   it("(11) legacy status is synced when transitioning to sent", async () => {
     const po = makePo({ status: "approved", physicalStatus: "draft" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionPhysical(1, "sent", "user-1");
 
@@ -245,6 +257,7 @@ describe("transitionPhysical", () => {
   it("(12) cancellation sets physicalStatus=cancelled", async () => {
     const po = makePo({ status: "sent", physicalStatus: "sent" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionPhysical(1, "cancelled", "user-1");
 
@@ -256,6 +269,7 @@ describe("transitionPhysical", () => {
   it("(13) rejects transition from terminal state: received → anything", async () => {
     const po = makePo({ physicalStatus: "received" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionPhysical(1, "receiving", "user-1"),
@@ -266,31 +280,35 @@ describe("transitionPhysical", () => {
 describe("transitionFinancial", () => {
   let svc: ReturnType<typeof createPurchasingService>;
   let storage: ReturnType<typeof buildMockStorage>;
+  let mockDb: ReturnType<typeof buildMockDb>;
 
   beforeEach(() => {
     mockDetectQtyVariance.mockReset();
     storage = buildMockStorage();
-    svc = createPurchasingService(buildMockDb(), storage);
+    mockDb = buildMockDb();
+    svc = createPurchasingService(mockDb, storage);
   });
 
   it("(3) accepts valid financial transition: unbilled → invoiced", async () => {
     const po = makePo({ financialStatus: "unbilled" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionFinancial(1, "invoiced", "user-1");
 
-    expect(storage.updatePurchaseOrderStatusWithHistory).toHaveBeenCalledOnce();
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+    const patch = mockDb._updateCalls[0];
     expect(patch.financialStatus).toBe("invoiced");
   });
 
   it("(3b) accepts valid financial transition: invoiced → paid", async () => {
     const po = makePo({ financialStatus: "invoiced" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionFinancial(1, "paid", "user-1");
 
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    const patch = mockDb._updateCalls[0];
     expect(patch.financialStatus).toBe("paid");
     expect(patch.fullyPaidAt).toBeInstanceOf(Date); // timestamp stamped
   });
@@ -298,16 +316,18 @@ describe("transitionFinancial", () => {
   it("(3c) accepts disputed → paid", async () => {
     const po = makePo({ financialStatus: "disputed" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await svc.transitionFinancial(1, "paid", "user-1");
 
-    const [, patch] = storage.updatePurchaseOrderStatusWithHistory.mock.calls[0];
+    const patch = mockDb._updateCalls[0];
     expect(patch.financialStatus).toBe("paid");
   });
 
   it("(4) rejects invalid financial transition: paid → invoiced", async () => {
     const po = makePo({ financialStatus: "paid" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionFinancial(1, "invoiced", "user-1"),
@@ -317,6 +337,7 @@ describe("transitionFinancial", () => {
   it("(14) rejects paid → unbilled (no backward transitions)", async () => {
     const po = makePo({ financialStatus: "paid" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
+    mockDb._poState = po;
 
     await expect(
       svc.transitionFinancial(1, "unbilled", "user-1"),

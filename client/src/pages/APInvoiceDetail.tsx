@@ -104,6 +104,7 @@ const STATUS_COLORS: Record<string, string> = {
 const MATCH_COLORS: Record<string, { label: string; className: string }> = {
   pending: { label: "Pending", className: "bg-slate-100 text-slate-600" },
   matched: { label: "Matched", className: "bg-green-100 text-green-700" },
+  po_line_missing: { label: "PO Line Missing", className: "bg-red-100 text-red-700" },
   qty_discrepancy: { label: "Qty Mismatch", className: "bg-amber-100 text-amber-700" },
   price_discrepancy: { label: "Price Mismatch", className: "bg-red-100 text-red-700" },
   over_billed: { label: "Over-billed", className: "bg-red-100 text-red-700" },

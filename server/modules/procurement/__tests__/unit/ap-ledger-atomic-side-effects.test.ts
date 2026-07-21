@@ -496,12 +496,32 @@ describe("AP ledger atomic side effects", () => {
       [{
         purchaseOrderLineId: 50,
         productVariantId: 6,
+        qtyInvoiced: 1,
         matchStatus: "price_discrepancy",
         unitCostCents: 551,
         unitCostMills: 55055,
       }],
-      [{ invoiceNumber: "INV-001" }],
-      [{ purchaseOrderId: 7 }],
+      [{
+        id: 50,
+        purchaseOrderId: 7,
+        lineType: "product",
+        status: "open",
+        orderQty: 1,
+        receivedQty: 0,
+        unitCostCents: 500,
+        unitCostMills: 50000,
+        expectedReceiveVariantId: 6,
+        productVariantId: 6,
+      }],
+      [{
+        id: 70,
+        vendorInvoiceId: 12,
+        productVariantId: 6,
+        qtyInvoiced: 1,
+        unitCostCents: 551,
+        unitCostMills: 55055,
+      }],
+      [{ id: 12, invoiceNumber: "INV-001", status: "approved" }],
     ]);
     tx.update = vi.fn((table) => {
       if (table === tables.vendorInvoices) {
@@ -524,10 +544,12 @@ describe("AP ledger atomic side effects", () => {
 
     expect(mocks.reconcileInvoiceVariance).toHaveBeenCalledWith({
       purchaseOrderId: 7,
-      productVariantId: 6,
+      purchaseOrderLineId: 50,
       invoiceUnitCostCents: 551,
       invoiceUnitCostMills: 55055,
       invoiceNumber: "INV-001",
+      costSource: "invoice",
+      reason: "po_line_cost_reconciliation:invoice_actual",
     }, tx);
     expect(tx.insert).not.toHaveBeenCalledWith(tables.auditEvents);
   });
