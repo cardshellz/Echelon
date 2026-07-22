@@ -563,7 +563,7 @@ describe("markShipmentShipped", () => {
     });
   });
 
-  it("does NOT call reconcileShopifyFulfillment when shipment has no shopify_fulfillment_id (never pushed)", async () => {
+  it("asks the service to reconcile changed tracking even when the legacy fulfillment column is blank", async () => {
     const mock = makeDb([
       {
         rows: [
@@ -589,7 +589,11 @@ describe("markShipmentShipped", () => {
       },
     );
     expect(result.changed).toBe(true);
-    expect(reconcile).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledWith(501, {
+      number: "NEW-456",
+      company: "UPS",
+      url: undefined,
+    });
   });
 
   it("does NOT call reconcileShopifyFulfillment when hook is not provided (graceful degrade)", async () => {
@@ -1280,6 +1284,37 @@ describe("markShipmentVoided", () => {
     expect(result).toEqual({ wmsOrderId: 42, changed: true });
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenCalledWith("gid://shopify/Fulfillment/999");
+  });
+
+  it("prefers shipment-scoped cancellation so every recorded Shopify fulfillment is cancelled", async () => {
+    const mock = makeDb([
+      {
+        rows: [
+          shipmentRow({
+            status: "shipped",
+            tracking_number: "T1",
+            carrier: "UPS",
+            shopify_fulfillment_id: "gid://shopify/Fulfillment/999",
+          }),
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ]);
+    const cancelOne = vi.fn(async (_id: string) => {});
+    const cancelAll = vi.fn(async (_shipmentId: number) => ({}));
+
+    const result = await markShipmentVoided(mock.db, 501, "ss_void", {
+      now: NOW,
+      fulfillmentPush: {
+        cancelShopifyFulfillment: cancelOne,
+        cancelShopifyFulfillmentsForShipment: cancelAll,
+      },
+    });
+
+    expect(result).toEqual({ wmsOrderId: 42, changed: true });
+    expect(cancelAll).toHaveBeenCalledWith(501);
+    expect(cancelOne).not.toHaveBeenCalled();
   });
 
   it("does not call cancelShopifyFulfillment when hook is not provided", async () => {

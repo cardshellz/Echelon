@@ -224,14 +224,18 @@ export interface RetryShipStationService {
  * via the same `db.__fulfillmentPush` stash already used by the V2
  * SHIP_NOTIFY hot path.
  *
- * The retry worker only cares about the boolean success of the push;
- * the full `{shopifyFulfillmentId, alreadyPushed}` shape is consumed
- * but not asserted on so callers can keep the contract minimal.
+ * The retry worker only marks the row successful when `writebackComplete`
+ * proves every Shopify-owned quantity in the current package is covered.
+ * A fulfillment id alone is historical identity, not completion evidence.
  */
 export interface RetryFulfillmentPushService {
   pushShopifyFulfillment(
     shipmentId: number,
-  ): Promise<{ shopifyFulfillmentId: string | null; alreadyPushed: boolean }>;
+  ): Promise<{
+    shopifyFulfillmentId: string | null;
+    alreadyPushed: boolean;
+    writebackComplete: boolean;
+  }>;
   pushTracking?(orderId: number): Promise<boolean>;
   pushTrackingForShipment?(shipmentId: number): Promise<boolean>;
 }
@@ -1366,7 +1370,12 @@ export async function dispatchShopifyFulfillmentRetry(
   }
 
   try {
-    await fulfillmentPush.pushShopifyFulfillment(shipmentId);
+    const result = await fulfillmentPush.pushShopifyFulfillment(shipmentId);
+    if (result.writebackComplete !== true) {
+      throw new Error(
+        `Shopify fulfillment push returned without complete package coverage for shipment ${shipmentId}`,
+      );
+    }
     await markRowSuccess(dbArg, item);
     console.log(
       `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) succeeded`,

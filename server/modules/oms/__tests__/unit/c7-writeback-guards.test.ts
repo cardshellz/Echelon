@@ -3,8 +3,8 @@
  *
  * Tests for:
  * - D-ENQFAIL: Dead-letter event persisted when retry enqueue fails
- * - D-PUSHAUDIT: OMS event recorded on successful Shopify push
- * - D-PUSHIDEM: FOR UPDATE on idempotency check serializes concurrent pushes
+ * - D-PUSHAUDIT: versioned package-completion evidence recorded after Shopify reconciliation
+ * - D-PUSHIDEM: legacy ID persistence cannot masquerade as completion
  * - D-RETRYDEDUP: DB-level dedup on webhook_retry_queue pending rows
  */
 
@@ -80,21 +80,23 @@ describe("D-ENQFAIL: dead-letter on enqueue failure", () => {
 
 // ─── D-PUSHAUDIT structural checks ───────────────────────────────
 
-describe("D-PUSHAUDIT: OMS event on successful Shopify push", () => {
-  it("records shopify_fulfillment_pushed event after persisting shopify_fulfillment_id", () => {
-    const pushFnStart = FULFILLMENT_PUSH_SRC.indexOf(
-      "async function pushSingleShipmentFulfillment",
+describe("D-PUSHAUDIT: OMS package-completion evidence", () => {
+  it("records versioned, line-sensitive completion evidence", () => {
+    const evidenceStart = FULFILLMENT_PUSH_SRC.indexOf(
+      "async function recordShopifyWritebackEvidence",
     );
-    const pushFnEnd = FULFILLMENT_PUSH_SRC.indexOf(
+    const evidenceEnd = FULFILLMENT_PUSH_SRC.indexOf(
       "async function",
-      pushFnStart + 10,
+      evidenceStart + 10,
     );
-    const fnBlock = FULFILLMENT_PUSH_SRC.substring(pushFnStart, pushFnEnd);
-    expect(fnBlock).toContain("shopify_fulfillment_pushed");
-    expect(fnBlock).toContain("shopifyFulfillmentId");
-    expect(fnBlock).toContain("wmsShipmentId");
-    expect(fnBlock).toContain("trackingNumber");
-    expect(fnBlock).toContain("carrier");
+    const evidenceBlock = FULFILLMENT_PUSH_SRC.substring(evidenceStart, evidenceEnd);
+    expect(evidenceBlock).toContain("wmsShipmentId");
+    expect(evidenceBlock).toContain("trackingNumber");
+    expect(evidenceBlock).toContain("coverageVersion");
+    expect(evidenceBlock).toContain("packageSignature");
+    expect(evidenceBlock).toContain("writebackComplete");
+    expect(evidenceBlock).toContain("requestedQuantity");
+    expect(evidenceBlock).toContain("lineEvidence");
   });
 
   it("uses event type matching what reconcilers and ops-health query for", () => {
@@ -110,27 +112,29 @@ describe("D-PUSHAUDIT: OMS event on successful Shopify push", () => {
     expect(fnBlock).not.toMatch(/eventType:\s*"fulfillment_pushed"/);
   });
 
-  it("resolves OMS order id from oms_fulfillment_order_id", () => {
-    const auditBlock = FULFILLMENT_PUSH_SRC.substring(
-      FULFILLMENT_PUSH_SRC.indexOf("D-PUSHAUDIT"),
-      FULFILLMENT_PUSH_SRC.indexOf("shopify_push_succeeded"),
+  it("requires a valid OMS order id before evidence can be persisted", () => {
+    const evidenceBlock = FULFILLMENT_PUSH_SRC.substring(
+      FULFILLMENT_PUSH_SRC.indexOf("async function recordShopifyWritebackEvidence"),
+      FULFILLMENT_PUSH_SRC.indexOf("async function pushFulfillmentForCombinedGroup"),
     );
-    expect(auditBlock).toContain("oms_fulfillment_order_id");
-    expect(auditBlock).toContain("parseInt");
+    expect(evidenceBlock).toContain("oms_fulfillment_order_id");
+    expect(evidenceBlock).toContain("Number.isInteger(omsOrderId)");
+    expect(evidenceBlock).toContain("cannot record reconciled writeback without an OMS order id");
   });
 
-  it("does not throw on audit event persistence failure", () => {
+  it("fails closed when completion evidence cannot be persisted", () => {
     const auditBlock = FULFILLMENT_PUSH_SRC.substring(
       FULFILLMENT_PUSH_SRC.indexOf("D-PUSHAUDIT"),
       FULFILLMENT_PUSH_SRC.indexOf("shopify_push_succeeded"),
     );
-    expect(auditBlock).toContain("catch (auditErr");
+    expect(auditBlock).toContain("await recordShopifyWritebackEvidence");
+    expect(auditBlock).not.toContain("catch (auditErr");
   });
 });
 
 // ─── D-PUSHIDEM structural checks ────────────────────────────────
 
-describe("D-PUSHIDEM: conditional UPDATE serializes concurrent pushes", () => {
+describe("D-PUSHIDEM: legacy fulfillment handle persistence", () => {
   it("uses conditional UPDATE with NULL guard when persisting fulfillment ID", () => {
     const persistBlock = FULFILLMENT_PUSH_SRC.substring(
       FULFILLMENT_PUSH_SRC.indexOf("D-PUSHIDEM"),
@@ -140,13 +144,14 @@ describe("D-PUSHIDEM: conditional UPDATE serializes concurrent pushes", () => {
     expect(persistBlock).toContain("rowCount");
   });
 
-  it("returns idempotent skip when concurrent caller wins", () => {
+  it("does not treat a preserved legacy handle as package completion", () => {
     const persistBlock = FULFILLMENT_PUSH_SRC.substring(
       FULFILLMENT_PUSH_SRC.indexOf("D-PUSHIDEM"),
       FULFILLMENT_PUSH_SRC.indexOf("D-PUSHAUDIT"),
     );
-    expect(persistBlock).toContain("shopify_push_concurrent_skip");
-    expect(persistBlock).toContain("alreadyPushed: true");
+    expect(persistBlock).toContain("recorded additional fulfillment");
+    expect(persistBlock).not.toContain("alreadyPushed: true");
+    expect(persistBlock).not.toContain("return {");
   });
 });
 

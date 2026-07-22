@@ -38,6 +38,7 @@ describe("fulfillment-sweeper.scheduler", () => {
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/42",
       alreadyPushed: false,
+      writebackComplete: true,
     }));
     const checkStatus = vi.fn();
     const db = {
@@ -71,6 +72,7 @@ describe("fulfillment-sweeper.scheduler", () => {
       shopifyFulfillmentId: null,
       alreadyPushed: false,
       alreadySatisfied: true,
+      writebackComplete: true,
     }));
     const db = {
       execute: vi.fn(async (query: any) => {

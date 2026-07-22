@@ -99,6 +99,7 @@ describe("ShopifyFulfillmentReconciler.repush", () => {
     const pushShopifyFulfillment = vi.fn().mockResolvedValue({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/1",
       alreadyPushed: false,
+      writebackComplete: true,
     });
     const db = makeDb({
       shipmentRows: [{ shipment_id: 257 }, { shipment_id: "258" }],
@@ -121,6 +122,7 @@ describe("ShopifyFulfillmentReconciler.repush", () => {
       .mockResolvedValueOnce({
         shopifyFulfillmentId: "gid://shopify/Fulfillment/1",
         alreadyPushed: false,
+        writebackComplete: true,
       })
       .mockRejectedValueOnce(new Error("Shopify rejected fulfillment"));
     const db = makeDb({

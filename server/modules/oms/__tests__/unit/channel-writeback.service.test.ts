@@ -117,6 +117,14 @@ describe("channel-writeback.service", () => {
 
     const text = JSON.stringify(execute.mock.calls[0]?.[0]);
     expect(text).toContain("shopify_fulfillment_reconciled");
+    expect(text).toContain("coverageVersion");
+    expect(text).toContain("writebackComplete");
+    expect(text).toContain("packageSignature");
+    expect(text).toContain("shopify_package_signature");
+    expect(text).toContain("LEFT JOIN LATERAL");
+    expect(text).not.toMatch(
+      /c\.provider = 'shopify'[^)]*shopify_fulfillment_id[^)]*IS NOT NULL/,
+    );
     expect(text).not.toContain("make_interval(days");
     expect(text).not.toContain("pending_retry = false");
   });
