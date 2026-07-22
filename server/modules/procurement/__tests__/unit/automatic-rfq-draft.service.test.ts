@@ -135,6 +135,7 @@ describe("automatic RFQ draft service", () => {
     });
 
     expect(result).toMatchObject({ reused: false, rfqs: [{ id: 501 }], lines: [{ requestedPieces: 60 }] });
+    expect(insertedValues[0].requestHash).toMatch(/^[0-9a-f]{64}$/);
     expect(insertedValues[1]).toMatchObject({
       requestedPieces: 60,
       quantityOverrideReason: "Automatically reduced by active RFQ allocations from prior recommendation runs.",

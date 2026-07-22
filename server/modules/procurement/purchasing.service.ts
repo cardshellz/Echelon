@@ -80,6 +80,11 @@ import {
   purchasingSkuAllocationKey,
 } from "./purchasing-rfq.service";
 import {
+  buildRfqBatchRequestHash,
+  evaluateRfqAllocationOverride,
+  type RfqAllocationOverrideEvidence,
+} from "./purchasing-rfq-allocation";
+import {
   deliveryDateIso,
   sameDeliveryDate,
   validateDeliverySchedulePatch,
@@ -7418,6 +7423,12 @@ export function createPurchasingService(
     vendorSku?: string | null;
     requestedPieces: number;
     quantityOverrideReason?: string | null;
+    allocationOverrideApproved?: boolean;
+  };
+
+  type PreparedRfqBatchLineInput = CreateRfqBatchLineInput & RfqAllocationOverrideEvidence & {
+    recommendedPieces: number;
+    alreadyAllocatedPieces: number;
   };
 
   async function createRfqBatch(input: {
@@ -7451,19 +7462,42 @@ export function createPurchasingService(
       duplicateKeys.add(duplicateKey);
     }
 
-    const vendorIds = Array.from(new Set(input.lines.map((line) => line.vendorId)));
     const writeTime = now();
     const { actorType, actorId } = resolveActor(userId);
+    const normalizedRequestNote = input.requestNote?.trim() || null;
+    const normalizedLines = input.lines.map((line) => ({
+      ...line,
+      vendorSku: line.vendorSku?.trim() || null,
+      quantityOverrideReason: line.quantityOverrideReason?.trim() || null,
+      allocationOverrideApproved: line.allocationOverrideApproved === true,
+    }));
+    const vendorIds = Array.from(new Set(normalizedLines.map((line) => line.vendorId)));
+    const requestHash = buildRfqBatchRequestHash({
+      requestNote: normalizedRequestNote,
+      responseDueDate: input.responseDueDate ?? null,
+      approvedBy: actorType === "user" ? actorId : null,
+      lines: normalizedLines.map((line) => ({
+        recommendationLineId: line.recommendationLineId,
+        vendorId: line.vendorId,
+        vendorSku: line.vendorSku,
+        requestedPieces: line.requestedPieces,
+        quantityOverrideReason: line.quantityOverrideReason,
+        allocationOverrideApproved: line.allocationOverrideApproved,
+      })),
+    });
 
     try {
       return await db.transaction(async (tx: any) => {
-        const priorRfqs = await tx.select().from(requestForQuotesTable).where(and(
+        const priorRfqs = await tx.select().from(requestForQuotesTable).where(
           eq(requestForQuotesTable.idempotencyKey, idempotencyKey),
-          inArray(requestForQuotesTable.vendorId, vendorIds),
-        ));
+        );
         if (priorRfqs.length > 0) {
-          if (priorRfqs.length !== vendorIds.length) {
-            throw new PurchasingError("The idempotency key was already used for a different supplier grouping", 409, {
+          if (
+            priorRfqs.length !== vendorIds.length
+            || priorRfqs.some((rfq: any) => !vendorIds.includes(Number(rfq.vendorId)))
+            || priorRfqs.some((rfq: any) => rfq.requestHash !== requestHash)
+          ) {
+            throw new PurchasingError("The idempotency key was already used for a different RFQ request", 409, {
               code: "RFQ_IDEMPOTENCY_CONFLICT",
             });
           }
@@ -7481,7 +7515,7 @@ export function createPurchasingService(
           });
         }
 
-        const recommendationIds = Array.from(new Set(input.lines.map((line) => line.recommendationLineId)));
+        const recommendationIds = Array.from(new Set(normalizedLines.map((line) => line.recommendationLineId)));
         const recommendationRows = await tx.select().from(purchaseRecommendationLinesTable).where(
           inArray(purchaseRecommendationLinesTable.id, recommendationIds),
         ).for("update");
@@ -7494,8 +7528,8 @@ export function createPurchasingService(
 
         const allocatedBySku = await lockAndLoadActiveRfqAllocations(tx, recommendationRows);
 
-        const grouped = new Map<number, CreateRfqBatchLineInput[]>();
-        for (const selection of input.lines) {
+        const grouped = new Map<number, PreparedRfqBatchLineInput[]>();
+        for (const selection of normalizedLines) {
           const recommendation = recommendationById.get(selection.recommendationLineId) as any;
           if (!recommendation || recommendation.status !== "open") {
             throw new PurchasingError("A selected recommendation is no longer open", 409, {
@@ -7505,25 +7539,32 @@ export function createPurchasingService(
           }
           const allocationKey = purchasingSkuAllocationKey(recommendation);
           const alreadyAllocated = allocatedBySku.get(allocationKey) ?? 0;
-          const remaining = Number(recommendation.recommendedPieces) - alreadyAllocated;
-          if (selection.requestedPieces > remaining) {
-            throw new PurchasingError("Requested RFQ quantity exceeds the recommendation's remaining quantity", 409, {
-              code: "RFQ_ALLOCATION_EXCEEDED",
+          const remainingPieces = Math.max(Number(recommendation.recommendedPieces) - alreadyAllocated, 0);
+          const allocation = evaluateRfqAllocationOverride({
+            requestedPieces: selection.requestedPieces,
+            remainingPieces,
+            quantityOverrideReason: selection.quantityOverrideReason,
+            allocationOverrideApproved: selection.allocationOverrideApproved,
+            approvedBy: actorType === "user" ? actorId : null,
+            approvedAt: writeTime,
+          });
+          if (!allocation.ok) {
+            throw new PurchasingError(allocation.issue.message, allocation.issue.statusCode, {
+              code: allocation.issue.code,
               recommendationLineId: selection.recommendationLineId,
               recommendedPieces: recommendation.recommendedPieces,
               alreadyAllocated,
-              remainingPieces: Math.max(remaining, 0),
-            });
-          }
-          if (selection.requestedPieces !== remaining && (selection.quantityOverrideReason?.trim().length ?? 0) < 3) {
-            throw new PurchasingError("A reason is required when changing the suggested RFQ quantity", 400, {
-              code: "RFQ_QUANTITY_REASON_REQUIRED",
-              recommendationLineId: selection.recommendationLineId,
+              ...allocation.issue.context,
             });
           }
           allocatedBySku.set(allocationKey, alreadyAllocated + selection.requestedPieces);
           const group = grouped.get(selection.vendorId) ?? [];
-          group.push(selection);
+          group.push({
+            ...selection,
+            ...allocation.evidence,
+            recommendedPieces: Number(recommendation.recommendedPieces),
+            alreadyAllocatedPieces: alreadyAllocated,
+          });
           grouped.set(selection.vendorId, group);
         }
 
@@ -7535,8 +7576,9 @@ export function createPurchasingService(
             rfqNumber: `RFQ-${writeTime.toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8).toUpperCase()}`,
             vendorId,
             idempotencyKey,
+            requestHash,
             status: "draft",
-            requestNote: input.requestNote?.trim() || null,
+            requestNote: normalizedRequestNote,
             currency: String((vendorById.get(vendorId) as any)?.currency ?? "USD").toUpperCase(),
             responseDueDate: input.responseDueDate ?? null,
             createdBy: userId ?? null,
@@ -7604,7 +7646,12 @@ export function createPurchasingService(
               vendorProductId: Number(vendorProduct.id),
               requestedPieces: selection.requestedPieces,
               status: "draft",
-              quantityOverrideReason: selection.quantityOverrideReason?.trim() || null,
+              quantityOverrideReason: selection.quantityOverrideReason,
+              allocationOverrideReason: selection.allocationOverrideReason,
+              allocationOverrideApprovedBy: selection.allocationOverrideApprovedBy,
+              allocationOverrideApprovedAt: selection.allocationOverrideApprovedAt,
+              allocationOverrideBaselinePieces: selection.allocationOverrideBaselinePieces,
+              allocationOverrideExcessPieces: selection.allocationOverrideExcessPieces,
               purchaseUom: vendorProduct.purchaseUom ?? null,
               piecesPerPurchaseUom: vendorProduct.piecesPerPurchaseUom ?? null,
               requestedPurchaseUomQty: vendorProduct.piecesPerPurchaseUom
@@ -7614,6 +7661,27 @@ export function createPurchasingService(
             const rfqLine = insertedLines[0];
             if (!rfqLine) throw new PurchasingError("RFQ line was not created", 409);
             createdLines.push(rfqLine);
+            if (selection.allocationOverrideExcessPieces) {
+              auditRows.push({
+                level: "AUDIT",
+                actor: `${actorType}:${actorId}`,
+                action: "purchase_rfq.allocation_override_approved",
+                target: `request_for_quote_line:${rfqLine.id}`,
+                changes: {
+                  after: {
+                    recommendationLineId: recommendation.id,
+                    recommendedPieces: selection.recommendedPieces,
+                    alreadyAllocatedPieces: selection.alreadyAllocatedPieces,
+                    requestedPieces: selection.requestedPieces,
+                    excessPieces: selection.allocationOverrideExcessPieces,
+                    reason: selection.allocationOverrideReason,
+                    approvedBy: selection.allocationOverrideApprovedBy,
+                    approvedAt: selection.allocationOverrideApprovedAt,
+                  },
+                },
+                context: { rfqId: rfq.id, vendorId },
+              });
+            }
             auditRows.push({
               level: "AUDIT",
               actor: `${actorType}:${actorId}`,

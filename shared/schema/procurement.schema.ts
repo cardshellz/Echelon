@@ -940,6 +940,7 @@ export const requestForQuotes = procurementSchema.table("request_for_quotes", {
   rfqNumber: varchar("rfq_number", { length: 80 }).notNull().unique(),
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: "restrict" }),
   idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
   status: varchar("status", { length: 24 }).notNull().default("draft"),
   requestNote: text("request_note"),
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
@@ -956,6 +957,7 @@ export const requestForQuotes = procurementSchema.table("request_for_quotes", {
   index("request_for_quotes_status_created_idx").on(table.status, table.createdAt),
   check("request_for_quotes_status_chk", sql`${table.status} IN ('draft', 'sent', 'partially_quoted', 'quoted', 'declined', 'cancelled', 'expired')`),
   check("request_for_quotes_currency_chk", sql`${table.currency} ~ '^[A-Z]{3}$'`),
+  check("request_for_quotes_request_hash_chk", sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`),
 ]);
 
 export const requestForQuoteLineStatusEnum = [
@@ -975,6 +977,10 @@ export const requestForQuoteLines = procurementSchema.table("request_for_quote_l
   status: varchar("status", { length: 24 }).notNull().default("draft"),
   quantityOverrideReason: text("quantity_override_reason"),
   allocationOverrideReason: text("allocation_override_reason"),
+  allocationOverrideApprovedBy: varchar("allocation_override_approved_by", { length: 255 }),
+  allocationOverrideApprovedAt: timestamp("allocation_override_approved_at", { withTimezone: true }),
+  allocationOverrideBaselinePieces: integer("allocation_override_baseline_pieces"),
+  allocationOverrideExcessPieces: integer("allocation_override_excess_pieces"),
   quotedPieces: integer("quoted_pieces"),
   quotedUnitCostMills: bigint("quoted_unit_cost_mills", { mode: "number" }),
   quoteReference: varchar("quote_reference", { length: 255 }),
@@ -991,6 +997,26 @@ export const requestForQuoteLines = procurementSchema.table("request_for_quote_l
   check("request_for_quote_lines_requested_qty_chk", sql`${table.requestedPieces} > 0`),
   check("request_for_quote_lines_pack_chk", sql`${table.piecesPerPurchaseUom} IS NULL OR ${table.piecesPerPurchaseUom} > 0`),
   check("request_for_quote_lines_status_chk", sql`${table.status} IN ('draft', 'sent', 'quoted', 'declined', 'cancelled', 'accepted', 'ordered')`),
+  check("request_for_quote_lines_override_evidence_chk", sql`
+    (
+      ${table.allocationOverrideReason} IS NULL
+      AND ${table.allocationOverrideApprovedBy} IS NULL
+      AND ${table.allocationOverrideApprovedAt} IS NULL
+      AND ${table.allocationOverrideBaselinePieces} IS NULL
+      AND ${table.allocationOverrideExcessPieces} IS NULL
+    )
+    OR (
+      NULLIF(BTRIM(${table.quantityOverrideReason}), '') IS NOT NULL
+      AND LENGTH(BTRIM(${table.quantityOverrideReason})) >= 3
+      AND NULLIF(BTRIM(${table.allocationOverrideReason}), '') IS NOT NULL
+      AND LENGTH(BTRIM(${table.allocationOverrideReason})) >= 3
+      AND ${table.allocationOverrideReason} = ${table.quantityOverrideReason}
+      AND NULLIF(BTRIM(${table.allocationOverrideApprovedBy}), '') IS NOT NULL
+      AND ${table.allocationOverrideApprovedAt} IS NOT NULL
+      AND ${table.allocationOverrideBaselinePieces} >= 0
+      AND ${table.allocationOverrideExcessPieces} > 0
+    )
+  `),
 ]);
 
 export const insertPurchaseRecommendationRunSchema = createInsertSchema(purchaseRecommendationRuns).omit({ id: true, generatedAt: true });

@@ -658,13 +658,21 @@ describe("purchasing recommendation routes", () => {
     expect(body.items[0].allocations[0].recommendationLineId).toBe(10);
   });
 
-  it("creates a supplier-grouped RFQ batch without accepting price fields", async () => {
+  it("creates a supplier-grouped RFQ batch with a strict approval flag and no client-supplied approver", async () => {
     server = await startServer(buildApp());
 
     const { status } = await requestJson(server.url, "POST", "/api/purchasing/rfq-queue", {
       idempotencyKey: "ui-request-123",
       requestNote: "Quote delivery to the main warehouse",
-      lines: [{ recommendationLineId: 11, vendorId: 77, vendorSku: "SUP-302", requestedPieces: 12 }],
+      lines: [{
+        recommendationLineId: 11,
+        vendorId: 77,
+        vendorSku: "SUP-302",
+        requestedPieces: 12,
+        quantityOverrideReason: "Build launch inventory",
+        allocationOverrideApproved: true,
+        allocationOverrideApprovedBy: "forged-user",
+      }],
       unitCostCents: 1,
     });
 
@@ -674,10 +682,37 @@ describe("purchasing recommendation routes", () => {
     expect(input).toMatchObject({
       idempotencyKey: "ui-request-123",
       requestNote: "Quote delivery to the main warehouse",
-      lines: [{ recommendationLineId: 11, vendorId: 77, vendorSku: "SUP-302", requestedPieces: 12 }],
+      lines: [{
+        recommendationLineId: 11,
+        vendorId: 77,
+        vendorSku: "SUP-302",
+        requestedPieces: 12,
+        quantityOverrideReason: "Build launch inventory",
+        allocationOverrideApproved: true,
+      }],
     });
+    expect(mocks.purchasingService.createRfqBatch.mock.calls[0][1]).toBe("admin-user");
     expect(input).not.toHaveProperty("unitCostCents");
     expect(input).not.toHaveProperty("pricing");
+    expect(input.lines[0]).not.toHaveProperty("allocationOverrideApprovedBy");
+  });
+
+  it("does not coerce a string into allocation approval", async () => {
+    server = await startServer(buildApp());
+
+    const { status } = await requestJson(server.url, "POST", "/api/purchasing/rfq-queue", {
+      idempotencyKey: "ui-request-string-approval",
+      lines: [{
+        recommendationLineId: 11,
+        vendorId: 77,
+        requestedPieces: 12,
+        quantityOverrideReason: "Build launch inventory",
+        allocationOverrideApproved: "true",
+      }],
+    });
+
+    expect(status).toBe(201);
+    expect(mocks.purchasingService.createRfqBatch.mock.calls[0][0].lines[0].allocationOverrideApproved).toBe(false);
   });
 
   it("returns live forecast input gap diagnostics with actionable samples", async () => {

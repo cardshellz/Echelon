@@ -1148,7 +1148,16 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           run: null,
           generatedAt: null,
           lookbackDays: null,
-          summary: { total: 0, open: 0, partiallyAllocated: 0, fullyAllocated: 0, supplierAssignmentRequired: 0, activeRfqs: 0 },
+          summary: {
+            total: 0,
+            open: 0,
+            partiallyAllocated: 0,
+            fullyAllocated: 0,
+            supplierAssignmentRequired: 0,
+            activeRfqs: 0,
+            aboveRecommendation: 0,
+            excessPieces: 0,
+          },
           items: [],
         });
       }
@@ -1165,6 +1174,12 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         productVariantId: allocatedRecommendation.productVariantId,
         warehouseId: allocatedRecommendation.warehouseId,
         requestedPieces: requestForQuoteLinesTable.requestedPieces,
+        quantityOverrideReason: requestForQuoteLinesTable.quantityOverrideReason,
+        allocationOverrideReason: requestForQuoteLinesTable.allocationOverrideReason,
+        allocationOverrideApprovedBy: requestForQuoteLinesTable.allocationOverrideApprovedBy,
+        allocationOverrideApprovedAt: requestForQuoteLinesTable.allocationOverrideApprovedAt,
+        allocationOverrideBaselinePieces: requestForQuoteLinesTable.allocationOverrideBaselinePieces,
+        allocationOverrideExcessPieces: requestForQuoteLinesTable.allocationOverrideExcessPieces,
         lineStatus: requestForQuoteLinesTable.status,
         rfqId: requestForQuotesTable.id,
         rfqNumber: requestForQuotesTable.rfqNumber,
@@ -1198,6 +1213,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         const lineAllocations = allocationsBySku.get(purchasingSkuAllocationKey(line)) ?? [];
         const allocatedPieces = lineAllocations.reduce((sum, allocation) => sum + Number(allocation.requestedPieces), 0);
         const remainingPieces = Math.max(Number(line.recommendedPieces) - allocatedPieces, 0);
+        const excessPieces = Math.max(allocatedPieces - Number(line.recommendedPieces), 0);
         const evidence = (line.evidenceSnapshot ?? {}) as Record<string, any>;
         return {
           recommendationLineId: line.id,
@@ -1212,6 +1228,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           recommendedPieces: line.recommendedPieces,
           allocatedPieces,
           remainingPieces,
+          excessPieces,
           sourcingStatus: remainingPieces === 0 ? "fully_allocated" : allocatedPieces > 0 ? "partially_allocated" : "open",
           availablePieces: Number(evidence.availablePieces ?? 0),
           onOrderPieces: Number(evidence.onOrderPieces ?? 0),
@@ -1250,6 +1267,8 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           fullyAllocated: items.filter((item) => item.sourcingStatus === "fully_allocated").length,
           supplierAssignmentRequired: items.filter((item) => item.supplierAssignmentRequired && item.remainingPieces > 0).length,
           activeRfqs: activeRfqIds.size,
+          aboveRecommendation: items.filter((item) => item.excessPieces > 0).length,
+          excessPieces: items.reduce((sum, item) => sum + item.excessPieces, 0),
         },
         items,
       });
@@ -1279,6 +1298,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
           vendorSku: line?.vendorSku == null ? null : String(line.vendorSku),
           requestedPieces: Number(line?.requestedPieces),
           quantityOverrideReason: line?.quantityOverrideReason == null ? null : String(line.quantityOverrideReason),
+          allocationOverrideApproved: line?.allocationOverrideApproved === true,
         })),
       }, userId);
       res.status(result.reused ? 200 : 201).json(result);

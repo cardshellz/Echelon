@@ -12,6 +12,7 @@ import {
   lockAndLoadActiveRfqAllocations,
   purchasingSkuAllocationKey,
 } from "./purchasing-rfq.service";
+import { buildRfqBatchRequestHash } from "./purchasing-rfq-allocation";
 
 export type AutomaticRfqDraftPolicy = {
   mode: "manual" | "preferred_vendor";
@@ -268,12 +269,32 @@ export function createAutomaticRfqDraftService(database: any) {
       const auditRows: any[] = [];
       for (const [vendorId, lines] of resolvedByVendor.entries()) {
         const vendor = activeVendorById.get(vendorId) as any;
+        const requestNote = `Automatically prepared from purchase recommendation run ${input.recommendationRunId}. Review before sending.`;
+        const requestHash = buildRfqBatchRequestHash({
+          requestNote,
+          responseDueDate: null,
+          approvedBy: null,
+          lines: lines.map((line) => {
+            const mapping = mappingById.get(Number(line.preferredVendorProductId)) as any;
+            return {
+              recommendationLineId: line.id,
+              vendorId,
+              vendorSku: mapping?.vendorSku?.trim() || null,
+              requestedPieces: line.requestedPieces,
+              quantityOverrideReason: line.requestedPieces === Number(line.recommendedPieces)
+                ? null
+                : "Automatically reduced by active RFQ allocations from prior recommendation runs.",
+              allocationOverrideApproved: false,
+            };
+          }),
+        });
         const insertedRfqs = await tx.insert(requestForQuotesTable).values({
           rfqNumber: `RFQ-AUTO-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8).toUpperCase()}`,
           vendorId,
           idempotencyKey,
+          requestHash,
           status: "draft",
-          requestNote: `Automatically prepared from purchase recommendation run ${input.recommendationRunId}. Review before sending.`,
+          requestNote,
           currency: String(vendor?.currency ?? "USD").toUpperCase(),
           createdBy: input.actorId,
         }).returning();
