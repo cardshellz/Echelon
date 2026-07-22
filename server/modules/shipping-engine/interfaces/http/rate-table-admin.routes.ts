@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   shippingRateBookAssignments,
   shippingRateBooks,
+  shippingRateRules,
   shippingRateTableRows,
   shippingRateTables,
   shippingServiceLevels,
@@ -139,7 +140,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "view"),
     async (_req, res) => {
       try {
-        const [tables, coverage, books, assignments, serviceLevels] = await Promise.all([
+        const [tables, coverage, productRuleCounts, books, assignments, serviceLevels] = await Promise.all([
           db.select().from(shippingRateTables)
             .orderBy(desc(shippingRateTables.effectiveFrom), desc(shippingRateTables.id)),
           db.select({
@@ -153,6 +154,12 @@ export function registerRateTableAdminRoutes(app: Express): void {
           })
             .from(shippingRateTableRows)
             .groupBy(shippingRateTableRows.rateTableId),
+          db.select({
+            rateTableId: shippingRateRules.rateTableId,
+            productRuleCount: sql<number>`count(*)::int`,
+          })
+            .from(shippingRateRules)
+            .groupBy(shippingRateRules.rateTableId),
           db.select({
             id: shippingRateBooks.id,
             code: shippingRateBooks.code,
@@ -179,6 +186,9 @@ export function registerRateTableAdminRoutes(app: Express): void {
 
         const assignmentsByBook = groupBy(assignments, (assignment) => assignment.rateBookId);
         const coverageByTable = new Map(coverage.map((item) => [item.rateTableId, item]));
+        const productRuleCountByTable = new Map(
+          productRuleCounts.map((item) => [item.rateTableId, item.productRuleCount]),
+        );
         const hydratedBooks = books.map((book) => ({
           ...book,
           assignments: assignmentsByBook.get(book.id) ?? [],
@@ -200,6 +210,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
             maxMeasure: coverageByTable.get(table.id)?.hasOpenEnded
               ? null
               : coverageByTable.get(table.id)?.maxMeasure ?? null,
+            productRuleCount: productRuleCountByTable.get(table.id) ?? 0,
           })),
         });
       } catch (error) {

@@ -60,6 +60,7 @@ export interface RateTableSummary {
   rowCount: number;
   stateCount: number;
   zipOverrideCount: number;
+  productRuleCount: number;
   minMeasure: number | null;
   maxMeasure: number | null;
 }
@@ -442,6 +443,23 @@ export interface ProgramOptionState {
   draft: RateTableSummary | null;
   /** Every revision for this program + option, newest first. */
   history: RateTableSummary[];
+}
+
+export interface ProductRuleRevisionStatus {
+  liveCount: number | null;
+  draftCount: number | null;
+}
+
+export function productRuleRevisionStatus(
+  option: {
+    active: Pick<RateTableSummary, "productRuleCount"> | null;
+    draft: Pick<RateTableSummary, "productRuleCount"> | null;
+  },
+): ProductRuleRevisionStatus {
+  return {
+    liveCount: option.active?.productRuleCount ?? null,
+    draftCount: option.draft?.productRuleCount ?? null,
+  };
 }
 
 export interface ProgramOverview {
