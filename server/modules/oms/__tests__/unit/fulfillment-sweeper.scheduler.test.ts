@@ -34,6 +34,60 @@ describe("fulfillment-sweeper.scheduler", () => {
     });
   });
 
+  it("reserves sweep capacity for recent failures and historical convergence", async () => {
+    const pushShopifyFulfillment = vi.fn(async () => ({
+      shopifyFulfillmentId: "gid://shopify/Fulfillment/42",
+      alreadyPushed: false,
+      writebackComplete: true,
+    }));
+    let candidateQueryCount = 0;
+    const execute = vi.fn(async (query: any) => {
+      const text = queryText(query);
+      if (!text.includes("FROM shipped_channel_shipments")) {
+        return { rows: [] };
+      }
+      candidateQueryCount += 1;
+      if (candidateQueryCount === 1) {
+        return {
+          rows: [{
+            shipment_id: 101,
+            order_number: "#recent",
+            oms_order_id: 201,
+            provider: "shopify",
+            pending_retry: false,
+            dead_retry: false,
+          }],
+        };
+      }
+      return {
+        rows: [{
+          shipment_id: 202,
+          order_number: "#historical",
+          oms_order_id: 302,
+          provider: "shopify",
+          pending_retry: false,
+          dead_retry: false,
+        }],
+      };
+    });
+    const db = {
+      execute,
+      __fulfillmentPush: { pushShopifyFulfillment },
+    };
+
+    await runFulfillmentSweep(db);
+
+    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(2);
+    expect(pushShopifyFulfillment).toHaveBeenNthCalledWith(1, 101);
+    expect(pushShopifyFulfillment).toHaveBeenNthCalledWith(2, 202);
+    const candidateQueries = execute.mock.calls
+      .filter(([query]) => queryText(query).includes("FROM shipped_channel_shipments"))
+      .map(([query]) => JSON.stringify(query));
+    expect(candidateQueries).toHaveLength(2);
+    expect(candidateQueries[0]).toContain("make_interval(days");
+    expect(candidateQueries[1]).not.toContain("make_interval(days");
+  });
+
   it("repushes a missing split shipment directly, including partially shipped orders", async () => {
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/42",

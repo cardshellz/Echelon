@@ -1575,6 +1575,36 @@ export function createShipStationService(
           );
         }
 
+        const sourceQty = Number(source.qty);
+        if (!Number.isInteger(sourceQty) || sourceQty <= 0) {
+          throw new Error(
+            `WMS shipment item ${item.sourceShipmentItemId} has invalid source ` +
+              `quantity ${String(source.qty)}`,
+          );
+        }
+
+        if (sourceQty === item.qty) {
+          // Preserve the stable wms-item identity when the entire line moves to
+          // the physical package. Copying and reducing would leave an illegal
+          // zero-quantity placeholder on the parent shipment.
+          const moved: any = await tx.execute(sql`
+            UPDATE wms.outbound_shipment_items
+            SET shipment_id = ${row.id},
+                tracking_id = ${String(shipment.shipmentId)}
+            WHERE id = ${item.sourceShipmentItemId}
+              AND shipment_id = ${parent.id}
+              AND qty = ${item.qty}
+            RETURNING id
+          `);
+          if ((moved?.rows ?? []).length !== 1) {
+            throw new Error(
+              `WMS shipment item ${item.sourceShipmentItemId} could not be moved ` +
+                `atomically to physical split ${shipment.shipmentId}`,
+            );
+          }
+          continue;
+        }
+
         const insertedItem: any = await tx.execute(sql`
           INSERT INTO wms.outbound_shipment_items
             (shipment_id, order_item_id, replacement_for_order_item_id,
@@ -1602,7 +1632,7 @@ export function createShipStationService(
           SET qty = qty - ${item.qty}
           WHERE id = ${item.sourceShipmentItemId}
             AND shipment_id = ${parent.id}
-            AND qty >= ${item.qty}
+            AND qty > ${item.qty}
           RETURNING id
         `);
         if ((reduced?.rows ?? []).length !== 1) {
@@ -1619,7 +1649,8 @@ export function createShipStationService(
       ? db.transaction(createSplit)
       : createSplit(db);
   }
-  async function syncShipmentItemsFromShipStation(
+  async function syncShipmentItemsWithExecutor(
+    executor: any,
     targetShipmentId: number,
     shipment: ShipStationShipment,
     allowedSourceShipmentItemIds?: Set<number>,
@@ -1633,7 +1664,7 @@ export function createShipStationService(
 
     let parsedItems = parsePositiveWmsShipmentItemsFromShipStation(shipment) ?? [];
 
-    const targetItems: any = await db.execute(sql`
+    const targetItems: any = await executor.execute(sql`
       SELECT osi.id, osi.order_item_id, osi.replacement_for_order_item_id,
              COALESCE(oi.sku, catalog_variant.sku) AS sku,
              osi.qty, target_shipment.shipment_purpose
@@ -1681,15 +1712,9 @@ export function createShipStationService(
           `[ShipStation Webhook V2] Shipment ${targetShipmentId} received ShipStation shipment ${shipment.shipmentId} without parseable lineItemKey values; matched items by exact SKU/qty.`,
         );
       } else {
-        await db.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET requires_review = true,
-              review_reason = 'shipstation_split_items_unmapped',
-              updated_at = NOW()
-          WHERE id = ${targetShipmentId}
-        `);
         throw new ShipStationUnmappedItemsError(
-          `ShipStation shipment ${shipment.shipmentId} has no parseable wms-item lineItemKey values`,
+          `shipstation_split_items_unmapped: ShipStation shipment ` +
+            `${shipment.shipmentId} has no parseable wms-item lineItemKey values`,
         );
       }
     }
@@ -1730,7 +1755,7 @@ export function createShipStationService(
     const touchedOriginalIds: number[] = [];
     const touchedChildIds: number[] = [];
     for (const item of parsedItems) {
-      const source: any = await db.execute(sql`
+      const source: any = await executor.execute(sql`
         SELECT
           osi.id,
           osi.order_item_id,
@@ -1759,20 +1784,15 @@ export function createShipStationService(
       `);
       const sourceRow = source?.rows?.[0];
       if (!sourceRow) {
-        await db.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET requires_review = true,
-              review_reason = 'shipstation_split_source_item_missing',
-              updated_at = NOW()
-          WHERE id = ${targetShipmentId}
-        `);
-        throw new Error(
-          `ShipStation shipment ${shipment.shipmentId} referenced missing WMS shipment item ${item.sourceShipmentItemId}`,
+        throw new ShipStationUnmappedItemsError(
+          `shipstation_split_source_item_missing: ShipStation shipment ` +
+            `${shipment.shipmentId} referenced missing WMS shipment item ` +
+            `${item.sourceShipmentItemId}`,
         );
       }
 
       if (targetIsOriginal && targetItemIds.has(item.sourceShipmentItemId)) {
-        await db.execute(sql`
+        await executor.execute(sql`
           UPDATE wms.outbound_shipment_items
           SET qty = ${item.qty},
               from_location_id = COALESCE(from_location_id, ${sourceRow.from_location_id}),
@@ -1787,7 +1807,7 @@ export function createShipStationService(
           : null;
 
         if (existingChild) {
-          await db.execute(sql`
+          await executor.execute(sql`
             UPDATE wms.outbound_shipment_items
             SET product_variant_id = ${sourceRow.product_variant_id},
                 qty = ${item.qty},
@@ -1802,7 +1822,7 @@ export function createShipStationService(
           // New splits reach this path with the parent quantity already
           // reduced and the physical child row already inserted atomically.
           // The insert below remains only for pre-hardening split rows.
-          const inserted: any = await db.execute(sql`
+          const inserted: any = await executor.execute(sql`
             INSERT INTO wms.outbound_shipment_items
               (shipment_id, order_item_id, replacement_for_order_item_id,
                product_variant_id, qty,
@@ -1825,32 +1845,50 @@ export function createShipStationService(
 
     if (targetIsOriginal && touchedOriginalIds.length > 0) {
       const touched = new Set(touchedOriginalIds);
-      for (const row of targetItems?.rows ?? []) {
-        const rowId = Number(row.id);
-        if (!touched.has(rowId)) {
-          await db.execute(sql`
-            UPDATE wms.outbound_shipment_items
-            SET qty = 0
-            WHERE id = ${rowId}
-          `);
-        }
+      const untouchedIds = (targetItems?.rows ?? [])
+        .map((row: any) => Number(row.id))
+        .filter((rowId: number) => Number.isInteger(rowId) && rowId > 0 && !touched.has(rowId));
+      if (untouchedIds.length > 0) {
+        throw new ShipStationUnmappedItemsError(
+          `ShipStation shipment ${shipment.shipmentId} omitted ${untouchedIds.length} ` +
+            `authoritative item row(s) from WMS shipment ${targetShipmentId}; ` +
+            `the remaining demand was preserved for review`,
+        );
       }
     }
 
     if (!targetIsOriginal && touchedChildIds.length > 0) {
       const touched = new Set(touchedChildIds);
-      for (const row of targetItems?.rows ?? []) {
-        const rowId = Number(row.id);
-        if (Number.isInteger(rowId) && rowId > 0 && !touched.has(rowId)) {
-          await db.execute(sql`
-            UPDATE wms.outbound_shipment_items
-            SET qty = 0,
-                tracking_id = ${String(shipment.shipmentId)}
-            WHERE id = ${rowId}
-          `);
-        }
+      const untouchedIds = (targetItems?.rows ?? [])
+        .map((row: any) => Number(row.id))
+        .filter((rowId: number) => Number.isInteger(rowId) && rowId > 0 && !touched.has(rowId));
+      if (untouchedIds.length > 0) {
+        throw new ShipStationUnmappedItemsError(
+          `ShipStation shipment ${shipment.shipmentId} omitted ${untouchedIds.length} ` +
+            `authoritative child item row(s) from WMS shipment ${targetShipmentId}; ` +
+            `the remaining demand was preserved for review`,
+        );
       }
     }
+  }
+
+  async function syncShipmentItemsFromShipStation(
+    targetShipmentId: number,
+    shipment: ShipStationShipment,
+    allowedSourceShipmentItemIds?: Set<number>,
+  ): Promise<void> {
+    const syncItems = (executor: any) => syncShipmentItemsWithExecutor(
+      executor,
+      targetShipmentId,
+      shipment,
+      allowedSourceShipmentItemIds,
+    );
+
+    if (typeof db.transaction === "function") {
+      await db.transaction(syncItems);
+      return;
+    }
+    await syncItems(db);
   }
 
   async function resolveCombinedShipmentGroupsFromShipStationItems(

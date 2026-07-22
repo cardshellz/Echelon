@@ -91,8 +91,13 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     );
     const itemSyncBlock = sourceBlock(
       SHIPSTATION_SRC,
+      "async function syncShipmentItemsWithExecutor",
       "async function syncShipmentItemsFromShipStation",
-      "async function loadValidatedInventoryShipmentItems",
+    );
+    const itemSyncWrapperBlock = sourceBlock(
+      SHIPSTATION_SRC,
+      "async function syncShipmentItemsFromShipStation",
+      "async function resolveCombinedShipmentGroupsFromShipStationItems",
     );
 
     expect(SHIP_NOTIFY_TEST_SRC).toContain(
@@ -109,11 +114,18 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(splitResolutionBlock).toContain("${SHIPSTATION_SPLIT_SOURCE}, 'queued'");
     expect(splitResolutionBlock).toContain("db.transaction(createSplit)");
     expect(splitResolutionBlock).not.toContain("SELECT pg_advisory_unlock");
-    expect(itemSyncBlock).toContain("parseWmsShipmentItemLineKey");
+    expect(splitResolutionBlock).toContain("if (sourceQty === item.qty)");
+    expect(splitResolutionBlock).toContain("SET shipment_id = ${row.id}");
+    expect(splitResolutionBlock).toContain("AND qty > ${item.qty}");
+    expect(SHIPSTATION_SRC).toContain("parseWmsShipmentItemLineKey");
     expect(itemSyncBlock).toContain("shipstation_split_items_unmapped");
     expect(itemSyncBlock).toContain("shipstation_split_source_item_missing");
     expect(itemSyncBlock).toContain("UPDATE wms.outbound_shipment_items");
     expect(itemSyncBlock).toContain("tracking_id = ${String(shipment.shipmentId)}");
+    expect(itemSyncBlock).not.toContain("SET qty = 0");
+    expect(itemSyncBlock).toContain("the remaining demand was preserved for review");
+    expect(itemSyncWrapperBlock).toContain('typeof db.transaction === "function"');
+    expect(itemSyncWrapperBlock).toContain("await db.transaction(syncItems)");
   });
 
   it("exempts legitimate ShipStation split children from active engine identity uniqueness", () => {

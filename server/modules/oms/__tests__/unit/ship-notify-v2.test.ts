@@ -656,12 +656,127 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(sqlText).toMatch(/INSERT INTO wms\.outbound_shipment_items[\s\S]*shipment_item_purpose/);
     expect(sqlText).toMatch(/SET qty = qty -/);
     expect(sqlText).not.toMatch(/SET shipment_id/);
-    expect(mock.db.transaction).toHaveBeenCalledTimes(1);
+    // Split creation and physical item synchronization are separate atomic
+    // units; both must roll back independently on a failed invariant.
+    expect(mock.db.transaction).toHaveBeenCalledTimes(2);
     expect(sqlText).toMatch(/fulfilled_quantity = LEAST\(/);
     expect(sqlText).toMatch(/SUM\(osi\.qty\)/);
     expect(sqlText).toMatch(/outbound_shipment_items/);
     expect(sqlText).toMatch(/picked_quantity = LEAST\(/);
     expect(sqlText).toMatch(/warehouse_status = /);
+  });
+
+  it("moves a whole shipment item into a physical split without writing zero quantity", async () => {
+    const shipmentPayload = makeShipmentPayload({
+      shipmentId: 7003,
+      orderId: 555003,
+      orderKey: "echelon-wms-shp-501",
+      shipmentItems: [
+        { lineItemKey: "wms-item-10001", sku: "SKU-A", quantity: 1 },
+      ],
+    });
+    const inventoryCore = {
+      recordShipment: vi.fn(async () => undefined),
+    };
+
+    const mock = makeDb([
+      { rows: [] },
+      {
+        rows: [{
+          id: 501,
+          order_id: 42,
+          channel_id: 7,
+          status: "planned",
+          shipstation_order_id: 555003,
+          shipstation_order_key: "echelon-wms-shp-501",
+          external_fulfillment_id: null,
+        }],
+      },
+      // The physical package contains one complete line while another line
+      // remains on the parent shipment.
+      { rows: [{ id: 10001, qty: 1 }, { id: 10002, qty: 1 }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [{ id: 501, status: "planned" }] },
+      { rows: [{ id: 9001, order_id: 42, status: "queued", shipstation_order_id: 555003 }] },
+      { rows: [{ id: 10001, qty: 1 }] },
+      // Move the stable item row to the physical child.
+      { rows: [{ id: 10001 }] },
+      { rows: [{ source_shipment_item_id: 10001, wms_order_id: 42 }] },
+      {
+        rows: [{
+          id: 10001,
+          order_item_id: 30001,
+          replacement_for_order_item_id: null,
+          shipment_item_purpose: "customer_fulfillment",
+          product_variant_id: 40001,
+          qty: 1,
+        }],
+      },
+      {
+        rows: [{
+          id: 10001,
+          order_item_id: 30001,
+          product_variant_id: 40001,
+          from_location_id: 50001,
+          box_id: null,
+          weight_oz: 4,
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 10001,
+          order_item_id: 30001,
+          product_variant_id: 40001,
+          qty: 1,
+          pick_location_id: 50001,
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          id: 9001,
+          order_id: 42,
+          status: "queued",
+          tracking_number: null,
+          carrier: null,
+          tracking_url: null,
+        }],
+      },
+      { rows: [] },
+      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
+      { rows: [{ status: "shipped" }, { status: "queued" }] },
+      { rows: [] },
+      { rows: [{ id: 1, quantity: 1, shipped_qty: 1 }, { id: 2, quantity: 1, shipped_qty: 0 }] },
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: [{ provider: "shopify" }] },
+    ]);
+    mock.db.transaction = vi.fn(async (work: (tx: any) => Promise<unknown>) => (
+      work(mock.db)
+    ));
+
+    globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
+
+    const processed = await createShipStationService(mock.db, inventoryCore)
+      .processShipNotify("/foo");
+
+    expect(processed).toBe(1);
+    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
+      orderItemId: 30001,
+      shipmentItemId: 10001,
+      qty: 1,
+      shipmentId: "9001",
+    }));
+    const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
+    expect(sqlText).toMatch(/SET shipment_id =/);
+    expect(sqlText).not.toMatch(/SET qty = qty -/);
+    expect(sqlText).not.toMatch(/SET qty = 0/);
+    expect(sqlText).not.toMatch(/INSERT INTO wms\.outbound_shipment_items/);
   });
 
   it("matches ShipStation shipment items by exact SKU/qty when lineItemKey is missing", async () => {

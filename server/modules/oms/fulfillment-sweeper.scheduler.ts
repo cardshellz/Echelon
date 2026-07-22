@@ -12,6 +12,8 @@ import { enqueueShopifyFulfillmentRetry } from "./webhook-retry.worker";
 
 const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 500;
+const OUTBOUND_RECENT_SWEEP_LIMIT = 400;
+const OUTBOUND_RECENT_WINDOW_DAYS = 30;
 
 export interface RecoveredShopifyWritebackDebtResult {
   retryRowsResolved: number;
@@ -158,13 +160,30 @@ export async function runFulfillmentSweep(dbArg: any = db) {
     }
 
     // Shipment scope is required here: an order can be partially shipped, and
-    // one successful sibling must never hide another missing writeback.
-    const candidates = await findChannelWritebackCandidates(dbArg, {
+    // one successful sibling must never hide another missing writeback. Keep
+    // independent capacity for recent incidents and historical convergence so
+    // neither a large legacy backlog nor a burst of new failures can starve the
+    // other lane.
+    const recentCandidates = await findChannelWritebackCandidates(dbArg, {
       minAgeMinutes: 60,
-      maxAgeDays: null,
-      limit: OUTBOUND_SWEEP_LIMIT,
+      maxAgeDays: OUTBOUND_RECENT_WINDOW_DAYS,
+      limit: OUTBOUND_RECENT_SWEEP_LIMIT,
       excludeRetryStates: false,
     });
+    const historicalCandidates = await findChannelWritebackCandidates(dbArg, {
+      minAgeMinutes: 60,
+      maxAgeDays: null,
+      limit: OUTBOUND_SWEEP_LIMIT - recentCandidates.length,
+      excludeRetryStates: false,
+    });
+    const candidates = Array.from(
+      new Map(
+        [...recentCandidates, ...historicalCandidates].map((candidate) => [
+          candidate.shipment_id,
+          candidate,
+        ]),
+      ).values(),
+    );
 
     if (candidates.length === 0) {
       console.log(`${LOG_PREFIX} No missing channel writebacks in the sweep window.`);
