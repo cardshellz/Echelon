@@ -188,6 +188,7 @@ describe("auto-draft job", () => {
         status: "open",
         evidenceSnapshot: {},
       }],
+      observations: [{ id: 9101, runId: 9001, productId: 1 }],
       reused: false,
     });
     mocks.automaticRfqDraft.createDrafts.mockResolvedValue({
@@ -279,7 +280,7 @@ describe("auto-draft job", () => {
       itemsSkippedAfterAnalysis: 0,
       reviewOnly: false,
       recommendationRun: { id: 500 },
-      purchaseRecommendationRun: { id: 9001, lineCount: 1, reused: false },
+      purchaseRecommendationRun: { id: 9001, lineCount: 1, observationCount: 1, reused: false },
       automaticRfqDrafts: {
         mode: "manual",
         suppressedForPilot: false,

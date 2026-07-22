@@ -1129,7 +1129,11 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         source: "manual",
         evaluatedCount,
       }), userId);
-      res.status(201).json({ run: result.run, lineCount: result.lines.length });
+      res.status(201).json({
+        run: result.run,
+        lineCount: result.lines.length,
+        observationCount: result.observations.length,
+      });
     } catch (error) {
       console.error("Error generating purchasing recommendation run:", error);
       res.status(500).json({ error: "Failed to generate purchasing recommendations" });

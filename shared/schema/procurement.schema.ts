@@ -930,6 +930,42 @@ export const purchaseRecommendationLines = procurementSchema.table("purchase_rec
   check("purchase_recommendation_lines_status_chk", sql`${table.status} IN ('open', 'cancelled')`),
 ]);
 
+export const purchaseForecastObservationScopeEnum = ["product_all_warehouses"] as const;
+export type PurchaseForecastObservationScope = typeof purchaseForecastObservationScopeEnum[number];
+
+export const purchaseForecastObservations = procurementSchema.table("purchase_forecast_observations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  runId: integer("run_id").notNull().references(() => purchaseRecommendationRuns.id, { onDelete: "restrict" }),
+  observationKey: varchar("observation_key", { length: 160 }).notNull(),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  selectedReceiveVariantId: integer("selected_receive_variant_id").references(() => productVariants.id, { onDelete: "restrict" }),
+  scope: varchar("scope", { length: 40 }).notNull().default("product_all_warehouses"),
+  productSku: varchar("product_sku", { length: 100 }).notNull(),
+  productName: text("product_name").notNull(),
+  forecastMethod: varchar("forecast_method", { length: 40 }).notNull(),
+  forecastVersion: integer("forecast_version").notNull(),
+  forecastDailyPiecesMicros: bigint("forecast_daily_pieces_micros", { mode: "number" }).notNull(),
+  baselineDailyPiecesMicros: bigint("baseline_daily_pieces_micros", { mode: "number" }).notNull(),
+  forwardDemandPieces: integer("forward_demand_pieces").notNull().default(0),
+  forwardDemandRawPieces: integer("forward_demand_raw_pieces").notNull().default(0),
+  evidenceSnapshot: jsonb("evidence_snapshot").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("purchase_forecast_observations_run_product_scope_uidx")
+    .on(table.runId, table.productId, table.scope),
+  index("purchase_forecast_observations_product_run_idx").on(table.productId, table.runId),
+  check("purchase_forecast_observations_scope_chk", sql`${table.scope} IN ('product_all_warehouses')`),
+  check("purchase_forecast_observations_version_chk", sql`${table.forecastVersion} > 0`),
+  check("purchase_forecast_observations_forecast_qty_chk", sql`${table.forecastDailyPiecesMicros} >= 0`),
+  check("purchase_forecast_observations_baseline_qty_chk", sql`${table.baselineDailyPiecesMicros} >= 0`),
+  check("purchase_forecast_observations_forward_qty_chk", sql`${table.forwardDemandPieces} >= 0 AND ${table.forwardDemandRawPieces} >= 0`),
+  foreignKey({
+    columns: [table.selectedReceiveVariantId, table.productId],
+    foreignColumns: [productVariants.id, productVariants.productId],
+    name: "purchase_forecast_observations_receive_variant_product_fk",
+  }),
+]);
+
 export const requestForQuoteStatusEnum = [
   "draft", "sent", "partially_quoted", "quoted", "declined", "cancelled", "expired",
 ] as const;
@@ -1021,11 +1057,13 @@ export const requestForQuoteLines = procurementSchema.table("request_for_quote_l
 
 export const insertPurchaseRecommendationRunSchema = createInsertSchema(purchaseRecommendationRuns).omit({ id: true, generatedAt: true });
 export const insertPurchaseRecommendationLineSchema = createInsertSchema(purchaseRecommendationLines).omit({ id: true, createdAt: true });
+export const insertPurchaseForecastObservationSchema = createInsertSchema(purchaseForecastObservations).omit({ id: true, createdAt: true });
 export const insertRequestForQuoteSchema = createInsertSchema(requestForQuotes).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertRequestForQuoteLineSchema = createInsertSchema(requestForQuoteLines).omit({ id: true, createdAt: true, updatedAt: true });
 
 export type PurchaseRecommendationRun = typeof purchaseRecommendationRuns.$inferSelect;
 export type PurchaseRecommendationLine = typeof purchaseRecommendationLines.$inferSelect;
+export type PurchaseForecastObservation = typeof purchaseForecastObservations.$inferSelect;
 export type RequestForQuote = typeof requestForQuotes.$inferSelect;
 export type RequestForQuoteLine = typeof requestForQuoteLines.$inferSelect;
 

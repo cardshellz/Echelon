@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import {
+  purchaseForecastObservations as purchaseForecastObservationsTable,
   purchaseRecommendationLines as purchaseRecommendationLinesTable,
   purchaseRecommendationRuns as purchaseRecommendationRunsTable,
 } from "@shared/schema";
@@ -10,6 +11,8 @@ import type {
 import { buildPurchasingRfqQueue } from "./purchasing-rfq.service";
 
 const MAX_RECOMMENDATION_LINES = 2_000;
+const MAX_FORECAST_OBSERVATIONS = 10_000;
+const PIECE_MICRO_SCALE = 1_000_000;
 
 export type PurchaseRecommendationRunSource = "manual" | "auto_draft" | "api";
 
@@ -27,6 +30,22 @@ export type PurchaseRecommendationSnapshotLine = {
   evidenceSnapshot: Record<string, unknown>;
 };
 
+export type PurchaseForecastObservationInput = {
+  observationKey: string;
+  productId: number;
+  selectedReceiveVariantId: number | null;
+  scope: "product_all_warehouses";
+  productSku: string;
+  productName: string;
+  forecastMethod: string;
+  forecastVersion: number;
+  forecastDailyPiecesMicros: number;
+  baselineDailyPiecesMicros: number;
+  forwardDemandPieces: number;
+  forwardDemandRawPieces: number;
+  evidenceSnapshot: Record<string, unknown>;
+};
+
 export type CreatePurchaseRecommendationRunInput = {
   calculationVersion: string;
   source?: PurchaseRecommendationRunSource;
@@ -36,12 +55,31 @@ export type CreatePurchaseRecommendationRunInput = {
   policySnapshot: Record<string, unknown>;
   inputSummary?: Record<string, unknown>;
   lines: PurchaseRecommendationSnapshotLine[];
+  observations?: PurchaseForecastObservationInput[];
 };
 
 function assertPositiveInteger(value: unknown, field: string) {
   if (!Number.isSafeInteger(value) || Number(value) <= 0) {
     throw new RangeError(`${field} must be a positive integer`);
   }
+}
+
+function assertNonnegativeInteger(value: unknown, field: string) {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new RangeError(`${field} must be a non-negative integer`);
+  }
+}
+
+function piecesToMicros(value: unknown, field: string): number {
+  const pieces = Number(value);
+  if (!Number.isFinite(pieces) || pieces < 0) {
+    throw new RangeError(`${field} must be a non-negative finite number`);
+  }
+  const micros = Math.round(pieces * PIECE_MICRO_SCALE);
+  if (!Number.isSafeInteger(micros)) {
+    throw new RangeError(`${field} exceeds the supported precision range`);
+  }
+  return micros;
 }
 
 function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
@@ -78,6 +116,44 @@ function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
     if (line.warehouseId != null) assertPositiveInteger(line.warehouseId, `lines[${index}].warehouseId`);
     assertPositiveInteger(line.recommendedPieces, `lines[${index}].recommendedPieces`);
   });
+  const observations = input.observations ?? [];
+  if (!Array.isArray(observations) || observations.length > MAX_FORECAST_OBSERVATIONS) {
+    throw new RangeError(`observations cannot contain more than ${MAX_FORECAST_OBSERVATIONS} items`);
+  }
+  const observedProducts = new Set<number>();
+  const observationKeys = new Set<string>();
+  observations.forEach((observation, index) => {
+    const key = observation.observationKey?.trim();
+    if (!key || key.length > 160 || observationKeys.has(key)) {
+      throw new RangeError(`observations[${index}].observationKey must be unique and no longer than 160 characters`);
+    }
+    observationKeys.add(key);
+    assertPositiveInteger(observation.productId, `observations[${index}].productId`);
+    if (observedProducts.has(observation.productId)) {
+      throw new RangeError(`observations[${index}].productId must be unique within a product-level run`);
+    }
+    observedProducts.add(observation.productId);
+    if (observation.selectedReceiveVariantId !== null) {
+      assertPositiveInteger(observation.selectedReceiveVariantId, `observations[${index}].selectedReceiveVariantId`);
+    }
+    if (observation.scope !== "product_all_warehouses") {
+      throw new RangeError(`observations[${index}].scope is invalid`);
+    }
+    if (!observation.productSku?.trim() || observation.productSku.length > 100) {
+      throw new RangeError(`observations[${index}].productSku is required and cannot exceed 100 characters`);
+    }
+    if (!observation.productName?.trim()) {
+      throw new RangeError(`observations[${index}].productName is required`);
+    }
+    if (!observation.forecastMethod?.trim() || observation.forecastMethod.length > 40) {
+      throw new RangeError(`observations[${index}].forecastMethod is required and cannot exceed 40 characters`);
+    }
+    assertPositiveInteger(observation.forecastVersion, `observations[${index}].forecastVersion`);
+    assertNonnegativeInteger(observation.forecastDailyPiecesMicros, `observations[${index}].forecastDailyPiecesMicros`);
+    assertNonnegativeInteger(observation.baselineDailyPiecesMicros, `observations[${index}].baselineDailyPiecesMicros`);
+    assertNonnegativeInteger(observation.forwardDemandPieces, `observations[${index}].forwardDemandPieces`);
+    assertNonnegativeInteger(observation.forwardDemandRawPieces, `observations[${index}].forwardDemandRawPieces`);
+  });
   return { source, sourceRunKey };
 }
 
@@ -111,6 +187,12 @@ export function buildPurchaseRecommendationRunInput(input: {
 }): CreatePurchaseRecommendationRunInput {
   const candidates = buildPurchasingRfqQueue(input.recommendationResult);
   const evaluatedCount = resolveEvaluatedCount(input);
+  const observations = buildPurchaseForecastObservations(input.recommendationResult);
+  if (observations.length !== evaluatedCount) {
+    throw new RangeError(
+      `Forecast observation coverage is incomplete: expected ${evaluatedCount}, captured ${observations.length}`,
+    );
+  }
   return {
     calculationVersion: "purchasing-recommendation-v2",
     source: input.source ?? "manual",
@@ -121,6 +203,8 @@ export function buildPurchaseRecommendationRunInput(input: {
     inputSummary: {
       candidateCount: candidates.length,
       evaluatedCount,
+      observationCount: observations.length,
+      observationCoverageComplete: true,
       summary: input.recommendationResult.summary,
     },
     lines: candidates.map((item) => ({
@@ -153,7 +237,60 @@ export function buildPurchaseRecommendationRunInput(input: {
         supplierBasis: item.supplierBasis,
       },
     })),
+    observations,
   };
+}
+
+export function buildPurchaseForecastObservations(
+  recommendationResult: { items: PurchasingRecommendationItem[]; skippedItems: PurchasingRecommendationItem[] },
+): PurchaseForecastObservationInput[] {
+  const byProduct = new Map<number, PurchasingRecommendationItem>();
+  for (const item of [...recommendationResult.items, ...recommendationResult.skippedItems]) {
+    const existing = byProduct.get(item.productId);
+    if (existing && existing.recommendationId !== item.recommendationId) {
+      throw new RangeError(`Product ${item.productId} produced multiple forecast identities in one recommendation run`);
+    }
+    if (!existing) byProduct.set(item.productId, item);
+  }
+
+  return Array.from(byProduct.values())
+    .map((item) => {
+      const forecastMethod = item.forecastProvenance.forecastMethod;
+      const forecastVersion = item.forecastProvenance.forecastVersion
+        ?? (forecastMethod === "weighted_blend_v1" ? 2 : 1);
+      const baselineDailyPieces = item.demandBasis.lookbackDays > 0
+        ? item.demandBasis.periodUsagePieces / item.demandBasis.lookbackDays
+        : 0;
+      return {
+        observationKey: `${item.productId}:product_all_warehouses`,
+        productId: item.productId,
+        selectedReceiveVariantId: item.productVariantId ?? null,
+        scope: "product_all_warehouses" as const,
+        productSku: item.sku.trim().slice(0, 100),
+        productName: item.productName.trim(),
+        forecastMethod,
+        forecastVersion,
+        forecastDailyPiecesMicros: piecesToMicros(
+          item.forecastProvenance.forecastBlend.avgDailyUsagePieces,
+          "forecastDailyPieces",
+        ),
+        baselineDailyPiecesMicros: piecesToMicros(baselineDailyPieces, "baselineDailyPieces"),
+        forwardDemandPieces: item.forwardDemandBasis.forwardDemandPieces,
+        forwardDemandRawPieces: item.forwardDemandBasis.forwardDemandRawPieces,
+        evidenceSnapshot: {
+          recommendationId: item.recommendationId,
+          status: item.status,
+          skippedReason: item.skippedReason,
+          actionable: item.actionable,
+          demandBasis: item.demandBasis,
+          forecastBlend: item.forecastProvenance.forecastBlend,
+          demandWindowDiagnostics: item.forecastProvenance.demandWindowDiagnostics,
+          forecastTrust: item.forecastProvenance.forecastTrust,
+          forwardDemandBasis: item.forwardDemandBasis,
+        },
+      };
+    })
+    .sort((left, right) => left.productId - right.productId);
 }
 
 export function createPurchaseRecommendationSnapshotService(database: any) {
@@ -167,7 +304,10 @@ export function createPurchaseRecommendationSnapshotService(database: any) {
     const lines = await database.select().from(purchaseRecommendationLinesTable).where(
       eq(purchaseRecommendationLinesTable.runId, run.id),
     );
-    return { run, lines, reused: true as const };
+    const observations = await database.select().from(purchaseForecastObservationsTable).where(
+      eq(purchaseForecastObservationsTable.runId, run.id),
+    );
+    return { run, lines, observations, reused: true as const };
   }
 
   async function createRun(input: CreatePurchaseRecommendationRunInput, generatedBy?: string | null) {
@@ -210,7 +350,27 @@ export function createPurchaseRecommendationSnapshotService(database: any) {
             evidenceSnapshot: line.evidenceSnapshot,
           })),
         ).returning();
-        return { run, lines, reused: false as const };
+        const observations = (input.observations?.length ?? 0) === 0
+          ? []
+          : await tx.insert(purchaseForecastObservationsTable).values(
+            input.observations!.map((observation) => ({
+              runId: run.id,
+              observationKey: observation.observationKey.trim(),
+              productId: observation.productId,
+              selectedReceiveVariantId: observation.selectedReceiveVariantId,
+              scope: observation.scope,
+              productSku: observation.productSku.trim(),
+              productName: observation.productName.trim(),
+              forecastMethod: observation.forecastMethod.trim(),
+              forecastVersion: observation.forecastVersion,
+              forecastDailyPiecesMicros: observation.forecastDailyPiecesMicros,
+              baselineDailyPiecesMicros: observation.baselineDailyPiecesMicros,
+              forwardDemandPieces: observation.forwardDemandPieces,
+              forwardDemandRawPieces: observation.forwardDemandRawPieces,
+              evidenceSnapshot: observation.evidenceSnapshot,
+            })),
+          ).returning();
+        return { run, lines, observations, reused: false as const };
       });
     } catch (error: any) {
       if (sourceRunKey && error?.code === "23505" && error?.constraint === "purchase_recommendation_runs_source_key_uidx") {
