@@ -213,6 +213,11 @@ describe("shipping-provider label normalization", () => {
       serviceCode: "ups_ground",
       shipDate: "2026-07-20T10:00:00.000Z",
       voidDate: null,
+      shipmentItems: [
+        { lineItemKey: "wms-item-9638", sku: "EG-SLV-VNT-P100" },
+        { lineItemKey: "not-owned-9638" },
+        { lineItemKey: " wms-item-9638 " },
+      ],
     }, receivedAt);
 
     expect(observation).toMatchObject({
@@ -222,6 +227,9 @@ describe("shipping-provider label normalization", () => {
       labelStatus: "active",
       eventType: "label_observed",
       labelCreatedAt: null,
+      sanitizedPayload: {
+        shipmentItems: [{ lineItemKey: "wms-item-9638" }],
+      },
     });
   });
 

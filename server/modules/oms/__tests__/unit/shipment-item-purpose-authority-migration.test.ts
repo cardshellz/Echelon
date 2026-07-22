@@ -39,8 +39,8 @@ describe("outbound shipment item purpose authority migration", () => {
     expect(MIGRATION_SOURCE).toContain(
       "WHERE order_item.id = authority_order_item_id",
     );
-    expect(MIGRATION_SOURCE).toContain(
-      "replacement_for_order_item_id,\n  shipment_item_purpose,\n  product_variant_id,",
+    expect(MIGRATION_SOURCE).toMatch(
+      /replacement_for_order_item_id,\r?\n\s+shipment_item_purpose,\r?\n\s+product_variant_id,/,
     );
   });
 });

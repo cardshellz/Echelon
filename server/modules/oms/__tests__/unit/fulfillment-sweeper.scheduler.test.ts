@@ -11,6 +11,29 @@ function queryText(query: any): string {
 }
 
 describe("fulfillment-sweeper.scheduler", () => {
+  it("runs bounded physical-package recovery before the ordinary writeback scan", async () => {
+    const recover = vi.fn(async () => ({
+      candidates: 1,
+      matchedPackages: 1,
+      enqueueRequests: 1,
+      noMatch: 0,
+      errors: 0,
+    }));
+    const db = {
+      execute: vi.fn(async () => ({ rows: [] })),
+      __shipStationPhysicalRecovery: { recover },
+    };
+
+    await runFulfillmentSweep(db);
+
+    expect(recover).toHaveBeenCalledWith({
+      mode: "execute",
+      limit: 10,
+      minAgeHours: 6,
+      maxAgeDays: 30,
+    });
+  });
+
   it("repushes a missing split shipment directly, including partially shipped orders", async () => {
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/42",

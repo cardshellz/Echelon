@@ -70,6 +70,8 @@ import {
 } from "../modules/shipping/carrier-tracking.service";
 import { createShipStationTrackingSubscriptionsClient } from "../modules/shipping/shipstation-tracking-subscriptions.client";
 import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-events.client";
+import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-physical-recovery.client";
+import { createShipStationPhysicalRecoveryService } from "../modules/oms/shipstation-physical-recovery.service";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
@@ -290,6 +292,9 @@ export function createServices(db: any) {
   const shipStation = createShipStationService(db, inventoryCore as any, {
     providerLabelObserver: carrierTracking,
   });
+  const shipStationPhysicalRecovery = createShipStationPhysicalRecoveryService(db, {
+    client: createShipStationPhysicalRecoveryClient(),
+  });
 
   // C9 ShippingEngine — engine-agnostic port over ShipStation (adapter #1)
   const shippingEngine = createShipStationEngine(shipStation);
@@ -340,6 +345,7 @@ export function createServices(db: any) {
     oms,
     fulfillmentPush,
     shipStation,
+    shipStationPhysicalRecovery,
     shippingEngine,
     carrierTracking,
     carrierTrackingLogger,

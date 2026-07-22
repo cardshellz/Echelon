@@ -125,6 +125,38 @@ export async function runFulfillmentSweep(dbArg: any = db) {
       );
     }
 
+    // Recover labels that ShipStation combined under a sibling order before
+    // the ordinary channel-writeback scan runs. This does not mutate
+    // fulfillment directly: it only enqueues the canonical SHIP_NOTIFY path,
+    // which revalidates provider item identity and applies the existing
+    // idempotent shipment/inventory/channel cascade.
+    const physicalRecovery = dbArg.__shipStationPhysicalRecovery;
+    if (physicalRecovery?.recover) {
+      try {
+        const result = await physicalRecovery.recover({
+          mode: "execute",
+          limit: 10,
+          minAgeHours: 6,
+          maxAgeDays: 30,
+        });
+        if (result.matchedPackages > 0 || result.errors > 0) {
+          console.log(
+            `${LOG_PREFIX} ShipStation physical recovery: ${JSON.stringify({
+              candidates: result.candidates,
+              matchedPackages: result.matchedPackages,
+              enqueueRequests: result.enqueueRequests,
+              noMatch: result.noMatch,
+              errors: result.errors,
+            })}`,
+          );
+        }
+      } catch (error: any) {
+        console.error(
+          `${LOG_PREFIX} ShipStation physical recovery failed: ${error?.message ?? String(error)}`,
+        );
+      }
+    }
+
     // Shipment scope is required here: an order can be partially shipped, and
     // one successful sibling must never hide another missing writeback.
     const candidates = await findChannelWritebackCandidates(dbArg, {
