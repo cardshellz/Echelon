@@ -670,7 +670,7 @@ function StateMultiSelect({ selected, conflicted, onChange }: StateMultiSelectPr
             All US states
           </Button>
           <Button type="button" size="sm" variant="secondary" className="h-7 text-xs" onClick={() => applyPreset(ALL_REGION_CODES)}>
-            States + territories
+            All US regions
           </Button>
           <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => applyPreset([])}>
             Clear

@@ -13,6 +13,7 @@ import {
   serializeRowsToCsv,
   validateRateGroups,
   ALL_REGION_CODES,
+  ALL_US_STATES,
   CONTIGUOUS_US,
   DESTINATION_GROUP_TEMPLATES,
   DESTINATION_REGION_TEMPLATES,
@@ -38,7 +39,7 @@ describe("pound formatting", () => {
 });
 
 describe("destination group templates", () => {
-  it("partitions every supported US state and territory exactly once", () => {
+  it("partitions every supported US postal region exactly once", () => {
     const assigned = DESTINATION_REGION_TEMPLATES.flatMap((template) => template.regions);
 
     expect(new Set(assigned).size).toBe(assigned.length);
@@ -55,6 +56,18 @@ describe("destination group templates", () => {
       .toBe("mountain-west");
     expect(findDestinationGroupTemplate(["PA", "CA"])).toBeNull();
     expect(destinationGroupTemplateById("unknown")).toBeNull();
+  });
+
+  it("keeps military mail out of state coverage and exposes one dedicated template", () => {
+    const militaryMail = destinationGroupTemplateById("military-mail");
+
+    expect(militaryMail?.regions).toEqual(["AA", "AE", "AP"]);
+    expect(CONTIGUOUS_US).not.toContain("AA");
+    expect(CONTIGUOUS_US).not.toContain("AE");
+    expect(CONTIGUOUS_US).not.toContain("AP");
+    expect(ALL_US_STATES).not.toContain("AA");
+    expect(ALL_US_STATES).not.toContain("AE");
+    expect(ALL_US_STATES).not.toContain("AP");
   });
 });
 

@@ -12,6 +12,12 @@ describe("normalizeUsPostalRegion", () => {
     expect(normalizeUsPostalRegion("Virgin Islands")).toBe("VI");
   });
 
+  it("accepts military mail region codes and names", () => {
+    expect(normalizeUsPostalRegion("aa")).toBe("AA");
+    expect(normalizeUsPostalRegion("Armed Forces Europe")).toBe("AE");
+    expect(normalizeUsPostalRegion("Armed Forces Pacific")).toBe("AP");
+  });
+
   it("returns null for missing or unknown regions", () => {
     expect(normalizeUsPostalRegion(null)).toBeNull();
     expect(normalizeUsPostalRegion("Atlantis")).toBeNull();
