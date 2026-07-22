@@ -37,6 +37,25 @@ The app deployment is current with `origin/main`. A read-only production query a
 confirmed all four purchasing migration records. Recheck current deployment and
 migrations after pulling newer work rather than relying indefinitely on this snapshot.
 
+## Continuation checkpoint - 2026-07-22
+
+- PR #982 (`codex/rfq-quantity-overrides`) is merged at `c625bc9f`. Recommendation
+  quantities can be adjusted during RFQ creation with required reduction reasons and
+  approved excess-allocation evidence.
+- Supplier email/send, response comparison, award, and supplier communication remain
+  intentionally deferred. Do not make that workflow the next build until the owner
+  resumes it.
+- Manual and scheduled recommendation runs, urgency/status classification, historical
+  demand, future-demand events, and recommendation-to-RFQ conversion already exist.
+- The next active hardening block is the future-demand operator workflow. Branch
+  `codex/demand-overlay-integrity` starts from `c625bc9f` and corrects mixed response
+  casing, the broken event update query, forecast-preview drift, raw product-ID input,
+  catalog integrity, optimistic concurrency, and mutation auditability.
+- Migration `159_demand_event_integrity.sql` belongs to that branch and is not deployed
+  merely because this handoff mentions it. Verify merge, release, and migration state.
+- No production mutation, policy change, demand event, recommendation run, RFQ, or
+  automatic purchasing pilot was performed during this continuation.
+
 Current source migration sequence:
 
 - `148_purchase_rfq_requests.sql`
@@ -503,13 +522,11 @@ acknowledgment.
 ## Cold-start resume prompt
 
 > Pull current `origin/main` and read
-> `docs/PURCHASING-HARDENING-HANDOFF-2026-07-19.md`. Verify the current branch,
-> Heroku release, and migrations 148-151 read-only. The recommendation engine now
-> produces exact SKU/base-piece requirements independently of supplier price, and
-> the RFQ workbench can allocate partial quantities, split suppliers, and create a
-> supplier catalog mapping without price. PRs #954 and #956 are merged and deployed,
-> but no production RFQ batch or automatic-purchasing pilot was executed in the
-> recorded conversation. First smoke the deployed recommendation/RFQ workbench with
-> no policy change. The next major build is the durable RFQ send -> response ->
-> compare/award -> supplier-evidence -> draft-PO lifecycle. Do not mutate production,
-> enable automation, or invent supplier evidence without explicit owner approval.
+> `docs/PURCHASING-HARDENING-HANDOFF-2026-07-19.md`, including the July 22
+> continuation checkpoint. Verify the current branch, Heroku release, and migrations
+> read-only. PR #982 is merged; recommendation-to-RFQ quantity overrides are complete.
+> Supplier communication remains deferred. Resume the demand-overlay integrity and
+> operator workflow from `codex/demand-overlay-integrity` if it is still open, or
+> verify its merged/deployed state before proceeding. Do not mutate production, enable
+> automation, create demand events/RFQs, or execute a purchasing pilot without explicit
+> owner approval.

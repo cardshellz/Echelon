@@ -1,14 +1,23 @@
-import React, { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
-  Plus, Trash2, Edit2, Calendar, Package, TrendingUp,
-  Check, X, ChevronDown,
+  AlertTriangle,
+  Calendar,
+  Check,
+  ChevronDown,
+  Edit2,
+  Loader2,
+  Package,
+  Plus,
+  Search,
+  Trash2,
+  TrendingUp,
+  X,
 } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -16,53 +25,91 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 
-interface DemandEvent {
+type DemandEventType = "drop" | "preorder" | "promotion" | "wholesale" | "seasonal" | "manual_forecast";
+type DemandEventStatus = "planned" | "active" | "completed" | "cancelled";
+type DemandConfidence = "high" | "medium" | "low";
+
+interface DemandEventSummary {
   id: number;
   name: string;
-  event_type: string;
-  start_date: string;
-  end_date: string | null;
-  status: string;
+  eventType: DemandEventType;
+  startDate: string;
+  endDate: string | null;
+  status: DemandEventStatus;
   notes: string | null;
-  created_at: string;
-  updated_at: string;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lineCount: number;
+  totalExpectedPieces: number;
 }
 
 interface DemandEventLine {
   id: number;
-  demand_event_id: number;
-  product_id: number;
-  product_variant_id: number | null;
-  expected_pieces: number;
-  confidence: string;
+  demandEventId: number;
+  productId: number;
+  productVariantId: number | null;
+  expectedPieces: number;
+  confidence: DemandConfidence;
   notes: string | null;
+  productName: string;
+  productSku: string | null;
+  variantName: string | null;
+  variantSku: string | null;
 }
 
-interface DemandEventWithLines extends DemandEvent {
+interface DemandEventDetail extends Omit<DemandEventSummary, "lineCount" | "totalExpectedPieces"> {
   lines: DemandEventLine[];
+}
+
+interface ProductSearchResult {
+  id: number;
+  variantId: number;
+  sku: string | null;
+  title: string;
+  imageUrl: string | null;
+  matchedVariantSku: string | null;
 }
 
 interface ForwardDemandItem {
   productId: number;
+  productName: string;
+  productSku: string | null;
   totalExpectedPieces: number;
+  weightedExpectedPieces: number;
   highConfidencePieces: number;
   mediumConfidencePieces: number;
   lowConfidencePieces: number;
   eventCount: number;
 }
 
-const EVENT_TYPES = [
+interface ForwardDemandResponse {
+  enabled: boolean;
+  horizonDays: number;
+  confidenceWeights: Record<DemandConfidence, number>;
+  items: ForwardDemandItem[];
+  totalProducts: number;
+}
+
+interface DemandLineDraft {
+  productId: number | null;
+  productVariantId: number | null;
+  sku: string;
+  title: string;
+  expectedPieces: string;
+  confidence: DemandConfidence;
+  notes: string;
+}
+
+const EVENT_TYPES: Array<{ value: DemandEventType; label: string }> = [
   { value: "drop", label: "Product Drop" },
   { value: "preorder", label: "Preorder" },
   { value: "promotion", label: "Promotion" },
@@ -71,204 +118,311 @@ const EVENT_TYPES = [
   { value: "manual_forecast", label: "Manual Forecast" },
 ];
 
-const STATUS_OPTIONS = [
-  { value: "planned", label: "Planned" },
-  { value: "active", label: "Active" },
-  { value: "completed", label: "Completed" },
-  { value: "cancelled", label: "Cancelled" },
+const CONFIDENCE_OPTIONS: Array<{ value: DemandConfidence; label: string }> = [
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
 ];
 
-const CONFIDENCE_OPTIONS = [
-  { value: "high", label: "High (100%)" },
-  { value: "medium", label: "Medium (70%)" },
-  { value: "low", label: "Low (40%)" },
-];
+function emptyLine(): DemandLineDraft {
+  return {
+    productId: null,
+    productVariantId: null,
+    sku: "",
+    title: "",
+    expectedPieces: "",
+    confidence: "medium",
+    notes: "",
+  };
+}
 
-function statusColor(status: string): string {
+function typeLabel(type: DemandEventType): string {
+  return EVENT_TYPES.find((option) => option.value === type)?.label ?? type;
+}
+
+function statusClass(status: DemandEventStatus): string {
   switch (status) {
-    case "planned": return "bg-blue-100 text-blue-800";
-    case "active": return "bg-green-100 text-green-800";
-    case "completed": return "bg-gray-100 text-gray-800";
-    case "cancelled": return "bg-red-100 text-red-800";
-    default: return "bg-gray-100 text-gray-800";
+    case "planned": return "border-blue-300 bg-blue-50 text-blue-800";
+    case "active": return "border-green-300 bg-green-50 text-green-800";
+    case "completed": return "border-zinc-300 bg-zinc-50 text-zinc-700";
+    case "cancelled": return "border-red-300 bg-red-50 text-red-800";
   }
 }
 
-function typeLabel(type: string): string {
-  return EVENT_TYPES.find((t) => t.value === type)?.label ?? type;
+function ProductSkuPicker({
+  line,
+  onSelect,
+}: {
+  line: DemandLineDraft;
+  onSelect: (result: ProductSearchResult) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
+
+  const searchQuery = useQuery<ProductSearchResult[]>({
+    queryKey: ["/api/catalog/products/search", debouncedSearch],
+    queryFn: async () => {
+      const response = await fetch(`/api/catalog/products/search?q=${encodeURIComponent(debouncedSearch)}&limit=25`, {
+        credentials: "include",
+      });
+      if (!response.ok) throw new Error("Product search failed");
+      return response.json();
+    },
+    enabled: open && debouncedSearch.length >= 2,
+  });
+
+  return (
+    <Popover open={open} onOpenChange={(nextOpen) => {
+      setOpen(nextOpen);
+      if (!nextOpen) setSearch("");
+    }}>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="outline" className="h-auto min-h-10 w-full justify-start px-3 py-2 text-left font-normal">
+          <Search className="mr-2 h-4 w-4 shrink-0 text-muted-foreground" />
+          {line.productId ? (
+            <span className="min-w-0">
+              <span className="block truncate font-mono text-xs font-semibold">{line.sku || `Product ${line.productId}`}</span>
+              <span className="block truncate text-xs text-muted-foreground">{line.title}</span>
+            </span>
+          ) : (
+            <span className="text-muted-foreground">Search product name or SKU</span>
+          )}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[420px] max-w-[calc(100vw-2rem)] p-0" align="start">
+        <div className="border-b p-2">
+          <Input
+            autoFocus
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Enter at least 2 characters"
+          />
+        </div>
+        <div className="max-h-72 overflow-y-auto p-1">
+          {searchQuery.isFetching && (
+            <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Searching catalog
+            </div>
+          )}
+          {searchQuery.isError && <p className="p-4 text-sm text-red-700">Product search failed.</p>}
+          {debouncedSearch.length >= 2 && !searchQuery.isFetching && (searchQuery.data?.length ?? 0) === 0 && (
+            <p className="p-4 text-sm text-muted-foreground">No products match this search.</p>
+          )}
+          {(searchQuery.data ?? []).map((result) => (
+            <button
+              key={`${result.id}:${result.variantId}`}
+              type="button"
+              className="flex w-full items-start gap-3 rounded px-3 py-2 text-left hover:bg-muted"
+              onClick={() => {
+                onSelect(result);
+                setOpen(false);
+              }}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-mono text-xs font-semibold">{result.sku || `Product ${result.id}`}</span>
+                <span className="block truncate text-sm">{result.title}</span>
+              </span>
+              {result.id === line.productId && result.variantId === line.productVariantId && <Check className="mt-1 h-4 w-4 text-green-700" />}
+            </button>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
-function CreateEventDialog({ onCreated }: { onCreated: () => void }) {
+function DemandEventEditor({
+  open,
+  event,
+  onOpenChange,
+  onSaved,
+}: {
+  open: boolean;
+  event: DemandEventDetail | null;
+  onOpenChange: (open: boolean) => void;
+  onSaved: () => void;
+}) {
   const { toast } = useToast();
-  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [eventType, setEventType] = useState("manual_forecast");
+  const [eventType, setEventType] = useState<DemandEventType>("manual_forecast");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [notes, setNotes] = useState("");
-  const [lines, setLines] = useState<{ productId: string; expectedPieces: string; confidence: string }[]>([
-    { productId: "", expectedPieces: "", confidence: "medium" },
-  ]);
+  const [lines, setLines] = useState<DemandLineDraft[]>([emptyLine()]);
 
-  const createMutation = useMutation({
+  useEffect(() => {
+    if (!open) return;
+    setName(event?.name ?? "");
+    setEventType(event?.eventType ?? "manual_forecast");
+    setStartDate(event?.startDate ?? "");
+    setEndDate(event?.endDate ?? "");
+    setNotes(event?.notes ?? "");
+    setLines(event?.lines.map((line) => ({
+      productId: line.productId,
+      productVariantId: line.productVariantId,
+      sku: line.variantSku ?? line.productSku ?? "",
+      title: line.variantName ? `${line.productName} - ${line.variantName}` : line.productName,
+      expectedPieces: String(line.expectedPieces),
+      confidence: line.confidence,
+      notes: line.notes ?? "",
+    })) ?? [emptyLine()]);
+  }, [event, open]);
+
+  const saveMutation = useMutation({
     mutationFn: async () => {
       const body = {
-        name,
+        name: name.trim(),
         eventType,
         startDate,
         endDate: endDate || null,
-        notes: notes || null,
-        lines: lines
-          .filter((l) => l.productId && l.expectedPieces)
-          .map((l) => ({
-            productId: Number(l.productId),
-            expectedPieces: Number(l.expectedPieces),
-            confidence: l.confidence,
-          })),
+        status: event?.status ?? "planned",
+        notes: notes.trim() || null,
+        lines: lines.map((line) => ({
+          productId: line.productId,
+          productVariantId: line.productVariantId,
+          expectedPieces: Number(line.expectedPieces),
+          confidence: line.confidence,
+          notes: line.notes.trim() || null,
+        })),
+        ...(event ? { expectedUpdatedAt: event.updatedAt } : {}),
       };
-      const res = await fetch("/api/demand-events", {
-        method: "POST",
+      const response = await fetch(event ? `/api/demand-events/${event.id}` : "/api/demand-events", {
+        method: event ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to create event");
-      }
-      return res.json();
+      const responseBody = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(responseBody?.error ?? "Demand event could not be saved");
+      return responseBody as DemandEventDetail;
     },
     onSuccess: () => {
-      toast({ title: "Demand event created" });
-      setOpen(false);
-      resetForm();
-      onCreated();
+      toast({ title: event ? "Demand event updated" : "Demand event created" });
+      onOpenChange(false);
+      onSaved();
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Demand event not saved", description: error.message, variant: "destructive" });
     },
   });
 
-  function resetForm() {
-    setName("");
-    setEventType("manual_forecast");
-    setStartDate("");
-    setEndDate("");
-    setNotes("");
-    setLines([{ productId: "", expectedPieces: "", confidence: "medium" }]);
-  }
+  const validLines = lines.length > 0 && lines.every((line) => (
+    line.productId !== null
+    && Number.isSafeInteger(Number(line.expectedPieces))
+    && Number(line.expectedPieces) > 0
+  ));
+  const validWindow = !endDate || !startDate || endDate >= startDate;
+  const canSave = Boolean(name.trim() && startDate && validLines && validWindow && !saveMutation.isPending);
 
-  function addLine() {
-    setLines([...lines, { productId: "", expectedPieces: "", confidence: "medium" }]);
-  }
-
-  function removeLine(index: number) {
-    setLines(lines.filter((_, i) => i !== index));
-  }
-
-  function updateLine(index: number, field: string, value: string) {
-    const updated = [...lines];
-    (updated[index] as any)[field] = value;
-    setLines(updated);
+  function updateLine(index: number, patch: Partial<DemandLineDraft>) {
+    setLines((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line));
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button>
-          <Plus className="h-4 w-4 mr-2" /> New Demand Event
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Create Demand Event</DialogTitle>
+          <DialogTitle>{event ? "Edit Demand Event" : "New Demand Event"}</DialogTitle>
           <DialogDescription>
-            Register known future demand so the purchasing engine accounts for it in reorder recommendations.
+            Enter expected demand in pieces. Confidence weighting is applied by the purchasing forecast policy.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-5">
+          <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <Label>Event Name</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Summer Sale 2026" />
+              <Label htmlFor="demand-event-name">Event name</Label>
+              <Input id="demand-event-name" value={name} onChange={(input) => setName(input.target.value)} placeholder="Fall wholesale commitment" />
             </div>
             <div>
               <Label>Type</Label>
-              <Select value={eventType} onValueChange={setEventType}>
+              <Select value={eventType} onValueChange={(value) => setEventType(value as DemandEventType)}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {EVENT_TYPES.map((t) => (
-                    <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
-                  ))}
+                  {EVENT_TYPES.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <Label>Start Date</Label>
-              <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+              <Label htmlFor="demand-start-date">Start date</Label>
+              <Input id="demand-start-date" type="date" value={startDate} onChange={(input) => setStartDate(input.target.value)} />
             </div>
             <div>
-              <Label>End Date (optional)</Label>
-              <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+              <Label htmlFor="demand-end-date">End date</Label>
+              <Input id="demand-end-date" type="date" value={endDate} onChange={(input) => setEndDate(input.target.value)} />
+              {!validWindow && <p className="mt-1 text-xs text-red-700">End date must be on or after the start date.</p>}
             </div>
           </div>
 
           <div>
-            <Label>Notes</Label>
-            <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional notes..." />
+            <Label htmlFor="demand-event-notes">Notes</Label>
+            <Textarea id="demand-event-notes" value={notes} onChange={(input) => setNotes(input.target.value)} rows={2} maxLength={4000} />
           </div>
 
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <Label>Product Lines</Label>
-              <Button variant="outline" size="sm" onClick={addLine}>
-                <Plus className="h-3 w-3 mr-1" /> Add Line
+          <div className="border-t pt-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">Demand lines</h3>
+                <p className="text-xs text-muted-foreground">Choose the catalog SKU that creates the demand and enter the expected piece quantity.</p>
+              </div>
+              <Button type="button" variant="outline" size="sm" onClick={() => setLines((current) => [...current, emptyLine()])}>
+                <Plus className="mr-1 h-4 w-4" /> Add line
               </Button>
             </div>
-            <div className="space-y-2">
-              {lines.map((line, i) => (
-                <div key={i} className="flex gap-2 items-end">
-                  <div className="flex-1">
-                    {i === 0 && <Label className="text-xs">Product ID</Label>}
-                    <Input
-                      type="number"
-                      value={line.productId}
-                      onChange={(e) => updateLine(i, "productId", e.target.value)}
-                      placeholder="Product ID"
+
+            <div className="space-y-3">
+              {lines.map((line, index) => (
+                <div key={index} className="grid items-end gap-3 border-b pb-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_140px_150px_40px]">
+                  <div>
+                    <Label className="text-xs">Product / SKU</Label>
+                    <ProductSkuPicker
+                      line={line}
+                      onSelect={(result) => updateLine(index, {
+                        productId: result.id,
+                        productVariantId: result.variantId,
+                        sku: result.sku ?? "",
+                        title: result.title,
+                      })}
                     />
                   </div>
-                  <div className="w-32">
-                    {i === 0 && <Label className="text-xs">Pieces</Label>}
+                  <div>
+                    <Label className="text-xs">Expected pieces</Label>
                     <Input
                       type="number"
+                      min={1}
+                      step={1}
                       value={line.expectedPieces}
-                      onChange={(e) => updateLine(i, "expectedPieces", e.target.value)}
-                      placeholder="Qty"
+                      onChange={(input) => updateLine(index, { expectedPieces: input.target.value })}
                     />
                   </div>
-                  <div className="w-36">
-                    {i === 0 && <Label className="text-xs">Confidence</Label>}
-                    <Select
-                      value={line.confidence}
-                      onValueChange={(v) => updateLine(i, "confidence", v)}
-                    >
+                  <div>
+                    <Label className="text-xs">Confidence</Label>
+                    <Select value={line.confidence} onValueChange={(value) => updateLine(index, { confidence: value as DemandConfidence })}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        {CONFIDENCE_OPTIONS.map((c) => (
-                          <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>
-                        ))}
+                        {CONFIDENCE_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </div>
-                  {lines.length > 1 && (
-                    <Button variant="ghost" size="icon" onClick={() => removeLine(i)}>
-                      <Trash2 className="h-4 w-4 text-red-500" />
-                    </Button>
-                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    title="Remove demand line"
+                    disabled={lines.length === 1}
+                    onClick={() => setLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}
+                  >
+                    <Trash2 className="h-4 w-4 text-red-600" />
+                  </Button>
                 </div>
               ))}
             </div>
@@ -276,12 +430,10 @@ function CreateEventDialog({ onCreated }: { onCreated: () => void }) {
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-          <Button
-            onClick={() => createMutation.mutate()}
-            disabled={!name || !startDate || createMutation.isPending}
-          >
-            {createMutation.isPending ? "Creating..." : "Create Event"}
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button disabled={!canSave} onClick={() => saveMutation.mutate()}>
+            {saveMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            {event ? "Save changes" : "Create event"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -289,123 +441,94 @@ function CreateEventDialog({ onCreated }: { onCreated: () => void }) {
   );
 }
 
-function EventCard({
+function EventRow({
   event,
+  detail,
+  loadingDetail,
+  weights,
+  onToggle,
+  onEdit,
   onStatusChange,
   onDelete,
 }: {
-  event: DemandEventWithLines;
-  onStatusChange: (id: number, status: string) => void;
-  onDelete: (id: number) => void;
+  event: DemandEventSummary;
+  detail?: DemandEventDetail;
+  loadingDetail: boolean;
+  weights: Record<DemandConfidence, number>;
+  onToggle: () => void;
+  onEdit: () => void;
+  onStatusChange: (status: DemandEventStatus) => void;
+  onDelete: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const totalPieces = event.lines.reduce((s, l) => s + l.expected_pieces, 0);
-
+  const expanded = detail !== undefined || loadingDetail;
   return (
-    <Card className="hover:shadow-sm transition-shadow">
-      <CardContent className="pt-4 pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6"
-              onClick={() => setExpanded(!expanded)}
-            >
+    <Card>
+      <CardContent className="py-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2">
+            <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" title={expanded ? "Collapse event" : "Expand event"} onClick={onToggle}>
               <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
             </Button>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{event.name}</span>
-                <Badge variant="outline" className="text-xs">{typeLabel(event.event_type)}</Badge>
-                <Badge className={`text-xs ${statusColor(event.status)}`}>{event.status}</Badge>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold">{event.name}</span>
+                <Badge variant="outline">{typeLabel(event.eventType)}</Badge>
+                <Badge variant="outline" className={statusClass(event.status)}>{event.status}</Badge>
               </div>
-              <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
-                <span className="flex items-center gap-1">
-                  <Calendar className="h-3 w-3" />
-                  {event.start_date}
-                  {event.end_date && ` → ${event.end_date}`}
-                </span>
-                <span className="flex items-center gap-1">
-                  <Package className="h-3 w-3" />
-                  {totalPieces.toLocaleString()} pieces across {event.lines.length} products
-                </span>
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                <span className="flex items-center gap-1"><Calendar className="h-3.5 w-3.5" />{event.startDate}{event.endDate ? ` to ${event.endDate}` : ""}</span>
+                <span className="flex items-center gap-1"><Package className="h-3.5 w-3.5" />{event.totalExpectedPieces.toLocaleString()} pieces across {event.lineCount} SKU{event.lineCount === 1 ? "" : "s"}</span>
               </div>
+              {event.notes && <p className="mt-2 text-xs text-muted-foreground">{event.notes}</p>}
             </div>
           </div>
-          <div className="flex items-center gap-1">
-            {event.status === "planned" && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-xs"
-                onClick={() => onStatusChange(event.id, "active")}
-              >
-                Activate
-              </Button>
+
+          <div className="flex shrink-0 items-center gap-1 pl-10 sm:pl-0">
+            {(event.status === "planned" || event.status === "active") && (
+              <Button variant="ghost" size="icon" title="Edit demand event" onClick={onEdit}><Edit2 className="h-4 w-4" /></Button>
             )}
-            {event.status === "active" && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-xs"
-                onClick={() => onStatusChange(event.id, "completed")}
-              >
-                Complete
-              </Button>
+            {event.status === "planned" && <Button size="sm" variant="outline" onClick={() => onStatusChange("active")}>Activate</Button>}
+            {event.status === "active" && <Button size="sm" variant="outline" onClick={() => onStatusChange("completed")}>Complete</Button>}
+            {(event.status === "planned" || event.status === "active") && (
+              <Button variant="ghost" size="icon" title="Cancel demand event" onClick={() => onStatusChange("cancelled")}><X className="h-4 w-4" /></Button>
             )}
-            {["planned", "active"].includes(event.status) && (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={() => onStatusChange(event.id, "cancelled")}
-              >
-                <X className="h-4 w-4 text-muted-foreground" />
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              onClick={() => onDelete(event.id)}
-            >
-              <Trash2 className="h-4 w-4 text-red-400" />
-            </Button>
+            <Button variant="ghost" size="icon" title="Delete demand event" onClick={onDelete}><Trash2 className="h-4 w-4 text-red-600" /></Button>
           </div>
         </div>
 
-        {expanded && event.lines.length > 0 && (
-          <div className="mt-3 border-t pt-3">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-xs text-muted-foreground border-b">
-                  <th className="text-left py-1 font-medium">Product ID</th>
-                  <th className="text-right py-1 font-medium">Expected Pieces</th>
-                  <th className="text-left py-1 font-medium pl-4">Confidence</th>
-                  <th className="text-right py-1 font-medium">Weighted</th>
-                </tr>
-              </thead>
-              <tbody>
-                {event.lines.map((line) => {
-                  const weight = line.confidence === "high" ? 1 : line.confidence === "medium" ? 0.7 : 0.4;
-                  return (
-                    <tr key={line.id} className="border-b last:border-0">
-                      <td className="py-1.5">{line.product_id}</td>
-                      <td className="text-right py-1.5">{line.expected_pieces.toLocaleString()}</td>
-                      <td className="py-1.5 pl-4">
-                        <Badge variant="outline" className="text-xs">
-                          {line.confidence} ({Math.round(weight * 100)}%)
-                        </Badge>
-                      </td>
-                      <td className="text-right py-1.5">
-                        {Math.ceil(line.expected_pieces * weight).toLocaleString()}
-                      </td>
+        {expanded && (
+          <div className="mt-4 border-t pt-3">
+            {loadingDetail ? (
+              <div className="flex items-center justify-center gap-2 py-5 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading event lines</div>
+            ) : detail?.lines.length ? (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[680px] text-sm">
+                  <thead>
+                    <tr className="border-b text-xs text-muted-foreground">
+                      <th className="py-2 text-left font-medium">SKU</th>
+                      <th className="py-2 text-left font-medium">Product</th>
+                      <th className="py-2 text-right font-medium">Expected pieces</th>
+                      <th className="py-2 text-right font-medium">Confidence</th>
+                      <th className="py-2 text-right font-medium">Forecast pieces</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody>
+                    {detail.lines.map((line) => {
+                      const weight = weights[line.confidence];
+                      return (
+                        <tr key={line.id} className="border-b last:border-0">
+                          <td className="py-2 font-mono text-xs font-semibold">{line.variantSku ?? line.productSku ?? `Product ${line.productId}`}</td>
+                          <td className="py-2">{line.productName}{line.variantName ? ` - ${line.variantName}` : ""}</td>
+                          <td className="py-2 text-right tabular-nums">{line.expectedPieces.toLocaleString()}</td>
+                          <td className="py-2 text-right"><Badge variant="outline">{line.confidence} ({weight}%)</Badge></td>
+                          <td className="py-2 text-right font-semibold tabular-nums">{Math.ceil(line.expectedPieces * weight / 100).toLocaleString()}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : <p className="py-4 text-sm text-muted-foreground">No demand lines found.</p>}
           </div>
         )}
       </CardContent>
@@ -416,186 +539,231 @@ function EventCard({
 export default function DemandPlanner() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [statusFilter, setStatusFilter] = useState<string>("planned,active");
+  const [, navigate] = useLocation();
+  const [statusFilter, setStatusFilter] = useState("planned,active");
+  const [detailById, setDetailById] = useState<Map<number, DemandEventDetail>>(new Map());
+  const [loadingDetailIds, setLoadingDetailIds] = useState<Set<number>>(new Set());
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorEvent, setEditorEvent] = useState<DemandEventDetail | null>(null);
 
-  const { data: eventsData, isLoading } = useQuery<{ events: DemandEvent[]; total: number }>({
+  const eventsQuery = useQuery<{ events: DemandEventSummary[]; total: number }>({
     queryKey: ["/api/demand-events", statusFilter],
     queryFn: async () => {
-      const res = await fetch(`/api/demand-events?status=${statusFilter}&limit=100`, {
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("Failed to fetch events");
-      return res.json();
+      const response = await fetch(`/api/demand-events?status=${encodeURIComponent(statusFilter)}&limit=100`, { credentials: "include" });
+      if (!response.ok) throw new Error("Demand events could not be loaded");
+      return response.json();
     },
   });
 
-  const [expandedEvents, setExpandedEvents] = useState<Map<number, DemandEventWithLines>>(new Map());
-
-  const { data: forwardDemandData } = useQuery<{ horizonDays: number; items: ForwardDemandItem[]; totalProducts: number }>({
+  const forwardDemandQuery = useQuery<ForwardDemandResponse>({
     queryKey: ["/api/demand-events/forward-demand"],
     queryFn: async () => {
-      const res = await fetch("/api/demand-events/forward-demand?horizonDays=90", {
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("Failed to fetch forward demand");
-      return res.json();
+      const response = await fetch("/api/demand-events/forward-demand", { credentials: "include" });
+      if (!response.ok) throw new Error("Forward demand summary could not be loaded");
+      return response.json();
     },
   });
 
-  const statusMutation = useMutation({
-    mutationFn: async ({ id, status }: { id: number; status: string }) => {
-      const res = await fetch(`/api/demand-events/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ status }),
-      });
-      if (!res.ok) throw new Error("Failed to update status");
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/demand-events"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/demand-events/forward-demand"] });
-      toast({ title: "Event updated" });
-    },
-  });
+  function invalidateDemandPlanning() {
+    setDetailById(new Map());
+    queryClient.invalidateQueries({ queryKey: ["/api/demand-events"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/demand-events/forward-demand"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/purchasing/rfq-queue"] });
+  }
 
-  const deleteMutation = useMutation({
-    mutationFn: async (id: number) => {
-      const res = await fetch(`/api/demand-events/${id}`, {
-        method: "DELETE",
-        credentials: "include",
+  async function loadEventDetail(id: number, force = false): Promise<DemandEventDetail | null> {
+    if (!force && detailById.has(id)) return detailById.get(id) ?? null;
+    setLoadingDetailIds((current) => new Set(current).add(id));
+    try {
+      const response = await fetch(`/api/demand-events/${id}`, { credentials: "include" });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.error ?? "Demand event details could not be loaded");
+      const detail = body as DemandEventDetail;
+      setDetailById((current) => new Map(current).set(id, detail));
+      return detail;
+    } catch (error) {
+      toast({ title: "Demand event not loaded", description: error instanceof Error ? error.message : "Unknown error", variant: "destructive" });
+      return null;
+    } finally {
+      setLoadingDetailIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
       });
-      if (!res.ok) throw new Error("Failed to delete event");
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/demand-events"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/demand-events/forward-demand"] });
-      toast({ title: "Event deleted" });
-    },
-  });
-
-  async function loadEventDetail(eventId: number) {
-    if (expandedEvents.has(eventId)) return;
-    const res = await fetch(`/api/demand-events/${eventId}`, { credentials: "include" });
-    if (res.ok) {
-      const detail = await res.json();
-      setExpandedEvents((prev) => new Map(prev).set(eventId, detail));
     }
   }
 
-  React.useEffect(() => {
-    if (eventsData?.events) {
-      for (const event of eventsData.events) {
-        loadEventDetail(event.id);
-      }
-    }
-  }, [eventsData?.events]);
+  const statusMutation = useMutation({
+    mutationFn: async ({ event, status }: { event: DemandEventSummary; status: DemandEventStatus }) => {
+      const response = await fetch(`/api/demand-events/${event.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ status, expectedUpdatedAt: event.updatedAt }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.error ?? "Demand event status could not be changed");
+      return body;
+    },
+    onSuccess: () => {
+      invalidateDemandPlanning();
+      toast({ title: "Demand event status updated" });
+    },
+    onError: (error: Error) => toast({ title: "Status not updated", description: error.message, variant: "destructive" }),
+  });
 
-  const events = eventsData?.events ?? [];
+  const deleteMutation = useMutation({
+    mutationFn: async (event: DemandEventSummary) => {
+      const response = await fetch(`/api/demand-events/${event.id}?expectedUpdatedAt=${encodeURIComponent(event.updatedAt)}`, { method: "DELETE", credentials: "include" });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.error ?? "Demand event could not be deleted");
+      return body;
+    },
+    onSuccess: () => {
+      invalidateDemandPlanning();
+      toast({ title: "Demand event deleted" });
+    },
+    onError: (error: Error) => toast({ title: "Demand event not deleted", description: error.message, variant: "destructive" }),
+  });
+
+  const policy = forwardDemandQuery.data;
+  const weights = policy?.confidenceWeights ?? { high: 100, medium: 70, low: 40 };
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 p-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Demand Planner</h1>
-          <p className="text-sm text-muted-foreground">
-            Register known future demand events to improve purchasing recommendations
-          </p>
+          <p className="text-sm text-muted-foreground">Maintain future demand that feeds purchase recommendations.</p>
         </div>
-        <CreateEventDialog onCreated={() => {
-          queryClient.invalidateQueries({ queryKey: ["/api/demand-events"] });
-          queryClient.invalidateQueries({ queryKey: ["/api/demand-events/forward-demand"] });
-        }} />
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => navigate("/reorder-analysis")}>Purchase recommendations</Button>
+          <Button onClick={() => {
+            setEditorEvent(null);
+            setEditorOpen(true);
+          }}><Plus className="mr-2 h-4 w-4" />New demand event</Button>
+        </div>
       </div>
 
-      {/* Forward Demand Summary */}
-      {forwardDemandData && forwardDemandData.items.length > 0 && (
+      {policy && !policy.enabled && (
+        <div className="flex items-center gap-3 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <AlertTriangle className="h-5 w-5 shrink-0" />
+          Future-demand overlays are disabled in the purchasing forecast policy. Events remain stored but currently add zero pieces to recommendations.
+        </div>
+      )}
+
+      {policy && policy.items.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-lg flex items-center gap-2">
-              <TrendingUp className="h-5 w-5" />
-              Forward Demand Summary (90-day horizon)
-            </CardTitle>
-            <CardDescription>
-              {forwardDemandData.totalProducts} products with planned demand events
-            </CardDescription>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-lg"><TrendingUp className="h-5 w-5" />Forecast impact</CardTitle>
+                <CardDescription>{policy.totalProducts} products inside the configured {policy.horizonDays}-day horizon</CardDescription>
+              </div>
+              <div className="flex gap-2 text-xs">
+                <Badge variant="outline">High {weights.high}%</Badge>
+                <Badge variant="outline">Medium {weights.medium}%</Badge>
+                <Badge variant="outline">Low {weights.low}%</Badge>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
-              {forwardDemandData.items.slice(0, 6).map((item) => (
-                <div key={item.productId} className="text-center p-2 rounded-lg bg-muted/50">
-                  <p className="text-xs text-muted-foreground">Product {item.productId}</p>
-                  <p className="text-lg font-bold">{item.totalExpectedPieces.toLocaleString()}</p>
-                  <p className="text-xs text-muted-foreground">
-                    pieces / {item.eventCount} event{item.eventCount !== 1 ? "s" : ""}
-                  </p>
-                </div>
-              ))}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[620px] text-sm">
+                <thead>
+                  <tr className="border-b text-xs text-muted-foreground">
+                    <th className="py-2 text-left font-medium">SKU</th>
+                    <th className="py-2 text-left font-medium">Product</th>
+                    <th className="py-2 text-right font-medium">Raw pieces</th>
+                    <th className="py-2 text-right font-medium">Forecast pieces</th>
+                    <th className="py-2 text-right font-medium">Events</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {policy.items.map((item) => (
+                    <tr key={item.productId} className="border-b last:border-0">
+                      <td className="py-2 font-mono text-xs font-semibold">{item.productSku ?? `Product ${item.productId}`}</td>
+                      <td className="py-2">{item.productName}</td>
+                      <td className="py-2 text-right tabular-nums">{item.totalExpectedPieces.toLocaleString()}</td>
+                      <td className="py-2 text-right font-semibold tabular-nums">{policy.enabled ? item.weightedExpectedPieces.toLocaleString() : "0"}</td>
+                      <td className="py-2 text-right tabular-nums">{item.eventCount}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            {forwardDemandData.items.length > 6 && (
-              <p className="text-xs text-muted-foreground mt-2 text-center">
-                + {forwardDemandData.items.length - 6} more products
-              </p>
-            )}
           </CardContent>
         </Card>
       )}
 
-      {/* Filters */}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         {[
-          { value: "planned,active", label: "Active & Planned" },
+          { value: "planned,active", label: "Active and planned" },
           { value: "planned", label: "Planned" },
           { value: "active", label: "Active" },
           { value: "completed", label: "Completed" },
           { value: "cancelled", label: "Cancelled" },
-        ].map((f) => (
-          <Button
-            key={f.value}
-            variant={statusFilter === f.value ? "default" : "outline"}
-            size="sm"
-            onClick={() => setStatusFilter(f.value)}
-          >
-            {f.label}
+        ].map((filter) => (
+          <Button key={filter.value} size="sm" variant={statusFilter === filter.value ? "default" : "outline"} onClick={() => setStatusFilter(filter.value)}>
+            {filter.label}
           </Button>
         ))}
       </div>
 
-      {/* Events List */}
-      {isLoading ? (
-        <p className="text-muted-foreground">Loading events...</p>
-      ) : events.length === 0 ? (
-        <Card>
-          <CardContent className="pt-6 text-center">
-            <Calendar className="h-12 w-12 text-muted-foreground/30 mx-auto mb-3" />
-            <p className="text-muted-foreground">No demand events found</p>
-            <p className="text-sm text-muted-foreground mt-1">
-              Create your first event to start planning future demand
-            </p>
-          </CardContent>
-        </Card>
+      {eventsQuery.isLoading ? (
+        <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading demand events</div>
+      ) : eventsQuery.isError ? (
+        <div className="border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">Demand events could not be loaded.</div>
+      ) : (eventsQuery.data?.events.length ?? 0) === 0 ? (
+        <div className="border py-12 text-center">
+          <Calendar className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
+          <p className="font-medium">No demand events in this status</p>
+        </div>
       ) : (
         <div className="space-y-2">
-          {events.map((event) => {
-            const detail = expandedEvents.get(event.id);
-            const withLines: DemandEventWithLines = detail ?? { ...event, lines: [] };
-            return (
-              <EventCard
-                key={event.id}
-                event={withLines}
-                onStatusChange={(id, status) => statusMutation.mutate({ id, status })}
-                onDelete={(id) => {
-                  if (window.confirm("Delete this demand event? This cannot be undone.")) {
-                    deleteMutation.mutate(id);
-                  }
-                }}
-              />
-            );
-          })}
+          {(eventsQuery.data?.events ?? []).map((event) => (
+            <EventRow
+              key={event.id}
+              event={event}
+              detail={detailById.get(event.id)}
+              loadingDetail={loadingDetailIds.has(event.id)}
+              weights={weights}
+              onToggle={() => {
+                if (detailById.has(event.id)) {
+                  setDetailById((current) => {
+                    const next = new Map(current);
+                    next.delete(event.id);
+                    return next;
+                  });
+                } else {
+                  void loadEventDetail(event.id);
+                }
+              }}
+              onEdit={() => {
+                void loadEventDetail(event.id, true).then((detail) => {
+                  if (!detail) return;
+                  setEditorEvent(detail);
+                  setEditorOpen(true);
+                });
+              }}
+              onStatusChange={(status) => statusMutation.mutate({ event, status })}
+              onDelete={() => {
+                if (window.confirm(`Delete demand event "${event.name}"? The deletion is recorded in the audit log.`)) {
+                  deleteMutation.mutate(event);
+                }
+              }}
+            />
+          ))}
         </div>
       )}
+
+      <DemandEventEditor
+        open={editorOpen}
+        event={editorEvent}
+        onOpenChange={setEditorOpen}
+        onSaved={invalidateDemandPlanning}
+      />
     </div>
   );
 }
