@@ -2479,6 +2479,11 @@ export function createShipStationService(
 
     try {
       const result = await fulfillmentPush.pushShopifyFulfillment(shipmentId);
+      if (result?.writebackComplete !== true) {
+        throw new Error(
+          `Shopify fulfillment push returned without complete package coverage for shipment ${shipmentId}`,
+        );
+      }
       if (result?.alreadyPushed) {
         console.log(
           `[ShipStation Webhook V2] shipment ${shipmentId} Shopify push idempotent skip (already pushed, fulfillment=${result.shopifyFulfillmentId})`,

@@ -341,11 +341,11 @@ export async function markShipmentShipped(
   `);
 
   // Shopify fulfillment convergence (void→re-ship heal; supersedes the
-  // §6 Commit 24 re-label-only hook). Fires when:
-  //   - the shipment already carries a `shopify_fulfillment_id` (it was
-  //     pushed to Shopify; nothing to converge otherwise — first ships
-  //     are owned by the create path), AND
-  //   - the incoming tracking differs from what's on the row.
+  // §6 Commit 24 re-label-only hook). Fires whenever incoming tracking
+  // differs from the row. The fulfillment
+  // service resolves every known Shopify handle from the legacy column and
+  // append-only event evidence; a shipment without handles is an idempotent
+  // no-op and remains owned by the create path.
   // We deliberately do NOT require `current.tracking_number` to be
   // non-empty: a label void nulls it (markShipmentVoided) before the
   // re-ship, and that null-out is exactly why the old re-label gate
@@ -361,8 +361,6 @@ export async function markShipmentShipped(
   // contract used by markShipmentVoided's cancel hook (§6 Commit 17);
   // reconcile + the CHANNEL_TRACKING_STALE detector catch drift.
   if (
-    typeof current.shopify_fulfillment_id === "string" &&
-    current.shopify_fulfillment_id.length > 0 &&
     current.tracking_number !== meta.trackingNumber &&
     typeof opts.fulfillmentPush?.reconcileShopifyFulfillment === "function"
   ) {
@@ -374,7 +372,7 @@ export async function markShipmentShipped(
       });
     } catch (err: any) {
       console.error(
-        `[markShipmentShipped] Shopify fulfillment convergence failed for shipment ${shipmentId} (fulfillment ${current.shopify_fulfillment_id}): ${err?.message ?? err}`,
+        `[markShipmentShipped] Shopify fulfillment convergence failed for shipment ${shipmentId}: ${err?.message ?? err}`,
       );
     }
   }
@@ -695,6 +693,7 @@ export async function markShipmentVoided(
     voidedTrackingNumber?: string | null;
     fulfillmentPush?: {
       cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
+      cancelShopifyFulfillmentsForShipment?: (shipmentId: number) => Promise<unknown>;
     };
   } = {},
 ): Promise<MarkShipmentResult> {
@@ -772,7 +771,15 @@ export async function markShipmentVoided(
   // silently. Cancel failures are logged but do NOT block; Group F
   // reconcile retries.
   const shopifyFulfillmentId = current.shopify_fulfillment_id;
-  if (
+  if (typeof opts.fulfillmentPush?.cancelShopifyFulfillmentsForShipment === "function") {
+    try {
+      await opts.fulfillmentPush.cancelShopifyFulfillmentsForShipment(shipmentId);
+    } catch (err: any) {
+      console.error(
+        `[markShipmentVoided] Shopify fulfillment cancel failed for shipment ${shipmentId}: ${err?.message ?? err}`,
+      );
+    }
+  } else if (
     typeof shopifyFulfillmentId === "string" &&
     shopifyFulfillmentId.length > 0 &&
     typeof opts.fulfillmentPush?.cancelShopifyFulfillment === "function"
@@ -989,6 +996,7 @@ export async function dispatchShipmentEvent(
     now?: Date;
     fulfillmentPush?: {
       cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
+      cancelShopifyFulfillmentsForShipment?: (shipmentId: number) => Promise<unknown>;
       reconcileShopifyFulfillment?: (
         shipmentId: number,
         trackingInfo: { number: string; company: string; url?: string },

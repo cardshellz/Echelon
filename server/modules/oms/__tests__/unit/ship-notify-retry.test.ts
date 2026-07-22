@@ -113,7 +113,11 @@ function makeDb(opts: {
     | {
         pushShopifyFulfillment?: (
           shipmentId: number,
-        ) => Promise<{ shopifyFulfillmentId: string | null; alreadyPushed: boolean }>;
+        ) => Promise<{
+          shopifyFulfillmentId: string | null;
+          alreadyPushed: boolean;
+          writebackComplete: boolean;
+        }>;
         pushTracking?: (orderId: number) => Promise<boolean>;
         pushTrackingForShipment?: (shipmentId: number) => Promise<boolean>;
       }
@@ -1741,6 +1745,7 @@ describe("dispatchShopifyFulfillmentRetry :: happy path", () => {
     const push = vi.fn(async (_id: number) => ({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/9",
       alreadyPushed: false,
+      writebackComplete: true,
     }));
     const { db, updates } = makeDb({
       fulfillmentPush: { pushShopifyFulfillment: push },
@@ -1765,6 +1770,7 @@ describe("dispatchShopifyFulfillmentRetry :: happy path", () => {
     const push = vi.fn(async (_id: number) => ({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/preexisting",
       alreadyPushed: true,
+      writebackComplete: true,
     }));
     const { db, updates } = makeDb({
       fulfillmentPush: { pushShopifyFulfillment: push },

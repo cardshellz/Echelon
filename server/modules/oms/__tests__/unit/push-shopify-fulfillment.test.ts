@@ -6,8 +6,8 @@
  *     Fulfillment GID into wms.outbound_shipments.shopify_fulfillment_id,
  *     structured ShopifyFulfillmentPushError on every documented failure.
  *   - C22c upgrades:
- *       D1  Idempotency: skip push when shipment already has
- *           shopify_fulfillment_id; return alreadyPushed:true.
+ *       D1  Idempotency: verify current Shopify line coverage even when the
+ *           shipment already has a historical shopify_fulfillment_id.
  *       D2/D4 Path A primary: when oms.oms_order_lines carry FO line
  *           item ids (populated by C22b ingest), validate them against
  *           live Shopify remainingQuantity before use.
@@ -35,6 +35,7 @@ import {
   SHOPIFY_PUSH_NETWORK_ERROR,
   SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
   SHOPIFY_PUSH_IN_PROGRESS,
+  SHOPIFY_PUSH_INCOMPLETE,
   __test__,
 } from "../../fulfillment-push.service";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
@@ -313,6 +314,9 @@ function makeDb(
         }],
       };
     }
+    if (sqlText.includes("INSERT INTO oms.oms_order_events")) {
+      return { rows: [], rowCount: 1 };
+    }
     if (remaining.length === 0) return { rows: [] };
     return remaining.shift()!;
   });
@@ -394,11 +398,12 @@ describe("pushShopifyFulfillment :: happy path (Path B end-to-end)", () => {
     expect(result).toEqual({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/55555",
       alreadyPushed: false,
+      writebackComplete: true,
     });
-    // 11 db.execute calls: idem, shipment, order, channel.provider, items,
+    // 13 db.execute calls: lock scope, idem, shipment, order, channel.provider, items,
     // path-A read, 2 back-writes (one per item), warehouses, channels (loc),
-    // UPDATE shipment, plus the immutable OMS-order lock-scope lookup.
-    expect(db.db.execute).toHaveBeenCalledTimes(12);
+    // UPDATE shipment, and append-only completion evidence.
+    expect(db.db.execute).toHaveBeenCalledTimes(13);
     // 3 Shopify GQL calls: fulfillmentOrders (resolve), fulfillmentOrders (location), fulfillmentCreateV2
     expect(client.calls).toHaveLength(3);
     expect(client.calls[0].query).toContain("fulfillmentOrders");
@@ -466,10 +471,12 @@ describe("pushShopifyFulfillment :: happy path (Path B end-to-end)", () => {
 
     await svc.pushShopifyFulfillment(SHIPMENT_ID);
 
-    const updateCall = db.capturedQueries[db.capturedQueries.length - 1];
-    expect(updateCall.sqlText).toContain("UPDATE wms.outbound_shipments");
-    expect(updateCall.sqlText).toContain("shopify_fulfillment_id");
-    expect(updateCall.sqlText).toContain("updated_at");
+    const updateCall = db.capturedQueries.find((query) =>
+      query.sqlText.includes("UPDATE wms.outbound_shipments"),
+    );
+    expect(updateCall).toBeDefined();
+    expect(updateCall!.sqlText).toContain("shopify_fulfillment_id");
+    expect(updateCall!.sqlText).toContain("updated_at");
   });
 
   it("omits trackingInfo.url when shipment has no tracking_url", async () => {
@@ -600,7 +607,11 @@ describe("pushShopifyFulfillment :: validation failures", () => {
     svc.setShopifyClient(makeShopifyClient([]));
 
     const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
-    expect(result).toEqual({ shopifyFulfillmentId: null, alreadyPushed: false });
+    expect(result).toEqual({
+      shopifyFulfillmentId: null,
+      alreadyPushed: false,
+      writebackComplete: true,
+    });
   });
 
   it("throws when Shopify client is not set", async () => {
@@ -901,12 +912,22 @@ describe("pushShopifyFulfillment :: GraphQL failures", () => {
 // ─── C22c: Idempotency (D1) ─────────────────────────────────────────
 
 describe("pushShopifyFulfillment :: idempotency (D1)", () => {
-  it("skips push and returns existing GID when shopify_fulfillment_id is already set", async () => {
+  it("verifies live line coverage before accepting an existing fulfillment GID", async () => {
     const existing = "gid://shopify/Fulfillment/already-pushed-001";
     const db = makeDb([
       { rows: [{ shopify_fulfillment_id: existing }] },
+      { rows: [okShipmentRow({ shopify_fulfillment_id: existing })] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] },
     ]);
-    const client = makeShopifyClient([]); // no GQL calls expected
+    const response = okFulfillmentOrdersResponse();
+    for (const edge of response.order.fulfillmentOrders.edges[0].node.lineItems.edges) {
+      edge.node.remainingQuantity = 0;
+    }
+    const client = makeShopifyClient([response]);
     const svc = createFulfillmentPushService(db.db, null);
     svc.setShopifyClient(client);
 
@@ -915,10 +936,67 @@ describe("pushShopifyFulfillment :: idempotency (D1)", () => {
     expect(result).toEqual({
       shopifyFulfillmentId: existing,
       alreadyPushed: true,
+      alreadySatisfied: true,
+      writebackComplete: true,
     });
-    // Only the lock-scope lookup and idempotency SELECT fired.
-    expect(db.db.execute).toHaveBeenCalledTimes(2);
-    expect(client.calls).toHaveLength(0);
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0].query).toContain("fulfillmentOrders");
+    expect(client.calls.some((call) => call.query.includes("fulfillmentCreateV2"))).toBe(false);
+    const evidence = db.capturedQueries.find((query) =>
+      query.sqlText.includes("shopify_fulfillment_reconciled"),
+    );
+    expect(evidence?.sqlText).toContain("coverageVersion");
+    expect(evidence?.sqlText).toContain("packageSignature");
+    expect(evidence?.sqlText).toContain("writebackComplete");
+  });
+
+  it("repairs a missing package line even when the shipment already has a fulfillment GID", async () => {
+    const existing = "gid://shopify/Fulfillment/partial-001";
+    const repaired = "gid://shopify/Fulfillment/repair-002";
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: existing }] },
+      { rows: [okShipmentRow({ shopify_fulfillment_id: existing })] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] },
+      ...locationConfigRows(),
+      { rows: [], rowCount: 0 },
+    ]);
+    const response = okFulfillmentOrdersResponse();
+    response.order.fulfillmentOrders.edges[0].node.lineItems.edges[0].node.remainingQuantity = 0;
+    response.order.fulfillmentOrders.edges[0].node.lineItems.edges[1].node.remainingQuantity = 1;
+    const client = makeShopifyClient([
+      response,
+      okLocationFilterResponse(),
+      okFulfillmentCreateV2Response(repaired),
+    ]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    expect(result).toEqual({
+      shopifyFulfillmentId: repaired,
+      alreadyPushed: false,
+      writebackComplete: true,
+    });
+    const fulfillment = (client.calls[2].variables as any).fulfillment;
+    expect(fulfillment.lineItemsByFulfillmentOrder).toEqual([
+      {
+        fulfillmentOrderId: FO_GID,
+        fulfillmentOrderLineItems: [
+          { id: "gid://shopify/FulfillmentOrderLineItem/777-2", quantity: 1 },
+        ],
+      },
+    ]);
+    const evidence = db.capturedQueries.find((query) =>
+      query.sqlText.includes("shopify_fulfillment_pushed"),
+    );
+    expect(evidence?.sqlText).toContain(existing);
+    expect(evidence?.sqlText).toContain(repaired);
+    expect(evidence?.sqlText).toContain("\"writebackComplete\":true");
   });
 
   it("treats empty-string shopify_fulfillment_id as not pushed and proceeds", async () => {
@@ -968,6 +1046,7 @@ describe("pushShopifyFulfillment :: idempotency (D1)", () => {
     expect(result).toEqual({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/55555",
       alreadyPushed: false,
+      writebackComplete: true,
     });
   });
 });
@@ -1399,7 +1478,7 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
     expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
   });
 
-  it("returns null no-op when ALL FOs are assigned to a 3PL (ShipMonk) location", async () => {
+  it("keeps writeback debt open when ALL FOs are assigned to a 3PL (ShipMonk) location", async () => {
     const db = makeDb([
       { rows: [{ shopify_fulfillment_id: null }] },
       { rows: [okShipmentRow()] },
@@ -1419,14 +1498,15 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
     const svc = createFulfillmentPushService(db.db, null);
     svc.setShopifyClient(client);
 
-    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
-    expect(result).toEqual({ shopifyFulfillmentId: null, alreadyPushed: false });
+    await expect(svc.pushShopifyFulfillment(SHIPMENT_ID)).rejects.toMatchObject({
+      context: { code: SHOPIFY_PUSH_INCOMPLETE },
+    });
     // Validation + location-filter query; no create.
     expect(client.calls).toHaveLength(2);
     expect(client.calls[1].query).toContain("assignedLocation");
   });
 
-  it("filters out 3PL FOs when some are ours and some are not (mixed)", async () => {
+  it("pushes owned quantity but keeps debt open when mixed 3PL quantity remains", async () => {
     // Two FOs split across our location + a 3PL location.
     const ourFo = "gid://shopify/FulfillmentOrder/ours";
     const threePlFo = "gid://shopify/FulfillmentOrder/3pl";
@@ -1511,8 +1591,9 @@ describe("pushShopifyFulfillment :: location filtering (D13)", () => {
     const svc = createFulfillmentPushService(db.db, null);
     svc.setShopifyClient(client);
 
-    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
-    expect(result.shopifyFulfillmentId).toBe("gid://shopify/Fulfillment/55555");
+    await expect(svc.pushShopifyFulfillment(SHIPMENT_ID)).rejects.toMatchObject({
+      context: { code: SHOPIFY_PUSH_INCOMPLETE },
+    });
 
     const fulfillment = (client.calls[2].variables as any).fulfillment;
     expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
@@ -1582,6 +1663,43 @@ describe("normaliseShopifyLocationId", () => {
   });
   it("trims surrounding whitespace before extracting the tail", () => {
     expect(__test__.normaliseShopifyLocationId("  gid://shopify/Location/777  ")).toBe("777");
+  });
+});
+
+describe("Shopify package completion signature", () => {
+  const item = (overrides: Record<string, unknown> = {}) => ({
+    shipment_item_id: 20,
+    order_item_id: 200,
+    oms_order_line_id: 2,
+    fulfillment_provider: "shopify",
+    sku: "SKU-2",
+    external_line_item_id: "2000",
+    qty: 1,
+    ...overrides,
+  });
+
+  it("is deterministic regardless of query row order", () => {
+    const first = item({ shipment_item_id: 10, order_item_id: 100, qty: 2 });
+    const second = item();
+
+    expect(__test__.buildShopifyPackageSignature([second, first])).toBe(
+      __test__.buildShopifyPackageSignature([first, second]),
+    );
+  });
+
+  it("changes when a late line is added or its shipped quantity changes", () => {
+    const original = item();
+    const added = item({ shipment_item_id: 21, order_item_id: 201, qty: 1 });
+
+    const originalSignature = __test__.buildShopifyPackageSignature([original]);
+    expect(__test__.buildShopifyPackageSignature([original, added])).not.toBe(originalSignature);
+    expect(__test__.buildShopifyPackageSignature([item({ qty: 2 })])).not.toBe(originalSignature);
+  });
+
+  it("rejects non-positive quantities instead of producing valid completion evidence", () => {
+    expect(() => __test__.buildShopifyPackageSignature([item({ qty: 0 })])).toThrow(
+      "invalid shipment item quantity",
+    );
   });
 });
 
@@ -1812,6 +1930,7 @@ describe("pushShopifyFulfillment :: live-state convergence", () => {
       shopifyFulfillmentId: null,
       alreadyPushed: false,
       alreadySatisfied: true,
+      writebackComplete: true,
     });
     expect(client.calls).toHaveLength(1);
     expect(client.calls[0].query).toContain("fulfillmentOrders");
@@ -2142,6 +2261,7 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
     expect(result).toEqual({
       shopifyFulfillmentId: fulfillmentParent,
       alreadyPushed: false,
+      writebackComplete: true,
     });
 
     // 2 fulfillmentCreateV2 mutations issued (parent + child).
@@ -2221,6 +2341,7 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
     expect(result).toEqual({
       shopifyFulfillmentId: fulfillmentChild,
       alreadyPushed: false,
+      writebackComplete: true,
     });
 
     const createCalls = client.calls.filter((c) =>
@@ -2462,31 +2583,6 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
     expect(createCalls).toHaveLength(1);
   });
 
-  it("all siblings already pushed → every sibling skips, no Shopify calls", async () => {
-    const triggeringExisting = "gid://shopify/Fulfillment/triggering-already";
-    const childExisting = "gid://shopify/Fulfillment/child-already";
-
-    // Triggering shipment's idempotency hits FIRST and short-circuits the
-    // public method before any fan-out can happen — that's the existing
-    // D1 contract for solo orders, and it carries through unchanged for
-    // combined orders. The public return is the triggering shipment's
-    // existing GID with alreadyPushed:true.
-    const db = makeDb([
-      { rows: [{ shopify_fulfillment_id: triggeringExisting }] }, // idempotency → short-circuit
-    ]);
-    void childExisting;
-    const client = makeShopifyClient([]);
-    const svc = createFulfillmentPushService(db.db, null);
-    svc.setShopifyClient(client);
-
-    const result = await svc.pushShopifyFulfillment(PARENT_SHIPMENT_ID);
-    expect(result).toEqual({
-      shopifyFulfillmentId: triggeringExisting,
-      alreadyPushed: true,
-    });
-    expect(client.calls).toHaveLength(0);
-  });
-
   it("sibling errors mid-fan-out → others still attempt; triggering still returns success", async () => {
     const fulfillmentParent = "gid://shopify/Fulfillment/parent-partial-success";
 
@@ -2560,6 +2656,7 @@ describe("pushShopifyFulfillment :: combined-orders fan-out (C25)", () => {
     expect(result).toEqual({
       shopifyFulfillmentId: fulfillmentParent,
       alreadyPushed: false,
+      writebackComplete: true,
     });
 
     // Both fulfillmentCreateV2 attempts were made; child failed but

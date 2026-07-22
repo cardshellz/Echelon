@@ -33,7 +33,7 @@ const SHIPSTATION_SPLIT_INDEX_MIGRATION = readSource(
 );
 
 describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
-  it("keeps concurrent Shopify fulfillment pushes idempotent for the same WMS shipment", () => {
+  it("keeps Shopify writeback retries idempotent without trusting a legacy fulfillment ID", () => {
     const persistBlock = sourceBlock(
       FULFILLMENT_PUSH_SRC,
       "D-PUSHIDEM",
@@ -41,7 +41,7 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     );
 
     expect(WRITEBACK_GUARDS_TEST_SRC).toContain(
-      'describe("D-PUSHIDEM: conditional UPDATE serializes concurrent pushes"',
+      'describe("D-PUSHIDEM: legacy fulfillment handle persistence"',
     );
     expect(WRITEBACK_GUARDS_TEST_SRC).toContain(
       'it("uses conditional UPDATE with NULL guard when persisting fulfillment ID"',
@@ -49,8 +49,10 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(persistBlock).toContain("UPDATE wms.outbound_shipments");
     expect(persistBlock).toContain("shopify_fulfillment_id IS NULL");
     expect(persistBlock).toContain("persistResult?.rowCount");
-    expect(persistBlock).toContain("shopify_push_concurrent_skip");
-    expect(persistBlock).toContain("alreadyPushed: true");
+    expect(persistBlock).toContain("recorded additional fulfillment");
+    expect(persistBlock).not.toContain("alreadyPushed: true");
+    expect(FULFILLMENT_PUSH_SRC).toContain("packageSignature");
+    expect(FULFILLMENT_PUSH_SRC).toContain("writebackComplete");
   });
 
   it("repairs duplicate ShipStation order-key callbacks instead of creating fake split work", () => {

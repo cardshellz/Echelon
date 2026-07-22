@@ -193,7 +193,7 @@ export async function runFulfillmentSweep(dbArg: any = db) {
             : false;
 
         const succeeded = row.provider === "shopify"
-          ? Boolean(result?.alreadyPushed || result?.alreadySatisfied || result?.shopifyFulfillmentId)
+          ? result?.writebackComplete === true
           : result === true;
         if (succeeded) {
           if (row.provider === "shopify") {

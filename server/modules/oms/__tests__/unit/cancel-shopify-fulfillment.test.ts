@@ -225,6 +225,38 @@ describe("cancelShopifyFulfillment :: idempotency", () => {
   });
 });
 
+describe("cancelShopifyFulfillmentsForShipment", () => {
+  it("deduplicates and cancels every legacy and event-backed fulfillment handle", async () => {
+    const first = "gid://shopify/Fulfillment/100";
+    const second = "gid://shopify/Fulfillment/200";
+    const db = {
+      execute: vi.fn(async () => ({
+        rows: [
+          { fulfillment_gid: first },
+          { fulfillment_gid: second },
+          { fulfillment_gid: first },
+          { fulfillment_gid: "not-a-shopify-gid" },
+        ],
+      })),
+    };
+    const client = makeShopifyClient([okCancelResponse(), okCancelResponse()]);
+    const svc = createFulfillmentPushService(db as any, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.cancelShopifyFulfillmentsForShipment(501);
+
+    expect(result).toEqual({
+      fulfillmentIds: [first, second],
+      cancelledCount: 2,
+    });
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(client.calls.map((call) => call.variables)).toEqual([
+      { id: first },
+      { id: second },
+    ]);
+  });
+});
+
 describe("cancelShopifyFulfillment :: input validation", () => {
   let db: ReturnType<typeof makeDbStub>;
 
