@@ -17,7 +17,9 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
     minMeasure: 0,
     maxMeasure: 1000,
     maxShipmentWeightGrams: null,
+    chargeModel: "fixed_band",
     rateCents: 899,
+    perStartedPoundCents: null,
     ...overrides,
   };
 }
@@ -39,7 +41,9 @@ describe("parseRateTableCsv", () => {
       minMeasure: 0,
       maxMeasure: 454,
       maxShipmentWeightGrams: null,
+      chargeModel: "fixed_band",
       rateCents: 899,
+      perStartedPoundCents: null,
     });
   });
 
@@ -99,6 +103,47 @@ describe("parseRateTableCsv", () => {
     expect(result.rows[0]).toMatchObject({ minMeasure: 0, maxMeasure: 1000, rateCents: 1599 });
   });
 
+  it("parses an open-ended fixed parcel band", () => {
+    const result = parseRateTableCsv(
+      "state,zip_prefix,charge_model,min_lb,max_lb,rate_usd,per_started_lb_usd\n" +
+      "PA,,fixed_band,30,,24.99,\n",
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows[0]).toMatchObject({
+      minMeasure: Math.round(30 * GRAMS_PER_POUND),
+      maxMeasure: null,
+      chargeModel: "fixed_band",
+      rateCents: 2499,
+      perStartedPoundCents: null,
+    });
+  });
+
+  it("parses base plus per-started-pound parcel pricing", () => {
+    const result = parseRateTableCsv(
+      "state,zip_prefix,charge_model,min_lb,max_lb,rate_usd,per_started_lb_usd\n" +
+      "PA,,base_plus_per_started_pound,0,,3.99,0.85\n",
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows[0]).toMatchObject({
+      minMeasure: 0,
+      maxMeasure: null,
+      chargeModel: "base_plus_per_started_pound",
+      rateCents: 399,
+      perStartedPoundCents: 85,
+    });
+  });
+
+  it("rejects incomplete formula pricing", () => {
+    const result = parseRateTableCsv(
+      "state,zip_prefix,charge_model,min_lb,max_lb,rate_usd,per_started_lb_usd\n" +
+      "PA,,base_plus_per_started_pound,0,,3.99,\n",
+    );
+
+    expect(result.errors[0]?.message).toContain("per_started_lb_usd");
+  });
+
   it("reports empty files and enforces the row cap", () => {
     expect(parseRateTableCsv("\n\n").errors).toEqual([
       { line: 1, message: "CSV is empty - a header row is required" },
@@ -121,6 +166,10 @@ describe("findBandOverlaps", () => {
     expect(findBandOverlaps([
       row({ minMeasure: 0, maxMeasure: 1000 }),
       row({ minMeasure: 1000, maxMeasure: 2000 }),
+    ])).toHaveLength(1);
+    expect(findBandOverlaps([
+      row({ minMeasure: 0, maxMeasure: null }),
+      row({ minMeasure: 1001, maxMeasure: 2000 }),
     ])).toHaveLength(1);
   });
 });

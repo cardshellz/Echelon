@@ -148,6 +148,9 @@ function successfulQuote(): ManualRateQuoteResult {
       promiseMaxBusinessDays: 7,
       ratedMeasure: 454,
       maxShipmentWeightGrams: null,
+      chargeModel: "fixed_band",
+      perStartedPoundCents: null,
+      billablePounds: null,
     }],
     warnings: [],
   };

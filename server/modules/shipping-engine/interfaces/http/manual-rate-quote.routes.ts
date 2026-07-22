@@ -53,6 +53,9 @@ const manualRateQuoteResponseSchema = z.object({
     promiseMaxBusinessDays: z.number().int().min(0).nullable(),
     ratedMeasure: z.number().int().min(0),
     maxShipmentWeightGrams: z.number().int().positive().nullable(),
+    chargeModel: z.enum(["fixed_band", "base_plus_per_started_pound"]),
+    perStartedPoundCents: z.number().int().min(0).nullable(),
+    billablePounds: z.number().int().min(0).nullable(),
   })),
   warnings: z.array(z.string()),
 });

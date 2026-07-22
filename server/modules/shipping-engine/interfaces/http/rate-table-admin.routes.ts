@@ -28,6 +28,7 @@ import {
   canRetireRateTable,
 } from "../../domain/rate-table-lifecycle";
 import { normalizeUsPostalRegion } from "../../domain/us-geography";
+import type { ShippingRateChargeModel } from "../../domain/rate-selection";
 
 const INITIAL_RATE_TABLE_SERVICE_LEVEL_CODE = "standard";
 
@@ -37,15 +38,34 @@ const rateRowSchema = z.object({
   destinationRegion: z.string().trim().length(2),
   postalPrefix: z.string().trim().regex(/^\d{1,5}$/).nullable().optional(),
   minMeasure: z.number().int().min(0),
-  maxMeasure: z.number().int().min(0),
+  maxMeasure: z.number().int().min(0).nullable(),
   maxShipmentWeightGrams: z.number().int().positive().nullable().optional(),
+  chargeModel: z.enum(["fixed_band", "base_plus_per_started_pound"]).default("fixed_band"),
   rateCents: z.number().int().min(0),
+  perStartedPoundCents: z.number().int().min(0).nullable().optional(),
 }).superRefine((row, context) => {
-  if (row.maxMeasure < row.minMeasure) {
+  if (row.maxMeasure !== null && row.maxMeasure < row.minMeasure) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["maxMeasure"],
       message: "Maximum must be greater than or equal to minimum.",
+    });
+  }
+  if (row.chargeModel === "fixed_band" && row.perStartedPoundCents != null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["perStartedPoundCents"],
+      message: "Fixed-band rows cannot have a per-pound charge.",
+    });
+  }
+  if (
+    row.chargeModel === "base_plus_per_started_pound"
+    && (row.minMeasure !== 0 || row.maxMeasure !== null || row.perStartedPoundCents == null)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["chargeModel"],
+      message: "Formula rows must begin at zero, have no maximum, and include a per-pound charge.",
     });
   }
 });
@@ -69,7 +89,11 @@ const draftLayoutSchema = z.object({
       maxMeasure: z.string().max(20),
       rateUsd: z.string().max(20),
       maxShipmentWeightLb: z.string().max(20),
+      openEnded: z.boolean().optional(),
     })).max(100),
+    pricingModel: z.enum(["weight_bands", "base_plus_per_started_pound"]).optional(),
+    baseChargeUsd: z.string().max(20).optional(),
+    perStartedPoundUsd: z.string().max(20).optional(),
   })).max(100),
 });
 
@@ -121,6 +145,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
             zipOverrideCount: sql<number>`count(*) filter (where ${shippingRateTableRows.postalPrefix} is not null)::int`,
             minMeasure: sql<number>`min(${shippingRateTableRows.minMeasure})::int`,
             maxMeasure: sql<number>`max(${shippingRateTableRows.maxMeasure})::int`,
+            hasOpenEnded: sql<boolean>`bool_or(${shippingRateTableRows.maxMeasure} is null)`,
           })
             .from(shippingRateTableRows)
             .groupBy(shippingRateTableRows.rateTableId),
@@ -168,7 +193,9 @@ export function registerRateTableAdminRoutes(app: Express): void {
             stateCount: coverageByTable.get(table.id)?.stateCount ?? 0,
             zipOverrideCount: coverageByTable.get(table.id)?.zipOverrideCount ?? 0,
             minMeasure: coverageByTable.get(table.id)?.minMeasure ?? null,
-            maxMeasure: coverageByTable.get(table.id)?.maxMeasure ?? null,
+            maxMeasure: coverageByTable.get(table.id)?.hasOpenEnded
+              ? null
+              : coverageByTable.get(table.id)?.maxMeasure ?? null,
           })),
         });
       } catch (error) {
@@ -596,6 +623,7 @@ function dedupeRowsByBandIdentity(rows: readonly RateTableImportRow[]): RateTabl
       row.minMeasure,
       row.maxMeasure,
       row.maxShipmentWeightGrams ?? 0,
+      row.chargeModel,
     ].join("|");
     if (seen.has(key)) continue;
     seen.add(key);
@@ -620,7 +648,9 @@ async function insertRateRows(
         minMeasure: row.minMeasure,
         maxMeasure: row.maxMeasure,
         maxShipmentWeightGrams: row.maxShipmentWeightGrams,
+        chargeModel: row.chargeModel,
         rateCents: row.rateCents,
+        perStartedPoundCents: row.perStartedPoundCents,
       })),
     );
   }
@@ -648,7 +678,9 @@ async function loadRateTableDetail(id: number) {
       minMeasure: shippingRateTableRows.minMeasure,
       maxMeasure: shippingRateTableRows.maxMeasure,
       maxShipmentWeightGrams: shippingRateTableRows.maxShipmentWeightGrams,
+      chargeModel: shippingRateTableRows.chargeModel,
       rateCents: shippingRateTableRows.rateCents,
+      perStartedPoundCents: shippingRateTableRows.perStartedPoundCents,
     })
       .from(shippingRateTableRows)
       .leftJoin(warehouses, eq(shippingRateTableRows.originWarehouseId, warehouses.id))
@@ -684,13 +716,18 @@ async function loadRateTableDetail(id: number) {
           .orderBy(asc(shippingRateBookAssignments.pricingChannel), asc(shippingRateBookAssignments.ratePurpose)),
       ]);
 
+  const normalizedRows = rows.map((row) => ({
+    ...row,
+    chargeModel: row.chargeModel as ShippingRateChargeModel,
+  }));
+
   return {
     rateTable,
     serviceLevel,
     rateBook: rateBook === null ? null : { ...rateBook, zoneSet, assignments },
     pricingMode: "state_zip" as const,
-    rows,
-    analysis: analyzeRateTable(rows, rateTable.pricingBasis as "shipment_weight" | "pallet_count"),
+    rows: normalizedRows,
+    analysis: analyzeRateTable(normalizedRows, rateTable.pricingBasis as "shipment_weight" | "pallet_count"),
   };
 }
 
@@ -718,7 +755,9 @@ function normalizeRateRow(input: RateRowInput): RateTableImportRow {
     minMeasure: input.minMeasure,
     maxMeasure: input.maxMeasure,
     maxShipmentWeightGrams: input.maxShipmentWeightGrams ?? null,
+    chargeModel: input.chargeModel,
     rateCents: input.rateCents,
+    perStartedPoundCents: input.perStartedPoundCents ?? null,
   };
 }
 
@@ -753,6 +792,13 @@ function validateRowForBasis(
   pricingBasis: string,
 ): void {
   if (pricingBasis === "pallet_count") {
+    if (row.chargeModel !== "fixed_band" || row.maxMeasure === null) {
+      throw new RateTableAdminError(
+        400,
+        "SHIPPING_ADMIN_RATE_CHARGE_MODEL_INVALID",
+        "Pallet rates require fixed bands with an upper limit.",
+      );
+    }
     if (row.minMeasure < 1) {
       throw new RateTableAdminError(
         400,
@@ -768,6 +814,15 @@ function validateRowForBasis(
       "SHIPPING_ADMIN_RATE_MEASURE_INVALID",
       "Shipment-weight rate rows cannot have a freight weight ceiling.",
     );
+  }
+  if (row.chargeModel === "base_plus_per_started_pound") {
+    if (row.minMeasure !== 0 || row.maxMeasure !== null || row.perStartedPoundCents === null) {
+      throw new RateTableAdminError(
+        400,
+        "SHIPPING_ADMIN_RATE_CHARGE_MODEL_INVALID",
+        "Per-pound rates must begin at zero, have no maximum, and include a per-pound charge.",
+      );
+    }
   }
 }
 

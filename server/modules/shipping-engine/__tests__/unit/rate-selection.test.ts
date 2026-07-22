@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   selectServiceLevelRates,
+  startedPoundsFromGrams,
   type RateCandidateRow,
 } from "../../domain/rate-selection";
 
@@ -24,7 +25,9 @@ function row(overrides: Partial<RateCandidateRow> = {}): RateCandidateRow {
     minMeasure: 0,
     maxMeasure: 1000,
     maxShipmentWeightGrams: null,
+    chargeModel: "fixed_band",
     rateCents: 899,
+    perStartedPoundCents: null,
     ...overrides,
   };
 }
@@ -56,6 +59,9 @@ describe("selectServiceLevelRates", () => {
       promiseMaxBusinessDays: 7,
       currency: "USD",
       rateCents: 899,
+      chargeModel: "fixed_band",
+      perStartedPoundCents: null,
+      billablePounds: null,
       rateTableId: 1,
       ratedMeasure: 500,
       maxShipmentWeightGrams: null,
@@ -153,5 +159,60 @@ describe("selectServiceLevelRates", () => {
     expect(selectServiceLevelRates([
       { ...freight, maxShipmentWeightGrams: 500 },
     ], { ...INPUT, palletCount: 1 })).toHaveLength(1);
+  });
+
+  it("matches a fixed final band with no maximum", () => {
+    const quotes = selectServiceLevelRates([
+      row({ minMeasure: 908, maxMeasure: null, rateCents: 2499 }),
+    ], { ...INPUT, shipmentWeightGrams: 100_000 });
+
+    expect(quotes[0]).toMatchObject({ rateCents: 2499, billablePounds: null });
+  });
+
+  it("keeps an exact two-pound boundary in the band ending at two pounds", () => {
+    const quotes = selectServiceLevelRates([
+      row({ minMeasure: 0, maxMeasure: 907, rateCents: 1000 }),
+      row({ minMeasure: 908, maxMeasure: null, rateCents: 2000 }),
+    ], { ...INPUT, shipmentWeightGrams: 907 });
+
+    expect(quotes[0]).toMatchObject({ rateCents: 1000 });
+  });
+
+  it("charges the base plus each started pound", () => {
+    const formula = row({
+      minMeasure: 0,
+      maxMeasure: null,
+      chargeModel: "base_plus_per_started_pound",
+      rateCents: 300,
+      perStartedPoundCents: 100,
+    });
+
+    expect(selectServiceLevelRates([formula], { ...INPUT, shipmentWeightGrams: 0 })[0])
+      .toMatchObject({ rateCents: 300, billablePounds: 0 });
+    expect(selectServiceLevelRates([formula], { ...INPUT, shipmentWeightGrams: 908 })[0])
+      .toMatchObject({ rateCents: 600, billablePounds: 3 });
+  });
+
+  it("does not emit an unsafe formula total", () => {
+    const formula = row({
+      minMeasure: 0,
+      maxMeasure: null,
+      chargeModel: "base_plus_per_started_pound",
+      rateCents: Number.MAX_SAFE_INTEGER,
+      perStartedPoundCents: 1,
+    });
+
+    expect(selectServiceLevelRates([formula], { ...INPUT, shipmentWeightGrams: 454 })).toEqual([]);
+  });
+});
+
+describe("startedPoundsFromGrams", () => {
+  it.each([
+    [0, 0],
+    [454, 1],
+    [907, 2],
+    [908, 3],
+  ])("maps %i grams to %i started pounds", (grams, pounds) => {
+    expect(startedPoundsFromGrams(grams)).toBe(pounds);
   });
 });

@@ -17,7 +17,9 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
     minMeasure: 0,
     maxMeasure: 1000,
     maxShipmentWeightGrams: null,
+    chargeModel: "fixed_band",
     rateCents: 800,
+    perStartedPoundCents: null,
     ...overrides,
   };
 }
@@ -67,6 +69,41 @@ describe("rate table lifecycle analysis", () => {
     const result = analyzeRateTable([row()], "shipment_weight");
     expect(result.canActivate).toBe(true);
     expect(result.coverage.stateCount).toBe(1);
+  });
+
+  it("accepts a final open-ended fixed band and reports unlimited coverage", () => {
+    const result = analyzeRateTable([
+      row({ minMeasure: 0, maxMeasure: 1000 }),
+      row({ minMeasure: 1001, maxMeasure: null }),
+    ], "shipment_weight");
+
+    expect(result.canActivate).toBe(true);
+    expect(result.coverage.maxMeasure).toBeNull();
+  });
+
+  it("rejects rows after an open-ended fixed band", () => {
+    const result = analyzeRateTable([
+      row({ minMeasure: 0, maxMeasure: null }),
+      row({ minMeasure: 1001, maxMeasure: 2000 }),
+    ], "shipment_weight");
+
+    expect(result.canActivate).toBe(false);
+    expect(result.errors).toContain("PA statewide has a rate band after its open-ended band.");
+  });
+
+  it("accepts one formula row per destination and rejects mixed schedules", () => {
+    const formula = row({
+      maxMeasure: null,
+      chargeModel: "base_plus_per_started_pound",
+      perStartedPoundCents: 85,
+    });
+    expect(analyzeRateTable([formula], "shipment_weight").canActivate).toBe(true);
+
+    const mixed = analyzeRateTable([formula, row({ minMeasure: 0, maxMeasure: 1000 })], "shipment_weight");
+    expect(mixed.canActivate).toBe(false);
+    expect(mixed.errors).toContain(
+      "PA statewide formula pricing must be the only rate row for that destination.",
+    );
   });
 
   it("has no geography warning when every US postal region has a fallback", () => {

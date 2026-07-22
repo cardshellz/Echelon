@@ -228,9 +228,11 @@ export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
   destinationRegion: varchar("destination_region", { length: 2 }).notNull(),
   postalPrefix: varchar("postal_prefix", { length: 5 }),
   minMeasure: integer("min_measure").notNull().default(0),
-  maxMeasure: integer("max_measure").notNull(),
+  maxMeasure: integer("max_measure"),
   maxShipmentWeightGrams: integer("max_shipment_weight_grams"),
+  chargeModel: varchar("charge_model", { length: 40 }).notNull().default("fixed_band"),
   rateCents: bigint("rate_cents", { mode: "number" }).notNull(),
+  perStartedPoundCents: bigint("per_started_pound_cents", { mode: "number" }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("shipping_rate_row_band_idx").on(
@@ -240,8 +242,9 @@ export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
     table.destinationRegion,
     sql`COALESCE(${table.postalPrefix}, '')`,
     table.minMeasure,
-    table.maxMeasure,
+    sql`COALESCE(${table.maxMeasure}, -1)`,
     sql`COALESCE(${table.maxShipmentWeightGrams}, 0)`,
+    table.chargeModel,
   ),
   index("shipping_rate_row_lookup_idx").on(
     table.rateTableId,
@@ -253,11 +256,31 @@ export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
   check("shipping_rate_row_country_chk", sql`${table.destinationCountry} ~ '^[A-Z]{2}$'`),
   check("shipping_rate_row_region_chk", sql`${table.destinationRegion} ~ '^[A-Z]{2}$'`),
   check("shipping_rate_row_postal_prefix_chk", sql`${table.postalPrefix} IS NULL OR ${table.postalPrefix} ~ '^[0-9]{1,5}$'`),
-  check("shipping_rate_row_measure_chk", sql`${table.minMeasure} >= 0 AND ${table.maxMeasure} >= ${table.minMeasure}`),
+  check("shipping_rate_row_measure_chk", sql`
+    ${table.minMeasure} >= 0
+    AND (${table.maxMeasure} IS NULL OR ${table.maxMeasure} >= ${table.minMeasure})
+  `),
   check("shipping_rate_row_shipment_weight_chk", sql`
     ${table.maxShipmentWeightGrams} IS NULL OR ${table.maxShipmentWeightGrams} > 0
   `),
   check("shipping_rate_row_rate_chk", sql`${table.rateCents} >= 0`),
+  check("shipping_rate_row_charge_model_chk", sql`
+    ${table.chargeModel} IN ('fixed_band', 'base_plus_per_started_pound')
+  `),
+  check("shipping_rate_row_charge_config_chk", sql`
+    (
+      ${table.chargeModel} = 'fixed_band'
+      AND ${table.perStartedPoundCents} IS NULL
+    )
+    OR (
+      ${table.chargeModel} = 'base_plus_per_started_pound'
+      AND ${table.minMeasure} = 0
+      AND ${table.maxMeasure} IS NULL
+      AND ${table.maxShipmentWeightGrams} IS NULL
+      AND ${table.perStartedPoundCents} IS NOT NULL
+      AND ${table.perStartedPoundCents} >= 0
+    )
+  `),
 ]);
 
 // ---------------------------------------------------------------------------

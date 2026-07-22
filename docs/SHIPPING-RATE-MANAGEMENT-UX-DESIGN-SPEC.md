@@ -61,7 +61,7 @@ Pricing context
   -> selects one Pricing Program
        -> contains one Rate Table revision per Shipping Option
             -> contains Destination Groups
-                 -> contains parcel Weight Bands OR freight Pallet Bands
+                 -> contains one parcel charge method OR freight Pallet Bands
 ```
 
 ### 4.1 Pricing context
@@ -129,7 +129,7 @@ A group contains:
 - One or more US states or territories.
 - Optional ZIP-prefix overrides associated with a state.
 - Optional origin-warehouse scope.
-- One complete set of weight bands or pallet bands.
+- One charge method: fixed weight bands, base plus each started pound, or pallet bands.
 
 Destination groups are a user-interface abstraction. The system expands them into individual rate rows when saved.
 
@@ -350,6 +350,13 @@ Do not require the user to scroll through a permanently expanded 50-state matrix
 
 Parcel options are priced once using **total shipment weight**, not units per package and not each package separately.
 
+Each destination group selects exactly one parcel charge method:
+
+1. **Fixed weight bands** — one fixed shipment charge from the matching band.
+2. **Base + per started lb** — base charge plus the configured amount for each started pound, with no maximum.
+
+For formula pricing, started pounds round upward using the same normalized gram boundaries as fixed bands. Examples: 454 g bills as 1 lb, 907 g as 2 lb, and 908 g as 3 lb. A zero-weight request charges only the base. All persisted and calculated money remains integer cents.
+
 Use a compact, spreadsheet-like matrix:
 
 | From | Through | Charge | Row actions |
@@ -367,7 +374,9 @@ Requirements:
 - Add, delete, and reorder bands without opening a modal.
 - Support keyboard navigation and paste into consecutive cells.
 - Offer `Copy bands to...` for applying a schedule to other destination groups.
-- Clearly show the open-ended final band if supported, or require an explicit maximum and state that limit.
+- Allow only the final parcel band to be marked `And over`; it has no maximum and covers every heavier shipment.
+- Formula pricing replaces the matrix with two fields: `Base charge` and `Per started lb`.
+- Switching methods must not silently erase the inactive method's draft inputs.
 
 ### 8.4 Step 3: Pallet Freight Rates
 
@@ -694,6 +703,9 @@ The designer does not need to design around table names, but the following const
 - State is a required two-letter US region.
 - ZIP prefix is optional and contains 1-5 digits.
 - Rates are stored in integer cents.
+- Every row has an explicit charge model: `fixed_band` or `base_plus_per_started_pound`.
+- A `NULL` maximum is an open-ended final fixed band or a formula row; it is never interpreted as zero.
+- Formula rows start at zero, have no maximum, and store base cents plus per-started-pound cents.
 - Parcel measures are stored in grams but displayed in pounds.
 - Pallet measures are stored as whole counts.
 - Optional freight weight ceilings are stored in grams but displayed in pounds.

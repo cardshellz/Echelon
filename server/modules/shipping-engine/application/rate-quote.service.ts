@@ -21,6 +21,7 @@ import {
   type RateCandidateRow,
   type ShippingFulfillmentMode,
   type ShippingPricingBasis,
+  type ShippingRateChargeModel,
 } from "../domain/rate-selection";
 import { selectRateBookAssignment } from "../domain/rate-book";
 import type { ShippingRateContext } from "../domain/shipping-channel";
@@ -78,6 +79,9 @@ export interface RateQuoteLine {
   promiseMaxBusinessDays: number | null;
   ratedMeasure: number;
   maxShipmentWeightGrams: number | null;
+  chargeModel: RateCandidateRow["chargeModel"];
+  perStartedPoundCents: number | null;
+  billablePounds: number | null;
 }
 
 export interface RateQuoteResult {
@@ -190,6 +194,9 @@ export async function quoteShipmentRates(
     promiseMaxBusinessDays: quote.promiseMaxBusinessDays,
     ratedMeasure: quote.ratedMeasure,
     maxShipmentWeightGrams: quote.maxShipmentWeightGrams,
+    chargeModel: quote.chargeModel,
+    perStartedPoundCents: quote.perStartedPoundCents,
+    billablePounds: quote.billablePounds,
   }));
 
   if (!request.freight && candidateRows.some((row) => row.pricingBasis === "pallet_count")) {
@@ -258,7 +265,9 @@ async function loadCandidateRows(
       minMeasure: shippingRateTableRows.minMeasure,
       maxMeasure: shippingRateTableRows.maxMeasure,
       maxShipmentWeightGrams: shippingRateTableRows.maxShipmentWeightGrams,
+      chargeModel: shippingRateTableRows.chargeModel,
       rateCents: shippingRateTableRows.rateCents,
+      perStartedPoundCents: shippingRateTableRows.perStartedPoundCents,
     })
     .from(shippingRateTableRows)
     .innerJoin(shippingRateTables, eq(shippingRateTableRows.rateTableId, shippingRateTables.id))
@@ -281,6 +290,7 @@ async function loadCandidateRows(
     ...row,
     fulfillmentMode: row.fulfillmentMode as ShippingFulfillmentMode,
     pricingBasis: row.pricingBasis as ShippingPricingBasis,
+    chargeModel: row.chargeModel as ShippingRateChargeModel,
   }));
 }
 

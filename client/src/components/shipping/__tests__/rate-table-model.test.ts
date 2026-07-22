@@ -78,6 +78,9 @@ function group(overrides: Partial<RateGroup> = {}): RateGroup {
     originWarehouseId: null,
     regions: ["PA"],
     zipEntries: [],
+    pricingModel: "weight_bands",
+    baseChargeUsd: "",
+    perStartedPoundUsd: "",
     bands: [
       {
         id: "band-1",
@@ -99,7 +102,9 @@ function draftRow(overrides: Partial<DraftRow> = {}): DraftRow {
     minMeasure: 0,
     maxMeasure: 454,
     maxShipmentWeightGrams: null,
+    chargeModel: "fixed_band",
     rateCents: 899,
+    perStartedPoundCents: null,
     ...overrides,
   };
 }
@@ -183,6 +188,52 @@ describe("validateRateGroups", () => {
         rateCents: 29900,
       }),
     ]);
+  });
+
+  it("emits a true open-ended final parcel band", () => {
+    const result = validateRateGroups([
+      group({
+        bands: [
+          { id: "band-1", maxMeasure: "30", rateUsd: "19.99", maxShipmentWeightLb: "" },
+          {
+            id: "band-2",
+            maxMeasure: "",
+            rateUsd: "29.99",
+            maxShipmentWeightLb: "",
+            openEnded: true,
+          },
+        ],
+      }),
+    ], "shipment_weight");
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows[1]).toMatchObject({
+      minMeasure: Math.round(30 * GRAMS_PER_POUND) + 1,
+      maxMeasure: null,
+      chargeModel: "fixed_band",
+      rateCents: 2999,
+    });
+  });
+
+  it("emits one base-plus-started-pound row per destination", () => {
+    const result = validateRateGroups([
+      group({
+        regions: ["PA", "CA"],
+        pricingModel: "base_plus_per_started_pound",
+        baseChargeUsd: "3.99",
+        perStartedPoundUsd: "0.85",
+      }),
+    ], "shipment_weight");
+
+    expect(result.errors).toEqual([]);
+    expect(result.rows).toHaveLength(2);
+    expect(result.rows[0]).toMatchObject({
+      minMeasure: 0,
+      maxMeasure: null,
+      chargeModel: "base_plus_per_started_pound",
+      rateCents: 399,
+      perStartedPoundCents: 85,
+    });
   });
 
   it("keeps global and warehouse-specific schedules in separate scopes", () => {
@@ -286,6 +337,21 @@ describe("draft layout round-trip", () => {
     expect(restored![0].bands[1]).toMatchObject({ maxMeasure: "", rateUsd: "" });
   });
 
+  it("restores the selected formula method and charges", () => {
+    const original = [group({
+      pricingModel: "base_plus_per_started_pound",
+      baseChargeUsd: "3.99",
+      perStartedPoundUsd: "0.85",
+    })];
+    const restored = groupsFromLayout({ draftLayout: layoutFromGroups(original) });
+
+    expect(restored?.[0]).toMatchObject({
+      pricingModel: "base_plus_per_started_pound",
+      baseChargeUsd: "3.99",
+      perStartedPoundUsd: "0.85",
+    });
+  });
+
   it("returns null for metadata without a layout", () => {
     expect(groupsFromLayout({ source: "admin-import" })).toBeNull();
     expect(groupsFromLayout(null)).toBeNull();
@@ -305,6 +371,23 @@ describe("groupsFromRows", () => {
     expect(groups[0].bands).toEqual([
       expect.objectContaining({ maxMeasure: "1", rateUsd: "189.00" }),
     ]);
+  });
+
+  it("rebuilds formula groups from persisted rows", () => {
+    const groups = groupsFromRows([
+      draftRow({
+        maxMeasure: null,
+        chargeModel: "base_plus_per_started_pound",
+        rateCents: 399,
+        perStartedPoundCents: 85,
+      }),
+    ], "shipment_weight");
+
+    expect(groups[0]).toMatchObject({
+      pricingModel: "base_plus_per_started_pound",
+      baseChargeUsd: "3.99",
+      perStartedPoundUsd: "0.85",
+    });
   });
 });
 
@@ -334,9 +417,26 @@ describe("serializeRowsToCsv", () => {
     ], "shipment_weight");
 
     const lines = csv.split("\n");
-    expect(lines[0]).toBe("state,zip_prefix,min_lb,max_lb,rate_usd");
-    expect(lines).toContain("PA,,0,1,8.99");
-    expect(lines).toContain("PA,160,0,1,7.99");
+    expect(lines[0]).toBe(
+      "state,zip_prefix,charge_model,min_lb,max_lb,rate_usd,per_started_lb_usd",
+    );
+    expect(lines).toContain("PA,,fixed_band,0,1,8.99,");
+    expect(lines).toContain("PA,160,fixed_band,0,1,7.99,");
+  });
+
+  it("writes formula rows and open-ended maximums without losing semantics", () => {
+    const csv = serializeRowsToCsv([
+      draftRow({
+        maxMeasure: null,
+        chargeModel: "base_plus_per_started_pound",
+        rateCents: 399,
+        perStartedPoundCents: 85,
+      }),
+    ], "shipment_weight");
+
+    expect(csv.split("\n")[1]).toBe(
+      "PA,,base_plus_per_started_pound,0,,3.99,0.85",
+    );
   });
 
   it("adds an origin_warehouse column only when scoped rows exist", () => {

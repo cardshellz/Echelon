@@ -153,6 +153,9 @@ export interface ManualRateQuoteResponse {
     promiseMaxBusinessDays: number | null;
     ratedMeasure: number;
     maxShipmentWeightGrams: number | null;
+    chargeModel: "fixed_band" | "base_plus_per_started_pound";
+    perStartedPoundCents: number | null;
+    billablePounds: number | null;
   }>;
   warnings: string[];
 }
