@@ -12,6 +12,7 @@
     "monitor:pick-replen-health": "tsx scripts/monitor-pick-replen-health.ts --notify --recoverInlineReplen --queueMissingReplen --json",
     "procurement:health-escalation": "tsx server/jobs/run-procurement-health-escalation.ts",
     "procurement:forecast-input-gaps": "tsx scripts/audit-forecast-input-gaps.ts --json",
+    "procurement:evaluate-forecasts": "tsx server/jobs/run-purchase-forecast-backtesting.ts",
     "procurement:automatic-purchasing-pilot": "tsx scripts/run-automatic-purchasing-pilot.ts",
     "procurement:backfill-historical-supplier-evidence": "tsx scripts/backfill-historical-po-supplier-evidence.ts",
     "procurement:remediate-legacy-po-receive-config": "tsx scripts/remediate-legacy-po-receive-config.ts",

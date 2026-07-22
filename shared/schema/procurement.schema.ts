@@ -966,6 +966,43 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
   }),
 ]);
 
+export const purchaseForecastEvaluationHorizonDaysEnum = [7, 30, 90] as const;
+export type PurchaseForecastEvaluationHorizonDays = typeof purchaseForecastEvaluationHorizonDaysEnum[number];
+
+export const purchaseForecastEvaluations = procurementSchema.table("purchase_forecast_evaluations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  observationId: integer("observation_id").notNull().references(() => purchaseForecastObservations.id, { onDelete: "restrict" }),
+  horizonDays: integer("horizon_days").notNull(),
+  evaluationVersion: integer("evaluation_version").notNull(),
+  demandQueryVersion: varchar("demand_query_version", { length: 80 }).notNull(),
+  observedFrom: timestamp("observed_from", { withTimezone: true }).notNull(),
+  observedThroughExclusive: timestamp("observed_through_exclusive", { withTimezone: true }).notNull(),
+  actualDemandPieces: bigint("actual_demand_pieces", { mode: "number" }).notNull(),
+  actualOrderCount: integer("actual_order_count").notNull(),
+  actualActiveDays: integer("actual_active_days").notNull(),
+  latestActualDemandAt: timestamp("latest_actual_demand_at", { withTimezone: true }),
+  forecastDemandMicros: bigint("forecast_demand_micros", { mode: "number" }).notNull(),
+  baselineDemandMicros: bigint("baseline_demand_micros", { mode: "number" }).notNull(),
+  forecastAbsoluteErrorMicros: bigint("forecast_absolute_error_micros", { mode: "number" }).notNull(),
+  baselineAbsoluteErrorMicros: bigint("baseline_absolute_error_micros", { mode: "number" }).notNull(),
+  forecastBiasMicros: bigint("forecast_bias_micros", { mode: "number" }).notNull(),
+  baselineBiasMicros: bigint("baseline_bias_micros", { mode: "number" }).notNull(),
+  evidenceSnapshot: jsonb("evidence_snapshot").notNull(),
+  evaluatedBy: varchar("evaluated_by", { length: 255 }),
+  evaluatedAt: timestamp("evaluated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("purchase_forecast_evaluations_observation_horizon_version_uidx")
+    .on(table.observationId, table.horizonDays, table.evaluationVersion),
+  index("purchase_forecast_evaluations_horizon_evaluated_idx")
+    .on(table.horizonDays, table.evaluatedAt, table.id),
+  check("purchase_forecast_evaluations_horizon_chk", sql`${table.horizonDays} IN (7, 30, 90)`),
+  check("purchase_forecast_evaluations_version_chk", sql`${table.evaluationVersion} > 0`),
+  check("purchase_forecast_evaluations_window_chk", sql`${table.observedThroughExclusive} > ${table.observedFrom}`),
+  check("purchase_forecast_evaluations_actual_chk", sql`${table.actualDemandPieces} >= 0 AND ${table.actualOrderCount} >= 0 AND ${table.actualActiveDays} >= 0`),
+  check("purchase_forecast_evaluations_prediction_chk", sql`${table.forecastDemandMicros} >= 0 AND ${table.baselineDemandMicros} >= 0`),
+  check("purchase_forecast_evaluations_error_chk", sql`${table.forecastAbsoluteErrorMicros} >= 0 AND ${table.baselineAbsoluteErrorMicros} >= 0`),
+]);
+
 export const requestForQuoteStatusEnum = [
   "draft", "sent", "partially_quoted", "quoted", "declined", "cancelled", "expired",
 ] as const;
@@ -1058,12 +1095,14 @@ export const requestForQuoteLines = procurementSchema.table("request_for_quote_l
 export const insertPurchaseRecommendationRunSchema = createInsertSchema(purchaseRecommendationRuns).omit({ id: true, generatedAt: true });
 export const insertPurchaseRecommendationLineSchema = createInsertSchema(purchaseRecommendationLines).omit({ id: true, createdAt: true });
 export const insertPurchaseForecastObservationSchema = createInsertSchema(purchaseForecastObservations).omit({ id: true, createdAt: true });
+export const insertPurchaseForecastEvaluationSchema = createInsertSchema(purchaseForecastEvaluations).omit({ id: true, evaluatedAt: true });
 export const insertRequestForQuoteSchema = createInsertSchema(requestForQuotes).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertRequestForQuoteLineSchema = createInsertSchema(requestForQuoteLines).omit({ id: true, createdAt: true, updatedAt: true });
 
 export type PurchaseRecommendationRun = typeof purchaseRecommendationRuns.$inferSelect;
 export type PurchaseRecommendationLine = typeof purchaseRecommendationLines.$inferSelect;
 export type PurchaseForecastObservation = typeof purchaseForecastObservations.$inferSelect;
+export type PurchaseForecastEvaluation = typeof purchaseForecastEvaluations.$inferSelect;
 export type RequestForQuote = typeof requestForQuotes.$inferSelect;
 export type RequestForQuoteLine = typeof requestForQuoteLines.$inferSelect;
 

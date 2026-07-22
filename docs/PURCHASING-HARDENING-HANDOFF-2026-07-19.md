@@ -51,17 +51,29 @@ migrations after pulling newer work rather than relying indefinitely on this sna
   resumes it.
 - Manual and scheduled recommendation runs, urgency/status classification, historical
   demand, future-demand events, and recommendation-to-RFQ conversion already exist.
-- The next active hardening block is forecast measurement. Branch
-  `codex/forecast-backtesting-foundation` starts from current `origin/main` and adds
+- PR #990 (`codex/forecast-backtesting-foundation`) is merged at `03df4168`. It adds
   immutable full-population forecast observations to recommendation runs. RFQ
   candidate lines are selection-biased and cannot serve as the backtest population.
 - The current recommendation query forecasts one product in base pieces across all
   warehouses. Its selected variant is a receiving configuration, not the forecast
   identity. Measurement must remain explicitly `product_all_warehouses` until the
   recommendation engine itself gains a warehouse-scoped demand and supply model.
-- Migration `162_purchase_forecast_observations.sql` belongs to that branch. It starts
-  collecting unbiased observations only for recommendation runs created after deploy;
+- Migration `162_purchase_forecast_observations.sql` is merged. It starts collecting
+  unbiased observations only for recommendation runs created after deploy;
   do not relabel legacy candidate-only runs as complete historical forecast evidence.
+- Branch `codex/forecast-backtesting-evaluator` adds migration
+  `163_purchase_forecast_evaluations.sql` and deterministic 7/30/90-day evaluation.
+  It compares the weighted historical-rate forecast with the standard-window baseline
+  against actual eligible WMS order demand in integer micro-pieces. Evaluation is
+  idempotent, repeatable-read, versioned, immutable, and available through a manual API
+  command or `npm run procurement:evaluate-forecasts` for scheduling. The scheduled
+  command drains bounded batches and reports `backlogMayRemain`; batch size and maximum
+  batches are controlled by `PURCHASE_FORECAST_EVALUATION_LIMIT` and
+  `PURCHASE_FORECAST_EVALUATION_MAX_BATCHES`.
+- Aggregate forward-demand evidence is shown with every result but is not included in
+  the first accuracy metric. The current observation stores one total for the configured
+  planning horizon, so prorating it across 7/30/90-day horizons would be false. Capture
+  immutable event-level/date-level overlay contributions before evaluating overlay lift.
 - No production mutation, policy change, demand event, recommendation run, RFQ, or
   automatic purchasing pilot was performed during this continuation.
 
@@ -80,7 +92,8 @@ Current source migration sequence:
   - `159_demand_event_integrity.sql`
   - `160_shipping_rate_charge_models.sql` (newer, unrelated shipping work)
   - `161_shipping_preload_cent_adjustment.sql` (newer, unrelated shipping work)
-  - `162_purchase_forecast_observations.sql` (current branch; not deployed yet)
+  - `162_purchase_forecast_observations.sql` (merged in PR #990)
+  - `163_purchase_forecast_evaluations.sql` (current branch; not deployed yet)
 
 ## Executive state
 
