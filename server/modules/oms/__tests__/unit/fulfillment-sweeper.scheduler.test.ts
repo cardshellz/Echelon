@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  enqueueRepairedShipNotifyRetries,
   resolveRecoveredShopifyWritebackDebt,
   runFulfillmentSweep,
 } from "../../fulfillment-sweeper.scheduler";
@@ -11,6 +12,36 @@ function queryText(query: any): string {
 }
 
 describe("fulfillment-sweeper.scheduler", () => {
+  it("requeues every distinct dead SHIP_NOTIFY callback repaired by the split fix", async () => {
+    const execute = vi.fn(async () => ({ rows: [{ enqueued: 37 }] }));
+
+    const result = await enqueueRepairedShipNotifyRetries({ execute }, 500);
+
+    expect(result).toEqual({ enqueued: 37 });
+    const query = execute.mock.calls[0]?.[0];
+    const text = queryText(query);
+    expect(text).toContain("q.provider = 'shipstation'");
+    expect(text).toContain("q.topic = 'SHIP_NOTIFY'");
+    expect(text).toContain("q.status = 'dead'");
+    expect(text).toContain("q.last_error NOT LIKE 'repair_enqueued:%'");
+    expect(JSON.stringify(query)).toContain(
+      "wms_outbound_shipment_items_qty_positive_chk",
+    );
+    expect(text).toContain("DISTINCT ON (q.payload->>'resource_url')");
+    expect(text).toContain("ON CONFLICT DO NOTHING");
+    expect(text).toContain("'pending'");
+    expect(text).toContain("SET last_error = 'repair_enqueued:");
+  });
+
+  it("rejects unbounded repaired callback scans", async () => {
+    const execute = vi.fn();
+
+    await expect(enqueueRepairedShipNotifyRetries({ execute }, 2_001)).rejects.toThrow(
+      /limit must be an integer from 1 through 2000/,
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("runs bounded physical-package recovery before the ordinary writeback scan", async () => {
     const recover = vi.fn(async () => ({
       candidates: 1,
@@ -28,7 +59,7 @@ describe("fulfillment-sweeper.scheduler", () => {
 
     expect(recover).toHaveBeenCalledWith({
       mode: "execute",
-      limit: 10,
+      limit: 100,
       minAgeHours: 6,
       maxAgeDays: 30,
     });

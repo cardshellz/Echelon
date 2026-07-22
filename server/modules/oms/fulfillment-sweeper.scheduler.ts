@@ -14,6 +14,10 @@ const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 500;
 const OUTBOUND_RECENT_SWEEP_LIMIT = 400;
 const OUTBOUND_RECENT_WINDOW_DAYS = 30;
+const PHYSICAL_RECOVERY_LIMIT = 100;
+const REPAIRED_SHIP_NOTIFY_RETRY_LIMIT = 500;
+const POSITIVE_SHIPMENT_ITEM_CONSTRAINT =
+  "wms_outbound_shipment_items_qty_positive_chk";
 
 export interface RecoveredShopifyWritebackDebtResult {
   retryRowsResolved: number;
@@ -21,9 +25,95 @@ export interface RecoveredShopifyWritebackDebtResult {
   reviewMarkersCleared: number;
 }
 
+export interface RepairedShipNotifyRetryResult {
+  enqueued: number;
+}
+
 function nonNegativeCount(value: unknown): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+/**
+ * Re-enter only SHIP_NOTIFY rows whose deterministic failure was fixed by the
+ * positive-quantity split repair. The original row remains dead with its
+ * attempts and original error preserved behind a repair marker; a new pending
+ * row is inserted through the queue's existing resource-url uniqueness guard.
+ * Any concurrent webhook/recovery enqueue wins safely through ON CONFLICT DO
+ * NOTHING.
+ */
+export async function enqueueRepairedShipNotifyRetries(
+  dbArg: any,
+  limit: number = REPAIRED_SHIP_NOTIFY_RETRY_LIMIT,
+): Promise<RepairedShipNotifyRetryResult> {
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 2_000) {
+    throw new Error(`limit must be an integer from 1 through 2000 (got ${limit})`);
+  }
+
+  const result = await dbArg.execute(sql`
+    WITH candidates AS (
+      SELECT DISTINCT ON (q.payload->>'resource_url')
+        q.id,
+        q.payload,
+        q.source_inbox_id,
+        q.payload->>'resource_url' AS resource_url
+      FROM oms.webhook_retry_queue q
+      WHERE q.provider = 'shipstation'
+        AND q.topic = 'SHIP_NOTIFY'
+        AND q.status = 'dead'
+        AND q.last_error LIKE ${`%${POSITIVE_SHIPMENT_ITEM_CONSTRAINT}%`}
+        AND q.last_error NOT LIKE 'repair_enqueued:%'
+        AND NULLIF(BTRIM(q.payload->>'resource_url'), '') IS NOT NULL
+      ORDER BY
+        q.payload->>'resource_url',
+        q.updated_at DESC,
+        q.id DESC
+      LIMIT ${limit}
+    ), inserted AS (
+      INSERT INTO oms.webhook_retry_queue (
+        provider,
+        topic,
+        payload,
+        attempts,
+        status,
+        next_retry_at,
+        last_error,
+        source_inbox_id,
+        created_at,
+        updated_at
+      )
+      SELECT
+        'shipstation',
+        'SHIP_NOTIFY',
+        candidate.payload,
+        0,
+        'pending',
+        NOW(),
+        'automatic retry after positive shipment-item split repair',
+        candidate.source_inbox_id,
+        NOW(),
+        NOW()
+      FROM candidates candidate
+      ON CONFLICT DO NOTHING
+      RETURNING id, payload->>'resource_url' AS resource_url
+    ), marked AS (
+      UPDATE oms.webhook_retry_queue q
+      SET last_error = 'repair_enqueued: positive shipment-item split repair; ' || q.last_error,
+          updated_at = NOW()
+      FROM candidates candidate
+      JOIN inserted
+        ON inserted.resource_url = candidate.resource_url
+      WHERE q.id = candidate.id
+      RETURNING q.id
+    )
+    SELECT
+      (SELECT COUNT(*)::int FROM inserted) AS enqueued,
+      (SELECT COUNT(*)::int FROM marked) AS marked
+  `);
+
+  return {
+    enqueued: nonNegativeCount(result?.rows?.[0]?.enqueued),
+  };
 }
 
 /**
@@ -127,6 +217,21 @@ export async function runFulfillmentSweep(dbArg: any = db) {
       );
     }
 
+    try {
+      const repairedRetries = await enqueueRepairedShipNotifyRetries(dbArg);
+      if (repairedRetries.enqueued > 0) {
+        console.log(
+          `${LOG_PREFIX} Enqueued ${repairedRetries.enqueued} repaired SHIP_NOTIFY callback(s).`,
+        );
+      }
+    } catch (error: any) {
+      // Physical-package discovery and channel writeback remain independent.
+      // A queue repair failure is observable and retried on the next sweep.
+      console.error(
+        `${LOG_PREFIX} Repaired SHIP_NOTIFY retry enqueue failed: ${error?.message ?? String(error)}`,
+      );
+    }
+
     // Recover labels that ShipStation combined under a sibling order before
     // the ordinary channel-writeback scan runs. This does not mutate
     // fulfillment directly: it only enqueues the canonical SHIP_NOTIFY path,
@@ -137,7 +242,7 @@ export async function runFulfillmentSweep(dbArg: any = db) {
       try {
         const result = await physicalRecovery.recover({
           mode: "execute",
-          limit: 10,
+          limit: PHYSICAL_RECOVERY_LIMIT,
           minAgeHours: 6,
           maxAgeDays: 30,
         });
