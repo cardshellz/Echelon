@@ -51,6 +51,7 @@ import {
   formatDate,
   invalidateShippingAdmin,
   postJson,
+  productRuleRevisionStatus,
   type ProgramOverview,
   type ProgramOptionState,
   type WarehouseOption,
@@ -231,6 +232,7 @@ export function ProgramDetail({
               <TableHead>Pricing basis</TableHead>
               <TableHead>Live revision</TableHead>
               <TableHead>Coverage</TableHead>
+              <TableHead>Product rules</TableHead>
               <TableHead>Draft</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
@@ -362,6 +364,7 @@ function OptionRow({
   onStartRates: (serviceLevelCode: string) => void;
 }) {
   const { serviceLevel, active, draft } = option;
+  const productRules = productRuleRevisionStatus(option);
   const configurable = serviceLevel.isActive;
   return (
     <TableRow className={!configurable ? "bg-muted/20" : undefined}>
@@ -408,6 +411,27 @@ function OptionRow({
           ? `${active.stateCount} states · ${active.zipOverrideCount} ZIP · ${describeMeasureRange(active.pricingBasis, active.minMeasure, active.maxMeasure)}`
           : "—"}
       </TableCell>
+      <TableCell className="whitespace-nowrap text-xs">
+        {productRules.liveCount !== null || productRules.draftCount !== null ? (
+          <div className="space-y-0.5">
+            {productRules.liveCount !== null && (
+              <div>
+                <span className="font-medium text-foreground">
+                  {productRules.liveCount.toLocaleString()}
+                </span>
+                <span className="text-muted-foreground"> live</span>
+              </div>
+            )}
+            {productRules.draftCount !== null && (
+              <div className="text-amber-700">
+                {productRules.draftCount.toLocaleString()} in draft
+              </div>
+            )}
+          </div>
+        ) : (
+          <span className="text-muted-foreground">None</span>
+        )}
+      </TableCell>
       <TableCell>
         {draft ? (
           configurable ? (
@@ -441,17 +465,17 @@ function OptionRow({
           {!programRetired && configurable && (draft ? (
             <Button size="sm" variant="outline" onClick={() => onContinueDraft(draft.id)}>
               <Pencil className="mr-1 h-3.5 w-3.5" />
-              Continue draft
+              Edit rates &amp; rules
             </Button>
           ) : active ? (
             <Button size="sm" variant="outline" onClick={() => onCreateRevision(active.id)}>
               <Pencil className="mr-1 h-3.5 w-3.5" />
-              Create revision
+              Edit rates &amp; rules
             </Button>
           ) : (
             <Button size="sm" onClick={() => onStartRates(serviceLevel.code)}>
               <Plus className="mr-1 h-3.5 w-3.5" />
-              Set up rates
+              Set up rates &amp; rules
             </Button>
           ))}
         </div>
