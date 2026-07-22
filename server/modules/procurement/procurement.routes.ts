@@ -332,7 +332,9 @@ export function registerPurchasingRoutes(app: Express) {
 
   registerPurchasingRecommendationAdminRoutes(app);
 
-  registerDemandEventRoutes(app);
+  registerDemandEventRoutes(app, {
+    getForecastPolicy: async () => (await storage.getAutoDraftSettings()).forecastPolicy,
+  });
 
   registerEnterpriseDashboardRoutes(app);
 }

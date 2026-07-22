@@ -1867,7 +1867,7 @@ export const demandEvents = procurementSchema.table("demand_events", {
   endDate: date("end_date"),
   status: varchar("status", { length: 20 }).notNull().default("planned"),
   notes: text("notes"),
-  createdBy: integer("created_by"),
+  createdBy: varchar("created_by", { length: 100 }).references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
@@ -1875,8 +1875,8 @@ export const demandEvents = procurementSchema.table("demand_events", {
 export const demandEventLines = procurementSchema.table("demand_event_lines", {
   id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
   demandEventId: integer("demand_event_id").notNull().references(() => demandEvents.id, { onDelete: "cascade" }),
-  productId: integer("product_id").notNull(),
-  productVariantId: integer("product_variant_id"),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "restrict" }),
   expectedPieces: integer("expected_pieces").notNull(),
   confidence: varchar("confidence", { length: 10 }).notNull().default("medium"),
   notes: text("notes"),
