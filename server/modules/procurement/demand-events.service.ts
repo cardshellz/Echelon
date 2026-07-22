@@ -255,14 +255,17 @@ export async function listDemandEvents(filters?: {
   const statusFilter = filters?.status;
   const statuses = statusFilter
     ? Array.isArray(statusFilter) ? statusFilter : [statusFilter]
-    : null;
+    : [];
   const limit = Math.max(1, Math.min(filters?.limit ?? 50, 200));
   const offset = Math.max(0, filters?.offset ?? 0);
+  const statusWhere = statuses.length > 0
+    ? sql`WHERE de.status IN (${sql.join(statuses.map((status) => sql`${status}`), sql`, `)})`
+    : sql``;
 
   const countResult = await db.execute(sql`
     SELECT COUNT(*)::int AS total
     FROM procurement.demand_events de
-    ${statuses ? sql`WHERE de.status = ANY(${statuses})` : sql``}
+    ${statusWhere}
   `);
   const total = parseCount(countResult.rows[0]?.total);
 
@@ -282,7 +285,7 @@ export async function listDemandEvents(filters?: {
       COALESCE(SUM(del.expected_pieces), 0)::bigint AS total_expected_pieces
     FROM procurement.demand_events de
     LEFT JOIN procurement.demand_event_lines del ON del.demand_event_id = de.id
-    ${statuses ? sql`WHERE de.status = ANY(${statuses})` : sql``}
+    ${statusWhere}
     GROUP BY de.id
     ORDER BY de.start_date ASC, de.id ASC
     LIMIT ${limit} OFFSET ${offset}
