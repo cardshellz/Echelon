@@ -769,7 +769,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
               WHERE e.order_id = oo.id
                 AND e.details->>'wmsShipmentId' = os.id::text
                 AND (
-                  (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                  (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
                   OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
                 )
             )
@@ -810,7 +810,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
               WHERE e.order_id = oo.id
                 AND e.details->>'wmsShipmentId' = os.id::text
                 AND (
-                  (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                  (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
                   OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
                 )
             )

@@ -59,6 +59,7 @@ import { recordReceivingReconciliationFailure } from "../modules/procurement/po-
 import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "../modules/procurement/ap-ledger.service";
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
+import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
 import { createShipStationService } from "../modules/oms/shipstation.service";
 import { createShipStationEngine } from "../modules/shipping";
 import { createDrizzleCarrierTrackingRepository } from "../modules/shipping/carrier-tracking.repository";
@@ -272,7 +273,9 @@ export function createServices(db: any) {
   // Fulfillment Push. eBay is injected later when polling starts; Shopify is
   // wired here so ShipStation webhooks and retry workers can create Shopify
   // fulfillments without relying on route-local setup.
-  const fulfillmentPush = createFulfillmentPushService(db, null);
+  const fulfillmentPush = createFulfillmentPushService(db, null, {
+    runExclusive: withAdvisoryLock,
+  });
   fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
 
   // ShipStation — order push + webhook integration

@@ -104,4 +104,20 @@ describe("channel-writeback.service", () => {
     expect(JSON.stringify(execute.mock.calls[0]?.[0])).toContain("pending_retry = false");
     expect(execute).toHaveBeenCalledTimes(1);
   });
+
+  it("supports unbounded historical convergence and recognizes reconciled Shopify evidence", async () => {
+    const execute = vi.fn(async () => ({ rows: [] }));
+
+    await findChannelWritebackCandidates({ execute }, {
+      minAgeMinutes: 60,
+      maxAgeDays: null,
+      limit: 500,
+      excludeRetryStates: false,
+    });
+
+    const text = JSON.stringify(execute.mock.calls[0]?.[0]);
+    expect(text).toContain("shopify_fulfillment_reconciled");
+    expect(text).not.toContain("make_interval(days");
+    expect(text).not.toContain("pending_retry = false");
+  });
 });

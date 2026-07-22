@@ -769,7 +769,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
                    WHERE e.order_id = oo.id
                      AND e.details->>'wmsShipmentId' = os.id::text
                      AND (
-                       (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                       (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
                        OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
                      )
                  )
@@ -809,7 +809,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
                    WHERE e.order_id = oo.id
                      AND e.details->>'wmsShipmentId' = os.id::text
                      AND (
-                       (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                       (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
                        OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
                      )
                  )
@@ -861,7 +861,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
           AND e.details->>'wmsShipmentId' = os.id::text
           AND NULLIF(e.details->>'trackingNumber', '') IS NOT NULL
           AND (
-            (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+            (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
             OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
           )
         ORDER BY e.created_at DESC, e.id DESC
@@ -899,7 +899,7 @@ const BASE_ISSUES: FlowIssueDef[] = [
           AND e.details->>'wmsShipmentId' = os.id::text
           AND NULLIF(e.details->>'trackingNumber', '') IS NOT NULL
           AND (
-            (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+            (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
             OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
           )
         ORDER BY e.created_at DESC, e.id DESC
@@ -1192,7 +1192,7 @@ export async function getFlowWaterfall(db: any, opts: { windowDays?: number } = 
                      WHERE e.order_id = oo.id
                        AND e.details->>'wmsShipmentId' = os.id::text
                        AND (
-                         (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                         (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
                          OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
                        )
                    )
