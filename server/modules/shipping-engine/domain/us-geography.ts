@@ -14,6 +14,8 @@ const US_REGION_ENTRIES = [
   ["WI", "Wisconsin"], ["WY", "Wyoming"], ["DC", "District of Columbia"],
   ["AS", "American Samoa"], ["GU", "Guam"], ["MP", "Northern Mariana Islands"],
   ["PR", "Puerto Rico"], ["VI", "U.S. Virgin Islands"],
+  ["AA", "Armed Forces Americas"], ["AE", "Armed Forces Europe"],
+  ["AP", "Armed Forces Pacific"],
 ] as const;
 
 export const US_POSTAL_REGIONS = US_REGION_ENTRIES.map(([code]) => code);

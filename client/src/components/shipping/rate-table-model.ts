@@ -28,18 +28,24 @@ export const US_POSTAL_REGIONS = [
   ["WI", "Wisconsin"], ["WY", "Wyoming"], ["DC", "District of Columbia"],
   ["AS", "American Samoa"], ["GU", "Guam"], ["MP", "Northern Mariana Islands"],
   ["PR", "Puerto Rico"], ["VI", "U.S. Virgin Islands"],
+  ["AA", "Armed Forces Americas"], ["AE", "Armed Forces Europe"],
+  ["AP", "Armed Forces Pacific"],
 ] as const;
 
 export const REGION_NAME = new Map<string, string>(
   US_POSTAL_REGIONS.map(([code, name]) => [code, name]),
 );
 
-const NON_CONTIGUOUS = new Set(["AK", "HI", "AS", "GU", "MP", "PR", "VI"]);
+const MILITARY_MAIL = new Set(["AA", "AE", "AP"]);
+const NON_CONTIGUOUS = new Set([
+  "AK", "HI", "AS", "GU", "MP", "PR", "VI", ...MILITARY_MAIL,
+]);
 const TERRITORIES = new Set(["AS", "GU", "MP", "PR", "VI"]);
+const NON_STATE_REGIONS = new Set([...TERRITORIES, ...MILITARY_MAIL]);
 
 export const ALL_REGION_CODES = US_POSTAL_REGIONS.map(([code]) => code);
 export const CONTIGUOUS_US = ALL_REGION_CODES.filter((code) => !NON_CONTIGUOUS.has(code));
-export const ALL_US_STATES = ALL_REGION_CODES.filter((code) => !TERRITORIES.has(code));
+export const ALL_US_STATES = ALL_REGION_CODES.filter((code) => !NON_STATE_REGIONS.has(code));
 
 export interface DestinationGroupTemplate {
   id: string;
@@ -51,12 +57,16 @@ export interface DestinationGroupTemplate {
 export const DESTINATION_COVERAGE_TEMPLATES: readonly DestinationGroupTemplate[] = [
   { id: "contiguous-us", name: "Contiguous US", regions: CONTIGUOUS_US },
   { id: "all-us-states", name: "All US states", regions: ALL_US_STATES },
-  { id: "states-and-territories", name: "States + territories", regions: ALL_REGION_CODES },
+  {
+    id: "states-and-territories",
+    name: "States, territories, and military mail",
+    regions: ALL_REGION_CODES,
+  },
 ];
 
 /**
  * Editable shipping regions. Together these form one exhaustive,
- * non-overlapping partition of every supported US state and territory.
+ * non-overlapping partition of every supported US postal region.
  */
 export const DESTINATION_REGION_TEMPLATES: readonly DestinationGroupTemplate[] = [
   {
@@ -103,6 +113,11 @@ export const DESTINATION_REGION_TEMPLATES: readonly DestinationGroupTemplate[] =
     id: "us-territories",
     name: "US Territories",
     regions: ["AS", "GU", "MP", "PR", "VI"],
+  },
+  {
+    id: "military-mail",
+    name: "Military mail (APO/FPO/DPO)",
+    regions: ["AA", "AE", "AP"],
   },
 ];
 
@@ -210,7 +225,7 @@ export function groupDisplayName(group: RateGroup, index: number): string {
   const regions = new Set(group.regions);
   const sameSet = (expected: readonly string[]) =>
     regions.size === expected.length && expected.every((code) => regions.has(code));
-  if (sameSet(ALL_REGION_CODES)) return "All US states and territories";
+  if (sameSet(ALL_REGION_CODES)) return "All US postal regions";
   if (sameSet(CONTIGUOUS_US)) return "Contiguous US";
   if (sameSet(ALL_US_STATES)) return "All US states";
   if (regions.size === 2 && regions.has("AK") && regions.has("HI")) return "Alaska and Hawaii";
