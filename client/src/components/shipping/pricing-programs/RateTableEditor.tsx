@@ -279,7 +279,7 @@ export function RateTableEditor({
       <ol className="flex flex-wrap items-center gap-1 text-sm">
         {([
           ["context", "1. Context"],
-          ["rates", "2. Destinations & rates"],
+          ["rates", "2. Destinations, rates & rules"],
           ["review", "3. Review & activate"],
         ] as Array<[EditorStep, string]>).map(([key, label], index) => {
           const enabled = key === "context"

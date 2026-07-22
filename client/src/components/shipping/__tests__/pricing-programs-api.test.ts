@@ -4,6 +4,7 @@ import {
   assignmentLabel,
   pricingFlowKey,
   pricingFlowLabel,
+  productRuleRevisionStatus,
   type RateBookAssignment,
 } from "../pricing-programs/api";
 
@@ -47,5 +48,21 @@ describe("pricing program business-flow labels", () => {
       pricingChannel: "partner_portal",
       ratePurpose: "customer_checkout",
     }))).toBe("Partner Portal customer checkout");
+  });
+});
+
+describe("pricing program product-rule status", () => {
+  it("keeps live and draft rule counts separate", () => {
+    expect(productRuleRevisionStatus({
+      active: { productRuleCount: 2 },
+      draft: { productRuleCount: 3 },
+    })).toEqual({ liveCount: 2, draftCount: 3 });
+  });
+
+  it("distinguishes a missing revision from a revision with zero rules", () => {
+    expect(productRuleRevisionStatus({
+      active: null,
+      draft: { productRuleCount: 0 },
+    })).toEqual({ liveCount: null, draftCount: 0 });
   });
 });
