@@ -34,6 +34,7 @@ import {
   SHOPIFY_PUSH_USER_ERRORS,
   SHOPIFY_PUSH_NETWORK_ERROR,
   SHOPIFY_PUSH_NO_FULFILLMENT_ORDERS,
+  SHOPIFY_PUSH_IN_PROGRESS,
   __test__,
 } from "../../fulfillment-push.service";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
@@ -274,7 +275,10 @@ interface ScriptedDb {
  *
  * Path A drops step 7 (no back-writes). Idempotency hits return after step 1.
  */
-function makeDb(scripted: Array<{ rows: any[] }>): ScriptedDb {
+function makeDb(
+  scripted: Array<{ rows: any[] }>,
+  options: { lockScopeRows?: any[] } = {},
+): ScriptedDb {
   const remaining = [...scripted];
   const captured: ScriptedDb["capturedQueries"] = [];
   const execute = vi.fn(async (query: any) => {
@@ -298,6 +302,17 @@ function makeDb(scripted: Array<{ rows: any[] }>): ScriptedDb {
       sqlText = "<unstringifiable>";
     }
     captured.push({ sqlText, params: [] });
+    if (sqlText.includes("fulfillment_lock_oms_order_id")) {
+      return {
+        rows: options.lockScopeRows ?? [{
+          wms_order_id: ORDER_ID,
+          fulfillment_lock_oms_order_id: "100",
+          fulfillment_lock_combined_group_id: null,
+          fulfillment_lock_source: "shopify",
+          fulfillment_lock_channel_provider: "shopify",
+        }],
+      };
+    }
     if (remaining.length === 0) return { rows: [] };
     return remaining.shift()!;
   });
@@ -382,8 +397,8 @@ describe("pushShopifyFulfillment :: happy path (Path B end-to-end)", () => {
     });
     // 11 db.execute calls: idem, shipment, order, channel.provider, items,
     // path-A read, 2 back-writes (one per item), warehouses, channels (loc),
-    // UPDATE shipment.
-    expect(db.db.execute).toHaveBeenCalledTimes(11);
+    // UPDATE shipment, plus the immutable OMS-order lock-scope lookup.
+    expect(db.db.execute).toHaveBeenCalledTimes(12);
     // 3 Shopify GQL calls: fulfillmentOrders (resolve), fulfillmentOrders (location), fulfillmentCreateV2
     expect(client.calls).toHaveLength(3);
     expect(client.calls[0].query).toContain("fulfillmentOrders");
@@ -901,8 +916,8 @@ describe("pushShopifyFulfillment :: idempotency (D1)", () => {
       shopifyFulfillmentId: existing,
       alreadyPushed: true,
     });
-    // Only the idempotency SELECT fired
-    expect(db.db.execute).toHaveBeenCalledTimes(1);
+    // Only the lock-scope lookup and idempotency SELECT fired.
+    expect(db.db.execute).toHaveBeenCalledTimes(2);
     expect(client.calls).toHaveLength(0);
   });
 
@@ -1321,6 +1336,14 @@ describe("pushShopifyFulfillment :: self-healing back-write (D2)", () => {
           .join("");
       }
       captured.push({ sqlText });
+      if (sqlText.includes("fulfillment_lock_oms_order_id")) {
+        return {
+          rows: [{
+            wms_order_id: ORDER_ID,
+            fulfillment_lock_oms_order_id: "100",
+          }],
+        };
+      }
       const i = callIdx++;
       // Calls 7 and 8 (zero-indexed 6 and 7) are the back-writes.
       if (sqlText.includes("UPDATE oms.oms_order_lines")) {
@@ -1673,6 +1696,179 @@ describe("resolveFulfillmentOrderLinesFromCandidates :: no-SKU line fallback", (
     expect(() =>
       __test__.resolveFulfillmentOrderLinesFromCandidates(ORDER, items as any, SHIPMENT, candidates as any),
     ).toThrow(/no fulfillment-order line item available/);
+  });
+
+  it("reconciles a split shipment line-by-line and pushes only the Shopify remainder", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "SHLZ", external_line_item_id: "111", qty: 1 },
+      { shipment_item_id: 2, order_item_id: 11, oms_order_line_id: 101,
+        sku: "EG", external_line_item_id: "222", qty: 1 },
+      { shipment_item_id: 3, order_item_id: 12, oms_order_line_id: 102,
+        sku: "ARM", external_line_item_id: "333", qty: 1 },
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "shlz", sku: "SHLZ", externalLineItemId: "111", remaining: 0 }),
+      candidate({ fulfillmentOrderLineItemId: "eg", sku: "EG", externalLineItemId: "222", remaining: 0 }),
+      candidate({ fulfillmentOrderLineItemId: "arm", sku: "ARM", externalLineItemId: "333", remaining: 1 }),
+    ];
+
+    const reconciliation = __test__.reconcileFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+
+    expect(reconciliation.requestedQuantity).toBe(3);
+    expect(reconciliation.alreadySatisfiedQuantity).toBe(2);
+    expect(reconciliation.resolved).toEqual([
+      expect.objectContaining({ fulfillmentOrderLineItemId: "arm", quantity: 1 }),
+    ]);
+  });
+
+  it("pushes only the remaining portion of a partially satisfied line", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 3 },
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "partial", sku: "ABC-1", externalLineItemId: "111", remaining: 1 }),
+    ];
+
+    const reconciliation = __test__.reconcileFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    );
+
+    expect(reconciliation.alreadySatisfiedQuantity).toBe(2);
+    expect(reconciliation.resolved).toEqual([
+      expect.objectContaining({ fulfillmentOrderLineItemId: "partial", quantity: 1 }),
+    ]);
+  });
+
+  it("does not fall back to a same-SKU candidate when an exact line id is present", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 1 },
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "wrong-line", sku: "ABC-1", externalLineItemId: "222", remaining: 1 }),
+    ];
+
+    expect(() => __test__.reconcileFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    )).toThrow(/no fulfillment-order line item available/);
+  });
+
+  it("rejects legacy SKU fallback when the SKU spans multiple Shopify order lines", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: null, qty: 1 },
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "line-1", sku: "ABC-1", externalLineItemId: "111", remaining: 1 }),
+      candidate({ fulfillmentOrderLineItemId: "line-2", sku: "ABC-1", externalLineItemId: "222", remaining: 1 }),
+    ];
+
+    expect(() => __test__.reconcileFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    )).toThrow(/ambiguous across Shopify order lines/);
+  });
+
+  it("rejects positive remaining quantity that exists only on a terminal fulfillment order", () => {
+    const items = [
+      { shipment_item_id: 1, order_item_id: 10, oms_order_line_id: 100,
+        sku: "ABC-1", external_line_item_id: "111", qty: 1 },
+    ];
+    const candidates = [
+      candidate({ fulfillmentOrderLineItemId: "closed", sku: "ABC-1", externalLineItemId: "111", remaining: 1, status: "CLOSED" }),
+    ];
+
+    expect(() => __test__.reconcileFulfillmentOrderLinesFromCandidates(
+      ORDER, items as any, SHIPMENT, candidates as any,
+    )).toThrow(/remaining quantity that cannot be allocated/);
+  });
+});
+
+describe("pushShopifyFulfillment :: live-state convergence", () => {
+  it("records an idempotent reconciliation without a Shopify mutation when every line is satisfied", async () => {
+    const db = makeDb([
+      { rows: [{ shopify_fulfillment_id: null }] },
+      { rows: [okShipmentRow()] },
+      { rows: [okOrderRow()] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: okItems() },
+      { rows: pathAPartialRows() },
+      { rows: [] },
+    ]);
+    const response = okFulfillmentOrdersResponse();
+    for (const edge of response.order.fulfillmentOrders.edges[0].node.lineItems.edges) {
+      edge.node.remainingQuantity = 0;
+    }
+    const client = makeShopifyClient([response]);
+    const svc = createFulfillmentPushService(db.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.pushShopifyFulfillment(SHIPMENT_ID);
+
+    expect(result).toEqual({
+      shopifyFulfillmentId: null,
+      alreadyPushed: false,
+      alreadySatisfied: true,
+    });
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0].query).toContain("fulfillmentOrders");
+    expect(client.calls.some((call) => call.query.includes("fulfillmentCreateV2"))).toBe(false);
+    expect(db.capturedQueries.at(-1)?.sqlText).toContain("shopify_fulfillment_reconciled");
+    const packageItemReads = db.capturedQueries.filter((query) =>
+      query.sqlText.includes("FROM wms.outbound_shipment_items"),
+    );
+    expect(packageItemReads).toHaveLength(2);
+    for (const query of packageItemReads) {
+      expect(query.sqlText).not.toContain("oms.order_line_adjustments");
+    }
+  });
+
+  it("rejects a concurrent reconciliation before reading mutable shipment state", async () => {
+    const db = makeDb([]);
+    const runExclusive = vi.fn(async () => null);
+    const svc = createFulfillmentPushService(db.db, null, { runExclusive });
+    svc.setShopifyClient(makeShopifyClient([]));
+
+    await expect(svc.pushShopifyFulfillment(SHIPMENT_ID)).rejects.toMatchObject({
+      context: {
+        code: SHOPIFY_PUSH_IN_PROGRESS,
+        shipmentId: SHIPMENT_ID,
+      },
+    });
+    expect(runExclusive).toHaveBeenCalledTimes(1);
+    expect(db.db.execute).toHaveBeenCalledTimes(1);
+    expect(db.capturedQueries[0].sqlText).toContain("fulfillment_lock_oms_order_id");
+  });
+
+  it("uses one shared lock for every shipment in a combined group", async () => {
+    const db = makeDb([], {
+      lockScopeRows: [
+        {
+          wms_order_id: 2,
+          fulfillment_lock_oms_order_id: "202",
+          fulfillment_lock_combined_group_id: "303",
+          fulfillment_lock_source: "shopify",
+        },
+      ],
+    });
+    const acquiredLockIds: number[] = [];
+    const runExclusive = vi.fn(async (lockId: number, fn: () => Promise<unknown>) => {
+      acquiredLockIds.push(lockId);
+      return null;
+    });
+    const svc = createFulfillmentPushService(db.db, null, { runExclusive });
+    svc.setShopifyClient(makeShopifyClient([]));
+
+    await expect(svc.pushShopifyFulfillment(SHIPMENT_ID)).rejects.toMatchObject({
+      context: {
+        code: SHOPIFY_PUSH_IN_PROGRESS,
+        shipmentId: SHIPMENT_ID,
+      },
+    });
+    expect(acquiredLockIds).toEqual([1_700_000_000_303]);
   });
 });
 

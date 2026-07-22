@@ -112,6 +112,17 @@ function makeDb(scripted: ScriptedResponse[]) {
       })
       .join("");
     calls.push({ sqlText: text });
+    if (text.includes("fulfillment_lock_oms_order_id")) {
+      return {
+        rows: [{
+          wms_order_id: 42,
+          fulfillment_lock_oms_order_id: null,
+          fulfillment_lock_combined_group_id: null,
+          fulfillment_lock_source: "ebay",
+          fulfillment_lock_channel_provider: null,
+        }],
+      };
+    }
     if (remaining.length === 0) return { rows: [] };
     return remaining.shift()!;
   });

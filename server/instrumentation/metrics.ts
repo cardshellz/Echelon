@@ -51,6 +51,7 @@ export type CounterName =
   | "shopify_push_succeeded"
   | "shopify_push_idempotent_skip"
   | "shopify_push_concurrent_skip"
+  | "shopify_push_already_satisfied"
   | "shopify_push_failed"
   | "shopify_push_dlq_enqueued"
   | "shopify_push_dead_letter"

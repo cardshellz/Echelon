@@ -57,7 +57,8 @@ export interface ChannelWritebackHealth {
 
 export interface ChannelWritebackCandidateOptions {
   minAgeMinutes?: number;
-  maxAgeDays?: number;
+  /** Null removes the historical lower bound for durable debt repair. */
+  maxAgeDays?: number | null;
   limit?: number;
   excludeRetryStates?: boolean;
 }
@@ -84,8 +85,10 @@ function normalizedLimit(value: unknown): number {
  * One row represents one physical WMS shipment. An order-level event is kept
  * only as diagnostic context; it never makes another shipment complete.
  */
-function shippedChannelShipmentsCte(windowDays: number, minAgeMinutes: number) {
-  const window = sql`NOW() - make_interval(days => ${windowDays})`;
+function shippedChannelShipmentsCte(windowDays: number | null, minAgeMinutes: number) {
+  const windowPredicate = windowDays === null
+    ? sql``
+    : sql`AND os.shipped_at > NOW() - make_interval(days => ${windowDays})`;
   const minAge = sql`${minAgeMinutes} * INTERVAL '1 minute'`;
 
   return sql`
@@ -109,7 +112,13 @@ function shippedChannelShipmentsCte(windowDays: number, minAgeMinutes: number) {
             WHERE e.order_id = oo.id
               AND e.details->>'wmsShipmentId' = os.id::text
               AND (
-                (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                (
+                  c.provider = 'shopify'
+                  AND e.event_type IN (
+                    'shopify_fulfillment_pushed',
+                    'shopify_fulfillment_reconciled'
+                  )
+                )
                 OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
               )
           )
@@ -118,7 +127,11 @@ function shippedChannelShipmentsCte(windowDays: number, minAgeMinutes: number) {
           SELECT 1
           FROM oms.oms_order_events e
           WHERE e.order_id = oo.id
-            AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed')
+            AND e.event_type IN (
+              'tracking_pushed',
+              'shopify_fulfillment_pushed',
+              'shopify_fulfillment_reconciled'
+            )
         ) AS has_order_level_success,
         EXISTS (
           SELECT 1
@@ -154,7 +167,7 @@ function shippedChannelShipmentsCte(windowDays: number, minAgeMinutes: number) {
       WHERE os.status = 'shipped'
         AND os.shipped_at IS NOT NULL
         AND os.shipped_at < NOW() - ${minAge}
-        AND os.shipped_at > ${window}
+        ${windowPredicate}
         AND c.provider IN ('shopify', 'ebay')
         AND EXISTS (
           SELECT 1
@@ -270,7 +283,9 @@ export async function findChannelWritebackCandidates(
   options: ChannelWritebackCandidateOptions = {},
 ): Promise<ChannelWritebackException[]> {
   const minAgeMinutes = positiveBound(options.minAgeMinutes, 60, 7 * 24 * 60);
-  const maxAgeDays = normalizedWindowDays(options.maxAgeDays);
+  const maxAgeDays = options.maxAgeDays === null
+    ? null
+    : normalizedWindowDays(options.maxAgeDays);
   const limit = normalizedLimit(options.limit);
   const cte = shippedChannelShipmentsCte(maxAgeDays, minAgeMinutes);
   const retryStatePredicate = options.excludeRetryStates
