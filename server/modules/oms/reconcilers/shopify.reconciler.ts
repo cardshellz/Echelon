@@ -120,7 +120,12 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
       let failures = 0;
       for (const shipmentId of shipmentIds) {
         try {
-          await fulfillmentPush.pushShopifyFulfillment(shipmentId);
+          const result = await fulfillmentPush.pushShopifyFulfillment(shipmentId);
+          if (result?.writebackComplete !== true) {
+            throw new Error(
+              `Shopify fulfillment push returned without complete package coverage for shipment ${shipmentId}`,
+            );
+          }
         } catch (err: any) {
           failures++;
           await enqueueShopifyFulfillmentRetry(

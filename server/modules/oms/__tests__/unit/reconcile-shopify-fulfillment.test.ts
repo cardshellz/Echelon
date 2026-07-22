@@ -176,6 +176,38 @@ describe("reconcileShopifyFulfillment", () => {
     expect(mock.calls.some((c) => /shopify_fulfillment_id\s*=\s*NULL/i.test(c.sqlText))).toBe(false);
   });
 
+  it("updates every fulfillment recorded for a repaired multi-fulfillment package", async () => {
+    const first = "gid://shopify/Fulfillment/100";
+    const second = "gid://shopify/Fulfillment/200";
+    const mock = makeDb([{
+      rows: [
+        { fulfillment_gid: first },
+        { fulfillment_gid: second },
+        { fulfillment_gid: first },
+      ],
+    }]);
+    client = makeShopifyClient([
+      { fulfillment: { id: first, status: "SUCCESS" } },
+      okUpdateResponse(),
+      { fulfillment: { id: second, status: "SUCCESS" } },
+      okUpdateResponse(),
+    ]);
+    const svc = createFulfillmentPushService(mock.db, null);
+    svc.setShopifyClient(client);
+
+    const result = await svc.reconcileShopifyFulfillment(SHIPMENT_ID, {
+      number: NEW_TRACKING,
+      company: CARRIER,
+    });
+
+    expect(result).toEqual({ reconciled: true, mode: "updated", fulfillmentGid: first });
+    expect(client.calls).toHaveLength(4);
+    expect(client.calls[0].variables).toEqual({ id: first });
+    expect(client.calls[1].variables).toMatchObject({ fulfillmentId: first });
+    expect(client.calls[2].variables).toEqual({ id: second });
+    expect(client.calls[3].variables).toMatchObject({ fulfillmentId: second });
+  });
+
   it("RETHROWS a transient (network) update failure and does NOT recreate", async () => {
     const mock = makeDb([{ rows: [{ shopify_fulfillment_id: FULFILLMENT_GID }] }]);
     // probe → SUCCESS (live), then the update transport throws.

@@ -454,6 +454,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       pushShopifyFulfillment: vi.fn(async () => ({
         shopifyFulfillmentId: "gid://shopify/Fulfillment/repaired",
         alreadyPushed: false,
+        writebackComplete: true,
       })),
       pushTracking: vi.fn(),
     };
@@ -1112,6 +1113,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
           vi.fn(async (_id: number) => ({
             shopifyFulfillmentId: "gid://shopify/Fulfillment/123",
             alreadyPushed: false,
+            writebackComplete: true,
           }));
       }
       (mock.db as any).__fulfillmentPush = stash;
@@ -1124,6 +1126,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: "x",
       alreadyPushed: false,
+      writebackComplete: true,
     }));
     const mock = makeDbWithPush({ pushShopifyFulfillment });
     globalThis.fetch = mockFetchOnceOk({
@@ -1155,6 +1158,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/777",
       alreadyPushed: false,
+      writebackComplete: true,
     }));
     const mock = makeDbWithPush({ pushShopifyFulfillment });
     globalThis.fetch = mockFetchOnceOk({
@@ -1176,6 +1180,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: "gid://shopify/Fulfillment/preexisting",
       alreadyPushed: true,
+      writebackComplete: true,
     }));
     const logSpy = vi.spyOn(console, "log");
     const mock = makeDbWithPush({ pushShopifyFulfillment });
@@ -1332,6 +1337,7 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     const pushShopifyFulfillment = vi.fn(async () => ({
       shopifyFulfillmentId: null,
       alreadyPushed: false,
+      writebackComplete: true,
     }));
 
     const mock = makeDb([

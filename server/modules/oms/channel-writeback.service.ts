@@ -104,9 +104,9 @@ function shippedChannelShipmentsCte(windowDays: number | null, minAgeMinutes: nu
         NULLIF(os.tracking_number, '') AS tracking_number,
         NULLIF(os.carrier, '') AS carrier,
         NULLIF(os.shopify_fulfillment_id, '') AS shopify_fulfillment_id,
+        package_signature.shopify_package_signature,
         (
-          (c.provider = 'shopify' AND NULLIF(os.shopify_fulfillment_id, '') IS NOT NULL)
-          OR EXISTS (
+          EXISTS (
             SELECT 1
             FROM oms.oms_order_events e
             WHERE e.order_id = oo.id
@@ -118,6 +118,9 @@ function shippedChannelShipmentsCte(windowDays: number | null, minAgeMinutes: nu
                     'shopify_fulfillment_pushed',
                     'shopify_fulfillment_reconciled'
                   )
+                  AND e.details->>'coverageVersion' = '2'
+                  AND e.details->>'writebackComplete' = 'true'
+                  AND e.details->>'packageSignature' = package_signature.shopify_package_signature
                 )
                 OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
               )
@@ -164,6 +167,25 @@ function shippedChannelShipmentsCte(windowDays: number | null, minAgeMinutes: nu
         OR (wo.source_table_id = oo.id::text)
       )
       JOIN channels.channels c ON c.id = oo.channel_id
+      LEFT JOIN LATERAL (
+        SELECT 'v2|' || COALESCE(
+          string_agg(
+            osi.id::text || ':' || COALESCE(osi.order_item_id::text, '0') || ':' || osi.qty::int::text,
+            ',' ORDER BY osi.id
+          ),
+          ''
+        ) AS shopify_package_signature
+        FROM wms.outbound_shipment_items osi
+        LEFT JOIN wms.order_items package_oi ON package_oi.id = osi.order_item_id
+        LEFT JOIN oms.oms_order_lines package_ol ON package_ol.id = package_oi.oms_order_line_id
+        WHERE osi.shipment_id = os.id
+          AND COALESCE(package_oi.status, 'pending') <> 'cancelled'
+          AND COALESCE(osi.qty, 0) > 0
+          AND COALESCE(
+            LOWER(NULLIF(BTRIM(package_ol.fulfillment_provider), '')),
+            'shopify'
+          ) = 'shopify'
+      ) package_signature ON TRUE
       WHERE os.status = 'shipped'
         AND os.shipped_at IS NOT NULL
         AND os.shipped_at < NOW() - ${minAge}
