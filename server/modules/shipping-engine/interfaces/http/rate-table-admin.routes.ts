@@ -29,6 +29,10 @@ import {
 } from "../../domain/rate-table-lifecycle";
 import { normalizeUsPostalRegion } from "../../domain/us-geography";
 import type { ShippingRateChargeModel } from "../../domain/rate-selection";
+import {
+  cloneProductRules,
+  validateRateTableProductRules,
+} from "../../application/product-rate-policy-admin.service";
 
 const INITIAL_RATE_TABLE_SERVICE_LEVEL_CODE = "standard";
 
@@ -412,6 +416,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
             },
           }).returning();
           await insertRateRows(tx, draft.id, detail.rows);
+          await cloneProductRules(tx, id, draft.id);
           return draft;
         });
         return res.status(201).json({ rateTable, rowCount: detail.rows.length });
@@ -459,6 +464,16 @@ export function registerRateTableAdminRoutes(app: Express): void {
 
         const now = new Date();
         const activated = await db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT id FROM shipping.rate_tables WHERE id = ${id} FOR UPDATE`);
+          const productPolicyErrors = await validateRateTableProductRules(id, tx);
+          if (productPolicyErrors.length > 0) {
+            throw new RateTableAdminError(
+              409,
+              "SHIPPING_ADMIN_ACTIVATION_BLOCKED",
+              "Resolve the product policy validation errors before activation.",
+              productPolicyErrors,
+            );
+          }
           const [target] = await tx.update(shippingRateTables)
             .set({ status: "active", effectiveFrom: now, effectiveTo: null })
             .where(and(eq(shippingRateTables.id, id), eq(shippingRateTables.status, "draft")))

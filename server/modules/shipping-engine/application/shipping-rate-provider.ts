@@ -1,4 +1,5 @@
 import type { ShippingParcelSpec } from "../domain/shipment";
+import type { ShipmentLineInput } from "../domain/shipment";
 import type { ShippingRateContext } from "../domain/shipping-channel";
 import {
   quoteShipmentRates,
@@ -17,6 +18,7 @@ export interface ShippingRateProviderRequest {
     postalCode: string;
   };
   parcels: readonly ShippingParcelSpec[];
+  lines?: readonly ShipmentLineInput[];
   freight?: FreightRatingContext | null;
   quotedAt?: Date;
   persistSnapshot?: boolean;
@@ -43,6 +45,7 @@ export const localRateTableShippingRateProvider: ShippingRateProvider = {
       parcels: input.parcels.map((parcel) => ({
         billableWeightGrams: parcel.billableWeightGrams,
       })),
+      lines: input.lines,
       freight: input.freight,
     }, {
       quotedAt: input.quotedAt,

@@ -80,6 +80,10 @@ import {
 } from "../rate-table-model";
 import type { WarehouseOption } from "./api";
 import { RateBandMatrix } from "./RateBandMatrix";
+import {
+  DestinationProductPolicies,
+  type DestinationPolicyView,
+} from "./DestinationProductPolicies";
 
 interface DestinationGroupsPanelProps {
   groups: RateGroup[];
@@ -89,6 +93,9 @@ interface DestinationGroupsPanelProps {
   selectedGroupId: string | null;
   onSelectGroup: (groupId: string) => void;
   issueMessagesByGroup: Map<string, string[]>;
+  draftId: number | null;
+  onSaveDraft: () => void;
+  savingDraft: boolean;
 }
 
 export function DestinationGroupsPanel({
@@ -99,6 +106,9 @@ export function DestinationGroupsPanel({
   selectedGroupId,
   onSelectGroup,
   issueMessagesByGroup,
+  draftId,
+  onSaveDraft,
+  savingDraft,
 }: DestinationGroupsPanelProps) {
   const { toast } = useToast();
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -106,6 +116,7 @@ export function DestinationGroupsPanel({
     state: "PA",
     prefixes: "",
   });
+  const [detailView, setDetailView] = useState<"default" | DestinationPolicyView>("default");
 
   const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? groups[0] ?? null;
   const selectedTemplate = selectedGroup === null
@@ -351,6 +362,39 @@ export function DestinationGroupsPanel({
             </div>
           )}
 
+          <div className="flex flex-wrap gap-1 rounded-md bg-muted p-1">
+            {([
+              ["default", "Default pricing"],
+              ["exceptions", "Product exceptions"],
+              ["restrictions", "Restrictions"],
+              ["test", "Test rate"],
+            ] as const).map(([value, label]) => (
+              <Button
+                key={value}
+                type="button"
+                variant={detailView === value ? "secondary" : "ghost"}
+                size="sm"
+                className="h-8"
+                onClick={() => setDetailView(value)}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+
+          {detailView !== "default" && (
+            <DestinationProductPolicies
+              view={detailView}
+              draftId={draftId}
+              group={selectedGroup}
+              groupIndex={groups.indexOf(selectedGroup)}
+              warehouses={warehouses}
+              onSaveDraft={onSaveDraft}
+              savingDraft={savingDraft}
+            />
+          )}
+
+          {detailView === "default" && <>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label className="flex items-center gap-1.5">
@@ -618,6 +662,7 @@ export function DestinationGroupsPanel({
               </>
             )}
           </div>
+          </>}
         </div>
       )}
 

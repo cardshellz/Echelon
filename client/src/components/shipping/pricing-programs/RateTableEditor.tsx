@@ -345,6 +345,9 @@ export function RateTableEditor({
           selectedGroupId={selectedGroupId}
           onSelectGroup={setSelectedGroupId}
           issueMessagesByGroup={issueMessagesByGroup}
+          draftId={draftId}
+          onSaveDraft={handleSaveDraft}
+          savingDraft={saveMutation.isPending}
         />
       )}
 

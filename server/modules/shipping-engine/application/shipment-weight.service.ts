@@ -2,8 +2,12 @@ import type { ShipmentLineInput } from "../domain/shipment";
 
 export interface ChannelShipmentLineInput {
   sku: string | null;
+  productVariantId?: number | null;
   quantity: number;
   channelWeightGrams: number | null;
+  unitPriceCents?: number | null;
+  shippingGroupCode?: string | null;
+  shipsInOwnContainer?: boolean;
 }
 
 /**
@@ -17,12 +21,19 @@ export function resolveShipmentLineWeights(
   return lines.map((line) => {
     const sku = line.sku?.trim() || null;
     const catalogWeight = sku ? catalogWeightBySku.get(sku) : undefined;
+    const productFacts = {
+      ...(line.productVariantId !== undefined ? { productVariantId: line.productVariantId } : {}),
+      ...(line.unitPriceCents !== undefined ? { unitPriceCents: line.unitPriceCents } : {}),
+      ...(line.shippingGroupCode !== undefined ? { shippingGroupCode: line.shippingGroupCode } : {}),
+      ...(line.shipsInOwnContainer !== undefined ? { shipsInOwnContainer: line.shipsInOwnContainer } : {}),
+    };
     if (isPositiveWeight(catalogWeight)) {
       return {
         sku,
         quantity: line.quantity,
         unitWeightGrams: catalogWeight,
         weightSource: "echelon_catalog",
+        ...productFacts,
       };
     }
     if (isPositiveWeight(line.channelWeightGrams)) {
@@ -31,6 +42,7 @@ export function resolveShipmentLineWeights(
         quantity: line.quantity,
         unitWeightGrams: line.channelWeightGrams,
         weightSource: "channel_fallback",
+        ...productFacts,
       };
     }
     return {
@@ -38,6 +50,7 @@ export function resolveShipmentLineWeights(
       quantity: line.quantity,
       unitWeightGrams: null,
       weightSource: "missing",
+      ...productFacts,
     };
   });
 }

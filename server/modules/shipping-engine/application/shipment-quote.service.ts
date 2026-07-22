@@ -74,6 +74,7 @@ export async function quoteShipment(
     originWarehouseId: request.originWarehouseId,
     destination: request.destination,
     parcels: parcelResult.plan.parcels,
+    lines: request.lines,
     freight: request.freight,
     quotedAt: request.quotedAt,
   });

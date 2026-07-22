@@ -156,14 +156,87 @@ export interface ManualRateQuoteResponse {
     chargeModel: "fixed_band" | "base_plus_per_started_pound";
     perStartedPoundCents: number | null;
     billablePounds: number | null;
+    rateTableId: number;
+    productPolicyApplied: boolean;
+    calculationTrace: Array<{
+      kind: "restriction" | "base_charge" | "threshold" | "adjustment" | "default";
+      ruleId: number | null;
+      label: string;
+      amountCents: number;
+      skus: string[];
+    }>;
   }>;
   warnings: string[];
+}
+
+export type ProductPolicyRuleKind = "restriction" | "base_charge" | "adjustment" | "threshold";
+export type ProductPolicyRuleAction =
+  | "block"
+  | "free"
+  | "fixed"
+  | "fixed_band"
+  | "base_plus_per_started_pound"
+  | "surcharge"
+  | "free_threshold";
+export type ProductPolicyMeasurementScope = "order" | "matched_items" | "each_item" | "carton";
+
+export interface ProductPolicyDestinationScope {
+  country: string;
+  regions: string[];
+  postalPrefixes: Array<{ region: string; prefixes: string[] }>;
+}
+
+export interface ProductPolicyRule {
+  id: number;
+  sourceProductSetId: number | null;
+  productSetName: string | null;
+  name: string;
+  kind: ProductPolicyRuleKind;
+  action: ProductPolicyRuleAction;
+  measurementScope: ProductPolicyMeasurementScope;
+  destinationScope: ProductPolicyDestinationScope;
+  rateCents: number | null;
+  perStartedPoundCents: number | null;
+  thresholdCents: number | null;
+  memberVariantIds: number[];
+  bands: Array<{ minMeasure: number; maxMeasure: number | null; rateCents: number }>;
+  isActive: boolean;
+}
+
+export interface ProductPolicyRulesResponse {
+  rateTable: { id: number; status: string };
+  rules: ProductPolicyRule[];
+  validationErrors: string[];
+}
+
+export interface ProductPolicySelectorsResponse {
+  shippingGroups: Array<{ code: string; name: string }>;
+  productLines: Array<{ code: string; name: string }>;
+  categories: Array<{ id: number; name: string }>;
+  productSets: Array<{
+    id: number;
+    name: string;
+    selectorKind: string;
+    selectorRef: string | null;
+    memberCount: number;
+  }>;
+  variants: Array<{
+    id: number;
+    sku: string | null;
+    name: string;
+    productName: string;
+    isActive: boolean;
+  }>;
 }
 
 export const RATE_TABLES_KEY = "/api/shipping/admin/rate-tables";
 
 export function rateTableDetailKey(id: number): string {
   return `/api/shipping/admin/rate-tables/${id}`;
+}
+
+export function productPolicyRulesKey(id: number): string {
+  return `/api/shipping/admin/rate-tables/${id}/product-rules`;
 }
 
 // ---------------------------------------------------------------------------

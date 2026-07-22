@@ -313,7 +313,9 @@ function RateTestResult({ result }: { result: ManualRateQuoteResponse }) {
                     {formatPromise(quote.promiseMinBusinessDays, quote.promiseMaxBusinessDays)}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
-                    {quote.chargeModel === "base_plus_per_started_pound"
+                    {quote.productPolicyApplied
+                      ? quote.calculationTrace.map((step) => step.label).join(" + ")
+                      : quote.chargeModel === "base_plus_per_started_pound"
                       ? `Base ${formatCurrencyFromCents(
                           quote.totalCents - (quote.perStartedPoundCents ?? 0) * (quote.billablePounds ?? 0),
                           quote.currency,

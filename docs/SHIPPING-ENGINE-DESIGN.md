@@ -68,6 +68,25 @@ The engine receives a pricing context separately from the physical shipment: `pr
 
 Storage is `shipping.rate_books` plus deterministic `shipping.rate_book_assignments`, with `shipping.rate_tables` attached to a book and reusable `shipping.zone_sets` shared when geography matches. Assignment resolution uses an exact warehouse assignment first, then the channel-wide assignment. Partial unique indexes prevent overlapping active assignments at either scope instead of settling ambiguity with an operator-entered priority. Store/vendor-specific mappings can later reference a book explicitly without changing the rating core.
 
+### Product-aware pricing policies
+
+Destination pricing remains the required default. Product policies are explicit exceptions or restrictions attached to one draft `shipping.rate_tables` revision; they never replace destination coverage and they do not create a second rate-book resolver.
+
+Reusable product sets are authoring tools backed by `shipping.product_sets` and `shipping.product_set_members`. An administrator may select exact variants, a shipping group, product line, category, or the SIOC catalog attribute. Saving a rule materializes the exact active variant IDs into `shipping.rate_rule_members`. The live revision therefore cannot change because a product is later recategorized, moved between product lines, or assigned to another shipping group. A new draft must be created and activated to change live behavior.
+
+Each rule has one typed purpose:
+
+- **Base-charge exception:** free, fixed, fixed weight bands, or base plus each started pound for the matched products.
+- **Surcharge:** a fixed charge added after all base buckets are priced.
+- **Free-shipping threshold:** zeroes the matching product bucket when matching merchandise value reaches the configured integer-cent threshold.
+- **Restriction:** blocks the service for matching products and destinations before any charge is returned.
+
+The evaluator is deterministic and integer-based. Restrictions run first. Each line may match at most one base-charge rule; overlapping base rules fail activation and fail closed at runtime. Unmatched lines use the destination table's default price based only on their residual weight. Matching buckets are then priced, thresholds are applied, and surcharges run last. The quote snapshot records the selected table, normalized line facts, whether product policy changed the quote, and a calculation trace.
+
+Rules may measure all matching units together or each item independently. Carton is reserved in the contract but activation rejects carton-scoped rules until verified cartonization is connected to checkout. This prevents an administrator from publishing a promise the current weight-only checkout path cannot enforce.
+
+The admin workflow is organized by destination group: **Default pricing**, **Product exceptions**, **Restrictions**, and **Test rate**. Draft testing evaluates the same draft rows and product rules that activation validates. Product-rule creates, updates, and deletes persist the authenticated operator and complete before/after rule snapshots through the shared audit API in the same transaction as the change. Activation locks the revision, revalidates product policies inside the activation transaction, and then supersedes the prior active revision atomically.
+
 ## Modules & contracts
 
 1. **Runtime quote contracts** — `shipping-channel.ts` declares runtime vs channel-policy ownership; `shipment.ts` defines channel-neutral lines and parcels; injected parcel/rate providers keep channel parsing, rating, and packing independent.

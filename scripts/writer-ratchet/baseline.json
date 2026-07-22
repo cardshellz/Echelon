@@ -578,6 +578,12 @@
     "modules/cartonization",
     "modules/shipping-engine"
   ],
+  "shipping.product_set_members": [
+    "modules/shipping-engine"
+  ],
+  "shipping.product_sets": [
+    "modules/shipping-engine"
+  ],
   "shipping.quote_snapshots": [
     "modules/shipping-engine"
   ],
@@ -585,6 +591,15 @@
     "modules/shipping-engine"
   ],
   "shipping.rate_books": [
+    "modules/shipping-engine"
+  ],
+  "shipping.rate_rule_bands": [
+    "modules/shipping-engine"
+  ],
+  "shipping.rate_rule_members": [
+    "modules/shipping-engine"
+  ],
+  "shipping.rate_rules": [
     "modules/shipping-engine"
   ],
   "shipping.rate_table_rows": [
