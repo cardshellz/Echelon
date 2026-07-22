@@ -1110,6 +1110,31 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                 ELSE NULL
               END
           ),
+          provider_item_targets AS (
+            SELECT DISTINCT
+              label.id AS shipping_provider_label_id,
+              NULL::bigint AS shipment_request_id,
+              NULL::bigint AS shipping_engine_order_id,
+              NULL::bigint AS physical_shipment_id,
+              source_item.shipment_id AS legacy_wms_shipment_id,
+              'provider_line_item_identity'::text AS source
+            FROM label
+            JOIN wms.shipping_provider_label_events AS event
+              ON event.shipping_provider_label_id = label.id
+            CROSS JOIN LATERAL jsonb_array_elements(
+              CASE
+                WHEN jsonb_typeof(event.sanitized_payload->'shipmentItems') = 'array'
+                THEN event.sanitized_payload->'shipmentItems'
+                ELSE '[]'::jsonb
+              END
+            ) AS provider_item
+            JOIN wms.outbound_shipment_items AS source_item
+              ON source_item.id = CASE
+                WHEN provider_item->>'lineItemKey' ~ '^wms-item-[1-9][0-9]*$'
+                THEN substring(provider_item->>'lineItemKey' FROM '^wms-item-([1-9][0-9]*)$')::integer
+                ELSE NULL
+              END
+          ),
           request_targets AS (
             SELECT DISTINCT
               label.id AS shipping_provider_label_id,
@@ -1122,6 +1147,8 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             JOIN wms.shipment_requests AS request
               ON request.legacy_wms_shipment_id IN (
                 SELECT legacy_wms_shipment_id FROM legacy_targets
+                UNION
+                SELECT legacy_wms_shipment_id FROM provider_item_targets
               )
               OR request.id IN (
                 SELECT physical.shipment_request_id
@@ -1154,6 +1181,8 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             SELECT * FROM physical_targets
             UNION ALL
             SELECT * FROM legacy_targets
+            UNION ALL
+            SELECT * FROM provider_item_targets
             UNION ALL
             SELECT * FROM request_targets
             UNION ALL

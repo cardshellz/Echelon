@@ -223,7 +223,33 @@ const shipStationLabelObservationSchema = z.object({
   serviceCode: boundedOptionalString(100),
   shipDate: boundedOptionalString(80),
   voidDate: boundedOptionalString(80),
+  // ShipStation V1 includes these only when the caller requests
+  // includeShipmentItems=true. Keep the raw members opaque here so a malformed
+  // optional item cannot prevent us from observing the label itself; the
+  // sanitizer below accepts only exact Echelon-owned line-item identities.
+  shipmentItems: z.array(z.unknown()).max(500).optional(),
 }).passthrough();
+
+interface SanitizedShipStationShipmentItemIdentity {
+  lineItemKey: string;
+}
+
+function sanitizeShipStationShipmentItemIdentities(
+  rawItems: unknown[] | undefined,
+): SanitizedShipStationShipmentItemIdentity[] {
+  const identities = new Set<string>();
+  for (const rawItem of rawItems ?? []) {
+    if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) continue;
+    const rawKey = (rawItem as Record<string, unknown>).lineItemKey;
+    if (typeof rawKey !== "string") continue;
+    const lineItemKey = rawKey.trim();
+    if (!/^wms-item-[1-9][0-9]*$/.test(lineItemKey) || lineItemKey.length > 200) continue;
+    identities.add(lineItemKey);
+  }
+  return [...identities]
+    .sort((left, right) => left.localeCompare(right))
+    .map((lineItemKey) => ({ lineItemKey }));
+}
 
 export interface CarrierTrackingMatchCandidate {
   shippingProviderLabelId: number;
@@ -550,6 +576,9 @@ export function normalizeShipStationLabelObservation(
   const eventType: ShippingProviderLabelEventType = voidedAt
     ? "label_voided"
     : "label_observed";
+  const shipmentItems = sanitizeShipStationShipmentItemIdentities(
+    shipment.shipmentItems,
+  );
   const sanitizedPayload = {
     providerLabelId: String(shipment.shipmentId),
     providerOrderId: shipment.orderId == null ? null : String(shipment.orderId),
@@ -559,6 +588,7 @@ export function normalizeShipStationLabelObservation(
     serviceCode: nullableString(shipment.serviceCode),
     shipDate: nullableString(shipment.shipDate),
     voidDate: nullableString(shipment.voidDate),
+    shipmentItems,
   };
   const eventIdentity = {
     provider: "shipstation",
