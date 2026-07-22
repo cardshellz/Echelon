@@ -301,6 +301,7 @@ function RateTestResult({ result }: { result: ManualRateQuoteResponse }) {
               <TableRow>
                 <TableHead>Shipping option</TableHead>
                 <TableHead>Promise</TableHead>
+                <TableHead>Calculation</TableHead>
                 <TableHead className="text-right">Customer charge</TableHead>
               </TableRow>
             </TableHeader>
@@ -310,6 +311,14 @@ function RateTestResult({ result }: { result: ManualRateQuoteResponse }) {
                   <TableCell className="font-medium">{quote.displayName}</TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatPromise(quote.promiseMinBusinessDays, quote.promiseMaxBusinessDays)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {quote.chargeModel === "base_plus_per_started_pound"
+                      ? `Base ${formatCurrencyFromCents(
+                          quote.totalCents - (quote.perStartedPoundCents ?? 0) * (quote.billablePounds ?? 0),
+                          quote.currency,
+                        )} + ${formatCurrencyFromCents(quote.perStartedPoundCents ?? 0, quote.currency)} × ${quote.billablePounds ?? 0} started lb`
+                      : "Fixed weight band"}
                   </TableCell>
                   <TableCell className="text-right font-medium tabular-nums">
                     {formatCurrencyFromCents(quote.totalCents, quote.currency)}

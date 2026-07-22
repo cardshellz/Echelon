@@ -8,6 +8,7 @@
 import { useRef } from "react";
 import { Copy, Info, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -65,7 +66,11 @@ export function RateBandMatrix({
   };
 
   const addBand = () => {
-    onChange([...bands, { id: newId(), maxMeasure: "", rateUsd: "", maxShipmentWeightLb: "" }]);
+    const existing = bands.map((band) => ({ ...band, openEnded: false }));
+    onChange([
+      ...existing,
+      { id: newId(), maxMeasure: "", rateUsd: "", maxShipmentWeightLb: "", openEnded: false },
+    ]);
   };
 
   const removeBand = (bandId: string) => {
@@ -127,7 +132,13 @@ export function RateBandMatrix({
     lines.forEach((line, lineOffset) => {
       const targetIndex = rowIndex + lineOffset;
       while (targetIndex >= next.length) {
-        next.push({ id: newId(), maxMeasure: "", rateUsd: "", maxShipmentWeightLb: "" });
+        next.push({
+          id: newId(),
+          maxMeasure: "",
+          rateUsd: "",
+          maxShipmentWeightLb: "",
+          openEnded: false,
+        });
       }
       const cells = line.split(/\t|,/).map((cell) => cell.trim().replace(/^\$/, ""));
       cells.forEach((cell, cellOffset) => {
@@ -178,21 +189,41 @@ export function RateBandMatrix({
                   {describeBandLowerBound(pricingBasis, bands, index)}
                 </td>
                 <td className="px-2 py-1.5">
-                  <Input
-                    type="number"
-                    inputMode="decimal"
-                    min={isFreight ? 1 : 0}
-                    step={isFreight ? 1 : 0.1}
-                    value={band.maxMeasure}
-                    disabled={readOnly}
-                    data-row={index}
-                    data-field="maxMeasure"
-                    aria-label={`Band ${index + 1} upper limit in ${unitLabel}`}
-                    onChange={(event) => updateBand(band.id, "maxMeasure", event.target.value)}
-                    onKeyDown={(event) => handleKeyDown(event, index, "maxMeasure")}
-                    onPaste={(event) => handlePaste(event, index, "maxMeasure")}
-                    className="h-8 min-w-20 tabular-nums"
-                  />
+                  <div className="flex min-w-52 items-center gap-2">
+                    {band.openEnded ? (
+                      <div className="flex h-8 min-w-24 flex-1 items-center rounded-md border bg-muted/30 px-3 text-muted-foreground">
+                        No maximum
+                      </div>
+                    ) : (
+                      <Input
+                        type="number"
+                        inputMode="decimal"
+                        min={isFreight ? 1 : 0}
+                        step={isFreight ? 1 : 0.1}
+                        value={band.maxMeasure}
+                        disabled={readOnly}
+                        data-row={index}
+                        data-field="maxMeasure"
+                        aria-label={`Band ${index + 1} upper limit in ${unitLabel}`}
+                        onChange={(event) => updateBand(band.id, "maxMeasure", event.target.value)}
+                        onKeyDown={(event) => handleKeyDown(event, index, "maxMeasure")}
+                        onPaste={(event) => handlePaste(event, index, "maxMeasure")}
+                        className="h-8 min-w-20 flex-1 tabular-nums"
+                      />
+                    )}
+                    {!isFreight && index === bands.length - 1 && !readOnly && (
+                      <label className="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap text-xs">
+                        <Checkbox
+                          checked={band.openEnded === true}
+                          onCheckedChange={(checked) => onChange(bands.map((item) => (
+                            item.id === band.id ? { ...item, openEnded: checked === true } : item
+                          )))}
+                          aria-label="Make this the open-ended final band"
+                        />
+                        And over
+                      </label>
+                    )}
+                  </div>
                 </td>
                 {isFreight && (
                   <td className="px-2 py-1.5">
@@ -259,7 +290,9 @@ export function RateBandMatrix({
         <p className="text-xs text-muted-foreground">
           {isFreight
             ? "Shipments above the last pallet band do not match this option."
-            : "Shipments heavier than the last band do not match this option."}
+            : bands.at(-1)?.openEnded
+              ? "The final band covers every heavier shipment."
+              : "Shipments heavier than the last band do not match this option."}
         </p>
         {!readOnly && (
           <div className="flex items-center gap-2">

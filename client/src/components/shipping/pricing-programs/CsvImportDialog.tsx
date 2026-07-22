@@ -162,7 +162,7 @@ export function CsvImportDialog({
             className="font-mono text-xs"
             placeholder={pricingBasis === "pallet_count"
               ? "state,zip_prefix,min_pallets,max_pallets,max_total_lb,rate_usd\nPA,,1,1,2500,189.00"
-              : "state,zip_prefix,min_lb,max_lb,rate_usd\nPA,,0,1,8.99"}
+              : "state,zip_prefix,charge_model,min_lb,max_lb,rate_usd,per_started_lb_usd\nPA,,fixed_band,0,1,8.99,"}
             aria-label="CSV contents"
           />
 
@@ -268,7 +268,9 @@ export function CsvImportDialog({
                         </TableCell>
                       )}
                       <TableCell className="text-right text-xs tabular-nums">
-                        {usdFromCents(row.rateCents)}
+                        {row.chargeModel === "base_plus_per_started_pound"
+                          ? `${usdFromCents(row.rateCents)} + ${usdFromCents(row.perStartedPoundCents ?? 0)}/started lb`
+                          : usdFromCents(row.rateCents)}
                       </TableCell>
                     </TableRow>
                   ))}

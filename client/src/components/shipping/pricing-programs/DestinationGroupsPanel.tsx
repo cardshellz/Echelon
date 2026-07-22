@@ -167,6 +167,8 @@ export function DestinationGroupsPanel({
   const groupHasContent = (group: RateGroup) =>
     group.regions.length > 0
     || group.zipEntries.length > 0
+    || group.baseChargeUsd.trim() !== ""
+    || group.perStartedPoundUsd.trim() !== ""
     || group.bands.some((band) => band.rateUsd.trim() !== "");
 
   /** Region codes claimed by another group in the same warehouse scope. */
@@ -232,9 +234,8 @@ export function DestinationGroupsPanel({
         <MapPin className="mx-auto mb-2 h-8 w-8 text-muted-foreground/60" />
         <p className="text-sm font-medium">No destination groups yet</p>
         <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-          A destination group applies one set of {pricingBasis === "pallet_count" ? "pallet" : "weight"} bands
-          to the states you choose, with optional ZIP-prefix exceptions. Create separate groups
-          when states need different prices.
+          A destination group applies one rate schedule to the states you choose, with optional
+          ZIP-prefix exceptions. Create separate groups when states need different prices.
         </p>
         <AddDestinationGroupMenu className="mt-4" onAdd={addGroup} />
       </div>
@@ -248,7 +249,7 @@ export function DestinationGroupsPanel({
         <div className="px-1 pb-1">
           <h3 className="text-sm font-semibold">Destination groups</h3>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            States in one group share this option's weight schedule. Put Pennsylvania and
+            States in one group share this option's rate schedule. Put Pennsylvania and
             California in separate groups when their prices differ.
           </p>
         </div>
@@ -519,31 +520,103 @@ export function DestinationGroupsPanel({
           </div>
 
           <div className="space-y-2 border-t pt-4">
-            <div>
-              <Label>{pricingBasis === "pallet_count" ? "Pallet bands" : "Weight bands"}</Label>
-              <p className="text-xs text-muted-foreground">
-                Lower boundaries are calculated from the previous row. Use arrow keys to move
-                between cells; paste a column from a spreadsheet to fill consecutive cells.
+            <div className="grid gap-3 sm:grid-cols-[260px_minmax(0,1fr)] sm:items-end">
+              <div className="space-y-1.5">
+                <Label>Charge method</Label>
+                <Select
+                  value={selectedGroup.pricingModel}
+                  onValueChange={(pricingModel: RateGroup["pricingModel"]) => updateGroup(
+                    selectedGroup.id,
+                    (group) => ({ ...group, pricingModel }),
+                  )}
+                >
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="weight_bands">Fixed weight bands</SelectItem>
+                    {pricingBasis === "shipment_weight" && (
+                      <SelectItem value="base_plus_per_started_pound">Base + per started lb</SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+              <p className="pb-2 text-xs text-muted-foreground">
+                {selectedGroup.pricingModel === "base_plus_per_started_pound"
+                  ? "The shipment weight rounds up to the next whole pound; 2.1 lb bills as 3 lb."
+                  : "Each shipment uses exactly one matching weight band."}
               </p>
             </div>
-            <RateBandMatrix
-              pricingBasis={pricingBasis}
-              bands={selectedGroup.bands}
-              onChange={(bands) => updateGroup(selectedGroup.id, (group) => ({ ...group, bands }))}
-              copyTargets={groups
-                .filter((group) => group.id !== selectedGroup.id)
-                .map((group) => ({
-                  id: group.id,
-                  label: groupDisplayName(group, groups.indexOf(group)),
-                }))}
-              onCopyTo={(targetGroupId) => {
-                updateGroup(targetGroupId, (group) => ({
-                  ...group,
-                  bands: selectedGroup.bands.map((band) => ({ ...band, id: newId() })),
-                }));
-                toast({ title: "Bands copied" });
-              }}
-            />
+
+            {selectedGroup.pricingModel === "base_plus_per_started_pound" ? (
+              <div className="grid gap-3 rounded-md border p-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor={`base-charge-${selectedGroup.id}`}>Base charge</Label>
+                  <div className="relative">
+                    <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-muted-foreground">$</span>
+                    <Input
+                      id={`base-charge-${selectedGroup.id}`}
+                      type="number"
+                      min={0}
+                      step={0.01}
+                      inputMode="decimal"
+                      value={selectedGroup.baseChargeUsd}
+                      onChange={(event) => updateGroup(selectedGroup.id, (group) => ({
+                        ...group,
+                        baseChargeUsd: event.target.value,
+                      }))}
+                      className="pl-7"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor={`per-pound-${selectedGroup.id}`}>Per started lb</Label>
+                  <div className="relative">
+                    <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-muted-foreground">$</span>
+                    <Input
+                      id={`per-pound-${selectedGroup.id}`}
+                      type="number"
+                      min={0}
+                      step={0.01}
+                      inputMode="decimal"
+                      value={selectedGroup.perStartedPoundUsd}
+                      onChange={(event) => updateGroup(selectedGroup.id, (group) => ({
+                        ...group,
+                        perStartedPoundUsd: event.target.value,
+                      }))}
+                      className="pl-7"
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div>
+                  <Label>{pricingBasis === "pallet_count" ? "Pallet bands" : "Weight bands"}</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Lower boundaries are calculated from the previous row. Use arrow keys to move
+                    between cells; paste a column from a spreadsheet to fill consecutive cells.
+                  </p>
+                </div>
+                <RateBandMatrix
+                  pricingBasis={pricingBasis}
+                  bands={selectedGroup.bands}
+                  onChange={(bands) => updateGroup(selectedGroup.id, (group) => ({ ...group, bands }))}
+                  copyTargets={groups
+                    .filter((group) => group.id !== selectedGroup.id)
+                    .map((group) => ({
+                      id: group.id,
+                      label: groupDisplayName(group, groups.indexOf(group)),
+                    }))}
+                  onCopyTo={(targetGroupId) => {
+                    updateGroup(targetGroupId, (group) => ({
+                      ...group,
+                      pricingModel: "weight_bands",
+                      bands: selectedGroup.bands.map((band) => ({ ...band, id: newId() })),
+                    }));
+                    toast({ title: "Bands copied" });
+                  }}
+                />
+              </>
+            )}
           </div>
         </div>
       )}

@@ -232,7 +232,9 @@ export function RevisionViewer({
                     </TableCell>
                   )}
                   <TableCell className="text-right text-xs tabular-nums">
-                    {usdFromCents(row.rateCents)}
+                    {row.chargeModel === "base_plus_per_started_pound"
+                      ? `${usdFromCents(row.rateCents)} + ${usdFromCents(row.perStartedPoundCents ?? 0)}/started lb`
+                      : usdFromCents(row.rateCents)}
                   </TableCell>
                 </TableRow>
               ))}

@@ -153,7 +153,11 @@ export interface BuilderBand {
   rateUsd: string;
   /** Freight only: optional total-shipment weight ceiling in pounds. */
   maxShipmentWeightLb: string;
+  /** Parcel only: this final band has no upper weight limit. */
+  openEnded?: boolean;
 }
+
+export type RateGroupPricingModel = "weight_bands" | "base_plus_per_started_pound";
 
 export interface ZipEntry {
   id: string;
@@ -168,6 +172,9 @@ export interface RateGroup {
   originWarehouseId: number | null;
   regions: string[];
   zipEntries: ZipEntry[];
+  pricingModel: RateGroupPricingModel;
+  baseChargeUsd: string;
+  perStartedPoundUsd: string;
   bands: BuilderBand[];
 }
 
@@ -177,9 +184,11 @@ export interface DraftRow {
   destinationRegion: string;
   postalPrefix: string | null;
   minMeasure: number;
-  maxMeasure: number;
+  maxMeasure: number | null;
   maxShipmentWeightGrams: number | null;
+  chargeModel: "fixed_band" | "base_plus_per_started_pound";
   rateCents: number;
+  perStartedPoundCents: number | null;
 }
 
 export function newId(): string {
@@ -189,15 +198,15 @@ export function newId(): string {
 export function defaultBands(pricingBasis: PricingBasis): BuilderBand[] {
   return pricingBasis === "pallet_count"
     ? [
-        { id: newId(), maxMeasure: "1", rateUsd: "", maxShipmentWeightLb: "" },
-        { id: newId(), maxMeasure: "2", rateUsd: "", maxShipmentWeightLb: "" },
-        { id: newId(), maxMeasure: "4", rateUsd: "", maxShipmentWeightLb: "" },
+        { id: newId(), maxMeasure: "1", rateUsd: "", maxShipmentWeightLb: "", openEnded: false },
+        { id: newId(), maxMeasure: "2", rateUsd: "", maxShipmentWeightLb: "", openEnded: false },
+        { id: newId(), maxMeasure: "4", rateUsd: "", maxShipmentWeightLb: "", openEnded: false },
       ]
     : [
-        { id: newId(), maxMeasure: "1", rateUsd: "", maxShipmentWeightLb: "" },
-        { id: newId(), maxMeasure: "5", rateUsd: "", maxShipmentWeightLb: "" },
-        { id: newId(), maxMeasure: "20", rateUsd: "", maxShipmentWeightLb: "" },
-        { id: newId(), maxMeasure: "50", rateUsd: "", maxShipmentWeightLb: "" },
+        { id: newId(), maxMeasure: "1", rateUsd: "", maxShipmentWeightLb: "", openEnded: false },
+        { id: newId(), maxMeasure: "5", rateUsd: "", maxShipmentWeightLb: "", openEnded: false },
+        { id: newId(), maxMeasure: "20", rateUsd: "", maxShipmentWeightLb: "", openEnded: false },
+        { id: newId(), maxMeasure: "50", rateUsd: "", maxShipmentWeightLb: "", openEnded: false },
       ];
 }
 
@@ -212,6 +221,9 @@ export function newGroup(
     originWarehouseId: null,
     regions,
     zipEntries: [],
+    pricingModel: "weight_bands",
+    baseChargeUsd: "",
+    perStartedPoundUsd: "",
     bands: defaultBands(pricingBasis),
   };
 }
@@ -269,7 +281,12 @@ export function describeMeasureRange(
   minMeasure: number | null,
   maxMeasure: number | null,
 ): string {
-  if (minMeasure === null || maxMeasure === null) return "—";
+  if (minMeasure === null) return "—";
+  if (maxMeasure === null) {
+    return pricingBasis === "pallet_count"
+      ? `${minMeasure}+ pallets`
+      : `${poundsFromGrams(minMeasure)}+ lb`;
+  }
   if (pricingBasis === "pallet_count") {
     return minMeasure === maxMeasure
       ? `${minMeasure} pallet${minMeasure === 1 ? "" : "s"}`
@@ -284,6 +301,7 @@ export function describeBandLowerBound(
   bandIndex: number,
 ): string {
   if (bandIndex === 0) return pricingBasis === "pallet_count" ? "1 pallet" : "0 lb";
+  if (bands[bandIndex - 1].openEnded) return "—";
   const previous = bands[bandIndex - 1].maxMeasure.trim();
   if (previous === "") return "—";
   if (pricingBasis === "pallet_count") {
@@ -346,24 +364,62 @@ export function validateRateGroups(
       }
     }
 
+    if (group.pricingModel === "base_plus_per_started_pound") {
+      if (pricingBasis !== "shipment_weight") {
+        fail(`${groupLabel(groupIndex)} can only use per-pound pricing for parcel shipments.`);
+      }
+      const baseCharge = Number(group.baseChargeUsd);
+      const perStartedPound = Number(group.perStartedPoundUsd);
+      if (!isValidCurrencyInput(group.baseChargeUsd, baseCharge)) {
+        fail(`${groupLabel(groupIndex)} needs a valid base charge.`);
+      }
+      if (!isValidCurrencyInput(group.perStartedPoundUsd, perStartedPound)) {
+        fail(`${groupLabel(groupIndex)} needs a valid charge per started pound.`);
+      }
+      for (const destination of groupDestinations(group)) {
+        rows.push({
+          originWarehouseId: group.originWarehouseId,
+          destinationCountry: "US",
+          destinationRegion: destination.region,
+          postalPrefix: destination.prefix,
+          minMeasure: 0,
+          maxMeasure: null,
+          maxShipmentWeightGrams: null,
+          chargeModel: "base_plus_per_started_pound",
+          rateCents: Math.round(baseCharge * 100),
+          perStartedPoundCents: Math.round(perStartedPound * 100),
+        });
+      }
+      return;
+    }
+
     const parsedBands = group.bands.map((band, bandIndex) => {
+      const openEnded = band.openEnded === true;
       const maximum = Number(band.maxMeasure);
       const rate = Number(band.rateUsd);
-      const previousMaximum = bandIndex === 0 ? null : Number(group.bands[bandIndex - 1].maxMeasure);
-      if (!Number.isFinite(maximum) || maximum <= 0 || band.maxMeasure.trim() === "") {
+      const previousBand = bandIndex === 0 ? null : group.bands[bandIndex - 1];
+      const previousMaximum = previousBand === null ? null : Number(previousBand.maxMeasure);
+      if (openEnded && (pricingBasis === "pallet_count" || bandIndex !== group.bands.length - 1)) {
+        fail(`${groupLabel(groupIndex)} can only make its final parcel band open-ended.`);
+      }
+      if (previousBand?.openEnded) {
+        fail(`${groupLabel(groupIndex)} cannot have a band after an open-ended band.`);
+      }
+      if (!openEnded && (!Number.isFinite(maximum) || maximum <= 0 || band.maxMeasure.trim() === "")) {
         fail(`${groupLabel(groupIndex)} has a band without a valid upper limit.`);
       }
-      if (pricingBasis === "pallet_count" && !Number.isInteger(maximum)) {
+      if (!openEnded && pricingBasis === "pallet_count" && !Number.isInteger(maximum)) {
         fail(`${groupLabel(groupIndex)} pallet limits must be whole numbers.`);
       }
       if (
-        previousMaximum !== null
+        !openEnded
+        && previousMaximum !== null
         && Number.isFinite(previousMaximum)
         && maximum <= previousMaximum
       ) {
         fail(`${groupLabel(groupIndex)} band upper limits must increase from row to row.`);
       }
-      if (!Number.isFinite(rate) || rate < 0 || band.rateUsd.trim() === "") {
+      if (!isValidCurrencyInput(band.rateUsd, rate)) {
         fail(`${groupLabel(groupIndex)} has a band without a charge.`);
       }
       const maxShipmentWeightLb = band.maxShipmentWeightLb.trim() === ""
@@ -381,13 +437,17 @@ export function validateRateGroups(
           : bandIndex === 0
             ? 0
             : Math.round(previousMaximum! * GRAMS_PER_POUND) + 1,
-        maxMeasure: pricingBasis === "pallet_count"
-          ? Math.round(maximum)
-          : Math.round(maximum * GRAMS_PER_POUND),
+        maxMeasure: openEnded
+          ? null
+          : pricingBasis === "pallet_count"
+            ? Math.round(maximum)
+            : Math.round(maximum * GRAMS_PER_POUND),
         maxShipmentWeightGrams: maxShipmentWeightLb === null
           ? null
           : Math.round(maxShipmentWeightLb * GRAMS_PER_POUND),
+        chargeModel: "fixed_band" as const,
         rateCents: Math.round(rate * 100),
+        perStartedPoundCents: null,
       };
     });
 
@@ -436,21 +496,50 @@ export function emitDraftRows(
 ): DraftRow[] {
   const rows: DraftRow[] = [];
   for (const group of groups) {
+    if (group.pricingModel === "base_plus_per_started_pound") {
+      if (pricingBasis !== "shipment_weight") continue;
+      const baseCharge = Number(group.baseChargeUsd);
+      const perStartedPound = Number(group.perStartedPoundUsd);
+      if (
+        !isValidCurrencyInput(group.baseChargeUsd, baseCharge)
+        || !isValidCurrencyInput(group.perStartedPoundUsd, perStartedPound)
+      ) continue;
+      for (const destination of groupDestinations(group)) {
+        rows.push({
+          originWarehouseId: group.originWarehouseId,
+          destinationCountry: "US",
+          destinationRegion: destination.region,
+          postalPrefix: destination.prefix,
+          minMeasure: 0,
+          maxMeasure: null,
+          maxShipmentWeightGrams: null,
+          chargeModel: "base_plus_per_started_pound",
+          rateCents: Math.round(baseCharge * 100),
+          perStartedPoundCents: Math.round(perStartedPound * 100),
+        });
+      }
+      continue;
+    }
     const emittable: Array<{
       minMeasure: number;
-      maxMeasure: number;
+      maxMeasure: number | null;
       maxShipmentWeightGrams: number | null;
+      chargeModel: "fixed_band";
       rateCents: number;
+      perStartedPoundCents: null;
     }> = [];
     let previousMaximum: number | null = null;
     for (const [bandIndex, band] of group.bands.entries()) {
+      const openEnded = band.openEnded === true
+        && pricingBasis === "shipment_weight"
+        && bandIndex === group.bands.length - 1;
       const maximum = Number(band.maxMeasure);
-      const validMaximum = band.maxMeasure.trim() !== ""
+      const validMaximum = openEnded || (band.maxMeasure.trim() !== ""
         && Number.isFinite(maximum)
         && maximum > 0
         && (pricingBasis !== "pallet_count" || Number.isInteger(maximum))
         && (previousMaximum === null || maximum > previousMaximum)
-        && (bandIndex === 0 || previousMaximum !== null);
+        && (bandIndex === 0 || previousMaximum !== null));
       if (!validMaximum) {
         // Later bands have no anchor for their computed lower bound.
         if (band.maxMeasure.trim() !== "" || bandIndex < group.bands.length - 1) break;
@@ -469,15 +558,20 @@ export function emitDraftRows(
             : previousMaximum === null
               ? 0
               : Math.round(previousMaximum * GRAMS_PER_POUND) + 1,
-          maxMeasure: pricingBasis === "pallet_count"
-            ? Math.round(maximum)
-            : Math.round(maximum * GRAMS_PER_POUND),
+          maxMeasure: openEnded
+            ? null
+            : pricingBasis === "pallet_count"
+              ? Math.round(maximum)
+              : Math.round(maximum * GRAMS_PER_POUND),
           maxShipmentWeightGrams: ceilingLb === null || pricingBasis !== "pallet_count"
             ? null
             : Math.round(ceilingLb * GRAMS_PER_POUND),
+          chargeModel: "fixed_band",
           rateCents: Math.round(rate * 100),
+          perStartedPoundCents: null,
         });
       }
+      if (openEnded) break;
       previousMaximum = maximum;
     }
     for (const destination of groupDestinations(group)) {
@@ -493,6 +587,14 @@ export function emitDraftRows(
     }
   }
   return rows;
+}
+
+function isValidCurrencyInput(raw: string, value: number): boolean {
+  const cents = Math.round(value * 100);
+  return raw.trim() !== ""
+    && Number.isFinite(value)
+    && value >= 0
+    && Number.isSafeInteger(cents);
 }
 
 function groupDestinations(group: RateGroup): Array<{ region: string; prefix: string | null }> {
@@ -529,6 +631,9 @@ export function groupsFromRows(
 
   const bySchedule = new Map<string, {
     originWarehouseId: number | null;
+    pricingModel: RateGroupPricingModel;
+    baseChargeUsd: string;
+    perStartedPoundUsd: string;
     bands: BuilderBand[];
     regions: string[];
     zipEntries: ZipEntry[];
@@ -538,22 +643,35 @@ export function groupsFromRows(
     const schedule = sorted.map((row) => ({
       maxMeasure: row.maxMeasure,
       maxShipmentWeightGrams: row.maxShipmentWeightGrams,
+      chargeModel: row.chargeModel,
       rateCents: row.rateCents,
+      perStartedPoundCents: row.perStartedPoundCents,
     }));
     const [warehouseScope, state, prefix] = geography.split("|");
     const originWarehouseId = warehouseScope === "any" ? null : Number(warehouseScope);
     const signature = JSON.stringify({ originWarehouseId, schedule });
+    const formulaRow = sorted.find((row) => row.chargeModel === "base_plus_per_started_pound") ?? null;
     const current = bySchedule.get(signature) ?? {
       originWarehouseId,
-      bands: sorted.map((row) => ({
+      pricingModel: formulaRow === null ? "weight_bands" as const : "base_plus_per_started_pound" as const,
+      baseChargeUsd: formulaRow === null ? "" : (formulaRow.rateCents / 100).toFixed(2),
+      perStartedPoundUsd: formulaRow?.perStartedPoundCents == null
+        ? ""
+        : (formulaRow.perStartedPoundCents / 100).toFixed(2),
+      bands: sorted
+        .filter((row) => row.chargeModel === "fixed_band")
+        .map((row) => ({
         id: newId(),
         maxMeasure: pricingBasis === "pallet_count"
-          ? String(row.maxMeasure)
-          : String(Number((row.maxMeasure / GRAMS_PER_POUND).toFixed(3))),
+          ? String(row.maxMeasure ?? "")
+          : row.maxMeasure === null
+            ? ""
+            : String(Number((row.maxMeasure / GRAMS_PER_POUND).toFixed(3))),
         rateUsd: (row.rateCents / 100).toFixed(2),
         maxShipmentWeightLb: row.maxShipmentWeightGrams === null
           ? ""
           : String(Number((row.maxShipmentWeightGrams / GRAMS_PER_POUND).toFixed(1))),
+        openEnded: row.maxMeasure === null,
       })),
       regions: [],
       zipEntries: [],
@@ -586,7 +704,15 @@ export interface DraftLayout {
     originWarehouseId: number | null;
     regions: string[];
     zipEntries: Array<{ state: string; prefixes: string[] }>;
-    bands: Array<{ maxMeasure: string; rateUsd: string; maxShipmentWeightLb: string }>;
+    pricingModel?: RateGroupPricingModel;
+    baseChargeUsd?: string;
+    perStartedPoundUsd?: string;
+    bands: Array<{
+      maxMeasure: string;
+      rateUsd: string;
+      maxShipmentWeightLb: string;
+      openEnded?: boolean;
+    }>;
   }>;
 }
 
@@ -601,10 +727,14 @@ export function layoutFromGroups(groups: RateGroup[]): DraftLayout {
         state: entry.state,
         prefixes: [...entry.prefixes],
       })),
+      pricingModel: group.pricingModel,
+      baseChargeUsd: group.baseChargeUsd.slice(0, 20),
+      perStartedPoundUsd: group.perStartedPoundUsd.slice(0, 20),
       bands: group.bands.map((band) => ({
         maxMeasure: band.maxMeasure.slice(0, 20),
         rateUsd: band.rateUsd.slice(0, 20),
         maxShipmentWeightLb: band.maxShipmentWeightLb.slice(0, 20),
+        openEnded: band.openEnded === true,
       })),
     })),
   };
@@ -632,14 +762,20 @@ export function groupsFromLayout(metadata: unknown): RateGroup[] | null {
             prefixes: Array.isArray(entry.prefixes) ? entry.prefixes.map(String) : [],
           }))
         : [],
+      pricingModel: group.pricingModel === "base_plus_per_started_pound"
+        ? "base_plus_per_started_pound"
+        : "weight_bands",
+      baseChargeUsd: typeof group.baseChargeUsd === "string" ? group.baseChargeUsd : "",
+      perStartedPoundUsd: typeof group.perStartedPoundUsd === "string" ? group.perStartedPoundUsd : "",
       bands: Array.isArray(group.bands) && group.bands.length > 0
         ? group.bands.map((band) => ({
             id: newId(),
             maxMeasure: String(band.maxMeasure ?? ""),
             rateUsd: String(band.rateUsd ?? ""),
             maxShipmentWeightLb: String(band.maxShipmentWeightLb ?? ""),
+            openEnded: band.openEnded === true,
           }))
-        : [{ id: newId(), maxMeasure: "", rateUsd: "", maxShipmentWeightLb: "" }],
+        : [{ id: newId(), maxMeasure: "", rateUsd: "", maxShipmentWeightLb: "", openEnded: false }],
     }));
   } catch {
     return null;
@@ -650,14 +786,14 @@ export function groupsFromLayout(metadata: unknown): RateGroup[] | null {
 // CSV (business-unit dialects; parsing itself stays on the server)
 // ---------------------------------------------------------------------------
 
-export const PARCEL_CSV_HEADER = "state,zip_prefix,min_lb,max_lb,rate_usd";
+export const PARCEL_CSV_HEADER = "state,zip_prefix,charge_model,min_lb,max_lb,rate_usd,per_started_lb_usd";
 export const FREIGHT_CSV_HEADER = "state,zip_prefix,min_pallets,max_pallets,max_total_lb,rate_usd";
 
 export const PARCEL_CSV_TEMPLATE = [
   PARCEL_CSV_HEADER,
-  "PA,,0,1,8.99",
-  "PA,,1.001,5,11.99",
-  "PA,160,0,1,7.99",
+  "PA,,fixed_band,0,1,8.99,",
+  "PA,,fixed_band,1.001,5,11.99,",
+  "PA,160,base_plus_per_started_pound,0,,3.99,0.85",
 ].join("\n");
 
 export const FREIGHT_CSV_TEMPLATE = [
@@ -698,9 +834,13 @@ export function serializeRowsToCsv(
       : [
           row.destinationRegion,
           row.postalPrefix ?? "",
+          row.chargeModel,
           poundsFromGrams(row.minMeasure),
-          poundsFromGrams(row.maxMeasure),
+          row.maxMeasure === null ? "" : poundsFromGrams(row.maxMeasure),
           (row.rateCents / 100).toFixed(2),
+          row.perStartedPoundCents === null
+            ? ""
+            : (row.perStartedPoundCents / 100).toFixed(2),
         ];
     if (hasWarehouseRows) {
       cells.push(row.originWarehouseId === null
@@ -746,8 +886,9 @@ export function diffRateRows(
     row.destinationRegion,
     row.postalPrefix ?? "",
     row.minMeasure,
-    row.maxMeasure,
+    row.maxMeasure ?? "open",
     row.maxShipmentWeightGrams ?? "",
+    row.chargeModel,
   ].join("|");
   const scopeKey = (row: DraftRow) =>
     `${row.originWarehouseId ?? "any"}|${row.destinationRegion}|${row.postalPrefix ?? ""}`;
@@ -763,7 +904,11 @@ export function diffRateRows(
     const previous = activeByBand.get(key);
     if (!previous) {
       addedBands += 1;
-    } else if (previous.rateCents !== row.rateCents) {
+    } else if (
+      previous.rateCents !== row.rateCents
+      || previous.perStartedPoundCents !== row.perStartedPoundCents
+      || previous.chargeModel !== row.chargeModel
+    ) {
       changedCount += 1;
       if (changedRates.length < DIFF_EXAMPLE_LIMIT) {
         changedRates.push({

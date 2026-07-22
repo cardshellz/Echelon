@@ -219,7 +219,7 @@ export function ProgramDetail({
         <div>
           <h3 className="text-sm font-semibold">Shipping options</h3>
           <p className="text-xs text-muted-foreground">
-            Each option owns its destination groups and weight bands inside this program.
+            Each option owns its destination groups and pricing method inside this program.
             Future options remain visible but cannot be priced until their fulfillment methods are mapped.
           </p>
         </div>

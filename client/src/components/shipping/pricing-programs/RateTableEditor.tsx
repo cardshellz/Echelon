@@ -129,6 +129,7 @@ export function RateTableEditor({
     previousBasis.current = pricingBasis;
     setGroups((current) => current.map((group) => ({
       ...group,
+      pricingModel: "weight_bands",
       bands: defaultBands(pricingBasis),
     })));
   }, [pricingBasis]);
