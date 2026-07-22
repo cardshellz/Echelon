@@ -42,17 +42,26 @@ migrations after pulling newer work rather than relying indefinitely on this sna
 - PR #982 (`codex/rfq-quantity-overrides`) is merged at `c625bc9f`. Recommendation
   quantities can be adjusted during RFQ creation with required reduction reasons and
   approved excess-allocation evidence.
+- PR #984 (`codex/demand-overlay-integrity`) and corrective PR #986
+  (`codex/fix-demand-event-status-filter`) are merged and deployed. Production release
+  `v2449` served the authenticated Demand Planner without the prior status-filter 500;
+  migration `159_demand_event_integrity.sql` applied in release `v2447`.
 - Supplier email/send, response comparison, award, and supplier communication remain
   intentionally deferred. Do not make that workflow the next build until the owner
   resumes it.
 - Manual and scheduled recommendation runs, urgency/status classification, historical
   demand, future-demand events, and recommendation-to-RFQ conversion already exist.
-- The next active hardening block is the future-demand operator workflow. Branch
-  `codex/demand-overlay-integrity` starts from `c625bc9f` and corrects mixed response
-  casing, the broken event update query, forecast-preview drift, raw product-ID input,
-  catalog integrity, optimistic concurrency, and mutation auditability.
-- Migration `159_demand_event_integrity.sql` belongs to that branch and is not deployed
-  merely because this handoff mentions it. Verify merge, release, and migration state.
+- The next active hardening block is forecast measurement. Branch
+  `codex/forecast-backtesting-foundation` starts from current `origin/main` and adds
+  immutable full-population forecast observations to recommendation runs. RFQ
+  candidate lines are selection-biased and cannot serve as the backtest population.
+- The current recommendation query forecasts one product in base pieces across all
+  warehouses. Its selected variant is a receiving configuration, not the forecast
+  identity. Measurement must remain explicitly `product_all_warehouses` until the
+  recommendation engine itself gains a warehouse-scoped demand and supply model.
+- Migration `162_purchase_forecast_observations.sql` belongs to that branch. It starts
+  collecting unbiased observations only for recommendation runs created after deploy;
+  do not relabel legacy candidate-only runs as complete historical forecast evidence.
 - No production mutation, policy change, demand event, recommendation run, RFQ, or
   automatic purchasing pilot was performed during this continuation.
 
@@ -60,9 +69,18 @@ Current source migration sequence:
 
 - `148_purchase_rfq_requests.sql`
 - `149_purchasing_forecast_policy.sql`
-- `150_purchase_recommendation_run_automation.sql`
-- `151_automatic_rfq_draft_policy.sql`
-- `152_channel_order_intake_ledger.sql` (newer, unrelated channel work)
+  - `150_purchase_recommendation_run_automation.sql`
+  - `151_automatic_rfq_draft_policy.sql`
+  - `152_channel_order_intake_ledger.sql` (newer, unrelated channel work)
+  - `153_channel_order_intake_oms_linkage.sql` through
+    `155_receipt_line_idempotency.sql` (newer cross-domain work)
+  - `156_landed_cost_current_row_uniqueness.sql`
+  - `157_procurement_usd_financial_authority.sql`
+  - `158_rfq_allocation_override_evidence.sql`
+  - `159_demand_event_integrity.sql`
+  - `160_shipping_rate_charge_models.sql` (newer, unrelated shipping work)
+  - `161_shipping_preload_cent_adjustment.sql` (newer, unrelated shipping work)
+  - `162_purchase_forecast_observations.sql` (current branch; not deployed yet)
 
 ## Executive state
 

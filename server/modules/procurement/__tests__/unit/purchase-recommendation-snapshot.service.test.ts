@@ -25,9 +25,21 @@ function recommendation(overrides: Partial<PurchasingRecommendationItem> = {}): 
     preferredVendorName: null,
     currentSupply: { effectiveSupplyPieces: 2 },
     supplierBasis: { vendorProductId: null },
-    demandBasis: { forecastTrust: "trusted" },
-    forecastProvenance: { forecastMethod: "weighted_blend_v1", demandWindowDays: 30 },
-    forwardDemandBasis: { forwardDemandPieces: 8 },
+    demandBasis: {
+      lookbackDays: 30,
+      periodUsagePieces: 120,
+      avgDailyUsagePieces: 4,
+      forecastTrust: { signal: "trusted" },
+    },
+    forecastProvenance: {
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion: 2,
+      demandWindowDays: 30,
+      forecastBlend: { avgDailyUsagePieces: 4 },
+      demandWindowDiagnostics: { standardWindow: { avgDailyUsagePieces: 4 } },
+      forecastTrust: { signal: "trusted" },
+    },
+    forwardDemandBasis: { forwardDemandPieces: 8, forwardDemandRawPieces: 10 },
     ...overrides,
   } as PurchasingRecommendationItem;
 }
@@ -41,14 +53,19 @@ describe("purchase recommendation snapshot service", () => {
       asOf: new Date("2026-07-17T12:00:00.000Z"),
       source: "auto_draft",
       sourceRunKey: "501",
-      evaluatedCount: 12,
+      evaluatedCount: 1,
     });
 
     expect(input).toMatchObject({
       source: "auto_draft",
       sourceRunKey: "501",
       lookbackDays: 30,
-      inputSummary: { candidateCount: 1, evaluatedCount: 12 },
+      inputSummary: {
+        candidateCount: 1,
+        evaluatedCount: 1,
+        observationCount: 1,
+        observationCoverageComplete: true,
+      },
       lines: [{
         recommendationKey: "10:100:30",
         recommendedPieces: 48,
@@ -57,6 +74,18 @@ describe("purchase recommendation snapshot service", () => {
           forecastMethod: "weighted_blend_v1",
           forwardDemandPieces: 8,
         },
+      }],
+      observations: [{
+        observationKey: "10:product_all_warehouses",
+        productId: 10,
+        selectedReceiveVariantId: 100,
+        scope: "product_all_warehouses",
+        forecastMethod: "weighted_blend_v1",
+        forecastVersion: 2,
+        forecastDailyPiecesMicros: 4_000_000,
+        baselineDailyPiecesMicros: 4_000_000,
+        forwardDemandPieces: 8,
+        forwardDemandRawPieces: 10,
       }],
     });
   });
@@ -76,6 +105,46 @@ describe("purchase recommendation snapshot service", () => {
     });
 
     expect(input.inputSummary).toMatchObject({ candidateCount: 1, evaluatedCount: 1 });
+    expect(input.observations).toHaveLength(1);
+  });
+
+  it("captures non-purchasing products without turning them into sourcing lines", () => {
+    const healthy = recommendation({
+      recommendationId: "11:101:30",
+      productId: 11,
+      productVariantId: 101,
+      sku: "SKU-11",
+      productName: "Product 11",
+      suggestedOrderPieces: 0,
+      status: "healthy",
+      skippedReason: "not_actionable_status",
+      actionable: false,
+      avgDailyUsage: 2.345678,
+      demandBasis: {
+        ...recommendation().demandBasis,
+        periodUsagePieces: 60,
+        avgDailyUsagePieces: 2.345678,
+      },
+      forecastProvenance: {
+        ...recommendation().forecastProvenance,
+        forecastBlend: { avgDailyUsagePieces: 2.345678 },
+      },
+    });
+    const input = buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [healthy], skippedItems: [healthy], summary: { totalProducts: 1 } },
+      settings: { autoDraftMode: "review_only" },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-20T12:00:00.000Z"),
+    });
+
+    expect(input.lines).toEqual([]);
+    expect(input.observations).toHaveLength(1);
+    expect(input.observations?.[0]).toMatchObject({
+      productId: 11,
+      selectedReceiveVariantId: 101,
+      forecastDailyPiecesMicros: 2_345_678,
+      baselineDailyPiecesMicros: 2_000_000,
+    });
   });
 
   it("rejects an invalid explicit evaluated count", () => {
@@ -86,6 +155,16 @@ describe("purchase recommendation snapshot service", () => {
       asOf: new Date("2026-07-20T12:00:00.000Z"),
       evaluatedCount: -1,
     })).toThrow("evaluatedCount must be a non-negative integer");
+  });
+
+  it("fails closed when the evaluated population is not fully observed", () => {
+    expect(() => buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [recommendation()], skippedItems: [], summary: {} },
+      settings: { autoDraftMode: "review_only" },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-20T12:00:00.000Z"),
+      evaluatedCount: 2,
+    })).toThrow("Forecast observation coverage is incomplete: expected 2, captured 1");
   });
 
   it("requires a durable source key for automated runs", async () => {
@@ -129,18 +208,35 @@ describe("purchase recommendation snapshot service", () => {
         recommendedPieces: 48,
         evidenceSnapshot: { demand: "saved" },
       }],
+      observations: [{
+        observationKey: "10:product_all_warehouses",
+        productId: 10,
+        selectedReceiveVariantId: 100,
+        scope: "product_all_warehouses",
+        productSku: "SKU-10",
+        productName: "Product 10",
+        forecastMethod: "weighted_blend_v1",
+        forecastVersion: 2,
+        forecastDailyPiecesMicros: 4_000_000,
+        baselineDailyPiecesMicros: 4_000_000,
+        forwardDemandPieces: 8,
+        forwardDemandRawPieces: 10,
+        evidenceSnapshot: { forecast: "saved" },
+      }],
     }, "buyer-1");
 
     expect(database.transaction).toHaveBeenCalledTimes(1);
-    expect(insert).toHaveBeenCalledTimes(2);
+    expect(insert).toHaveBeenCalledTimes(3);
     expect(result).toMatchObject({ run: { id: 91 }, reused: false });
     expect(result.lines).toHaveLength(1);
+    expect(result.observations).toHaveLength(1);
   });
 
   it("replays an existing source-scoped run without opening a write transaction", async () => {
     const selectResults = [
       [{ id: 92, source: "auto_draft", sourceRunKey: "500" }],
       [{ id: 101, runId: 92, recommendationKey: "10:100:30" }],
+      [{ id: 201, runId: 92, observationKey: "10:product_all_warehouses" }],
     ];
     const select = vi.fn(() => {
       const rows = selectResults.shift() ?? [];
@@ -166,6 +262,7 @@ describe("purchase recommendation snapshot service", () => {
 
     expect(result).toMatchObject({ run: { id: 92 }, reused: true });
     expect(result.lines).toHaveLength(1);
+    expect(result.observations).toHaveLength(1);
     expect(database.transaction).not.toHaveBeenCalled();
   });
 });

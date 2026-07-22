@@ -189,6 +189,7 @@ describe("purchasing recommendation routes", () => {
     mocks.purchasingService.snapshotPurchaseRecommendations.mockImplementation(async (input) => ({
       run: { id: 701, calculationVersion: input.calculationVersion },
       lines: input.lines.map((line: any, index: number) => ({ id: index + 1, ...line })),
+      observations: input.observations.map((observation: any, index: number) => ({ id: index + 1001, ...observation })),
     }));
     mocks.purchasingService.createRfqBatch.mockResolvedValue({
       reused: false,
@@ -583,7 +584,7 @@ describe("purchasing recommendation routes", () => {
     const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/recommendation-runs");
 
     expect(status).toBe(201);
-    expect(body).toMatchObject({ run: { id: 701 }, lineCount: 1 });
+    expect(body).toMatchObject({ run: { id: 701 }, lineCount: 1, observationCount: 1 });
     expect(mocks.purchasingService.snapshotPurchaseRecommendations).toHaveBeenCalledTimes(1);
     const input = mocks.purchasingService.snapshotPurchaseRecommendations.mock.calls[0][0];
     expect(input.lines[0]).toMatchObject({
@@ -597,6 +598,7 @@ describe("purchasing recommendation routes", () => {
     expect(input.lines[0].recommendedPieces).toBeGreaterThan(0);
     expect(input.lines[0]).not.toHaveProperty("estimatedCostMills");
     expect(input.inputSummary).toMatchObject({ candidateCount: 1, evaluatedCount: 1 });
+    expect(input.observations).toHaveLength(1);
   });
 
   it("returns the latest durable recommendation run with allocated and remaining quantities", async () => {

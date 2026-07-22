@@ -204,6 +204,7 @@ export interface AutoDraftJobResult {
   purchaseRecommendationRun: {
     id: number;
     lineCount: number;
+    observationCount: number;
     reused: boolean;
   };
   automaticRfqDrafts: {
@@ -659,6 +660,7 @@ async function executeAutoDraftJob(
     purchaseRecommendationRun = {
       id: Number(snapshot.run.id),
       lineCount: snapshot.lines.length,
+      observationCount: snapshot.observations.length,
       reused: snapshot.reused,
     };
 
