@@ -484,6 +484,9 @@
   "procurement.po_status_history": [
     "modules/procurement"
   ],
+  "procurement.purchase_forecast_evaluations": [
+    "modules/procurement"
+  ],
   "procurement.purchase_forecast_observations": [
     "modules/procurement"
   ],

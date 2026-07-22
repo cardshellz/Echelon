@@ -19,6 +19,7 @@ import {
 } from "./purchasing-recommendation.routes";
 import { registerDemandEventRoutes } from "./demand-events.routes";
 import { registerEnterpriseDashboardRoutes } from "./enterprise-dashboard.routes";
+import { registerPurchaseForecastBacktestingRoutes } from "./purchase-forecast-backtesting.routes";
 
 export function registerPurchasingRoutes(app: Express) {
   // ===== VENDORS API =====
@@ -238,6 +239,7 @@ export function registerPurchasingRoutes(app: Express) {
   });
 
   registerPurchasingRecommendationRoutes(app);
+  registerPurchaseForecastBacktestingRoutes(app);
 
   // ===== INTERNAL API (for Archon cross-service sync) =====
 
