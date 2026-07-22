@@ -390,7 +390,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
               WHERE e.order_id = oo.id
                 AND e.details->>'wmsShipmentId' = os.id::text
                 AND (
-                  (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                  (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
                   OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
                 )
             )
@@ -422,7 +422,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
               WHERE e.order_id = oo.id
                 AND e.details->>'wmsShipmentId' = os.id::text
                 AND (
-                  (c.provider = 'shopify' AND e.event_type = 'shopify_fulfillment_pushed')
+                  (c.provider = 'shopify' AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
                   OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
                 )
             )
@@ -520,7 +520,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
             SELECT 1
             FROM oms.oms_order_events e
             WHERE e.order_id = oo.id
-              AND e.event_type = 'shopify_fulfillment_pushed'
+              AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled')
               AND e.details->>'wmsShipmentId' = os.id::text
           )
           AND NOT EXISTS (
@@ -552,7 +552,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
             SELECT 1
             FROM oms.oms_order_events e
             WHERE e.order_id = oo.id
-              AND e.event_type = 'shopify_fulfillment_pushed'
+              AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled')
               AND e.details->>'wmsShipmentId' = os.id::text
           )
           AND NOT EXISTS (
@@ -972,9 +972,9 @@ export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<
         ON e.created_at >= COALESCE(c.dead_at, c.created_at)
        AND (
             (c.topic = 'delayed_tracking_push'
-              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed'))
+              AND e.event_type IN ('tracking_pushed', 'shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
          OR (c.topic = 'shopify_fulfillment_push'
-              AND e.event_type = 'shopify_fulfillment_pushed')
+              AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled'))
        )
       WHERE (c.oms_order_id IS NULL OR e.order_id = c.oms_order_id)
         AND (

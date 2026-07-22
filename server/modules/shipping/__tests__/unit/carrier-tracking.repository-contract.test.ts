@@ -31,8 +31,8 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(repositorySource).toContain(
       "label.updated_at > state.last_reconciled_at",
     );
-    expect(repositorySource).toContain(
-      ".onConflictDoUpdate({\n                target: carrierTrackingReconciliationState.carrierTrackingEventId",
+    expect(repositorySource).toMatch(
+      /\.onConflictDoUpdate\(\{\s+target: carrierTrackingReconciliationState\.carrierTrackingEventId/,
     );
   });
 
@@ -64,6 +64,20 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(matchSource).toContain(
       "AND label.normalized_tracking_number = ${event.normalizedTrackingNumber}",
     );
+  });
+
+  it("links a combined provider label to every exact Echelon shipment-item owner", () => {
+    const reconciliationStart = repositorySource.indexOf(
+      "async reconcileProviderLabelLinks(provider, providerLabelId, reconciledAt)",
+    );
+    const reconciliationSource = repositorySource.slice(reconciliationStart);
+
+    expect(reconciliationStart).toBeGreaterThan(-1);
+    expect(reconciliationSource).toContain("provider_item_targets AS");
+    expect(reconciliationSource).toContain("jsonb_array_elements(");
+    expect(reconciliationSource).toContain("'^wms-item-[1-9][0-9]*$'");
+    expect(reconciliationSource).toContain("JOIN wms.outbound_shipment_items AS source_item");
+    expect(reconciliationSource).toContain("'provider_line_item_identity'::text AS source");
   });
 
   it("claims subscription work with leases and row-level skip locking", () => {

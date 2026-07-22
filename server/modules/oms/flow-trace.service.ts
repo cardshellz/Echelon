@@ -198,7 +198,8 @@ async function traceWithin(db: any, ref: string): Promise<FlowTrace> {
     return eventRows.some((event) => {
       const details = event.details && typeof event.details === "object" ? event.details : {};
       return String(details.wmsShipmentId ?? "") === String(s.id)
-        && ((String(o.provider) === "shopify" && String(event.event_type) === "shopify_fulfillment_pushed")
+        && ((String(o.provider) === "shopify"
+          && ["shopify_fulfillment_pushed", "shopify_fulfillment_reconciled"].includes(String(event.event_type)))
           || (String(o.provider) === "ebay" && String(event.event_type) === "tracking_pushed"));
     });
   }).length;

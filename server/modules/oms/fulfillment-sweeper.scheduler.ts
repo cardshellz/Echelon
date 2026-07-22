@@ -8,9 +8,88 @@ import type { FulfillmentReconciler } from "./reconcilers/reconciler.interface";
 import { applyChannelFulfillment } from "./channel-fulfillment.service";
 import { findChannelWritebackCandidates } from "./channel-writeback.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
+import { enqueueShopifyFulfillmentRetry } from "./webhook-retry.worker";
 
 const LOG_PREFIX = "[Fulfillment Sweeper]";
-const OUTBOUND_SWEEP_LIMIT = 200;
+const OUTBOUND_SWEEP_LIMIT = 500;
+
+export interface RecoveredShopifyWritebackDebtResult {
+  retryRowsResolved: number;
+  inboxRowsResolved: number;
+  reviewMarkersCleared: number;
+}
+
+function nonNegativeCount(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+/**
+ * Close only the retry/review debt owned by Shopify fulfillment writeback.
+ * Other shipment review reasons are intentionally preserved.
+ */
+export async function resolveRecoveredShopifyWritebackDebt(
+  dbArg: any,
+  shipmentId: number,
+): Promise<RecoveredShopifyWritebackDebtResult> {
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+    throw new Error(`shipmentId must be a positive integer (got ${shipmentId})`);
+  }
+
+  const resolveInTransaction = async (tx: any): Promise<RecoveredShopifyWritebackDebtResult> => {
+    const retryResult = await tx.execute(sql`
+      WITH resolved_retry AS (
+        UPDATE oms.webhook_retry_queue
+        SET status = 'success',
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE provider = 'internal'
+          AND topic = 'shopify_fulfillment_push'
+          AND payload->>'shipmentId' = ${String(shipmentId)}
+          AND status <> 'success'
+        RETURNING source_inbox_id
+      ), resolved_inbox AS (
+        UPDATE oms.webhook_inbox wi
+        SET status = 'succeeded',
+            last_error = NULL,
+            processed_at = COALESCE(wi.processed_at, NOW()),
+            updated_at = NOW()
+        WHERE wi.id IN (
+          SELECT source_inbox_id
+          FROM resolved_retry
+          WHERE source_inbox_id IS NOT NULL
+        )
+        RETURNING wi.id
+      )
+      SELECT
+        (SELECT COUNT(*)::int FROM resolved_retry) AS retry_rows_resolved,
+        (SELECT COUNT(*)::int FROM resolved_inbox) AS inbox_rows_resolved
+    `);
+
+    const reviewResult = await tx.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET requires_review = false,
+          review_reason = NULL,
+          updated_at = NOW()
+      WHERE id = ${shipmentId}
+        AND requires_review = true
+        AND review_reason LIKE 'permanent_fulfillment_push_failure:%'
+      RETURNING id
+    `);
+
+    const retryRow = retryResult?.rows?.[0] ?? {};
+    return {
+      retryRowsResolved: nonNegativeCount(retryRow.retry_rows_resolved),
+      inboxRowsResolved: nonNegativeCount(retryRow.inbox_rows_resolved),
+      reviewMarkersCleared: Array.isArray(reviewResult?.rows) ? reviewResult.rows.length : 0,
+    };
+  };
+
+  if (typeof dbArg?.transaction === "function") {
+    return dbArg.transaction(resolveInTransaction);
+  }
+  return resolveInTransaction(dbArg);
+}
 
 function getReconciler(provider: string, dbArg: any): FulfillmentReconciler | null {
   if (provider === "ebay") {
@@ -46,13 +125,45 @@ export async function runFulfillmentSweep(dbArg: any = db) {
       );
     }
 
+    // Recover labels that ShipStation combined under a sibling order before
+    // the ordinary channel-writeback scan runs. This does not mutate
+    // fulfillment directly: it only enqueues the canonical SHIP_NOTIFY path,
+    // which revalidates provider item identity and applies the existing
+    // idempotent shipment/inventory/channel cascade.
+    const physicalRecovery = dbArg.__shipStationPhysicalRecovery;
+    if (physicalRecovery?.recover) {
+      try {
+        const result = await physicalRecovery.recover({
+          mode: "execute",
+          limit: 10,
+          minAgeHours: 6,
+          maxAgeDays: 30,
+        });
+        if (result.matchedPackages > 0 || result.errors > 0) {
+          console.log(
+            `${LOG_PREFIX} ShipStation physical recovery: ${JSON.stringify({
+              candidates: result.candidates,
+              matchedPackages: result.matchedPackages,
+              enqueueRequests: result.enqueueRequests,
+              noMatch: result.noMatch,
+              errors: result.errors,
+            })}`,
+          );
+        }
+      } catch (error: any) {
+        console.error(
+          `${LOG_PREFIX} ShipStation physical recovery failed: ${error?.message ?? String(error)}`,
+        );
+      }
+    }
+
     // Shipment scope is required here: an order can be partially shipped, and
     // one successful sibling must never hide another missing writeback.
     const candidates = await findChannelWritebackCandidates(dbArg, {
       minAgeMinutes: 60,
-      maxAgeDays: 7,
+      maxAgeDays: null,
       limit: OUTBOUND_SWEEP_LIMIT,
-      excludeRetryStates: true,
+      excludeRetryStates: false,
     });
 
     if (candidates.length === 0) {
@@ -69,7 +180,7 @@ export async function runFulfillmentSweep(dbArg: any = db) {
     }
 
     for (const row of candidates) {
-      if (row.pending_retry || row.dead_retry) {
+      if (row.pending_retry) {
         continue;
       }
 
@@ -82,9 +193,21 @@ export async function runFulfillmentSweep(dbArg: any = db) {
             : false;
 
         const succeeded = row.provider === "shopify"
-          ? Boolean(result?.alreadyPushed || result?.shopifyFulfillmentId)
+          ? Boolean(result?.alreadyPushed || result?.alreadySatisfied || result?.shopifyFulfillmentId)
           : result === true;
         if (succeeded) {
+          if (row.provider === "shopify") {
+            const recovery = await resolveRecoveredShopifyWritebackDebt(dbArg, row.shipment_id);
+            if (
+              recovery.retryRowsResolved > 0
+              || recovery.inboxRowsResolved > 0
+              || recovery.reviewMarkersCleared > 0
+            ) {
+              console.log(
+                `${LOG_PREFIX} Resolved Shopify writeback debt for shipment ${row.shipment_id}: ${JSON.stringify(recovery)}`,
+              );
+            }
+          }
           repushed++;
         } else {
           console.error(
@@ -95,6 +218,15 @@ export async function runFulfillmentSweep(dbArg: any = db) {
         console.error(
           `${LOG_PREFIX} Error writing shipment ${row.shipment_id} back to ${row.provider}: ${err.message}`,
         );
+        if (row.provider === "shopify" && !row.dead_retry) {
+          try {
+            await enqueueShopifyFulfillmentRetry(dbArg, row.shipment_id, err);
+          } catch (enqueueError: any) {
+            console.error(
+              `${LOG_PREFIX} Failed to enqueue Shopify writeback retry for shipment ${row.shipment_id}: ${enqueueError?.message ?? String(enqueueError)}`,
+            );
+          }
+        }
       }
     }
 

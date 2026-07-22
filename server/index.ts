@@ -519,6 +519,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // (mirrors the __fulfillmentPush pattern — keeps the scheduler start
   // surface free of service threading).
   (db as any).__shipStationService = services.shipStation;
+  (db as any).__shipStationPhysicalRecovery = services.shipStationPhysicalRecovery;
   (db as any).__shippingEngine = services.shippingEngine;
   (db as any).__wmsSyncService = services.wmsSync;
 

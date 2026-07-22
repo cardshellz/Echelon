@@ -750,6 +750,7 @@ export function createOmsService(db: any, reservationService?: any) {
             'tracking_push_failed',
             'shopify_fulfillment_push_failed',
             'shopify_fulfillment_pushed',
+            'shopify_fulfillment_reconciled',
             'tracking_pushed'
           )
         ORDER BY created_at DESC

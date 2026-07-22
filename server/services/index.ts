@@ -59,6 +59,7 @@ import { recordReceivingReconciliationFailure } from "../modules/procurement/po-
 import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "../modules/procurement/ap-ledger.service";
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
+import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
 import { createShipStationService } from "../modules/oms/shipstation.service";
 import { createShipStationEngine } from "../modules/shipping";
 import { createDrizzleCarrierTrackingRepository } from "../modules/shipping/carrier-tracking.repository";
@@ -69,6 +70,8 @@ import {
 } from "../modules/shipping/carrier-tracking.service";
 import { createShipStationTrackingSubscriptionsClient } from "../modules/shipping/shipstation-tracking-subscriptions.client";
 import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-events.client";
+import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-physical-recovery.client";
+import { createShipStationPhysicalRecoveryService } from "../modules/oms/shipstation-physical-recovery.service";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
@@ -272,7 +275,9 @@ export function createServices(db: any) {
   // Fulfillment Push. eBay is injected later when polling starts; Shopify is
   // wired here so ShipStation webhooks and retry workers can create Shopify
   // fulfillments without relying on route-local setup.
-  const fulfillmentPush = createFulfillmentPushService(db, null);
+  const fulfillmentPush = createFulfillmentPushService(db, null, {
+    runExclusive: withAdvisoryLock,
+  });
   fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
 
   // ShipStation — order push + webhook integration
@@ -286,6 +291,9 @@ export function createServices(db: any) {
   });
   const shipStation = createShipStationService(db, inventoryCore as any, {
     providerLabelObserver: carrierTracking,
+  });
+  const shipStationPhysicalRecovery = createShipStationPhysicalRecoveryService(db, {
+    client: createShipStationPhysicalRecoveryClient(),
   });
 
   // C9 ShippingEngine — engine-agnostic port over ShipStation (adapter #1)
@@ -337,6 +345,7 @@ export function createServices(db: any) {
     oms,
     fulfillmentPush,
     shipStation,
+    shipStationPhysicalRecovery,
     shippingEngine,
     carrierTracking,
     carrierTrackingLogger,
