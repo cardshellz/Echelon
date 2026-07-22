@@ -45,8 +45,8 @@ describe("parseShopifyRateRequest", () => {
       destCountry: "US",
       destRegion: "HI",
       items: [
-        { sku: "SLV-100", quantity: 2, grams: 120 },
-        { sku: "CASE-9", quantity: 1, grams: 2500 },
+        { sku: "SLV-100", quantity: 2, grams: 120, priceCents: 999 },
+        { sku: "CASE-9", quantity: 1, grams: 2500, priceCents: 4999 },
       ],
     });
   });
@@ -61,8 +61,8 @@ describe("parseShopifyRateRequest", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.request.items).toEqual([
-      { sku: null, quantity: 3, grams: 50 },
-      { sku: null, quantity: 2, grams: null },
+      { sku: null, quantity: 3, grams: 50, priceCents: null },
+      { sku: null, quantity: 2, grams: null, priceCents: null },
     ]);
   });
 

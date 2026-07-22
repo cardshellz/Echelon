@@ -151,6 +151,9 @@ function successfulQuote(): ManualRateQuoteResult {
       chargeModel: "fixed_band",
       perStartedPoundCents: null,
       billablePounds: null,
+      rateTableId: 7,
+      productPolicyApplied: false,
+      calculationTrace: [],
     }],
     warnings: [],
   };

@@ -284,6 +284,160 @@ export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
 ]);
 
 // ---------------------------------------------------------------------------
+// Product-aware pricing policies
+//
+// Product sets are reusable authoring aids. Rate-rule members are immutable
+// snapshots on a rate-table revision, so later catalog reclassification cannot
+// silently change a live checkout price.
+// ---------------------------------------------------------------------------
+
+export const SHIPPING_PRODUCT_SET_SELECTOR_KINDS = [
+  "manual",
+  "shipping_group",
+  "product_line",
+  "category",
+  "sioc",
+] as const;
+export type ShippingProductSetSelectorKind =
+  (typeof SHIPPING_PRODUCT_SET_SELECTOR_KINDS)[number];
+
+export const shippingProductSets = shippingSchema.table("product_sets", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 100 }).notNull(),
+  name: varchar("name", { length: 160 }).notNull(),
+  selectorKind: varchar("selector_kind", { length: 30 }).notNull(),
+  selectorRef: varchar("selector_ref", { length: 160 }),
+  status: varchar("status", { length: 20 }).notNull().default("active"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_product_set_code_idx").on(table.code),
+  check("shipping_product_set_selector_kind_chk", sql`
+    ${table.selectorKind} IN ('manual', 'shipping_group', 'product_line', 'category', 'sioc')
+  `),
+  check("shipping_product_set_status_chk", sql`${table.status} IN ('active', 'archived')`),
+  check("shipping_product_set_selector_ref_chk", sql`
+    (${table.selectorKind} = 'manual' AND ${table.selectorRef} IS NULL)
+    OR (${table.selectorKind} <> 'manual' AND ${table.selectorRef} IS NOT NULL)
+  `),
+]);
+
+export const shippingProductSetMembers = shippingSchema.table("product_set_members", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  productSetId: integer("product_set_id").notNull()
+    .references(() => shippingProductSets.id, { onDelete: "cascade" }),
+  productVariantId: integer("product_variant_id").notNull()
+    .references(() => productVariants.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_product_set_member_idx").on(table.productSetId, table.productVariantId),
+  index("shipping_product_set_member_variant_idx").on(table.productVariantId),
+]);
+
+export const SHIPPING_RATE_RULE_KINDS = [
+  "restriction",
+  "base_charge",
+  "adjustment",
+  "threshold",
+] as const;
+export type ShippingRateRuleKind = (typeof SHIPPING_RATE_RULE_KINDS)[number];
+
+export const SHIPPING_RATE_RULE_ACTIONS = [
+  "block",
+  "free",
+  "fixed",
+  "fixed_band",
+  "base_plus_per_started_pound",
+  "surcharge",
+  "free_threshold",
+] as const;
+export type ShippingRateRuleAction = (typeof SHIPPING_RATE_RULE_ACTIONS)[number];
+
+export const SHIPPING_RATE_RULE_MEASUREMENT_SCOPES = [
+  "order",
+  "matched_items",
+  "each_item",
+  "carton",
+] as const;
+export type ShippingRateRuleMeasurementScope =
+  (typeof SHIPPING_RATE_RULE_MEASUREMENT_SCOPES)[number];
+
+export interface ShippingRateRuleDestinationScope {
+  country: string;
+  regions: string[];
+  postalPrefixes: Array<{ region: string; prefixes: string[] }>;
+}
+
+export const shippingRateRules = shippingSchema.table("rate_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  rateTableId: integer("rate_table_id").notNull()
+    .references(() => shippingRateTables.id, { onDelete: "cascade" }),
+  sourceProductSetId: integer("source_product_set_id")
+    .references(() => shippingProductSets.id, { onDelete: "set null" }),
+  name: varchar("name", { length: 160 }).notNull(),
+  kind: varchar("kind", { length: 30 }).notNull(),
+  action: varchar("action", { length: 50 }).notNull(),
+  measurementScope: varchar("measurement_scope", { length: 30 }).notNull(),
+  destinationScope: jsonb("destination_scope").$type<ShippingRateRuleDestinationScope>().notNull(),
+  rateCents: bigint("rate_cents", { mode: "number" }),
+  perStartedPoundCents: bigint("per_started_pound_cents", { mode: "number" }),
+  thresholdCents: bigint("threshold_cents", { mode: "number" }),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  index("shipping_rate_rule_table_idx").on(table.rateTableId, table.isActive),
+  check("shipping_rate_rule_kind_chk", sql`
+    ${table.kind} IN ('restriction', 'base_charge', 'adjustment', 'threshold')
+  `),
+  check("shipping_rate_rule_action_chk", sql`
+    ${table.action} IN ('block', 'free', 'fixed', 'fixed_band', 'base_plus_per_started_pound', 'surcharge', 'free_threshold')
+  `),
+  check("shipping_rate_rule_measurement_scope_chk", sql`
+    ${table.measurementScope} IN ('order', 'matched_items', 'each_item', 'carton')
+  `),
+  check("shipping_rate_rule_money_chk", sql`
+    (${table.rateCents} IS NULL OR ${table.rateCents} >= 0)
+    AND (${table.perStartedPoundCents} IS NULL OR ${table.perStartedPoundCents} >= 0)
+    AND (${table.thresholdCents} IS NULL OR ${table.thresholdCents} >= 0)
+  `),
+]);
+
+export const shippingRateRuleMembers = shippingSchema.table("rate_rule_members", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  rateRuleId: integer("rate_rule_id").notNull()
+    .references(() => shippingRateRules.id, { onDelete: "cascade" }),
+  productVariantId: integer("product_variant_id").notNull()
+    .references(() => productVariants.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_rate_rule_member_idx").on(table.rateRuleId, table.productVariantId),
+  index("shipping_rate_rule_member_variant_idx").on(table.productVariantId),
+]);
+
+export const shippingRateRuleBands = shippingSchema.table("rate_rule_bands", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  rateRuleId: integer("rate_rule_id").notNull()
+    .references(() => shippingRateRules.id, { onDelete: "cascade" }),
+  minMeasure: integer("min_measure").notNull().default(0),
+  maxMeasure: integer("max_measure"),
+  rateCents: bigint("rate_cents", { mode: "number" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_rate_rule_band_idx").on(
+    table.rateRuleId,
+    table.minMeasure,
+    sql`COALESCE(${table.maxMeasure}, -1)`,
+  ),
+  check("shipping_rate_rule_band_measure_chk", sql`
+    ${table.minMeasure} >= 0
+    AND (${table.maxMeasure} IS NULL OR ${table.maxMeasure} >= ${table.minMeasure})
+  `),
+  check("shipping_rate_rule_band_rate_chk", sql`${table.rateCents} >= 0`),
+]);
+
+// ---------------------------------------------------------------------------
 // Service levels are Card Shellz-owned checkout options such as Standard,
 // Priority, Overnight, and Pallet Freight. Provider methods are future
 // fulfillment mappings and are deliberately separate from customer pricing.

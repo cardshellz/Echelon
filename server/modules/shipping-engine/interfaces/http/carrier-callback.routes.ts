@@ -49,7 +49,11 @@ import {
 } from "../../domain/checkout-rate-rollout-policy";
 import { resolveShopifyCheckoutRateOwnership } from "../../domain/destination-rate-ownership";
 import { normalizeUsPostalRegion } from "../../domain/us-geography";
-import { loadCatalogWeightsBySku } from "../../infrastructure/catalog-weight.repository";
+import {
+  loadCatalogShippingFactsBySku,
+  loadCatalogWeightsBySku,
+  type CatalogShippingFact,
+} from "../../infrastructure/catalog-weight.repository";
 
 /** Respond by this deadline even if the quote pipeline is still running. */
 const RESPONSE_DEADLINE_MS = 2000;
@@ -100,7 +104,7 @@ const shopifyRateRequestSchema = z.object({
       sku: z.string().nullish(),
       quantity: z.number().int().positive(),
       grams: z.number().nullish(),
-      price: z.number().nullish(),
+      price: z.number().int().nonnegative().nullish(),
     }).passthrough()).min(1),
   }).passthrough(),
 });
@@ -109,7 +113,12 @@ export interface ParsedRateRequest {
   destPostal: string;
   destCountry: string;
   destRegion: string | null;
-  items: Array<{ sku: string | null; quantity: number; grams: number | null }>;
+  items: Array<{
+    sku: string | null;
+    quantity: number;
+    grams: number | null;
+    priceCents: number | null;
+  }>;
 }
 
 export type ParseRateRequestResult =
@@ -133,6 +142,7 @@ export function parseShopifyRateRequest(body: unknown): ParseRateRequestResult {
       : null,
     quantity: item.quantity,
     grams: typeof item.grams === "number" && item.grams > 0 ? item.grams : null,
+    priceCents: typeof item.price === "number" ? item.price : null,
   }));
   return {
     ok: true,
@@ -253,6 +263,7 @@ export interface CheckoutRateDependencies {
   originWarehouseId: () => number;
   rolloutPolicy: () => CheckoutRateRolloutPolicy;
   loadCatalogWeightsBySku: typeof loadCatalogWeightsBySku;
+  loadCatalogShippingFactsBySku?: typeof loadCatalogShippingFactsBySku;
   quoteShipment: typeof quoteShipment;
   loadDeliveryEstimates: typeof loadDeliveryEstimates;
   persistSnapshot: typeof persistCheckoutSnapshot;
@@ -262,6 +273,7 @@ const DEFAULT_CHECKOUT_RATE_DEPENDENCIES: CheckoutRateDependencies = {
   originWarehouseId: callbackOriginWarehouseId,
   rolloutPolicy: callbackRateRolloutPolicy,
   loadCatalogWeightsBySku,
+  loadCatalogShippingFactsBySku,
   quoteShipment,
   loadDeliveryEstimates,
   persistSnapshot: persistCheckoutSnapshot,
@@ -351,10 +363,17 @@ export async function computeCheckoutRates(
   try {
     const originWarehouseId = dependencies.originWarehouseId();
     let catalogWeightBySku = new Map<string, number | null>();
+    let catalogFactsBySku = new Map<string, CatalogShippingFact>();
     try {
-      catalogWeightBySku = await dependencies.loadCatalogWeightsBySku(
-        request.items.flatMap((line) => line.sku ? [line.sku] : []),
-      );
+      const skus = request.items.flatMap((line) => line.sku ? [line.sku] : []);
+      if (dependencies.loadCatalogShippingFactsBySku) {
+        catalogFactsBySku = await dependencies.loadCatalogShippingFactsBySku(skus);
+        catalogWeightBySku = new Map(
+          [...catalogFactsBySku].map(([sku, fact]) => [sku, fact.weightGrams]),
+        );
+      } else {
+        catalogWeightBySku = await dependencies.loadCatalogWeightsBySku(skus);
+      }
     } catch (error) {
       console.error("[CarrierCallback] catalog weight lookup failed; using channel weights:", error);
       warnings.push("Echelon catalog weight lookup failed; used channel weights");
@@ -362,8 +381,18 @@ export async function computeCheckoutRates(
     const weightedLines = resolveShipmentLineWeights(
       request.items.map((line) => ({
         sku: line.sku,
+        productVariantId: line.sku
+          ? catalogFactsBySku.get(line.sku)?.productVariantId ?? null
+          : null,
         quantity: line.quantity,
         channelWeightGrams: line.grams,
+        unitPriceCents: line.priceCents,
+        shippingGroupCode: line.sku
+          ? catalogFactsBySku.get(line.sku)?.shippingGroupCode ?? null
+          : null,
+        shipsInOwnContainer: line.sku
+          ? catalogFactsBySku.get(line.sku)?.shipsInOwnContainer ?? false
+          : false,
       })),
       catalogWeightBySku,
     );

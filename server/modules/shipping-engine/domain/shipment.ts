@@ -5,10 +5,13 @@ export type ShipmentWeightSource =
 
 export interface ShipmentLineInput {
   sku: string | null;
+  productVariantId?: number | null;
   quantity: number;
   unitWeightGrams: number | null;
+  unitPriceCents?: number | null;
   weightSource?: ShipmentWeightSource;
   shippingGroupCode?: string | null;
+  shipsInOwnContainer?: boolean;
 }
 
 export interface ShippingParcelDimensions {

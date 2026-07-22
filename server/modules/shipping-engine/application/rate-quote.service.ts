@@ -23,10 +23,16 @@ import {
   type ShippingPricingBasis,
   type ShippingRateChargeModel,
 } from "../domain/rate-selection";
+import {
+  evaluateProductRatePolicy,
+  type ProductRateTraceStep,
+} from "../domain/product-rate-policy";
+import type { ShipmentLineInput } from "../domain/shipment";
 import { selectRateBookAssignment } from "../domain/rate-book";
 import type { ShippingRateContext } from "../domain/shipping-channel";
 import { resolveZone, type ZoneRule } from "../domain/zones";
 import { loadActiveRateBookAssignments } from "../infrastructure/rate-book.repository";
+import { loadProductRateRules } from "../infrastructure/product-rate-policy.repository";
 
 export const RATE_QUOTE_ENGINE = { name: "cardshellz-rates", version: "2.0.0" } as const;
 
@@ -56,6 +62,7 @@ export interface RateQuoteRequest {
   destRegion?: string | null;
   destPostal: string;
   parcels: RateQuoteParcel[];
+  lines?: readonly ShipmentLineInput[];
   freight?: FreightRatingContext | null;
 }
 
@@ -82,6 +89,9 @@ export interface RateQuoteLine {
   chargeModel: RateCandidateRow["chargeModel"];
   perStartedPoundCents: number | null;
   billablePounds: number | null;
+  rateTableId: number;
+  productPolicyApplied: boolean;
+  calculationTrace: ProductRateTraceStep[];
 }
 
 export interface RateQuoteResult {
@@ -174,30 +184,83 @@ export async function quoteShipmentRates(
     0,
   );
   const shipmentWeightGrams = request.freight?.totalWeightGrams ?? parcelWeightGrams;
-  const quotes = selectServiceLevelRates(candidateRows, {
+  const selectionInput = {
     destinationCountry: destCountry,
     destinationRegion: destRegion,
     destinationPostal: destPostal,
     shipmentWeightGrams,
     palletCount: request.freight?.palletCount ?? null,
     originWarehouseId: request.originWarehouseId,
-  }).map((quote) => ({
-    serviceLevelId: quote.serviceLevelId,
-    serviceLevelCode: quote.serviceLevelCode,
-    displayName: quote.displayName,
-    description: quote.description,
-    fulfillmentMode: quote.fulfillmentMode,
-    pricingBasis: quote.pricingBasis,
-    totalCents: quote.rateCents,
-    currency: quote.currency.toUpperCase(),
-    promiseMinBusinessDays: quote.promiseMinBusinessDays,
-    promiseMaxBusinessDays: quote.promiseMaxBusinessDays,
-    ratedMeasure: quote.ratedMeasure,
-    maxShipmentWeightGrams: quote.maxShipmentWeightGrams,
-    chargeModel: quote.chargeModel,
-    perStartedPoundCents: quote.perStartedPoundCents,
-    billablePounds: quote.billablePounds,
-  }));
+  };
+  const selectedRates = selectServiceLevelRates(candidateRows, selectionInput);
+  const policiesByTable = await loadProductRateRules(
+    selectedRates.map((quote) => quote.rateTableId),
+  );
+  const quotes: RateQuoteLine[] = [];
+  for (const quote of selectedRates) {
+    const rules = policiesByTable.get(quote.rateTableId) ?? [];
+    let totalCents = quote.rateCents;
+    let productPolicyApplied = false;
+    let calculationTrace: ProductRateTraceStep[] = [];
+
+    if (rules.length > 0 && (!request.lines || request.lines.length === 0)) {
+      warnings.push(`${quote.serviceLevelCode}: product policies were not evaluated because no item lines were provided`);
+    } else if (rules.length > 0 && request.lines) {
+      const tableRows = candidateRows.filter((row) =>
+        row.rateTableId === quote.rateTableId
+        && row.serviceLevelId === quote.serviceLevelId);
+      const policyResult = evaluateProductRatePolicy({
+        destination: {
+          country: destCountry,
+          region: destRegion,
+          postalCode: destPostal,
+        },
+        lines: request.lines.map((line) => ({
+          sku: line.sku,
+          productVariantId: line.productVariantId ?? null,
+          quantity: line.quantity,
+          unitWeightGrams: line.unitWeightGrams,
+          unitPriceCents: line.unitPriceCents ?? null,
+        })),
+        rules,
+        defaultRateForWeightGrams: (weightGrams) => {
+          if (weightGrams === 0) return 0;
+          return selectServiceLevelRates(tableRows, {
+            ...selectionInput,
+            shipmentWeightGrams: weightGrams,
+          })[0]?.rateCents ?? null;
+        },
+      });
+      calculationTrace = policyResult.trace;
+      if (!policyResult.ok) {
+        warnings.push(`${quote.serviceLevelCode}: [${policyResult.code}] ${policyResult.message}`);
+        continue;
+      }
+      totalCents = policyResult.totalCents;
+      productPolicyApplied = calculationTrace.some((step) => step.ruleId !== null);
+    }
+
+    quotes.push({
+      serviceLevelId: quote.serviceLevelId,
+      serviceLevelCode: quote.serviceLevelCode,
+      displayName: quote.displayName,
+      description: quote.description,
+      fulfillmentMode: quote.fulfillmentMode,
+      pricingBasis: quote.pricingBasis,
+      totalCents,
+      currency: quote.currency.toUpperCase(),
+      promiseMinBusinessDays: quote.promiseMinBusinessDays,
+      promiseMaxBusinessDays: quote.promiseMaxBusinessDays,
+      ratedMeasure: quote.ratedMeasure,
+      maxShipmentWeightGrams: quote.maxShipmentWeightGrams,
+      chargeModel: quote.chargeModel,
+      perStartedPoundCents: quote.perStartedPoundCents,
+      billablePounds: quote.billablePounds,
+      rateTableId: quote.rateTableId,
+      productPolicyApplied,
+      calculationTrace,
+    });
+  }
 
   if (!request.freight && candidateRows.some((row) => row.pricingBasis === "pallet_count")) {
     warnings.push("pallet freight was not quoted because pallet count was not provided");
@@ -314,6 +377,13 @@ async function maybePersistSnapshot(input: {
     destRegion: input.request.destRegion?.trim().toUpperCase() || null,
     destPostal: input.destPostal,
     parcels: input.request.parcels.map((p) => ({ billableWeightGrams: p.billableWeightGrams })),
+    lines: input.request.lines?.map((line) => ({
+      sku: line.sku,
+      productVariantId: line.productVariantId ?? null,
+      quantity: line.quantity,
+      unitWeightGrams: line.unitWeightGrams,
+      unitPriceCents: line.unitPriceCents ?? null,
+    })) ?? null,
     freight: input.request.freight ?? null,
   };
 

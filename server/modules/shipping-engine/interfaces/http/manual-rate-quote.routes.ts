@@ -56,6 +56,15 @@ const manualRateQuoteResponseSchema = z.object({
     chargeModel: z.enum(["fixed_band", "base_plus_per_started_pound"]),
     perStartedPoundCents: z.number().int().min(0).nullable(),
     billablePounds: z.number().int().min(0).nullable(),
+    rateTableId: z.number().int().positive(),
+    productPolicyApplied: z.boolean(),
+    calculationTrace: z.array(z.object({
+      kind: z.enum(["restriction", "base_charge", "threshold", "adjustment", "default"]),
+      ruleId: z.number().int().positive().nullable(),
+      label: z.string(),
+      amountCents: z.number().int().min(0),
+      skus: z.array(z.string()),
+    })),
   })),
   warnings: z.array(z.string()),
 });
