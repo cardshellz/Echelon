@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { config } from "dotenv";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -13,6 +13,10 @@ const describeWithDisposableDb = TEST_DB_URL && DISPOSABLE_DB ? describe : descr
 const migrationSql = readFileSync(resolve(process.cwd(), "migrations/148_purchase_rfq_requests.sql"), "utf8");
 const automationMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/150_purchase_recommendation_run_automation.sql"),
+  "utf8",
+);
+const allocationOverrideMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/158_rfq_allocation_override_evidence.sql"),
   "utf8",
 );
 
@@ -66,6 +70,7 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
     `);
     await pool.query(migrationSql);
     await pool.query(automationMigrationSql);
+    await pool.query(allocationOverrideMigrationSql);
     productId = (await pool.query("INSERT INTO catalog.products (sku) VALUES ($1) RETURNING id", [`RFQ-${suffix}`])).rows[0].id;
     variantId = (await pool.query("INSERT INTO catalog.product_variants (product_id) VALUES ($1) RETURNING id", [productId])).rows[0].id;
     vendorA = (await pool.query("INSERT INTO procurement.vendors (name) VALUES ($1) RETURNING id", [`Vendor A ${suffix}`])).rows[0].id;
@@ -99,19 +104,44 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
   });
 
   async function createRfq(vendorId: number, key: string) {
+    const requestHash = createHash("sha256").update(`${vendorId}:${key}`).digest("hex");
     return (await pool.query(
-      `INSERT INTO procurement.request_for_quotes (rfq_number, vendor_id, idempotency_key)
-       VALUES ($1, $2, $3) RETURNING id`,
-      [`RFQ-${key}`, vendorId, key],
+      `INSERT INTO procurement.request_for_quotes (rfq_number, vendor_id, idempotency_key, request_hash)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [`RFQ-${key}`, vendorId, key, requestHash],
     )).rows[0].id as number;
   }
 
-  async function addLine(rfqId: number, vendorProductId: number, pieces: number) {
+  async function addLine(
+    rfqId: number,
+    vendorProductId: number,
+    pieces: number,
+    override: {
+      reason?: string;
+      approvedBy?: string;
+      approvedAt?: Date;
+      baselinePieces?: number;
+      excessPieces?: number;
+    } = {},
+  ) {
     return pool.query(
       `INSERT INTO procurement.request_for_quote_lines
-        (rfq_id, recommendation_line_id, vendor_product_id, requested_pieces)
-       VALUES ($1, $2, $3, $4) RETURNING id`,
-      [rfqId, recommendationLineId, vendorProductId, pieces],
+        (rfq_id, recommendation_line_id, vendor_product_id, requested_pieces,
+         quantity_override_reason, allocation_override_reason,
+         allocation_override_approved_by, allocation_override_approved_at,
+         allocation_override_baseline_pieces, allocation_override_excess_pieces)
+       VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9) RETURNING id`,
+      [
+        rfqId,
+        recommendationLineId,
+        vendorProductId,
+        pieces,
+        override.reason ?? null,
+        override.approvedBy ?? null,
+        override.approvedAt ?? null,
+        override.baselinePieces ?? null,
+        override.excessPieces ?? null,
+      ],
     );
   }
 
@@ -149,6 +179,70 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
     await addLine(rfqB, vendorProductB, second);
     const overflow = await createRfq(vendorA, `overflow-${suffix}`);
     await expectDatabaseError(() => addLine(overflow, vendorProductA, 1), "23514");
+  });
+
+  it("requires attributable approval for excess sourcing and makes the evidence immutable", async () => {
+    const reasonOnlyRfq = await createRfq(vendorA, `reason-only-${suffix}`);
+    await expectDatabaseError(
+      () => addLine(reasonOnlyRfq, vendorProductA, 5, { reason: "Build launch safety stock" }),
+      "23514",
+    );
+
+    const wrongEvidenceRfq = await createRfq(vendorA, `wrong-evidence-${suffix}`);
+    await expectDatabaseError(
+      () => addLine(wrongEvidenceRfq, vendorProductA, 5, {
+        reason: "Build launch safety stock",
+        approvedBy: "buyer-17",
+        approvedAt: new Date("2026-07-21T12:00:00.000Z"),
+        baselinePieces: 999,
+        excessPieces: 999,
+      }),
+      "23514",
+    );
+
+    const approvedRfq = await createRfq(vendorA, `approved-overage-${suffix}`);
+    const inserted = await addLine(approvedRfq, vendorProductA, 5, {
+      reason: "Build launch safety stock",
+      approvedBy: "buyer-17",
+      approvedAt: new Date("2026-07-21T12:00:00.000Z"),
+      baselinePieces: 0,
+      excessPieces: 5,
+    });
+    const lineId = Number(inserted.rows[0].id);
+    const stored = (await pool.query(
+      `SELECT allocation_override_reason,
+              allocation_override_approved_by,
+              allocation_override_baseline_pieces,
+              allocation_override_excess_pieces
+         FROM procurement.request_for_quote_lines
+        WHERE id = $1`,
+      [lineId],
+    )).rows[0];
+    expect(stored).toMatchObject({
+      allocation_override_reason: "Build launch safety stock",
+      allocation_override_approved_by: "buyer-17",
+      allocation_override_baseline_pieces: 0,
+      allocation_override_excess_pieces: 5,
+    });
+
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE procurement.request_for_quote_lines SET requested_pieces = 6 WHERE id = $1",
+        [lineId],
+      ),
+      "23514",
+    );
+    await pool.query(
+      "UPDATE procurement.request_for_quote_lines SET status = 'cancelled' WHERE id = $1",
+      [lineId],
+    );
+    await expectDatabaseError(
+      () => pool.query(
+        "UPDATE procurement.request_for_quote_lines SET status = 'draft' WHERE id = $1",
+        [lineId],
+      ),
+      "23514",
+    );
   });
 
   it("serializes concurrent allocation across recommendation runs for the same exact SKU", async () => {

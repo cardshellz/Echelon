@@ -397,6 +397,7 @@ interface RfqQueueItem {
   recommendedPieces: number;
   allocatedPieces: number;
   remainingPieces: number;
+  excessPieces: number;
   sourcingStatus: "open" | "partially_allocated" | "fully_allocated";
   availablePieces: number;
   onOrderPieces: number;
@@ -417,6 +418,12 @@ interface RfqQueueItem {
     rfqStatus: string;
     vendorId: number;
     requestedPieces: number;
+    quantityOverrideReason: string | null;
+    allocationOverrideReason: string | null;
+    allocationOverrideApprovedBy: string | null;
+    allocationOverrideApprovedAt: string | null;
+    allocationOverrideBaselinePieces: number | null;
+    allocationOverrideExcessPieces: number | null;
     lineStatus: string;
     vendorName: string | null;
     createdAt: string;
@@ -441,6 +448,8 @@ interface RfqQueueResponse {
     fullyAllocated: number;
     supplierAssignmentRequired: number;
     activeRfqs: number;
+    aboveRecommendation: number;
+    excessPieces: number;
   };
   items: RfqQueueItem[];
 }
@@ -450,6 +459,7 @@ interface RfqSelection {
   vendorId: string;
   vendorSku: string;
   quantityOverrideReason: string;
+  allocationOverrideApproved: boolean;
 }
 
 interface RfqVendor {
@@ -860,6 +870,7 @@ export default function PurchasingView() {
         vendorSku: string;
         requestedPieces: number;
         quantityOverrideReason: string;
+        allocationOverrideApproved: boolean;
       }>;
       requestNote: string;
       responseDueDate: string;
@@ -873,6 +884,7 @@ export default function PurchasingView() {
             ...line,
             vendorSku: line.vendorSku.trim() || null,
             quantityOverrideReason: line.quantityOverrideReason.trim() || null,
+            allocationOverrideApproved: line.allocationOverrideApproved,
           })),
           requestNote: input.requestNote.trim() || null,
           responseDueDate: input.responseDueDate || null,
@@ -1145,22 +1157,23 @@ export default function PurchasingView() {
   };
 
   const selectionForRfqItem = (item: RfqQueueItem): RfqSelection => rfqSelections[item.recommendationLineId] ?? {
-    requestedPieces: item.remainingPieces,
+    requestedPieces: Math.max(item.remainingPieces, 1),
     vendorId: item.preferredVendorId ? String(item.preferredVendorId) : "",
     vendorSku: "",
     quantityOverrideReason: "",
+    allocationOverrideApproved: false,
   };
 
   const selectRecommendationForRfq = (item: RfqQueueItem) => {
-    if (item.remainingPieces <= 0) return;
     setSelectedRfqLineIds((current) => new Set(current).add(item.recommendationLineId));
     setRfqSelections((current) => current[item.recommendationLineId] ? current : {
       ...current,
       [item.recommendationLineId]: {
-        requestedPieces: item.remainingPieces,
+        requestedPieces: Math.max(item.remainingPieces, 1),
         vendorId: item.preferredVendorId ? String(item.preferredVendorId) : "",
         vendorSku: "",
         quantityOverrideReason: "",
+        allocationOverrideApproved: false,
       },
     });
   };
@@ -1178,10 +1191,19 @@ export default function PurchasingView() {
   };
 
   const updateRfqSelection = (item: RfqQueueItem, patch: Partial<RfqSelection>) => {
-    setRfqSelections((current) => ({
-      ...current,
-      [item.recommendationLineId]: { ...selectionForRfqItem(item), ...patch },
-    }));
+    setRfqSelections((current) => {
+      const prior = current[item.recommendationLineId] ?? selectionForRfqItem(item);
+      const quantityChanged = patch.requestedPieces !== undefined
+        && patch.requestedPieces !== prior.requestedPieces;
+      return {
+        ...current,
+        [item.recommendationLineId]: {
+          ...prior,
+          ...patch,
+          ...(quantityChanged ? { allocationOverrideApproved: false } : {}),
+        },
+      };
+    });
   };
 
   const selectedRfqItems = (rfqQueue?.items ?? []).filter((item) => selectedRfqLineIds.has(item.recommendationLineId));
@@ -1205,13 +1227,13 @@ export default function PurchasingView() {
       return !selection.vendorId
         || !Number.isSafeInteger(selection.requestedPieces)
         || selection.requestedPieces <= 0
-        || selection.requestedPieces > item.remainingPieces
-        || (selection.requestedPieces !== item.remainingPieces && selection.quantityOverrideReason.trim().length < 3);
+        || (selection.requestedPieces !== item.remainingPieces && selection.quantityOverrideReason.trim().length < 3)
+        || (selection.requestedPieces > item.remainingPieces && !selection.allocationOverrideApproved);
     });
     if (invalid) {
       toast({
         title: "Complete the RFQ selections",
-        description: `${invalid.sku} needs a supplier, valid remaining quantity, and an adjustment reason when its quantity is changed.`,
+        description: `${invalid.sku} needs a supplier, a positive whole-piece quantity, a reason for any adjustment, and approval for any amount above the recommendation.`,
         variant: "destructive",
       });
       return;
@@ -1237,6 +1259,7 @@ export default function PurchasingView() {
           vendorSku: selection.vendorSku,
           requestedPieces: selection.requestedPieces,
           quantityOverrideReason: selection.quantityOverrideReason,
+          allocationOverrideApproved: selection.allocationOverrideApproved,
         };
       }),
       requestNote: rfqRequestNote,
@@ -1547,6 +1570,11 @@ export default function PurchasingView() {
                             {item.allocatedPieces.toLocaleString()} of {item.recommendedPieces.toLocaleString()} recommended pieces are already allocated to active RFQs.
                           </div>
                         )}
+                        {item.excessPieces > 0 && (
+                          <div className="mt-2 text-xs font-medium text-amber-700">
+                            {item.excessPieces.toLocaleString()} pieces above the recommendation are covered by approved sourcing exceptions.
+                          </div>
+                        )}
                         <div className="mt-2 text-[11px] text-zinc-500">
                           {item.forecastMethod === "weighted_blend_v1" ? "Weighted forecast" : "Recent velocity"} {item.forecastDailyPieces.toFixed(2)} pieces/day · {item.leadTimeDays} lead days + {item.safetyStockDays} safety days
                           {item.forwardDemandPieces > 0 ? ` · ${item.forwardDemandPieces.toLocaleString()} future-demand pieces` : ""}
@@ -1557,7 +1585,6 @@ export default function PurchasingView() {
                         <div className="flex items-center gap-2">
                           <Checkbox
                             checked={selectedRfqLineIds.has(item.recommendationLineId)}
-                            disabled={item.remainingPieces <= 0}
                             onCheckedChange={(checked) => toggleRecommendationForRfq(item, Boolean(checked))}
                           />
                           <span className="text-xs font-medium">Add to RFQ</span>
@@ -1565,7 +1592,6 @@ export default function PurchasingView() {
                         <Input
                           type="number"
                           min={1}
-                          max={item.remainingPieces}
                           step={1}
                           disabled={!selectedRfqLineIds.has(item.recommendationLineId)}
                           value={selectionForRfqItem(item).requestedPieces}
@@ -1575,9 +1601,34 @@ export default function PurchasingView() {
                           <Input
                             value={selectionForRfqItem(item).quantityOverrideReason}
                             onChange={(event) => updateRfqSelection(item, { quantityOverrideReason: event.target.value })}
-                            placeholder="Quantity adjustment reason *"
+                            placeholder={selectionForRfqItem(item).requestedPieces > item.remainingPieces
+                              ? "Above-recommendation reason *"
+                              : "Quantity adjustment reason *"}
                             maxLength={2000}
                           />
+                        )}
+                        {selectedRfqLineIds.has(item.recommendationLineId)
+                          && selectionForRfqItem(item).requestedPieces > item.remainingPieces && (
+                          <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-amber-950">
+                            <div className="text-xs font-medium">
+                              {(selectionForRfqItem(item).requestedPieces - item.remainingPieces).toLocaleString()} pieces above the remaining recommendation
+                            </div>
+                            <div className="flex items-start gap-2">
+                              <Checkbox
+                                id={`rfq-allocation-override-${item.recommendationLineId}`}
+                                checked={selectionForRfqItem(item).allocationOverrideApproved}
+                                onCheckedChange={(checked) => updateRfqSelection(item, {
+                                  allocationOverrideApproved: Boolean(checked),
+                                })}
+                              />
+                              <Label
+                                htmlFor={`rfq-allocation-override-${item.recommendationLineId}`}
+                                className="text-xs leading-4"
+                              >
+                                Approve this sourcing exception
+                              </Label>
+                            </div>
+                          </div>
                         )}
                         <Select
                           disabled={!selectedRfqLineIds.has(item.recommendationLineId)}
@@ -2117,12 +2168,26 @@ export default function PurchasingView() {
                   <Badge variant="outline">{group.items.length} line{group.items.length === 1 ? "" : "s"} · {group.pieces.toLocaleString()} pieces</Badge>
                 </div>
                 <div className="mt-2 space-y-1 text-xs text-zinc-600">
-                  {group.items.map((item) => (
-                    <div key={item.recommendationLineId} className="flex justify-between gap-3">
-                      <span><span className="font-mono font-medium">{item.sku}</span> · {item.productName}</span>
-                      <span className="whitespace-nowrap font-medium">{selectionForRfqItem(item).requestedPieces.toLocaleString()} pieces</span>
-                    </div>
-                  ))}
+                  {group.items.map((item) => {
+                    const selection = selectionForRfqItem(item);
+                    const excessPieces = Math.max(selection.requestedPieces - item.remainingPieces, 0);
+                    return (
+                      <div key={item.recommendationLineId} className="border-t py-2 first:border-t-0 first:pt-0 last:pb-0">
+                        <div className="flex justify-between gap-3">
+                          <span><span className="font-mono font-medium">{item.sku}</span> · {item.productName}</span>
+                          <span className="whitespace-nowrap font-medium">{selection.requestedPieces.toLocaleString()} pieces</span>
+                        </div>
+                        {excessPieces > 0 && (
+                          <div className="mt-1 rounded-md border border-amber-300 bg-amber-50 p-2 text-amber-950">
+                            <div className="font-medium">
+                              Approved sourcing exception: {excessPieces.toLocaleString()} pieces above remaining demand
+                            </div>
+                            <div className="mt-1">Reason: {selection.quantityOverrideReason.trim()}</div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ))}
