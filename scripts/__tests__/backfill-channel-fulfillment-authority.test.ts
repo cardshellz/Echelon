@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -19,6 +20,15 @@ const candidate: BackfillCandidate = Object.freeze({
 });
 
 describe("backfill-channel-fulfillment-authority", () => {
+  it("does not import dev-only dotenv in the production operator script", () => {
+    const source = readFileSync(
+      new URL("../backfill-channel-fulfillment-authority.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).not.toMatch(/(?:import|require\s*\()\s*["']dotenv(?:\/config)?["']/);
+  });
+
   it("defaults to a bounded dry-run and validates mutation flags", () => {
     expect(parseFlags([])).toEqual({
       help: false,
