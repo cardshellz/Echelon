@@ -1,6 +1,10 @@
 import { sql } from "drizzle-orm";
 
 import {
+  sqlIntegerArray,
+  sqlTextArray,
+} from "../../infrastructure/postgres-array";
+import {
   buildProviderPhysicalShipmentIdentity,
 } from "./channel-fulfillment-authority.repository";
 import {
@@ -331,7 +335,7 @@ async function resolveExactLines(
       ol.external_line_item_id AS channel_order_line_id
     FROM oms.oms_order_lines ol
     WHERE ol.order_id = ${omsOrderId}
-      AND ol.external_line_item_id = ANY(${lineIds}::text[])
+      AND ol.external_line_item_id = ANY(${sqlTextArray(lineIds)})
     ORDER BY ol.id
     FOR UPDATE OF ol
   `);
@@ -429,7 +433,7 @@ async function resolveExactLines(
       ON w.id = oi.order_id
      AND w.warehouse_status <> 'cancelled'
     WHERE oo.id = ${omsOrderId}
-      AND ol.external_line_item_id = ANY(${lineIds}::text[])
+      AND ol.external_line_item_id = ANY(${sqlTextArray(lineIds)})
     ORDER BY ol.id, w.id, oi.id
     FOR UPDATE OF ol, w, oi
   `);
@@ -546,7 +550,7 @@ async function findExactEcho(
       ON physical_item.id = item.physical_shipment_item_id
     WHERE push.channel_provider = ${input.sourceProvider}
       AND push.oms_order_id = ${omsOrderId}
-      AND push.channel_fulfillment_id = ANY(${providerIds}::text[])
+      AND push.channel_fulfillment_id = ANY(${sqlTextArray(providerIds)})
       AND push.push_status IN ('success', 'ignored')
     ORDER BY push.id, item.id
   `);
@@ -860,8 +864,8 @@ async function findCancellationCandidates(
       item.qty::int AS quantity
     FROM wms.outbound_shipments shipment
     JOIN wms.outbound_shipment_items item ON item.shipment_id = shipment.id
-    WHERE shipment.order_id = ANY(${wmsOrderIds}::int[])
-      AND shipment.id <> ALL(${packageLegacyShipmentIds}::int[])
+    WHERE shipment.order_id = ANY(${sqlIntegerArray(wmsOrderIds)})
+      AND shipment.id <> ALL(${sqlIntegerArray(packageLegacyShipmentIds)})
       AND shipment.status IN ('planned', 'queued', 'labeled', 'on_hold')
       AND item.shipment_item_purpose = 'customer_fulfillment'
       AND item.qty > 0
