@@ -96,6 +96,10 @@ function repositoryMock(
     claimReceipt: vi.fn().mockResolvedValue({
       receiptId: receipt.receiptId,
       terminalReplay: receipt.terminalReplay,
+      terminalProcessingStatus: receipt.terminalReplay
+        ? (receipt.sourceEcho ? "ignored" : "processed")
+        : null,
+      terminalReason: null,
       sourceEcho: receipt.sourceEcho,
       physicalShipmentId: receipt.physicalShipmentId,
       leaseToken: "lease-1",
@@ -106,6 +110,11 @@ function repositoryMock(
     attachPhysicalShipment: vi.fn().mockResolvedValue(undefined),
     recordTrackingAmendment: vi.fn().mockResolvedValue(undefined),
     completeReceipt: vi.fn().mockResolvedValue(undefined),
+    failReceiptAttempt: vi.fn().mockResolvedValue({
+      processingStatus: "pending",
+      retryFailureCount: 1,
+      nextRetryAt: new Date("2026-07-22T15:02:00.000Z"),
+    }),
     recordReviewException: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -362,7 +371,7 @@ describe("channel fulfillment ingress", () => {
     expect(result.processingStatus).toBe("review");
   });
 
-  it("rethrows infrastructure failures so the durable webhook queue retries them", async () => {
+  it("persists infrastructure failures as retryable before the durable queue retries them", async () => {
     const repository = repositoryMock();
     vi.mocked(repository.prepareReceipt).mockRejectedValue(Object.assign(
       new Error("connection reset"),
@@ -372,7 +381,105 @@ describe("channel fulfillment ingress", () => {
     const service = createChannelFulfillmentIngressService(deps);
 
     await expect(service.process(input())).rejects.toMatchObject({ code: "ECONNRESET" });
+    expect(repository.failReceiptAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      receiptId: 91,
+      leaseToken: "lease-1",
+      errorCode: "ECONNRESET",
+      errorMessage: "connection reset",
+      maxFailures: 5,
+    }));
     expect(repository.completeReceipt).not.toHaveBeenCalled();
     expect(repository.recordReviewException).not.toHaveBeenCalled();
+  });
+
+  it("routes exhausted transient retries to durable review without throwing", async () => {
+    const repository = repositoryMock();
+    vi.mocked(repository.prepareReceipt).mockRejectedValue(Object.assign(
+      new Error("database unavailable"),
+      { code: "ECONNRESET" },
+    ));
+    vi.mocked(repository.failReceiptAttempt).mockResolvedValue({
+      processingStatus: "review",
+      retryFailureCount: 5,
+      nextRetryAt: null,
+    });
+    const deps = dependencies(repository);
+    const service = createChannelFulfillmentIngressService(deps);
+
+    const result = await service.process(input());
+
+    expect(repository.recordReviewException).toHaveBeenCalledWith(expect.objectContaining({
+      receiptId: 91,
+      rule: "channel_fulfillment_transient_retry_exhausted",
+      details: expect.objectContaining({
+        originalErrorCode: "ECONNRESET",
+        retryFailureCount: 5,
+      }),
+    }));
+    expect(result).toMatchObject({
+      processingStatus: "review",
+      physicalShipmentId: null,
+    });
+  });
+
+  it("returns a terminal review receipt without repeating side effects", async () => {
+    const repository = repositoryMock(prepared({
+      terminalReplay: true,
+      physicalShipmentId: null,
+      materializationIdentity: null,
+      legacyWmsShipmentIds: Object.freeze([]),
+      inventoryItems: Object.freeze([]),
+      cancellationCandidates: Object.freeze([]),
+    }));
+    vi.mocked(repository.claimReceipt).mockResolvedValue({
+      receiptId: 91,
+      terminalReplay: true,
+      terminalProcessingStatus: "review",
+      terminalReason: null,
+      sourceEcho: false,
+      physicalShipmentId: null,
+      leaseToken: null,
+      attemptNumber: 5,
+    });
+    const deps = dependencies(repository);
+    const service = createChannelFulfillmentIngressService(deps);
+
+    const result = await service.process(input());
+
+    expect(result).toMatchObject({
+      processingStatus: "review",
+      replayed: true,
+    });
+    expect(repository.prepareReceipt).not.toHaveBeenCalled();
+    expect(repository.failReceiptAttempt).not.toHaveBeenCalled();
+  });
+
+  it("records a review exception when repeated lease expiry exhausts recovery", async () => {
+    const repository = repositoryMock();
+    vi.mocked(repository.claimReceipt).mockResolvedValue({
+      receiptId: 91,
+      terminalReplay: true,
+      terminalProcessingStatus: "review",
+      terminalReason: "lease_retry_exhausted",
+      sourceEcho: false,
+      physicalShipmentId: null,
+      leaseToken: null,
+      attemptNumber: 5,
+    });
+    const deps = dependencies(repository);
+    const service = createChannelFulfillmentIngressService(deps);
+
+    const result = await service.process(input());
+
+    expect(repository.recordReviewException).toHaveBeenCalledWith({
+      receiptId: 91,
+      rule: "channel_fulfillment_lease_retry_exhausted",
+      summary: "Channel fulfillment receipt exhausted recovery after repeated lease expiry",
+      details: { attemptNumber: 5 },
+    });
+    expect(result).toMatchObject({
+      processingStatus: "review",
+      replayed: true,
+    });
   });
 });

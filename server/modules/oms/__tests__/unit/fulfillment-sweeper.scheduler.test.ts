@@ -129,7 +129,11 @@ describe("fulfillment-sweeper.scheduler", () => {
     expect(query).toContain("processing_status = 'pending'");
     expect(query).toContain("processing_status = 'processing'");
     expect(query).toContain("lease_expires_at <= NOW()");
-    expect(query).toContain("attempt_count <");
+    expect(query).toContain("retry_failure_count <");
+    expect(query).toContain("next_retry_at IS NOT NULL");
+    expect(query).toContain("next_retry_at <= NOW()");
+    expect(query).toContain("next_retry_at IS NULL");
+    expect(query).not.toContain("attempt_count <");
   });
 
   it("isolates a malformed stale receipt and continues recovering later candidates", async () => {

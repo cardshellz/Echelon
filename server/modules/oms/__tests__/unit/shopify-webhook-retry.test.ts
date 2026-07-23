@@ -37,6 +37,13 @@ vi.mock("../../../../db", () => ({
 }));
 
 import { recordRetryFailure } from "../../webhook-retry.worker";
+import {
+  buildShopifyFulfillmentRetryEnvelope,
+  enqueueShopifyFulfillmentWebhookRetry,
+  receiptRecoveryOwnedStatus,
+  sourceChannelIdFromRetryPayload,
+  sourceEventIdFromRetryPayload,
+} from "../../shopify-fulfillment-webhook-retry";
 
 // ─── DB mock helpers ─────────────────────────────────────────────────
 
@@ -76,6 +83,10 @@ const SHOPIFY_ROUTES_SRC = readFileSync(
 );
 const OMS_WEBHOOKS_SRC = readFileSync(
   resolve(__dirname, "../../oms-webhooks.ts"),
+  "utf-8",
+);
+const FULFILLMENT_RETRY_SRC = readFileSync(
+  resolve(__dirname, "../../shopify-fulfillment-webhook-retry.ts"),
   "utf-8",
 );
 
@@ -266,9 +277,10 @@ describe("oms-webhooks.ts :: retry rows carry sourceInboxId", () => {
 
 // ─── Source regression: shopify.routes.ts enqueue + bypass ───────────
 
-describe("shopify.routes.ts :: enqueue on error + internal retry bypass", () => {
-  it("imports webhookRetryQueue from @shared/schema", () => {
-    expect(SHOPIFY_ROUTES_SRC).toMatch(/webhookRetryQueue.*@shared\/schema|@shared\/schema.*webhookRetryQueue/);
+describe("shopify.routes.ts :: bounded fulfillment retry + internal retry bypass", () => {
+  it("delegates failed fulfillment delivery to the idempotent retry helper", () => {
+    expect(SHOPIFY_ROUTES_SRC).toContain("enqueueShopifyFulfillmentWebhookRetry");
+    expect(FULFILLMENT_RETRY_SRC).toContain(".onConflictDoNothing()");
   });
 
   it("fulfillments/create catch block enqueues with topic 'fulfillments/create'", () => {
@@ -284,18 +296,143 @@ describe("shopify.routes.ts :: enqueue on error + internal retry bypass", () => 
   });
 
   it("enqueues with provider 'shopify'", () => {
-    const shopifyEnqueues = SHOPIFY_ROUTES_SRC.match(/provider:\s*["']shopify["']/g);
-    // Both fulfillments/create and fulfillments/update should enqueue with provider=shopify
-    expect(shopifyEnqueues?.length).toBeGreaterThanOrEqual(2);
+    expect(FULFILLMENT_RETRY_SRC).toMatch(/provider:\s*["']shopify["']/);
   });
 
-  it("enqueues with payload=req.body", () => {
-    expect(SHOPIFY_ROUTES_SRC).toMatch(/payload:\s*req\.body/);
+  it("does not enqueue a child retry from an internal loopback", () => {
+    expect(SHOPIFY_ROUTES_SRC).toMatch(
+      /if \(input\.webhookVerified && !isInternalRetryRequest\(input\.req\)\)[\s\S]*enqueueShopifyFulfillmentWebhookRetry/,
+    );
+  });
+
+  it("acknowledges deliveries already owned by canonical receipt recovery", () => {
+    expect(SHOPIFY_ROUTES_SRC).toMatch(
+      /receiptRecoveryOwnedStatus\(input\.error\)[\s\S]*status\(200\)/,
+    );
+  });
+
+  it("only enqueues externally delivered payloads after HMAC verification", () => {
+    expect(SHOPIFY_ROUTES_SRC).toMatch(
+      /if \(input\.webhookVerified && !isInternalRetryRequest\(input\.req\)\)/,
+    );
+    expect(SHOPIFY_ROUTES_SRC).toMatch(/webhookVerified = true/);
   });
 
   it("verifyChannelWebhook supports x-internal-retry bypass", () => {
     expect(SHOPIFY_ROUTES_SRC).toMatch(/x-internal-retry/);
     expect(SHOPIFY_ROUTES_SRC).toMatch(/SESSION_SECRET/);
     expect(SHOPIFY_ROUTES_SRC).toMatch(/verified:\s*true/);
+  });
+
+  it("does not authenticate an absent retry header when SESSION_SECRET is absent", () => {
+    expect(SHOPIFY_ROUTES_SRC).toMatch(
+      /const secret = process\.env\.SESSION_SECRET\?\.trim\(\);[\s\S]*if \(!secret\) return false/,
+    );
+  });
+});
+
+describe("Shopify fulfillment retry event identity", () => {
+  it("preserves Shopify event, channel, and shop identity in a stable retry envelope", () => {
+    const envelope = buildShopifyFulfillmentRetryEnvelope({
+      topic: "fulfillments/update",
+      payload: { id: 6330164707487, order_id: 12167289405599 },
+      sourceEventId: "7bec3250-e0b7-3f75-4331-28cd89477e2e",
+      sourceChannelId: 36,
+      shopDomain: "Card-Shellz.MyShopify.com",
+    });
+
+    expect(envelope.retryKey).toBe(
+      "shopify-fulfillment-webhook:v1:fulfillments/update:36:card-shellz.myshopify.com:7bec3250-e0b7-3f75-4331-28cd89477e2e",
+    );
+    expect(sourceEventIdFromRetryPayload(envelope.payload)).toBe(
+      "7bec3250-e0b7-3f75-4331-28cd89477e2e",
+    );
+    expect(sourceChannelIdFromRetryPayload(envelope.payload)).toBe(36);
+  });
+
+  it("uses a deterministic payload hash when Shopify event identity is unavailable", () => {
+    const first = buildShopifyFulfillmentRetryEnvelope({
+      topic: "fulfillments/create",
+      payload: { order_id: 100, id: 200 },
+      sourceEventId: null,
+      sourceChannelId: null,
+      shopDomain: null,
+    });
+    const second = buildShopifyFulfillmentRetryEnvelope({
+      topic: "fulfillments/create",
+      payload: { id: 200, order_id: 100 },
+      sourceEventId: null,
+      sourceChannelId: null,
+      shopDomain: null,
+    });
+
+    expect(first.retryKey).toBe(second.retryKey);
+  });
+
+  it("does not collapse distinct updates for one fulfillment when event identity is unavailable", () => {
+    const first = buildShopifyFulfillmentRetryEnvelope({
+      topic: "fulfillments/update",
+      payload: {
+        order_id: 100,
+        id: 200,
+        tracking_number: "TRACKING-ONE",
+      },
+      sourceEventId: null,
+      sourceChannelId: 36,
+      shopDomain: "card-shellz.myshopify.com",
+    });
+    const second = buildShopifyFulfillmentRetryEnvelope({
+      topic: "fulfillments/update",
+      payload: {
+        order_id: 100,
+        id: 200,
+        tracking_number: "TRACKING-TWO",
+      },
+      sourceEventId: null,
+      sourceChannelId: 36,
+      shopDomain: "card-shellz.myshopify.com",
+    });
+
+    expect(first.retryKey).not.toBe(second.retryKey);
+  });
+
+  it("enqueues with the stable key and conflict-safe insert semantics", async () => {
+    const onConflictDoNothing = vi.fn(async () => undefined);
+    const values = vi.fn(() => ({ onConflictDoNothing }));
+    const insert = vi.fn(() => ({ values }));
+    const envelope = buildShopifyFulfillmentRetryEnvelope({
+      topic: "fulfillments/update",
+      payload: { id: 200, order_id: 100 },
+      sourceEventId: "event-1",
+      sourceChannelId: 36,
+      shopDomain: "card-shellz.myshopify.com",
+    });
+
+    await enqueueShopifyFulfillmentWebhookRetry(
+      { insert },
+      {
+        topic: "fulfillments/update",
+        envelope,
+        errorMessage: "temporary failure",
+      },
+    );
+
+    expect(insert).toHaveBeenCalledOnce();
+    expect(values).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "shopify",
+      topic: "fulfillments/update",
+      retryKey: envelope.retryKey,
+      payload: envelope.payload,
+      lastError: "temporary failure",
+    }));
+    expect(onConflictDoNothing).toHaveBeenCalledOnce();
+  });
+
+  it("classifies active and deferred receipts as recovery-owned acknowledgements", () => {
+    expect(receiptRecoveryOwnedStatus({ code: "RECEIPT_ALREADY_PROCESSING" }))
+      .toBe("processing");
+    expect(receiptRecoveryOwnedStatus({ code: "RECEIPT_RETRY_NOT_DUE" }))
+      .toBe("pending");
+    expect(receiptRecoveryOwnedStatus({ code: "ECONNRESET" })).toBeNull();
   });
 });

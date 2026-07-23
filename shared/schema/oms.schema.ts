@@ -400,6 +400,7 @@ export const webhookRetryQueue = omsSchema.table("webhook_retry_queue", {
   provider: varchar("provider", { length: 50 }).notNull(), // 'shopify', 'ebay', 'shipstation'
   topic: varchar("topic", { length: 100 }).notNull(),
   payload: jsonb("payload").notNull(),
+  retryKey: varchar("retry_key", { length: 1000 }),
   sourceInboxId: integer("source_inbox_id"),
   attempts: integer("attempts").notNull().default(0),
   lastError: text("last_error"),

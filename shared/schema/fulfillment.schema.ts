@@ -677,6 +677,8 @@ export const channelFulfillmentReceipts = omsSchema.table("channel_fulfillment_r
   trackingUrl: text("tracking_url"),
   shippedAt: timestamp("shipped_at", { withTimezone: true }),
   processingStatus: varchar("processing_status", { length: 30 }).notNull().default("pending"),
+  retryFailureCount: integer("retry_failure_count").notNull().default(0),
+  nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
   omsOrderId: bigint("oms_order_id", { mode: "number" }).references(() => omsOrders.id, { onDelete: "restrict" }),
   physicalShipmentId: bigint("physical_shipment_id", { mode: "number" }).references(() => physicalShipments.id, { onDelete: "restrict" }),
   errorCode: varchar("error_code", { length: 100 }),
