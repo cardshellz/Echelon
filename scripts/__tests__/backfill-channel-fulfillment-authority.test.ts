@@ -19,6 +19,19 @@ const candidate: BackfillCandidate = Object.freeze({
   missingCommandItemCount: 1,
 });
 
+const resolvedPackage = Object.freeze({
+  legacyWmsShipmentIds: Object.freeze([4842, 6001]),
+  shippingProvider: "shipstation",
+  providerPhysicalShipmentId: "444087291",
+  providerOrderId: "755802673",
+  providerOrderKey: "echelon-wms-shp-4842",
+  trackingNumber: candidate.trackingNumber,
+  carrier: "USPS",
+  trackingUrl: null,
+  serviceCode: null,
+  shippedAt: new Date("2026-06-28T14:08:50.000Z"),
+});
+
 describe("backfill-channel-fulfillment-authority", () => {
   it("does not import dev-only dotenv in the production operator script", () => {
     const source = readFileSync(
@@ -71,9 +84,9 @@ describe("backfill-channel-fulfillment-authority", () => {
     expect(query.text).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
   });
 
-  it("does not invoke the repository in dry-run mode", async () => {
+  it("validates lineage without materializing in dry-run mode", async () => {
     const repository = {
-      resolveLegacyPhysicalPackage: vi.fn(),
+      resolveLegacyPhysicalPackage: vi.fn(async () => resolvedPackage),
       materializePhysicalPackage: vi.fn(),
     };
     const summary = await runBackfill(parseFlags([]), {
@@ -82,26 +95,48 @@ describe("backfill-channel-fulfillment-authority", () => {
       log: vi.fn(),
     });
 
-    expect(summary).toMatchObject({ candidates: 1, materialized: 0, commandsCreated: 0 });
-    expect(repository.resolveLegacyPhysicalPackage).not.toHaveBeenCalled();
+    expect(summary).toMatchObject({
+      candidates: 1,
+      lineageValidated: 1,
+      materialized: 0,
+      commandsCreated: 0,
+      reviewRequired: 0,
+    });
+    expect(repository.resolveLegacyPhysicalPackage).toHaveBeenCalledWith(4842);
+    expect(repository.materializePhysicalPackage).not.toHaveBeenCalled();
+  });
+
+  it("reports dry-run lineage failures for manual review without materializing", async () => {
+    const error = Object.assign(new Error("stable package identity is missing"), {
+      code: "PACKAGE_IDENTITY_CONFLICT",
+    });
+    const repository = {
+      resolveLegacyPhysicalPackage: vi.fn(async () => { throw error; }),
+      materializePhysicalPackage: vi.fn(),
+    };
+    const summary = await runBackfill(parseFlags([]), {
+      loadCandidates: vi.fn(async () => [candidate]),
+      repository: repository as any,
+      log: vi.fn(),
+    });
+
+    expect(summary).toMatchObject({
+      candidates: 1,
+      lineageValidated: 0,
+      materialized: 0,
+      reviewRequired: 1,
+      failures: [expect.objectContaining({
+        representativeShipmentId: 4842,
+        code: "PACKAGE_IDENTITY_CONFLICT",
+        message: "stable package identity is missing",
+      })],
+    });
     expect(repository.materializePhysicalPackage).not.toHaveBeenCalled();
   });
 
   it("materializes canonical rows without dispatching a provider call", async () => {
-    const resolved = {
-      legacyWmsShipmentIds: Object.freeze([4842, 6001]),
-      shippingProvider: "shipstation",
-      providerPhysicalShipmentId: "444087291",
-      providerOrderId: "755802673",
-      providerOrderKey: "echelon-wms-shp-4842",
-      trackingNumber: candidate.trackingNumber,
-      carrier: "USPS",
-      trackingUrl: null,
-      serviceCode: null,
-      shippedAt: new Date("2026-06-28T14:08:50.000Z"),
-    };
     const repository = {
-      resolveLegacyPhysicalPackage: vi.fn(async () => resolved),
+      resolveLegacyPhysicalPackage: vi.fn(async () => resolvedPackage),
       materializePhysicalPackage: vi.fn(async () => ({
         fulfillmentPlanIds: Object.freeze([1]),
         shipmentRequestIds: Object.freeze([2]),
@@ -126,6 +161,7 @@ describe("backfill-channel-fulfillment-authority", () => {
       }),
     );
     expect(summary).toMatchObject({
+      lineageValidated: 1,
       materialized: 1,
       commandsCreated: 1,
       commandsReplayed: 0,

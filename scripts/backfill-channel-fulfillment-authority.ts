@@ -46,6 +46,7 @@ export interface BackfillCandidate {
 export interface BackfillSummary {
   readonly mode: Mode;
   readonly candidates: number;
+  readonly lineageValidated: number;
   readonly materialized: number;
   readonly commandsCreated: number;
   readonly commandsReplayed: number;
@@ -125,7 +126,7 @@ export function usage(): string {
     "  npx tsx scripts/backfill-channel-fulfillment-authority.ts --execute --limit=all",
     "",
     "Flags:",
-    "  --dry-run               Report missing canonical coverage. Default.",
+    "  --dry-run               Resolve and validate missing canonical coverage without writes. Default.",
     "  --execute               Materialize canonical rows and pending commands.",
     "  --limit=N|all           Maximum physical packages. Default 100.",
     "  --order-number=TEXT     Restrict to one channel-facing order number.",
@@ -314,6 +315,7 @@ export async function runBackfill(
 ): Promise<BackfillSummary> {
   const log = dependencies.log ?? console.log;
   const candidates = await dependencies.loadCandidates(flags);
+  let lineageValidated = 0;
   let materialized = 0;
   let commandsCreated = 0;
   let commandsReplayed = 0;
@@ -336,12 +338,21 @@ export async function runBackfill(
         + `missingCommandItems=${candidate.missingCommandItemCount}`,
       );
     }
-    if (flags.mode === "dry-run") continue;
-
     try {
       const resolved = await dependencies.repository.resolveLegacyPhysicalPackage(
         candidate.representativeShipmentId,
       );
+      lineageValidated += 1;
+      if (!flags.json && flags.mode === "dry-run") {
+        log(
+          `[Channel fulfillment authority backfill] VALIDATED `
+          + `shipment=${candidate.representativeShipmentId} `
+          + `legacyShipments=${resolved.legacyWmsShipmentIds.join(",")} `
+          + `provider=${resolved.shippingProvider}:${resolved.providerPhysicalShipmentId}`,
+        );
+      }
+      if (flags.mode === "dry-run") continue;
+
       const result = await dependencies.repository.materializePhysicalPackage({
         ...resolved,
         legacyWmsShipmentIds: [...resolved.legacyWmsShipmentIds],
@@ -367,6 +378,7 @@ export async function runBackfill(
   return Object.freeze({
     mode: flags.mode,
     candidates: candidates.length,
+    lineageValidated,
     materialized,
     commandsCreated,
     commandsReplayed,
