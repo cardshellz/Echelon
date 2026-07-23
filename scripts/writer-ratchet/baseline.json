@@ -429,8 +429,7 @@
     "modules/oms"
   ],
   "oms.webhook_retry_queue": [
-    "modules/oms",
-    "server/routes/shopify.routes.ts"
+    "modules/oms"
   ],
   "operations.control_tower_flow_snapshots": [
     "modules/operations"

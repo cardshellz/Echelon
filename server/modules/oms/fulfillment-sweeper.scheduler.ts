@@ -17,9 +17,10 @@ const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 500;
 const OUTBOUND_RECENT_SWEEP_LIMIT = 400;
 const OUTBOUND_RECENT_WINDOW_DAYS = 30;
-const INBOUND_RECEIPT_RECOVERY_LIMIT = 50;
+const INBOUND_RECEIPT_RECOVERY_LIMIT = 100;
 const INBOUND_RECEIPT_RECOVERY_MIN_AGE_MINUTES = 5;
-const INBOUND_RECEIPT_RECOVERY_MAX_ATTEMPTS = 10;
+const INBOUND_RECEIPT_RECOVERY_MAX_FAILURES = 5;
+const INBOUND_RECEIPT_RECOVERY_INTERVAL_MS = 60_000;
 
 type InboundReceiptEventKind = "created" | "updated" | "reconciled";
 
@@ -103,20 +104,24 @@ export async function recoverStaleChannelFulfillmentReceipts(
   options: {
     limit?: number;
     minAgeMinutes?: number;
+    maxRetryFailures?: number;
+    /** @deprecated Use maxRetryFailures. Retained for caller compatibility. */
     maxAttempts?: number;
   } = {},
 ): Promise<InboundReceiptRecoveryResult> {
   const limit = options.limit ?? INBOUND_RECEIPT_RECOVERY_LIMIT;
   const minAgeMinutes = options.minAgeMinutes ?? INBOUND_RECEIPT_RECOVERY_MIN_AGE_MINUTES;
-  const maxAttempts = options.maxAttempts ?? INBOUND_RECEIPT_RECOVERY_MAX_ATTEMPTS;
+  const maxRetryFailures = options.maxRetryFailures
+    ?? options.maxAttempts
+    ?? INBOUND_RECEIPT_RECOVERY_MAX_FAILURES;
   if (!Number.isInteger(limit) || limit <= 0 || limit > 500) {
     throw new Error("Inbound receipt recovery limit must be an integer from 1 through 500");
   }
   if (!Number.isInteger(minAgeMinutes) || minAgeMinutes < 1) {
     throw new Error("Inbound receipt recovery minimum age must be a positive integer");
   }
-  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    throw new Error("Inbound receipt recovery max attempts must be a positive integer");
+  if (!Number.isInteger(maxRetryFailures) || maxRetryFailures < 1) {
+    throw new Error("Inbound receipt recovery max failures must be a positive integer");
   }
 
   const result = await dbArg.execute(sql`
@@ -134,11 +139,20 @@ export async function recoverStaleChannelFulfillmentReceipts(
       causation_id
     FROM oms.channel_fulfillment_receipts
     WHERE source_provider IN ('shopify', 'ebay')
-      AND attempt_count < ${maxAttempts}
+      AND retry_failure_count < ${maxRetryFailures}
       AND (
         (
           processing_status = 'pending'
-          AND created_at <= NOW() - make_interval(mins => ${minAgeMinutes})
+          AND (
+            (
+              next_retry_at IS NOT NULL
+              AND next_retry_at <= NOW()
+            )
+            OR (
+              next_retry_at IS NULL
+              AND created_at <= NOW() - make_interval(mins => ${minAgeMinutes})
+            )
+          )
         )
         OR (
           processing_status = 'processing'
@@ -473,16 +487,6 @@ export async function runInboundFulfillmentSweep(
   try {
     console.log(`${LOG_PREFIX} Starting inbound fulfillment sweep...`);
 
-    if (channelFulfillmentIngress) {
-      try {
-        await recoverStaleChannelFulfillmentReceipts(dbArg, channelFulfillmentIngress);
-      } catch (err: any) {
-        console.error(
-          `${LOG_PREFIX} Inbound receipt recovery failed; continuing channel poll: ${err.message}`,
-        );
-      }
-    }
-
     // Orders that are paid/active in OMS but NOT shipped in WMS — candidates
     // where someone may have bought a label on the channel directly.
     const candidates = await dbArg.execute(sql`
@@ -541,6 +545,23 @@ export async function runInboundFulfillmentSweep(
   }
 }
 
+export async function runInboundReceiptRecoverySweep(
+  dbArg: any,
+  channelFulfillmentIngress: ChannelFulfillmentIngressService,
+): Promise<InboundReceiptRecoveryResult> {
+  try {
+    return await recoverStaleChannelFulfillmentReceipts(
+      dbArg,
+      channelFulfillmentIngress,
+    );
+  } catch (error: any) {
+    console.error(
+      `${LOG_PREFIX} Inbound receipt recovery failed: ${error?.message ?? String(error)}`,
+    );
+    throw error;
+  }
+}
+
 export function startFulfillmentSweeper(
   dbArg: any,
   fulfillmentAuthority: ChannelFulfillmentAuthorityService,
@@ -555,6 +576,7 @@ export function startFulfillmentSweeper(
 
   const SWEEPER_LOCK_ID = 8484;
   const INBOUND_LOCK_ID = 8485;
+  const RECEIPT_RECOVERY_LOCK_ID = 8486;
 
   // Run immediately on boot
   setTimeout(() => {
@@ -563,7 +585,23 @@ export function startFulfillmentSweeper(
     }).catch((err) => console.error(`${LOG_PREFIX} Boot run error: ${err.message}`));
   }, 5000);
 
-  // Inbound sweep on boot (staggered)
+  // Recover durable receipts independently from provider polling. The
+  // advisory lock prevents multiple web dynos from processing the same batch.
+  if (channelFulfillmentIngress) {
+    setTimeout(() => {
+      withAdvisoryLock(RECEIPT_RECOVERY_LOCK_ID, async () => {
+        await runInboundReceiptRecoverySweep(dbArg, channelFulfillmentIngress);
+      }).catch((err) => console.error(`${LOG_PREFIX} Receipt boot recovery error: ${err.message}`));
+    }, 15000);
+
+    setInterval(() => {
+      withAdvisoryLock(RECEIPT_RECOVERY_LOCK_ID, async () => {
+        await runInboundReceiptRecoverySweep(dbArg, channelFulfillmentIngress);
+      }).catch((err) => console.error(`${LOG_PREFIX} Receipt recovery error: ${err.message}`));
+    }, INBOUND_RECEIPT_RECOVERY_INTERVAL_MS);
+  }
+
+  // Inbound provider poll on boot (staggered from receipt recovery).
   setTimeout(() => {
     withAdvisoryLock(INBOUND_LOCK_ID, async () => {
       await runInboundFulfillmentSweep(
@@ -572,7 +610,7 @@ export function startFulfillmentSweeper(
         channelFulfillmentIngress,
       );
     }).catch((err) => console.error(`${LOG_PREFIX} Inbound boot run error: ${err.message}`));
-  }, 15000);
+  }, 30000);
 
   // Run every 1 hour thereafter
   setInterval(() => {

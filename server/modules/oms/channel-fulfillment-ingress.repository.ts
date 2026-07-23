@@ -62,11 +62,14 @@ export interface ClaimChannelFulfillmentReceiptInput {
   readonly now: Date;
   readonly leaseToken: string;
   readonly leaseDurationMs: number;
+  readonly maxFailures: number;
 }
 
 export interface ClaimedChannelFulfillmentReceipt {
   readonly receiptId: number;
   readonly terminalReplay: boolean;
+  readonly terminalProcessingStatus: "processed" | "ignored" | "review" | null;
+  readonly terminalReason: "lease_retry_exhausted" | null;
   readonly sourceEcho: boolean;
   readonly physicalShipmentId: number | null;
   readonly leaseToken: string | null;
@@ -97,6 +100,24 @@ export interface CompleteChannelFulfillmentReceiptInput {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+export interface FailChannelFulfillmentReceiptAttemptInput {
+  readonly receiptId: number;
+  readonly leaseToken: string;
+  readonly failedAt: Date;
+  readonly errorCode: string;
+  readonly errorMessage: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly maxFailures: number;
+  readonly retryBaseDelayMs: number;
+  readonly retryMaxDelayMs: number;
+}
+
+export interface FailChannelFulfillmentReceiptAttemptResult {
+  readonly processingStatus: "pending" | "review";
+  readonly retryFailureCount: number;
+  readonly nextRetryAt: Date | null;
+}
+
 export interface ChannelFulfillmentIngressRepository {
   stageReceipt(input: NormalizedChannelFulfillmentIngress): Promise<StageChannelFulfillmentReceiptResult>;
   claimReceipt(input: ClaimChannelFulfillmentReceiptInput): Promise<ClaimedChannelFulfillmentReceipt>;
@@ -122,6 +143,9 @@ export interface ChannelFulfillmentIngressRepository {
     now: Date,
   ): Promise<void>;
   completeReceipt(input: CompleteChannelFulfillmentReceiptInput): Promise<void>;
+  failReceiptAttempt(
+    input: FailChannelFulfillmentReceiptAttemptInput,
+  ): Promise<FailChannelFulfillmentReceiptAttemptResult>;
   recordReviewException(input: {
     receiptId: number;
     rule: string;
@@ -203,6 +227,8 @@ function assertLeaseClaimInput(input: ClaimChannelFulfillmentReceiptInput): void
     || !input.leaseToken.trim()
     || !Number.isInteger(input.leaseDurationMs)
     || input.leaseDurationMs <= 0
+    || !Number.isInteger(input.maxFailures)
+    || input.maxFailures <= 0
   ) {
     throw new ChannelFulfillmentIngressError(
       "INVALID_INPUT",
@@ -239,7 +265,15 @@ async function assertActiveReceiptLease(
       lease_token,
       lease_expires_at,
       last_attempt_at,
-      physical_shipment_id
+      physical_shipment_id,
+      retry_failure_count,
+      next_retry_at,
+      source_provider,
+      source_order_id,
+      source_fulfillment_id,
+      source_event_id,
+      event_kind,
+      raw_payload
     FROM oms.channel_fulfillment_receipts
     WHERE id = ${receiptId}
     FOR UPDATE
@@ -257,6 +291,59 @@ async function assertActiveReceiptLease(
     });
   }
   return receipt;
+}
+
+async function closeShopifyFulfillmentRetryDebt(
+  executor: any,
+  receipt: {
+    id: number;
+    source_provider: string;
+    source_order_id: string;
+    source_fulfillment_id: string;
+    source_event_id: string | null;
+    event_kind: string;
+    raw_payload: unknown;
+  },
+  processingStatus: "processed" | "ignored" | "review",
+  completedAt: Date,
+): Promise<void> {
+  if (String(receipt.source_provider).toLowerCase() !== "shopify") return;
+
+  await executor.execute(sql`
+    UPDATE oms.webhook_retry_queue
+    SET status = 'success',
+        last_error = ${`Resolved by canonical fulfillment receipt ${receipt.id} (${processingStatus})`},
+        updated_at = ${completedAt}
+    WHERE provider = 'shopify'
+      AND topic = CASE
+        WHEN ${receipt.event_kind} = 'created' THEN 'fulfillments/create'
+        WHEN ${receipt.event_kind} = 'updated' THEN 'fulfillments/update'
+        ELSE ''
+      END
+      AND payload->>'order_id' = ${String(receipt.source_order_id)}
+      AND payload->>'id' = ${String(receipt.source_fulfillment_id)}
+      AND (
+        (
+          ${receipt.source_event_id}::text IS NOT NULL
+          AND payload->>'__echelon_source_event_id' = ${receipt.source_event_id}
+        )
+        OR (
+          ${receipt.source_event_id}::text IS NULL
+          AND (
+            payload
+              - '__echelon_source_event_id'
+              - '__echelon_source_channel_id'
+              - 'shop_domain'
+          ) = (
+            ${json(receipt.raw_payload ?? {})}::jsonb
+              - '__echelon_source_event_id'
+              - '__echelon_source_channel_id'
+              - 'shop_domain'
+          )
+        )
+      )
+      AND status <> 'success'
+  `);
 }
 
 function inputLineMap(input: NormalizedChannelFulfillmentIngress): Map<string, number> {
@@ -1257,7 +1344,15 @@ export function createChannelFulfillmentIngressRepository(
           lease_token,
           lease_expires_at,
           last_attempt_at,
-          physical_shipment_id
+          physical_shipment_id,
+          retry_failure_count,
+          next_retry_at,
+          source_provider,
+          source_order_id,
+          source_fulfillment_id,
+          source_event_id,
+          event_kind,
+          raw_payload
         FROM oms.channel_fulfillment_receipts
         WHERE id = ${claim.receiptId}
         FOR UPDATE
@@ -1273,10 +1368,16 @@ export function createChannelFulfillmentIngressRepository(
 
       const currentStatus = String(receipt.processing_status);
       const currentAttempt = Number(receipt.attempt_count ?? 0);
-      if (currentStatus === "processed" || currentStatus === "ignored") {
+      if (
+        currentStatus === "processed"
+        || currentStatus === "ignored"
+        || currentStatus === "review"
+      ) {
         return Object.freeze({
           receiptId: claim.receiptId,
           terminalReplay: true,
+          terminalProcessingStatus: currentStatus,
+          terminalReason: null,
           sourceEcho: currentStatus === "ignored",
           physicalShipmentId: positiveInteger(receipt.physical_shipment_id),
           leaseToken: null,
@@ -1304,7 +1405,29 @@ export function createChannelFulfillmentIngressRepository(
         );
       }
 
+      const nextRetryAt = receipt.next_retry_at
+        ? new Date(receipt.next_retry_at)
+        : null;
+      if (
+        currentStatus === "pending"
+        && nextRetryAt
+        && nextRetryAt.getTime() > claim.now.getTime()
+      ) {
+        throw new ChannelFulfillmentIngressError(
+          "RECEIPT_RETRY_NOT_DUE",
+          `Channel fulfillment receipt ${claim.receiptId} is not due for retry`,
+          {
+            receiptId: claim.receiptId,
+            attemptNumber: currentAttempt,
+            nextRetryAt: nextRetryAt.toISOString(),
+          },
+          { reviewRequired: false },
+        );
+      }
+
       if (currentStatus === "processing") {
+        const retryFailureCount = Number(receipt.retry_failure_count ?? 0) + 1;
+        const exhausted = retryFailureCount >= claim.maxFailures;
         const previousStartedAt = receipt.last_attempt_at
           ? new Date(receipt.last_attempt_at)
           : claim.now;
@@ -1330,11 +1453,46 @@ export function createChannelFulfillmentIngressRepository(
             ${claim.now},
             'RECEIPT_LEASE_EXPIRED',
             'Receipt processing lease expired before completion',
-            ${json({ previousLeaseExpiresAt: currentLeaseExpiresAt?.toISOString() ?? null })}::jsonb,
+            ${json({
+              previousLeaseExpiresAt: currentLeaseExpiresAt?.toISOString() ?? null,
+              retryFailureCount,
+              exhausted,
+            })}::jsonb,
             ${claim.now}
           )
           ON CONFLICT (receipt_id, attempt_number) DO NOTHING
         `);
+        await tx.execute(sql`
+          UPDATE oms.channel_fulfillment_receipts
+          SET processing_status = ${exhausted ? "review" : "pending"},
+              retry_failure_count = ${retryFailureCount},
+              next_retry_at = NULL,
+              lease_token = NULL,
+              lease_expires_at = NULL,
+              error_code = 'RECEIPT_LEASE_EXPIRED',
+              error_message = 'Receipt processing lease expired before completion',
+              processed_at = ${exhausted ? claim.now : null},
+              updated_at = ${claim.now}
+          WHERE id = ${claim.receiptId}
+        `);
+        if (exhausted) {
+          await closeShopifyFulfillmentRetryDebt(
+            tx,
+            receipt,
+            "review",
+            claim.now,
+          );
+          return Object.freeze({
+            receiptId: claim.receiptId,
+            terminalReplay: true,
+            terminalProcessingStatus: "review" as const,
+            terminalReason: "lease_retry_exhausted" as const,
+            sourceEcho: false,
+            physicalShipmentId: positiveInteger(receipt.physical_shipment_id),
+            leaseToken: null,
+            attemptNumber: currentAttempt,
+          });
+        }
       }
 
       const claimed = firstRow<any>(await tx.execute(sql`
@@ -1346,6 +1504,7 @@ export function createChannelFulfillmentIngressRepository(
             last_attempt_at = ${claim.now},
             error_code = NULL,
             error_message = NULL,
+            next_retry_at = NULL,
             processed_at = NULL,
             updated_at = ${claim.now}
         WHERE id = ${claim.receiptId}
@@ -1357,6 +1516,8 @@ export function createChannelFulfillmentIngressRepository(
       return Object.freeze({
         receiptId: claim.receiptId,
         terminalReplay: false,
+        terminalProcessingStatus: null,
+        terminalReason: null,
         sourceEcho: false,
         physicalShipmentId: positiveInteger(claimed.physical_shipment_id),
         leaseToken: claim.leaseToken,
@@ -1753,6 +1914,123 @@ export function createChannelFulfillmentIngressRepository(
             updated_at = ${input.completedAt}
         WHERE id = ${input.receiptId}
       `);
+      await closeShopifyFulfillmentRetryDebt(
+        tx,
+        receipt,
+        input.processingStatus,
+        input.completedAt,
+      );
+    });
+  }
+
+  async function failReceiptAttempt(
+    input: FailChannelFulfillmentReceiptAttemptInput,
+  ): Promise<FailChannelFulfillmentReceiptAttemptResult> {
+    if (
+      !Number.isInteger(input.receiptId)
+      || input.receiptId <= 0
+      || !input.leaseToken.trim()
+      || !(input.failedAt instanceof Date)
+      || Number.isNaN(input.failedAt.getTime())
+      || !input.errorCode.trim()
+      || !input.errorMessage.trim()
+      || !Number.isInteger(input.maxFailures)
+      || input.maxFailures <= 0
+      || !Number.isInteger(input.retryBaseDelayMs)
+      || input.retryBaseDelayMs <= 0
+      || !Number.isInteger(input.retryMaxDelayMs)
+      || input.retryMaxDelayMs < input.retryBaseDelayMs
+    ) {
+      throw new ChannelFulfillmentIngressError(
+        "INVALID_INPUT",
+        "Invalid channel fulfillment receipt retry failure",
+        { receiptId: input.receiptId },
+        { reviewRequired: false },
+      );
+    }
+
+    return db.transaction(async (tx: any) => {
+      const receipt = await assertActiveReceiptLease(
+        tx,
+        input.receiptId,
+        input.leaseToken,
+        input.failedAt,
+      );
+      const retryFailureCount = Number(receipt.retry_failure_count ?? 0) + 1;
+      const exhausted = retryFailureCount >= input.maxFailures;
+      const delayMultiplier = 2 ** Math.max(0, retryFailureCount - 1);
+      const retryDelayMs = Math.min(
+        input.retryMaxDelayMs,
+        input.retryBaseDelayMs * delayMultiplier,
+      );
+      const nextRetryAt = exhausted
+        ? null
+        : new Date(input.failedAt.getTime() + retryDelayMs);
+      const processingStatus = exhausted ? "review" : "pending";
+      const errorMessage = input.errorMessage.slice(0, 2_000);
+      const startedAt = receipt.last_attempt_at
+        ? new Date(receipt.last_attempt_at)
+        : input.failedAt;
+
+      await tx.execute(sql`
+        INSERT INTO oms.channel_fulfillment_receipt_attempts (
+          receipt_id,
+          attempt_number,
+          lease_token,
+          outcome,
+          started_at,
+          completed_at,
+          error_code,
+          error_message,
+          metadata,
+          created_at
+        )
+        VALUES (
+          ${input.receiptId},
+          ${Number(receipt.attempt_count)},
+          ${input.leaseToken},
+          ${exhausted ? "review" : "retryable"},
+          ${startedAt},
+          ${input.failedAt},
+          ${input.errorCode.slice(0, 100)},
+          ${errorMessage},
+          ${json({
+            ...(input.metadata ?? {}),
+            retryFailureCount,
+            retryDelayMs: exhausted ? null : retryDelayMs,
+            exhausted,
+          })}::jsonb,
+          ${input.failedAt}
+        )
+      `);
+      await tx.execute(sql`
+        UPDATE oms.channel_fulfillment_receipts
+        SET processing_status = ${processingStatus},
+            retry_failure_count = ${retryFailureCount},
+            next_retry_at = ${nextRetryAt},
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            error_code = ${input.errorCode.slice(0, 100)},
+            error_message = ${errorMessage},
+            processed_at = ${exhausted ? input.failedAt : null},
+            updated_at = ${input.failedAt}
+        WHERE id = ${input.receiptId}
+      `);
+
+      if (exhausted) {
+        await closeShopifyFulfillmentRetryDebt(
+          tx,
+          receipt,
+          "review",
+          input.failedAt,
+        );
+      }
+
+      return Object.freeze({
+        processingStatus,
+        retryFailureCount,
+        nextRetryAt,
+      });
     });
   }
 
@@ -1826,6 +2104,7 @@ export function createChannelFulfillmentIngressRepository(
     attachPhysicalShipment,
     recordTrackingAmendment,
     completeReceipt,
+    failReceiptAttempt,
     recordReviewException,
   };
 }

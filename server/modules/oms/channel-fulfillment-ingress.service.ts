@@ -19,6 +19,9 @@ import {
 } from "./channel-fulfillment-ingress";
 
 const DEFAULT_RECEIPT_LEASE_DURATION_MS = 120_000;
+const MAX_TRANSIENT_RECEIPT_FAILURES = 5;
+const TRANSIENT_RECEIPT_RETRY_BASE_DELAY_MS = 2 * 60_000;
+const TRANSIENT_RECEIPT_RETRY_MAX_DELAY_MS = 60 * 60_000;
 
 export interface ChannelFulfillmentIngressClock {
   now(): Date;
@@ -303,12 +306,39 @@ export function createChannelFulfillmentIngressService(
         now: clock.now(),
         leaseToken: requestedLeaseToken,
         leaseDurationMs,
+        maxFailures: MAX_TRANSIENT_RECEIPT_FAILURES,
       });
       if (claimed.terminalReplay) {
-        logger.info({ code: "CHANNEL_FULFILLMENT_RECEIPT_REPLAYED", ...context });
+        logger.info({
+          code: "CHANNEL_FULFILLMENT_RECEIPT_REPLAYED",
+          ...context,
+          terminalReason: claimed.terminalReason,
+        });
+        const processingStatus = claimed.terminalProcessingStatus ?? (
+          claimed.sourceEcho ? "ignored" : "processed"
+        );
+        if (claimed.terminalReason === "lease_retry_exhausted") {
+          try {
+            await dependencies.repository.recordReviewException({
+              receiptId: staged.receiptId,
+              rule: "channel_fulfillment_lease_retry_exhausted",
+              summary: "Channel fulfillment receipt exhausted recovery after repeated lease expiry",
+              details: Object.freeze({
+                attemptNumber: claimed.attemptNumber,
+              }),
+            });
+          } catch (reviewError) {
+            logger.error({
+              code: "CHANNEL_FULFILLMENT_RECEIPT_REVIEW_EVIDENCE_FAILED",
+              ...context,
+              errorCode: errorCode(reviewError),
+              errorMessage: errorMessage(reviewError),
+            });
+          }
+        }
         return Object.freeze({
           receiptId: staged.receiptId,
-          processingStatus: claimed.sourceEcho ? "ignored" : "processed",
+          processingStatus,
           physicalShipmentId: claimed.physicalShipmentId,
           sourceEcho: claimed.sourceEcho,
           replayed: true,
@@ -492,12 +522,75 @@ export function createChannelFulfillmentIngressService(
       });
     } catch (error) {
       if (!shouldRouteToReview(error)) {
+        const transientErrorCode = errorCode(error);
+        const transientErrorMessage = errorMessage(error);
         logger.error({
           code: "CHANNEL_FULFILLMENT_RECEIPT_TRANSIENT_FAILURE",
           ...context,
-          errorCode: errorCode(error),
-          errorMessage: errorMessage(error),
+          errorCode: transientErrorCode,
+          errorMessage: transientErrorMessage,
         });
+
+        if (activeLeaseToken) {
+          try {
+            const failedAttempt = await dependencies.repository.failReceiptAttempt({
+              receiptId: staged.receiptId,
+              leaseToken: activeLeaseToken,
+              failedAt: clock.now(),
+              errorCode: transientErrorCode,
+              errorMessage: transientErrorMessage,
+              metadata: errorContext(error),
+              maxFailures: MAX_TRANSIENT_RECEIPT_FAILURES,
+              retryBaseDelayMs: TRANSIENT_RECEIPT_RETRY_BASE_DELAY_MS,
+              retryMaxDelayMs: TRANSIENT_RECEIPT_RETRY_MAX_DELAY_MS,
+            });
+            if (failedAttempt.processingStatus === "review") {
+              const failure = Object.freeze({
+                code: "CHANNEL_FULFILLMENT_TRANSIENT_RETRY_EXHAUSTED",
+                message: `Channel fulfillment receipt exhausted transient retries: ${transientErrorMessage}`,
+                context: Object.freeze({
+                  originalErrorCode: transientErrorCode,
+                  retryFailureCount: failedAttempt.retryFailureCount,
+                  ...errorContext(error),
+                }),
+              });
+              try {
+                await dependencies.repository.recordReviewException({
+                  receiptId: staged.receiptId,
+                  rule: failure.code.toLowerCase(),
+                  summary: failure.message,
+                  details: failure.context,
+                });
+              } catch (reviewError) {
+                logger.error({
+                  code: "CHANNEL_FULFILLMENT_RECEIPT_REVIEW_EVIDENCE_FAILED",
+                  ...context,
+                  errorCode: errorCode(reviewError),
+                  errorMessage: errorMessage(reviewError),
+                });
+              }
+              return Object.freeze({
+                receiptId: staged.receiptId,
+                processingStatus: "review",
+                physicalShipmentId: activePhysicalShipmentId,
+                sourceEcho: false,
+                replayed: false,
+                inventoryFailures: 0,
+                cancellationFailures: 0,
+                partialOverlapShipmentIds: Object.freeze([]),
+              });
+            }
+          } catch (retryPersistenceError) {
+            logger.error({
+              code: "CHANNEL_FULFILLMENT_RECEIPT_RETRY_PERSISTENCE_FAILED",
+              ...context,
+              errorCode: errorCode(retryPersistenceError),
+              errorMessage: errorMessage(retryPersistenceError),
+              originalErrorCode: transientErrorCode,
+              originalErrorMessage: transientErrorMessage,
+            });
+          }
+        }
         throw error;
       }
 

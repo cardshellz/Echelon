@@ -9,11 +9,18 @@ const storage = { ...ordersStorage, ...channelsStorage, ...catalogStorage, ...in
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "../modules/integrations/shopify";
 import { broadcastOrdersUpdated } from "../websocket";
 import type { InsertOrderItem } from "@shared/schema";
-import { webhookRetryQueue } from "@shared/schema";
 import crypto from "crypto";
 import { runReconciliationNow } from "../modules/orders/shopify-order-reconciliation";
 import { sql } from "drizzle-orm";
 import { processShopifyFulfillmentIngress } from "../modules/oms/shopify-fulfillment-ingress.adapter";
+import {
+  buildShopifyFulfillmentRetryEnvelope,
+  enqueueShopifyFulfillmentWebhookRetry,
+  receiptRecoveryOwnedStatus,
+  sourceChannelIdFromRetryPayload,
+  sourceEventIdFromRetryPayload,
+  type ShopifyFulfillmentWebhookTopic,
+} from "../modules/oms/shopify-fulfillment-webhook-retry";
 
 // ---------------------------------------------------------------------------
 // Shopify carrier-name → canonical carrier code mapping (§6 Commit 26).
@@ -31,6 +38,76 @@ import { processShopifyFulfillmentIngress } from "../modules/oms/shopify-fulfill
 // Fulfillment webhooks below enter through the canonical exact-line ingress.
 // Legacy SKU-based handlers were removed because they could manufacture
 // shipment state and mark an entire order fulfilled from one package.
+function isInternalRetryRequest(req: Request): boolean {
+  const secret = process.env.SESSION_SECRET?.trim();
+  if (!secret) return false;
+  const header = req.headers["x-internal-retry"];
+  const supplied = Array.isArray(header) ? header[0] : header;
+  return supplied === secret;
+}
+
+function webhookHeader(req: Request, name: string): string | null {
+  const value = req.headers[name];
+  const first = Array.isArray(value) ? value[0] : value;
+  return typeof first === "string" && first.trim() ? first.trim() : null;
+}
+
+async function handleFulfillmentWebhookFailure(input: {
+  app: Express;
+  req: Request;
+  res: Response;
+  topic: ShopifyFulfillmentWebhookTopic;
+  sourceChannelId: number | null;
+  sourceEventId: string | null;
+  shopDomain: string | null;
+  webhookVerified: boolean;
+  error: unknown;
+}): Promise<Response> {
+  const errorMessage = input.error instanceof Error
+    ? input.error.message
+    : String(input.error);
+
+  const recoveryOwnedStatus = receiptRecoveryOwnedStatus(input.error);
+  if (recoveryOwnedStatus) {
+    console.log(JSON.stringify({
+      event: "shopify_fulfillment_ingress_recovery_owned",
+      topic: input.topic,
+      sourceEventId: input.sourceEventId,
+      shopDomain: input.shopDomain,
+      processingStatus: recoveryOwnedStatus,
+    }));
+    return input.res.status(200).json({
+      received: true,
+      processingStatus: recoveryOwnedStatus,
+      replayed: true,
+    });
+  }
+
+  if (input.webhookVerified && !isInternalRetryRequest(input.req)) {
+    try {
+      const envelope = buildShopifyFulfillmentRetryEnvelope({
+        topic: input.topic,
+        payload: input.req.body as Record<string, unknown>,
+        sourceEventId: input.sourceEventId,
+        sourceChannelId: input.sourceChannelId,
+        shopDomain: input.shopDomain,
+      });
+      const retryDb = input.app.locals.db ?? (await import("../db")).db;
+      await enqueueShopifyFulfillmentWebhookRetry(retryDb, {
+        topic: input.topic,
+        envelope,
+        errorMessage,
+      });
+    } catch (enqueueError: any) {
+      console.error(
+        `[${input.topic}] failed to enqueue retry: ${enqueueError?.message ?? enqueueError}`,
+      );
+    }
+  }
+
+  return input.res.status(500).json({ error: "Webhook processing failed" });
+}
+
 export function registerShopifyRoutes(app: Express) {
 
   // -----------------------------------------------------------------------
@@ -671,8 +748,12 @@ export function registerShopifyRoutes(app: Express) {
     shopDomain: string | null;
   }> {
     // Allow internal worker bypass (mirrors oms-webhooks.ts verifyAndParse)
-    if (req.headers["x-internal-retry"] === process.env.SESSION_SECRET) {
-      return { verified: true, channelId: null, shopDomain: (req.headers["x-shopify-shop-domain"] as string) || null };
+    if (isInternalRetryRequest(req)) {
+      return {
+        verified: true,
+        channelId: sourceChannelIdFromRetryPayload(req.body),
+        shopDomain: webhookHeader(req, "x-shopify-shop-domain"),
+      };
     }
 
     const hmac = req.headers["x-shopify-hmac-sha256"] as string;
@@ -871,17 +952,26 @@ export function registerShopifyRoutes(app: Express) {
   //      in `shipped` state with `source='shopify_external_fulfillment'`
   //      so the order can roll up to shipped.
   //
-  // Failure handling: Group F C30 will add a formal retry queue. For now,
-  // unhandled exceptions return 500 and Shopify retries automatically.
+  // Failures use a stable provider-event retry key. Once a canonical receipt
+  // exists, its leased recovery state owns retries and duplicate deliveries
+  // are acknowledged without creating child retry rows.
   // ---------------------------------------------------------------------
   app.post("/api/shopify/webhooks/fulfillments/create", async (req: Request, res: Response) => {
+    let sourceChannelId: number | null = null;
+    let shopDomain: string | null = null;
+    let webhookVerified = false;
+    const sourceEventId = sourceEventIdFromRetryPayload(req.body)
+      ?? webhookHeader(req, "x-shopify-webhook-id");
     try {
-      const { verified, channelId, shopDomain } = await verifyChannelWebhook(req);
+      const verification = await verifyChannelWebhook(req);
+      sourceChannelId = verification.channelId;
+      shopDomain = verification.shopDomain;
 
-      if (!verified) {
+      if (!verification.verified) {
         console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
+      webhookVerified = true;
 
       const payload = req.body as Record<string, unknown>;
       const fulfillmentId = payload?.id ?? "<missing>";
@@ -900,15 +990,11 @@ export function registerShopifyRoutes(app: Express) {
           code: "CHANNEL_FULFILLMENT_INGRESS_UNAVAILABLE",
         });
       }
-      const webhookIdHeader = req.headers["x-shopify-webhook-id"];
-      const sourceEventId = Array.isArray(webhookIdHeader)
-        ? webhookIdHeader[0] ?? null
-        : webhookIdHeader ?? null;
       const outcome = await processShopifyFulfillmentIngress(
         service,
         payload,
         {
-          sourceChannelId: channelId,
+          sourceChannelId,
           sourceEventId,
           eventKind: "created",
           source: "shopify_fulfillments_create",
@@ -940,21 +1026,17 @@ export function registerShopifyRoutes(app: Express) {
       console.error(
         `[fulfillments/create] unhandled error: ${error?.message ?? error}`,
       );
-      // Enqueue to DLQ for worker retry (C30)
-      try {
-        const { db } = app.locals;
-        await db.insert(webhookRetryQueue).values({
-          provider: "shopify",
-          topic: "fulfillments/create",
-          payload: req.body,
-          lastError: error?.message ?? String(error),
-        });
-      } catch (enqueueErr: any) {
-        console.error(
-          `[fulfillments/create] failed to enqueue retry: ${enqueueErr?.message ?? enqueueErr}`,
-        );
-      }
-      return res.status(500).json({ error: "Webhook processing failed" });
+      return handleFulfillmentWebhookFailure({
+        app,
+        req,
+        res,
+        topic: "fulfillments/create",
+        sourceChannelId,
+        sourceEventId,
+        shopDomain,
+        webhookVerified,
+        error,
+      });
     }
   });
 
@@ -972,17 +1054,26 @@ export function registerShopifyRoutes(app: Express) {
   // Idempotent on replay: same tracking arrives twice → markShipmentShipped
   // returns changed=false, no DB writes beyond the lookups.
   //
-  // Failure handling: Group F C30 will add a formal retry queue. For now,
-  // unhandled exceptions return 500 and Shopify retries automatically.
+  // Retry behavior is shared with fulfillments/create: authenticated external
+  // failures get one idempotent transport retry, while the canonical receipt
+  // owns processing retries after it has been staged.
   // ---------------------------------------------------------------------
   app.post("/api/shopify/webhooks/fulfillments/update", async (req: Request, res: Response) => {
+    let sourceChannelId: number | null = null;
+    let shopDomain: string | null = null;
+    let webhookVerified = false;
+    const sourceEventId = sourceEventIdFromRetryPayload(req.body)
+      ?? webhookHeader(req, "x-shopify-webhook-id");
     try {
-      const { verified, channelId, shopDomain } = await verifyChannelWebhook(req);
+      const verification = await verifyChannelWebhook(req);
+      sourceChannelId = verification.channelId;
+      shopDomain = verification.shopDomain;
 
-      if (!verified) {
+      if (!verification.verified) {
         console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
+      webhookVerified = true;
 
       const payload = req.body as Record<string, unknown>;
       const fulfillmentId = payload?.id ?? "<missing>";
@@ -998,15 +1089,11 @@ export function registerShopifyRoutes(app: Express) {
           code: "CHANNEL_FULFILLMENT_INGRESS_UNAVAILABLE",
         });
       }
-      const webhookIdHeader = req.headers["x-shopify-webhook-id"];
-      const sourceEventId = Array.isArray(webhookIdHeader)
-        ? webhookIdHeader[0] ?? null
-        : webhookIdHeader ?? null;
       const outcome = await processShopifyFulfillmentIngress(
         service,
         payload,
         {
-          sourceChannelId: channelId,
+          sourceChannelId,
           sourceEventId,
           eventKind: "updated",
           source: "shopify_fulfillments_update",
@@ -1038,21 +1125,17 @@ export function registerShopifyRoutes(app: Express) {
       console.error(
         `[fulfillments/update] unhandled error: ${error?.message ?? error}`,
       );
-      // Enqueue to DLQ for worker retry (C30)
-      try {
-        const { db } = require("../db");
-        await db.insert(webhookRetryQueue).values({
-          provider: "shopify",
-          topic: "fulfillments/update",
-          payload: req.body,
-          lastError: error?.message ?? String(error),
-        });
-      } catch (enqueueErr: any) {
-        console.error(
-          `[fulfillments/update] failed to enqueue retry: ${enqueueErr?.message ?? enqueueErr}`,
-        );
-      }
-      return res.status(500).json({ error: "Webhook processing failed" });
+      return handleFulfillmentWebhookFailure({
+        app,
+        req,
+        res,
+        topic: "fulfillments/update",
+        sourceChannelId,
+        sourceEventId,
+        shopDomain,
+        webhookVerified,
+        error,
+      });
     }
   });
 
