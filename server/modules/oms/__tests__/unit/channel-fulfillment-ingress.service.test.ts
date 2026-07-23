@@ -51,6 +51,17 @@ function prepared(
     terminalReplay: false,
     sourceEcho: false,
     physicalShipmentId: null,
+    materializationIdentity: Object.freeze({
+      shippingProvider: "shopify",
+      providerPhysicalShipmentId: "6312306376863",
+      providerOrderId: "12140180865183",
+      providerOrderKey: "12140180865183",
+      trackingNumber: "1ZTEST",
+      carrier: "UPS",
+      trackingUrl: "https://example.test/track/1ZTEST",
+      serviceCode: null,
+      shippedAt: NOW,
+    }),
     legacyWmsShipmentIds: Object.freeze([501]),
     inventoryItems: Object.freeze([{
       legacyWmsShipmentId: 501,
@@ -211,6 +222,7 @@ describe("channel fulfillment ingress", () => {
     const repository = repositoryMock(prepared({
       sourceEcho: true,
       physicalShipmentId: 701,
+      materializationIdentity: null,
       legacyWmsShipmentIds: Object.freeze([]),
       inventoryItems: Object.freeze([]),
       cancellationCandidates: Object.freeze([]),
@@ -233,10 +245,67 @@ describe("channel fulfillment ingress", () => {
     expect(result).toMatchObject({ processingStatus: "ignored", sourceEcho: true });
   });
 
+  it("adopts the existing shipping-provider package identity for a channel acknowledgement", async () => {
+    const repository = repositoryMock(prepared({
+      sourceEcho: true,
+      materializationIdentity: Object.freeze({
+        shippingProvider: "shipstation",
+        providerPhysicalShipmentId: "442326748",
+        providerOrderId: "755417850",
+        providerOrderKey: "echelon-wms-shp-4641",
+        trackingNumber: "1ZOWNEDBYSHIPSTATION",
+        carrier: "UPS",
+        trackingUrl: "https://example.test/shipstation/1ZOWNEDBYSHIPSTATION",
+        serviceCode: "ups_ground",
+        shippedAt: new Date("2026-07-22T14:50:00.000Z"),
+      }),
+      legacyWmsShipmentIds: Object.freeze([4641]),
+      inventoryItems: Object.freeze([]),
+      cancellationCandidates: Object.freeze([]),
+    }));
+    const deps = dependencies(repository);
+    const service = createChannelFulfillmentIngressService(deps);
+
+    const result = await service.process(input({
+      trackingNumber: "1ZOWNEDBYSHIPSTATION",
+      carrier: "UPS\u00ae",
+    }));
+
+    expect(deps.authority.recordPhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        legacyWmsShipmentIds: [4641],
+        shippingProvider: "shipstation",
+        providerPhysicalShipmentId: "442326748",
+        providerOrderId: "755417850",
+        providerOrderKey: "echelon-wms-shp-4641",
+        trackingNumber: "1ZOWNEDBYSHIPSTATION",
+        carrier: "UPS",
+        trackingUrl: "https://example.test/shipstation/1ZOWNEDBYSHIPSTATION",
+        serviceCode: "ups_ground",
+        shippedAt: new Date("2026-07-22T14:50:00.000Z"),
+        suppressChannelProviders: ["shopify"],
+      }),
+      { executeImmediately: false },
+    );
+    expect(deps.inventory.recordShipment).not.toHaveBeenCalled();
+    expect(deps.cancelEngineShipment).not.toHaveBeenCalled();
+    expect(repository.completeReceipt).toHaveBeenCalledWith(expect.objectContaining({
+      processingStatus: "ignored",
+      physicalShipmentId: 701,
+      metadata: { sourceEcho: true },
+    }));
+    expect(result).toMatchObject({
+      processingStatus: "ignored",
+      physicalShipmentId: 701,
+      sourceEcho: true,
+    });
+  });
+
   it("returns terminal receipts without repeating any side effect", async () => {
     const repository = repositoryMock(prepared({
       terminalReplay: true,
       physicalShipmentId: 701,
+      materializationIdentity: null,
       legacyWmsShipmentIds: Object.freeze([]),
       inventoryItems: Object.freeze([]),
       cancellationCandidates: Object.freeze([]),

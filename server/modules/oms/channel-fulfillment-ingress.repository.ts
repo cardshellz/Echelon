@@ -6,6 +6,7 @@ import {
 } from "../../infrastructure/postgres-array";
 import {
   buildProviderPhysicalShipmentIdentity,
+  parseLegacyProviderPhysicalShipmentId,
 } from "./channel-fulfillment-authority.repository";
 import {
   ChannelFulfillmentIngressError,
@@ -36,10 +37,23 @@ export interface PreparedChannelFulfillmentReceipt {
   readonly terminalReplay: boolean;
   readonly sourceEcho: boolean;
   readonly physicalShipmentId: number | null;
+  readonly materializationIdentity: IngressPhysicalPackageIdentity | null;
   readonly legacyWmsShipmentIds: readonly number[];
   readonly inventoryItems: readonly IngressInventoryItem[];
   readonly cancellationCandidates: readonly IngressEngineCancellationCandidate[];
   readonly partialOverlapShipmentIds: readonly number[];
+}
+
+export interface IngressPhysicalPackageIdentity {
+  readonly shippingProvider: string;
+  readonly providerPhysicalShipmentId: string;
+  readonly providerOrderId: string | null;
+  readonly providerOrderKey: string | null;
+  readonly trackingNumber: string | null;
+  readonly carrier: string | null;
+  readonly trackingUrl: string | null;
+  readonly serviceCode: string | null;
+  readonly shippedAt: Date | null;
 }
 
 export interface ClaimChannelFulfillmentReceiptInput {
@@ -252,7 +266,10 @@ function inputLineMap(input: NormalizedChannelFulfillmentIngress): Map<string, n
 function assertExactAllocation(
   expected: ReadonlyMap<string, number>,
   actualRows: readonly { channel_order_line_id: string; quantity: number }[],
-  errorCode: "ECHO_COMMAND_CONFLICT" | "CANONICAL_PACKAGE_CONFLICT",
+  errorCode:
+    | "ECHO_COMMAND_CONFLICT"
+    | "CANONICAL_PACKAGE_CONFLICT"
+    | "PACKAGE_ITEM_CONFLICT",
   context: Record<string, unknown>,
 ): void {
   const actual = new Map<string, number>();
@@ -272,6 +289,11 @@ function assertExactAllocation(
       },
     );
   }
+}
+
+function normalizedTrackingNumber(value: unknown): string | null {
+  const normalized = nullableText(value)?.replace(/[^a-z0-9]/gi, "").toUpperCase() ?? "";
+  return normalized.length > 0 ? normalized : null;
 }
 
 async function resolveOmsOrder(
@@ -611,6 +633,241 @@ async function findExistingCanonicalPackage(
     sourceFulfillmentId: input.sourceFulfillmentId,
   });
   return { physicalShipmentId: [...physicalIds][0], itemRows: rows };
+}
+
+async function findExistingCanonicalPackageByTracking(
+  tx: any,
+  input: NormalizedChannelFulfillmentIngress,
+  omsOrderId: number,
+): Promise<{ physicalShipmentId: number; itemRows: any[] } | null> {
+  const trackingNumber = normalizedTrackingNumber(input.trackingNumber);
+  if (!trackingNumber) return null;
+
+  const result = await tx.execute(sql`
+    SELECT
+      physical.id AS physical_shipment_id,
+      oms_line.external_line_item_id AS channel_order_line_id,
+      item.quantity_shipped::int AS quantity,
+      item.id AS physical_shipment_item_id,
+      item.legacy_wms_shipment_item_id,
+      legacy_item.shipment_id AS legacy_wms_shipment_id
+    FROM wms.physical_shipments physical
+    JOIN wms.physical_shipment_items item ON item.physical_shipment_id = physical.id
+    LEFT JOIN wms.outbound_shipment_items legacy_item
+      ON legacy_item.id = item.legacy_wms_shipment_item_id
+    JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = item.fulfillment_plan_line_id
+    JOIN oms.oms_order_lines oms_line ON oms_line.id = plan_line.oms_order_line_id
+    WHERE physical.status = 'shipped'
+      AND oms_line.order_id = ${omsOrderId}
+      AND item.shipment_item_purpose = 'customer_fulfillment'
+      AND UPPER(REGEXP_REPLACE(BTRIM(physical.tracking_number), '[^a-zA-Z0-9]', '', 'g'))
+        = ${trackingNumber}
+    ORDER BY physical.id, item.id
+  `);
+  const rows = rowsOf<any>(result);
+  if (rows.length === 0) return null;
+  const physicalIds = new Set(rows.map((row) => Number(row.physical_shipment_id)));
+  if (physicalIds.size !== 1) {
+    throw new ChannelFulfillmentIngressError(
+      "CANONICAL_PACKAGE_CONFLICT",
+      "Tracking identity maps this channel fulfillment to multiple canonical packages",
+      {
+        sourceProvider: input.sourceProvider,
+        sourceFulfillmentId: input.sourceFulfillmentId,
+        trackingNumber: input.trackingNumber,
+        physicalShipmentIds: [...physicalIds],
+      },
+    );
+  }
+  assertExactAllocation(inputLineMap(input), rows, "CANONICAL_PACKAGE_CONFLICT", {
+    sourceProvider: input.sourceProvider,
+    sourceFulfillmentId: input.sourceFulfillmentId,
+    trackingNumber: input.trackingNumber,
+    matchStrategy: "oms_order_tracking_exact_allocation",
+  });
+  return { physicalShipmentId: [...physicalIds][0], itemRows: rows };
+}
+
+interface ExistingLegacyPackageMatch {
+  readonly legacyShipmentIds: readonly number[];
+  readonly lineRows: readonly any[];
+  readonly materializationIdentity: IngressPhysicalPackageIdentity;
+}
+
+async function findExistingLegacyPackageByTracking(
+  tx: any,
+  input: NormalizedChannelFulfillmentIngress,
+  lines: readonly ResolvedLine[],
+): Promise<ExistingLegacyPackageMatch | null> {
+  const trackingNumber = normalizedTrackingNumber(input.trackingNumber);
+  if (!trackingNumber) return null;
+
+  const byWmsOrder = new Map<number, ResolvedLine[]>();
+  for (const line of lines) {
+    const group = byWmsOrder.get(line.wmsOrderId) ?? [];
+    group.push(line);
+    byWmsOrder.set(line.wmsOrderId, group);
+  }
+
+  const legacyShipmentIds: number[] = [];
+  const lineRows: any[] = [];
+  let materializationIdentity: IngressPhysicalPackageIdentity | null = null;
+
+  for (const [wmsOrderId, orderLines] of [...byWmsOrder.entries()].sort(([left], [right]) => left - right)) {
+    const result = await tx.execute(sql`
+      SELECT
+        shipment.id AS legacy_wms_shipment_id,
+        COALESCE(
+          NULLIF(BTRIM(shipment.shipping_engine), ''),
+          CASE WHEN shipment.shipstation_order_id IS NOT NULL THEN 'shipstation' END
+        ) AS shipping_provider,
+        COALESCE(
+          NULLIF(BTRIM(shipment.engine_order_ref), ''),
+          shipment.shipstation_order_id::text
+        ) AS provider_order_id,
+        NULLIF(BTRIM(shipment.shipstation_order_key), '') AS provider_order_key,
+        shipment.external_fulfillment_id,
+        shipment.tracking_number,
+        shipment.carrier,
+        shipment.tracking_url,
+        shipment.service_code,
+        shipment.shipped_at,
+        shipment_item.id AS legacy_wms_shipment_item_id,
+        shipment_item.order_item_id,
+        shipment_item.qty::int AS quantity,
+        oms_line.external_line_item_id AS channel_order_line_id
+      FROM wms.outbound_shipments shipment
+      JOIN wms.outbound_shipment_items shipment_item
+        ON shipment_item.shipment_id = shipment.id
+      JOIN wms.order_items order_item ON order_item.id = shipment_item.order_item_id
+      JOIN oms.oms_order_lines oms_line ON oms_line.id = order_item.oms_order_line_id
+      WHERE shipment.order_id = ${wmsOrderId}
+        AND shipment.status = 'shipped'
+        AND shipment_item.shipment_item_purpose = 'customer_fulfillment'
+        AND shipment_item.qty > 0
+        AND UPPER(REGEXP_REPLACE(BTRIM(shipment.tracking_number), '[^a-zA-Z0-9]', '', 'g'))
+          = ${trackingNumber}
+      ORDER BY shipment.id, shipment_item.id
+      FOR UPDATE OF shipment, shipment_item
+    `);
+    const rows = rowsOf<any>(result);
+    if (rows.length === 0) return null;
+
+    const shipmentIds = new Set(rows.map((row) => Number(row.legacy_wms_shipment_id)));
+    if (shipmentIds.size !== 1) {
+      throw new ChannelFulfillmentIngressError(
+        "CANONICAL_PACKAGE_CONFLICT",
+        "Tracking identity maps this WMS order to multiple shipped legacy packages",
+        {
+          wmsOrderId,
+          trackingNumber: input.trackingNumber,
+          legacyWmsShipmentIds: [...shipmentIds],
+        },
+      );
+    }
+
+    assertExactAllocation(
+      new Map(orderLines.map((line) => [line.channelOrderLineId, line.quantity])),
+      rows,
+      "PACKAGE_ITEM_CONFLICT",
+      {
+        wmsOrderId,
+        trackingNumber: input.trackingNumber,
+        legacyWmsShipmentId: [...shipmentIds][0],
+        matchStrategy: "wms_order_tracking_exact_allocation",
+      },
+    );
+
+    const first = rows[0];
+    const parsedPhysical = parseLegacyProviderPhysicalShipmentId(first.external_fulfillment_id);
+    const shippingProvider = nullableText(first.shipping_provider)?.toLowerCase() ?? null;
+    const providerOrderId = nullableText(first.provider_order_id);
+    const providerOrderKey = nullableText(first.provider_order_key);
+    const persistedTrackingNumber = nullableText(first.tracking_number);
+    const persistedCarrier = nullableText(first.carrier);
+    const persistedTrackingUrl = nullableText(first.tracking_url);
+    const persistedServiceCode = nullableText(first.service_code);
+    const persistedShippedAt = first.shipped_at ? new Date(first.shipped_at) : null;
+    if (
+      !parsedPhysical
+      || !shippingProvider
+      || parsedPhysical.provider !== shippingProvider
+      || (!providerOrderId && !providerOrderKey)
+      || !persistedTrackingNumber
+      || !persistedCarrier
+      || (persistedShippedAt && Number.isNaN(persistedShippedAt.getTime()))
+    ) {
+      throw new ChannelFulfillmentIngressError(
+        "CANONICAL_PACKAGE_CONFLICT",
+        "The existing shipped package lacks stable shipping-provider identity",
+        {
+          wmsOrderId,
+          legacyWmsShipmentId: [...shipmentIds][0],
+          shippingProvider,
+          externalFulfillmentId: first.external_fulfillment_id,
+          providerOrderId,
+          providerOrderKey,
+          persistedTrackingNumber,
+          persistedCarrier,
+          persistedShippedAt: first.shipped_at,
+        },
+      );
+    }
+
+    const identity = Object.freeze({
+      shippingProvider,
+      providerPhysicalShipmentId: parsedPhysical.providerPhysicalShipmentId,
+      providerOrderId,
+      providerOrderKey,
+      trackingNumber: persistedTrackingNumber,
+      carrier: persistedCarrier,
+      trackingUrl: persistedTrackingUrl,
+      serviceCode: persistedServiceCode,
+      shippedAt: persistedShippedAt,
+    });
+    if (
+      materializationIdentity
+      && (
+        materializationIdentity.shippingProvider !== identity.shippingProvider
+        || materializationIdentity.providerPhysicalShipmentId !== identity.providerPhysicalShipmentId
+        || materializationIdentity.providerOrderId !== identity.providerOrderId
+        || materializationIdentity.providerOrderKey !== identity.providerOrderKey
+        || normalizedTrackingNumber(materializationIdentity.trackingNumber)
+          !== normalizedTrackingNumber(identity.trackingNumber)
+        || (materializationIdentity.carrier ?? "").trim().toLowerCase()
+          !== (identity.carrier ?? "").trim().toLowerCase()
+      )
+    ) {
+      throw new ChannelFulfillmentIngressError(
+        "CANONICAL_PACKAGE_CONFLICT",
+        "One provider fulfillment maps to multiple legacy physical package identities",
+        {
+          trackingNumber: input.trackingNumber,
+          firstIdentity: materializationIdentity,
+          conflictingIdentity: identity,
+        },
+      );
+    }
+    materializationIdentity = identity;
+    legacyShipmentIds.push([...shipmentIds][0]);
+
+    const byChannelLine = new Map(rows.map((row) => [String(row.channel_order_line_id), row]));
+    for (const line of orderLines) {
+      const row = byChannelLine.get(line.channelOrderLineId);
+      lineRows.push({
+        line,
+        legacyWmsShipmentItemId: positiveInteger(row?.legacy_wms_shipment_item_id),
+        physicalShipmentItemId: null,
+      });
+    }
+  }
+
+  if (!materializationIdentity) return null;
+  return Object.freeze({
+    legacyShipmentIds: Object.freeze(legacyShipmentIds),
+    lineRows: Object.freeze(lineRows),
+    materializationIdentity,
+  });
 }
 
 async function findOrCreateLegacyPackage(
@@ -1163,6 +1420,7 @@ export function createChannelFulfillmentIngressRepository(
           terminalReplay: false,
           sourceEcho: true,
           physicalShipmentId: echo.physicalShipmentId,
+          materializationIdentity: null,
           legacyWmsShipmentIds: Object.freeze([]),
           inventoryItems: Object.freeze([]),
           cancellationCandidates: Object.freeze([]),
@@ -1171,12 +1429,43 @@ export function createChannelFulfillmentIngressRepository(
       }
 
       const existingPhysical = await findExistingCanonicalPackage(tx, input);
+      const existingPhysicalByTracking = existingPhysical
+        ? null
+        : await findExistingCanonicalPackageByTracking(tx, input, order.omsOrderId);
+      if (existingPhysicalByTracking) {
+        const byChannelLine = new Map(
+          existingPhysicalByTracking.itemRows.map((row) => [row.channel_order_line_id, row]),
+        );
+        await persistReceiptItems(tx, receiptId, lines.map((line) => {
+          const row = byChannelLine.get(line.channelOrderLineId);
+          return {
+            line,
+            legacyWmsShipmentItemId: positiveInteger(row?.legacy_wms_shipment_item_id),
+            physicalShipmentItemId: positiveInteger(row?.physical_shipment_item_id),
+          };
+        }));
+        return Object.freeze({
+          receiptId,
+          omsOrderId: order.omsOrderId,
+          terminalReplay: false,
+          sourceEcho: true,
+          physicalShipmentId: existingPhysicalByTracking.physicalShipmentId,
+          materializationIdentity: null,
+          legacyWmsShipmentIds: Object.freeze([]),
+          inventoryItems: Object.freeze([]),
+          cancellationCandidates: Object.freeze([]),
+          partialOverlapShipmentIds: Object.freeze([]),
+        });
+      }
+
       let packageRows: any[];
       let physicalShipmentId: number | null;
+      let materializationIdentity: IngressPhysicalPackageIdentity | null;
       let legacyWmsShipmentIds: number[];
       let inventoryItems: IngressInventoryItem[];
       if (existingPhysical) {
         physicalShipmentId = existingPhysical.physicalShipmentId;
+        materializationIdentity = null;
         const byChannelLine = new Map(existingPhysical.itemRows.map((row) => [row.channel_order_line_id, row]));
         packageRows = lines.map((line) => {
           const row = byChannelLine.get(line.channelOrderLineId);
@@ -1210,8 +1499,36 @@ export function createChannelFulfillmentIngressRepository(
             deductFromOnHandOnly: row.line.wmsItemPickedQuantity <= 0,
           }));
       } else {
+        const existingLegacy = await findExistingLegacyPackageByTracking(tx, input, lines);
+        if (existingLegacy) {
+          await persistReceiptItems(tx, receiptId, existingLegacy.lineRows);
+          return Object.freeze({
+            receiptId,
+            omsOrderId: order.omsOrderId,
+            terminalReplay: false,
+            sourceEcho: true,
+            physicalShipmentId: null,
+            materializationIdentity: existingLegacy.materializationIdentity,
+            legacyWmsShipmentIds: existingLegacy.legacyShipmentIds,
+            inventoryItems: Object.freeze([]),
+            cancellationCandidates: Object.freeze([]),
+            partialOverlapShipmentIds: Object.freeze([]),
+          });
+        }
+
         const created = await findOrCreateLegacyPackage(tx, input, lines);
         physicalShipmentId = null;
+        materializationIdentity = Object.freeze({
+          shippingProvider: input.sourceProvider,
+          providerPhysicalShipmentId: input.sourceFulfillmentId,
+          providerOrderId: input.sourceOrderId,
+          providerOrderKey: input.sourceOrderId,
+          trackingNumber: input.trackingNumber,
+          carrier: input.carrier,
+          trackingUrl: input.trackingUrl,
+          serviceCode: null,
+          shippedAt: input.shippedAt,
+        });
         packageRows = created.lineRows;
         legacyWmsShipmentIds = created.legacyShipmentIds;
         inventoryItems = created.inventoryItems;
@@ -1229,6 +1546,7 @@ export function createChannelFulfillmentIngressRepository(
         terminalReplay: false,
         sourceEcho: false,
         physicalShipmentId,
+        materializationIdentity,
         legacyWmsShipmentIds: Object.freeze([...legacyWmsShipmentIds]),
         inventoryItems: Object.freeze([...inventoryItems]),
         cancellationCandidates: Object.freeze(cancellation.candidates),

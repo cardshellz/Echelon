@@ -61,6 +61,7 @@ export interface ChannelWritebackCandidateOptions {
   maxAgeDays?: number | null;
   limit?: number;
   excludeRetryStates?: boolean;
+  provider?: "shopify" | "ebay";
 }
 
 function rows(result: any): any[] {
@@ -85,11 +86,18 @@ function normalizedLimit(value: unknown): number {
  * One row represents one physical WMS shipment. An order-level event is kept
  * only as diagnostic context; it never makes another shipment complete.
  */
-function shippedChannelShipmentsCte(windowDays: number | null, minAgeMinutes: number) {
+function shippedChannelShipmentsCte(
+  windowDays: number | null,
+  minAgeMinutes: number,
+  provider?: "shopify" | "ebay",
+) {
   const windowPredicate = windowDays === null
     ? sql``
     : sql`AND os.shipped_at > NOW() - make_interval(days => ${windowDays})`;
   const minAge = sql`${minAgeMinutes} * INTERVAL '1 minute'`;
+  const providerPredicate = provider
+    ? sql`AND c.provider = ${provider}`
+    : sql`AND c.provider IN ('shopify', 'ebay')`;
 
   return sql`
     WITH shipped_channel_shipments AS (
@@ -124,6 +132,66 @@ function shippedChannelShipmentsCte(windowDays: number | null, minAgeMinutes: nu
                 )
                 OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
               )
+          )
+          OR (
+            EXISTS (
+              SELECT 1
+              FROM wms.outbound_shipment_items eligible_item
+              JOIN wms.order_items eligible_order_item
+                ON eligible_order_item.id = eligible_item.order_item_id
+              LEFT JOIN oms.oms_order_lines eligible_oms_line
+                ON eligible_oms_line.id = eligible_order_item.oms_order_line_id
+              WHERE eligible_item.shipment_id = os.id
+                AND eligible_item.shipment_item_purpose = 'customer_fulfillment'
+                AND eligible_item.qty > 0
+                AND COALESCE(eligible_order_item.status, 'pending') <> 'cancelled'
+                AND COALESCE(
+                  LOWER(NULLIF(BTRIM(eligible_oms_line.fulfillment_provider), '')),
+                  c.provider
+                ) = c.provider
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM wms.outbound_shipment_items eligible_item
+              JOIN wms.order_items eligible_order_item
+                ON eligible_order_item.id = eligible_item.order_item_id
+              LEFT JOIN oms.oms_order_lines eligible_oms_line
+                ON eligible_oms_line.id = eligible_order_item.oms_order_line_id
+              WHERE eligible_item.shipment_id = os.id
+                AND eligible_item.shipment_item_purpose = 'customer_fulfillment'
+                AND eligible_item.qty > 0
+                AND COALESCE(eligible_order_item.status, 'pending') <> 'cancelled'
+                AND COALESCE(
+                  LOWER(NULLIF(BTRIM(eligible_oms_line.fulfillment_provider), '')),
+                  c.provider
+                ) = c.provider
+                AND NOT (
+                  EXISTS (
+                    SELECT 1
+                    FROM wms.physical_shipment_items physical_item
+                    JOIN oms.channel_fulfillment_push_items push_item
+                      ON push_item.physical_shipment_item_id = physical_item.id
+                    JOIN oms.channel_fulfillment_pushes push
+                      ON push.id = push_item.channel_fulfillment_push_id
+                    WHERE physical_item.legacy_wms_shipment_item_id = eligible_item.id
+                      AND push.oms_order_id = oo.id
+                      AND push.channel_provider = c.provider
+                      AND push.push_status IN ('success', 'ignored')
+                      AND push_item.quantity_pushed = eligible_item.qty
+                  )
+                  OR EXISTS (
+                    SELECT 1
+                    FROM oms.channel_fulfillment_receipt_items receipt_item
+                    JOIN oms.channel_fulfillment_receipts receipt
+                      ON receipt.id = receipt_item.receipt_id
+                    WHERE receipt_item.legacy_wms_shipment_item_id = eligible_item.id
+                      AND receipt.oms_order_id = oo.id
+                      AND receipt.source_provider = c.provider
+                      AND receipt.processing_status IN ('processed', 'ignored')
+                      AND receipt_item.quantity = eligible_item.qty
+                  )
+                )
+            )
           )
         ) AS has_per_shipment_success,
         EXISTS (
@@ -190,7 +258,7 @@ function shippedChannelShipmentsCte(windowDays: number | null, minAgeMinutes: nu
         AND os.shipped_at IS NOT NULL
         AND os.shipped_at < NOW() - ${minAge}
         ${windowPredicate}
-        AND c.provider IN ('shopify', 'ebay')
+        ${providerPredicate}
         AND EXISTS (
           SELECT 1
           FROM wms.outbound_shipment_items osi
@@ -309,7 +377,7 @@ export async function findChannelWritebackCandidates(
     ? null
     : normalizedWindowDays(options.maxAgeDays);
   const limit = normalizedLimit(options.limit);
-  const cte = shippedChannelShipmentsCte(maxAgeDays, minAgeMinutes);
+  const cte = shippedChannelShipmentsCte(maxAgeDays, minAgeMinutes, options.provider);
   const retryStatePredicate = options.excludeRetryStates
     ? sql` AND pending_retry = false AND dead_retry = false`
     : sql``;

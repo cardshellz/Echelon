@@ -66,7 +66,7 @@ describe("oms-flow-reconciliation.service", () => {
     const issues = await collectOmsFlowReconciliationIssues(db);
 
     expect(issues).toEqual([]);
-    expect(db.execute).toHaveBeenCalledTimes(20);
+    expect(db.execute).toHaveBeenCalledTimes(22);
   });
 
   it("returns critical OMS/WMS and shipment drift issues with samples", async () => {
@@ -131,12 +131,26 @@ describe("oms-flow-reconciliation.service", () => {
     );
   });
 
-  it("does not queue Shopify fulfillment repair for orders OMS already considers fulfilled", () => {
-    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("NULLIF(os.shopify_fulfillment_id, '') IS NULL");
-    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("e.details->>'wmsShipmentId' = os.id::text");
+  it("uses canonical package evidence rather than the legacy Shopify id as repair authority", () => {
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("getChannelWritebackHealth");
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("findChannelWritebackCandidates");
+    expect(OMS_FLOW_RECONCILIATION_SRC).not.toContain("NULLIF(os.shopify_fulfillment_id, '') IS NULL");
     expect(OMS_FLOW_RECONCILIATION_SRC).not.toContain(
       "COALESCE(oo.fulfillment_status, 'unfulfilled') <> 'fulfilled'",
     );
+  });
+
+  it("surfaces inbound fulfillment receipts that exceed automatic recovery", () => {
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
+      "CHANNEL_FULFILLMENT_RECEIPT_STALLED",
+    );
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
+      "FROM oms.channel_fulfillment_receipts receipt",
+    );
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain(
+      "receipt.lease_expires_at < NOW() - INTERVAL '1 hour'",
+    );
+    expect(OMS_FLOW_RECONCILIATION_SRC).toContain("receipt.attempt_count >= 10");
   });
 
   it("flags active fulfillment partitions that cover the same OMS line", () => {
@@ -405,8 +419,10 @@ describe("oms-flow-reconciliation.service", () => {
         .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
-        .mockResolvedValueOnce(countRows(1))
-        .mockResolvedValueOnce(sampleRows([{ shipment_id: 1441, order_number: "#57743" }]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
         .mockResolvedValueOnce(sampleRows([])),
       insert: vi.fn(() => ({
         values: vi.fn(async (row: unknown) => {
@@ -421,9 +437,29 @@ describe("oms-flow-reconciliation.service", () => {
         .flatMap((chunk: any) => chunk?.value ?? [])
         .join(" ");
       if (queryText.includes("FROM shipped_channel_shipments")) {
+        if (queryText.includes("GROUP BY provider")) {
+          return {
+            rows: [{
+              provider: "shopify",
+              shipped: 1,
+              complete: 0,
+              missing: 1,
+              masked: 0,
+              partial_orders: 0,
+              retrying: 0,
+              dead: 0,
+            }],
+          };
+        }
         return {
           rows: [
-            { oms_order_id: 10, shipment_id: 1441, provider: "shopify", pending_retry: false, dead_retry: false },
+            {
+              oms_order_id: 10,
+              shipment_id: 1441,
+              provider: "shopify",
+              pending_retry: false,
+              dead_retry: false,
+            },
           ],
         };
       }
@@ -477,6 +513,9 @@ describe("oms-flow-reconciliation.service", () => {
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         // OMS_PROVIDER_FULFILLMENT_REFERENCE_DRIFT detector count + sample.
+        .mockResolvedValueOnce(countRows(0))
+        .mockResolvedValueOnce(sampleRows([]))
+        // CHANNEL_FULFILLMENT_RECEIPT_STALLED detector count + sample.
         .mockResolvedValueOnce(countRows(0))
         .mockResolvedValueOnce(sampleRows([]))
         // Auto-close cleanup finds no resolved dead fulfillment/tracking retries.

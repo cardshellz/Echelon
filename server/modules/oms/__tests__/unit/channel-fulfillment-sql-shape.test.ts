@@ -27,3 +27,23 @@ describe("canonical fulfillment SQL array bindings", () => {
     expect(pushSource).toContain("sqlTextArray(deadFulfillmentIds)");
   });
 });
+
+describe("channel fulfillment source-echo adoption", () => {
+  it("requires exact tracking and line allocation before adopting an existing package", () => {
+    expect(ingressSource).toContain("findExistingCanonicalPackageByTracking");
+    expect(ingressSource).toContain("findExistingLegacyPackageByTracking");
+    expect(ingressSource).toContain("oms_order_tracking_exact_allocation");
+    expect(ingressSource).toContain("wms_order_tracking_exact_allocation");
+    expect(ingressSource).toContain("parseLegacyProviderPhysicalShipmentId");
+    expect(ingressSource).toContain("FOR UPDATE OF shipment, shipment_item");
+  });
+
+  it("does not treat a uniqueness conflict as successful package adoption", () => {
+    const adoptionSource = ingressSource.slice(
+      ingressSource.indexOf("async function findExistingLegacyPackageByTracking"),
+      ingressSource.indexOf("async function findOrCreateLegacyPackage"),
+    );
+    expect(adoptionSource).not.toContain("ON CONFLICT");
+    expect(adoptionSource).not.toContain("unique constraint");
+  });
+});

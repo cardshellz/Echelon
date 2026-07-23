@@ -337,18 +337,31 @@ export function createChannelFulfillmentIngressService(
       let physicalShipmentId = prepared.physicalShipmentId;
       activePhysicalShipmentId = physicalShipmentId;
       if (!physicalShipmentId) {
+        const identity = prepared.materializationIdentity;
+        if (!identity) {
+          throw new ChannelFulfillmentIngressError(
+            "CANONICAL_PACKAGE_CONFLICT",
+            "Receipt preparation did not provide a physical package identity",
+            {
+              receiptId: staged.receiptId,
+              sourceProvider: input.sourceProvider,
+              sourceFulfillmentId: input.sourceFulfillmentId,
+              legacyWmsShipmentIds: prepared.legacyWmsShipmentIds,
+            },
+          );
+        }
         await renewLease();
         const materialized = await dependencies.authority.recordPhysicalPackage({
           legacyWmsShipmentIds: [...prepared.legacyWmsShipmentIds],
-          shippingProvider: input.sourceProvider,
-          providerPhysicalShipmentId: input.sourceFulfillmentId,
-          providerOrderId: input.sourceOrderId,
-          providerOrderKey: input.sourceOrderId,
-          trackingNumber: input.trackingNumber,
-          carrier: input.carrier,
-          trackingUrl: input.trackingUrl,
-          serviceCode: null,
-          shippedAt: input.shippedAt,
+          shippingProvider: identity.shippingProvider,
+          providerPhysicalShipmentId: identity.providerPhysicalShipmentId,
+          providerOrderId: identity.providerOrderId,
+          providerOrderKey: identity.providerOrderKey,
+          trackingNumber: identity.trackingNumber,
+          carrier: identity.carrier,
+          trackingUrl: identity.trackingUrl,
+          serviceCode: identity.serviceCode,
+          shippedAt: identity.shippedAt,
           source: input.source,
           correlationId: input.correlationId,
           causationId: input.causationId,

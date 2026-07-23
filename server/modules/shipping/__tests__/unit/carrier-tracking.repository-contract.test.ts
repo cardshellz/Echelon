@@ -80,6 +80,12 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(reconciliationSource).toContain("'provider_line_item_identity'::text AS source");
   });
 
+  it("keeps delayed link reconciliation arithmetic in timestamptz", () => {
+    expect(repositorySource).toContain(
+      "${reconciledAt}::timestamptz + INTERVAL '30 minutes'",
+    );
+  });
+
   it("claims subscription work with leases and row-level skip locking", () => {
     expect(repositorySource).toContain("async claimTrackingSubscriptions(");
     expect(repositorySource).toContain("FOR UPDATE SKIP LOCKED");

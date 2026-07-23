@@ -73,7 +73,11 @@ export function mapShopifyFulfillmentCarrier(value: string | null | undefined): 
   if (!value) return null;
   const normalized = value.trim();
   if (!normalized) return null;
-  return SHOPIFY_TO_CANONICAL_CARRIER[normalized.toLowerCase()] ?? normalized.toUpperCase();
+  const canonicalKey = normalized
+    .toLowerCase()
+    .replace(/[\u00ae\u2122]/g, "")
+    .trim();
+  return SHOPIFY_TO_CANONICAL_CARRIER[canonicalKey] ?? normalized.toUpperCase();
 }
 
 export function mapShopifyFulfillmentIngress(
