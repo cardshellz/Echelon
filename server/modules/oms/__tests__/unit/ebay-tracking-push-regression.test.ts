@@ -43,7 +43,11 @@ function makeMockDb(opts: {
   lines?: any[];
   shippedShipmentIds?: number[];
   shipment?: any;
-  shipmentLines?: Array<{ external_line_item_id: string | null; quantity: number }>;
+  shipmentLines?: Array<{
+    external_line_item_id: string | null;
+    qty: number;
+    fulfillment_provider?: string | null;
+  }>;
   priorTrackingPush?: {
     id: number;
     fulfillment_id: string | null;
@@ -355,7 +359,11 @@ describe("eBay tracking push regression (2026-04-14)", () => {
         tags: null,
         provider: "ebay",
       },
-      shipmentLines: [{ external_line_item_id: "12345", quantity: 1 }],
+      shipmentLines: [{
+        external_line_item_id: "12345",
+        qty: 1,
+        fulfillment_provider: "ebay",
+      }],
     });
     const svc = createFulfillmentPushService(db as any, mockEbayClient);
 

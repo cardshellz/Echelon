@@ -19,7 +19,6 @@
  *     ├── inventory-atp   (read-only, depends on core indirectly via DB)
  *     ├── channel-sync     (depends on atp)
  *     ├── break-assembly   (depends on core)
- *     ├── fulfillment      (depends on core + channelSync)
  *     ├── reservation      (depends on core + channelSync)
  *     ├── replenishment    (depends on core)
  *     ├── picking           (depends on core + replenishment + storage)
@@ -36,7 +35,6 @@ import {
   createCycleCountService,
   createInventoryAlertService,
 } from "../modules/inventory";
-import { createFulfillmentService } from "../modules/orders/fulfillment.service";
 import { createReservationService } from "../modules/channels/reservation.service";
 import { createChannelSyncService } from "../modules/channels/sync.service";
 import { createReturnsService } from "../modules/orders/returns.service";
@@ -59,6 +57,15 @@ import { recordReceivingReconciliationFailure } from "../modules/procurement/po-
 import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "../modules/procurement/ap-ledger.service";
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
+import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
+import { createChannelFulfillmentProjector } from "../modules/oms/channel-fulfillment-projection.repository";
+import {
+  createChannelFulfillmentAuthorityService,
+  createCompatibilityChannelFulfillmentProviderExecutor,
+} from "../modules/oms/channel-fulfillment-authority.service";
+import { createChannelFulfillmentIngressRepository } from "../modules/oms/channel-fulfillment-ingress.repository";
+import { createChannelFulfillmentIngressService } from "../modules/oms/channel-fulfillment-ingress.service";
+import { markShipmentCancelled } from "../modules/orders/shipment-rollup";
 import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
 import { createShipStationService } from "../modules/oms/shipstation.service";
 import { createShipStationEngine } from "../modules/shipping";
@@ -101,9 +108,8 @@ export function createServices(db: any) {
   // Channel sync (depends on atp only — must precede fulfillment/reservation)
   const channelSync = createChannelSyncService(db, atp);
 
-  // Depends on inventoryCore (+ channelSync for fulfillment/reservation)
+  // Depends on inventoryCore (+ channelSync for reservation)
   const breakAssembly = createBreakAssemblyService(db, inventoryCore);
-  const fulfillment = createFulfillmentService(db, inventoryCore as any, channelSync);
   const reservation = createReservationService(db, inventoryCore as any, channelSync, atp);
   const replenishment = createReplenishmentService(db, inventoryCore);
   const returns = createReturnsService(db, inventoryCore as any);
@@ -279,6 +285,11 @@ export function createServices(db: any) {
     runExclusive: withAdvisoryLock,
   });
   fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
+  const channelFulfillmentAuthority = createChannelFulfillmentAuthorityService({
+    repository: createChannelFulfillmentAuthorityRepository(db),
+    projector: createChannelFulfillmentProjector(db),
+    providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(fulfillmentPush),
+  });
 
   // ShipStation — order push + webhook integration
   const carrierTrackingLogger = makeCarrierTrackingLogger();
@@ -291,6 +302,7 @@ export function createServices(db: any) {
   });
   const shipStation = createShipStationService(db, inventoryCore as any, {
     providerLabelObserver: carrierTracking,
+    fulfillmentAuthority: channelFulfillmentAuthority,
   });
   const shipStationPhysicalRecovery = createShipStationPhysicalRecoveryService(db, {
     client: createShipStationPhysicalRecoveryClient(),
@@ -298,6 +310,32 @@ export function createServices(db: any) {
 
   // C9 ShippingEngine — engine-agnostic port over ShipStation (adapter #1)
   const shippingEngine = createShipStationEngine(shipStation);
+  const channelFulfillmentIngress = createChannelFulfillmentIngressService({
+    repository: createChannelFulfillmentIngressRepository(db),
+    authority: channelFulfillmentAuthority,
+    inventory: inventoryCore,
+    cancelEngineShipment: async (candidate, occurredAt) => {
+      if (candidate.engine !== shippingEngine.engineName) {
+        throw Object.assign(
+          new Error(`No shipping-engine adapter is registered for ${candidate.engine}`),
+          { code: "SHIPPING_ENGINE_NOT_REGISTERED" },
+        );
+      }
+      await shippingEngine.cancel({
+        engine: candidate.engine,
+        engineOrderRef: candidate.engineOrderRef,
+        ...(candidate.engineShipmentRef
+          ? { engineShipmentRef: candidate.engineShipmentRef }
+          : {}),
+      });
+      await markShipmentCancelled(
+        db,
+        candidate.wmsShipmentId,
+        "superseded_external_fulfillment",
+        { now: occurredAt, skipEngineCancel: true },
+      );
+    },
+  });
 
   // WMS Sync — bridges OMS → WMS for fulfillment
   const wmsSync = new WmsSyncService({
@@ -319,7 +357,6 @@ export function createServices(db: any) {
     atp,
     cogs,
     breakAssembly,
-    fulfillment,
     reservation,
     replenishment,
     picking,
@@ -344,6 +381,8 @@ export function createServices(db: any) {
     echelonOrchestrator,
     oms,
     fulfillmentPush,
+    channelFulfillmentAuthority,
+    channelFulfillmentIngress,
     shipStation,
     shipStationPhysicalRecovery,
     shippingEngine,
@@ -359,7 +398,6 @@ export type ServiceRegistry = ReturnType<typeof createServices>;
 
 // Re-export factory functions for individual service creation
 export { createBreakAssemblyService, createReplenishmentService, createCycleCountService, createInventoryAtpService, createInventoryAlertService } from "../modules/inventory";
-export { createFulfillmentService } from "../modules/orders/fulfillment.service";
 export { createReservationService } from "../modules/channels/reservation.service";
 export { createChannelSyncService } from "../modules/channels/sync.service";
 export { createReturnsService } from "../modules/orders/returns.service";

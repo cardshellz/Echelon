@@ -194,7 +194,7 @@ Authority:
 3. A shipment request is not a physical shipment.
 4. A shipping-engine order is not a physical shipment.
 5. A physical shipment is unique by `(provider, provider_physical_shipment_id)`.
-6. A channel fulfillment push is unique by `(channel_provider, physical_shipment_id)`.
+6. A channel fulfillment command is unique by `(channel_provider, oms_order_id, physical_shipment_id, channel_fulfillment_scope_key)`.
 7. Multiple physical shipments may reference one shipping-engine order.
 8. One physical shipment may contain a subset of shipment-request items.
 9. Retries must re-read by canonical idempotency key before writing.
@@ -205,6 +205,10 @@ Authority:
 14. Label creation is not physical dispatch.
 15. Verified webhook receipts, carrier events, label links, and match attempts are immutable evidence.
 16. Carrier tracking cannot create or infer an unknown provider label.
+17. One shipping-engine order may combine multiple shipment requests.
+18. One physical shipment may contain authorized items from multiple OMS orders; package ownership is derived from its item allocations.
+19. Every channel command item must reference the exact physical-shipment item that authorized it.
+20. External attempts are append-only evidence; terminal commands cannot be reopened in place.
 
 ## Proposed Tables
 
@@ -261,8 +265,9 @@ The exact schema should be finalized in migrations during implementation, but th
 ### `wms.shipping_engine_orders`
 
 - `id`
-- `shipment_request_id`
+- nullable legacy `shipment_request_id` compatibility pointer
 - `provider`
+- `command_key`
 - `provider_order_id`
 - `provider_order_key`
 - `provider_status`
@@ -271,11 +276,21 @@ The exact schema should be finalized in migrations during implementation, but th
 - `created_at`
 - `updated_at`
 
-### `wms.physical_shipments`
+### `wms.shipping_engine_order_requests`
 
 - `id`
 - `shipping_engine_order_id`
 - `shipment_request_id`
+- `relationship_type`
+- `created_at`
+
+This join is authoritative. It permits one provider order to combine requests and permits a request to be represented by more than one provider order when an explicit split or replacement workflow authorizes that shape.
+
+### `wms.physical_shipments`
+
+- `id`
+- `shipping_engine_order_id`
+- nullable legacy `shipment_request_id` compatibility pointer
 - `provider`
 - `provider_physical_shipment_id`
 - `tracking_number`
@@ -283,6 +298,32 @@ The exact schema should be finalized in migrations during implementation, but th
 - `service`
 - `ship_date`
 - `status`
+
+The exact request and OMS-order membership of a package is derived through `physical_shipment_items.shipment_request_item_id`, never from the compatibility pointer.
+
+### `oms.channel_fulfillment_pushes`
+
+- `id`
+- `oms_order_id`
+- `physical_shipment_id`
+- `channel_provider`
+- `channel_fulfillment_scope_key`
+- `command_key`
+- `request_hash`
+- leased retry state
+- terminal provider acknowledgement
+
+### `oms.channel_fulfillment_push_items`
+
+- `channel_fulfillment_push_id`
+- `physical_shipment_item_id`
+- `oms_order_line_id`
+- `channel_order_line_id`
+- `quantity_pushed`
+
+### `oms.channel_fulfillment_push_attempts`
+
+Append-only evidence for every provider attempt, including the immutable request hash, outcome, provider response identity, classified error, correlation, and causation.
 - `raw_event_hash`
 - `created_at`
 - `updated_at`
@@ -504,8 +545,10 @@ Goal: push tracking to Shopify/eBay from physical shipment authority only.
 Rules:
 
 - Physical shipment with mapped items triggers channel fulfillment push.
-- One push row per physical shipment/channel.
-- Retry re-reads by physical shipment id.
+- One command per physical shipment, OMS order, channel, and channel fulfillment scope.
+- A combined physical package fans out into independent commands for every represented OMS order.
+- Retry claims by command id under a lease and re-reads the immutable request snapshot.
+- Every command item retains its physical-shipment-item provenance.
 - Shopify "no fulfillment order line item available" must be classified:
   - already fulfilled/idempotent,
   - line mismatch requiring review,
@@ -588,6 +631,7 @@ Exit gate:
 | --- | --- |
 | Single Shopify order, one package | One plan, one request, one engine order, one physical shipment, one Shopify push |
 | Shopify order split into two packages | One plan, one request, one engine order, two physical shipments, two channel pushes |
+| Two OMS orders combined into one package | Two plans, two requests, one engine order linked to both requests, one physical shipment, two independent channel commands |
 | Same SKU in two packages | Physical shipment items map by request item keys, not SKU alone |
 | Multiple order lines same SKU | Mapping remains line-authoritative |
 | Partial shipment now, rest later | Channel gets first tracking for shipped subset, then second tracking later |
@@ -687,30 +731,31 @@ Activation is proven only after all of these are true:
 3. Control Tower shows no sustained receipt, authentication, parser, label-link, or ambiguity failures.
 4. Shadow classifications agree with known carrier pickups for the agreed observation window.
 
-## Immediate Next PR
+## Fulfillment Authority Cutover Status
 
-The next PR should be non-behavioral.
+The provider-neutral authority cutover was implemented on 2026-07-22. The runtime now:
 
-Scope:
+- Materializes immutable physical shipments and exact physical-shipment item lineage.
+- Creates one durable channel command per OMS order, physical shipment, provider, and channel scope.
+- Records the physical fact and command outbox in one transaction.
+- Claims commands under leases, records append-only attempts, and retries classified transient failures.
+- Ingests Shopify and eBay fulfillment evidence through immutable receipts before projection.
+- Projects OMS fulfillment from canonical physical-shipment items instead of legacy shipment aggregates.
+- Enforces current line authority, terminal commercial state, provider ownership, and blocking review decisions before channel writeback.
+- Uses explicit dependencies for callbacks, retries, reconcilers, and sweepers; the legacy direct channel-fulfillment service and hidden database service locators are retired.
+- Provides a dry-run-first historical backfill that leaves ambiguous lineage in review instead of guessing.
 
-- Add this plan document.
-- Add conformance test scaffolding for the known failure shapes.
-- Mark expected failures where the current overloaded model cannot satisfy the target invariant.
+Compatibility boundaries remain intentionally explicit:
 
-Do not:
+- Existing WMS outbound shipment rows are still accepted as source records while native shipment planning migrates to the canonical plan/request model.
+- Shopify, eBay, and ShipStation API clients remain infrastructure adapters behind the canonical authority.
+- Carrier-possession authority remains a separate rollout described above.
+- Multi-FC planning and any future service extraction remain later architecture phases; they do not change the canonical contracts or idempotency keys established here.
 
-- Drop production unique indexes yet.
-- Rewrite SHIP_NOTIFY yet.
-- Add provider-specific tables as the long-term model.
-- Add another one-off ShipStation repair branch.
+Production rollout requires the additive migration followed by a reviewed dry run of:
 
-## First Implementation PR After Tests
+```powershell
+npx tsx scripts/backfill-channel-fulfillment-authority.ts --dry-run --limit=25
+```
 
-After the conformance test PR is reviewed, the first behavior-changing PR should introduce the canonical tables and read-only backfill.
-
-That gives us evidence before cutover:
-
-- What maps cleanly.
-- What is historical drift.
-- What needs manual review.
-- Which existing UI/report queries depend on overloaded shipment fields.
+Only execute the backfill after the dry-run classifications are accepted. Historical rows that cannot be mapped exactly must remain review exceptions; they must not be repaired by SKU, order-level totals, or inferred package ownership.

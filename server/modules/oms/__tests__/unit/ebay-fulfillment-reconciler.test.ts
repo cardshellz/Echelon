@@ -3,13 +3,24 @@ import { EbayFulfillmentReconciler } from "../../reconcilers/ebay.reconciler";
 
 function makeDb(opts: {
   shipmentRows?: Array<{ shipment_id: number | string | null }>;
-  pushTrackingForShipment?: any;
-  pushTracking?: any;
+  ensureLegacyShipment?: any;
 }) {
+  const ensureLegacyShipment = opts.ensureLegacyShipment ?? vi.fn(async () => ({
+    materialized: {
+      physicalShipmentId: 90001,
+      shippingEngineOrderId: 80001,
+      channelCommands: [{ id: 70001, pushStatus: "pending" }],
+      customerFulfillmentItemCount: 1,
+      nonCustomerItemCount: 0,
+    },
+    dispatch: { claimed: 1, succeeded: 1, ignored: 0, retryScheduled: 0, reviewRequired: 0, deadLettered: 0 },
+  }));
   return {
-    __fulfillmentPush: {
-      pushTrackingForShipment: opts.pushTrackingForShipment,
-      pushTracking: opts.pushTracking,
+    fulfillmentAuthority: {
+      ensureLegacyShipment,
+      recordPhysicalPackage: vi.fn(),
+      projectPhysicalPackage: vi.fn(),
+      runDueBatch: vi.fn(),
     },
     execute: vi.fn(async (query: any) => {
       const queryText = (query?.queryChunks ?? [])
@@ -20,96 +31,110 @@ function makeDb(opts: {
       }
       return { rows: opts.shipmentRows ?? [] };
     }),
-    insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
   };
 }
 
 describe("EbayFulfillmentReconciler.repush", () => {
   it("repushes shipped WMS shipments through the shipment-scoped path", async () => {
-    const pushTrackingForShipment = vi.fn().mockResolvedValue(true);
-    const pushTracking = vi.fn().mockResolvedValue(true);
+    const ensureLegacyShipment = vi.fn(async () => ({
+      materialized: {
+        physicalShipmentId: 90001,
+        shippingEngineOrderId: 80001,
+        channelCommands: [{ id: 70001, pushStatus: "pending" }],
+        customerFulfillmentItemCount: 1,
+        nonCustomerItemCount: 0,
+      },
+      dispatch: { claimed: 1, succeeded: 1, ignored: 0, retryScheduled: 0, reviewRequired: 0, deadLettered: 0 },
+    }));
     const db = makeDb({
       shipmentRows: [{ shipment_id: 309 }, { shipment_id: 310 }],
-      pushTrackingForShipment,
-      pushTracking,
+      ensureLegacyShipment,
     });
 
-    const reconciler = new EbayFulfillmentReconciler(db as any);
+    const reconciler = new EbayFulfillmentReconciler(db as any, db.fulfillmentAuthority as any);
     const result = await reconciler.repush({ id: 161881 } as any);
 
     expect(result).toBe(true);
-    expect(pushTrackingForShipment).toHaveBeenCalledTimes(2);
-    expect(pushTrackingForShipment).toHaveBeenNthCalledWith(1, 309);
-    expect(pushTrackingForShipment).toHaveBeenNthCalledWith(2, 310);
-    expect(pushTracking).not.toHaveBeenCalled();
+    expect(ensureLegacyShipment).toHaveBeenCalledTimes(2);
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(1, 309, {
+      executeImmediately: true,
+      source: "ebay_fulfillment_reconciler",
+    });
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(2, 310, {
+      executeImmediately: true,
+      source: "ebay_fulfillment_reconciler",
+    });
   });
 
-  it("falls back to order-level push when no shipped WMS shipment exists", async () => {
-    const pushTrackingForShipment = vi.fn().mockResolvedValue(true);
-    const pushTracking = vi.fn().mockResolvedValue(true);
+  it("fails closed when no shipped WMS package exists", async () => {
+    const ensureLegacyShipment = vi.fn();
     const db = makeDb({
       shipmentRows: [],
-      pushTrackingForShipment,
-      pushTracking,
+      ensureLegacyShipment,
     });
 
-    const reconciler = new EbayFulfillmentReconciler(db as any);
+    const reconciler = new EbayFulfillmentReconciler(db as any, db.fulfillmentAuthority as any);
     const result = await reconciler.repush({ id: 161881 } as any);
 
-    expect(result).toBe(true);
-    expect(pushTrackingForShipment).not.toHaveBeenCalled();
-    expect(pushTracking).toHaveBeenCalledWith(161881);
+    expect(result).toBe(false);
+    expect(ensureLegacyShipment).not.toHaveBeenCalled();
   });
 
-  it("returns false when any shipment-scoped repush fails", async () => {
-    const pushTrackingForShipment = vi
+  it("returns false when any package command remains retryable", async () => {
+    const ensureLegacyShipment = vi
       .fn()
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
-    const pushTracking = vi.fn().mockResolvedValue(true);
+      .mockResolvedValueOnce({
+        materialized: { physicalShipmentId: 90001, shippingEngineOrderId: 80001, channelCommands: [{ id: 70001, pushStatus: "pending" }], customerFulfillmentItemCount: 1, nonCustomerItemCount: 0 },
+        dispatch: { claimed: 1, succeeded: 1, ignored: 0, retryScheduled: 0, reviewRequired: 0, deadLettered: 0 },
+      })
+      .mockResolvedValueOnce({
+        materialized: { physicalShipmentId: 90002, shippingEngineOrderId: 80002, channelCommands: [{ id: 70002, pushStatus: "pending" }], customerFulfillmentItemCount: 1, nonCustomerItemCount: 0 },
+        dispatch: { claimed: 1, succeeded: 0, ignored: 0, retryScheduled: 1, reviewRequired: 0, deadLettered: 0 },
+      });
     const db = makeDb({
       shipmentRows: [{ shipment_id: 309 }, { shipment_id: 310 }],
-      pushTrackingForShipment,
-      pushTracking,
+      ensureLegacyShipment,
     });
 
-    const reconciler = new EbayFulfillmentReconciler(db as any);
+    const reconciler = new EbayFulfillmentReconciler(db as any, db.fulfillmentAuthority as any);
     const result = await reconciler.repush({ id: 161881 } as any);
 
     expect(result).toBe(false);
-    expect(pushTrackingForShipment).toHaveBeenCalledTimes(2);
-    expect(pushTracking).not.toHaveBeenCalled();
-    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(ensureLegacyShipment).toHaveBeenCalledTimes(2);
   });
 
-  it("enqueues an order-level delayed retry when fallback tracking push returns false", async () => {
-    const pushTrackingForShipment = vi.fn().mockResolvedValue(true);
-    const pushTracking = vi.fn().mockResolvedValue(false);
+  it("does not synthesize an order-level retry when package evidence is absent", async () => {
+    const ensureLegacyShipment = vi.fn();
     const db = makeDb({
       shipmentRows: [],
-      pushTrackingForShipment,
-      pushTracking,
+      ensureLegacyShipment,
     });
 
-    const reconciler = new EbayFulfillmentReconciler(db as any);
+    const reconciler = new EbayFulfillmentReconciler(db as any, db.fulfillmentAuthority as any);
     const result = await reconciler.repush({ id: 161881 } as any);
 
     expect(result).toBe(false);
-    expect(pushTrackingForShipment).not.toHaveBeenCalled();
-    expect(pushTracking).toHaveBeenCalledWith(161881);
-    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(ensureLegacyShipment).not.toHaveBeenCalled();
   });
 
-  it("returns false when no tracking push service is wired", async () => {
+  it("fails closed when canonical authority rejects the handoff", async () => {
     const db = {
-      __fulfillmentPush: null,
-      execute: vi.fn(),
+      execute: vi.fn(async () => ({ rows: [{ shipment_id: 309 }] })),
     };
 
-    const reconciler = new EbayFulfillmentReconciler(db as any);
+    const fulfillmentAuthority = {
+      ensureLegacyShipment: vi.fn(async () => {
+        throw Object.assign(new Error("authority unavailable"), {
+          code: "CHANNEL_FULFILLMENT_AUTHORITY_UNAVAILABLE",
+        });
+      }),
+    } as any;
+
+    const reconciler = new EbayFulfillmentReconciler(db as any, fulfillmentAuthority);
     const result = await reconciler.repush({ id: 161881 } as any);
 
     expect(result).toBe(false);
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(fulfillmentAuthority.ensureLegacyShipment).toHaveBeenCalledTimes(1);
   });
 });

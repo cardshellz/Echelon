@@ -5,12 +5,13 @@
  * fetch mock. No network, no real DB.
  *
  * What this file covers:
- *   - Shipment found by `shipstation_order_id` → dispatches 'shipped'
- *     → rollup runs → OMS updated → event recorded.
+ *   - Shipment found by `shipstation_order_id` → records operational shipment
+ *     evidence → hands one physical package to canonical fulfillment authority.
  *   - Shipment not found → falls back to the legacy orderKey path
  *     (verified by observing the legacy path's SQL pattern).
  *   - Void detected → dispatches 'voided' (no OMS status change).
- *   - Idempotency: already-shipped with same tracking → repair cascade.
+ *   - Idempotency: already-shipped with the same tracking replays through the
+ *     same canonical authority boundary without direct OMS writes.
  *
  * What it does NOT cover (left to integration tests per the plan):
  *   - Real partial-shipment rollup with multiple outbound_shipments
@@ -59,6 +60,30 @@ interface RecordedCall {
 function makeDb(executeResponses: Array<{ rows: any[] }>) {
   const calls: RecordedCall[] = [];
   const remaining = [...executeResponses];
+  const fulfillmentAuthority = {
+    recordPhysicalPackage: vi.fn(async () => ({
+      materialized: {
+        physicalShipmentId: 90001,
+        shippingEngineOrderId: 80001,
+        channelCommands: [
+          { id: 70001, pushStatus: "pending" },
+        ],
+        customerFulfillmentItemCount: 1,
+        nonCustomerItemCount: 0,
+      },
+      dispatch: {
+        claimed: 0,
+        succeeded: 0,
+        ignored: 0,
+        retryScheduled: 0,
+        reviewRequired: 0,
+        deadLettered: 0,
+      },
+    })),
+    ensureLegacyShipment: vi.fn(),
+    projectPhysicalPackage: vi.fn(),
+    runDueBatch: vi.fn(),
+  };
 
   const execute = vi.fn(async (query: any) => {
     const chunks: unknown[] = query?.queryChunks ?? [];
@@ -69,9 +94,15 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
           return (c as any).value.join("");
         }
         return "";
-      })
+    })
       .join("");
     calls.push({ sqlText: text, tag: "execute" });
+    if (
+      text.includes("WITH candidates AS")
+      && text.includes("UPDATE wms.reconciliation_exceptions")
+    ) {
+      return { rows: [] };
+    }
     if (remaining.length === 0) return { rows: [] };
     return remaining.shift()!;
   });
@@ -116,7 +147,13 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
     }),
   };
 
-  return { db, execute, calls };
+  return { db, execute, calls, fulfillmentAuthority };
+}
+
+function createTestShipStationService(mock: ReturnType<typeof makeDb>, inventoryCore?: any) {
+  return createShipStationService(mock.db, inventoryCore, {
+    fulfillmentAuthority: mock.fulfillmentAuthority as any,
+  });
 }
 
 function mockFetchOnceOk(json: any) {
@@ -162,7 +199,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     vi.restoreAllMocks();
   });
 
-  it("dispatches 'shipped' → rollup → OMS derived update + event", async () => {
+  it("dispatches shipped evidence to canonical authority without direct fulfillment writes", async () => {
     const shipmentPayload = makeShipmentPayload({ shipmentCost: 5.99 });
 
     // Execute queue in the exact order the V2 path reads:
@@ -201,30 +238,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       },
       // 3b. UPDATE outbound_shipments
       { rows: [] },
-      // 4a. SELECT wms.orders
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready_to_ship",
-            completed_at: null,
-          },
-        ],
-      },
-      // 4b. SELECT shipment statuses
-      { rows: [{ status: "shipped" }] },
-      // 4c. UPDATE wms.orders
-      { rows: [] },
-      // 5. SELECT oms_fulfillment_order_id
+      // 4. SELECT oms_fulfillment_order_id
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       // finality guard
       { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      // OMS line status derivation
-      { rows: [] },
-      // delayed tracking provider guard
-      { rows: [{ provider: "shopify" }] },
-      // Shopify fulfillment provider guard
-      { rows: [{ provider: "shopify" }] },
     ]);
 
     // Fetch mock returns the SS shipment payload for the resourceUrl GET.
@@ -232,7 +249,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
     const processed = await svc.processShipNotify(
       "https://ssapi.shipstation.com/shipments?foo=bar",
     );
@@ -247,21 +264,33 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(executeSqls.some((text) => text.includes("carrier_cost_cents = CASE"))).toBe(true);
     expect(executeSqls.some((text) => text.includes("service_code = COALESCE"))).toBe(true);
 
-    // Verify OMS was updated via the fluent builder and line fulfillment
-    // was derived from WMS shipment rows via raw SQL.
+    // ShipStation is not an OMS/WMS fulfillment writer. Projection belongs to
+    // the canonical authority invoked below.
     const updateCalls = mock.calls.filter((c) => c.tag === "update");
-    expect(updateCalls.length).toBeGreaterThanOrEqual(1);
-    expect(executeSqls.some((text) => text.includes("shipped_by_line"))).toBe(true);
+    expect(updateCalls).toHaveLength(0);
+    expect(executeSqls.some((text) => text.includes("shipped_by_line"))).toBe(false);
+    expect(executeSqls.some((text) => text.includes("UPDATE oms.oms_order_lines"))).toBe(false);
     expect(
       executeSqls.some((text) => text.includes("UPDATE wms.reconciliation_exceptions")),
     ).toBe(true);
 
-    // Verify the audit event and Shopify fulfillment retry were inserted.
+    // The callback records one audit event and hands the physical package to
+    // canonical authority. It must not enqueue a second legacy retry row.
     const insertCalls = mock.calls.filter((c) => c.tag === "insert");
-    expect(insertCalls.length).toBe(2);
+    expect(insertCalls.length).toBe(1);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        legacyWmsShipmentIds: [501],
+        shippingProvider: "shipstation",
+        providerPhysicalShipmentId: "77777",
+        providerOrderId: "555000",
+        trackingNumber: "1Z12345",
+      }),
+      { executeImmediately: false },
+    );
   });
 
-  it("does not re-fulfill OMS or push Shopify when SS ships after a final refunded order", async () => {
+  it("records a post-refund package for review without direct OMS or provider writes", async () => {
     const shipmentPayload = makeShipmentPayload();
     const mock = makeDb([
       // shipstation_order_id lookup
@@ -281,12 +310,6 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       },
       // UPDATE outbound_shipments -> shipped
       { rows: [] },
-      // recompute: SELECT order
-      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
-      // recompute: SELECT shipment statuses
-      { rows: [{ status: "shipped" }] },
-      // recompute: UPDATE wms.orders
-      { rows: [] },
       // resolve OMS id
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       // finality guard
@@ -295,15 +318,11 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [] },
     ]);
 
-    (mock.db as any).__fulfillmentPush = {
-      pushShopifyFulfillment: vi.fn(),
-      pushTracking: vi.fn(),
-    };
     globalThis.fetch = mockFetchOnceOk({
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
     const processed = await svc.processShipNotify("/foo");
 
     expect(processed).toBe(1);
@@ -312,14 +331,23 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(updateCalls.length).toBe(0);
 
     const insertCalls = mock.calls.filter((c) => c.tag === "insert");
-    expect(insertCalls).toHaveLength(1);
-    expect(insertCalls[0]!.values.eventType).toBe("shipstation_shipped_after_final_order");
+    expect(insertCalls).toHaveLength(2);
+    expect(insertCalls.map((call) => call.values.eventType)).toContain(
+      "shipstation_shipped_after_final_order",
+    );
 
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
     expect(sqlText).toMatch(/review_reason/);
     expect(sqlText).toMatch(/shipstation_shipped_after_refund/);
     expect(sqlText).not.toMatch(/shipped_by_line/);
-    expect((mock.db as any).__fulfillmentPush.pushShopifyFulfillment).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        legacyWmsShipmentIds: [501],
+        providerPhysicalShipmentId: "77777",
+        trackingNumber: "1Z12345",
+      }),
+      { executeImmediately: false },
+    );
   });
 
   it("rejects non-ShipStation resource URLs before fetch", async () => {
@@ -327,7 +355,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     const fetchSpy = vi.fn();
     globalThis.fetch = fetchSpy as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
 
     await expect(
       svc.processShipNotify("https://attacker.example/shipments?foo=bar"),
@@ -391,7 +419,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
     const processed = await svc.processShipNotify("/foo");
 
     expect(processed).toBe(1);
@@ -408,7 +436,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     expect(insertCalls.length).toBe(1);
   });
 
-  it("idempotent: already-shipped with same tracking runs OMS/Shopify repair without rewriting shipment", async () => {
+  it("idempotently replays an already-shipped package through canonical authority", async () => {
     const shipmentPayload = makeShipmentPayload();
 
     const mock = makeDb([
@@ -432,50 +460,36 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
-      // recompute: order row.
-      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
-      // recompute: shipment statuses.
-      { rows: [{ status: "shipped" }] },
-      // recompute UPDATE wms.orders.
-      { rows: [] },
       // resolve OMS id.
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       // finality guard.
       { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      // OMS line status derivation.
-      { rows: [] },
-      // delayed tracking provider guard.
-      { rows: [{ provider: "shopify" }] },
-      // Shopify fulfillment provider guard.
-      { rows: [{ provider: "shopify" }] },
     ]);
 
-    (mock.db as any).__fulfillmentPush = {
-      pushShopifyFulfillment: vi.fn(async () => ({
-        shopifyFulfillmentId: "gid://shopify/Fulfillment/repaired",
-        alreadyPushed: false,
-        writebackComplete: true,
-      })),
-      pushTracking: vi.fn(),
-    };
     globalThis.fetch = mockFetchOnceOk({
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
     const processed = await svc.processShipNotify("/foo");
 
     expect(processed).toBe(1);
 
     const executeSqls = mock.calls.filter((c) => c.tag === "execute");
-    expect(executeSqls.map((c) => c.sqlText).join("\n")).toMatch(/UPDATE oms\.oms_order_lines/);
-    expect(executeSqls.map((c) => c.sqlText).join("\n")).toMatch(/UPDATE wms\.orders/);
+    expect(executeSqls.map((c) => c.sqlText).join("\n")).not.toMatch(/UPDATE oms\.oms_order_lines/);
+    expect(executeSqls.map((c) => c.sqlText).join("\n")).not.toMatch(/UPDATE wms\.orders/);
 
-    // No outbound shipment UPDATE is emitted because status/tracking already match,
-    // but the OMS order and line-level fulfillment state are repaired.
-    expect(mock.calls.filter((c) => c.tag === "update").length).toBe(1);
+    // No legacy writer is emitted because status/tracking already match.
+    expect(mock.calls.filter((c) => c.tag === "update")).toHaveLength(0);
     expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
-    expect((mock.db as any).__fulfillmentPush.pushShopifyFulfillment).toHaveBeenCalledWith(501);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        legacyWmsShipmentIds: [501],
+        providerPhysicalShipmentId: "77777",
+        trackingNumber: "1Z12345",
+      }),
+      { executeImmediately: false },
+    );
   });
 
   it("ignores ShipStation split/package edits that are not shipped", async () => {
@@ -497,7 +511,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [splitButNotShipped],
     }) as any;
 
-    const processed = await createShipStationService(mock.db).processShipNotify("/foo");
+    const processed = await createTestShipStationService(mock).processShipNotify("/foo");
 
     expect(processed).toBe(0);
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
@@ -612,26 +626,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       },
       // UPDATE outbound_shipments.
       { rows: [] },
-      // recompute: order row.
-      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
-      // recompute: one shipped package, one still open package.
-      { rows: [{ status: "shipped" }, { status: "queued" }] },
-      // recompute UPDATE wms.orders to partially_shipped.
-      { rows: [] },
-      // cancelStaleShipmentsIfFullyCovered: coverage check (not all covered).
-      { rows: [{ id: 1, quantity: 2, shipped_qty: 1 }] },
       // resolve OMS id.
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       // finality guard.
       { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      // OMS line status derivation.
-      { rows: [] },
-      // applyShipmentQuantitiesToWmsOrderItems.
-      { rows: [] },
-      // delayed tracking provider guard.
-      { rows: [{ provider: "shopify" }] },
-      // Shopify fulfillment provider guard.
-      { rows: [{ provider: "shopify" }] },
     ]);
     mock.db.transaction = vi.fn(async (work: (tx: any) => Promise<unknown>) => (
       work(mock.db)
@@ -641,7 +639,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const processed = await createShipStationService(mock.db, inventoryCore)
+    const processed = await createTestShipStationService(mock, inventoryCore)
       .processShipNotify("/foo");
 
     expect(processed).toBe(1);
@@ -659,11 +657,15 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     // Split creation and physical item synchronization are separate atomic
     // units; both must roll back independently on a failed invariant.
     expect(mock.db.transaction).toHaveBeenCalledTimes(2);
-    expect(sqlText).toMatch(/fulfilled_quantity = LEAST\(/);
-    expect(sqlText).toMatch(/SUM\(osi\.qty\)/);
-    expect(sqlText).toMatch(/outbound_shipment_items/);
-    expect(sqlText).toMatch(/picked_quantity = LEAST\(/);
-    expect(sqlText).toMatch(/warehouse_status = /);
+    expect(sqlText).not.toMatch(/fulfilled_quantity = LEAST\(/);
+    expect(sqlText).not.toMatch(/picked_quantity = LEAST\(/);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        legacyWmsShipmentIds: [9001],
+        providerPhysicalShipmentId: "7001",
+      }),
+      { executeImmediately: false },
+    );
   });
 
   it("moves a whole shipment item into a physical split without writing zero quantity", async () => {
@@ -745,16 +747,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
         }],
       },
       { rows: [] },
-      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
-      { rows: [{ status: "shipped" }, { status: "queued" }] },
-      { rows: [] },
-      { rows: [{ id: 1, quantity: 1, shipped_qty: 1 }, { id: 2, quantity: 1, shipped_qty: 0 }] },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      { rows: [] },
-      { rows: [] },
-      { rows: [{ provider: "shopify" }] },
-      { rows: [{ provider: "shopify" }] },
     ]);
     mock.db.transaction = vi.fn(async (work: (tx: any) => Promise<unknown>) => (
       work(mock.db)
@@ -762,7 +756,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await createShipStationService(mock.db, inventoryCore)
+    const processed = await createTestShipStationService(mock, inventoryCore)
       .processShipNotify("/foo");
 
     expect(processed).toBe(1);
@@ -838,22 +832,15 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
         ],
       },
       { rows: [] },
-      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] },
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      { rows: [] },
-      { rows: [] },
-      { rows: [{ provider: "shopify" }] },
-      { rows: [{ provider: "shopify" }] },
     ]);
 
     globalThis.fetch = mockFetchOnceOk({
       shipments: [shipmentPayload],
     }) as any;
 
-    const processed = await createShipStationService(mock.db, inventoryCore)
+    const processed = await createTestShipStationService(mock, inventoryCore)
       .processShipNotify("/foo");
 
     expect(processed).toBe(1);
@@ -945,7 +932,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await createShipStationService(mock.db, inventoryCore)
+    const processed = await createTestShipStationService(mock, inventoryCore)
       .processShipNotify("/foo");
 
     expect(processed).toBe(1);
@@ -1043,7 +1030,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await createShipStationService(mock.db, inventoryCore)
+    const processed = await createTestShipStationService(mock, inventoryCore)
       .processShipNotify("/foo");
 
     expect(processed).toBe(1);
@@ -1090,7 +1077,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
     const processed = await svc.processShipNotify("/foo");
 
     expect(processed).toBe(0);
@@ -1107,10 +1094,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     // Final no-match is persisted as a WMS review exception.
     expect(executeSqls.join("\n")).toMatch(/INSERT INTO wms\.reconciliation_exceptions/);
 
-    // Proof the legacy path was reached: it used the fluent builder to
-    // hit omsOrders select.
-    const selectCalls = mock.calls.filter((c) => c.tag === "select");
-    expect(selectCalls.length).toBeGreaterThanOrEqual(1);
+    // The compatibility resolver is SQL-only and must not fall back to the
+    // former OMS-only builder path that could fabricate fulfillment state.
+    expect(mock.calls.some((c) => c.tag === "select")).toBe(false);
+    expect(mock.calls.some((c) => c.tag === "insert")).toBe(false);
   });
 
   it("records unmatched ShipStation callbacks as reconciliation exceptions", async () => {
@@ -1133,7 +1120,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
     const processed = await svc.processShipNotify("/foo");
 
     expect(processed).toBe(0);
@@ -1152,7 +1139,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
 // ─── V2 Shopify fulfillment push wiring (C22d) ───────────────────────
 
-describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
+describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => {
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
@@ -1167,405 +1154,82 @@ describe("processShipNotify V2 :: Shopify fulfillment push (C22d)", () => {
     vi.restoreAllMocks();
   });
 
-  /** Happy-path execute queue for a shipped V2 event. */
   function happyPathRows() {
     return [
-      // 1. shipstation_order_id lookup
       { rows: [{ id: 501, order_id: 42, status: "planned" }] },
-      // 2. markShipmentShipped load-current
       {
-        rows: [
-          {
-            id: 501,
-            order_id: 42,
-            status: "planned",
-            tracking_number: null,
-            carrier: null,
-            tracking_url: null,
-          },
-        ],
+        rows: [{
+          id: 501,
+          order_id: 42,
+          status: "planned",
+          tracking_number: null,
+          carrier: null,
+          tracking_url: null,
+        }],
       },
-      // 3. UPDATE outbound_shipments
       { rows: [] },
-      // 4. SELECT wms.orders for rollup
-      {
-        rows: [
-          { id: 42, warehouse_status: "ready_to_ship", completed_at: null },
-        ],
-      },
-      // 5. SELECT shipment statuses
-      { rows: [{ status: "shipped" }] },
-      // 6. UPDATE wms.orders
-      { rows: [] },
-      // 7. SELECT oms_fulfillment_order_id
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
-      // 8. finality guard
       { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      // 9. OMS line status derivation
-      { rows: [] },
-      // 10. delayed tracking provider guard
-      { rows: [{ provider: "shopify" }] },
-      // 11. Shopify fulfillment provider guard
-      { rows: [{ provider: "shopify" }] },
     ];
   }
 
-  /** Build a db with __fulfillmentPush stash + happy-path execute queue. */
-  function makeDbWithPush(opts: {
-    pushShopifyFulfillment?: ReturnType<typeof vi.fn>;
-    pushTracking?: ReturnType<typeof vi.fn>;
-    omitPushFn?: boolean; // attach the stash but without the function
-    omitStash?: boolean; // don't attach the stash at all
-  } = {}) {
+  it("materializes the physical package and never invokes a legacy provider push", async () => {
     const mock = makeDb(happyPathRows());
-    if (!opts.omitStash) {
-      const stash: any = {
-        pushTracking: opts.pushTracking ?? vi.fn(async () => undefined),
-      };
-      if (!opts.omitPushFn) {
-        stash.pushShopifyFulfillment =
-          opts.pushShopifyFulfillment ??
-          vi.fn(async (_id: number) => ({
-            shopifyFulfillmentId: "gid://shopify/Fulfillment/123",
-            alreadyPushed: false,
-            writebackComplete: true,
-          }));
-      }
-      (mock.db as any).__fulfillmentPush = stash;
-    }
-    return mock;
-  }
-
-  it("flag default (undefined) → pushShopifyFulfillment IS called", async () => {
-    delete process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED;
-    const pushShopifyFulfillment = vi.fn(async () => ({
-      shopifyFulfillmentId: "x",
-      alreadyPushed: false,
-      writebackComplete: true,
-    }));
-    const mock = makeDbWithPush({ pushShopifyFulfillment });
     globalThis.fetch = mockFetchOnceOk({
       shipments: [makeShipmentPayload()],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
-    await svc.processShipNotify("/foo");
+    const processed = await createTestShipStationService(mock).processShipNotify("/foo");
 
-    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
-    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1); // only the audit event
+    expect(processed).toBe(1);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        legacyWmsShipmentIds: [501],
+        shippingProvider: "shipstation",
+        providerPhysicalShipmentId: "77777",
+        providerOrderId: "555000",
+        providerOrderKey: "echelon-wms-shp-501",
+        trackingNumber: "1Z12345",
+        carrier: "UPS",
+        serviceCode: "ups_ground",
+        source: "shipstation_ship_notify_v2",
+      }),
+      { executeImmediately: false },
+    );
+    const source = readFileSync(
+      resolve(__dirname, "../../shipstation.service.ts"),
+      "utf-8",
+    );
+    expect(source).not.toContain("__fulfillmentPush");
   });
 
-  it("flag explicitly 'false' → pushShopifyFulfillment is NOT called", async () => {
+  it("cannot be disabled by the retired Shopify fulfillment feature flag", async () => {
     process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "false";
-    const pushShopifyFulfillment = vi.fn();
-    const mock = makeDbWithPush({
-      pushShopifyFulfillment: pushShopifyFulfillment as any,
-    });
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
-    }) as any;
-    await createShipStationService(mock.db).processShipNotify("/foo");
-    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
-  });
-
-  it("flag ON + push success → calls pushShopifyFulfillment(shipmentId), no retry insert", async () => {
-    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
-    const pushShopifyFulfillment = vi.fn(async () => ({
-      shopifyFulfillmentId: "gid://shopify/Fulfillment/777",
-      alreadyPushed: false,
-      writebackComplete: true,
-    }));
-    const mock = makeDbWithPush({ pushShopifyFulfillment });
+    const mock = makeDb(happyPathRows());
     globalThis.fetch = mockFetchOnceOk({
       shipments: [makeShipmentPayload()],
     }) as any;
 
-    await createShipStationService(mock.db).processShipNotify("/foo");
+    await createTestShipStationService(mock).processShipNotify("/foo");
 
-    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
-    // wmsShipmentRow.id from the lookup is 501
-    expect(pushShopifyFulfillment).toHaveBeenCalledWith(501);
-
-    // Only the audit event insert; no DLQ enqueue.
-    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
   });
 
-  it("flag ON + alreadyPushed=true → logs idempotent skip, no retry insert", async () => {
-    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
-    const pushShopifyFulfillment = vi.fn(async () => ({
-      shopifyFulfillmentId: "gid://shopify/Fulfillment/preexisting",
-      alreadyPushed: true,
-      writebackComplete: true,
-    }));
-    const logSpy = vi.spyOn(console, "log");
-    const mock = makeDbWithPush({ pushShopifyFulfillment });
+  it("fails closed when the canonical authority is unavailable", async () => {
+    const mock = makeDb(happyPathRows());
     globalThis.fetch = mockFetchOnceOk({
       shipments: [makeShipmentPayload()],
     }) as any;
 
-    await createShipStationService(mock.db).processShipNotify("/foo");
-
-    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
-    const idempotentLogged = logSpy.mock.calls.some((args) =>
-      String(args[0] ?? "").includes("idempotent skip"),
-    );
-    expect(idempotentLogged).toBe(true);
-    // Only the audit event insert.
-    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(1);
-  });
-
-  it("flag ON + push throws → enqueues a webhook_retry_queue row", async () => {
-    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
-    const pushShopifyFulfillment = vi.fn(async () => {
-      throw new Error("shopify 500");
-    });
-    const errSpy = vi.spyOn(console, "error");
-    const mock = makeDbWithPush({ pushShopifyFulfillment });
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
-    }) as any;
-
-    await createShipStationService(mock.db).processShipNotify("/foo");
-
-    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
-    // Two inserts: the audit event AND the retry-queue row.
-    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(2);
-
-    const failureLogged = errSpy.mock.calls.some((args) =>
-      String(args[0] ?? "").includes("Shopify fulfillment push failed"),
-    );
-    expect(failureLogged).toBe(true);
-  });
-
-  it("flag ON + fulfillmentPush stash missing pushShopifyFulfillment fn → warn and enqueue retry", async () => {
-    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
-    const warnSpy = vi.spyOn(console, "warn");
-    const mock = makeDbWithPush({ omitPushFn: true });
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
-    }) as any;
-
-    await createShipStationService(mock.db).processShipNotify("/foo");
-
-    const warned = warnSpy.mock.calls.some((args) =>
-      String(args[0] ?? "").includes("pushShopifyFulfillment not wired"),
-    );
-    expect(warned).toBe(true);
-    // Audit event + retry row.
-    expect(mock.calls.filter((c) => c.tag === "insert").length).toBe(2);
-  });
-
-  it("flag ON + voided event → push NOT triggered (only shipped triggers it)", async () => {
-    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
-    const pushShopifyFulfillment = vi.fn();
-
-    // Reuse the void-path execute queue from the existing void test.
-    const mock = makeDb([
-      // Resolve any prior unmapped-package exception for the voided label.
-      { rows: [] },
-      { rows: [{ id: 501, order_id: 42, status: "shipped" }] },
-      {
-        rows: [
-          {
-            id: 501,
-            order_id: 42,
-            status: "shipped",
-            tracking_number: "OLD",
-            carrier: "UPS",
-            tracking_url: null,
-          },
-        ],
-      },
-      { rows: [] },
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "shipped",
-            completed_at: new Date("2026-04-20T00:00:00Z"),
-          },
-        ],
-      },
-      { rows: [{ status: "voided" }] },
-      { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: "9999" }] },
-    ]);
-    (mock.db as any).__fulfillmentPush = {
-      pushShopifyFulfillment,
-      pushTracking: vi.fn(),
-    };
-
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload({ voidDate: "2026-04-24T13:00:00Z" })],
-    }) as any;
-
-    await createShipStationService(mock.db).processShipNotify("/foo");
-
-    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
-  });
-
-  it("flag ON + already-shipped idempotent shipment → push is retried for replay repair", async () => {
-    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
-    const pushShopifyFulfillment = vi.fn();
-
-    // Same as the existing idempotent test: marks-shipped sees no
-    // change, but replay still repairs a missing Shopify push.
-    const mock = makeDb([
-      { rows: [{ id: 501, order_id: 42, status: "shipped" }] },
-      {
-        rows: [
-          {
-            id: 501,
-            order_id: 42,
-            status: "shipped",
-            tracking_number: "1Z12345",
-            carrier: "UPS",
-            tracking_url: null,
-          },
-        ],
-      },
-      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: "9999" }] },
-      { rows: [{ status: "shipped", financial_status: "paid" }] },
-      { rows: [] },
-      { rows: [{ provider: "shopify" }] },
-      { rows: [{ provider: "shopify" }] },
-    ]);
-    (mock.db as any).__fulfillmentPush = {
-      pushShopifyFulfillment,
-      pushTracking: vi.fn(),
-    };
-
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
-    }) as any;
-
-    await createShipStationService(mock.db).processShipNotify("/foo");
-
-    expect(pushShopifyFulfillment).toHaveBeenCalledWith(501);
-  });
-
-  it("already-shipped idempotent shipment enqueues delayed tracking for non-Shopify replay repair without Shopify push", async () => {
-    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
-    const pushShopifyFulfillment = vi.fn(async () => ({
-      shopifyFulfillmentId: null,
-      alreadyPushed: false,
-      writebackComplete: true,
-    }));
-
-    const mock = makeDb([
-      { rows: [{ id: 501, order_id: 42, status: "shipped" }] },
-      {
-        rows: [
-          {
-            id: 501,
-            order_id: 42,
-            status: "shipped",
-            tracking_number: "1Z12345",
-            carrier: "UPS",
-            tracking_url: null,
-          },
-        ],
-      },
-      { rows: [{ id: 42, warehouse_status: "ready_to_ship", completed_at: null }] },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: "9999" }] },
-      { rows: [{ status: "shipped", financial_status: "paid" }] },
-      { rows: [] },
-      { rows: [{ provider: "ebay" }] },
-      { rows: [] },
-      { rows: [{ provider: "ebay" }] },
-    ]);
-    (mock.db as any).__fulfillmentPush = {
-      pushShopifyFulfillment,
-      pushTracking: vi.fn(),
-    };
-
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
-    }) as any;
-
-    await createShipStationService(mock.db).processShipNotify("/foo");
-
-    expect(pushShopifyFulfillment).not.toHaveBeenCalled();
-    expect(mock.calls).toContainEqual(expect.objectContaining({
-      tag: "insert",
-      values: expect.objectContaining({
-        provider: "internal",
-        topic: "delayed_tracking_push",
-        payload: { orderId: 9999, shipmentId: 501 },
-      }),
-    }));
-  });
-
-  it("non-Shopify shipment does not enqueue a Shopify retry when fulfillment push is not wired", async () => {
-    process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "true";
-    const warnSpy = vi.spyOn(console, "warn");
-
-    const mock = makeDb([
-      { rows: [{ id: 501, order_id: 42, status: "planned" }] },
-      {
-        rows: [
-          {
-            id: 501,
-            order_id: 42,
-            status: "planned",
-            tracking_number: null,
-            carrier: null,
-            tracking_url: null,
-          },
-        ],
-      },
-      { rows: [] },
-      {
-        rows: [
-          { id: 42, warehouse_status: "ready_to_ship", completed_at: null },
-        ],
-      },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: "9999" }] },
-      { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      { rows: [] },
-      { rows: [{ provider: "ebay" }] },
-      { rows: [] },
-      { rows: [{ provider: "ebay" }] },
-    ]);
-    (mock.db as any).__fulfillmentPush = {
-      pushTracking: vi.fn(),
-    };
-
-    globalThis.fetch = mockFetchOnceOk({
-      shipments: [makeShipmentPayload()],
-    }) as any;
-
-    await createShipStationService(mock.db).processShipNotify("/foo");
-
-    expect(warnSpy.mock.calls.some((args) =>
-      String(args[0] ?? "").includes("pushShopifyFulfillment not wired"),
-    )).toBe(false);
-    expect(mock.calls).not.toContainEqual(expect.objectContaining({
-      tag: "insert",
-      values: expect.objectContaining({
-        provider: "internal",
-        topic: "shopify_fulfillment_push",
-      }),
-    }));
-    expect(mock.calls).toContainEqual(expect.objectContaining({
-      tag: "insert",
-      values: expect.objectContaining({
-        provider: "internal",
-        topic: "delayed_tracking_push",
-        payload: { orderId: 9999, shipmentId: 501 },
-      }),
-    }));
+    await expect(
+      createShipStationService(mock.db).processShipNotify("/foo"),
+    ).rejects.toThrow(/Canonical channel fulfillment authority is not initialized/);
   });
 });
 
-// ─── V2 error-resilience ─────────────────────────────────────────────
+// --- V2 error resilience -------------------------------------------------
+
 
 describe("processShipNotify V2 :: error resilience", () => {
   beforeEach(() => {
@@ -1579,165 +1243,77 @@ describe("processShipNotify V2 :: error resilience", () => {
   });
 
   it("continues the batch but rejects when any shipment fails", async () => {
-    const good = makeShipmentPayload({ orderId: 1, orderKey: "echelon-wms-shp-1" });
-    const broken = makeShipmentPayload({ orderId: 2, orderKey: "echelon-wms-shp-2" });
-    const alsoGood = makeShipmentPayload({ orderId: 3, orderKey: "echelon-wms-shp-3" });
-
-    // good → normal happy-path responses (9 execute calls)
-    // broken → V2 lookup returns a shipment that triggers an error
-    //          in the rollup step (we throw from the UPDATE sql step)
-    // alsoGood → normal happy-path again
-    const goodPath = [
-      { rows: [{ id: 10, order_id: 100, status: "planned" }] },
-      {
-        rows: [
-          {
-            id: 10,
-            order_id: 100,
-            status: "planned",
-            tracking_number: null,
-            carrier: null,
-            tracking_url: null,
-          },
-        ],
-      },
-      { rows: [] },
-      {
-        rows: [
-          { id: 100, warehouse_status: "ready_to_ship", completed_at: null },
-        ],
-      },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: "200" }] },
-      // finality guard
-      { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      // OMS line status derivation
-      { rows: [] },
-      // shouldEnqueueDelayedTrackingPush provider lookup
-      { rows: [] },
-    ];
-
-    // Broken path: V2 lookup finds the shipment, then the mark-shipped
-    // UPDATE throws. The outer try/catch must swallow and continue.
-    const brokenPath = [
-      { rows: [{ id: 11, order_id: 101, status: "planned" }] },
-      {
-        rows: [
-          {
-            id: 11,
-            order_id: 101,
-            status: "planned",
-            tracking_number: null,
-            carrier: null,
-            tracking_url: null,
-          },
-        ],
-      },
-      // Next execute should be the UPDATE; instead we let the mock
-      // trigger an error by leaving the queue short AND patching
-      // execute to throw on the very next call. We'll handle this by
-      // using a custom mock variant below.
-    ];
-
-    const alsoGoodPath: Array<{ rows: any[] }> = [
-      { rows: [{ id: 12, order_id: 102, status: "planned" }] },
-      {
-        rows: [
-          {
-            id: 12,
-            order_id: 102,
-            status: "planned",
-            tracking_number: null,
-            carrier: null,
-            tracking_url: null,
-          },
-        ],
-      },
-      { rows: [] },
-      {
-        rows: [
-          { id: 102, warehouse_status: "ready_to_ship", completed_at: null },
-        ],
-      },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: "202" }] },
-      // finality guard
-      { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      // OMS line status derivation
-      { rows: [] },
-      // shouldEnqueueDelayedTrackingPush provider lookup
-      { rows: [] },
-    ];
-
-    // Custom db: execute calls draw from goodPath → brokenPath → throw → alsoGoodPath.
-    const goodQ = [...goodPath];
-    const brokenQ = [...brokenPath];
-    const alsoGoodQ = [...alsoGoodPath];
-    let thrownForBroken = false;
-    const calls: RecordedCall[] = [];
-    const execute = vi.fn(async (query: any) => {
-      const chunks: unknown[] = query?.queryChunks ?? [];
-      const text = chunks
-        .map((c) => {
-          if (typeof c === "string") return c;
-          if (c && typeof c === "object" && Array.isArray((c as any).value)) {
-            return (c as any).value.join("");
-          }
-          return "";
-        })
-        .join("");
-      calls.push({ sqlText: text, tag: "execute" });
-      if (text.includes("UPDATE wms.reconciliation_exceptions")) {
-        return { rows: [] };
-      }
-      if (goodQ.length > 0) return goodQ.shift()!;
-      if (brokenQ.length > 0) return brokenQ.shift()!;
-      if (brokenQ.length === 0 && !thrownForBroken) {
-        thrownForBroken = true;
-        throw new Error("simulated DB failure on UPDATE");
-      }
-      if (alsoGoodQ.length > 0) return alsoGoodQ.shift()!;
-      return { rows: [] };
+    const good = makeShipmentPayload({
+      shipmentId: 1001,
+      orderId: 1,
+      orderKey: "echelon-wms-shp-10",
     });
-    const db: any = {
-      execute,
-      update: (_: any) => ({
-        set: (_v: any) => ({
-          where: (_w: any) => {
-            calls.push({ sqlText: "__update__", tag: "update" });
-            return Promise.resolve(undefined);
+    const broken = makeShipmentPayload({
+      shipmentId: 1002,
+      orderId: 2,
+      orderKey: "echelon-wms-shp-11",
+    });
+    const alsoGood = makeShipmentPayload({
+      shipmentId: 1003,
+      orderId: 3,
+      orderKey: "echelon-wms-shp-12",
+    });
+    const path = (shipmentId: number, wmsOrderId: number, omsOrderId: number) => [
+      { rows: [{ id: shipmentId, order_id: wmsOrderId, status: "planned" }] },
+      {
+        rows: [{
+          id: shipmentId,
+          order_id: wmsOrderId,
+          status: "planned",
+          tracking_number: null,
+          carrier: null,
+          tracking_url: null,
+        }],
+      },
+      { rows: [] },
+      { rows: [{ oms_fulfillment_order_id: String(omsOrderId) }] },
+      { rows: [{ status: "confirmed", financial_status: "paid" }] },
+    ];
+    const mock = makeDb([
+      ...path(10, 100, 200),
+      ...path(11, 101, 201),
+      ...path(12, 102, 202),
+    ]);
+    mock.fulfillmentAuthority.recordPhysicalPackage.mockImplementation(
+      async (input: any) => {
+        if (input.providerPhysicalShipmentId === "1002") {
+          throw new Error("simulated canonical authority failure");
+        }
+        return {
+          materialized: {
+            physicalShipmentId: 90001,
+            shippingEngineOrderId: 80001,
+            channelCommands: [{ id: 70001, pushStatus: "pending" }],
+            customerFulfillmentItemCount: 1,
+            nonCustomerItemCount: 0,
           },
-        }),
-      }),
-      insert: (_: any) => ({
-        values: (_v: any) => {
-          calls.push({ sqlText: "__insert__", tag: "insert" });
-          return Promise.resolve(undefined);
-        },
-      }),
-      select: () => ({
-        from: (_t: any) => ({
-          where: (_w: any) => ({
-            limit: (_n: number) => {
-              calls.push({ sqlText: "__select__", tag: "select" });
-              return Promise.resolve([]);
-            },
-          }),
-        }),
-      }),
-    };
+          dispatch: {
+            claimed: 0,
+            succeeded: 0,
+            ignored: 0,
+            retryScheduled: 0,
+            reviewRequired: 0,
+            deadLettered: 0,
+          },
+        };
+      },
+    );
 
     globalThis.fetch = mockFetchOnceOk({
       shipments: [good, broken, alsoGood],
     }) as any;
 
-    const svc = createShipStationService(db);
+    const svc = createTestShipStationService(mock);
     await expect(svc.processShipNotify("/foo")).rejects.toMatchObject({
       processed: 2,
-      failures: [{ shipmentId: 77777 }],
+      failures: [{ shipmentId: 1002, message: "simulated canonical authority failure" }],
     });
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -1822,7 +1398,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
     const processed = await svc.processShipNotify("/foo");
 
     expect(processed).toBe(1);
@@ -1868,7 +1444,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createShipStationService(mock.db);
+    const svc = createTestShipStationService(mock);
     const processed = await svc.processShipNotify("/foo");
 
     // Should not have processed — no WMS shipment to operate on.
@@ -1919,7 +1495,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await createShipStationService(mock.db, inventoryCore)
+    const processed = await createTestShipStationService(mock, inventoryCore)
       .processShipNotify("/foo");
 
     expect(processed).toBe(0);
@@ -1956,7 +1532,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
 
       globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-      const processed = await createShipStationService(mock.db, inventoryCore)
+      const processed = await createTestShipStationService(mock, inventoryCore)
         .processShipNotify("/foo");
 
       expect(processed).toBe(0);
@@ -2229,31 +1805,17 @@ describe("processShipNotify V2 :: duplicate orderKey repair", () => {
       },
       // UPDATE outbound_shipments.
       { rows: [] },
-      // recompute: order row.
-      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
-      // recompute: shipment statuses.
-      { rows: [{ status: "shipped" }] },
-      // recompute UPDATE wms.orders.
-      { rows: [] },
       // resolve OMS id.
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       // finality guard.
       { rows: [{ status: "confirmed", financial_status: "paid" }] },
-      // OMS line status derivation.
-      { rows: [] },
-      // applyShipmentQuantitiesToWmsOrderItems.
-      { rows: [] },
-      // delayed tracking provider guard.
-      { rows: [{ provider: "shopify" }] },
-      // Shopify fulfillment provider guard.
-      { rows: [{ provider: "shopify" }] },
     ]);
 
     globalThis.fetch = mockFetchOnceOk({
       shipments: [shipmentPayload],
     }) as any;
 
-    const processed = await createShipStationService(mock.db, inventoryCore)
+    const processed = await createTestShipStationService(mock, inventoryCore)
       .processShipNotify("/foo");
 
     expect(processed).toBe(1);

@@ -13,11 +13,7 @@ import { webhookRetryQueue } from "@shared/schema";
 import crypto from "crypto";
 import { runReconciliationNow } from "../modules/orders/shopify-order-reconciliation";
 import { sql } from "drizzle-orm";
-import {
-  markShipmentShipped,
-  markShipmentCancelled,
-  recomputeOrderStatusFromShipments,
-} from "../modules/orders/shipment-rollup";
+import { processShopifyFulfillmentIngress } from "../modules/oms/shopify-fulfillment-ingress.adapter";
 
 // ---------------------------------------------------------------------------
 // Shopify carrier-name → canonical carrier code mapping (§6 Commit 26).
@@ -32,716 +28,9 @@ import {
 // Shopify→canonical translation, so reviewers don't have to chase string
 // comparisons through call sites.
 // ---------------------------------------------------------------------------
-const SHOPIFY_TO_CANONICAL_CARRIER: Record<string, string> = {
-  usps: "USPS",
-  "u.s. postal service": "USPS",
-  ups: "UPS",
-  fedex: "FedEx",
-  "federal express": "FedEx",
-  dhl: "DHL",
-  "dhl express": "DHL",
-  "dhl ecommerce": "DHL",
-};
-
-export function mapShopifyCarrier(
-  trackingCompany: string | null | undefined,
-): string {
-  if (typeof trackingCompany !== "string" || trackingCompany.trim().length === 0) {
-    return "unknown";
-  }
-  const key = trackingCompany.trim().toLowerCase();
-  return SHOPIFY_TO_CANONICAL_CARRIER[key] ?? trackingCompany.trim().toUpperCase();
-}
-
-// ---------------------------------------------------------------------------
-// Shopify `fulfillments/create` webhook payload — only the fields we use.
-// Rule #4 (explicit types): the inbound payload is JSON-from-Shopify, so we
-// type the slice we trust and validate at the boundary.
-// ---------------------------------------------------------------------------
-export interface ShopifyFulfillmentCreatePayload {
-  id: number | string;
-  order_id: number | string;
-  status?: string;
-  tracking_number?: string | null;
-  tracking_url?: string | null;
-  tracking_company?: string | null;
-  created_at?: string | null;
-  line_items?: Array<{ sku?: string | null; quantity: number }>;
-}
-
-// ---------------------------------------------------------------------------
-// Pure handler for fulfillments/create — extracted from the route so it is
-// unit-testable without express. The route handler thin-wraps this and
-// translates the structured response into HTTP.
-//
-// Behavior (§6 Commit 26):
-//   1. Validate the payload (id + order_id required, status==='success' to
-//      proceed). `status='cancelled'` and friends are 200-acked but skip the
-//      cascade (Shopify retries on non-200, so we must not 500 over a
-//      non-actionable status).
-//   2. Match an existing WMS shipment by `shopify_fulfillment_id`. If found,
-//      delegate to `markShipmentShipped` — idempotent on replay.
-//   3. If no shipment found, look up the WMS order via the OMS pointer
-//      (Shopify order id → oms_orders.external_order_id → wms.orders by
-//      oms_fulfillment_order_id / source_table_id). If found, INSERT a new
-//      shipment row directly in `shipped` state with
-//      `source='shopify_external_fulfillment'`. This represents 3PL or
-//      manual-Shopify-admin fulfillments so the order can roll up.
-//   4. If no WMS order either, log + return 200 (we don't track this order;
-//       500 would just churn Shopify retries forever).
-//   5. After mark/insert, `recomputeOrderStatusFromShipments` rolls up
-//      `wms.orders.warehouse_status`.
-//   6. OMS-side: `markShippedByExternalId` keeps oms_orders in sync.
-//   7. Idempotency lives in `markShipmentShipped` (existing) +
-//      `recomputeOrderStatusFromShipments` (no-op when status matches).
-//      Path B (new shipment row) is guarded by the shipment lookup itself:
-//      a duplicate webhook re-routes through path A on second delivery.
-// ---------------------------------------------------------------------------
-export interface FulfillmentsCreateDeps {
-  db: any;
-  omsSvc?: { markShippedByExternalId?: (...args: any[]) => Promise<unknown> } | null;
-  now?: Date;
-  // When an order is fulfilled directly in Shopify (e.g. int'l labels bought
-  // in Shopify), the SS shipment(s) carrying those exact items are superseded
-  // and must be engine-cancelled or they double-ship. Injected so the handler
-  // can engine-cancel; omit (tests) to skip the cancel.
-  shippingEngine?: {
-    isConfigured?: () => boolean;
-    cancel: (ref: any) => Promise<unknown>;
-  } | null;
-}
-
-export interface FulfillmentsCreateResult {
-  status: number;
-  body: {
-    received: boolean;
-    outcome:
-      | "non_actionable_status"
-      | "shipment_updated"
-      | "shipment_idempotent"
-      | "external_shipment_created"
-      | "order_not_tracked";
-    error?: string;
-  };
-}
-
-/**
- * Cancel the ShipStation shipment(s) this Shopify fulfillment supersedes.
- *
- * Shipment-SCOPED (not whole-order): when an order is fulfilled directly in
- * Shopify for specific line items, only the PRE-SHIP SS shipment(s) whose
- * qty>0 items are FULLY covered by the fulfilled SKUs are cancelled. A shipment
- * that still has an item to ship via ShipStation is left alone (the NOT EXISTS
- * subset guard). Mapping is by SKU — the only line-item key the webhook
- * reliably carries (order_items.shopify_line_item_id is frequently null).
- *
- * Cancel goes through the shipping-engine port (markShipmentCancelled
- * engine-cancels queued/labeled rows). Non-blocking: failures are logged;
- * reconcile catches drift. Already-shipped shipments are excluded by
- * `shipped_at IS NULL`, so a normal SS flow — or a webhook race on a
- * fulfillment we pushed — never cancels a real shipment.
- *
- * KNOWN LIMITATION: scopes by order_item membership, not per-unit quantity. A
- * SKU split across BOTH a Shopify fulfillment and an SS shipment (partial qty
- * each) fails the subset rule, so the SS shipment is left for the operator
- * rather than risk stranding units.
- */
-async function supersedeShipStationForFulfilledItems(
-  deps: FulfillmentsCreateDeps,
-  wmsOrderId: number,
-  lineItems: Array<{ sku?: string | null; quantity: number }>,
-  fulfillmentGid: string,
-  now: Date,
-): Promise<void> {
-  const engine = deps.shippingEngine;
-  if (!engine || engine.isConfigured?.() === false) return;
-
-  const fulfilledSkus = Array.from(
-    new Set(
-      lineItems
-        .map((li) => (typeof li.sku === "string" ? li.sku.trim() : ""))
-        .filter((s) => s.length > 0),
-    ),
-  );
-  if (fulfilledSkus.length === 0) {
-    console.warn(
-      `[fulfillments/create] fulfillment ${fulfillmentGid} carried no line-item SKUs — cannot scope ShipStation cancel; skipping`,
-    );
-    return;
-  }
-
-  const { db } = deps;
-  const itemRows: any = await db.execute(sql`
-    SELECT id FROM wms.order_items
-    WHERE order_id = ${wmsOrderId} AND sku = ANY(${fulfilledSkus}::text[])
-  `);
-  const fulfilledItemIds = (itemRows?.rows ?? [])
-    .map((r: any) => Number(r.id))
-    .filter((n: number) => Number.isInteger(n) && n > 0);
-  if (fulfilledItemIds.length === 0) {
-    console.warn(
-      `[fulfillments/create] fulfillment ${fulfillmentGid} SKUs did not map to any order_items for order ${wmsOrderId} — no ShipStation shipment cancelled`,
-    );
-    return;
-  }
-
-  // Pre-ship SS shipments whose EVERY qty>0 item is in the fulfilled set (⊆)
-  // AND that hold at least one fulfilled item. The NOT EXISTS clause is the
-  // shipment-scoping guard: a shipment with any not-yet-fulfilled item is left
-  // to ship via ShipStation.
-  const superseded: any = await db.execute(sql`
-    SELECT os.id
-    FROM wms.outbound_shipments os
-    WHERE os.order_id = ${wmsOrderId}
-      AND os.status IN ('planned', 'queued', 'labeled')
-      AND os.shipped_at IS NULL
-      AND COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
-      AND EXISTS (
-        SELECT 1 FROM wms.outbound_shipment_items osi
-        WHERE osi.shipment_id = os.id AND osi.qty > 0
-          AND osi.order_item_id = ANY(${fulfilledItemIds}::int[])
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM wms.outbound_shipment_items osi
-        WHERE osi.shipment_id = os.id AND osi.qty > 0
-          AND osi.order_item_id <> ALL(${fulfilledItemIds}::int[])
-      )
-    ORDER BY os.id
-  `);
-
-  for (const row of (superseded?.rows ?? []) as Array<{ id: number }>) {
-    try {
-      await markShipmentCancelled(db, row.id, "superseded_external_fulfillment", {
-        now,
-        engineCancel: async (ref: any) => {
-          await engine.cancel(ref);
-        },
-      });
-    } catch (err: any) {
-      console.error(
-        `[fulfillments/create] failed to cancel superseded SS shipment ${row.id} for order ${wmsOrderId}: ${err?.message ?? err}`,
-      );
-    }
-  }
-}
-
-export async function handleShopifyFulfillmentCreate(
-  deps: FulfillmentsCreateDeps,
-  payload: ShopifyFulfillmentCreatePayload,
-): Promise<FulfillmentsCreateResult> {
-  // -- 1. Validate payload -------------------------------------------------
-  // `id` and `order_id` are non-negotiable; everything else is optional in
-  // theory (Shopify will sometimes deliver test fulfillments with no
-  // tracking). Rule #3 (validate at boundary).
-  if (
-    payload === null ||
-    typeof payload !== "object" ||
-    payload.id === undefined ||
-    payload.id === null ||
-    payload.order_id === undefined ||
-    payload.order_id === null
-  ) {
-    return {
-      status: 400,
-      body: {
-        received: false,
-        outcome: "non_actionable_status",
-        error: "Missing required fields: id, order_id",
-      },
-    };
-  }
-
-  const fulfillmentGid = String(payload.id);
-  const shopifyOrderId = String(payload.order_id);
-  const status = (payload.status ?? "success").toLowerCase();
-
-  // Only `success` fulfillments transition WMS to `shipped`. Cancelled,
-  // failed, etc. are 200-acked (Shopify will resend on non-2xx; we don't
-  // want to churn retries over an event that has nothing for us to do).
-  if (status !== "success") {
-    return {
-      status: 200,
-      body: { received: true, outcome: "non_actionable_status" },
-    };
-  }
-
-  const trackingNumber =
-    typeof payload.tracking_number === "string" && payload.tracking_number.trim().length > 0
-      ? payload.tracking_number.trim()
-      : "";
-  const trackingCompanyRaw = payload.tracking_company ?? null;
-  const carrier = mapShopifyCarrier(trackingCompanyRaw);
-  const trackingUrl =
-    typeof payload.tracking_url === "string" && payload.tracking_url.trim().length > 0
-      ? payload.tracking_url.trim()
-      : null;
-  const shipDate =
-    typeof payload.created_at === "string" && payload.created_at.length > 0
-      ? new Date(payload.created_at)
-      : (deps.now ?? new Date());
-  const safeShipDate = Number.isNaN(shipDate.getTime())
-    ? (deps.now ?? new Date())
-    : shipDate;
-  const now = deps.now ?? new Date();
-
-  const { db } = deps;
-
-  // -- 2. Match existing WMS shipment by shopify_fulfillment_id -----------
-  // This is path A: a fulfillment WE pushed (via C22d / fulfillment-push
-  // service stamping `shopify_fulfillment_id` after Shopify accepts it).
-  // The roundtrip webhook lands here and we just need to flip status.
-  const existingShipmentResult: any = await db.execute(sql`
-    SELECT id, order_id
-    FROM wms.outbound_shipments
-    WHERE shopify_fulfillment_id = ${fulfillmentGid}
-    LIMIT 1
-  `);
-  const existingShipmentRow: any = existingShipmentResult?.rows?.[0];
-
-  if (existingShipmentRow) {
-    // Tracking number is required by `markShipmentShipped`. If Shopify
-    // delivered without one (rare; e.g. test webhook), skip — the next
-    // valid webhook (or the Group F reconcile) will catch up rather than
-    // us fabricating a placeholder.
-    if (trackingNumber.length === 0) {
-      console.warn(
-        `[fulfillments/create] shipment ${existingShipmentRow.id} (fulfillment ${fulfillmentGid}) arrived with no tracking_number — skipping mark-shipped`,
-      );
-      return {
-        status: 200,
-        body: { received: true, outcome: "shipment_idempotent" },
-      };
-    }
-
-    const result = await markShipmentShipped(
-      db,
-      existingShipmentRow.id,
-      {
-        trackingNumber,
-        carrier,
-        shipDate: safeShipDate,
-        trackingUrl,
-      },
-      {
-        now,
-        // Deliberately NOT wiring `fulfillmentPush.reconcileShopifyFulfillment`:
-        // Shopify is the SOURCE of this event, so pushing back would loop.
-      },
-    );
-
-    if (result.changed) {
-      await recomputeOrderStatusFromShipments(db, result.wmsOrderId, { now });
-      // OMS-side mirror — Rule #1 separation: mark-shipment is WMS-only,
-      // OMS update is a separate concern, gated on whether the OMS service
-      // is wired (tests stub it).
-      if (deps.omsSvc?.markShippedByExternalId) {
-        try {
-          await deps.omsSvc.markShippedByExternalId(
-            shopifyOrderId,
-            trackingNumber,
-            carrier,
-          );
-        } catch (omsErr: any) {
-          // Non-fatal: WMS state is the source of truth here.
-          console.warn(
-            `[fulfillments/create] OMS markShippedByExternalId failed for shopify order ${shopifyOrderId}: ${omsErr?.message ?? omsErr}`,
-          );
-        }
-      }
-      return {
-        status: 200,
-        body: { received: true, outcome: "shipment_updated" },
-      };
-    }
-
-    // No-op replay: shipment already in target state with same tracking.
-    return {
-      status: 200,
-      body: { received: true, outcome: "shipment_idempotent" },
-    };
-  }
-
-  // -- 3. No existing shipment — try to resolve the WMS order ------------
-  // Path B: external fulfillment (3PL like ShipMonk, manual Shopify admin
-  // action). Match Shopify order id → wms.orders via OMS pointer or legacy
-  // shopify_order_id. Both columns are checked because pre-refactor orders
-  // populated `shopify_order_id` while post-refactor orders use
-  // `oms_fulfillment_order_id`.
-  const wmsOrderResult: any = await db.execute(sql`
-    SELECT id, channel_id
-    FROM wms.orders
-    WHERE oms_fulfillment_order_id = ${shopifyOrderId}
-       OR source_table_id = ${shopifyOrderId}
-       OR shopify_order_id = ${shopifyOrderId}
-    LIMIT 1
-  `);
-  const wmsOrderRow: any = wmsOrderResult?.rows?.[0];
-
-  if (!wmsOrderRow) {
-    // Order never synced to Echelon (rare: pre-refactor data, or a channel
-    // we don't ingest). Don't 500 — Shopify will retry and we'd just churn.
-    console.warn(
-      `[fulfillments/create] no WMS order for Shopify order ${shopifyOrderId} (fulfillment ${fulfillmentGid}) — skipping`,
-    );
-    return {
-      status: 200,
-      body: { received: true, outcome: "order_not_tracked" },
-    };
-  }
-
-  // -- 3b. Insert a new WMS shipment row in `shipped` state --------------
-  // We bypass `markShipmentShipped` here because there's no prior shipment
-  // row to transition — we're creating it directly in the terminal state
-  // to mirror the external fulfillment. `source='shopify_external_fulfillment'`
-  // distinguishes it from shipments WE created. Tracking history is not
-  // written for new rows (history captures REPLACEMENT, not initial label).
-  const wmsOrderId = wmsOrderRow.id as number;
-  const channelId = wmsOrderRow.channel_id ?? null;
-  const safeTrackingNumber = trackingNumber.length > 0 ? trackingNumber : null;
-
-  await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
-  try {
-    const existingExternal: any = await db.execute(sql`
-      SELECT id FROM wms.outbound_shipments
-      WHERE order_id = ${wmsOrderId}
-        AND shopify_fulfillment_id = ${fulfillmentGid}
-      LIMIT 1
-    `);
-    if (!existingExternal?.rows?.[0]) {
-      await db.execute(sql`
-        INSERT INTO wms.outbound_shipments
-          (order_id, channel_id, status, source,
-           shopify_fulfillment_id, tracking_number, carrier, tracking_url,
-           shipped_at, created_at, updated_at)
-        VALUES
-          (${wmsOrderId}, ${channelId}, 'shipped', 'shopify_external_fulfillment',
-           ${fulfillmentGid}, ${safeTrackingNumber}, ${carrier}, ${trackingUrl},
-           ${safeShipDate}, ${now}, ${now})
-      `);
-    }
-  } finally {
-    await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
-  }
-
-  // Order fulfilled OUTSIDE ShipStation → cancel the SS shipment(s) this
-  // fulfillment supersedes (shipment-scoped; see helper). Prevents double-ship.
-  await supersedeShipStationForFulfilledItems(
-    deps,
-    wmsOrderId,
-    payload.line_items ?? [],
-    fulfillmentGid,
-    now,
-  );
-
-  await recomputeOrderStatusFromShipments(db, wmsOrderId, { now });
-
-  if (deps.omsSvc?.markShippedByExternalId) {
-    try {
-      await deps.omsSvc.markShippedByExternalId(
-        shopifyOrderId,
-        safeTrackingNumber ?? "",
-        carrier,
-      );
-    } catch (omsErr: any) {
-      console.warn(
-        `[fulfillments/create] OMS markShippedByExternalId failed for shopify order ${shopifyOrderId}: ${omsErr?.message ?? omsErr}`,
-      );
-    }
-  }
-
-  return {
-    status: 200,
-    body: { received: true, outcome: "external_shipment_created" },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Shopify `fulfillments/update` webhook payload — only the fields we use.
-// Shape mirrors `fulfillments/create`; the difference is semantic, not
-// structural. Shopify fires this when an existing fulfillment's tracking
-// metadata changes (ShipMonk relabel, operator edit in Shopify admin, etc.).
-// Rule #4 (explicit types).
-// ---------------------------------------------------------------------------
-export interface ShopifyFulfillmentUpdatePayload {
-  id: number | string;
-  order_id?: number | string;
-  status?: string;
-  tracking_number?: string | null;
-  tracking_url?: string | null;
-  tracking_company?: string | null;
-  created_at?: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Pure handler for fulfillments/update — extracted from the route so it is
-// unit-testable without express. Mirrors the C26 handleShopifyFulfillmentCreate
-// pattern for symmetry.
-//
-// Behavior (§6 Commit 27):
-//   1. Validate payload (id required). status==='cancelled' is acked but
-//      delegated to the cancel webhook. Other non-success statuses (pending,
-//      failure, ...) are 200-acked with no DB action — Shopify retries on
-//      non-2xx so we must not 500 over a non-actionable status.
-//   2. Match an existing WMS shipment by `shopify_fulfillment_id`. Not found
-//      → recover like fulfillments/create Path B when `order_id` is present.
-//      This covers lost create webhooks where Shopify later sends an update
-//      with tracking for the same external/manual fulfillment.
-//   3. Cascade through `markShipmentShipped`. The re-tracking branch (added
-//      in C18) writes a `shipment_tracking_history` row when tracking
-//      changes and UPDATEs the shipment. If tracking matches, returns
-//      `{changed: false}` and nothing else fires — clean idempotency.
-//   4. On change, `recomputeOrderStatusFromShipments` re-derives the order
-//      `warehouse_status` (likely already 'shipped'; the function no-ops
-//      when status matches, so this is cheap), and `markShippedByExternalId`
-//      keeps OMS in sync with the new tracking.
-//   5. We do NOT wire `fulfillmentPush.reconcileShopifyFulfillment`
-//      here. Shopify is the SOURCE of this event — pushing back would loop.
-// ---------------------------------------------------------------------------
-export interface FulfillmentsUpdateDeps {
-  db: any;
-  omsSvc?: { markShippedByExternalId?: (...args: any[]) => Promise<unknown> } | null;
-  now?: Date;
-}
-
-export interface FulfillmentsUpdateResult {
-  status: number;
-  body: {
-    received: boolean;
-    outcome:
-      | "updated"
-      | "idempotent"
-      | "no_tracking"
-      | "shipment_not_tracked"
-      | "external_shipment_created"
-      | "cancel_handled_by_other_webhook"
-      | "status_ignored"
-      | "invalid_payload";
-    error?: string;
-  };
-}
-
-export async function handleShopifyFulfillmentUpdate(
-  deps: FulfillmentsUpdateDeps,
-  payload: ShopifyFulfillmentUpdatePayload | null | undefined,
-): Promise<FulfillmentsUpdateResult> {
-  // -- 1. Validate payload -------------------------------------------------
-  if (
-    payload === null ||
-    payload === undefined ||
-    typeof payload !== "object" ||
-    payload.id === undefined ||
-    payload.id === null
-  ) {
-    return {
-      status: 400,
-      body: {
-        received: false,
-        outcome: "invalid_payload",
-        error: "missing fulfillment id",
-      },
-    };
-  }
-
-  const fulfillmentGid = String(payload.id);
-  const shopifyOrderId =
-    payload.order_id !== undefined && payload.order_id !== null
-      ? String(payload.order_id)
-      : null;
-  const status = (payload.status ?? "success").toLowerCase();
-
-  // -- 2. Status routing ---------------------------------------------------
-  // `cancelled` is handled by the dedicated fulfillment-cancelled webhook;
-  // we ack so Shopify doesn't retry, but we don't unwind state here.
-  if (status === "cancelled") {
-    console.log(
-      `[fulfillments/update] fulfillment ${fulfillmentGid} cancelled — deferring to cancel webhook`,
-    );
-    return {
-      status: 200,
-      body: { received: true, outcome: "cancel_handled_by_other_webhook" },
-    };
-  }
-
-  // Non-success/non-cancelled (pending, failure, error, open, ...) — log
-  // + ack. Re-tracking only makes sense on a success transition.
-  if (status !== "success") {
-    console.log(
-      `[fulfillments/update] fulfillment ${fulfillmentGid} status=${status} — no action`,
-    );
-    return {
-      status: 200,
-      body: { received: true, outcome: "status_ignored" },
-    };
-  }
-
-  const trackingNumberRaw =
-    typeof payload.tracking_number === "string" && payload.tracking_number.trim().length > 0
-      ? payload.tracking_number.trim()
-      : "";
-
-  // No tracking on a success update is a no-op — Shopify occasionally
-  // sends success updates with cleared tracking (operator wiping tracking
-  // before re-entering). Don't overwrite real tracking with nothing.
-  if (trackingNumberRaw.length === 0) {
-    console.log(
-      `[fulfillments/update] fulfillment ${fulfillmentGid} arrived without tracking_number — skipping`,
-    );
-    return {
-      status: 200,
-      body: { received: true, outcome: "no_tracking" },
-    };
-  }
-
-  const trackingCompanyRaw = payload.tracking_company ?? null;
-  const carrier = mapShopifyCarrier(trackingCompanyRaw);
-  const trackingUrl =
-    typeof payload.tracking_url === "string" && payload.tracking_url.trim().length > 0
-      ? payload.tracking_url.trim()
-      : null;
-  const shipDateRaw =
-    typeof payload.created_at === "string" && payload.created_at.length > 0
-      ? new Date(payload.created_at)
-      : (deps.now ?? new Date());
-  const safeShipDate = Number.isNaN(shipDateRaw.getTime())
-    ? (deps.now ?? new Date())
-    : shipDateRaw;
-  const now = deps.now ?? new Date();
-
-  const { db } = deps;
-
-  // -- 3. Match existing WMS shipment --------------------------------------
-  const existingShipmentResult: any = await db.execute(sql`
-    SELECT id, order_id
-    FROM wms.outbound_shipments
-    WHERE shopify_fulfillment_id = ${fulfillmentGid}
-    LIMIT 1
-  `);
-  const existingShipmentRow: any = existingShipmentResult?.rows?.[0];
-
-  if (!existingShipmentRow) {
-    if (shopifyOrderId !== null) {
-      const wmsOrderResult: any = await db.execute(sql`
-        SELECT id, channel_id
-        FROM wms.orders
-        WHERE oms_fulfillment_order_id = ${shopifyOrderId}
-           OR source_table_id = ${shopifyOrderId}
-           OR shopify_order_id = ${shopifyOrderId}
-        LIMIT 1
-      `);
-      const wmsOrderRow: any = wmsOrderResult?.rows?.[0];
-
-      if (wmsOrderRow) {
-        const wmsOrderId = wmsOrderRow.id as number;
-        const channelId = wmsOrderRow.channel_id ?? null;
-
-        await db.execute(sql`SELECT pg_advisory_lock(918406, ${wmsOrderId})`);
-        try {
-          const existingExtFul: any = await db.execute(sql`
-            SELECT id FROM wms.outbound_shipments
-            WHERE order_id = ${wmsOrderId}
-              AND shopify_fulfillment_id = ${fulfillmentGid}
-            LIMIT 1
-          `);
-          if (!existingExtFul?.rows?.[0]) {
-            await db.execute(sql`
-              INSERT INTO wms.outbound_shipments
-                (order_id, channel_id, status, source,
-                 shopify_fulfillment_id, tracking_number, carrier, tracking_url,
-                 shipped_at, created_at, updated_at)
-              VALUES
-                (${wmsOrderId}, ${channelId}, 'shipped', 'shopify_external_fulfillment',
-                 ${fulfillmentGid}, ${trackingNumberRaw}, ${carrier}, ${trackingUrl},
-                 ${safeShipDate}, ${now}, ${now})
-            `);
-          }
-        } finally {
-          await db.execute(sql`SELECT pg_advisory_unlock(918406, ${wmsOrderId})`);
-        }
-
-        await recomputeOrderStatusFromShipments(db, wmsOrderId, { now });
-
-        if (deps.omsSvc?.markShippedByExternalId) {
-          try {
-            await deps.omsSvc.markShippedByExternalId(
-              shopifyOrderId,
-              trackingNumberRaw,
-              carrier,
-            );
-          } catch (omsErr: any) {
-            console.warn(
-              `[fulfillments/update] OMS markShippedByExternalId failed for shopify order ${shopifyOrderId}: ${omsErr?.message ?? omsErr}`,
-            );
-          }
-        }
-
-        return {
-          status: 200,
-          body: { received: true, outcome: "external_shipment_created" },
-        };
-      }
-    }
-
-    // No shipment with this fulfillment id and no known WMS order. Don't
-    // 500 — Shopify would retry forever for orders Echelon does not track.
-    console.warn(
-      `[fulfillments/update] no shipment found for fulfillment ${fulfillmentGid} — skipping`,
-    );
-    return {
-      status: 200,
-      body: { received: true, outcome: "shipment_not_tracked" },
-    };
-  }
-
-  // -- 4. Cascade through markShipmentShipped ------------------------------
-  // C18's re-tracking branch handles the actual UPDATE + history write.
-  // Returns `{changed: false}` if tracking already matches → idempotent.
-  const result = await markShipmentShipped(
-    db,
-    existingShipmentRow.id,
-    {
-      trackingNumber: trackingNumberRaw,
-      carrier,
-      shipDate: safeShipDate,
-      trackingUrl,
-    },
-    {
-      now,
-      // Deliberately NOT wiring `fulfillmentPush.reconcileShopifyFulfillment`:
-      // Shopify is the SOURCE of this event, so pushing back would loop.
-    },
-  );
-
-  if (!result.changed) {
-    return {
-      status: 200,
-      body: { received: true, outcome: "idempotent" },
-    };
-  }
-
-  // -- 5. Roll up + OMS mirror --------------------------------------------
-  await recomputeOrderStatusFromShipments(db, result.wmsOrderId, { now });
-
-  if (deps.omsSvc?.markShippedByExternalId && shopifyOrderId !== null) {
-    try {
-      await deps.omsSvc.markShippedByExternalId(
-        shopifyOrderId,
-        trackingNumberRaw,
-        carrier,
-      );
-    } catch (omsErr: any) {
-      // Non-fatal: WMS state is the source of truth here.
-      console.warn(
-        `[fulfillments/update] OMS markShippedByExternalId failed for shopify order ${shopifyOrderId}: ${omsErr?.message ?? omsErr}`,
-      );
-    }
-  }
-
-  return {
-    status: 200,
-    body: { received: true, outcome: "updated" },
-  };
-}
-
+// Fulfillment webhooks below enter through the canonical exact-line ingress.
+// Legacy SKU-based handlers were removed because they could manufacture
+// shipment state and mark an entire order fulfilled from one package.
 export function registerShopifyRoutes(app: Express) {
 
   // -----------------------------------------------------------------------
@@ -1587,14 +876,14 @@ export function registerShopifyRoutes(app: Express) {
   // ---------------------------------------------------------------------
   app.post("/api/shopify/webhooks/fulfillments/create", async (req: Request, res: Response) => {
     try {
-      const { verified, shopDomain } = await verifyChannelWebhook(req);
+      const { verified, channelId, shopDomain } = await verifyChannelWebhook(req);
 
       if (!verified) {
         console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
 
-      const payload = req.body as ShopifyFulfillmentCreatePayload;
+      const payload = req.body as Record<string, unknown>;
       const fulfillmentId = payload?.id ?? "<missing>";
       const shopifyOrderId = payload?.order_id ?? "<missing>";
       const status = payload?.status ?? "<missing>";
@@ -1605,16 +894,48 @@ export function registerShopifyRoutes(app: Express) {
         `[fulfillments/create] received: fulfillment=${fulfillmentId} order=${shopifyOrderId} status=${status} line_items=${lineItemCount}`,
       );
 
-      const { db } = app.locals;
-      const { oms: omsSvc } = app.locals.services ?? {};
-      const result = await handleShopifyFulfillmentCreate(
-        { db, omsSvc, shippingEngine: app.locals.services?.shippingEngine ?? null },
+      const service = app.locals.services?.channelFulfillmentIngress;
+      if (!service) {
+        throw Object.assign(new Error("Channel fulfillment ingress service is unavailable"), {
+          code: "CHANNEL_FULFILLMENT_INGRESS_UNAVAILABLE",
+        });
+      }
+      const webhookIdHeader = req.headers["x-shopify-webhook-id"];
+      const sourceEventId = Array.isArray(webhookIdHeader)
+        ? webhookIdHeader[0] ?? null
+        : webhookIdHeader ?? null;
+      const outcome = await processShopifyFulfillmentIngress(
+        service,
         payload,
+        {
+          sourceChannelId: channelId,
+          sourceEventId,
+          eventKind: "created",
+          source: "shopify_fulfillments_create",
+          correlationId: sourceEventId,
+          causationId: sourceEventId,
+        },
       );
       console.log(
-        `[fulfillments/create] outcome=${result.body.outcome} status=${result.status} fulfillment=${fulfillmentId}`,
+        JSON.stringify({
+          event: "shopify_fulfillment_ingress_accepted",
+          topic: "fulfillments/create",
+          fulfillmentId: String(fulfillmentId),
+          actionable: outcome.actionable,
+          processingStatus: outcome.result?.processingStatus ?? "ignored",
+          receiptId: outcome.result?.receiptId ?? null,
+          physicalShipmentId: outcome.result?.physicalShipmentId ?? null,
+          replayed: outcome.result?.replayed ?? false,
+        }),
       );
-      return res.status(result.status).json(result.body);
+      return res.status(200).json({
+        received: true,
+        actionable: outcome.actionable,
+        processingStatus: outcome.result?.processingStatus ?? "ignored",
+        receiptId: outcome.result?.receiptId ?? null,
+        physicalShipmentId: outcome.result?.physicalShipmentId ?? null,
+        replayed: outcome.result?.replayed ?? false,
+      });
     } catch (error: any) {
       console.error(
         `[fulfillments/create] unhandled error: ${error?.message ?? error}`,
@@ -1656,14 +977,14 @@ export function registerShopifyRoutes(app: Express) {
   // ---------------------------------------------------------------------
   app.post("/api/shopify/webhooks/fulfillments/update", async (req: Request, res: Response) => {
     try {
-      const { verified, shopDomain } = await verifyChannelWebhook(req);
+      const { verified, channelId, shopDomain } = await verifyChannelWebhook(req);
 
       if (!verified) {
         console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
 
-      const payload = req.body as ShopifyFulfillmentUpdatePayload;
+      const payload = req.body as Record<string, unknown>;
       const fulfillmentId = payload?.id ?? "<missing>";
       const shopifyOrderId = payload?.order_id ?? "<missing>";
       const status = payload?.status ?? "<missing>";
@@ -1671,16 +992,48 @@ export function registerShopifyRoutes(app: Express) {
         `[fulfillments/update] received: fulfillment=${fulfillmentId} order=${shopifyOrderId} status=${status}`,
       );
 
-      const { db } = require("../db");
-      const { oms: omsSvc } = req.app.locals.services ?? {};
-      const result = await handleShopifyFulfillmentUpdate(
-        { db, omsSvc },
+      const service = req.app.locals.services?.channelFulfillmentIngress;
+      if (!service) {
+        throw Object.assign(new Error("Channel fulfillment ingress service is unavailable"), {
+          code: "CHANNEL_FULFILLMENT_INGRESS_UNAVAILABLE",
+        });
+      }
+      const webhookIdHeader = req.headers["x-shopify-webhook-id"];
+      const sourceEventId = Array.isArray(webhookIdHeader)
+        ? webhookIdHeader[0] ?? null
+        : webhookIdHeader ?? null;
+      const outcome = await processShopifyFulfillmentIngress(
+        service,
         payload,
+        {
+          sourceChannelId: channelId,
+          sourceEventId,
+          eventKind: "updated",
+          source: "shopify_fulfillments_update",
+          correlationId: sourceEventId,
+          causationId: sourceEventId,
+        },
       );
       console.log(
-        `[fulfillments/update] outcome=${result.body.outcome} status=${result.status} fulfillment=${fulfillmentId}`,
+        JSON.stringify({
+          event: "shopify_fulfillment_ingress_accepted",
+          topic: "fulfillments/update",
+          fulfillmentId: String(fulfillmentId),
+          actionable: outcome.actionable,
+          processingStatus: outcome.result?.processingStatus ?? "ignored",
+          receiptId: outcome.result?.receiptId ?? null,
+          physicalShipmentId: outcome.result?.physicalShipmentId ?? null,
+          replayed: outcome.result?.replayed ?? false,
+        }),
       );
-      return res.status(result.status).json(result.body);
+      return res.status(200).json({
+        received: true,
+        actionable: outcome.actionable,
+        processingStatus: outcome.result?.processingStatus ?? "ignored",
+        receiptId: outcome.result?.receiptId ?? null,
+        physicalShipmentId: outcome.result?.physicalShipmentId ?? null,
+        replayed: outcome.result?.replayed ?? false,
+      });
     } catch (error: any) {
       console.error(
         `[fulfillments/update] unhandled error: ${error?.message ?? error}`,

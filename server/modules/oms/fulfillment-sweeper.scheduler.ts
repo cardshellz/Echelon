@@ -5,10 +5,11 @@ import { withAdvisoryLock } from "../../infrastructure/scheduler-lock";
 import { EbayFulfillmentReconciler } from "./reconcilers/ebay.reconciler";
 import { ShopifyFulfillmentReconciler } from "./reconcilers/shopify.reconciler";
 import type { FulfillmentReconciler } from "./reconcilers/reconciler.interface";
-import { applyChannelFulfillment } from "./channel-fulfillment.service";
+import type { ChannelFulfillmentIngressService } from "./channel-fulfillment-ingress.service";
+import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
+import type { ShipStationPhysicalRecoveryService } from "./shipstation-physical-recovery.service";
 import { findChannelWritebackCandidates } from "./channel-writeback.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
-import { enqueueShopifyFulfillmentRetry } from "./webhook-retry.worker";
 
 const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 500;
@@ -93,18 +94,32 @@ export async function resolveRecoveredShopifyWritebackDebt(
   return resolveInTransaction(dbArg);
 }
 
-function getReconciler(provider: string, dbArg: any): FulfillmentReconciler | null {
+function getReconciler(
+  provider: string,
+  dbArg: any,
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService,
+  channelFulfillmentIngress: ChannelFulfillmentIngressService | null,
+): FulfillmentReconciler | null {
   if (provider === "ebay") {
-    return new EbayFulfillmentReconciler(dbArg);
+    return new EbayFulfillmentReconciler(dbArg, fulfillmentAuthority, channelFulfillmentIngress);
   }
   if (provider === "shopify") {
-    return new ShopifyFulfillmentReconciler(dbArg);
+    return new ShopifyFulfillmentReconciler(
+      dbArg,
+      fulfillmentAuthority,
+      undefined,
+      channelFulfillmentIngress,
+    );
   }
   // Dropship reconciler can be added here
   return null;
 }
 
-export async function runFulfillmentSweep(dbArg: any = db) {
+export async function runFulfillmentSweep(
+  dbArg: any,
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService,
+  physicalRecovery: ShipStationPhysicalRecoveryService | null = null,
+) {
   try {
     console.log(`${LOG_PREFIX} Starting hourly outbound channel writeback sweep...`);
 
@@ -132,7 +147,6 @@ export async function runFulfillmentSweep(dbArg: any = db) {
     // fulfillment directly: it only enqueues the canonical SHIP_NOTIFY path,
     // which revalidates provider item identity and applies the existing
     // idempotent shipment/inventory/channel cascade.
-    const physicalRecovery = dbArg.__shipStationPhysicalRecovery;
     if (physicalRecovery?.recover) {
       try {
         const result = await physicalRecovery.recover({
@@ -192,12 +206,6 @@ export async function runFulfillmentSweep(dbArg: any = db) {
 
     let processed = 0;
     let repushed = 0;
-    const fulfillmentPush = dbArg.__fulfillmentPush;
-    if (!fulfillmentPush) {
-      console.error(`${LOG_PREFIX} Fulfillment push service is unavailable; leaving candidates pending.`);
-      return;
-    }
-
     for (const row of candidates) {
       if (row.pending_retry) {
         continue;
@@ -205,15 +213,18 @@ export async function runFulfillmentSweep(dbArg: any = db) {
 
       processed++;
       try {
-        const result = row.provider === "shopify"
-          ? await fulfillmentPush.pushShopifyFulfillment(row.shipment_id)
-          : row.provider === "ebay"
-            ? await fulfillmentPush.pushTrackingForShipment(row.shipment_id)
-            : false;
-
-        const succeeded = row.provider === "shopify"
-          ? result?.writebackComplete === true
-          : result === true;
+        const result = await fulfillmentAuthority.ensureLegacyShipment(
+          row.shipment_id,
+          { executeImmediately: true, source: "fulfillment_sweeper" },
+        );
+        const commands = result.materialized.channelCommands;
+        const terminalBeforeDispatch = commands.filter((command: any) =>
+          command.pushStatus === "success" || command.pushStatus === "ignored"
+        ).length;
+        const terminalDuringDispatch =
+          result.dispatch.succeeded + result.dispatch.ignored;
+        const succeeded = commands.length > 0
+          && terminalBeforeDispatch + terminalDuringDispatch === commands.length;
         if (succeeded) {
           if (row.provider === "shopify") {
             const recovery = await resolveRecoveredShopifyWritebackDebt(dbArg, row.shipment_id);
@@ -230,22 +241,13 @@ export async function runFulfillmentSweep(dbArg: any = db) {
           repushed++;
         } else {
           console.error(
-            `${LOG_PREFIX} Writeback returned false for shipment ${row.shipment_id} (${row.provider}, order ${row.order_number ?? row.oms_order_id}).`,
+            `${LOG_PREFIX} Canonical writeback remains pending for shipment ${row.shipment_id} (${row.provider}, order ${row.order_number ?? row.oms_order_id}): ${JSON.stringify({ commands, dispatch: result.dispatch })}`,
           );
         }
       } catch (err: any) {
         console.error(
-          `${LOG_PREFIX} Error writing shipment ${row.shipment_id} back to ${row.provider}: ${err.message}`,
+          `${LOG_PREFIX} Error materializing shipment ${row.shipment_id} for ${row.provider}: ${err.message}`,
         );
-        if (row.provider === "shopify" && !row.dead_retry) {
-          try {
-            await enqueueShopifyFulfillmentRetry(dbArg, row.shipment_id, err);
-          } catch (enqueueError: any) {
-            console.error(
-              `${LOG_PREFIX} Failed to enqueue Shopify writeback retry for shipment ${row.shipment_id}: ${enqueueError?.message ?? String(enqueueError)}`,
-            );
-          }
-        }
       }
     }
 
@@ -260,7 +262,11 @@ export async function runFulfillmentSweep(dbArg: any = db) {
  * already reports the order as fulfilled (label bought outside ShipStation).
  * Pulls tracking from the channel and flows it through WMS shipments.
  */
-export async function runInboundFulfillmentSweep(dbArg: any = db) {
+export async function runInboundFulfillmentSweep(
+  dbArg: any,
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService,
+  channelFulfillmentIngress: ChannelFulfillmentIngressService | null = null,
+) {
   try {
     console.log(`${LOG_PREFIX} Starting inbound fulfillment sweep...`);
 
@@ -289,29 +295,25 @@ export async function runInboundFulfillmentSweep(dbArg: any = db) {
 
     for (const row of candidates.rows) {
       const provider = row.provider;
-      const reconciler = getReconciler(provider, dbArg);
+      const reconciler = getReconciler(
+        provider,
+        dbArg,
+        fulfillmentAuthority,
+        channelFulfillmentIngress,
+      );
       if (!reconciler) continue;
 
       try {
         const status = await reconciler.checkStatus(row);
         if (status !== "fulfilled") continue;
 
-        // Channel says fulfilled — pull tracking and flow through WMS
+        // Channel says fulfilled — enumerate exact provider packages and lines.
         if (provider === "ebay" && reconciler instanceof EbayFulfillmentReconciler) {
           const ok = await reconciler.syncFulfillmentFromChannel(row);
           if (ok) synced++;
         } else if (provider === "shopify" && reconciler instanceof ShopifyFulfillmentReconciler) {
-          const tracking = await reconciler.getTrackingInfo(row);
-          if (tracking?.trackingNumber) {
-            await applyChannelFulfillment(dbArg, row.wms_order_id, {
-              trackingNumber: tracking.trackingNumber,
-              carrier: tracking.carrier || "other",
-              source: "shopify_fulfillment_sweep",
-            }, {
-              shippingEngine: dbArg?.__shippingEngine ?? null,
-            });
-            synced++;
-          }
+          const ok = await reconciler.syncFulfillmentsFromChannel(row);
+          if (ok) synced++;
         }
       } catch (err: any) {
         console.error(
@@ -326,7 +328,12 @@ export async function runInboundFulfillmentSweep(dbArg: any = db) {
   }
 }
 
-export function startFulfillmentSweeper(dbArg: any = db) {
+export function startFulfillmentSweeper(
+  dbArg: any,
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService,
+  channelFulfillmentIngress: ChannelFulfillmentIngressService | null = null,
+  physicalRecovery: ShipStationPhysicalRecoveryService | null = null,
+) {
   if (process.env.DISABLE_SCHEDULERS === "true") {
     return;
   }
@@ -339,21 +346,25 @@ export function startFulfillmentSweeper(dbArg: any = db) {
   // Run immediately on boot
   setTimeout(() => {
     withAdvisoryLock(SWEEPER_LOCK_ID, async () => {
-      await runFulfillmentSweep(dbArg);
+      await runFulfillmentSweep(dbArg, fulfillmentAuthority, physicalRecovery);
     }).catch((err) => console.error(`${LOG_PREFIX} Boot run error: ${err.message}`));
   }, 5000);
 
   // Inbound sweep on boot (staggered)
   setTimeout(() => {
     withAdvisoryLock(INBOUND_LOCK_ID, async () => {
-      await runInboundFulfillmentSweep(dbArg);
+      await runInboundFulfillmentSweep(
+        dbArg,
+        fulfillmentAuthority,
+        channelFulfillmentIngress,
+      );
     }).catch((err) => console.error(`${LOG_PREFIX} Inbound boot run error: ${err.message}`));
   }, 15000);
 
   // Run every 1 hour thereafter
   setInterval(() => {
     withAdvisoryLock(SWEEPER_LOCK_ID, async () => {
-      await runFulfillmentSweep(dbArg);
+      await runFulfillmentSweep(dbArg, fulfillmentAuthority, physicalRecovery);
     }).catch((err) => console.error(`${LOG_PREFIX} Scheduled run error: ${err.message}`));
   }, 60 * 60 * 1000);
 
@@ -361,7 +372,11 @@ export function startFulfillmentSweeper(dbArg: any = db) {
   setTimeout(() => {
     setInterval(() => {
       withAdvisoryLock(INBOUND_LOCK_ID, async () => {
-        await runInboundFulfillmentSweep(dbArg);
+        await runInboundFulfillmentSweep(
+          dbArg,
+          fulfillmentAuthority,
+          channelFulfillmentIngress,
+        );
       }).catch((err) => console.error(`${LOG_PREFIX} Inbound sweep error: ${err.message}`));
     }, 60 * 60 * 1000);
   }, 30 * 60 * 1000);

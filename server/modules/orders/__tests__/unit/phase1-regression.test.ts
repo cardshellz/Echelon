@@ -425,18 +425,20 @@ describe("C4 Phase 2: in_progress and completed transitions", () => {
 // ═════════════════════════════════════════════════════════════════════
 
 describe("Migrated writers use C4 functions", () => {
-  it("OMS↔WMS reconciler uses cancelOrder/markOrderShipped (not raw UPDATE)", async () => {
+  it("OMS-to-WMS reconciliation is cancellation-only and cannot infer shipped state", async () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf-8");
-    const reconcilerStart = src.indexOf("OMS<->WMS reconciliation");
-    const reconcilerEnd = src.indexOf("One-time data repair", reconcilerStart);
+    const reconcilerStart = src.indexOf("OMS<->WMS cancellation reconciliation");
+    const reconcilerEnd = src.indexOf("setInterval(runOmsWmsReconcile", reconcilerStart);
     const block = src.slice(reconcilerStart, reconcilerEnd);
 
-    expect(block).toContain("markOrderShipped(db,");
-    // P0.1c: cancels route through the single entrypoint, which wraps the
-    // guarded cancelOrder transition AND releases reservations.
-    expect(block).toContain("cancelWmsOrderAndRelease(db,");
+    expect(reconcilerStart).toBeGreaterThanOrEqual(0);
+    expect(reconcilerEnd).toBeGreaterThan(reconcilerStart);
+    expect(block).toContain("oms.status IN ('cancelled', 'refunded')");
+    expect(block).toContain("cancelWmsOrderAndRelease(");
+    expect(block).not.toContain("markOrderShipped(db,");
+    expect(block).not.toMatch(/oms\.status\s*=\s*'shipped'/);
     expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
   });
 
@@ -455,7 +457,7 @@ describe("Migrated writers use C4 functions", () => {
     expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
   });
 
-  it("OMS_FINAL_WMS_ACTIVE uses cancelOrder/markOrderShipped (not raw UPDATE)", async () => {
+  it("OMS_FINAL_WMS_ACTIVE only cancels terminal commercial orders through C4", async () => {
     const { readFileSync } = await import("fs");
     const { resolve } = await import("path");
     const src = readFileSync(
@@ -467,7 +469,8 @@ describe("Migrated writers use C4 functions", () => {
     const block = src.slice(blockStart, blockEnd);
 
     expect(block).toContain("cancelOrder(");
-    expect(block).toContain("markOrderShipped(");
+    expect(block).not.toContain("markOrderShipped(");
+    expect(block).toContain("oo.financial_status = 'refunded'");
     expect(block).not.toMatch(/SET warehouse_status\s*=\s*CASE/);
   });
 

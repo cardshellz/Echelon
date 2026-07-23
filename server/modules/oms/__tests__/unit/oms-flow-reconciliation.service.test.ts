@@ -21,6 +21,42 @@ function sampleRows(rows: unknown[]) {
   return { rows };
 }
 
+function canonicalAuthority(ensureLegacyShipment: any) {
+  return {
+    ensureLegacyShipment,
+    recordPhysicalPackage: vi.fn(),
+    projectPhysicalPackage: vi.fn(),
+    runDueBatch: vi.fn(),
+  };
+}
+
+function flowDependencies(
+  fulfillmentAuthority: any = canonicalAuthority(vi.fn()),
+  reservation: any = null,
+) {
+  return { fulfillmentAuthority, reservation };
+}
+
+function completedCanonicalHandoff() {
+  return {
+    materialized: {
+      physicalShipmentId: 90001,
+      shippingEngineOrderId: 80001,
+      channelCommands: [{ id: 70001, pushStatus: "success" }],
+      customerFulfillmentItemCount: 1,
+      nonCustomerItemCount: 0,
+    },
+    dispatch: {
+      claimed: 0,
+      succeeded: 0,
+      ignored: 0,
+      retryScheduled: 0,
+      reviewRequired: 0,
+      deadLettered: 0,
+    },
+  };
+}
+
 describe("oms-flow-reconciliation.service", () => {
   it("returns no issues when every detector is clean", async () => {
     const db = {
@@ -152,7 +188,7 @@ describe("oms-flow-reconciliation.service", () => {
       }),
     };
 
-    const issues = await runOmsFlowReconciliation(db);
+    const issues = await runOmsFlowReconciliation(db, flowDependencies());
 
     // Resolves (not rejects) with no issues…
     expect(issues).toEqual([]);
@@ -190,7 +226,7 @@ describe("oms-flow-reconciliation.service", () => {
         .mockResolvedValueOnce(sampleRows([])),
     };
 
-    const issues = await runOmsFlowReconciliation(db);
+    const issues = await runOmsFlowReconciliation(db, flowDependencies());
 
     expect(issues).toHaveLength(1);
     expect(issues[0]).toMatchObject({
@@ -233,9 +269,10 @@ describe("oms-flow-reconciliation.service", () => {
     warn.mockRestore();
   });
 
-  it("auto-queues stale tracking push retries when scheduled reconciliation finds shipped unpushed shipments", async () => {
+  it("hands stale eBay writebacks to canonical authority", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
+    const ensureLegacyShipment = vi.fn(async () => ({}));
     const db = {
       execute: vi
         .fn()
@@ -263,7 +300,7 @@ describe("oms-flow-reconciliation.service", () => {
           inserts.push(row);
           return undefined;
         }),
-      })),
+        })),
     };
     const queuedExecute = db.execute;
     db.execute = vi.fn(async (query: any) => {
@@ -281,13 +318,24 @@ describe("oms-flow-reconciliation.service", () => {
       return queuedExecute(query);
     });
 
-    const issues = await runOmsFlowReconciliation(db);
+    const issues = await runOmsFlowReconciliation(
+      db,
+      flowDependencies(canonicalAuthority(ensureLegacyShipment)),
+    );
 
     expect(issues).toHaveLength(1);
     expect(db.execute).toHaveBeenCalled();
-    expect(inserts).toHaveLength(2);
+    expect(inserts).toHaveLength(0);
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(1, 30, {
+      executeImmediately: false,
+      source: "oms_flow_stale_ebay_writeback",
+    });
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(2, 31, {
+      executeImmediately: false,
+      source: "oms_flow_stale_ebay_writeback",
+    });
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("auto-queued 2 delayed tracking push retry"),
+      expect.stringContaining("handed off 2 stale eBay writeback"),
     );
     warn.mockRestore();
   });
@@ -320,7 +368,7 @@ describe("oms-flow-reconciliation.service", () => {
         }),
       })),
     };
-    const issues = await runOmsFlowReconciliation(db);
+    const issues = await runOmsFlowReconciliation(db, flowDependencies());
 
     expect(issues).toHaveLength(1);
     expect(issues[0]).toMatchObject({
@@ -336,9 +384,10 @@ describe("oms-flow-reconciliation.service", () => {
     warn.mockRestore();
   });
 
-  it("auto-queues Shopify fulfillment retries when shipped Shopify shipments have no fulfillment id", async () => {
+  it("hands missing Shopify fulfillment writebacks to canonical authority", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const inserts: unknown[] = [];
+    const ensureLegacyShipment = vi.fn(async () => ({}));
     const db = {
       execute: vi
         .fn()
@@ -364,7 +413,7 @@ describe("oms-flow-reconciliation.service", () => {
           inserts.push(row);
           return undefined;
         }),
-      })),
+        })),
     };
     const queuedExecute = db.execute;
     db.execute = vi.fn(async (query: any) => {
@@ -381,18 +430,23 @@ describe("oms-flow-reconciliation.service", () => {
       return queuedExecute(query);
     });
 
-    const issues = await runOmsFlowReconciliation(db);
+    const issues = await runOmsFlowReconciliation(
+      db,
+      flowDependencies(canonicalAuthority(ensureLegacyShipment)),
+    );
 
     expect(issues).toHaveLength(1);
     expect(issues[0]).toMatchObject({
       code: "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
       severity: "critical",
     });
-    expect(inserts).toHaveLength(1);
-    expect((inserts[0] as any).topic).toBe("shopify_fulfillment_push");
-    expect((inserts[0] as any).payload).toEqual({ shipmentId: 1441 });
+    expect(inserts).toHaveLength(0);
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(1441, {
+      executeImmediately: false,
+      source: "oms_flow_missing_shopify_writeback",
+    });
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("auto-queued 1 Shopify fulfillment push retry"),
+      expect.stringContaining("handed off 1 missing Shopify writeback"),
     );
     warn.mockRestore();
   });
@@ -439,7 +493,7 @@ describe("oms-flow-reconciliation.service", () => {
       })),
     };
 
-    const issues = await runOmsFlowReconciliation(db);
+    const issues = await runOmsFlowReconciliation(db, flowDependencies());
 
     expect(issues.map((issue) => issue.code)).toEqual([
       "OMS_PAID_WITHOUT_WMS",
@@ -478,7 +532,7 @@ describe("oms-flow-reconciliation.service", () => {
       omsOrderId: 10,
       wmsOrderId: 20,
       operator: "ops",
-    });
+    }, flowDependencies());
 
     expect(result).toMatchObject({
       action: "aligned_wms_from_oms",
@@ -490,38 +544,39 @@ describe("oms-flow-reconciliation.service", () => {
   });
 
   it("remediates shipped shipment/OMS-open drift from the shipment row", async () => {
-    const tx = {
+    const ensureLegacyShipment = vi.fn(async () => completedCanonicalHandoff());
+    const db = {
       execute: vi
         .fn()
-        .mockResolvedValueOnce(sampleRows([{ id: 10, wms_order_id: 20 }]))
+        .mockResolvedValueOnce(sampleRows([{ wms_order_id: 20, oms_status: "confirmed" }]))
         .mockResolvedValueOnce(sampleRows([])),
     };
-    const db = {
-      transaction: vi.fn(async (fn) => fn(tx)),
-    };
+    const authority = canonicalAuthority(ensureLegacyShipment);
 
     const result = await remediateOmsFlowIssue(db, {
       code: "SHIPMENT_SHIPPED_OMS_OPEN",
       omsOrderId: 10,
       shipmentId: 30,
       operator: "ops",
-    });
+    }, flowDependencies(authority));
 
     expect(result).toMatchObject({
-      action: "marked_oms_shipped_from_wms_shipment",
+      action: "handed_off_canonical_shipment",
       changed: true,
       omsOrderId: 10,
       wmsOrderId: 20,
       shipmentId: 30,
     });
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(30, {
+      executeImmediately: true,
+      source: "oms_flow_reconcile_shipped_package",
+    });
   });
 
-  it("queues tracking push remediation through the retry queue", async () => {
-    const db = {
-      insert: vi.fn(() => ({
-        values: vi.fn(async () => undefined),
-      })),
-    };
+  it("hands shipment-scoped tracking remediation to canonical authority", async () => {
+    const ensureLegacyShipment = vi.fn(async () => ({}));
+    const db = {};
+    const authority = canonicalAuthority(ensureLegacyShipment);
 
     const result = await remediateOmsFlowIssue(db, {
       code: "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
@@ -529,39 +584,45 @@ describe("oms-flow-reconciliation.service", () => {
       wmsOrderId: 20,
       shipmentId: 30,
       operator: "ops",
-    });
+    }, flowDependencies(authority));
 
     expect(result).toMatchObject({
-      action: "queued_tracking_push",
+      action: "handed_off_channel_fulfillment",
       changed: true,
       omsOrderId: 10,
       wmsOrderId: 20,
       shipmentId: 30,
     });
-    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(30, {
+      executeImmediately: false,
+      source: "oms_flow_operator_remediation:WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+    });
   });
 
-  it("queues OMS-level shipped tracking push remediation through the retry queue", async () => {
+  it("expands OMS-level tracking remediation into exact shipped packages", async () => {
+    const ensureLegacyShipment = vi.fn(async () => completedCanonicalHandoff());
     const db = {
-      insert: vi.fn(() => ({
-        values: vi.fn(async () => undefined),
-      })),
+      execute: vi.fn(async () => ({ rows: [{ shipment_id: 30 }] })),
     };
+    const authority = canonicalAuthority(ensureLegacyShipment);
 
     const result = await remediateOmsFlowIssue(db, {
       code: "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
       omsOrderId: 10,
       operator: "ops",
-    });
+    }, flowDependencies(authority));
 
     expect(result).toMatchObject({
-      action: "queued_tracking_push",
+      action: "handed_off_channel_fulfillment",
       changed: true,
       omsOrderId: 10,
       wmsOrderId: null,
       shipmentId: null,
     });
-    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(30, {
+      executeImmediately: false,
+      source: "oms_flow_operator_remediation:SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+    });
   });
 
   it("queues the canonical succeeded orders/paid event instead of a no-op WMS sync", async () => {
@@ -582,7 +643,7 @@ describe("oms-flow-reconciliation.service", () => {
       code: "OMS_PAID_WITHOUT_WMS",
       omsOrderId: 10,
       operator: "ops",
-    });
+    }, flowDependencies());
 
     expect(result).toMatchObject({
       action: "queued_orders_paid_replay",
@@ -621,7 +682,7 @@ describe("oms-flow-reconciliation.service", () => {
       code: "OMS_PAID_WITHOUT_WMS",
       omsOrderId: 10,
       operator: "ops",
-    });
+    }, flowDependencies());
 
     expect(result).toMatchObject({
       action: "orders_paid_replay_already_pending",
@@ -647,7 +708,7 @@ describe("oms-flow-reconciliation.service", () => {
       code: "OMS_PAID_WITHOUT_WMS",
       omsOrderId: 10,
       operator: "ops",
-    })).rejects.toThrow(/No succeeded Shopify orders\/paid inbox event/);
+    }, flowDependencies())).rejects.toThrow(/No succeeded Shopify orders\/paid inbox event/);
     expect(tx.execute).toHaveBeenCalledTimes(2);
   });
 
@@ -670,7 +731,7 @@ describe("oms-flow-reconciliation.service", () => {
       code: "WMS_READY_WITHOUT_SHIPMENT",
       wmsOrderId: 20,
       operator: "ops",
-    });
+    }, flowDependencies());
 
     expect(result).toMatchObject({
       action: "queued_wms_shipment_create",
@@ -708,7 +769,7 @@ describe("oms-flow-reconciliation.service", () => {
       wmsOrderId: 20,
       shipmentId: 30,
       operator: "ops",
-    });
+    }, flowDependencies());
 
     expect(result).toMatchObject({
       action: "queued_shipstation_shipment_push",
@@ -727,6 +788,6 @@ describe("oms-flow-reconciliation.service", () => {
     await expect(remediateOmsFlowIssue({ execute: vi.fn() }, {
       code: "NOPE",
       operator: "ops",
-    })).rejects.toThrow(/Unsupported OMS flow remediation code/);
+    }, flowDependencies())).rejects.toThrow(/Unsupported OMS flow remediation code/);
   });
 });

@@ -10,6 +10,36 @@ function queryText(query: any): string {
     .join(" ");
 }
 
+function canonicalHandoffResult(options: { retryScheduled?: number } = {}) {
+  const retryScheduled = options.retryScheduled ?? 0;
+  return {
+    materialized: {
+      physicalShipmentId: 90001,
+      shippingEngineOrderId: 80001,
+      channelCommands: [{ id: 70001, pushStatus: "pending" }],
+      customerFulfillmentItemCount: 1,
+      nonCustomerItemCount: 0,
+    },
+    dispatch: {
+      claimed: 1,
+      succeeded: retryScheduled === 0 ? 1 : 0,
+      ignored: 0,
+      retryScheduled,
+      reviewRequired: 0,
+      deadLettered: 0,
+    },
+  };
+}
+
+function canonicalAuthority(ensureLegacyShipment: any) {
+  return {
+    ensureLegacyShipment,
+    recordPhysicalPackage: vi.fn(),
+    projectPhysicalPackage: vi.fn(),
+    runDueBatch: vi.fn(),
+  };
+}
+
 describe("fulfillment-sweeper.scheduler", () => {
   it("runs bounded physical-package recovery before the ordinary writeback scan", async () => {
     const recover = vi.fn(async () => ({
@@ -21,10 +51,10 @@ describe("fulfillment-sweeper.scheduler", () => {
     }));
     const db = {
       execute: vi.fn(async () => ({ rows: [] })),
-      __shipStationPhysicalRecovery: { recover },
     };
+    const authority = canonicalAuthority(vi.fn());
 
-    await runFulfillmentSweep(db);
+    await runFulfillmentSweep(db, authority as any, { recover } as any);
 
     expect(recover).toHaveBeenCalledWith({
       mode: "execute",
@@ -35,11 +65,7 @@ describe("fulfillment-sweeper.scheduler", () => {
   });
 
   it("reserves sweep capacity for recent failures and historical convergence", async () => {
-    const pushShopifyFulfillment = vi.fn(async () => ({
-      shopifyFulfillmentId: "gid://shopify/Fulfillment/42",
-      alreadyPushed: false,
-      writebackComplete: true,
-    }));
+    const ensureLegacyShipment = vi.fn(async () => canonicalHandoffResult());
     let candidateQueryCount = 0;
     const execute = vi.fn(async (query: any) => {
       const text = queryText(query);
@@ -70,16 +96,20 @@ describe("fulfillment-sweeper.scheduler", () => {
         }],
       };
     });
-    const db = {
-      execute,
-      __fulfillmentPush: { pushShopifyFulfillment },
-    };
+    const db = { execute };
+    const authority = canonicalAuthority(ensureLegacyShipment);
 
-    await runFulfillmentSweep(db);
+    await runFulfillmentSweep(db, authority as any);
 
-    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(2);
-    expect(pushShopifyFulfillment).toHaveBeenNthCalledWith(1, 101);
-    expect(pushShopifyFulfillment).toHaveBeenNthCalledWith(2, 202);
+    expect(ensureLegacyShipment).toHaveBeenCalledTimes(2);
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(1, 101, {
+      executeImmediately: true,
+      source: "fulfillment_sweeper",
+    });
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(2, 202, {
+      executeImmediately: true,
+      source: "fulfillment_sweeper",
+    });
     const candidateQueries = execute.mock.calls
       .filter(([query]) => queryText(query).includes("FROM shipped_channel_shipments"))
       .map(([query]) => JSON.stringify(query));
@@ -89,11 +119,7 @@ describe("fulfillment-sweeper.scheduler", () => {
   });
 
   it("repushes a missing split shipment directly, including partially shipped orders", async () => {
-    const pushShopifyFulfillment = vi.fn(async () => ({
-      shopifyFulfillmentId: "gid://shopify/Fulfillment/42",
-      alreadyPushed: false,
-      writebackComplete: true,
-    }));
+    const ensureLegacyShipment = vi.fn(async () => canonicalHandoffResult());
     const checkStatus = vi.fn();
     const db = {
       execute: vi.fn(async (query: any) => {
@@ -112,22 +138,20 @@ describe("fulfillment-sweeper.scheduler", () => {
         }
         return { rows: [] };
       }),
-      __fulfillmentPush: { pushShopifyFulfillment, checkStatus },
     };
+    const authority = canonicalAuthority(ensureLegacyShipment);
 
-    await runFulfillmentSweep(db);
+    await runFulfillmentSweep(db, authority as any);
 
-    expect(pushShopifyFulfillment).toHaveBeenCalledWith(42);
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(42, {
+      executeImmediately: true,
+      source: "fulfillment_sweeper",
+    });
     expect(checkStatus).not.toHaveBeenCalled();
   });
 
   it("leaves active retries alone but retries dead-lettered historical debt", async () => {
-    const pushShopifyFulfillment = vi.fn(async () => ({
-      shopifyFulfillmentId: null,
-      alreadyPushed: false,
-      alreadySatisfied: true,
-      writebackComplete: true,
-    }));
+    const ensureLegacyShipment = vi.fn(async () => canonicalHandoffResult());
     const db = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
@@ -141,13 +165,16 @@ describe("fulfillment-sweeper.scheduler", () => {
         }
         return { rows: [] };
       }),
-      __fulfillmentPush: { pushShopifyFulfillment },
     };
+    const authority = canonicalAuthority(ensureLegacyShipment);
 
-    await runFulfillmentSweep(db);
+    await runFulfillmentSweep(db, authority as any);
 
-    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(1);
-    expect(pushShopifyFulfillment).toHaveBeenCalledWith(44);
+    expect(ensureLegacyShipment).toHaveBeenCalledTimes(1);
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(44, {
+      executeImmediately: true,
+      source: "fulfillment_sweeper",
+    });
   });
 
   it("marks only Shopify fulfillment retry debt and its owned review marker resolved", async () => {
@@ -178,9 +205,11 @@ describe("fulfillment-sweeper.scheduler", () => {
     );
   });
 
-  it("durably enqueues a new Shopify retry when an unqueued sweep candidate fails", async () => {
+  it("leaves transient provider failure in the canonical command retry state", async () => {
     const values = vi.fn(async () => undefined);
     const insert = vi.fn(() => ({ values }));
+    const ensureLegacyShipment = vi.fn(async () =>
+      canonicalHandoffResult({ retryScheduled: 1 }));
     const execute = vi.fn(async (query: any) => {
       const text = queryText(query);
       if (text.includes("FROM shipped_channel_shipments")) {
@@ -197,27 +226,17 @@ describe("fulfillment-sweeper.scheduler", () => {
       }
       return { rows: [] };
     });
-    const pushError = new Error("temporary Shopify failure");
-    const db = {
-      execute,
-      insert,
-      __fulfillmentPush: {
-        pushShopifyFulfillment: vi.fn(async () => {
-          throw pushError;
-        }),
-      },
-    };
+    const db = { execute, insert };
+    const authority = canonicalAuthority(ensureLegacyShipment);
 
-    await runFulfillmentSweep(db);
+    await runFulfillmentSweep(db, authority as any);
 
-    expect(insert).toHaveBeenCalledTimes(1);
-    expect(values).toHaveBeenCalledWith(expect.objectContaining({
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 45 },
-      status: "pending",
-      lastError: "temporary Shopify failure",
-    }));
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(45, {
+      executeImmediately: true,
+      source: "fulfillment_sweeper",
+    });
+    expect(insert).not.toHaveBeenCalled();
+    expect(values).not.toHaveBeenCalled();
   });
 
   it("rejects invalid shipment ids before changing retry state", async () => {

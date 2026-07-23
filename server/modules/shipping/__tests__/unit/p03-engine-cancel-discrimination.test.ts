@@ -23,6 +23,7 @@ const read = (p: string) =>
 const INDEX_SRC = read("../../../../index.ts");
 const SS_SRC = read("../../../oms/shipstation.service.ts");
 const FLOW_SRC = read("../../../oms/oms-flow-reconciliation.service.ts");
+const AUTHORITY_POLICY_SRC = read("../../../oms/channel-fulfillment-authority.policy.ts");
 const TYPES_SRC = read("../../types.ts");
 
 describe("P0.3 — engine-cancel discrimination", () => {
@@ -36,8 +37,9 @@ describe("P0.3 — engine-cancel discrimination", () => {
 
   it("reconcilers record shipped ONLY on already_shipped — never on already_cancelled", () => {
     const branches = INDEX_SRC.match(/cancelResult\?\.state === "already_shipped"/g) ?? [];
-    // hourly OMS<->WMS cascade, Reconcile V2 outbound sync, Reconcile V1 sweep
-    expect(branches.length).toBe(3);
+    // Hourly OMS<->WMS cancellation cascade and canonical V2 outbound sync.
+    // The legacy V1 sweep is deliberately retired.
+    expect(branches.length).toBe(2);
     // the old conflated branch shape must be gone
     expect(INDEX_SRC).not.toMatch(/if \(cancelResult\?\.alreadyInState\)/);
   });
@@ -51,21 +53,37 @@ describe("P0.3 — engine-cancel discrimination", () => {
     expect(cascade).toContain("AND status NOT IN ('shipped', 'returned', 'lost')");
   });
 
-  it("the V2 inline OMS shipped-flip never touches money-final orders", () => {
-    const flip = INDEX_SRC.slice(
-      INDEX_SRC.indexOf("const nextFulfillmentStatus"),
-      INDEX_SRC.indexOf("WITH shipped_by_line"),
+  it("the V2 callback delegates finality to canonical fulfillment authority", () => {
+    const finalizeStart = SS_SRC.indexOf(
+      "async function finalizeCanonicalShipNotifyPackage",
     );
-    expect(flip).toContain("AND status NOT IN ('cancelled', 'refunded')");
+    const finalizeEnd = SS_SRC.indexOf("\n  async function ", finalizeStart + 1);
+    expect(finalizeStart).toBeGreaterThanOrEqual(0);
+    expect(finalizeEnd).toBeGreaterThan(finalizeStart);
+    const finalize = SS_SRC.slice(finalizeStart, finalizeEnd);
+    expect(finalize).toContain("requireFulfillmentAuthority().recordPhysicalPackage");
+    expect(INDEX_SRC).not.toContain("WITH shipped_by_line");
+    expect(AUTHORITY_POLICY_SRC).toContain(
+      'const TERMINAL_COMMERCIAL_ORDER_STATUSES = new Set(["cancelled", "refunded"])',
+    );
+    expect(AUTHORITY_POLICY_SRC).toContain(
+      'const TERMINAL_FINANCIAL_STATUSES = new Set(["refunded", "voided"])',
+    );
   });
 
-  it("SHIPMENT_SHIPPED_OMS_OPEN excludes money-final OMS orders in detection AND remediation", () => {
+  it("SHIPMENT_SHIPPED_OMS_OPEN excludes money-final orders and hands eligible packages to canonical authority", () => {
     const guards =
       FLOW_SRC.match(
         /oo\.status NOT IN \('shipped', 'partially_shipped', 'cancelled', 'refunded'\)/g,
       ) ?? [];
-    // detection count + detection sample + remediation UPDATE
-    expect(guards.length).toBe(3);
+    // Detection count + sample. Remediation no longer writes OMS status directly.
+    expect(guards.length).toBe(2);
+    const remediation = FLOW_SRC.slice(
+      FLOW_SRC.indexOf('input.code === "SHIPMENT_SHIPPED_OMS_OPEN"'),
+      FLOW_SRC.indexOf('input.code === "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED"'),
+    );
+    expect(remediation).toContain("handoffLegacyShipmentToChannelFulfillment");
+    expect(remediation).not.toMatch(/UPDATE\s+oms\.oms_orders\s+SET\s+status\s*=\s*'shipped'/);
   });
 
   it("shipped-but-terminal becomes a requires_review flag, not a silent skip", () => {

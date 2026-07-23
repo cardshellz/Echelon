@@ -60,19 +60,25 @@ describe("Shopify orders/updated WMS reconciliation", () => {
     expect(addressSyncBlock).not.toMatch(/LIMIT 1/);
   });
 
-  it("routes Shopify fulfilled webhooks through WMS shipment cascade", () => {
-    expect(OMS_WEBHOOKS_SRC).toMatch(/applyChannelFulfillment/);
-    expect(OMS_WEBHOOKS_SRC).toMatch(/shopify_fulfilled_webhook/);
-  });
-
-  it("replays Shopify fulfilled webhooks through WMS before already-shipped acknowledgement", () => {
+  it("routes every Shopify fulfillment package through canonical ingress", () => {
     const fulfilledBlock = OMS_WEBHOOKS_SRC.match(
       /app\.post\("\/api\/oms\/webhooks\/orders\/fulfilled"[\s\S]*?POST \/api\/oms\/webhooks\/refunds\/create/,
     )?.[0] ?? "";
 
-    expect(fulfilledBlock).toMatch(/const applyWmsChannelFulfillment/);
-    expect(fulfilledBlock).toMatch(
-      /if \(existing\.status === "shipped"\)[\s\S]*applyWmsChannelFulfillment\("shopify_fulfilled_webhook_replay"\)[\s\S]*acknowledgeProcessed/,
-    );
+    expect(fulfilledBlock).toMatch(/for \(const fulfillment of fulfillments\)/);
+    expect(fulfilledBlock).toMatch(/processShopifyFulfillmentIngress/);
+    expect(fulfilledBlock).toMatch(/source: "shopify_orders_fulfilled"/);
+    expect(fulfilledBlock).not.toMatch(/applyChannelFulfillment/);
+  });
+
+  it("uses immutable inbox and fulfillment identities for replay-safe ingress", () => {
+    const fulfilledBlock = OMS_WEBHOOKS_SRC.match(
+      /app\.post\("\/api\/oms\/webhooks\/orders\/fulfilled"[\s\S]*?POST \/api\/oms\/webhooks\/refunds\/create/,
+    )?.[0] ?? "";
+
+    expect(fulfilledBlock).toMatch(/sourceInboxId: inbox\.receipt\.id/);
+    expect(fulfilledBlock).toMatch(/webhook_inbox:\$\{inbox\.receipt\.id\}:fulfillment:\$\{sourceFulfillmentId\}/);
+    expect(fulfilledBlock).toMatch(/await markInboxSucceeded\(inbox\.receipt\)/);
+    expect(fulfilledBlock).not.toMatch(/existing\.status === "shipped"/);
   });
 });

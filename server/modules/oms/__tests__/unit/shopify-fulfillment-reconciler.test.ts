@@ -7,15 +7,37 @@ function makeClient(response: any) {
   };
 }
 
+function makeAuthority(ensureLegacyShipment: any = vi.fn()) {
+  return {
+    ensureLegacyShipment,
+    recordPhysicalPackage: vi.fn(),
+    projectPhysicalPackage: vi.fn(),
+    runDueBatch: vi.fn(),
+  } as any;
+}
+
 function makeDb(opts: {
   shipmentRows?: Array<{ shipment_id: number | string | null }>;
-  pushShopifyFulfillment?: any;
+  ensureLegacyShipment?: any;
 } = {}) {
+  const ensureLegacyShipment = opts.ensureLegacyShipment ?? vi.fn(async () => ({
+    materialized: {
+      physicalShipmentId: 90001,
+      shippingEngineOrderId: 80001,
+      channelCommands: [{ id: 70001, pushStatus: "pending" }],
+      customerFulfillmentItemCount: 1,
+      nonCustomerItemCount: 0,
+    },
+    dispatch: {
+      claimed: 1,
+      succeeded: 1,
+      ignored: 0,
+      retryScheduled: 0,
+      reviewRequired: 0,
+      deadLettered: 0,
+    },
+  }));
   return {
-    __fulfillmentPush:
-      opts.pushShopifyFulfillment === undefined
-        ? undefined
-        : { pushShopifyFulfillment: opts.pushShopifyFulfillment },
     execute: vi.fn(async (query: any) => {
       const queryText = (query?.queryChunks ?? [])
         .flatMap((chunk: any) => chunk?.value ?? [])
@@ -30,7 +52,7 @@ function makeDb(opts: {
       }
       return { rows: opts.shipmentRows ?? [] };
     }),
-    insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
+    fulfillmentAuthority: makeAuthority(ensureLegacyShipment),
   };
 }
 
@@ -43,7 +65,11 @@ describe("ShopifyFulfillmentReconciler.checkStatus", () => {
         fulfillmentOrders: { nodes: [] },
       },
     });
-    const reconciler = new ShopifyFulfillmentReconciler({} as any, client);
+    const reconciler = new ShopifyFulfillmentReconciler(
+      {} as any,
+      makeAuthority(),
+      client,
+    );
 
     const status = await reconciler.checkStatus({
       id: 161177,
@@ -70,7 +96,11 @@ describe("ShopifyFulfillmentReconciler.checkStatus", () => {
         },
       },
     });
-    const reconciler = new ShopifyFulfillmentReconciler({} as any, client);
+    const reconciler = new ShopifyFulfillmentReconciler(
+      {} as any,
+      makeAuthority(),
+      client,
+    );
 
     const status = await reconciler.checkStatus({
       id: 161177,
@@ -82,7 +112,11 @@ describe("ShopifyFulfillmentReconciler.checkStatus", () => {
 
   it("returns unknown when the OMS order has no resolvable Shopify order id", async () => {
     const client = makeClient({});
-    const reconciler = new ShopifyFulfillmentReconciler({} as any, client);
+    const reconciler = new ShopifyFulfillmentReconciler(
+      {} as any,
+      makeAuthority(),
+      client,
+    );
 
     const status = await reconciler.checkStatus({
       id: 161177,
@@ -96,45 +130,85 @@ describe("ShopifyFulfillmentReconciler.checkStatus", () => {
 
 describe("ShopifyFulfillmentReconciler.repush", () => {
   it("repushes every shipped WMS shipment for the OMS order", async () => {
-    const pushShopifyFulfillment = vi.fn().mockResolvedValue({
-      shopifyFulfillmentId: "gid://shopify/Fulfillment/1",
-      alreadyPushed: false,
-      writebackComplete: true,
-    });
+    const ensureLegacyShipment = vi.fn(async () => ({
+      materialized: {
+        physicalShipmentId: 90001,
+        shippingEngineOrderId: 80001,
+        channelCommands: [{ id: 70001, pushStatus: "pending" }],
+        customerFulfillmentItemCount: 1,
+        nonCustomerItemCount: 0,
+      },
+      dispatch: {
+        claimed: 1,
+        succeeded: 1,
+        ignored: 0,
+        retryScheduled: 0,
+        reviewRequired: 0,
+        deadLettered: 0,
+      },
+    }));
     const db = makeDb({
       shipmentRows: [{ shipment_id: 257 }, { shipment_id: "258" }],
-      pushShopifyFulfillment,
+      ensureLegacyShipment,
     });
-    const reconciler = new ShopifyFulfillmentReconciler(db as any, makeClient({}));
+    const reconciler = new ShopifyFulfillmentReconciler(
+      db as any,
+      db.fulfillmentAuthority,
+      makeClient({}),
+    );
 
     const success = await reconciler.repush({ id: 161177 } as any);
 
     expect(success).toBe(true);
-    expect(pushShopifyFulfillment).toHaveBeenCalledTimes(2);
-    expect(pushShopifyFulfillment).toHaveBeenNthCalledWith(1, 257);
-    expect(pushShopifyFulfillment).toHaveBeenNthCalledWith(2, 258);
+    expect(ensureLegacyShipment).toHaveBeenCalledTimes(2);
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(1, 257, {
+      executeImmediately: true,
+      source: "shopify_fulfillment_reconciler",
+    });
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(2, 258, {
+      executeImmediately: true,
+      source: "shopify_fulfillment_reconciler",
+    });
   });
 
-  it("returns false when any shipment repush throws", async () => {
+  it("returns false when any canonical command remains retryable", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const pushShopifyFulfillment = vi
+    const ensureLegacyShipment = vi
       .fn()
       .mockResolvedValueOnce({
-        shopifyFulfillmentId: "gid://shopify/Fulfillment/1",
-        alreadyPushed: false,
-        writebackComplete: true,
+        materialized: {
+          physicalShipmentId: 90001,
+          shippingEngineOrderId: 80001,
+          channelCommands: [{ id: 70001, pushStatus: "pending" }],
+          customerFulfillmentItemCount: 1,
+          nonCustomerItemCount: 0,
+        },
+        dispatch: { claimed: 1, succeeded: 1, ignored: 0, retryScheduled: 0, reviewRequired: 0, deadLettered: 0 },
       })
-      .mockRejectedValueOnce(new Error("Shopify rejected fulfillment"));
+      .mockResolvedValueOnce({
+        materialized: {
+          physicalShipmentId: 90002,
+          shippingEngineOrderId: 80002,
+          channelCommands: [{ id: 70002, pushStatus: "pending" }],
+          customerFulfillmentItemCount: 1,
+          nonCustomerItemCount: 0,
+        },
+        dispatch: { claimed: 1, succeeded: 0, ignored: 0, retryScheduled: 1, reviewRequired: 0, deadLettered: 0 },
+      });
     const db = makeDb({
       shipmentRows: [{ shipment_id: 257 }, { shipment_id: 258 }],
-      pushShopifyFulfillment,
+      ensureLegacyShipment,
     });
-    const reconciler = new ShopifyFulfillmentReconciler(db as any, makeClient({}));
+    const reconciler = new ShopifyFulfillmentReconciler(
+      db as any,
+      db.fulfillmentAuthority,
+      makeClient({}),
+    );
 
     const success = await reconciler.repush({ id: 161177 } as any);
 
     expect(success).toBe(false);
-    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(ensureLegacyShipment).toHaveBeenCalledTimes(2);
     vi.restoreAllMocks();
   });
 });

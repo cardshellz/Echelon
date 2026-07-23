@@ -5,7 +5,13 @@ import {
   createDefaultShopifyAdminClient,
   type ShopifyAdminGraphQLClient,
 } from "../../shopify/admin-gql-client";
-import { enqueueShopifyFulfillmentRetry } from "../webhook-retry.worker";
+import {
+  handoffLegacyShipmentToChannelFulfillment,
+  isChannelFulfillmentHandoffComplete,
+} from "../channel-fulfillment-authority.handoff";
+import type { ChannelFulfillmentIngressService } from "../channel-fulfillment-ingress.service";
+import { processShopifyFulfillmentIngress } from "../shopify-fulfillment-ingress.adapter";
+import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
 
 interface ShopifyFulfillmentStatusResponse {
   order?: {
@@ -26,10 +32,36 @@ interface ShopifyFulfillmentStatusResponse {
   } | null;
 }
 
+interface ShopifyFulfillmentPackagesResponse {
+  order?: {
+    id: string;
+    fulfillments?: Array<{
+      id: string;
+      status?: string | null;
+      createdAt?: string | null;
+      updatedAt?: string | null;
+      trackingInfo?: Array<{
+        number?: string | null;
+        company?: string | null;
+        url?: string | null;
+      }>;
+      fulfillmentLineItems?: {
+        nodes?: Array<{
+          id: string;
+          quantity?: number | null;
+          lineItem?: { id?: string | null } | null;
+        }>;
+      };
+    }>;
+  } | null;
+}
+
 export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
   constructor(
     private db: any,
+    private fulfillmentAuthority: ChannelFulfillmentAuthorityService,
     private shopifyClient: ShopifyAdminGraphQLClient = createDefaultShopifyAdminClient(),
+    private channelFulfillmentIngress: ChannelFulfillmentIngressService | null = null,
   ) {}
 
   async checkStatus(order: OmsOrder): Promise<ReconciliationStatus> {
@@ -99,12 +131,6 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
 
   async repush(order: OmsOrder): Promise<boolean> {
     try {
-      const fulfillmentPush = this.db.__fulfillmentPush;
-      if (!fulfillmentPush || typeof fulfillmentPush.pushShopifyFulfillment !== "function") {
-        console.error(`[ShopifyFulfillmentReconciler] pushShopifyFulfillment service not found on db`);
-        return false;
-      }
-
       const orderId = Number((order as any).id);
       if (!Number.isInteger(orderId) || orderId <= 0) {
         console.error(`[ShopifyFulfillmentReconciler] Cannot repush order without a valid id`);
@@ -120,19 +146,21 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
       let failures = 0;
       for (const shipmentId of shipmentIds) {
         try {
-          const result = await fulfillmentPush.pushShopifyFulfillment(shipmentId);
-          if (result?.writebackComplete !== true) {
+          const result = await handoffLegacyShipmentToChannelFulfillment(
+            this.fulfillmentAuthority,
+            shipmentId,
+            {
+              executeImmediately: true,
+              source: "shopify_fulfillment_reconciler",
+            },
+          );
+          if (!isChannelFulfillmentHandoffComplete(result)) {
             throw new Error(
-              `Shopify fulfillment push returned without complete package coverage for shipment ${shipmentId}`,
+              `Canonical Shopify fulfillment remains non-terminal for shipment ${shipmentId}`,
             );
           }
         } catch (err: any) {
           failures++;
-          await enqueueShopifyFulfillmentRetry(
-            this.db,
-            shipmentId,
-            err?.message || err,
-          );
           console.error(
             `[ShopifyFulfillmentReconciler] Error repushing fulfillment for shipment ${shipmentId}: ${err.message}`,
           );
@@ -146,53 +174,93 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
     }
   }
 
-  /**
-   * Pull tracking info from Shopify fulfillments for the inbound sweep.
-   * Returns the most recent fulfillment's tracking data.
-   */
-  async getTrackingInfo(order: OmsOrder): Promise<{ trackingNumber: string; carrier: string } | null> {
-    try {
-      const shopifyOrderGid = resolveShopifyOrderGid(order);
-      if (!shopifyOrderGid) return null;
+  /** Reconcile every Shopify fulfillment package with exact order-line identity. */
+  async syncFulfillmentsFromChannel(order: OmsOrder): Promise<boolean> {
+    if (!this.channelFulfillmentIngress) {
+      throw Object.assign(new Error("Channel fulfillment ingress service is unavailable"), {
+        code: "CHANNEL_FULFILLMENT_INGRESS_UNAVAILABLE",
+      });
+    }
 
-      const response = await this.shopifyClient.request<{
-        order?: {
-          fulfillments?: Array<{
-            trackingInfo?: Array<{ number?: string; company?: string }>;
-          }>;
-        } | null;
-      }>(
-        `
-          query trackingForOrder($id: ID!) {
-            order(id: $id) {
-              fulfillments(first: 10) {
-                trackingInfo {
-                  number
-                  company
+    const shopifyOrderGid = resolveShopifyOrderGid(order);
+    if (!shopifyOrderGid) return false;
+    const externalOrderId = String(
+      (order as any).external_order_id ?? order.externalOrderId ?? "",
+    ).trim();
+    const channelId = Number((order as any).channel_id ?? order.channelId);
+
+    const response = await this.shopifyClient.request<ShopifyFulfillmentPackagesResponse>(
+      `
+        query fulfillmentPackagesForOrder($id: ID!) {
+          order(id: $id) {
+            id
+            fulfillments(first: 100) {
+              id
+              status
+              createdAt
+              updatedAt
+              trackingInfo(first: 10) {
+                number
+                company
+                url
+              }
+              fulfillmentLineItems(first: 250) {
+                nodes {
+                  id
+                  quantity
+                  lineItem {
+                    id
+                  }
                 }
               }
             }
           }
-        `,
-        { id: shopifyOrderGid },
-      );
-
-      const fulfillments = response.order?.fulfillments ?? [];
-      for (let i = fulfillments.length - 1; i >= 0; i--) {
-        const tracking = fulfillments[i].trackingInfo;
-        if (tracking && tracking.length > 0 && tracking[0].number) {
-          return {
-            trackingNumber: tracking[0].number,
-            carrier: tracking[0].company || "other",
-          };
         }
-      }
+      `,
+      { id: shopifyOrderGid },
+    );
 
-      return null;
-    } catch (err: any) {
-      console.error(`[ShopifyFulfillmentReconciler] Error fetching tracking for order ${order.id}: ${err.message}`);
-      return null;
+    const fulfillments = response.order?.fulfillments ?? [];
+    if (fulfillments.length === 0) return false;
+
+    let reviewed = 0;
+    for (const fulfillment of fulfillments) {
+      const lineItems = fulfillment.fulfillmentLineItems?.nodes ?? [];
+      const tracking = fulfillment.trackingInfo?.[0] ?? null;
+      const outcome = await processShopifyFulfillmentIngress(
+        this.channelFulfillmentIngress,
+        {
+          id: fulfillment.id,
+          order_id: externalOrderId,
+          status: String(fulfillment.status ?? "success").toLowerCase(),
+          tracking_number: tracking?.number ?? null,
+          tracking_company: tracking?.company ?? null,
+          tracking_url: tracking?.url ?? null,
+          created_at: fulfillment.createdAt ?? null,
+          updated_at: fulfillment.updatedAt ?? null,
+          line_items: lineItems.map((line) => ({
+            id: line.lineItem?.id,
+            quantity: line.quantity,
+          })),
+          tracking_info: fulfillment.trackingInfo ?? [],
+          fulfillment_line_items: lineItems,
+        },
+        {
+          sourceChannelId: Number.isInteger(channelId) && channelId > 0 ? channelId : null,
+          sourceEventId: `shopify_reconciler:${fulfillment.id}`,
+          eventKind: "reconciled",
+          source: "shopify_fulfillment_reconciler",
+          correlationId: `shopify_order:${externalOrderId}`,
+          causationId: `shopify_reconciler:${fulfillment.id}`,
+        },
+      );
+      if (outcome.result?.processingStatus === "review") reviewed++;
     }
+
+    console.log(
+      `[ShopifyFulfillmentReconciler] Reconciled ${fulfillments.length} Shopify fulfillment package(s) for order ${externalOrderId}; review=${reviewed}`,
+    );
+    return reviewed === 0;
   }
 
   private async findShippedWmsShipmentIds(orderId: number): Promise<number[]> {

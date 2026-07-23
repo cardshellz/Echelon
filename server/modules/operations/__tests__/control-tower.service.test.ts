@@ -110,9 +110,19 @@ describe("operations control tower service", () => {
   });
 
   it("delegates OMS remediation only after loading the concrete live record", async () => {
+    const flowReconciliation = {
+      reservation: null,
+      fulfillmentAuthority: {
+        recordPhysicalPackage: vi.fn(),
+        ensureLegacyShipment: vi.fn(),
+        projectPhysicalPackage: vi.fn(),
+        runDueBatch: vi.fn(),
+      },
+    } as any;
     const deps = {
       db: fakeDb(),
       canViewProcurement: false,
+      flowReconciliation,
       operationsDashboard: {
         getPickReplenHealth: vi.fn().mockResolvedValue({ total: 0, items: [] }),
       },
@@ -131,7 +141,7 @@ describe("operations control tower service", () => {
       code: "OMS_PAID_WITHOUT_WMS",
       omsOrderId: 42,
       operator: "admin@example.com",
-    });
+    }, flowReconciliation);
   });
 
   it("loads only the selected domain when opening detail", async () => {

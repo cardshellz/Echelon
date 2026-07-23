@@ -31,15 +31,16 @@ describe("P0.4 — SHIP_NOTIFY creation paths are closed", () => {
     expect(SS_SRC).not.toMatch(/ON CONFLICT DO NOTHING\s*\n\s*RETURNING/);
   });
 
-  it("the legacy path resolves (replay → adopt) or flags — in that order", () => {
+  it("the legacy path resolves one existing package or records review", () => {
     const block = SS_SRC.slice(
-      SS_SRC.indexOf("P0.4: RESOLVE-OR-FLAG"),
-      SS_SRC.indexOf("legacy_no_shipment_row"),
+      SS_SRC.indexOf("async function processShipNotifyLegacy"),
+      SS_SRC.indexOf("// ─── processShipNotify entry point"),
     );
-    const replay = block.indexOf("AND tracking_number = ${trackingNumber}");
-    const adopt = block.indexOf("AND status IN ('planned', 'queued', 'labeled', 'on_hold')");
-    expect(replay).toBeGreaterThan(-1);
-    expect(adopt).toBeGreaterThan(replay);
+    expect(block).toContain("exactTracking.length === 1");
+    expect(block).toContain("active.length === 1");
+    expect(block).toContain("recordLegacyShipNotifyAuthorityReview");
+    expect(block).toContain("finalizeCanonicalShipNotifyPackage");
+    expect(block).not.toContain("INSERT INTO wms.outbound_shipments");
     expect(SS_SRC).toContain("'ship_notify_unresolved'");
   });
 

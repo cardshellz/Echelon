@@ -80,7 +80,6 @@ import {
   dispatchEbayWebhookRetry,
 } from "../../webhook-retry.worker";
 import { ShipStationPushError, SS_PUSH_INVALID_SHIPMENT } from "../../shipstation.service";
-import { EbayTrackingConflictError } from "../../channel-fulfillment-conflict";
 
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
   resolve(__dirname, "../../webhook-retry.worker.ts"),
@@ -109,17 +108,11 @@ function makeDb(opts: {
       mode: "hold" | "release",
     ) => Promise<{ touched: number }>;
   } | null;
-  fulfillmentPush?:
+  fulfillmentAuthority?:
     | {
-        pushShopifyFulfillment?: (
-          shipmentId: number,
-        ) => Promise<{
-          shopifyFulfillmentId: string | null;
-          alreadyPushed: boolean;
-          writebackComplete: boolean;
-        }>;
-        pushTracking?: (orderId: number) => Promise<boolean>;
-        pushTrackingForShipment?: (shipmentId: number) => Promise<boolean>;
+        ensureLegacyShipment: (shipmentId: number, options: any) => Promise<any>;
+        recordPhysicalPackage?: (...args: any[]) => Promise<any>;
+        runDueBatch?: (...args: any[]) => Promise<any>;
       }
     | null;
   ebayReplay?:
@@ -173,9 +166,6 @@ function makeDb(opts: {
   if (opts.shipStationService !== undefined) {
     db.__shipStationService = opts.shipStationService;
   }
-  if (opts.fulfillmentPush !== undefined) {
-    db.__fulfillmentPush = opts.fulfillmentPush;
-  }
   if (opts.ebayReplay !== undefined) {
     db.__ebayWebhookReplay = opts.ebayReplay;
   }
@@ -183,7 +173,13 @@ function makeDb(opts: {
     db.__wmsSyncService = opts.wmsSync;
   }
 
-  return { db, inserts, updates, executes };
+  return {
+    db,
+    inserts,
+    updates,
+    executes,
+    fulfillmentAuthority: opts.fulfillmentAuthority,
+  };
 }
 
 function postgresUniqueViolation(
@@ -1655,26 +1651,82 @@ describe("enqueueShopifyFulfillmentRetry :: DB failure", () => {
   });
 });
 
-// ─── dispatchShopifyFulfillmentRetry tests (C22d) ─────────────────────
+// --- Legacy retry adoption by canonical fulfillment authority -------------
 
-describe("dispatchShopifyFulfillmentRetry :: PERMANENT error classification", () => {
+function canonicalAuthorityResult(commandId = 70001) {
+  return {
+    materialized: {
+      physicalShipmentId: 90001,
+      shippingEngineOrderId: 80001,
+      channelCommands: [{ id: commandId, pushStatus: "pending" }],
+      customerFulfillmentItemCount: 1,
+      nonCustomerItemCount: 0,
+    },
+    dispatch: {
+      claimed: 1,
+      succeeded: 1,
+      ignored: 0,
+      retryScheduled: 0,
+      reviewRequired: 0,
+      deadLettered: 0,
+    },
+  };
+}
+
+function makeFulfillmentAuthority(
+  ensureLegacyShipment = vi.fn(async () => canonicalAuthorityResult()),
+) {
+  return {
+    ensureLegacyShipment,
+    recordPhysicalPackage: vi.fn(),
+    runDueBatch: vi.fn(),
+  };
+}
+
+describe("dispatchShopifyFulfillmentRetry :: canonical adoption", () => {
   beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("dead-letters SHOPIFY_PUSH_INVALID_INPUT immediately and flags the shipment requires_review", async () => {
-    // Deterministic bad input (e.g. zero-qty split items) — identical retries
-    // can never succeed (CLAUDE.md §6). Previously burned 5 attempts, then the
-    // sweeper re-enqueued forever.
-    const err = Object.assign(new Error("shipment 42 has no items with positive quantity"), {
-      context: { code: "shopify_push_invalid_input", shipmentId: 42 },
+  it("hands the legacy shipment to canonical authority and marks the old row successful", async () => {
+    const ensureLegacyShipment = vi.fn(async () => canonicalAuthorityResult());
+    const { db, updates, fulfillmentAuthority } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
     });
-    const push = vi.fn(async () => { throw err; });
-    const { db, updates, executes } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: push },
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 501,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 42 },
+      attempts: 0,
+    }, fulfillmentAuthority as any);
+
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(42, {
+      executeImmediately: true,
+      source: "legacy_shopify_fulfillment_retry",
+    });
+    expect(outcome).toBe("success");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("dead-letters deterministic invalid lineage and flags the shipment for review", async () => {
+    const error = Object.assign(
+      new Error("shipment 42 has no items with positive quantity"),
+      { context: { code: "shopify_push_invalid_input", shipmentId: 42 } },
+    );
+    const ensureLegacyShipment = vi.fn(async () => {
+      throw error;
+    });
+    const { db, updates, executes, fulfillmentAuthority } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
     });
 
     const outcome = await dispatchShopifyFulfillmentRetry(db, {
@@ -1683,46 +1735,134 @@ describe("dispatchShopifyFulfillmentRetry :: PERMANENT error classification", ()
       topic: "shopify_fulfillment_push",
       payload: { shipmentId: 42 },
       attempts: 0,
-    });
+    }, fulfillmentAuthority as any);
 
     expect(outcome).toBe("dead");
-    expect(push).toHaveBeenCalledTimes(1); // exactly one attempt, no retry ladder
-    // The requires_review stamp ran as a raw execute (UPDATE wms.outbound_shipments…).
+    expect(ensureLegacyShipment).toHaveBeenCalledTimes(1);
     expect(executes.length).toBeGreaterThanOrEqual(1);
-    // …and the queue row was marked dead (drizzle update path via markRowDead).
-    expect(updates.some((u) => u.set?.status === "dead")).toBe(true);
+    expect(updates.some((update) => update.set?.status === "dead")).toBe(true);
   });
 
-  it("transient errors (no permanent code) still take the retry ladder, not the permanent path", async () => {
-    const err = Object.assign(new Error("ECONNRESET"), {
-      context: { code: "shopify_push_network_error", shipmentId: 42 },
+  it("uses the retry ladder for transient canonical handoff failures", async () => {
+    const ensureLegacyShipment = vi.fn(async () => {
+      throw new Error("shopify 503");
     });
-    const push = vi.fn(async () => { throw err; });
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: push },
+    const { db, updates, fulfillmentAuthority } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
     });
 
     const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 901,
+      id: 700,
       provider: "internal",
       topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 42 },
+      payload: { shipmentId: 11 },
+      attempts: 1,
+    }, fulfillmentAuthority as any);
+
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set.status).toBe("pending");
+    expect(updates[0]!.set.attempts).toBe(2);
+    expect(updates[0]!.set.lastError).toBe("shopify 503");
+  });
+
+  it("does not burn an attempt while the Shopify client is unavailable", async () => {
+    const ensureLegacyShipment = vi.fn(async () => {
+      const error = Object.assign(new Error("shopify client not initialized"), {
+        context: { code: "shopify_push_client_not_set" },
+      });
+      throw error;
+    });
+    const { db, updates, fulfillmentAuthority } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 702,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 257 },
+      attempts: 4,
+    }, fulfillmentAuthority as any);
+
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set.status).toBeUndefined();
+    expect(updates[0]!.set.attempts).toBeUndefined();
+    expect(updates[0]!.set.lastError).toBe(
+      "shopify fulfillment push client not initialized",
+    );
+  });
+
+  it("moves a repeatedly failing legacy row to dead-letter at the attempt limit", async () => {
+    const ensureLegacyShipment = vi.fn(async () => {
+      throw new Error("still failing");
+    });
+    const { db, updates, fulfillmentAuthority } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 701,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 99 },
+      attempts: 4,
+    }, fulfillmentAuthority as any);
+
+    expect(outcome).toBe("dead");
+    expect(updates[0]!.set.status).toBe("dead");
+    expect(updates[0]!.set.attempts).toBe(5);
+  });
+
+  it.each([
+    ["missing", undefined as any],
+    ["negative", -1],
+    ["zero", 0],
+    ["float", 1.5],
+    ["string", "42" as any],
+  ])("dead-letters malformed shipment scope: %s", async (_label, shipmentId) => {
+    const ensureLegacyShipment = vi.fn();
+    const { db, updates } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
+    });
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 600,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: shipmentId === undefined ? {} : { shipmentId },
       attempts: 0,
     });
 
-    expect(outcome).toBe("pending"); // attempt 1 of MAX_ATTEMPTS → scheduled retry
-    expect(updates.some((u) => u.set?.status === "dead")).toBe(false);
+    expect(outcome).toBe("malformed");
+    expect(ensureLegacyShipment).not.toHaveBeenCalled();
+    expect(updates[0]!.set.status).toBe("dead");
   });
 
-  it("keeps the worker's local error-code literal in sync with fulfillment-push.service", () => {
-    // The worker deliberately uses a local literal (no static import — the push
-    // service is resolved via the db stash). This pins the two definitions.
-    const FULFILLMENT_PUSH_SRC = readFileSync(
+  it("keeps the old retry pending until canonical authority is initialized", async () => {
+    const { db, updates, fulfillmentAuthority } = makeDb();
+
+    const outcome = await dispatchShopifyFulfillmentRetry(db, {
+      id: 800,
+      provider: "internal",
+      topic: "shopify_fulfillment_push",
+      payload: { shipmentId: 51 },
+      attempts: 2,
+    }, fulfillmentAuthority as any);
+
+    expect(outcome).toBe("pending");
+    expect(updates[0]!.set.attempts).toBeUndefined();
+    expect(updates[0]!.set.status).toBeUndefined();
+    expect(String(updates[0]!.set.lastError)).toMatch(
+      /canonical fulfillment authority not available/,
+    );
+  });
+
+  it("keeps the worker error-code literal aligned with the provider adapter", () => {
+    const fulfillmentPushSource = readFileSync(
       resolve(__dirname, "../../fulfillment-push.service.ts"),
       "utf8",
     );
-    const exported = FULFILLMENT_PUSH_SRC.match(
+    const exported = fulfillmentPushSource.match(
       /export const SHOPIFY_PUSH_INVALID_INPUT = "([^"]+)"/,
     )?.[1];
     const local = WEBHOOK_RETRY_WORKER_SRC.match(
@@ -1733,276 +1873,89 @@ describe("dispatchShopifyFulfillmentRetry :: PERMANENT error classification", ()
   });
 });
 
-describe("dispatchShopifyFulfillmentRetry :: happy path", () => {
+describe("dispatchDelayedTrackingPush :: canonical adoption", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("calls pushShopifyFulfillment(shipmentId) and marks row success", async () => {
-    const push = vi.fn(async (_id: number) => ({
-      shopifyFulfillmentId: "gid://shopify/Fulfillment/9",
-      alreadyPushed: false,
-      writebackComplete: true,
-    }));
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: push },
-    });
-
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 501,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 42 },
-      attempts: 0,
-    });
-
-    expect(push).toHaveBeenCalledTimes(1);
-    expect(push).toHaveBeenCalledWith(42);
-    expect(outcome).toBe("success");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.set.status).toBe("success");
-  });
-
-  it("treats alreadyPushed=true as success (idempotent skip)", async () => {
-    const push = vi.fn(async (_id: number) => ({
-      shopifyFulfillmentId: "gid://shopify/Fulfillment/preexisting",
-      alreadyPushed: true,
-      writebackComplete: true,
-    }));
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: push },
-    });
-
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 502,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 43 },
-      attempts: 0,
-    });
-
-    expect(outcome).toBe("success");
-    expect(updates[0]!.set.status).toBe("success");
-  });
-});
-
-describe("dispatchShopifyFulfillmentRetry :: malformed payload", () => {
-  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it.each([
-    ["missing", undefined as any],
-    ["negative", -1],
-    ["zero", 0],
-    ["float", 1.5],
-    ["string", "42" as any],
-  ])("dead-letters immediately when shipmentId is %s", async (_label, badId) => {
-    const push = vi.fn();
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: push as any },
-    });
-
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 600,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: badId === undefined ? {} : { shipmentId: badId },
-      attempts: 0,
-    });
-
-    expect(outcome).toBe("malformed");
-    expect(push).not.toHaveBeenCalled();
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.set.status).toBe("dead");
-    expect(String(updates[0]!.set.lastError)).toContain("malformed payload");
-  });
-
-  it("dead-letters when payload is null", async () => {
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: vi.fn() as any },
-    });
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 601,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: null as any,
-      attempts: 0,
-    });
-    expect(outcome).toBe("malformed");
-    expect(updates[0]!.set.status).toBe("dead");
-  });
-});
-
-describe("dispatchShopifyFulfillmentRetry :: failure path", () => {
-  beforeEach(() => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("increments attempts and pushes next_retry_at on transient failure", async () => {
-    const push = vi.fn(async () => {
-      throw new Error("shopify 503");
-    });
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: push },
-    });
-
-    const before = Date.now();
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 700,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 11 },
-      attempts: 1,
-    });
-    const after = Date.now();
-
-    expect(outcome).toBe("pending");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.set.status).toBe("pending");
-    expect(updates[0]!.set.attempts).toBe(2);
-    expect(updates[0]!.set.lastError).toBe("shopify 503");
-
-    const nextMs = (updates[0]!.set.nextRetryAt as Date).getTime();
-    expect(nextMs).toBeGreaterThanOrEqual(before + 4 * 60_000 - 50);
-    expect(nextMs).toBeLessThanOrEqual(after + 4 * 60_000 + 50);
-  });
-
-  it("keeps pending without incrementing attempts when Shopify client is not initialized", async () => {
-    const push = vi.fn(async () => {
-      const err = new Error("shopify client not initialized") as any;
-      err.context = { code: "shopify_push_client_not_set" };
-      throw err;
-    });
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: push },
-    });
-
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 702,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 257 },
-      attempts: 4,
-    });
-
-    expect(outcome).toBe("pending");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.set.status).toBeUndefined();
-    expect(updates[0]!.set.attempts).toBeUndefined();
-    expect(updates[0]!.set.lastError).toBe(
-      "shopify fulfillment push client not initialized",
-    );
-  });
-
-  it("marks dead and emits CRITICAL: log when attempts hit MAX_ATTEMPTS", async () => {
-    const errSpy = vi.spyOn(console, "error");
-    const push = vi.fn(async () => {
-      throw new Error("still failing");
-    });
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushShopifyFulfillment: push },
-    });
-
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 701,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 99 },
-      attempts: 4, // → 5 = MAX_ATTEMPTS
-    });
-
-    expect(outcome).toBe("dead");
-    expect(updates[0]!.set.status).toBe("dead");
-    expect(updates[0]!.set.attempts).toBe(5);
-
-    const critical = errSpy.mock.calls.find((args) =>
-      String(args[0] ?? "").startsWith("CRITICAL:"),
-    );
-    expect(critical).toBeDefined();
-    expect(String(critical![0])).toContain(
-      "CRITICAL: Shopify Fulfillment Push Dead-Lettered",
-    );
-    expect(String(critical![0])).toContain("Shipment ID: 99");
-  });
-});
-
-describe("dispatchShopifyFulfillmentRetry :: service not wired", () => {
-  beforeEach(() => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("keeps row pending without incrementing attempts when fulfillmentPush stash missing", async () => {
-    // No fulfillmentPush key at all on db.
-    const { db, updates } = makeDb();
-
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 800,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 51 },
-      attempts: 2,
-    });
-
-    expect(outcome).toBe("pending");
-    expect(updates).toHaveLength(1);
-    // attempts NOT incremented — graceful degrade.
-    expect(updates[0]!.set.attempts).toBeUndefined();
-    expect(updates[0]!.set.status).toBeUndefined();
-    expect(String(updates[0]!.set.lastError)).toMatch(
-      /fulfillment push service not available/,
-    );
-  });
-
-  it("keeps pending when stash exists but pushShopifyFulfillment fn is missing", async () => {
-    const { db, updates } = makeDb({
-      fulfillmentPush: {} as any,
-    });
-
-    const outcome = await dispatchShopifyFulfillmentRetry(db, {
-      id: 801,
-      provider: "internal",
-      topic: "shopify_fulfillment_push",
-      payload: { shipmentId: 52 },
-      attempts: 0,
-    });
-
-    expect(outcome).toBe("pending");
-    expect(updates[0]!.set.attempts).toBeUndefined();
-  });
-
-  it("retries delayed tracking push when pushTracking returns false", async () => {
-    const pushTracking = vi.fn(async () => false);
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushTracking } as any,
+  it("hands shipment-scoped retries to canonical authority first", async () => {
+    const ensureLegacyShipment = vi.fn(async () => canonicalAuthorityResult());
+    const { db, updates, fulfillmentAuthority } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
     });
 
     const outcome = await dispatchDelayedTrackingPush(db, {
-      id: 900,
+      id: 901,
+      provider: "internal",
+      topic: "delayed_tracking_push",
+      payload: { orderId: 77, shipmentId: 501 },
+      attempts: 0,
+    }, fulfillmentAuthority as any);
+
+    expect(outcome).toBe("success");
+    expect(ensureLegacyShipment).toHaveBeenCalledWith(501, {
+      executeImmediately: true,
+      source: "legacy_delayed_tracking_retry",
+    });
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("expands order-scoped retries into every real shipped package", async () => {
+    const ensureLegacyShipment = vi.fn(async (shipmentId: number) =>
+      canonicalAuthorityResult(70000 + shipmentId));
+    const { db, updates, fulfillmentAuthority } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
+      executeRows: [{
+        rows: [{ shipment_id: 501 }, { shipment_id: 502 }],
+      }],
+    });
+
+    const outcome = await dispatchDelayedTrackingPush(db, {
+      id: 902,
       provider: "internal",
       topic: "delayed_tracking_push",
       payload: { orderId: 77 },
-      attempts: 1,
+      attempts: 0,
+    }, fulfillmentAuthority as any);
+
+    expect(outcome).toBe("success");
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(1, 501, {
+      executeImmediately: true,
+      source: "legacy_order_tracking_retry",
+    });
+    expect(ensureLegacyShipment).toHaveBeenNthCalledWith(2, 502, {
+      executeImmediately: true,
+      source: "legacy_order_tracking_retry",
+    });
+    expect(updates[0]!.set.status).toBe("success");
+  });
+
+  it("does not report success when an order has no physical package", async () => {
+    const { db, updates, fulfillmentAuthority } = makeDb({
+      fulfillmentAuthority: makeFulfillmentAuthority(),
+      executeRows: [{ rows: [] }],
     });
 
+    const outcome = await dispatchDelayedTrackingPush(db, {
+      id: 903,
+      provider: "internal",
+      topic: "delayed_tracking_push",
+      payload: { orderId: 77 },
+      attempts: 0,
+    }, fulfillmentAuthority as any);
+
     expect(outcome).toBe("pending");
-    expect(pushTracking).toHaveBeenCalledWith(77);
     expect(updates[0]!.set.status).toBe("pending");
-    expect(updates[0]!.set.attempts).toBe(2);
-    expect(updates[0]!.set.lastError).toContain("fulfillment push returned false");
+    expect(updates[0]!.set.attempts).toBe(1);
+    expect(updates[0]!.set.lastError).toContain(
+      "has no shipped WMS package with tracking",
+    );
   });
 
   it("enqueues delayed tracking push with shipment scope when provided", async () => {
@@ -2014,7 +1967,7 @@ describe("dispatchShopifyFulfillmentRetry :: service not wired", () => {
     expect(inserts[0]!.values.payload).toEqual({ orderId: 77, shipmentId: 501 });
   });
 
-  it("does not enqueue duplicate pending delayed tracking push for the same shipment", async () => {
+  it("does not enqueue a duplicate pending shipment-scoped retry", async () => {
     const { db, inserts } = makeDb({
       executeRows: [{ rows: [{ id: 123 }] }],
     });
@@ -2024,7 +1977,7 @@ describe("dispatchShopifyFulfillmentRetry :: service not wired", () => {
     expect(inserts).toHaveLength(0);
   });
 
-  it("does not enqueue duplicate pending delayed tracking push for the same order-level scope", async () => {
+  it("does not enqueue a duplicate pending order-scoped retry", async () => {
     const { db, inserts } = makeDb({
       executeRows: [{ rows: [{ id: 124 }] }],
     });
@@ -2033,60 +1986,8 @@ describe("dispatchShopifyFulfillmentRetry :: service not wired", () => {
 
     expect(inserts).toHaveLength(0);
   });
-
-  it("dispatches delayed tracking push through shipment-scoped handler first", async () => {
-    const pushTracking = vi.fn(async () => true);
-    const pushTrackingForShipment = vi.fn(async () => true);
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushTracking, pushTrackingForShipment } as any,
-    });
-
-    const outcome = await dispatchDelayedTrackingPush(db, {
-      id: 901,
-      provider: "internal",
-      topic: "delayed_tracking_push",
-      payload: { orderId: 77, shipmentId: 501 },
-      attempts: 0,
-    });
-
-    expect(outcome).toBe("success");
-    expect(pushTrackingForShipment).toHaveBeenCalledWith(501);
-    expect(pushTracking).not.toHaveBeenCalled();
-    expect(updates[0]!.set.status).toBe("success");
-  });
-
-  it("routes an eBay tracking identity conflict to reconciliation without retrying", async () => {
-    const conflict = new EbayTrackingConflictError({
-      omsOrderId: 77,
-      wmsOrderId: 88,
-      wmsShipmentId: 501,
-      externalOrderId: "07-14878-86923",
-      priorEventId: 7001,
-      priorFulfillmentId: "9400150206217770309995",
-      priorTrackingNumber: "9400150206217770309995",
-      currentTrackingNumber: "9400150206217777402897",
-    });
-    const pushTrackingForShipment = vi.fn(async () => {
-      throw conflict;
-    });
-    const { db, updates } = makeDb({
-      fulfillmentPush: { pushTrackingForShipment } as any,
-    });
-
-    const outcome = await dispatchDelayedTrackingPush(db, {
-      id: 116718,
-      provider: "internal",
-      topic: "delayed_tracking_push",
-      payload: { orderId: 77, shipmentId: 501 },
-      attempts: 4,
-    });
-
-    expect(outcome).toBe("success");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]!.set.status).toBe("success");
-    expect(updates[0]!.set.attempts).toBeUndefined();
-  });
 });
+
 
 // ─── Source-of-truth assertion on server/index.ts ────────────────────
 //
@@ -2112,11 +2013,15 @@ describe("ship-notify retry :: wiring in server/index.ts", () => {
     expect(SRC).toMatch(/__shipStationService\s*=\s*services\.shipStation/);
   });
 
-  it("enqueues delayed tracking retry from the eBay startup reconcile path", () => {
-    expect(SRC).toMatch(/async function enqueueEbayReconcileTrackingRetry\(orderId: number, reason: string\)/);
-    expect(SRC).toMatch(/enqueueEbayReconcileTrackingRetry[\s\S]*enqueueDelayedTrackingPush\s*\(\s*db\s*,\s*orderId\s*\)/);
-    expect(SRC).toMatch(/const pushed\s*=\s*await services\.fulfillmentPush\.pushTracking\(order\.id\)/);
-    expect(SRC).toMatch(/pushed === false[\s\S]*enqueueEbayReconcileTrackingRetry\s*\(\s*Number\(order\.id\)\s*,\s*"Tracking push returned false"\s*\)/);
-    expect(SRC).toMatch(/Tracking push failed for \$\{order\.id\}[\s\S]*enqueueEbayReconcileTrackingRetry\s*\(\s*Number\(order\.id\)\s*,\s*"Tracking push failed"\s*\)/);
+  it("routes eBay startup reconciliation through physical-package authority", () => {
+    expect(SRC).not.toMatch(/enqueueEbayReconcileTrackingRetry/);
+    expect(SRC).not.toMatch(/services\.fulfillmentPush\.pushTracking\s*\(/);
+    expect(SRC).toMatch(
+      /if \(!engine\.applyInboundShipmentAuthority \|\| !orderNumber\)/,
+    );
+    expect(SRC).toMatch(
+      /await engine\.applyInboundShipmentAuthority\(\{\s*engineRef: ref,\s*orderNumber,\s*\}\)/,
+    );
+    expect(SRC).toMatch(/EBAY_RECONCILE_PHYSICAL_AUTHORITY_UNAVAILABLE/);
   });
 });

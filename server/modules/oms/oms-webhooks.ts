@@ -16,7 +16,6 @@ import { createHmac } from "crypto";
 import type { Request, Response, Express } from "express";
 import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
-import { applyChannelFulfillment } from "./channel-fulfillment.service";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections, webhookRetryQueue } from "@shared/schema";
 import { db } from "../../db";
@@ -35,6 +34,12 @@ import {
   __test__ as refundCascadeTest,
 } from "./shopify-refund-cascade.service";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
+import {
+  processShopifyFulfillmentIngress,
+} from "./shopify-fulfillment-ingress.adapter";
+import type {
+  ChannelFulfillmentIngressService,
+} from "./channel-fulfillment-ingress.service";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
 import {
@@ -740,6 +745,7 @@ export function registerOmsWebhooks(
   shipStationService: ShipStationService | null,
   wmsSyncService?: any, // WmsSyncService - will be set from server/index.ts
   shippingEngine?: Pick<ShippingEngine, "cancel" | "isConfigured" | "markShipped"> | null,
+  channelFulfillmentIngress?: ChannelFulfillmentIngressService | null,
 ) {
   const webhookLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute
@@ -1726,100 +1732,62 @@ export function registerOmsWebhooks(
       };
       const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
 
-      // Extract tracking from fulfillments
-      const fulfillments = shopifyOrder.fulfillments || [];
-      const latestFulfillment = fulfillments[fulfillments.length - 1];
-      const trackingNumber = latestFulfillment?.tracking_number || null;
-      const carrier = latestFulfillment?.tracking_company || null;
-      const now = new Date();
-      let fulfilledThroughWmsShipment = false;
-
-      // Find WMS order
-      const wmsOrder = await db.execute<{ id: number }>(sql`
-        SELECT id FROM wms.orders
-        WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
-           OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
-        LIMIT 1
-      `);
-
-      const applyWmsChannelFulfillment = async (source: string): Promise<boolean> => {
-        if (wmsOrder.rows.length === 0 || !trackingNumber) return false;
-
-        // Flow through WMS shipment cascade: same state path as SHIP_NOTIFY V2.
-        await applyChannelFulfillment(db, wmsOrder.rows[0].id, {
-          trackingNumber,
-          carrier: carrier || "other",
-          shipDate: now,
-          source,
-          sourceFulfillmentId: latestFulfillment?.id ? String(latestFulfillment.id) : null,
-        }, {
-          shippingEngine: shippingEngine ?? null,
-        });
-        return true;
-      };
-
-      if (existing.status === "shipped") {
-        await applyWmsChannelFulfillment("shopify_fulfilled_webhook_replay");
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already shipped`);
-        await markInboxSucceeded(inbox.receipt);
-        acknowledgeProcessed(req, res);
-        return;
-      }
-
-      if (await applyWmsChannelFulfillment("shopify_fulfilled_webhook")) {
-        // Flow through WMS shipment cascade — same path as SHIP_NOTIFY V2.
-        fulfilledThroughWmsShipment = true;
-      } else {
-        // No WMS order or no tracking — update OMS directly
-        await db
-          .update(omsOrders)
-          .set({
-            status: "shipped",
-            fulfillmentStatus: "fulfilled",
-            trackingNumber,
-            trackingCarrier: carrier,
-            shippedAt: now,
-            updatedAt: now,
-          })
-          .where(eq(omsOrders.id, existing.id));
-
-        await db
-          .update(omsOrderLines)
-          .set({ fulfillmentStatus: "fulfilled" })
-          .where(eq(omsOrderLines.orderId, existing.id));
-
-        if (wmsOrder.rows.length > 0) {
-          const { markOrderShipped } = await import("../orders/order-status-core");
-          await markOrderShipped(db, wmsOrder.rows[0].id, "shopify_fulfilled_webhook");
-        }
-
-        await db.insert(omsOrderEvents).values({
-          orderId: existing.id,
-          eventType: "shipped",
-          details: {
-            source: "shopify_fulfilled_webhook",
-            trackingNumber,
-            carrier,
-            fulfillmentId: latestFulfillment?.id,
-          },
+      const fulfillments = Array.isArray(shopifyOrder.fulfillments)
+        ? shopifyOrder.fulfillments
+        : [];
+      if (!channelFulfillmentIngress) {
+        throw Object.assign(new Error("Channel fulfillment ingress service is unavailable"), {
+          code: "CHANNEL_FULFILLMENT_INGRESS_UNAVAILABLE",
         });
       }
+      if (fulfillments.length === 0) {
+        throw Object.assign(
+          new Error("Shopify orders/fulfilled payload contains no fulfillment packages"),
+          { code: "SHOPIFY_FULFILLMENT_PACKAGES_MISSING" },
+        );
+      }
 
-      // Mirror to ShipStation so the order leaves Awaiting Shipment.
-      if (!fulfilledThroughWmsShipment && shipStationService?.isConfigured() && existing.shipstationOrderId) {
-        try {
-          await shipStationService.markAsShipped(existing.shipstationOrderId, {
-            shipDate: now,
-            trackingNumber,
-            carrierCode: carrier?.toLowerCase() || "other",
-            notifyCustomer: false,
+      const packageResults: Array<Record<string, unknown>> = [];
+      for (const fulfillment of fulfillments) {
+        const sourceFulfillmentId = String(fulfillment?.id ?? "").trim();
+        if (!sourceFulfillmentId) {
+          throw Object.assign(new Error("Shopify fulfillment package is missing its id"), {
+            code: "SHOPIFY_FULFILLMENT_ID_MISSING",
           });
-        } catch (err: any) {
-          console.error(`${LOG_PREFIX} ShipStation markAsShipped failed for ${shopifyOrder.name}: ${err.message}`);
         }
+        const outcome = await processShopifyFulfillmentIngress(
+          channelFulfillmentIngress,
+          {
+            ...fulfillment,
+            order_id: externalOrderId,
+          },
+          {
+            sourceChannelId: channelId,
+            sourceEventId: `webhook_inbox:${inbox.receipt.id}:fulfillment:${sourceFulfillmentId}`,
+            sourceInboxId: inbox.receipt.id,
+            eventKind: "reconciled",
+            source: "shopify_orders_fulfilled",
+            correlationId: `webhook_inbox:${inbox.receipt.id}`,
+            causationId: `webhook_inbox:${inbox.receipt.id}`,
+          },
+        );
+        packageResults.push({
+          fulfillmentId: sourceFulfillmentId,
+          actionable: outcome.actionable,
+          processingStatus: outcome.result?.processingStatus ?? "ignored",
+          receiptId: outcome.result?.receiptId ?? null,
+          physicalShipmentId: outcome.result?.physicalShipmentId ?? null,
+          replayed: outcome.result?.replayed ?? false,
+        });
       }
 
-      console.log(`${LOG_PREFIX} ✅ Fulfilled order ${shopifyOrder.name} (tracking: ${trackingNumber || "none"})`);
+      console.log(JSON.stringify({
+        event: "shopify_order_fulfillment_packages_ingested",
+        omsOrderId: existing.id,
+        externalOrderId,
+        packageCount: packageResults.length,
+        packages: packageResults,
+      }));
       pushToMissionControl(existing.id, "order.fulfilled");
 
       // M18: Trigger real-time backfill bridge

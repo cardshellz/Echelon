@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+
+import { planChannelFulfillmentCommands } from "../../channel-fulfillment-command";
 
 type ChannelProvider = "shopify" | "ebay";
 type ShippingProvider = "shipstation" | "internal_shipping_engine";
@@ -12,6 +16,7 @@ type ConformanceInvariant =
   | "physical_shipment_item_authority"
   | "channel_push_from_physical_shipment"
   | "channel_push_idempotency"
+  | "combined_package_fans_out_by_oms_order"
   | "ambiguous_provider_event_requires_review";
 
 interface ExpectedCanonicalShape {
@@ -43,6 +48,7 @@ const REQUIRED_INVARIANTS: ConformanceInvariant[] = [
   "physical_shipment_item_authority",
   "channel_push_from_physical_shipment",
   "channel_push_idempotency",
+  "combined_package_fans_out_by_oms_order",
   "ambiguous_provider_event_requires_review",
 ];
 
@@ -149,6 +155,34 @@ const CONFORMANCE_SCENARIOS: ConformanceScenario[] = [
     ],
     currentGap:
       "Current status and Shopify fulfillment state are materialized on overloaded WMS shipment rows, which makes partial follow-up tracking fragile.",
+  },
+  {
+    id: "combined-orders-one-physical-package",
+    title: "Multiple OMS orders combined into one physical package",
+    productionExamples: ["#59564"],
+    channelProvider: "shopify",
+    shippingProvider: "shipstation",
+    description:
+      "One provider order and physical package may contain authorized items from multiple OMS orders. The package remains one physical shipment while each OMS order receives an independent channel fulfillment command.",
+    expected: {
+      fulfillmentPlans: 2,
+      shipmentRequests: 2,
+      shippingEngineOrders: 1,
+      physicalShipments: 1,
+      channelFulfillmentPushes: 2,
+    },
+    requiredInvariants: [
+      "oms_line_authority",
+      "shipping_adapter_cannot_invent_lines",
+      "shipping_engine_order_is_not_physical_shipment",
+      "physical_shipment_idempotency",
+      "physical_shipment_item_authority",
+      "channel_push_from_physical_shipment",
+      "channel_push_idempotency",
+      "combined_package_fans_out_by_oms_order",
+    ],
+    currentGap:
+      "The shadow schema linked a provider order and physical package to one shipment request and keyed one channel push per provider package, so combined orders could not be represented faithfully.",
   },
   {
     id: "webhook-replay",
@@ -272,6 +306,7 @@ describe("shipment and fulfillment hardening conformance matrix", () => {
     expect(examples.has("#59453")).toBe(true);
     expect(examples.has("#59540")).toBe(true);
     expect(examples.has("#59551")).toBe(true);
+    expect(examples.has("#59564")).toBe(true);
   });
 
   it("requires every scenario to document an actionable current runtime gap", () => {
@@ -320,6 +355,45 @@ describe("shipment and fulfillment hardening conformance matrix", () => {
     expect(providers.has("internal_shipping_engine")).toBe(true);
   });
 
+  it("executes combined-package fan-out without duplicating physical shipment identity", () => {
+    const commands = planChannelFulfillmentCommands({
+      physicalShipmentId: 7001,
+      shippingProvider: "shipstation",
+      providerPhysicalShipmentId: "442503317",
+      trackingNumber: "1Z999AA10123456784",
+      carrier: "UPS",
+      trackingUrl: null,
+      shippedAt: "2026-07-22T12:00:00.000Z",
+      items: [
+        {
+          physicalShipmentItemId: 8001,
+          shipmentRequestItemId: 9001,
+          omsOrderId: 1001,
+          omsOrderLineId: 1101,
+          channelProvider: "shopify",
+          channelOrderLineId: "gid://shopify/LineItem/1101",
+          channelFulfillmentScopeKey: "gid://shopify/FulfillmentOrder/1201",
+          quantityShipped: 1,
+        },
+        {
+          physicalShipmentItemId: 8002,
+          shipmentRequestItemId: 9002,
+          omsOrderId: 1002,
+          omsOrderLineId: 1102,
+          channelProvider: "shopify",
+          channelOrderLineId: "gid://shopify/LineItem/1102",
+          channelFulfillmentScopeKey: "gid://shopify/FulfillmentOrder/1202",
+          quantityShipped: 1,
+        },
+      ],
+    });
+
+    expect(commands).toHaveLength(2);
+    expect(new Set(commands.map((command) => command.physicalShipmentId))).toEqual(new Set([7001]));
+    expect(new Set(commands.map((command) => command.omsOrderId))).toEqual(new Set([1001, 1002]));
+    expect(new Set(commands.map((command) => command.commandKey)).size).toBe(2);
+  });
+
   it("documents every required invariant in at least one scenario", () => {
     const covered = new Set(
       CONFORMANCE_SCENARIOS.flatMap((scenario) => scenario.requiredInvariants),
@@ -332,7 +406,77 @@ describe("shipment and fulfillment hardening conformance matrix", () => {
 });
 
 describe("shipment and fulfillment hardening target runtime behavior", () => {
-  for (const scenario of CONFORMANCE_SCENARIOS) {
-    it.todo(`${scenario.id}: ${scenario.title}`);
-  }
+  it("prevents orchestration paths from calling legacy channel write APIs directly", () => {
+    const orchestrationFiles = [
+      "server/index.ts",
+      "server/routes/oms.routes.ts",
+      "server/modules/oms/shipstation.service.ts",
+      "server/modules/oms/webhook-retry.worker.ts",
+      "server/modules/oms/fulfillment-sweeper.scheduler.ts",
+      "server/modules/oms/oms-flow-reconciliation.service.ts",
+      "server/modules/oms/reconcilers/shopify.reconciler.ts",
+      "server/modules/oms/reconcilers/ebay.reconciler.ts",
+    ];
+    const forbiddenCalls = [
+      /\.pushShopifyFulfillment\s*\(/,
+      /\.pushTrackingForShipment\s*\(/,
+      /\.pushTracking\s*\(/,
+    ];
+
+    for (const relativePath of orchestrationFiles) {
+      const source = fs.readFileSync(path.resolve(process.cwd(), relativePath), "utf8");
+      for (const forbiddenCall of forbiddenCalls) {
+        expect(source, `${relativePath} bypasses canonical fulfillment authority`).not.toMatch(
+          forbiddenCall,
+        );
+      }
+    }
+  });
+
+  it("does not use database-object service locators for fulfillment authority", () => {
+    const productionFiles = [
+      "server/index.ts",
+      "server/services/index.ts",
+      "server/modules/oms/shipstation.service.ts",
+      "server/modules/oms/webhook-retry.worker.ts",
+      "server/modules/oms/fulfillment-sweeper.scheduler.ts",
+      "server/modules/oms/oms-flow-reconciliation.service.ts",
+    ];
+    const forbiddenServiceLocators = [
+      "__channelFulfillmentAuthority",
+      "__fulfillmentPush",
+      "__shipStationPhysicalRecovery",
+    ];
+
+    for (const relativePath of productionFiles) {
+      const source = fs.readFileSync(path.resolve(process.cwd(), relativePath), "utf8");
+      for (const forbidden of forbiddenServiceLocators) {
+        expect(source, `${relativePath} uses hidden dependency ${forbidden}`).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it("removes the retired order-level channel fulfillment service", () => {
+    expect(fs.existsSync(path.resolve(
+      process.cwd(),
+      "server/modules/oms/channel-fulfillment.service.ts",
+    ))).toBe(false);
+  });
+
+  it("retires the OMS order-level manual shipment mutation", () => {
+    const routeSource = fs.readFileSync(
+      path.resolve(process.cwd(), "server/routes/oms.routes.ts"),
+      "utf8",
+    );
+    const clientSource = fs.readFileSync(
+      path.resolve(process.cwd(), "client/src/pages/OmsOrders.tsx"),
+      "utf8",
+    );
+
+    expect(routeSource).toContain("PHYSICAL_SHIPMENT_REQUIRED");
+    expect(routeSource).not.toMatch(/getOms\(req\)\.markShipped/);
+    expect(clientSource).not.toContain("/mark-shipped");
+    expect(clientSource).not.toContain("Mark Order Shipped");
+  });
+
 });

@@ -195,10 +195,6 @@ export default function OmsOrders() {
     const parsed = Number(value);
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
   });
-  const [shipDialog, setShipDialog] = useState<{ orderId: number } | null>(null);
-  const [trackingNumber, setTrackingNumber] = useState("");
-  const [carrier, setCarrier] = useState("USPS");
-
   const limit = 50;
 
   // Fetch stats
@@ -279,24 +275,6 @@ export default function OmsOrders() {
     },
     onError: (err: Error) => {
       toast({ title: "ShipStation push failed", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const markShippedMutation = useMutation({
-    mutationFn: async ({ orderId, trackingNumber, carrier }: any) => {
-      const res = await fetch(`/api/oms/orders/${orderId}/mark-shipped`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trackingNumber, carrier }),
-      });
-      if (!res.ok) throw new Error("Failed to mark shipped");
-      return res.json();
-    },
-    onSuccess: () => {
-      toast({ title: "Order marked as shipped" });
-      setShipDialog(null);
-      setTrackingNumber("");
-      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
     },
   });
 
@@ -735,17 +713,6 @@ export default function OmsOrders() {
                         {pushToShipStationMutation.isPending ? "Re-pushing..." : "Re-push to ShipStation"}
                       </Button>
                     )}
-                  {selectedOrder.status !== "shipped" && selectedOrder.status !== "cancelled" && (
-                    <Button
-                      size="sm"
-                      onClick={() => {
-                        setShipDialog({ orderId: selectedOrder.id });
-                        setSelectedOrderId(null);
-                      }}
-                    >
-                      Mark Shipped
-                    </Button>
-                  )}
                 </div>
               </div>
             </>
@@ -753,55 +720,6 @@ export default function OmsOrders() {
         </DialogContent>
       </Dialog>
 
-      {/* Ship Dialog */}
-      <Dialog open={!!shipDialog} onOpenChange={(open) => { if (!open) setShipDialog(null); }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Mark Order Shipped</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label>Carrier</Label>
-              <Select value={carrier} onValueChange={setCarrier}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="USPS">USPS</SelectItem>
-                  <SelectItem value="UPS">UPS</SelectItem>
-                  <SelectItem value="FEDEX">FedEx</SelectItem>
-                  <SelectItem value="DHL">DHL</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>Tracking Number</Label>
-              <Input
-                value={trackingNumber}
-                onChange={(e) => setTrackingNumber(e.target.value)}
-                placeholder="Enter tracking number"
-              />
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShipDialog(null)}>Cancel</Button>
-              <Button
-                onClick={() => {
-                  if (shipDialog) {
-                    markShippedMutation.mutate({
-                      orderId: shipDialog.orderId,
-                      trackingNumber,
-                      carrier,
-                    });
-                  }
-                }}
-                disabled={!trackingNumber || markShippedMutation.isPending}
-              >
-                {markShippedMutation.isPending ? "Shipping..." : "Confirm Ship"}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

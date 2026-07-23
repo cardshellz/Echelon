@@ -7,7 +7,11 @@ import { createShipmentForOrder } from "../wms/create-shipment";
 // Imported (not string-literal'd) so a rename stays in sync. shipstation.service
 // only imports this worker via dynamic import(), so this static import is cycle-safe.
 import { SS_PUSH_INVALID_SHIPMENT } from "./shipstation.service";
-import { isEbayTrackingConflictError } from "./channel-fulfillment-conflict";
+import {
+  handoffOmsOrderShipmentsToChannelFulfillment,
+  requireChannelFulfillmentAuthority,
+} from "./channel-fulfillment-authority.handoff";
+import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
 
 const MAX_ATTEMPTS = 5;
 const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
@@ -120,7 +124,7 @@ export function resetWebhookRetryWorkerHeartbeatForTest(): void {
 }
 
 export async function runWebhookRetryWorkerTick(
-  processor: () => Promise<void> = processPendingWebhooks,
+  processor: () => Promise<void>,
 ): Promise<"success" | "error" | "skipped"> {
   if (retryWorkerRunInFlight) {
     retryWorkerLastSkippedAt = new Date();
@@ -148,7 +152,13 @@ export async function runWebhookRetryWorkerTick(
 /**
  * Polls the webhook_retry_queue for pending items that are due for a retry.
  */
-export async function startWebhookRetryWorker() {
+export interface WebhookRetryWorkerDependencies {
+  readonly channelFulfillmentAuthority: ChannelFulfillmentAuthorityService;
+}
+
+export async function startWebhookRetryWorker(
+  dependencies: WebhookRetryWorkerDependencies,
+) {
   if (retryWorkerTimer) {
     console.warn(`${LOG_PREFIX} Worker already started; ignoring duplicate start`);
     return;
@@ -157,9 +167,16 @@ export async function startWebhookRetryWorker() {
   retryWorkerStartedAt = new Date();
   console.log(`${LOG_PREFIX} Started background webhook retry worker`);
 
-  void runWebhookRetryWorkerTick();
+  const authority = requireChannelFulfillmentAuthority(
+    dependencies.channelFulfillmentAuthority,
+  );
+  const processor = () => processPendingWebhooks({
+    channelFulfillmentAuthority: authority,
+  });
+
+  void runWebhookRetryWorkerTick(processor);
   retryWorkerTimer = setInterval(() => {
-    void runWebhookRetryWorkerTick();
+    void runWebhookRetryWorkerTick(processor);
   }, 60 * 1000); // Check every minute
 }
 
@@ -221,8 +238,7 @@ export interface RetryShipStationService {
 /**
  * Shape of the small subset of FulfillmentPushService the retry worker
  * needs to re-dispatch a `shopify_fulfillment_push` row. C22d wires this
- * via the same `db.__fulfillmentPush` stash already used by the V2
- * SHIP_NOTIFY hot path.
+ * through the explicitly injected canonical fulfillment authority.
  *
  * The retry worker only marks the row successful when `writebackComplete`
  * proves every Shopify-owned quantity in the current package is covered.
@@ -777,10 +793,8 @@ export async function requeueDeadWebhookRetry(
 /**
  * Resolve the ShipStation service the worker should invoke.
  *
- * Follows the same db-stash pattern already used by `__fulfillmentPush`
- * in shipstation.service.ts: the boot site in server/index.ts pokes the
- * instance onto db, and the worker reads it back here. Keeps us from
- * threading services through the scheduler start surface.
+ * The legacy operational ShipStation service is still resolved from the
+ * runtime registry; customer fulfillment authority is injected explicitly.
  */
 function resolveShipStationService(dbArg: any): RetryShipStationService | null {
   const svc = dbArg?.__shipStationService;
@@ -792,21 +806,6 @@ function resolveShipStationService(dbArg: any): RetryShipStationService | null {
 
 function resolveShippingEngine(dbArg: any): any | null {
   return dbArg?.__shippingEngine ?? null;
-}
-
-/**
- * Resolve the in-process Shopify fulfillment push service. Same pattern
- * as `resolveShipStationService` but reads the `__fulfillmentPush`
- * stash. See C22d for the wiring rationale.
- */
-function resolveFulfillmentPushService(
-  dbArg: any,
-): any | null {
-  const svc = dbArg?.__fulfillmentPush;
-  if (svc) {
-    return svc;
-  }
-  return null;
 }
 
 function resolveEbayWebhookReplayService(
@@ -1333,6 +1332,7 @@ export async function dispatchShipStationSortRankSyncRetry(
 export async function dispatchShopifyFulfillmentRetry(
   dbArg: any,
   item: RetryDispatchItem,
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService | null | undefined,
 ): Promise<"success" | "pending" | "dead" | "malformed"> {
   const payload = item.payload as { shipmentId?: number } | null;
   const shipmentId = payload?.shipmentId;
@@ -1353,32 +1353,30 @@ export async function dispatchShopifyFulfillmentRetry(
     return "malformed";
   }
 
-  const fulfillmentPush = resolveFulfillmentPushService(dbArg);
-  if (!fulfillmentPush || typeof fulfillmentPush.pushShopifyFulfillment !== "function") {
-    // Service not wired — graceful degrade. Don't burn an attempt on a
-    // boot-order issue; the next worker tick will likely succeed once
-    // server/index.ts has stashed the service.
+  if (!fulfillmentAuthority) {
+    // Do not burn an attempt when startup wiring is incomplete. Production
+    // startup requires this dependency, but direct repair invocations still
+    // fail closed and leave durable work pending.
     await keepPending(
       dbArg,
       item.id,
-      "fulfillment push service not available on db.__fulfillmentPush",
+      "canonical fulfillment authority not available",
     );
     console.warn(
       `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push) deferred — fulfillment push service unavailable`,
     );
     return "pending";
   }
+  const authority = requireChannelFulfillmentAuthority(fulfillmentAuthority);
 
   try {
-    const result = await fulfillmentPush.pushShopifyFulfillment(shipmentId);
-    if (result.writebackComplete !== true) {
-      throw new Error(
-        `Shopify fulfillment push returned without complete package coverage for shipment ${shipmentId}`,
-      );
-    }
+    await authority.ensureLegacyShipment(shipmentId, {
+      executeImmediately: true,
+      source: "legacy_shopify_fulfillment_retry",
+    });
     await markRowSuccess(dbArg, item);
     console.log(
-      `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) succeeded`,
+      `${LOG_PREFIX} Item ${item.id} (shopify_fulfillment_push, shipment=${shipmentId}) handed off to canonical fulfillment authority`,
     );
     return "success";
   } catch (err: any) {
@@ -1446,6 +1444,7 @@ export async function dispatchShopifyFulfillmentRetry(
 export async function dispatchDelayedTrackingPush(
   dbArg: any,
   item: RetryDispatchItem,
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService | null | undefined,
 ): Promise<"success" | "pending" | "dead" | "malformed"> {
   const payload = item.payload as { orderId?: number; shipmentId?: number } | null;
   const orderId = payload?.orderId;
@@ -1483,45 +1482,62 @@ export async function dispatchDelayedTrackingPush(
     return "malformed";
   }
 
-  const fulfillmentPush = resolveFulfillmentPushService(dbArg);
-  const hasShipmentPush =
-    shipmentId !== undefined &&
-    typeof fulfillmentPush?.pushTrackingForShipment === "function";
-  const hasOrderPush = typeof fulfillmentPush?.pushTracking === "function";
-  if (!fulfillmentPush || (!hasShipmentPush && !hasOrderPush)) {
+  if (!fulfillmentAuthority) {
     await keepPending(
       dbArg,
       item.id,
-      "fulfillment push service not available",
+      "canonical fulfillment authority not available",
     );
     return "pending";
   }
 
+  if (shipmentId !== undefined) {
+    const authority = requireChannelFulfillmentAuthority(fulfillmentAuthority);
+    try {
+      await authority.ensureLegacyShipment(shipmentId, {
+        executeImmediately: true,
+        source: "legacy_delayed_tracking_retry",
+      });
+      await markRowSuccess(dbArg, item);
+      console.log(
+        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId}) handed off to canonical fulfillment authority`,
+      );
+      return "success";
+    } catch (err: any) {
+      const { status, attempts, nextRetryAt } = await recordRetryFailure(
+        dbArg,
+        item,
+        err?.message || String(err),
+        { topic: "delayed_tracking_push", orderId, shipmentId },
+      );
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} canonical handoff failed (status=${status}, attempts=${attempts}, next=${nextRetryAt.toISOString()})`,
+      );
+      return status;
+    }
+  }
+
   try {
-    const pushed = hasShipmentPush
-      ? await fulfillmentPush.pushTrackingForShipment(shipmentId)
-      : await fulfillmentPush.pushTracking(orderId);
-    if (!pushed) {
+    const handoff = await handoffOmsOrderShipmentsToChannelFulfillment(
+      dbArg,
+      requireChannelFulfillmentAuthority(fulfillmentAuthority),
+      orderId,
+      {
+        executeImmediately: true,
+        source: "legacy_order_tracking_retry",
+      },
+    );
+    if (handoff.commandCount === 0) {
       throw new Error(
-        hasShipmentPush
-          ? `fulfillment push returned false for shipment ${shipmentId}`
-          : `fulfillment push returned false for order ${orderId}`,
+        `canonical fulfillment handoff produced no channel commands for OMS order ${orderId}`,
       );
     }
     await markRowSuccess(dbArg, item);
     console.log(
-      `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) succeeded (pushed=${pushed})`,
+      `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) handed off ${handoff.shipmentIds.length} physical package(s) and ${handoff.commandCount} channel command(s)`,
     );
     return "success";
   } catch (err: any) {
-    if (isEbayTrackingConflictError(err)) {
-      await markRowSuccess(dbArg, item);
-      console.warn(
-        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) ` +
-          "was routed to reconciliation because eBay already has a different tracking fulfillment",
-      );
-      return "success";
-    }
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
       dbArg,
       item,
@@ -1530,11 +1546,11 @@ export async function dispatchDelayedTrackingPush(
     );
     if (status === "dead") {
       console.error(
-        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) moved to DLQ after ${attempts} attempts`,
+        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) moved to DLQ after ${attempts} attempts`,
       );
     } else {
       console.warn(
-        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}, shipment=${shipmentId ?? "none"}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+        `${LOG_PREFIX} Item ${item.id} (delayed_tracking_push, order=${orderId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -1900,7 +1916,9 @@ export async function dispatchShipStationRetry(
   }
 }
 
-async function processPendingWebhooks() {
+async function processPendingWebhooks(
+  dependencies: WebhookRetryWorkerDependencies,
+) {
   const defaultDb = getDefaultDb();
   const pending = await defaultDb
     .select()
@@ -2022,7 +2040,11 @@ async function processPendingWebhooks() {
       item.topic === "shopify_fulfillment_push"
     ) {
       try {
-        await dispatchShopifyFulfillmentRetry(defaultDb, item as any);
+        await dispatchShopifyFulfillmentRetry(
+          defaultDb,
+          item as any,
+          dependencies.channelFulfillmentAuthority,
+        );
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} shopify_fulfillment_push dispatch threw: ${branchErr?.message || branchErr}`,
@@ -2036,7 +2058,11 @@ async function processPendingWebhooks() {
       item.topic === "delayed_tracking_push"
     ) {
       try {
-        await dispatchDelayedTrackingPush(defaultDb, item as any);
+        await dispatchDelayedTrackingPush(
+          defaultDb,
+          item as any,
+          dependencies.channelFulfillmentAuthority,
+        );
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} delayed_tracking_push dispatch threw: ${branchErr?.message || branchErr}`,

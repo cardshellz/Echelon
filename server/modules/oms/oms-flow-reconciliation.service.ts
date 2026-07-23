@@ -1,13 +1,16 @@
 import { sql } from "drizzle-orm";
-import { cancelOrder, markOrderShipped } from "../orders/order-status-core";
+import { cancelOrder } from "../orders/order-status-core";
 import type { OmsOpsIssue } from "./ops-health.service";
 import {
-  enqueueDelayedTrackingPush,
-  enqueueShopifyFulfillmentRetry,
   enqueueShipStationShipmentPushRetry,
   enqueueWmsShipmentCreateRetry,
 } from "./webhook-retry.worker";
 import { findChannelWritebackCandidates } from "./channel-writeback.service";
+import {
+  handoffLegacyShipmentToChannelFulfillment,
+  handoffOmsOrderShipmentsToChannelFulfillment,
+} from "./channel-fulfillment-authority.handoff";
+import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
 
 const LOG_PREFIX = "[OMS Flow Reconciliation]";
 const LOCK_ID = 918405;
@@ -34,7 +37,7 @@ const AUTO_RESERVATION_REPAIR_LIMIT = 25;
  * setters. When unwired (tests, partial boots), the reconciler falls back to
  * status-only behavior and logs that release was skipped.
  */
-interface FlowReconciliationReservation {
+export interface FlowReconciliationReservation {
   reserveOrder(orderId: number): Promise<{
     reserved: number;
     failed: Array<{ sku: string; orderItemId: number; reason: string }>;
@@ -45,12 +48,18 @@ interface FlowReconciliationReservation {
     userId?: string,
   ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }>;
 }
-let flowReconciliationReservation: FlowReconciliationReservation | null = null;
+export interface OmsFlowReconciliationDependencies {
+  reservation: FlowReconciliationReservation | null;
+  fulfillmentAuthority: ChannelFulfillmentAuthorityService;
+}
 
-export function setOmsFlowReconciliationServices(services: {
-  reservation: FlowReconciliationReservation;
-}): void {
-  flowReconciliationReservation = services.reservation;
+function requireFlowFulfillmentAuthority(
+  dependencies: OmsFlowReconciliationDependencies,
+): ChannelFulfillmentAuthorityService {
+  if (!dependencies.fulfillmentAuthority) {
+    throw new Error("Canonical fulfillment authority is not configured for OMS flow reconciliation");
+  }
+  return dependencies.fulfillmentAuthority;
 }
 
 let reconciliationSchedulerStartedAt: Date | null = null;
@@ -790,7 +799,10 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
   return issues.filter((entry) => entry.count > 0);
 }
 
-export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Promise<OmsOpsIssue[]> {
+export async function runOmsFlowReconciliation(
+  dbArg: any,
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<OmsOpsIssue[]> {
   // Per-step isolation. Before 2026-07-07 these were bare sequential awaits, so
   // ONE failing step aborted every step after it — a single broken detector query
   // (the missing-FROM bug in the drift sample) silently killed ALL
@@ -816,11 +828,11 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
     console.warn(`${LOG_PREFIX} detected flow issues: ${summary}`);
   }
   await step("autoCloseResolvedDeadFulfillmentRetries", () => autoCloseResolvedDeadFulfillmentRetries(dbArg), 0);
-  await step("autoRemediateCriticalFlowIssues", () => autoRemediateCriticalFlowIssues(dbArg, issues), undefined);
-  await step("autoQueueStaleTrackingPushRetries", () => autoQueueStaleTrackingPushRetries(dbArg, issues), undefined);
+  await step("autoRemediateCriticalFlowIssues", () => autoRemediateCriticalFlowIssues(dbArg, issues, dependencies), undefined);
+  await step("autoQueueStaleTrackingPushRetries", () => autoQueueStaleTrackingPushRetries(dbArg, issues, dependencies), undefined);
   await step("autoQueueStaleShipStationPushRetries", () => autoQueueStaleShipStationPushRetries(dbArg, issues), undefined);
-  await step("autoQueueMissingShopifyFulfillmentRetries", () => autoQueueMissingShopifyFulfillmentRetries(dbArg, issues), undefined);
-  await step("remediateMissingReservations", () => remediateMissingReservations(dbArg), undefined);
+  await step("autoQueueMissingShopifyFulfillmentRetries", () => autoQueueMissingShopifyFulfillmentRetries(dbArg, issues, dependencies), undefined);
+  await step("remediateMissingReservations", () => remediateMissingReservations(dbArg, dependencies), undefined);
 
   // Surface partial failures on the heartbeat (ops-health) without failing the
   // run — completed steps' work is real and must count as progress.
@@ -846,8 +858,11 @@ export async function runOmsFlowReconciliation(dbArg: any = getDefaultDb()): Pro
  * promotion), and 'in_progress' orders may be partially picked — reserveOrder
  * is not pick-aware, so re-reserving them would over-reserve.
  */
-async function remediateMissingReservations(db: any): Promise<void> {
-  const svc = flowReconciliationReservation;
+async function remediateMissingReservations(
+  db: any,
+  dependencies: OmsFlowReconciliationDependencies,
+): Promise<void> {
+  const svc = dependencies.reservation;
   if (!svc?.reserveOrder) return;
 
   let rows: any;
@@ -1017,6 +1032,7 @@ export async function autoCloseResolvedDeadFulfillmentRetries(db: any): Promise<
 async function autoRemediateCriticalFlowIssues(
   db: any,
   issues: OmsOpsIssue[],
+  dependencies: OmsFlowReconciliationDependencies,
 ): Promise<void> {
   const mappings: Array<{
     code: string;
@@ -1088,7 +1104,7 @@ async function autoRemediateCriticalFlowIssues(
         const result = await remediateOmsFlowIssue(db, {
           ...remediationInput,
           operator: "scheduled_reconciliation",
-        });
+        }, dependencies);
         if (result.changed) changed++;
       } catch (error: any) {
         console.warn(
@@ -1106,6 +1122,7 @@ async function autoRemediateCriticalFlowIssues(
 async function autoQueueStaleTrackingPushRetries(
   db: any,
   issues: OmsOpsIssue[],
+  dependencies: OmsFlowReconciliationDependencies,
 ): Promise<void> {
   const issue = issues.find((entry) => entry.code === "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED");
   if (!issue) return;
@@ -1116,48 +1133,29 @@ async function autoQueueStaleTrackingPushRetries(
     limit: AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT,
     excludeRetryStates: true,
   });
-  let queued = 0;
+  let handedOff = 0;
   for (const row of candidates) {
     if (row.provider !== "ebay" || row.pending_retry || row.dead_retry) {
       continue;
     }
 
-    const omsOrderId = Number(row.oms_order_id);
     const shipmentId = Number(row.shipment_id);
     if (
-      !Number.isInteger(omsOrderId) ||
-      omsOrderId <= 0 ||
       !Number.isInteger(shipmentId) ||
       shipmentId <= 0
     ) {
       continue;
     }
 
-    const existing = await db.execute(sql`
-      SELECT id
-      FROM oms.webhook_retry_queue
-      WHERE provider = 'internal'
-        AND topic = 'delayed_tracking_push'
-        AND status = 'pending'
-        AND (
-             (payload->>'shipmentId') = ${String(shipmentId)}
-          OR (
-               (payload->>'orderId') = ${String(omsOrderId)}
-           AND payload->>'shipmentId' IS NULL
-          )
-        )
-      LIMIT 1
-    `);
-    if (rows(existing).length > 0) {
-      continue;
-    }
-
-    await enqueueDelayedTrackingPush(db, omsOrderId, shipmentId);
-    queued++;
+    await handoffLegacyShipmentToChannelFulfillment(requireFlowFulfillmentAuthority(dependencies), shipmentId, {
+      executeImmediately: false,
+      source: "oms_flow_stale_ebay_writeback",
+    });
+    handedOff++;
   }
 
-  if (queued > 0) {
-    console.warn(`${LOG_PREFIX} auto-queued ${queued} delayed tracking push retry row(s)`);
+  if (handedOff > 0) {
+    console.warn(`${LOG_PREFIX} handed off ${handedOff} stale eBay writeback(s) to canonical authority`);
   }
 }
 
@@ -1191,6 +1189,7 @@ async function autoQueueStaleShipStationPushRetries(
 async function autoQueueMissingShopifyFulfillmentRetries(
   db: any,
   issues: OmsOpsIssue[],
+  dependencies: OmsFlowReconciliationDependencies,
 ): Promise<void> {
   const issue = issues.find((entry) => entry.code === "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED");
   if (!issue) return;
@@ -1201,7 +1200,7 @@ async function autoQueueMissingShopifyFulfillmentRetries(
     limit: AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT,
     excludeRetryStates: true,
   });
-  let queued = 0;
+  let handedOff = 0;
   for (const row of candidates) {
     if (row.provider !== "shopify" || row.pending_retry || row.dead_retry) {
       continue;
@@ -1212,22 +1211,22 @@ async function autoQueueMissingShopifyFulfillmentRetries(
       continue;
     }
 
-    await enqueueShopifyFulfillmentRetry(
-      db,
-      shipmentId,
-      new Error("scheduled reconciliation: shipped Shopify shipment missing fulfillment id"),
-    );
-    queued++;
+    await handoffLegacyShipmentToChannelFulfillment(requireFlowFulfillmentAuthority(dependencies), shipmentId, {
+      executeImmediately: false,
+      source: "oms_flow_missing_shopify_writeback",
+    });
+    handedOff++;
   }
 
-  if (queued > 0) {
-    console.warn(`${LOG_PREFIX} auto-queued ${queued} Shopify fulfillment push retry row(s)`);
+  if (handedOff > 0) {
+    console.warn(`${LOG_PREFIX} handed off ${handedOff} missing Shopify writeback(s) to canonical authority`);
   }
 }
 
 export async function remediateOmsFlowIssue(
   db: any,
   input: OmsFlowRemediationInput,
+  dependencies: OmsFlowReconciliationDependencies,
 ): Promise<OmsFlowRemediationResult> {
   if (!REMEDIABLE_CODES.has(input.code)) {
     throw new Error(`Unsupported OMS flow remediation code: ${input.code}`);
@@ -1573,10 +1572,17 @@ export async function remediateOmsFlowIssue(
       const omsRow = omsResult?.rows?.[0];
       if (!omsRow) return false;
 
-      const isCancelled = omsRow.status === "cancelled" || omsRow.status === "refunded" || omsRow.financial_status === "refunded";
-      const transResult = isCancelled
-        ? await cancelOrder(tx, wmsOrderId, `oms_flow_reconcile_${omsRow.status}`)
-        : await markOrderShipped(tx, wmsOrderId, "oms_flow_reconcile_shipped");
+      const isCancelled = omsRow.status === "cancelled"
+        || omsRow.status === "refunded"
+        || omsRow.financial_status === "refunded";
+      if (!isCancelled) {
+        return false;
+      }
+      const transResult = await cancelOrder(
+        tx,
+        wmsOrderId,
+        `oms_flow_reconcile_${omsRow.status}`,
+      );
 
       if (transResult.transitioned) {
         if (isCancelled) {
@@ -1602,9 +1608,9 @@ export async function remediateOmsFlowIssue(
     // idempotent (P0.1b), run after the status commit; failures are logged
     // and cleaned by the drift check.
     if (updated && cancelledByThisRemediation) {
-      if (flowReconciliationReservation) {
+      if (dependencies.reservation) {
         try {
-          await flowReconciliationReservation.releaseOrderReservation(
+          await dependencies.reservation.releaseOrderReservation(
             wmsOrderId,
             "oms_flow_reconcile_cancel_release",
           );
@@ -1633,36 +1639,56 @@ export async function remediateOmsFlowIssue(
   if (input.code === "WMS_FINAL_OMS_OPEN") {
     const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
     const wmsOrderId = positiveInt(input.wmsOrderId, "wmsOrderId");
+    const finalStatusResult: any = await db.execute(sql`
+      SELECT wo.warehouse_status
+      FROM wms.orders wo
+      JOIN oms.oms_orders oo ON (
+           (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
+        OR (wo.source_table_id = oo.id::text)
+      )
+      WHERE wo.id = ${wmsOrderId}
+        AND oo.id = ${omsOrderId}
+      LIMIT 1
+    `);
+    const finalWarehouseStatus = String(
+      finalStatusResult?.rows?.[0]?.warehouse_status ?? "",
+    );
+    if (finalWarehouseStatus === "shipped") {
+      const handoff = await handoffOmsOrderShipmentsToChannelFulfillment(
+        db,
+        requireFlowFulfillmentAuthority(dependencies),
+        omsOrderId,
+        {
+          executeImmediately: true,
+          source: "oms_flow_reconcile_wms_final",
+        },
+      );
+      const changed = handoff.results.length > 0;
+      if (changed) {
+        await db.execute(sql`
+          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+          VALUES (
+            ${omsOrderId},
+            'flow_reconciliation_remediated',
+            ${JSON.stringify({ code: input.code, wmsOrderId, operator: input.operator })}::jsonb,
+            NOW()
+          )
+        `);
+      }
+      return {
+        code: input.code,
+        action: "aligned_oms_from_canonical_shipments",
+        changed,
+        omsOrderId,
+        wmsOrderId,
+        shipmentId: null,
+      };
+    }
     const updated = await withOptionalTransaction(db, async (tx) => {
       const result = await tx.execute(sql`
-        WITH latest_shipment AS (
-          SELECT tracking_number, carrier, shipped_at
-          FROM wms.outbound_shipments
-          WHERE order_id = ${wmsOrderId}
-            AND status = 'shipped'
-          ORDER BY shipped_at DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC
-          LIMIT 1
-        )
         UPDATE oms.oms_orders oo
-        SET status = CASE
-              WHEN wo.warehouse_status = 'cancelled' THEN 'cancelled'
-              WHEN wo.warehouse_status = 'shipped' THEN 'shipped'
-              ELSE oo.status
-            END,
-            fulfillment_status = CASE
-              WHEN wo.warehouse_status = 'shipped' THEN 'fulfilled'
-              ELSE oo.fulfillment_status
-            END,
-            tracking_number = COALESCE((SELECT tracking_number FROM latest_shipment), oo.tracking_number),
-            tracking_carrier = COALESCE((SELECT carrier FROM latest_shipment), oo.tracking_carrier),
-            shipped_at = CASE
-              WHEN wo.warehouse_status = 'shipped' THEN COALESCE((SELECT shipped_at FROM latest_shipment), oo.shipped_at, NOW())
-              ELSE oo.shipped_at
-            END,
-            cancelled_at = CASE
-              WHEN wo.warehouse_status = 'cancelled' THEN COALESCE(oo.cancelled_at, NOW())
-              ELSE oo.cancelled_at
-            END,
+        SET status = 'cancelled',
+            cancelled_at = COALESCE(oo.cancelled_at, NOW()),
             updated_at = NOW()
         FROM wms.orders wo
         WHERE oo.id = ${omsOrderId}
@@ -1671,7 +1697,7 @@ export async function remediateOmsFlowIssue(
                (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
             OR (wo.source_table_id = oo.id::text)
           )
-          AND wo.warehouse_status IN ('cancelled', 'shipped')
+          AND wo.warehouse_status = 'cancelled'
           AND oo.status NOT IN ('cancelled', 'shipped', 'partially_shipped', 'refunded')
         RETURNING oo.id
       `);
@@ -1692,7 +1718,7 @@ export async function remediateOmsFlowIssue(
 
     return {
       code: input.code,
-      action: "aligned_oms_from_wms",
+      action: "aligned_oms_cancellation_from_wms",
       changed: updated,
       omsOrderId,
       wmsOrderId,
@@ -1703,44 +1729,66 @@ export async function remediateOmsFlowIssue(
   if (input.code === "SHIPMENT_SHIPPED_OMS_OPEN") {
     const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
     const shipmentId = positiveInt(input.shipmentId, "shipmentId");
-    const updated = await withOptionalTransaction(db, async (tx) => {
-      const result = await tx.execute(sql`
-        UPDATE oms.oms_orders oo
-        SET status = 'shipped',
-            fulfillment_status = 'fulfilled',
-            tracking_number = COALESCE(os.tracking_number, oo.tracking_number),
-            tracking_carrier = COALESCE(os.carrier, oo.tracking_carrier),
-            shipped_at = COALESCE(os.shipped_at, oo.shipped_at, NOW()),
-            updated_at = NOW()
-        FROM wms.outbound_shipments os
-        JOIN wms.orders wo ON wo.id = os.order_id
-        WHERE oo.id = ${omsOrderId}
-          AND os.id = ${shipmentId}
-          AND os.status = 'shipped'
-          AND (
-               (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
-            OR (wo.source_table_id = oo.id::text)
-          )
-          -- P0.3: cancelled/refunded are money-final — never auto-flip them
-          -- to shipped. Divergence handled below as a review flag instead.
-          AND oo.status NOT IN ('shipped', 'partially_shipped', 'cancelled', 'refunded')
-        RETURNING oo.id, os.order_id AS wms_order_id
+    const linked = firstRow<{ wms_order_id: number; oms_status: string }>(
+      await db.execute(sql`
+        SELECT shipment.order_id AS wms_order_id, oms_order.status AS oms_status
+        FROM wms.outbound_shipments shipment
+        JOIN wms.orders wms_order ON wms_order.id = shipment.order_id
+        JOIN oms.oms_orders oms_order ON (
+             (wms_order.source = 'oms' AND wms_order.oms_fulfillment_order_id = oms_order.id::text)
+          OR (wms_order.source_table_id = oms_order.id::text)
+        )
+        WHERE shipment.id = ${shipmentId}
+          AND shipment.status = 'shipped'
+          AND oms_order.id = ${omsOrderId}
+        LIMIT 1
+      `),
+    );
+    if (!linked) {
+      return {
+        code: input.code,
+        action: "canonical_shipment_not_eligible",
+        changed: false,
+        omsOrderId,
+        wmsOrderId: null,
+        shipmentId,
+      };
+    }
+
+    if (linked.oms_status !== "cancelled" && linked.oms_status !== "refunded") {
+      const handoff = await handoffLegacyShipmentToChannelFulfillment(
+        requireFlowFulfillmentAuthority(dependencies),
+        shipmentId,
+        {
+        executeImmediately: true,
+        source: "oms_flow_reconcile_shipped_package",
+        },
+      );
+      await db.execute(sql`
+        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+        VALUES (
+          ${omsOrderId},
+          'flow_reconciliation_remediated',
+          ${JSON.stringify({
+            code: input.code,
+            shipmentId,
+            physicalShipmentId: handoff.materialized.physicalShipmentId,
+            operator: input.operator,
+          })}::jsonb,
+          NOW()
+        )
       `);
+      return {
+        code: input.code,
+        action: "handed_off_canonical_shipment",
+        changed: handoff.materialized.customerFulfillmentItemCount > 0,
+        omsOrderId,
+        wmsOrderId: Number(linked.wms_order_id),
+        shipmentId,
+      };
+    }
 
-      const row = firstRow<{ wms_order_id: number }>(result);
-      if (row) {
-        await tx.execute(sql`
-          INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-          VALUES (
-            ${omsOrderId},
-            'flow_reconciliation_remediated',
-            ${JSON.stringify({ code: input.code, shipmentId, operator: input.operator })}::jsonb,
-            NOW()
-          )
-        `);
-        return row;
-      }
-
+    const updated = await withOptionalTransaction(db, async (tx) => {
       // P0.3 review bucket: the UPDATE was refused. If that's because the OMS
       // order is money-final (cancelled/refunded) while a physical package
       // shipped, a human must decide (refund vs recall vs re-open) — flag the
@@ -1769,15 +1817,15 @@ export async function remediateOmsFlowIssue(
           )
         `);
       }
-      return null;
+      return true;
     });
 
     return {
       code: input.code,
-      action: "marked_oms_shipped_from_wms_shipment",
-      changed: Boolean(updated),
+      action: "flagged_terminal_order_shipment_review",
+      changed: updated,
       omsOrderId,
-      wmsOrderId: updated ? Number(updated.wms_order_id) : null,
+      wmsOrderId: Number(linked.wms_order_id),
       shipmentId,
     };
   }
@@ -1786,11 +1834,26 @@ export async function remediateOmsFlowIssue(
   const shipmentId = input.shipmentId == null
     ? undefined
     : positiveInt(input.shipmentId, "shipmentId");
-  await enqueueDelayedTrackingPush(db, omsOrderId, shipmentId);
+  if (shipmentId !== undefined) {
+    await handoffLegacyShipmentToChannelFulfillment(requireFlowFulfillmentAuthority(dependencies), shipmentId, {
+      executeImmediately: false,
+      source: `oms_flow_operator_remediation:${input.code}`,
+    });
+  } else {
+    await handoffOmsOrderShipmentsToChannelFulfillment(
+      db,
+      requireFlowFulfillmentAuthority(dependencies),
+      omsOrderId,
+      {
+      executeImmediately: false,
+      source: `oms_flow_operator_remediation:${input.code}`,
+      },
+    );
+  }
 
   return {
     code: input.code,
-    action: "queued_tracking_push",
+    action: "handed_off_channel_fulfillment",
     changed: true,
     omsOrderId,
     wmsOrderId: input.wmsOrderId ? Number(input.wmsOrderId) : null,
@@ -1799,7 +1862,10 @@ export async function remediateOmsFlowIssue(
   };
 }
 
-export function startOmsFlowReconciliationScheduler(dbArg: any = getDefaultDb()): void {
+export function startOmsFlowReconciliationScheduler(
+  dbArg: any,
+  dependencies: OmsFlowReconciliationDependencies,
+): void {
   if (process.env.DISABLE_SCHEDULERS === "true") return;
   const withAdvisoryLock = getWithAdvisoryLock();
   reconciliationSchedulerStartedAt = new Date();
@@ -1811,7 +1877,7 @@ export function startOmsFlowReconciliationScheduler(dbArg: any = getDefaultDb())
       // failures on the heartbeat during the run, so nulling it afterwards (the
       // pre-2026-07-07 order) would hide them from ops-health.
       reconciliationSchedulerLastError = null;
-      await runOmsFlowReconciliation(dbArg);
+      await runOmsFlowReconciliation(dbArg, dependencies);
       reconciliationSchedulerLastSuccessAt = new Date();
     }).catch((err) => {
       reconciliationSchedulerLastError = err instanceof Error ? err.message : String(err);

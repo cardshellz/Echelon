@@ -45,6 +45,7 @@ describe("EbayApiClient.createShippingFulfillment", () => {
             {
               fulfillmentId: "track-1",
               shipmentTrackingNumber: "track-1",
+              lineItems: [{ lineItemId: "line-1", quantity: 2 }],
             },
           ],
         }),
@@ -78,6 +79,7 @@ describe("EbayApiClient.createShippingFulfillment", () => {
           {
             fulfillmentId: "existing-fulfillment",
             shipmentTrackingNumber: "track-1",
+            lineItems: [{ lineItemId: "line-1", quantity: 2 }],
           },
         ],
       }),
@@ -94,6 +96,35 @@ describe("EbayApiClient.createShippingFulfillment", () => {
     );
 
     expect(result).toEqual({ fulfillmentId: "existing-fulfillment" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET");
+  });
+
+  it("refuses to treat matching tracking with different line allocations as idempotent", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({
+        total: 1,
+        fulfillments: [
+          {
+            fulfillmentId: "conflicting-fulfillment",
+            shipmentTrackingNumber: "track-1",
+            lineItems: [{ lineItemId: "line-1", quantity: 1 }],
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      makeClient().createShippingFulfillment("22-14563-95067", {
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      }),
+    ).rejects.toMatchObject({
+      code: "ebay_fulfillment_idempotency_conflict",
+    });
+
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET");
   });
