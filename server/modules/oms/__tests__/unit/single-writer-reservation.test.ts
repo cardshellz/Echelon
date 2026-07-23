@@ -102,7 +102,7 @@ describe("P0.1c — cancels release, shortfalls log, detector re-reserves", () =
   });
 
   it("the ready-but-unreserved detector exists and is wired into the sweep", () => {
-    expect(FLOW_RECON_SRC).toContain("remediateMissingReservations(dbArg)");
+    expect(FLOW_RECON_SRC).toContain("remediateMissingReservations(dbArg, dependencies)");
     expect(FLOW_RECON_SRC).toContain("warehouse_status = 'ready'");
   });
 });

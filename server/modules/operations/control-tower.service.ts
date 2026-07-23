@@ -2,7 +2,10 @@ import { sql } from "drizzle-orm";
 
 import { getFlowBucketSamples, getFlowWaterfall } from "../oms/flow-waterfall.service";
 import { getOmsOpsHealth, type OmsOpsIssue } from "../oms/ops-health.service";
-import { remediateOmsFlowIssue } from "../oms/oms-flow-reconciliation.service";
+import {
+  remediateOmsFlowIssue,
+  type OmsFlowReconciliationDependencies,
+} from "../oms/oms-flow-reconciliation.service";
 import { loadProcurementHealthSummary } from "../procurement/procurement-health-summary.service";
 
 export const CONTROL_TOWER_DOMAINS = [
@@ -140,6 +143,16 @@ export interface ControlTowerDependencies {
   replenishment?: ReplenishmentService;
   shipmentTracking?: any;
   canViewProcurement?: boolean;
+  flowReconciliation?: OmsFlowReconciliationDependencies;
+}
+
+function requireFlowReconciliationDependencies(
+  dependencies: ControlTowerDependencies,
+): OmsFlowReconciliationDependencies {
+  if (!dependencies.flowReconciliation) {
+    throw new Error("OMS flow reconciliation dependencies are unavailable");
+  }
+  return dependencies.flowReconciliation;
 }
 
 interface SourceLoadResult {
@@ -893,7 +906,7 @@ export async function executeOperationsControlTowerAction(input: {
     if (!input.record || typeof input.record !== "object") throw new Error("A concrete affected OMS record is required");
     return remediateOmsFlowIssue(input.deps.db, {
       ...omsRemediationInput(detail.code, input.record, input.operator),
-    });
+    }, requireFlowReconciliationDependencies(input.deps));
   }
 
   if (detail.domain === "shipping" && input.actionId === "retry_push") {
@@ -902,7 +915,7 @@ export async function executeOperationsControlTowerAction(input: {
       code: "SHIPMENT_NOT_PUSHED_TO_SHIPSTATION",
       shipmentId: positiveInt(row?.shipment_id, "shipmentId"),
       operator: input.operator,
-    });
+    }, requireFlowReconciliationDependencies(input.deps));
   }
 
   if (detail.domain === "shipping" && input.actionId === "retry_writeback") {
@@ -916,7 +929,7 @@ export async function executeOperationsControlTowerAction(input: {
       wmsOrderId: row?.wms_order_id == null ? undefined : positiveInt(row.wms_order_id, "wmsOrderId"),
       shipmentId: positiveInt(row?.shipment_id, "shipmentId"),
       operator: input.operator,
-    });
+    }, requireFlowReconciliationDependencies(input.deps));
   }
 
   if (detail.domain === "wms" && input.actionId === "execute") {

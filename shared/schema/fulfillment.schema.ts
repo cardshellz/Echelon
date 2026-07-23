@@ -13,6 +13,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 import { productVariants } from "./catalog.schema";
+import { channels } from "./channels.schema";
 import { omsOrderLines, omsOrders, omsSchema } from "./oms.schema";
 import {
   orderItems,
@@ -85,8 +86,30 @@ export const carrierTrackingMatchStatusValues = [
 ] as const;
 export const channelFulfillmentPushStatusValues = [
   "pending",
+  "processing",
+  "retry",
   "success",
   "failed",
+  "ignored",
+  "review",
+  "dead",
+] as const;
+export const shippingEngineOrderRequestRelationshipValues = [
+  "primary",
+  "combined",
+  "split",
+  "reconciled",
+] as const;
+export const channelFulfillmentPushAttemptOutcomeValues = [
+  "success",
+  "retry_scheduled",
+  "ignored",
+  "review_required",
+  "dead_lettered",
+] as const;
+export const channelFulfillmentReceiptStatusValues = [
+  "pending",
+  "processed",
   "ignored",
   "review",
 ] as const;
@@ -104,6 +127,9 @@ export type CarrierTrackingStatus = typeof carrierTrackingStatusValues[number];
 export type CarrierDispatchEvidence = typeof carrierDispatchEvidenceValues[number];
 export type CarrierTrackingMatchStatus = typeof carrierTrackingMatchStatusValues[number];
 export type ChannelFulfillmentPushStatus = typeof channelFulfillmentPushStatusValues[number];
+export type ShippingEngineOrderRequestRelationship = typeof shippingEngineOrderRequestRelationshipValues[number];
+export type ChannelFulfillmentPushAttemptOutcome = typeof channelFulfillmentPushAttemptOutcomeValues[number];
+export type ChannelFulfillmentReceiptStatus = typeof channelFulfillmentReceiptStatusValues[number];
 
 export const fulfillmentPlans = wmsSchema.table("fulfillment_plans", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
@@ -179,8 +205,11 @@ export const shipmentRequestItems = wmsSchema.table("shipment_request_items", {
 
 export const shippingEngineOrders = wmsSchema.table("shipping_engine_orders", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  shipmentRequestId: bigint("shipment_request_id", { mode: "number" }).notNull().references(() => shipmentRequests.id, { onDelete: "cascade" }),
+  // Compatibility pointer for legacy one-request provider orders. The join
+  // table below is authoritative because a provider order may combine requests.
+  shipmentRequestId: bigint("shipment_request_id", { mode: "number" }).references(() => shipmentRequests.id, { onDelete: "set null" }),
   provider: varchar("provider", { length: 40 }).notNull(),
+  commandKey: varchar("command_key", { length: 300 }).notNull(),
   providerOrderId: varchar("provider_order_id", { length: 200 }),
   providerOrderKey: varchar("provider_order_key", { length: 200 }),
   providerStatus: varchar("provider_status", { length: 80 }),
@@ -196,13 +225,27 @@ export const shippingEngineOrders = wmsSchema.table("shipping_engine_orders", {
   uniqueIndex("uq_shipping_engine_orders_provider_order_key")
     .on(table.provider, table.providerOrderKey)
     .where(sql`${table.providerOrderKey} IS NOT NULL`),
+  uniqueIndex("uq_shipping_engine_orders_command_key").on(table.provider, table.commandKey),
   index("idx_shipping_engine_orders_request").on(table.shipmentRequestId),
+]);
+
+export const shippingEngineOrderRequests = wmsSchema.table("shipping_engine_order_requests", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  shippingEngineOrderId: bigint("shipping_engine_order_id", { mode: "number" }).notNull().references(() => shippingEngineOrders.id, { onDelete: "restrict" }),
+  shipmentRequestId: bigint("shipment_request_id", { mode: "number" }).notNull().references(() => shipmentRequests.id, { onDelete: "restrict" }),
+  relationshipType: varchar("relationship_type", { length: 30 }).notNull().default("primary"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_engine_order_requests_unique").on(table.shippingEngineOrderId, table.shipmentRequestId),
+  index("idx_shipping_engine_order_requests_request").on(table.shipmentRequestId, table.shippingEngineOrderId),
 ]);
 
 export const physicalShipments = wmsSchema.table("physical_shipments", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  shippingEngineOrderId: bigint("shipping_engine_order_id", { mode: "number" }).references(() => shippingEngineOrders.id, { onDelete: "set null" }),
-  shipmentRequestId: bigint("shipment_request_id", { mode: "number" }).notNull().references(() => shipmentRequests.id, { onDelete: "cascade" }),
+  shippingEngineOrderId: bigint("shipping_engine_order_id", { mode: "number" }).references(() => shippingEngineOrders.id, { onDelete: "restrict" }),
+  // Compatibility pointer only. Package ownership is derived from the exact
+  // request-item allocations in physical_shipment_items.
+  shipmentRequestId: bigint("shipment_request_id", { mode: "number" }).references(() => shipmentRequests.id, { onDelete: "set null" }),
   provider: varchar("provider", { length: 40 }).notNull(),
   providerPhysicalShipmentId: varchar("provider_physical_shipment_id", { length: 200 }).notNull(),
   trackingNumber: varchar("tracking_number", { length: 200 }),
@@ -224,17 +267,28 @@ export const physicalShipments = wmsSchema.table("physical_shipments", {
 
 export const physicalShipmentItems = wmsSchema.table("physical_shipment_items", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  physicalShipmentId: bigint("physical_shipment_id", { mode: "number" }).notNull().references(() => physicalShipments.id, { onDelete: "cascade" }),
-  shipmentRequestItemId: bigint("shipment_request_item_id", { mode: "number" }).notNull().references(() => shipmentRequestItems.id, { onDelete: "restrict" }),
-  fulfillmentPlanLineId: bigint("fulfillment_plan_line_id", { mode: "number" }).notNull().references(() => fulfillmentPlanLines.id, { onDelete: "restrict" }),
-  wmsOrderItemId: integer("wms_order_item_id").notNull().references(() => orderItems.id, { onDelete: "restrict" }),
+  physicalShipmentId: bigint("physical_shipment_id", { mode: "number" }).notNull().references(() => physicalShipments.id, { onDelete: "restrict" }),
+  shipmentRequestItemId: bigint("shipment_request_item_id", { mode: "number" }).references(() => shipmentRequestItems.id, { onDelete: "restrict" }),
+  fulfillmentPlanLineId: bigint("fulfillment_plan_line_id", { mode: "number" }).references(() => fulfillmentPlanLines.id, { onDelete: "restrict" }),
+  wmsOrderItemId: integer("wms_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
+  legacyWmsShipmentItemId: integer("legacy_wms_shipment_item_id").references(() => outboundShipmentItems.id, { onDelete: "restrict" }),
+  shipmentItemPurpose: varchar("shipment_item_purpose", { length: 30 }).notNull().default("customer_fulfillment"),
+  replacementForOrderItemId: integer("replacement_for_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
+  sku: varchar("sku", { length: 100 }).notNull(),
   quantityShipped: integer("quantity_shipped").notNull(),
   providerPhysicalShipmentLineId: varchar("provider_physical_shipment_line_id", { length: 200 }),
   providerOrderLineId: varchar("provider_order_line_id", { length: 200 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("physical_shipment_items_request_item_unique").on(table.physicalShipmentId, table.shipmentRequestItemId),
+  uniqueIndex("uq_physical_shipment_items_legacy_item")
+    .on(table.legacyWmsShipmentItemId)
+    .where(sql`${table.legacyWmsShipmentItemId} IS NOT NULL`),
   index("idx_physical_shipment_items_plan_line").on(table.fulfillmentPlanLineId),
+  index("idx_physical_shipment_items_replacement_line")
+    .on(table.replacementForOrderItemId)
+    .where(sql`${table.replacementForOrderItemId} IS NOT NULL`),
 ]);
 
 export const shippingProviderLabels = wmsSchema.table("shipping_provider_labels", {
@@ -520,32 +574,170 @@ export const carrierTrackingReconciliationState = wmsSchema.table("carrier_track
 
 export const channelFulfillmentPushes = omsSchema.table("channel_fulfillment_pushes", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
-  physicalShipmentId: bigint("physical_shipment_id", { mode: "number" }).notNull().references(() => physicalShipments.id, { onDelete: "cascade" }),
+  omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "restrict" }),
+  physicalShipmentId: bigint("physical_shipment_id", { mode: "number" }).notNull().references(() => physicalShipments.id, { onDelete: "restrict" }),
   channelProvider: varchar("channel_provider", { length: 40 }).notNull(),
+  channelFulfillmentScopeKey: varchar("channel_fulfillment_scope_key", { length: 200 }).notNull().default("order"),
+  commandKey: varchar("command_key", { length: 400 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }),
+  trackingNumber: varchar("tracking_number", { length: 200 }),
+  carrier: varchar("carrier", { length: 100 }),
+  trackingUrl: text("tracking_url"),
+  shippedAt: timestamp("shipped_at", { withTimezone: true }),
   channelFulfillmentId: varchar("channel_fulfillment_id", { length: 200 }),
   pushStatus: varchar("push_status", { length: 30 }).notNull().default("pending"),
   attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(12),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).defaultNow().notNull(),
+  leaseToken: varchar("lease_token", { length: 100 }),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  lastErrorCode: varchar("last_error_code", { length: 100 }),
   lastError: text("last_error"),
+  lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  correlationId: varchar("correlation_id", { length: 100 }),
+  causationId: varchar("causation_id", { length: 100 }),
   metadata: jsonb("metadata").notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("channel_fulfillment_pushes_unique_physical").on(table.channelProvider, table.physicalShipmentId),
+  uniqueIndex("uq_channel_fulfillment_pushes_command").on(
+    table.channelProvider,
+    table.omsOrderId,
+    table.physicalShipmentId,
+    table.channelFulfillmentScopeKey,
+  ),
+  uniqueIndex("uq_channel_fulfillment_pushes_command_key").on(table.commandKey),
   index("idx_channel_fulfillment_pushes_oms_order").on(table.omsOrderId),
+  index("idx_channel_fulfillment_pushes_due")
+    .on(table.nextAttemptAt, table.id)
+    .where(sql`${table.pushStatus} IN ('pending', 'retry')`),
+  index("idx_channel_fulfillment_pushes_expired_lease")
+    .on(table.leaseExpiresAt, table.id)
+    .where(sql`${table.pushStatus} = 'processing'`),
 ]);
 
 export const channelFulfillmentPushItems = omsSchema.table("channel_fulfillment_push_items", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  channelFulfillmentPushId: bigint("channel_fulfillment_push_id", { mode: "number" }).notNull().references(() => channelFulfillmentPushes.id, { onDelete: "cascade" }),
+  channelFulfillmentPushId: bigint("channel_fulfillment_push_id", { mode: "number" }).notNull().references(() => channelFulfillmentPushes.id, { onDelete: "restrict" }),
+  physicalShipmentItemId: bigint("physical_shipment_item_id", { mode: "number" }).references(() => physicalShipmentItems.id, { onDelete: "restrict" }),
   omsOrderLineId: bigint("oms_order_line_id", { mode: "number" }).notNull().references(() => omsOrderLines.id, { onDelete: "restrict" }),
   channelOrderLineId: varchar("channel_order_line_id", { length: 200 }),
   quantityPushed: integer("quantity_pushed").notNull(),
   metadata: jsonb("metadata").notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("channel_fulfillment_push_items_unique_line").on(table.channelFulfillmentPushId, table.omsOrderLineId),
+  uniqueIndex("uq_channel_fulfillment_push_items_physical_item")
+    .on(table.channelFulfillmentPushId, table.physicalShipmentItemId)
+    .where(sql`${table.physicalShipmentItemId} IS NOT NULL`),
+  index("idx_channel_fulfillment_push_items_push_oms_line").on(table.channelFulfillmentPushId, table.omsOrderLineId),
   index("idx_channel_fulfillment_push_items_oms_line").on(table.omsOrderLineId),
+]);
+
+export const channelFulfillmentPushAttempts = omsSchema.table("channel_fulfillment_push_attempts", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  channelFulfillmentPushId: bigint("channel_fulfillment_push_id", { mode: "number" }).notNull().references(() => channelFulfillmentPushes.id, { onDelete: "restrict" }),
+  attemptNumber: integer("attempt_number").notNull(),
+  outcome: varchar("outcome", { length: 30 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  providerResponseId: varchar("provider_response_id", { length: 300 }),
+  errorCode: varchar("error_code", { length: 100 }),
+  errorMessage: varchar("error_message", { length: 1000 }),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+  correlationId: varchar("correlation_id", { length: 100 }),
+  causationId: varchar("causation_id", { length: 100 }),
+  metadata: jsonb("metadata").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("channel_fulfillment_push_attempts_unique").on(table.channelFulfillmentPushId, table.attemptNumber),
+  index("idx_channel_fulfillment_push_attempts_push").on(table.channelFulfillmentPushId, table.attemptNumber),
+]);
+
+/**
+ * Immutable inbound evidence from a sales channel's fulfillment API/webhook.
+ * A receipt is not itself permission to mutate an entire order. Its exact line
+ * allocations must resolve through channel -> OMS -> WMS lineage before it can
+ * materialize a canonical physical package.
+ */
+export const channelFulfillmentReceipts = omsSchema.table("channel_fulfillment_receipts", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  receiptKey: varchar("receipt_key", { length: 500 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  sourceProvider: varchar("source_provider", { length: 40 }).notNull(),
+  sourceChannelId: integer("source_channel_id").references(() => channels.id, { onDelete: "restrict" }),
+  sourceOrderId: varchar("source_order_id", { length: 200 }).notNull(),
+  sourceFulfillmentId: varchar("source_fulfillment_id", { length: 200 }).notNull(),
+  sourceEventId: varchar("source_event_id", { length: 200 }),
+  sourceInboxId: integer("source_inbox_id"),
+  eventKind: varchar("event_kind", { length: 30 }).notNull(),
+  source: varchar("source", { length: 80 }).notNull(),
+  trackingNumber: varchar("tracking_number", { length: 200 }),
+  carrier: varchar("carrier", { length: 100 }),
+  trackingUrl: text("tracking_url"),
+  shippedAt: timestamp("shipped_at", { withTimezone: true }),
+  processingStatus: varchar("processing_status", { length: 30 }).notNull().default("pending"),
+  omsOrderId: bigint("oms_order_id", { mode: "number" }).references(() => omsOrders.id, { onDelete: "restrict" }),
+  physicalShipmentId: bigint("physical_shipment_id", { mode: "number" }).references(() => physicalShipments.id, { onDelete: "restrict" }),
+  errorCode: varchar("error_code", { length: 100 }),
+  errorMessage: text("error_message"),
+  rawPayload: jsonb("raw_payload").notNull().default({}),
+  correlationId: varchar("correlation_id", { length: 100 }),
+  causationId: varchar("causation_id", { length: 100 }),
+  processedAt: timestamp("processed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_channel_fulfillment_receipts_key").on(table.receiptKey),
+  index("idx_channel_fulfillment_receipts_package").on(
+    table.sourceProvider,
+    table.sourceOrderId,
+    table.sourceFulfillmentId,
+  ),
+  index("idx_channel_fulfillment_receipts_status").on(table.processingStatus, table.createdAt),
+]);
+
+export const channelFulfillmentReceiptItems = omsSchema.table("channel_fulfillment_receipt_items", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  receiptId: bigint("receipt_id", { mode: "number" }).notNull().references(() => channelFulfillmentReceipts.id, { onDelete: "restrict" }),
+  sourceFulfillmentLineId: varchar("source_fulfillment_line_id", { length: 200 }),
+  channelOrderLineId: varchar("channel_order_line_id", { length: 200 }).notNull(),
+  quantity: integer("quantity").notNull(),
+  omsOrderLineId: bigint("oms_order_line_id", { mode: "number" }).references(() => omsOrderLines.id, { onDelete: "restrict" }),
+  wmsOrderItemId: integer("wms_order_item_id").references(() => orderItems.id, { onDelete: "restrict" }),
+  legacyWmsShipmentItemId: integer("legacy_wms_shipment_item_id").references(() => outboundShipmentItems.id, { onDelete: "restrict" }),
+  physicalShipmentItemId: bigint("physical_shipment_item_id", { mode: "number" }).references(() => physicalShipmentItems.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_channel_fulfillment_receipt_items_line").on(table.receiptId, table.channelOrderLineId),
+  index("idx_channel_fulfillment_receipt_items_oms_line").on(table.omsOrderLineId),
+  index("idx_channel_fulfillment_receipt_items_wms_line").on(table.wmsOrderItemId),
+]);
+
+/** Append-only changes to an already-observed package's tracking metadata. */
+export const physicalShipmentTrackingAmendments = wmsSchema.table("physical_shipment_tracking_amendments", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  physicalShipmentId: bigint("physical_shipment_id", { mode: "number" }).notNull().references(() => physicalShipments.id, { onDelete: "restrict" }),
+  provider: varchar("provider", { length: 40 }).notNull(),
+  providerEventId: varchar("provider_event_id", { length: 200 }),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  trackingNumber: varchar("tracking_number", { length: 200 }),
+  carrier: varchar("carrier", { length: 100 }),
+  trackingUrl: text("tracking_url"),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  source: varchar("source", { length: 80 }).notNull(),
+  rawPayload: jsonb("raw_payload").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_physical_shipment_tracking_amendment_hash").on(
+    table.physicalShipmentId,
+    table.requestHash,
+  ),
+  index("idx_physical_shipment_tracking_amendment_current").on(
+    table.physicalShipmentId,
+    table.occurredAt,
+    table.id,
+  ),
 ]);
 
 export const insertFulfillmentPlanSchema = createInsertSchema(fulfillmentPlans).omit({ id: true, createdAt: true, updatedAt: true });
@@ -553,6 +745,7 @@ export const insertFulfillmentPlanLineSchema = createInsertSchema(fulfillmentPla
 export const insertShipmentRequestSchema = createInsertSchema(shipmentRequests).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShipmentRequestItemSchema = createInsertSchema(shipmentRequestItems).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingEngineOrderSchema = createInsertSchema(shippingEngineOrders).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertShippingEngineOrderRequestSchema = createInsertSchema(shippingEngineOrderRequests).omit({ id: true, createdAt: true });
 export const insertPhysicalShipmentSchema = createInsertSchema(physicalShipments).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertPhysicalShipmentItemSchema = createInsertSchema(physicalShipmentItems).omit({ id: true, createdAt: true });
 export const insertShippingProviderLabelSchema = createInsertSchema(shippingProviderLabels).omit({ id: true, createdAt: true, updatedAt: true });
@@ -570,6 +763,10 @@ export const insertCarrierTrackingEventMatchSchema = createInsertSchema(carrierT
 export const insertCarrierTrackingReconciliationStateSchema = createInsertSchema(carrierTrackingReconciliationState);
 export const insertChannelFulfillmentPushSchema = createInsertSchema(channelFulfillmentPushes).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertChannelFulfillmentPushItemSchema = createInsertSchema(channelFulfillmentPushItems).omit({ id: true, createdAt: true });
+export const insertChannelFulfillmentPushAttemptSchema = createInsertSchema(channelFulfillmentPushAttempts).omit({ id: true, createdAt: true });
+export const insertChannelFulfillmentReceiptSchema = createInsertSchema(channelFulfillmentReceipts).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertChannelFulfillmentReceiptItemSchema = createInsertSchema(channelFulfillmentReceiptItems).omit({ id: true, createdAt: true });
+export const insertPhysicalShipmentTrackingAmendmentSchema = createInsertSchema(physicalShipmentTrackingAmendments).omit({ id: true, createdAt: true });
 
 export type InsertFulfillmentPlan = z.infer<typeof insertFulfillmentPlanSchema>;
 export type FulfillmentPlan = typeof fulfillmentPlans.$inferSelect;
@@ -581,6 +778,8 @@ export type InsertShipmentRequestItem = z.infer<typeof insertShipmentRequestItem
 export type ShipmentRequestItem = typeof shipmentRequestItems.$inferSelect;
 export type InsertShippingEngineOrder = z.infer<typeof insertShippingEngineOrderSchema>;
 export type ShippingEngineOrder = typeof shippingEngineOrders.$inferSelect;
+export type InsertShippingEngineOrderRequest = z.infer<typeof insertShippingEngineOrderRequestSchema>;
+export type ShippingEngineOrderRequest = typeof shippingEngineOrderRequests.$inferSelect;
 export type InsertPhysicalShipment = z.infer<typeof insertPhysicalShipmentSchema>;
 export type PhysicalShipment = typeof physicalShipments.$inferSelect;
 export type InsertPhysicalShipmentItem = z.infer<typeof insertPhysicalShipmentItemSchema>;
@@ -615,3 +814,11 @@ export type InsertChannelFulfillmentPush = z.infer<typeof insertChannelFulfillme
 export type ChannelFulfillmentPush = typeof channelFulfillmentPushes.$inferSelect;
 export type InsertChannelFulfillmentPushItem = z.infer<typeof insertChannelFulfillmentPushItemSchema>;
 export type ChannelFulfillmentPushItem = typeof channelFulfillmentPushItems.$inferSelect;
+export type InsertChannelFulfillmentPushAttempt = z.infer<typeof insertChannelFulfillmentPushAttemptSchema>;
+export type ChannelFulfillmentPushAttempt = typeof channelFulfillmentPushAttempts.$inferSelect;
+export type InsertChannelFulfillmentReceipt = z.infer<typeof insertChannelFulfillmentReceiptSchema>;
+export type ChannelFulfillmentReceipt = typeof channelFulfillmentReceipts.$inferSelect;
+export type InsertChannelFulfillmentReceiptItem = z.infer<typeof insertChannelFulfillmentReceiptItemSchema>;
+export type ChannelFulfillmentReceiptItem = typeof channelFulfillmentReceiptItems.$inferSelect;
+export type InsertPhysicalShipmentTrackingAmendment = z.infer<typeof insertPhysicalShipmentTrackingAmendmentSchema>;
+export type PhysicalShipmentTrackingAmendment = typeof physicalShipmentTrackingAmendments.$inferSelect;

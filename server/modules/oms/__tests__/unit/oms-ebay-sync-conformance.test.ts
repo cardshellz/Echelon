@@ -151,11 +151,6 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
   });
 
   it("keeps eBay tracking push shipment-scoped, idempotent, and retry-backed", () => {
-    const shipmentTrackingBlock = sourceBlock(
-      FULFILLMENT_PUSH_SRC,
-      "async function pushTrackingForShipment",
-      "async function pushShopifyFulfillment",
-    );
     const ebayRepushBlock = sourceBlock(
       EBAY_RECONCILER_SRC,
       "async repush(order: OmsOrder)",
@@ -166,7 +161,10 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
       "repushes shipped WMS shipments through the shipment-scoped path",
     );
     expect(EBAY_FULFILLMENT_RECONCILER_TEST_SRC).toContain(
-      "enqueues an order-level delayed retry when fallback tracking push returns false",
+      "returns false when any package command remains retryable",
+    );
+    expect(EBAY_FULFILLMENT_RECONCILER_TEST_SRC).toContain(
+      "does not synthesize an order-level retry when package evidence is absent",
     );
     expect(EBAY_TRACKING_PUSH_TEST_SRC).toContain(
       "fans out order-level tracking through shipped WMS shipments when they exist",
@@ -174,17 +172,12 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     expect(EBAY_TRACKING_PUSH_TEST_SRC).toContain(
       "does NOT throw when createShippingFulfillment returns undefined",
     );
-    expect(shipmentTrackingBlock).toContain("event_type = 'tracking_pushed'");
-    expect(shipmentTrackingBlock).toContain("details->>'provider' = 'ebay'");
-    expect(shipmentTrackingBlock).toContain("details->>'wmsShipmentId'");
-    expect(shipmentTrackingBlock).toContain("details->>'trackingNumber'");
-    expect(shipmentTrackingBlock).toContain("idempotent skip");
-    expect(shipmentTrackingBlock).toContain("external_line_item_id");
-    expect(shipmentTrackingBlock).toContain("lineItems");
-    expect(shipmentTrackingBlock).toContain("wmsShipmentId: shipmentId");
-    expect(ebayRepushBlock).toContain("pushTrackingForShipment(shipmentId)");
-    expect(ebayRepushBlock).toContain("enqueueDelayedTrackingPush(this.db, orderId, shipmentId)");
-    expect(ebayRepushBlock).toContain("pushTracking(orderId)");
-    expect(ebayRepushBlock).toContain("enqueueDelayedTrackingPush(this.db, orderId)");
+    expect(FULFILLMENT_PUSH_SRC).toContain("async function pushTrackingForShipmentCommand");
+    expect(FULFILLMENT_PUSH_SRC).toContain("external_line_item_id");
+    expect(ebayRepushBlock).toContain("handoffLegacyShipmentToChannelFulfillment");
+    expect(ebayRepushBlock).toContain("executeImmediately: true");
+    expect(ebayRepushBlock).toContain("isChannelFulfillmentHandoffComplete");
+    expect(ebayRepushBlock).not.toContain("enqueueDelayedTrackingPush");
+    expect(ebayRepushBlock).not.toContain("pushTracking(orderId)");
   });
 });

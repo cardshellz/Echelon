@@ -16,6 +16,10 @@ const SHIPSTATION_SRC = readFileSync(
   fileURLToPath(new URL("../../shipstation.service.ts", import.meta.url)),
   "utf8",
 );
+const PROJECTION_SRC = readFileSync(
+  fileURLToPath(new URL("../../channel-fulfillment-projection.repository.ts", import.meta.url)),
+  "utf8",
+);
 
 // ─── D-DUPEVENT structural checks ──────────────────────────────────
 
@@ -113,61 +117,29 @@ describe("D-NOMATCH: no-match SHIP_NOTIFY surfacing", () => {
 
 // ─── D-FULLQTY structural checks ───────────────────────────────────
 
-describe("D-FULLQTY: idempotent quantity application", () => {
-  it("derives fulfilled_quantity from shipment items (not additive)", () => {
-    const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf(
-        "async function applyShipmentQuantitiesToWmsOrderItems",
-      ),
-      SHIPSTATION_SRC.indexOf(
-        "async function applyShipmentQuantitiesToWmsOrderItemsFallback",
-      ),
-    );
-    // Should NOT have the old additive pattern
-    expect(fnBlock).not.toContain(
-      "COALESCE(fulfilled_quantity, 0) + ${qty}",
-    );
-    // Should derive from shipment items via subquery
-    expect(fnBlock).toContain("outbound_shipment_items");
-    expect(fnBlock).toContain("SUM(osi.qty)");
+describe("D-FULLQTY: canonical idempotent quantity projection", () => {
+  it("derives fulfilled_quantity from canonical physical shipment items", () => {
+    expect(PROJECTION_SRC).toContain("FROM wms.physical_shipment_items item");
+    expect(PROJECTION_SRC).toContain("SUM(item.quantity_shipped)::int AS shipped_quantity");
+    expect(PROJECTION_SRC).not.toContain("FROM wms.outbound_shipment_items");
+    expect(PROJECTION_SRC).not.toContain("COALESCE(fulfilled_quantity, 0) +");
   });
 
   it("uses LEAST to cap at order item quantity", () => {
-    const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf(
-        "async function applyShipmentQuantitiesToWmsOrderItems",
-      ),
-      SHIPSTATION_SRC.indexOf(
-        "async function applyShipmentQuantitiesToWmsOrderItemsFallback",
-      ),
+    expect(PROJECTION_SRC).toContain(
+      "SET fulfilled_quantity = LEAST(order_item.quantity, shipped.shipped_quantity)",
     );
-    expect(fnBlock).toContain("LEAST(");
-    expect(fnBlock).toContain("oi.quantity");
   });
 
-  it("only counts shipped/labeled/queued shipments", () => {
-    const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf(
-        "async function applyShipmentQuantitiesToWmsOrderItems",
-      ),
-      SHIPSTATION_SRC.indexOf(
-        "async function applyShipmentQuantitiesToWmsOrderItemsFallback",
-      ),
-    );
-    expect(fnBlock).toContain("shipped");
-    expect(fnBlock).toContain("labeled");
-    expect(fnBlock).toContain("queued");
+  it("only counts packages with confirmed shipped status", () => {
+    expect(PROJECTION_SRC).toContain("AND package.status = 'shipped'");
+    expect(PROJECTION_SRC).not.toMatch(/package\.status\s+IN\s*\([^)]*'queued'/);
+    expect(PROJECTION_SRC).not.toMatch(/package\.status\s+IN\s*\([^)]*'labeled'/);
   });
 
-  it("deduplicates order item IDs", () => {
-    const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf(
-        "async function applyShipmentQuantitiesToWmsOrderItems",
-      ),
-      SHIPSTATION_SRC.indexOf(
-        "async function applyShipmentQuantitiesToWmsOrderItemsFallback",
-      ),
-    );
-    expect(fnBlock).toContain("new Set(orderItemIds)");
+  it("projects each affected WMS line by canonical line identity", () => {
+    expect(PROJECTION_SRC).toContain("SELECT DISTINCT item.wms_order_item_id");
+    expect(PROJECTION_SRC).toContain("WHERE order_item.id = shipped.wms_order_item_id");
+    expect(SHIPSTATION_SRC).not.toContain("UPDATE wms.order_items");
   });
 });

@@ -3,11 +3,20 @@ import { sql } from "drizzle-orm";
 import type { FulfillmentReconciler, ReconciliationStatus } from "./reconciler.interface";
 import { createEbayApiClient } from "../../channels/adapters/ebay/ebay-api.client";
 import { EbayAuthService } from "../../channels/adapters/ebay/ebay-auth.service";
-import { enqueueDelayedTrackingPush } from "../webhook-retry.worker";
-import { applyChannelFulfillment } from "../channel-fulfillment.service";
+import type { ChannelFulfillmentIngressService } from "../channel-fulfillment-ingress.service";
+import { processEbayFulfillmentIngress } from "../ebay-fulfillment-ingress.adapter";
+import {
+  handoffLegacyShipmentToChannelFulfillment,
+  isChannelFulfillmentHandoffComplete,
+} from "../channel-fulfillment-authority.handoff";
+import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
 
 export class EbayFulfillmentReconciler implements FulfillmentReconciler {
-  constructor(private db: any) {}
+  constructor(
+    private db: any,
+    private fulfillmentAuthority: ChannelFulfillmentAuthorityService,
+    private channelFulfillmentIngress: ChannelFulfillmentIngressService | null = null,
+  ) {}
 
   async checkStatus(order: OmsOrder): Promise<ReconciliationStatus> {
     try {
@@ -31,136 +40,106 @@ export class EbayFulfillmentReconciler implements FulfillmentReconciler {
 
   async repush(order: OmsOrder): Promise<boolean> {
     try {
-      const fulfillmentPush = this.db.__fulfillmentPush;
-      if (!fulfillmentPush) {
-        console.error(`[EbayFulfillmentReconciler] fulfillmentPush service not found on db`);
-        return false;
-      }
-
       const orderId = Number((order as any).id);
       if (!Number.isInteger(orderId) || orderId <= 0) {
         console.error(`[EbayFulfillmentReconciler] Cannot repush order without a valid id`);
         return false;
       }
 
-      if (typeof fulfillmentPush.pushTrackingForShipment === "function") {
-        const shipmentIds = await this.findShippedWmsShipmentIds(orderId);
-        if (shipmentIds.length > 0) {
-          let failures = 0;
-          for (const shipmentId of shipmentIds) {
-            try {
-              const pushed = await fulfillmentPush.pushTrackingForShipment(shipmentId);
-              if (!pushed) {
-                failures++;
-                await enqueueDelayedTrackingPush(this.db, orderId, shipmentId);
-              }
-            } catch (err: any) {
-              failures++;
-              await enqueueDelayedTrackingPush(this.db, orderId, shipmentId);
-              console.error(
-                `[EbayFulfillmentReconciler] Error repushing tracking for shipment ${shipmentId}: ${err.message}`,
-              );
-            }
-          }
+      const shipmentIds = await this.findShippedWmsShipmentIds(orderId);
+      if (shipmentIds.length === 0) {
+        console.error(
+          `[EbayFulfillmentReconciler] No shipped WMS package exists for OMS order ${orderId}`,
+        );
+        return false;
+      }
 
-          return failures === 0;
+      let failures = 0;
+      for (const shipmentId of shipmentIds) {
+        try {
+          const result = await handoffLegacyShipmentToChannelFulfillment(
+            this.fulfillmentAuthority,
+            shipmentId,
+            {
+              executeImmediately: true,
+              source: "ebay_fulfillment_reconciler",
+            },
+          );
+          if (!isChannelFulfillmentHandoffComplete(result)) {
+            failures++;
+          }
+        } catch (err: any) {
+          failures++;
+          console.error(
+            `[EbayFulfillmentReconciler] Error repushing tracking for shipment ${shipmentId}: ${err.message}`,
+          );
         }
       }
 
-      if (typeof fulfillmentPush.pushTracking !== "function") {
-        console.error(`[EbayFulfillmentReconciler] fulfillmentPush service has no tracking push method`);
-        return false;
-      }
-
-      const pushed = await fulfillmentPush.pushTracking(orderId);
-      if (!pushed) {
-        await enqueueDelayedTrackingPush(this.db, orderId);
-        return false;
-      }
-
-      return true;
+      return failures === 0;
     } catch (err: any) {
       console.error(`[EbayFulfillmentReconciler] Error repushing tracking for order ${order.id}: ${err.message}`);
       return false;
     }
   }
 
-  /**
-   * When eBay reports an order as FULFILLED (label bought on eBay, not SS),
-   * pull the tracking from eBay's fulfillment data and flow it through WMS
-   * shipments via the shared channel-fulfillment cascade.
-   */
+  /** Reconcile every eBay physical fulfillment through exact channel line ids. */
   async syncFulfillmentFromChannel(order: OmsOrder): Promise<boolean> {
     try {
+      if (!this.channelFulfillmentIngress) {
+        throw Object.assign(new Error("Channel fulfillment ingress service is unavailable"), {
+          code: "CHANNEL_FULFILLMENT_INGRESS_UNAVAILABLE",
+        });
+      }
       const ebayClient = this.createEbayClient(order);
-      const externalId = (order as any).external_order_id || order.externalOrderId;
+      const externalId = String(
+        (order as any).external_order_id || order.externalOrderId || "",
+      ).trim();
+      if (!externalId) {
+        throw Object.assign(new Error("eBay order is missing its external order id"), {
+          code: "EBAY_EXTERNAL_ORDER_ID_MISSING",
+        });
+      }
       const ebayOrder = await ebayClient.getOrder(externalId);
 
       if (!ebayOrder || ebayOrder.orderFulfillmentStatus !== "FULFILLED") {
         return false;
       }
 
-      const fulfillments: any[] = ebayOrder.fulfillmentHrefs
-        ? []
-        : (ebayOrder.fulfillments || []);
-
-      // eBay stores tracking in fulfillmentStartInstructions[].shippingStep
-      // and in shipping_fulfillment entries. Try both.
-      let trackingNumber: string | null = null;
-      let carrier: string | null = null;
-      let fulfillmentId: string | null = null;
-
-      // Check shipping_fulfillment entries first (most reliable)
-      if (fulfillments.length > 0) {
-        const latest = fulfillments[fulfillments.length - 1];
-        trackingNumber = latest.shipmentTrackingNumber || null;
-        carrier = latest.shippingCarrierCode || null;
-        fulfillmentId = latest.fulfillmentId || null;
-      }
-
-      // Fallback: fulfillmentStartInstructions
-      if (!trackingNumber) {
-        const instructions = ebayOrder.fulfillmentStartInstructions || [];
-        for (const instr of instructions) {
-          const step = instr.shippingStep;
-          if (step?.shipTo && step?.shippingServiceCode) {
-            carrier = step.shippingCarrierCode || carrier;
-          }
-        }
-      }
-
-      if (!trackingNumber) {
+      const response = await ebayClient.getShippingFulfillments(externalId);
+      const fulfillments = Array.isArray(response?.fulfillments)
+        ? response.fulfillments
+        : [];
+      if (fulfillments.length === 0) {
         console.warn(
-          `[EbayFulfillmentReconciler] eBay order ${externalId} is FULFILLED but no tracking found`,
+          `[EbayFulfillmentReconciler] eBay order ${externalId} is FULFILLED but has no shipping fulfillment records`,
         );
         return false;
       }
 
-      const orderId = Number((order as any).id);
-      const wmsOrderResult: any = await this.db.execute(sql`
-        SELECT id FROM wms.orders
-        WHERE source = 'oms' AND oms_fulfillment_order_id = ${String(orderId)}
-        LIMIT 1
-      `);
-
-      if (!wmsOrderResult?.rows?.[0]?.id) {
-        console.warn(
-          `[EbayFulfillmentReconciler] No WMS order for OMS order ${orderId} — cannot sync eBay fulfillment`,
+      const channelId = Number((order as any).channel_id ?? order.channelId);
+      let reviewed = 0;
+      for (const fulfillment of fulfillments) {
+        const fulfillmentId = String(fulfillment.fulfillmentId ?? "").trim();
+        const result = await processEbayFulfillmentIngress(
+          this.channelFulfillmentIngress,
+          fulfillment,
+          {
+            sourceChannelId: Number.isInteger(channelId) && channelId > 0 ? channelId : null,
+            sourceOrderId: externalId,
+            sourceEventId: fulfillmentId ? `ebay_fulfillment:${fulfillmentId}` : null,
+            source: "ebay_fulfillment_reconciler",
+            correlationId: `ebay_order:${externalId}`,
+            causationId: fulfillmentId ? `ebay_fulfillment:${fulfillmentId}` : null,
+          },
         );
-        return false;
+        if (result.processingStatus === "review") reviewed++;
       }
-
-      const result = await applyChannelFulfillment(this.db, wmsOrderResult.rows[0].id, {
-        trackingNumber,
-        carrier: carrier || "other",
-        source: "ebay_fulfillment_sync",
-        sourceFulfillmentId: fulfillmentId,
-      });
 
       console.log(
-        `[EbayFulfillmentReconciler] Synced eBay fulfillment for order ${orderId}: ${result.shipmentsMarked} shipments marked`,
+        `[EbayFulfillmentReconciler] Reconciled ${fulfillments.length} eBay fulfillment package(s) for order ${externalId}; review=${reviewed}`,
       );
-      return result.processed;
+      return reviewed === 0;
     } catch (err: any) {
       console.error(
         `[EbayFulfillmentReconciler] Error syncing fulfillment from eBay for order ${order.id}: ${err.message}`,

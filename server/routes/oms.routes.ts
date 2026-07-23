@@ -7,14 +7,16 @@ import { requireAuth, requirePermission } from "./middleware";
 
 import type { Express, Request, Response } from "express";
 import type { OmsService } from "../modules/oms/oms.service";
-import type { FulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import type { ShipStationService } from "../modules/oms/shipstation.service";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { getOmsOpsHealth } from "../modules/oms/ops-health.service";
 import { getFlowWaterfall, getFlowBucketSamples } from "../modules/oms/flow-waterfall.service";
 import { getFlowTrace } from "../modules/oms/flow-trace.service";
-import { remediateOmsFlowIssue } from "../modules/oms/oms-flow-reconciliation.service";
+import {
+  remediateOmsFlowIssue,
+  type OmsFlowReconciliationDependencies,
+} from "../modules/oms/oms-flow-reconciliation.service";
 import { enqueueWebhookInboxReplay } from "../modules/oms/webhook-inbox.service";
 import { requeueDeadWebhookRetry } from "../modules/oms/webhook-retry.worker";
 import { hasPermission } from "../modules/identity";
@@ -26,10 +28,20 @@ import {
 
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
-  const getFulfillmentPush = (req: Request): FulfillmentPushService | null =>
-    (req.app.locals.services as any).fulfillmentPush || null;
   const getShipStation = (req: Request): ShipStationService | null =>
     (req.app.locals.services as any).shipStation || null;
+  const getFlowReconciliationDependencies = (
+    req: Request,
+  ): OmsFlowReconciliationDependencies => {
+    const services = req.app.locals.services as any;
+    if (!services?.channelFulfillmentAuthority) {
+      throw new Error("Canonical fulfillment authority is unavailable");
+    }
+    return {
+      reservation: services.reservation ?? null,
+      fulfillmentAuthority: services.channelFulfillmentAuthority,
+    };
+  };
 
   // -----------------------------------------------------------------------
   // GET /api/oms/orders/stats — summary stats (must be before :id route)
@@ -293,7 +305,7 @@ export function registerOmsRoutes(app: Express) {
           wmsOrderId: req.body?.wmsOrderId,
           shipmentId: req.body?.shipmentId,
           operator,
-        });
+        }, getFlowReconciliationDependencies(req));
         res.json(result);
       } catch (err: any) {
         console.error("[OMS Routes] Reconciliation remediation error:", err);
@@ -373,32 +385,11 @@ export function registerOmsRoutes(app: Express) {
   // POST /api/oms/orders/:id/mark-shipped — manual ship with tracking
   // -----------------------------------------------------------------------
   app.post("/api/oms/orders/:id/mark-shipped", requireAuth, async (req: Request, res: Response) => {
-    try {
-      const id = Number(req.params.id);
-      const { trackingNumber, carrier } = req.body;
-
-      if (!trackingNumber || !carrier) {
-        return res.status(400).json({ error: "trackingNumber and carrier are required" });
-      }
-
-      const order = await getOms(req).markShipped(id, trackingNumber, carrier);
-
-      // Push tracking to channel
-      const push = getFulfillmentPush(req);
-      if (push) {
-        try {
-          await push.pushTracking(id);
-        } catch (e: any) {
-          console.error(`[OMS Routes] Tracking push failed for ${id}: ${e.message}`);
-        }
-      }
-
-      const detail = await getOms(req).getOrderById(id);
-      res.json(detail);
-    } catch (err: any) {
-      console.error("[OMS Routes] Mark shipped error:", err);
-      res.status(500).json({ error: err.message });
-    }
+    return res.status(409).json({
+      code: "PHYSICAL_SHIPMENT_REQUIRED",
+      error:
+        "An OMS order cannot be marked shipped directly. Record the package and its exact items through the WMS or shipping workflow.",
+    });
   });
 
   // -----------------------------------------------------------------------

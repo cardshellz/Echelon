@@ -24,15 +24,16 @@ const SHIPSTATION_SRC = readFileSync(
 );
 
 describe("SHIP_NOTIFY legacy WMS-order lookup :: source/link dual-match", () => {
-  // Isolate the legacy-path lookup block.
+  // The compatibility resolver may identify existing rows, but it delegates
+  // all fulfillment effects to the canonical package handler.
   const legacyBlock = SHIPSTATION_SRC.slice(
-    SHIPSTATION_SRC.indexOf("LEGACY PATH: SHIP_NOTIFY carried echelon-oms"),
-    SHIPSTATION_SRC.indexOf("const hasWmsOrder"),
+    SHIPSTATION_SRC.indexOf("async function processShipNotifyLegacy"),
+    SHIPSTATION_SRC.indexOf("// ─── processShipNotify entry point"),
   );
 
   it("matches the source='oms'/'ebay' creation path via oms_fulfillment_order_id", () => {
     expect(legacyBlock).toMatch(
-      /source IN \('oms', 'ebay'\) AND oms_fulfillment_order_id =/,
+      /source IN \('oms', 'ebay'\)[\s\S]*AND oms_fulfillment_order_id =/,
     );
   });
 
@@ -45,6 +46,8 @@ describe("SHIP_NOTIFY legacy WMS-order lookup :: source/link dual-match", () => 
     // ('oms','ebay')` with no OR-branch for shopify/source_table_id.
     expect(legacyBlock).toContain("source_table_id");
     // The query must be an OR of the two creation paths.
-    expect(legacyBlock).toMatch(/\)\s*OR \(source = 'shopify'/);
+    expect(legacyBlock).toMatch(/\)\s*OR \([\s\S]*source = 'shopify'/);
+    expect(legacyBlock).toContain("finalizeCanonicalShipNotifyPackage");
+    expect(legacyBlock).not.toContain("UPDATE wms.order_items");
   });
 });

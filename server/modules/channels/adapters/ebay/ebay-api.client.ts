@@ -17,6 +17,7 @@ import type {
   EbayOrdersResponse,
   EbayShippingFulfillmentRequest,
   EbayShippingFulfillmentResponse,
+  EbayShippingFulfillmentsResponse,
   EbayBulkPriceQuantityRequest,
   EbayBulkPriceQuantityResponse,
   EbayErrorResponse,
@@ -42,6 +43,20 @@ const FULFILLMENT_VERIFY_DELAYS_MS = [0, 500, 1500, 3000] as const;
 const EBAY_US_MARKETPLACE_ID = "EBAY_US";
 const EBAY_US_LOCALE = "en-US";
 
+export const EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT =
+  "ebay_fulfillment_idempotency_conflict";
+
+export class EbayFulfillmentIdempotencyConflictError extends Error {
+  readonly code = EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT;
+  readonly context: Readonly<Record<string, unknown>>;
+
+  constructor(message: string, context: Record<string, unknown>) {
+    super(message);
+    this.name = "EbayFulfillmentIdempotencyConflictError";
+    this.context = Object.freeze({ ...context });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -55,6 +70,37 @@ interface RequestOptions {
   headers?: Record<string, string>;
   /** If true, expect 204 No Content response */
   expectNoContent?: boolean;
+}
+
+interface NormalizedEbayFulfillmentLine {
+  readonly lineItemId: string;
+  readonly quantity: number;
+}
+
+function normalizeFulfillmentLines(
+  value: unknown,
+): readonly NormalizedEbayFulfillmentLine[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+
+  const quantities = new Map<string, number>();
+  for (const candidate of value) {
+    const lineItemId = String((candidate as any)?.lineItemId ?? "").trim();
+    const quantity = Number((candidate as any)?.quantity);
+    if (!lineItemId || !Number.isInteger(quantity) || quantity <= 0) return null;
+    quantities.set(lineItemId, (quantities.get(lineItemId) ?? 0) + quantity);
+  }
+
+  return Object.freeze(
+    [...quantities.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([lineItemId, quantity]) => Object.freeze({ lineItemId, quantity })),
+  );
+}
+
+function fulfillmentLineSignature(
+  lines: readonly NormalizedEbayFulfillmentLine[],
+): string {
+  return JSON.stringify(lines.map((line) => [line.lineItemId, line.quantity]));
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +361,17 @@ export class EbayApiClient {
   // -------------------------------------------------------------------------
 
   /**
+   * List every physical shipping fulfillment recorded for an order.
+   * GET /sell/fulfillment/v1/order/{orderId}/shipping_fulfillment
+   */
+  async getShippingFulfillments(orderId: string): Promise<EbayShippingFulfillmentsResponse> {
+    return await this.request({
+      method: "GET",
+      path: buildEbayShippingFulfillmentPath(orderId),
+    });
+  }
+
+  /**
    * Create a shipping fulfillment for an order.
    * POST /sell/fulfillment/v1/order/{orderId}/shipping_fulfillment
    *
@@ -344,7 +401,7 @@ export class EbayApiClient {
     const existing = await this.findShippingFulfillment(
       orderId,
       accessToken,
-      fulfillment.trackingNumber,
+      fulfillment,
     );
     if (existing) {
       console.log(
@@ -470,7 +527,7 @@ export class EbayApiClient {
       const matched = await this.findShippingFulfillment(
         orderId,
         accessToken,
-        expectedTracking,
+        fulfillment,
         fulfillmentId,
         true,
       );
@@ -488,10 +545,24 @@ export class EbayApiClient {
   private async findShippingFulfillment(
     orderId: string,
     accessToken: string,
-    expectedTracking: string,
+    expectedFulfillment: EbayShippingFulfillmentRequest,
     expectedFulfillmentId?: string | null,
     tolerateReadFailure = false,
   ): Promise<{ fulfillmentId: string; trackingNumber: string } | null> {
+    const expectedTracking = expectedFulfillment.trackingNumber.trim();
+    const expectedLines = normalizeFulfillmentLines(expectedFulfillment.lineItems);
+    if (!expectedTracking || !expectedLines) {
+      throw new EbayFulfillmentIdempotencyConflictError(
+        `eBay fulfillment idempotency check for order ${orderId} received an invalid expected package`,
+        {
+          orderId,
+          expectedFulfillmentId: expectedFulfillmentId ?? null,
+          expectedTracking,
+          expectedLineItems: expectedFulfillment.lineItems,
+        },
+      );
+    }
+    const expectedLineSignature = fulfillmentLineSignature(expectedLines);
     const path = buildEbayShippingFulfillmentPath(orderId);
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: "GET",
@@ -515,6 +586,24 @@ export class EbayApiClient {
     const fulfillments: any[] = Array.isArray(body?.fulfillments)
       ? body.fulfillments
       : [];
+    const reportedTotal = Number(body?.total);
+    if (Number.isInteger(reportedTotal) && reportedTotal > fulfillments.length) {
+      throw new EbayFulfillmentIdempotencyConflictError(
+        `eBay fulfillment read for order ${orderId} was incomplete; refusing to infer package absence`,
+        {
+          orderId,
+          expectedFulfillmentId: expectedFulfillmentId ?? null,
+          expectedTracking,
+          reportedTotal,
+          returnedCount: fulfillments.length,
+        },
+      );
+    }
+    const identityMatches: Array<{
+      fulfillmentId: string;
+      trackingNumber: string;
+      lines: readonly NormalizedEbayFulfillmentLine[] | null;
+    }> = [];
     for (const item of fulfillments) {
       const itemFulfillmentId =
         typeof item?.fulfillmentId === "string" ? item.fulfillmentId.trim() : "";
@@ -522,17 +611,42 @@ export class EbayApiClient {
         typeof item?.shipmentTrackingNumber === "string"
           ? item.shipmentTrackingNumber.trim()
           : "";
-      const matches =
+      const matchesIdentity =
         (expectedFulfillmentId && itemFulfillmentId === expectedFulfillmentId) ||
         itemTracking === expectedTracking;
-      if (matches && itemFulfillmentId) {
-        return {
-          fulfillmentId: itemFulfillmentId,
-          trackingNumber: itemTracking,
-        };
-      }
+      if (!matchesIdentity) continue;
+      identityMatches.push({
+        fulfillmentId: itemFulfillmentId,
+        trackingNumber: itemTracking,
+        lines: normalizeFulfillmentLines(item?.lineItems),
+      });
     }
-    return null;
+
+    if (identityMatches.length === 0) return null;
+
+    const exactMatches = identityMatches.filter((candidate) =>
+      Boolean(candidate.fulfillmentId)
+      && candidate.trackingNumber === expectedTracking
+      && candidate.lines !== null
+      && fulfillmentLineSignature(candidate.lines) === expectedLineSignature,
+    );
+    if (identityMatches.length === 1 && exactMatches.length === 1) {
+      return {
+        fulfillmentId: exactMatches[0].fulfillmentId,
+        trackingNumber: exactMatches[0].trackingNumber,
+      };
+    }
+
+    throw new EbayFulfillmentIdempotencyConflictError(
+      `eBay fulfillment identity for order ${orderId} conflicts with the expected physical package`,
+      {
+        orderId,
+        expectedFulfillmentId: expectedFulfillmentId ?? null,
+        expectedTracking,
+        expectedLines,
+        providerCandidates: identityMatches,
+      },
+    );
   }
 
   private formatEbayError(errorBody: string): string {

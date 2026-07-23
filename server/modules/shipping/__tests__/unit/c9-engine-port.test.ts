@@ -21,6 +21,14 @@ function readSrc(relPath: string): string {
   return readFileSync(resolve(ROOT, relPath), "utf8");
 }
 
+function sourceBetween(source: string, startMarker: string, endMarker: string): string {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  expect(start, `missing source marker: ${startMarker}`).toBeGreaterThanOrEqual(0);
+  expect(end, `missing source marker: ${endMarker}`).toBeGreaterThan(start);
+  return source.slice(start, end);
+}
+
 // ─── Schema: engine-agnostic columns ─────────────────────────────────
 
 describe("D-NOENGINE: engine-agnostic schema columns", () => {
@@ -141,13 +149,10 @@ describe("D-NOENGINE: reconciler cancel/markShipped uses engine", () => {
     expect(block).toBeDefined();
   });
 
-  it("V1 reconciler uses engine.markShipped and engine.cancel", () => {
-    const v1Block = indexSrc.substring(
-      indexSrc.indexOf("V1: legacy order-based reconcile"),
-      indexSrc.indexOf("V1: legacy order-based reconcile") + 2500,
-    );
-    expect(v1Block).toContain("shippingEngine.markShipped(v1Ref");
-    expect(v1Block).toContain("shippingEngine.cancel(v1Ref)");
+  it("retires the legacy order-level reconciliation fallback", () => {
+    expect(indexSrc).not.toContain("runShipStationReconcileV1");
+    expect(indexSrc).not.toContain("process.env.RECONCILE_V2");
+    expect(indexSrc).toContain("await runShipStationReconcileV2()");
   });
 
   it("webhook registration uses engine.registerWebhook", () => {
@@ -234,19 +239,18 @@ describe("D-NOENGINE: engineRefFromRow helper", () => {
 
 describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
   const indexSrc = readSrc("server/index.ts");
+  const v2Block = sourceBetween(
+    indexSrc,
+    "const runShipStationReconcileV2 = async () => {",
+    "const runShipStationReconcile = async () => {",
+  );
 
   it("V2 reconciler calls engine.getState(ref) not ss.getOrderById", () => {
-    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
-    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
-    const v2Block = indexSrc.substring(v2Start, v2End);
     expect(v2Block).toContain("engine.getState(ref)");
     expect(v2Block).not.toContain("ss.getOrderById");
   });
 
   it("V2 reconciler calls engine.getShipments with stable order identity, not ss.getShipments", () => {
-    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
-    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
-    const v2Block = indexSrc.substring(v2Start, v2End);
     const shipmentsPos = v2Block.indexOf("engine.getShipments(");
     const missingOrderPos = v2Block.indexOf("if (!engineState)");
 
@@ -257,17 +261,11 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
   });
 
   it("V2 reconciler uses deriveReconcileEvent not SS-specific derive", () => {
-    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
-    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
-    const v2Block = indexSrc.substring(v2Start, v2End);
     expect(v2Block).toContain("deriveReconcileEvent(");
     expect(v2Block).not.toContain("deriveShipStationShipmentReconcileEvent");
   });
 
   it("V2 reconciler routes inbound package facts through engine authority before direct dispatch", () => {
-    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
-    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
-    const v2Block = indexSrc.substring(v2Start, v2End);
     const authorityPos = v2Block.indexOf(
       "engine.applyInboundShipmentAuthority",
     );
@@ -282,19 +280,12 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
   });
 
   it("V2 reconciler never auto-applies shipments already flagged for review", () => {
-    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
-    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
-    const v2Block = indexSrc.substring(v2Start, v2End);
-
     expect(v2Block).toContain(
       "COALESCE(os.requires_review, false) = false",
     );
   });
 
   it("V2 reconciler gates engine-cancel on order intent and flags live orders for review", () => {
-    const v2Start = indexSrc.indexOf("V2: shipment-based reconcile");
-    const v2End = indexSrc.indexOf("V1: legacy order-based reconcile");
-    const v2Block = indexSrc.substring(v2Start, v2End);
     // Cancel is WMS-owned: the reconciler tells deriveReconcileEvent whether the
     // ORDER itself is cancelled (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
     expect(v2Block).toContain("orderIsCancelled");
@@ -315,42 +306,41 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
 
 describe("D-NOENGINE Phase 4: eBay reconciler uses engine interface", () => {
   const indexSrc = readSrc("server/index.ts");
+  const ebayBlock = sourceBetween(
+    indexSrc,
+    "eBay order reconciliation",
+    "OMS<->WMS cancellation reconciliation",
+  );
 
   it("eBay reconciler calls engine.getState not ss.getOrderById", () => {
-    const ebayStart = indexSrc.indexOf("eBay order reconciliation");
-    const ebayEnd = indexSrc.indexOf("OMS<->WMS reconciliation");
-    const ebayBlock = indexSrc.substring(ebayStart, ebayEnd);
     expect(ebayBlock).toContain("engine.getState(ref)");
     expect(ebayBlock).not.toContain("ss.getOrderById");
     expect(ebayBlock).not.toContain("ss.getOrderByNumber");
   });
 
   it("eBay reconciler uses engineRefFromRow with toEngineRef fallback", () => {
-    const ebayStart = indexSrc.indexOf("eBay order reconciliation");
-    const ebayEnd = indexSrc.indexOf("OMS<->WMS reconciliation");
-    const ebayBlock = indexSrc.substring(ebayStart, ebayEnd);
     expect(ebayBlock).toContain("engineRefFromRow(order)");
     expect(ebayBlock).toContain("toEngineRef(");
   });
 
   it("eBay reconciler no longer references services.shipStation", () => {
-    const ebayStart = indexSrc.indexOf("eBay order reconciliation");
-    const ebayEnd = indexSrc.indexOf("OMS<->WMS reconciliation");
-    const ebayBlock = indexSrc.substring(ebayStart, ebayEnd);
     expect(ebayBlock).not.toContain("services.shipStation");
   });
 });
 
-describe("D-NOENGINE Phase 4: V1 reconciler uses engine.isConfigured", () => {
+describe("D-NOENGINE Phase 4: legacy V1 reconciler is retired", () => {
   const indexSrc = readSrc("server/index.ts");
 
-  it("V1 reconciler guard uses shippingEngine.isConfigured not ss", () => {
-    const v1Start = indexSrc.indexOf("V1: legacy order-based reconcile");
-    const v1End = indexSrc.indexOf("Schedule: V2 when flag is ON");
-    const v1Block = indexSrc.substring(v1Start, v1End);
-    expect(v1Block).toContain("services.shippingEngine?.isConfigured()");
-    expect(v1Block).not.toContain("services.shipStation");
-    expect(v1Block).not.toContain("(services as any).shipStation");
+  it("always invokes the canonical V2 reconciler without a feature flag fallback", () => {
+    const schedulerBlock = sourceBetween(
+      indexSrc,
+      "const runShipStationReconcile = async () => {",
+      "setTimeout(runShipStationReconcile, 30_000)",
+    );
+    expect(schedulerBlock).toContain("await runShipStationReconcileV2()");
+    expect(schedulerBlock).not.toContain("runShipStationReconcileV1");
+    expect(indexSrc).not.toContain("RECONCILE_V2");
+    expect(indexSrc).not.toContain("V1: legacy order-based reconcile");
   });
 });
 

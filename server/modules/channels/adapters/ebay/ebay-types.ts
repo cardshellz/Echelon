@@ -301,6 +301,23 @@ export interface EbayShippingFulfillmentResponse {
   fulfillmentId: string;
 }
 
+export interface EbayShippingFulfillmentRecord {
+  fulfillmentId: string;
+  lineItems: Array<{
+    lineItemId: string;
+    quantity: number;
+  }>;
+  shippedDate?: string;
+  shippingCarrierCode?: string;
+  shipmentTrackingNumber?: string;
+}
+
+export interface EbayShippingFulfillmentsResponse {
+  fulfillments: EbayShippingFulfillmentRecord[];
+  href?: string;
+  total?: number;
+}
+
 // ---------------------------------------------------------------------------
 // OAuth Types
 // ---------------------------------------------------------------------------

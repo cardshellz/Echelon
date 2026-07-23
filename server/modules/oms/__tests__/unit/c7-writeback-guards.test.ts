@@ -26,55 +26,85 @@ const WEBHOOK_RETRY_SRC = readFileSync(
   fileURLToPath(new URL("../../webhook-retry.worker.ts", import.meta.url)),
   "utf8",
 );
+const AUTHORITY_SERVICE_SRC = readFileSync(
+  fileURLToPath(new URL("../../channel-fulfillment-authority.service.ts", import.meta.url)),
+  "utf8",
+);
+const AUTHORITY_REPOSITORY_SRC = readFileSync(
+  fileURLToPath(new URL("../../channel-fulfillment-authority.repository.ts", import.meta.url)),
+  "utf8",
+);
+const AUTHORITY_MIGRATION_SRC = readFileSync(
+  fileURLToPath(new URL("../../../../../migrations/0593_fulfillment_authority_cutover_foundation.sql", import.meta.url)),
+  "utf8",
+);
+const SERVER_INDEX_SRC = readFileSync(
+  fileURLToPath(new URL("../../../../index.ts", import.meta.url)),
+  "utf8",
+);
+const SERVICE_REGISTRY_SRC = readFileSync(
+  fileURLToPath(new URL("../../../../services/index.ts", import.meta.url)),
+  "utf8",
+);
+const LEGACY_FULFILLMENT_SERVICE_PATH = fileURLToPath(
+  new URL("../../../orders/fulfillment.service.ts", import.meta.url),
+);
 
 // ─── D-ENQFAIL structural checks ─────────────────────────────────
 
-describe("D-ENQFAIL: dead-letter on enqueue failure", () => {
-  it("persists dead-letter event when Shopify push + retry enqueue both fail", () => {
-    const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf("async function pushShopifyFulfillmentFromShipNotify"),
-      SHIPSTATION_SRC.indexOf(
-        "async function",
-        SHIPSTATION_SRC.indexOf("async function pushShopifyFulfillmentFromShipNotify") + 10,
-      ),
-    );
-    expect(fnBlock).toContain("fulfillment_push_enqueue_failed");
-    expect(fnBlock).toContain("requiresReview: true");
-    expect(fnBlock).toContain("pushError");
-    expect(fnBlock).toContain("enqueueError");
+describe("D-COMMANDFAIL: durable canonical channel commands", () => {
+  it("classifies every provider failure into review, retry, or dead-letter", () => {
+    expect(AUTHORITY_SERVICE_SRC).toContain('outcome: "review_required"');
+    expect(AUTHORITY_SERVICE_SRC).toContain('outcome: exhausted ? "dead_lettered" : "retry_scheduled"');
+    expect(AUTHORITY_SERVICE_SRC).toContain("calculateChannelFulfillmentRetryAt");
   });
 
-  it("persists dead-letter for service-unavailable enqueue failure", () => {
-    const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf("fulfillment push service not available on db.__fulfillmentPush"),
-      SHIPSTATION_SRC.indexOf("const result = await fulfillmentPush.pushShopifyFulfillment"),
-    );
-    expect(fnBlock).toContain("fulfillment_push_enqueue_failed");
-    expect(fnBlock).toContain("requiresReview: true");
+  it("claims due commands under a bounded lease with skip-locked concurrency", () => {
+    expect(AUTHORITY_REPOSITORY_SRC).toContain("FOR UPDATE SKIP LOCKED");
+    expect(AUTHORITY_REPOSITORY_SRC).toContain("lease_expires_at");
+    expect(AUTHORITY_REPOSITORY_SRC).toContain("attempt_count = attempt_count + 1");
   });
 
-  it("persists dead-letter for tracking push enqueue failure (enqueueDelayedTrackingPushFromShipNotify)", () => {
-    const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf("async function enqueueDelayedTrackingPushFromShipNotify"),
-      SHIPSTATION_SRC.indexOf(
-        "async function",
-        SHIPSTATION_SRC.indexOf("async function enqueueDelayedTrackingPushFromShipNotify") + 10,
-      ),
-    );
-    expect(fnBlock).toContain("fulfillment_push_enqueue_failed");
-    expect(fnBlock).toContain("requiresReview: true");
+  it("records immutable append-only attempt evidence", () => {
+    expect(AUTHORITY_MIGRATION_SRC).toContain("CREATE TABLE IF NOT EXISTS oms.channel_fulfillment_push_attempts");
+    expect(AUTHORITY_MIGRATION_SRC).toContain("channel_fulfillment_push_attempts_immutable");
+    expect(AUTHORITY_MIGRATION_SRC).toContain("BEFORE UPDATE OR DELETE ON oms.channel_fulfillment_push_attempts");
   });
 
-  it("persists dead-letter for tracking push enqueue failure (enqueueDelayedTrackingPushForShippedShipment)", () => {
-    const fnBlock = SHIPSTATION_SRC.substring(
-      SHIPSTATION_SRC.indexOf("async function enqueueDelayedTrackingPushForShippedShipment"),
-      SHIPSTATION_SRC.indexOf(
-        "async function",
-        SHIPSTATION_SRC.indexOf("async function enqueueDelayedTrackingPushForShippedShipment") + 10,
-      ),
+  it("requires explicit fulfillment authority instead of a database service locator", () => {
+    expect(SHIPSTATION_SRC).toContain("requireFulfillmentAuthority().recordPhysicalPackage");
+    expect(SHIPSTATION_SRC).not.toContain("db.__fulfillmentPush");
+    expect(SHIPSTATION_SRC).not.toContain("db.__channelFulfillmentAuthority");
+  });
+});
+
+describe("D-SINGLEWRITER: physical shipment projection has one authority", () => {
+  it("does not wire the legacy whole-order Shopify fulfillment writer", () => {
+    expect(existsSync(LEGACY_FULFILLMENT_SERVICE_PATH)).toBe(false);
+    expect(SERVICE_REGISTRY_SRC).not.toContain("createFulfillmentService");
+  });
+
+  it("does not infer WMS shipped state from an OMS aggregate", () => {
+    const reconcileBlock = SERVER_INDEX_SRC.slice(
+      SERVER_INDEX_SRC.indexOf("OMS<->WMS cancellation reconciliation"),
+      SERVER_INDEX_SRC.indexOf("Startup reconciliation for orders"),
     );
-    expect(fnBlock).toContain("fulfillment_push_enqueue_failed");
-    expect(fnBlock).toContain("requiresReview: true");
+    expect(reconcileBlock).toContain("oms.status IN ('cancelled', 'refunded')");
+    expect(reconcileBlock).not.toContain("markOrderShipped");
+    expect(reconcileBlock).not.toContain("oms.status IN ('cancelled', 'shipped', 'refunded')");
+  });
+
+  it("does not force item fulfillment quantities during application startup", () => {
+    expect(SERVER_INDEX_SRC).not.toContain("Completed ${itemFix.rows.length} orphaned item(s)");
+    expect(SERVER_INDEX_SRC).not.toMatch(
+      /UPDATE wms\.order_items oi SET\s+status = 'completed',\s+fulfilled_quantity = oi\.quantity/,
+    );
+  });
+
+  it("always uses physical-shipment reconciliation without a legacy flag fallback", () => {
+    expect(SERVER_INDEX_SRC).not.toContain("runShipStationReconcileV1");
+    expect(SERVER_INDEX_SRC).not.toContain("process.env.RECONCILE_V2");
+    expect(SERVER_INDEX_SRC).toContain("await runShipStationReconcileV2()");
   });
 });
 

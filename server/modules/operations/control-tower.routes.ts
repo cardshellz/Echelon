@@ -42,6 +42,12 @@ function dependencies(req: Request) {
     operationsDashboard: services?.operationsDashboard,
     replenishment: services?.replenishment,
     shipmentTracking: services?.shipmentTracking,
+    flowReconciliation: services?.channelFulfillmentAuthority
+      ? {
+          reservation: services?.reservation ?? null,
+          fulfillmentAuthority: services.channelFulfillmentAuthority,
+        }
+      : undefined,
     canViewProcurement: Boolean(req.session.user?.id),
   };
 }

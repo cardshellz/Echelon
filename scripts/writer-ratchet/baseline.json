@@ -372,6 +372,24 @@
   "membership.subscription_events": [
     "modules/subscriptions"
   ],
+  "oms.channel_fulfillment_push_attempts": [
+    "modules/oms"
+  ],
+  "oms.channel_fulfillment_push_items": [
+    "modules/oms"
+  ],
+  "oms.channel_fulfillment_pushes": [
+    "modules/oms"
+  ],
+  "oms.channel_fulfillment_receipt_attempts": [
+    "modules/oms"
+  ],
+  "oms.channel_fulfillment_receipt_items": [
+    "modules/oms"
+  ],
+  "oms.channel_fulfillment_receipts": [
+    "modules/oms"
+  ],
   "oms.ebay_order_poll_checkpoints": [
     "modules/oms"
   ],
@@ -381,7 +399,6 @@
   "oms.oms_order_events": [
     "modules/dropship",
     "modules/oms",
-    "modules/orders",
     "server/index.ts"
   ],
   "oms.oms_order_line_authority_events": [
@@ -389,15 +406,12 @@
   ],
   "oms.oms_order_lines": [
     "modules/dropship",
-    "modules/oms",
-    "modules/orders",
-    "server/index.ts"
+    "modules/oms"
   ],
   "oms.oms_orders": [
     "modules/dropship",
     "modules/oms",
-    "modules/orders",
-    "server/index.ts"
+    "modules/orders"
   ],
   "oms.order_item_costs": [
     "modules/inventory"
@@ -677,13 +691,18 @@
   "wms.combined_order_groups": [
     "modules/orders"
   ],
+  "wms.fulfillment_plan_lines": [
+    "modules/oms"
+  ],
+  "wms.fulfillment_plans": [
+    "modules/oms"
+  ],
   "wms.order_items": [
     "modules/catalog",
     "modules/inventory",
     "modules/oms",
     "modules/orders",
     "modules/wms",
-    "server/index.ts",
     "server/routes/diagnostics.ts"
   ],
   "wms.orders": [
@@ -703,8 +722,16 @@
     "modules/oms",
     "modules/orders",
     "modules/wms",
-    "server/index.ts",
-    "server/routes/shopify.routes.ts"
+    "server/index.ts"
+  ],
+  "wms.physical_shipment_items": [
+    "modules/oms"
+  ],
+  "wms.physical_shipment_tracking_amendments": [
+    "modules/oms"
+  ],
+  "wms.physical_shipments": [
+    "modules/oms"
   ],
   "wms.picking_logs": [
     "modules/catalog",
@@ -719,8 +746,20 @@
   "wms.returns": [
     "modules/oms"
   ],
+  "wms.shipment_request_items": [
+    "modules/oms"
+  ],
+  "wms.shipment_requests": [
+    "modules/oms"
+  ],
   "wms.shipment_tracking_history": [
     "modules/orders"
+  ],
+  "wms.shipping_engine_order_requests": [
+    "modules/oms"
+  ],
+  "wms.shipping_engine_orders": [
+    "modules/oms"
   ],
   "wms.shipping_provider_label_events": [
     "modules/shipping"

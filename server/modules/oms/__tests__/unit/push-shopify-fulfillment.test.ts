@@ -1706,6 +1706,107 @@ describe("Shopify package completion signature", () => {
 // Regression: order #58197 — a no-SKU wax line ("sku=UNKNOWN") failed the
 // whole order's fulfillment push because the resolver matched by SKU only.
 // It now falls back to the Shopify order line-item id.
+describe("Shopify exact physical-package idempotency", () => {
+  const expectedItems = [
+    { channelOrderLineId: "gid://shopify/LineItem/1001", quantity: 2 },
+    { channelOrderLineId: "1002", quantity: 1 },
+  ];
+
+  function response(overrides: Record<string, unknown> = {}) {
+    return {
+      order: {
+        fulfillmentsCount: { count: 1 },
+        fulfillments: [{
+          id: "gid://shopify/Fulfillment/7001",
+          status: "SUCCESS",
+          trackingInfo: [{ number: "1ZEXACT" }],
+          fulfillmentLineItems: {
+            nodes: [
+              { quantity: 1, lineItem: { id: "gid://shopify/LineItem/1002" } },
+              { quantity: 2, lineItem: { id: "gid://shopify/LineItem/1001" } },
+            ],
+          },
+          ...overrides,
+        }],
+      },
+    };
+  }
+
+  it("accepts only one successful fulfillment with exact tracking and line quantities", () => {
+    expect(__test__.classifyExactShopifyPackageState({
+      response: response(),
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: [],
+      expectedItems,
+    })).toEqual({
+      kind: "present",
+      fulfillmentId: "gid://shopify/Fulfillment/7001",
+    });
+  });
+
+  it("routes matching tracking with different line quantities to conflict", () => {
+    expect(__test__.classifyExactShopifyPackageState({
+      response: response({
+        fulfillmentLineItems: {
+          nodes: [
+            { quantity: 1, lineItem: { id: "gid://shopify/LineItem/1001" } },
+            { quantity: 1, lineItem: { id: "gid://shopify/LineItem/1002" } },
+          ],
+        },
+      }),
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: [],
+      expectedItems,
+    }).kind).toBe("conflict");
+  });
+
+  it("treats a cancelled fulfillment as absent so a replacement package can be written", () => {
+    expect(__test__.classifyExactShopifyPackageState({
+      response: response({ status: "CANCELLED" }),
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: ["gid://shopify/Fulfillment/7001"],
+      expectedItems,
+    })).toEqual({ kind: "absent" });
+  });
+
+  it("fails closed when Shopify reports more fulfillments than the bounded list contains", () => {
+    const providerResponse = response();
+    providerResponse.order.fulfillmentsCount.count = 2;
+
+    expect(__test__.classifyExactShopifyPackageState({
+      response: providerResponse,
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: [],
+      expectedItems,
+    })).toEqual({
+      kind: "conflict",
+      evidence: {
+        reason: "provider_package_page_incomplete",
+        reportedFulfillmentCount: 2,
+        loadedFulfillmentCount: 1,
+        incompleteLineFulfillmentIds: [],
+      },
+    });
+  });
+
+  it("fails closed when a fulfillment has more line items than the bounded page contains", () => {
+    expect(__test__.classifyExactShopifyPackageState({
+      response: response({
+        fulfillmentLineItems: {
+          nodes: [
+            { quantity: 2, lineItem: { id: "gid://shopify/LineItem/1001" } },
+            { quantity: 1, lineItem: { id: "gid://shopify/LineItem/1002" } },
+          ],
+          pageInfo: { hasNextPage: true },
+        },
+      }),
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: [],
+      expectedItems,
+    }).kind).toBe("conflict");
+  });
+});
+
 describe("resolveFulfillmentOrderLinesFromCandidates :: no-SKU line fallback", () => {
   const ORDER = "gid://shopify/Order/12095128600735";
   const SHIPMENT = 2147;

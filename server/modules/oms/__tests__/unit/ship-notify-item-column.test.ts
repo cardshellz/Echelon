@@ -15,25 +15,20 @@ const SS_SRC = readFileSync(
   resolve(__dirname, "../../shipstation.service.ts"),
   "utf-8",
 );
+const PROJECTION_SRC = readFileSync(
+  resolve(__dirname, "../../channel-fulfillment-projection.repository.ts"),
+  "utf-8",
+);
 
-describe("SHIP_NOTIFY item completion :: column name", () => {
-  const legacySection = SS_SRC.slice(
-    SS_SRC.indexOf("LEGACY PATH: SHIP_NOTIFY carried echelon-oms"),
-    SS_SRC.indexOf("Create shipment record for the WMS order"),
-  );
-
-  const v2ShipmentSection = SS_SRC.slice(
-    SS_SRC.indexOf("Mark all still-in-flight order items completed"),
-    SS_SRC.indexOf("Updated WMS shipment"),
-  );
-
-  it("legacy path uses order_id (not wms_order_id) when completing items", () => {
-    expect(legacySection).toContain("WHERE order_id =");
-    expect(legacySection).not.toContain("WHERE wms_order_id =");
+describe("SHIP_NOTIFY item completion :: canonical projection", () => {
+  it("SHIP_NOTIFY does not directly complete WMS item counters", () => {
+    expect(SS_SRC).not.toContain("UPDATE wms.order_items");
+    expect(SS_SRC).toContain("requireFulfillmentAuthority().recordPhysicalPackage");
   });
 
-  it("V2 shipment path uses order_id (not wms_order_id) when completing items", () => {
-    expect(v2ShipmentSection).toContain("WHERE order_id =");
-    expect(v2ShipmentSection).not.toContain("WHERE wms_order_id =");
+  it("the canonical projector updates by exact WMS order-item identity", () => {
+    expect(PROJECTION_SRC).toContain("UPDATE wms.order_items order_item");
+    expect(PROJECTION_SRC).toContain("WHERE order_item.id = shipped.wms_order_item_id");
+    expect(PROJECTION_SRC).not.toContain("WHERE wms_order_id =");
   });
 });
