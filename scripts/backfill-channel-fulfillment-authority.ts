@@ -13,7 +13,6 @@
  *   npx tsx scripts/backfill-channel-fulfillment-authority.ts --wms-shipment-id=4842
  */
 
-import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
