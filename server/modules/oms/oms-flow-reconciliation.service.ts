@@ -5,7 +5,10 @@ import {
   enqueueShipStationShipmentPushRetry,
   enqueueWmsShipmentCreateRetry,
 } from "./webhook-retry.worker";
-import { findChannelWritebackCandidates } from "./channel-writeback.service";
+import {
+  findChannelWritebackCandidates,
+  getChannelWritebackHealth,
+} from "./channel-writeback.service";
 import {
   handoffLegacyShipmentToChannelFulfillment,
   handoffOmsOrderShipmentsToChannelFulfillment,
@@ -175,6 +178,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
     shopifyShipmentFulfillmentMissing,
     partitionDuplicateLineCoverage,
     providerFulfillmentReferenceDrift,
+    stalledChannelFulfillmentReceipts,
   ] = await Promise.all([
     countAndSample(
       db,
@@ -509,73 +513,19 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         LIMIT 10
       `,
     ),
-    countAndSample(
-      db,
-      sql`
-        SELECT COUNT(*)::int AS count
-        FROM wms.outbound_shipments os
-        JOIN wms.orders wo ON wo.id = os.order_id
-        JOIN oms.oms_orders oo ON (
-             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
-          OR (wo.source_table_id = oo.id::text)
-        )
-        JOIN channels.channels c ON c.id = oo.channel_id
-        WHERE os.status = 'shipped'
-          AND os.shipped_at < NOW() - INTERVAL '10 minutes'
-          AND os.shipped_at > NOW() - INTERVAL '14 days'
-          AND c.provider = 'shopify'
-          AND NULLIF(os.shopify_fulfillment_id, '') IS NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM oms.oms_order_events e
-            WHERE e.order_id = oo.id
-              AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled')
-              AND e.details->>'wmsShipmentId' = os.id::text
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM oms.webhook_retry_queue q
-            WHERE q.provider = 'internal'
-              AND q.topic = 'shopify_fulfillment_push'
-              AND q.status = 'pending'
-              AND q.payload->>'shipmentId' = os.id::text
-          )
-      `,
-      sql`
-        SELECT os.id AS shipment_id, os.order_id AS wms_order_id, os.shipped_at,
-               os.tracking_number, os.carrier, oo.id AS oms_order_id,
-               oo.external_order_number, os.shopify_fulfillment_id
-        FROM wms.outbound_shipments os
-        JOIN wms.orders wo ON wo.id = os.order_id
-        JOIN oms.oms_orders oo ON (
-             (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
-          OR (wo.source_table_id = oo.id::text)
-        )
-        JOIN channels.channels c ON c.id = oo.channel_id
-        WHERE os.status = 'shipped'
-          AND os.shipped_at < NOW() - INTERVAL '10 minutes'
-          AND os.shipped_at > NOW() - INTERVAL '14 days'
-          AND c.provider = 'shopify'
-          AND NULLIF(os.shopify_fulfillment_id, '') IS NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM oms.oms_order_events e
-            WHERE e.order_id = oo.id
-              AND e.event_type IN ('shopify_fulfillment_pushed', 'shopify_fulfillment_reconciled')
-              AND e.details->>'wmsShipmentId' = os.id::text
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM oms.webhook_retry_queue q
-            WHERE q.provider = 'internal'
-              AND q.topic = 'shopify_fulfillment_push'
-              AND q.status = 'pending'
-              AND q.payload->>'shipmentId' = os.id::text
-          )
-        ORDER BY os.shipped_at ASC
-        LIMIT 10
-      `,
-    ),
+    (async () => {
+      const health = await getChannelWritebackHealth(
+        db,
+        { windowDays: 14, sampleLimit: 500 },
+      );
+      const shopify = health.byProvider.find((entry) => entry.provider === "shopify");
+      return {
+        count: shopify?.missing ?? 0,
+        sample: health.exceptions
+          .filter((entry) => entry.provider === "shopify")
+          .slice(0, 10),
+      };
+    })(),
     countAndSample(
       db,
       sql`
@@ -721,6 +671,63 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
         LIMIT 10
       `,
     ),
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM oms.channel_fulfillment_receipts receipt
+        WHERE (
+            receipt.processing_status = 'pending'
+            AND receipt.created_at < NOW() - INTERVAL '2 hours'
+          )
+          OR (
+            receipt.processing_status = 'processing'
+            AND receipt.lease_expires_at IS NOT NULL
+            AND receipt.lease_expires_at < NOW() - INTERVAL '1 hour'
+          )
+          OR (
+            receipt.processing_status = 'processing'
+            AND receipt.attempt_count >= 10
+            AND receipt.lease_expires_at IS NOT NULL
+            AND receipt.lease_expires_at <= NOW()
+          )
+      `,
+      sql`
+        SELECT
+          receipt.id AS receipt_id,
+          receipt.source_provider,
+          receipt.source_order_id,
+          receipt.source_fulfillment_id,
+          receipt.processing_status,
+          receipt.attempt_count,
+          receipt.error_code,
+          receipt.error_message,
+          receipt.last_attempt_at,
+          receipt.lease_expires_at,
+          receipt.created_at,
+          order_row.id AS oms_order_id,
+          order_row.external_order_number
+        FROM oms.channel_fulfillment_receipts receipt
+        LEFT JOIN oms.oms_orders order_row ON order_row.id = receipt.oms_order_id
+        WHERE (
+            receipt.processing_status = 'pending'
+            AND receipt.created_at < NOW() - INTERVAL '2 hours'
+          )
+          OR (
+            receipt.processing_status = 'processing'
+            AND receipt.lease_expires_at IS NOT NULL
+            AND receipt.lease_expires_at < NOW() - INTERVAL '1 hour'
+          )
+          OR (
+            receipt.processing_status = 'processing'
+            AND receipt.attempt_count >= 10
+            AND receipt.lease_expires_at IS NOT NULL
+            AND receipt.lease_expires_at <= NOW()
+          )
+        ORDER BY COALESCE(receipt.last_attempt_at, receipt.created_at) ASC
+        LIMIT 10
+      `,
+    ),
   ]);
 
   const issues: OmsOpsIssue[] = [
@@ -777,7 +784,7 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       code: "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
       severity: "critical" as const,
       count: shopifyShipmentFulfillmentMissing.count,
-      message: "Shopify WMS shipments are shipped but have no Shopify fulfillment id.",
+      message: "Shipped Shopify packages have no exact terminal channel-writeback evidence.",
       sample: shopifyShipmentFulfillmentMissing.sample,
     },
     {
@@ -793,6 +800,13 @@ export async function collectOmsFlowReconciliationIssues(db: any): Promise<OmsOp
       count: providerFulfillmentReferenceDrift.count,
       message: "Shopify OMS line fulfillment references differ from provider-neutral references.",
       sample: providerFulfillmentReferenceDrift.sample,
+    },
+    {
+      code: "CHANNEL_FULFILLMENT_RECEIPT_STALLED",
+      severity: "critical" as const,
+      count: stalledChannelFulfillmentReceipts.count,
+      message: "Inbound channel fulfillment receipts exceeded the automatic recovery window.",
+      sample: stalledChannelFulfillmentReceipts.sample,
     },
   ];
 

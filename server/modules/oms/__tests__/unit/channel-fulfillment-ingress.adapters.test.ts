@@ -5,6 +5,7 @@ import {
   mapEbayFulfillmentIngress,
 } from "../../ebay-fulfillment-ingress.adapter";
 import {
+  mapShopifyFulfillmentCarrier,
   mapShopifyFulfillmentIngress,
   processShopifyFulfillmentIngress,
   ShopifyFulfillmentIngressPayloadError,
@@ -18,6 +19,11 @@ const shopifyMetadata = {
 };
 
 describe("channel fulfillment ingress adapters", () => {
+  it("normalizes decorated Shopify carrier names", () => {
+    expect(mapShopifyFulfillmentCarrier("UPS\u00ae")).toBe("UPS");
+    expect(mapShopifyFulfillmentCarrier("DHL\u2122 Express")).toBe("DHL");
+  });
+
   it("normalizes REST and GraphQL Shopify resource ids to the same exact identity", () => {
     const rest = mapShopifyFulfillmentIngress({
       id: 6312306376863,

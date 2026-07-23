@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  recoverStaleChannelFulfillmentReceipts,
   resolveRecoveredShopifyWritebackDebt,
   runFulfillmentSweep,
 } from "../../fulfillment-sweeper.scheduler";
@@ -41,6 +42,149 @@ function canonicalAuthority(ensureLegacyShipment: any) {
 }
 
 describe("fulfillment-sweeper.scheduler", () => {
+  it("replays stale Shopify and eBay receipts through the original ingress service", async () => {
+    const process = vi.fn(async (input: any) => ({
+      receiptId: input.sourceProvider === "shopify" ? 501 : 502,
+      processingStatus: input.sourceProvider === "shopify" ? "ignored" : "review",
+      physicalShipmentId: 90001,
+      sourceEcho: input.sourceProvider === "shopify",
+      replayed: false,
+      inventoryFailures: 0,
+      cancellationFailures: 0,
+      partialOverlapShipmentIds: [],
+    }));
+    const execute = vi.fn(async () => ({
+      rows: [
+        {
+          id: 501,
+          source_provider: "shopify",
+          source_channel_id: 36,
+          source_order_id: "12148212400287",
+          source_event_id: "webhook_inbox:70825:fulfillment:6312306376863",
+          source_inbox_id: 70825,
+          event_kind: "reconciled",
+          source: "shopify_orders_fulfilled",
+          raw_payload: {
+            id: "6312306376863",
+            order_id: "12148212400287",
+            status: "success",
+            tracking_number: "1ZE365H56830499454",
+            line_items: [{ id: "311001", quantity: 1 }],
+          },
+          correlation_id: "webhook_inbox:70825",
+          causation_id: "webhook_inbox:70825",
+        },
+        {
+          id: 502,
+          source_provider: "ebay",
+          source_channel_id: 40,
+          source_order_id: "07-14878-86923",
+          source_event_id: "ebay_reconciler:9400150206217777402897",
+          source_inbox_id: null,
+          event_kind: "reconciled",
+          source: "ebay_fulfillment_reconciler",
+          raw_payload: {
+            fulfillmentId: "9400150206217777402897",
+            shipmentTrackingNumber: "9400150206217777402897",
+            lineItems: [{ lineItemId: "1001", quantity: 1 }],
+          },
+          correlation_id: "ebay_order:07-14878-86923",
+          causation_id: "ebay_reconciler:9400150206217777402897",
+        },
+      ],
+    }));
+
+    const result = await recoverStaleChannelFulfillmentReceipts(
+      { execute },
+      { process } as any,
+      { limit: 25, minAgeMinutes: 10, maxAttempts: 8 },
+    );
+
+    expect(result).toEqual({
+      candidates: 2,
+      recovered: 1,
+      reviewRequired: 1,
+      failed: 0,
+    });
+    expect(process).toHaveBeenCalledTimes(2);
+    expect(process.mock.calls[0][0]).toMatchObject({
+      sourceProvider: "shopify",
+      sourceChannelId: 36,
+      sourceOrderId: "12148212400287",
+      sourceFulfillmentId: "6312306376863",
+      sourceEventId: "webhook_inbox:70825:fulfillment:6312306376863",
+      eventKind: "reconciled",
+      source: "shopify_orders_fulfilled",
+    });
+    expect(process.mock.calls[1][0]).toMatchObject({
+      sourceProvider: "ebay",
+      sourceChannelId: 40,
+      sourceOrderId: "07-14878-86923",
+      sourceFulfillmentId: "9400150206217777402897",
+      sourceEventId: "ebay_reconciler:9400150206217777402897",
+      eventKind: "reconciled",
+      source: "ebay_fulfillment_reconciler",
+    });
+    const query = queryText(execute.mock.calls[0][0]);
+    expect(query).toContain("processing_status = 'pending'");
+    expect(query).toContain("processing_status = 'processing'");
+    expect(query).toContain("lease_expires_at <= NOW()");
+    expect(query).toContain("attempt_count <");
+  });
+
+  it("isolates a malformed stale receipt and continues recovering later candidates", async () => {
+    const process = vi.fn(async () => ({
+      receiptId: 602,
+      processingStatus: "processed",
+      physicalShipmentId: 90002,
+      sourceEcho: false,
+      replayed: false,
+      inventoryFailures: 0,
+      cancellationFailures: 0,
+      partialOverlapShipmentIds: [],
+    }));
+    const execute = vi.fn(async () => ({
+      rows: [
+        {
+          id: 601,
+          source_provider: "shopify",
+          source_order_id: "100",
+          event_kind: "reconciled",
+          source: "shopify_fulfillment_reconciler",
+          raw_payload: { status: "success" },
+        },
+        {
+          id: 602,
+          source_provider: "ebay",
+          source_order_id: "07-14878-86923",
+          event_kind: "reconciled",
+          source: "ebay_fulfillment_reconciler",
+          raw_payload: {
+            fulfillmentId: "200",
+            lineItems: [{ lineItemId: "300", quantity: 1 }],
+          },
+        },
+      ],
+    }));
+
+    const result = await recoverStaleChannelFulfillmentReceipts(
+      { execute },
+      { process } as any,
+    );
+
+    expect(result).toEqual({
+      candidates: 2,
+      recovered: 1,
+      reviewRequired: 0,
+      failed: 1,
+    });
+    expect(process).toHaveBeenCalledTimes(1);
+    expect(process.mock.calls[0][0]).toMatchObject({
+      sourceProvider: "ebay",
+      sourceFulfillmentId: "200",
+    });
+  });
+
   it("runs bounded physical-package recovery before the ordinary writeback scan", async () => {
     const recover = vi.fn(async () => ({
       candidates: 1,

@@ -10,11 +10,214 @@ import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-a
 import type { ShipStationPhysicalRecoveryService } from "./shipstation-physical-recovery.service";
 import { findChannelWritebackCandidates } from "./channel-writeback.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
+import { processShopifyFulfillmentIngress } from "./shopify-fulfillment-ingress.adapter";
+import { processEbayFulfillmentIngress } from "./ebay-fulfillment-ingress.adapter";
 
 const LOG_PREFIX = "[Fulfillment Sweeper]";
 const OUTBOUND_SWEEP_LIMIT = 500;
 const OUTBOUND_RECENT_SWEEP_LIMIT = 400;
 const OUTBOUND_RECENT_WINDOW_DAYS = 30;
+const INBOUND_RECEIPT_RECOVERY_LIMIT = 50;
+const INBOUND_RECEIPT_RECOVERY_MIN_AGE_MINUTES = 5;
+const INBOUND_RECEIPT_RECOVERY_MAX_ATTEMPTS = 10;
+
+type InboundReceiptEventKind = "created" | "updated" | "reconciled";
+
+interface RecoverableInboundReceipt {
+  id: number;
+  sourceProvider: "shopify" | "ebay";
+  sourceChannelId: number | null;
+  sourceOrderId: string;
+  sourceEventId: string | null;
+  sourceInboxId: number | null;
+  eventKind: InboundReceiptEventKind;
+  source: string;
+  rawPayload: unknown;
+  correlationId: string | null;
+  causationId: string | null;
+}
+
+export interface InboundReceiptRecoveryResult {
+  candidates: number;
+  recovered: number;
+  reviewRequired: number;
+  failed: number;
+}
+
+function nullableString(value: unknown): string | null {
+  if (typeof value !== "string") return value == null ? null : String(value);
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function nullablePositiveInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function receiptEventKind(value: unknown): InboundReceiptEventKind {
+  if (value === "created" || value === "updated" || value === "reconciled") {
+    return value;
+  }
+  throw new Error(`Unsupported channel fulfillment receipt event kind: ${String(value)}`);
+}
+
+function recoverableReceipt(row: any): RecoverableInboundReceipt {
+  const id = Number(row.id);
+  const sourceProvider = String(row.source_provider);
+  const sourceOrderId = nullableString(row.source_order_id);
+  const source = nullableString(row.source);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error(`Invalid channel fulfillment receipt id: ${String(row.id)}`);
+  }
+  if (sourceProvider !== "shopify" && sourceProvider !== "ebay") {
+    throw new Error(`Unsupported channel fulfillment receipt provider: ${sourceProvider}`);
+  }
+  if (!sourceOrderId || !source) {
+    throw new Error(`Channel fulfillment receipt ${id} is missing immutable source identity`);
+  }
+  return {
+    id,
+    sourceProvider,
+    sourceChannelId: nullablePositiveInteger(row.source_channel_id),
+    sourceOrderId,
+    sourceEventId: nullableString(row.source_event_id),
+    sourceInboxId: nullablePositiveInteger(row.source_inbox_id),
+    eventKind: receiptEventKind(row.event_kind),
+    source,
+    rawPayload: row.raw_payload ?? {},
+    correlationId: nullableString(row.correlation_id),
+    causationId: nullableString(row.causation_id),
+  };
+}
+
+/**
+ * Recover receipts stranded by a process crash or transient database/provider
+ * failure. The immutable provider payload and original event identity are sent
+ * through the same adapters and lease-controlled ingress service as live
+ * traffic; this function does not write fulfillment or inventory state itself.
+ */
+export async function recoverStaleChannelFulfillmentReceipts(
+  dbArg: any,
+  channelFulfillmentIngress: ChannelFulfillmentIngressService,
+  options: {
+    limit?: number;
+    minAgeMinutes?: number;
+    maxAttempts?: number;
+  } = {},
+): Promise<InboundReceiptRecoveryResult> {
+  const limit = options.limit ?? INBOUND_RECEIPT_RECOVERY_LIMIT;
+  const minAgeMinutes = options.minAgeMinutes ?? INBOUND_RECEIPT_RECOVERY_MIN_AGE_MINUTES;
+  const maxAttempts = options.maxAttempts ?? INBOUND_RECEIPT_RECOVERY_MAX_ATTEMPTS;
+  if (!Number.isInteger(limit) || limit <= 0 || limit > 500) {
+    throw new Error("Inbound receipt recovery limit must be an integer from 1 through 500");
+  }
+  if (!Number.isInteger(minAgeMinutes) || minAgeMinutes < 1) {
+    throw new Error("Inbound receipt recovery minimum age must be a positive integer");
+  }
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error("Inbound receipt recovery max attempts must be a positive integer");
+  }
+
+  const result = await dbArg.execute(sql`
+    SELECT
+      id,
+      source_provider,
+      source_channel_id,
+      source_order_id,
+      source_event_id,
+      source_inbox_id,
+      event_kind,
+      source,
+      raw_payload,
+      correlation_id,
+      causation_id
+    FROM oms.channel_fulfillment_receipts
+    WHERE source_provider IN ('shopify', 'ebay')
+      AND attempt_count < ${maxAttempts}
+      AND (
+        (
+          processing_status = 'pending'
+          AND created_at <= NOW() - make_interval(mins => ${minAgeMinutes})
+        )
+        OR (
+          processing_status = 'processing'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at <= NOW()
+        )
+      )
+    ORDER BY COALESCE(last_attempt_at, created_at) ASC, id ASC
+    LIMIT ${limit}
+  `);
+  const rows: any[] = Array.isArray(result?.rows) ? result.rows : [];
+  let recovered = 0;
+  let reviewRequired = 0;
+  let failed = 0;
+
+  for (const rawRow of rows) {
+    let receiptId: number | null = nullablePositiveInteger(rawRow?.id);
+    try {
+      const receipt = recoverableReceipt(rawRow);
+      receiptId = receipt.id;
+      if (receipt.sourceProvider === "shopify") {
+        const outcome = await processShopifyFulfillmentIngress(
+          channelFulfillmentIngress,
+          receipt.rawPayload,
+          {
+            sourceChannelId: receipt.sourceChannelId,
+            sourceEventId: receipt.sourceEventId,
+            sourceInboxId: receipt.sourceInboxId,
+            eventKind: receipt.eventKind,
+            source: receipt.source,
+            correlationId: receipt.correlationId,
+            causationId: receipt.causationId,
+          },
+        );
+        if (!outcome.actionable || !outcome.result) {
+          throw new Error(`Shopify receipt ${receipt.id} is not an actionable fulfillment`);
+        }
+        if (outcome.result.processingStatus === "review") reviewRequired++;
+        else recovered++;
+      } else {
+        const outcome = await processEbayFulfillmentIngress(
+          channelFulfillmentIngress,
+          receipt.rawPayload,
+          {
+            sourceChannelId: receipt.sourceChannelId,
+            sourceOrderId: receipt.sourceOrderId,
+            sourceEventId: receipt.sourceEventId,
+            sourceInboxId: receipt.sourceInboxId,
+            source: receipt.source,
+            correlationId: receipt.correlationId,
+            causationId: receipt.causationId,
+          },
+        );
+        if (outcome.processingStatus === "review") reviewRequired++;
+        else recovered++;
+      }
+    } catch (error: any) {
+      failed++;
+      console.error(JSON.stringify({
+        code: "CHANNEL_FULFILLMENT_RECEIPT_RECOVERY_FAILED",
+        receiptId,
+        errorCode: typeof error?.code === "string" ? error.code : null,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }));
+    }
+  }
+
+  const summary = {
+    candidates: rows.length,
+    recovered,
+    reviewRequired,
+    failed,
+  };
+  console.log(JSON.stringify({
+    code: "CHANNEL_FULFILLMENT_RECEIPT_RECOVERY_COMPLETED",
+    ...summary,
+  }));
+  return summary;
+}
 
 export interface RecoveredShopifyWritebackDebtResult {
   retryRowsResolved: number;
@@ -269,6 +472,16 @@ export async function runInboundFulfillmentSweep(
 ) {
   try {
     console.log(`${LOG_PREFIX} Starting inbound fulfillment sweep...`);
+
+    if (channelFulfillmentIngress) {
+      try {
+        await recoverStaleChannelFulfillmentReceipts(dbArg, channelFulfillmentIngress);
+      } catch (err: any) {
+        console.error(
+          `${LOG_PREFIX} Inbound receipt recovery failed; continuing channel poll: ${err.message}`,
+        );
+      }
+    }
 
     // Orders that are paid/active in OMS but NOT shipped in WMS — candidates
     // where someone may have bought a label on the channel directly.
