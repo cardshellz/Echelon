@@ -1,17 +1,19 @@
 /**
- * Enrich legacy WMS shipment rows with the stable ShipStation physical
- * shipment id.
+ * Enrich legacy WMS shipment rows with stable ShipStation identity.
  *
  * This script is intentionally conservative:
  * - dry-run by default
  * - fetches ShipStation by orderId, orderNumber, and trackingNumber because
  *   legacy rows can have stale or missing ShipStation order identity
  * - only accepts an exact one-to-one tracking-number match
- * - refuses to overwrite any existing external_fulfillment_id
+ * - refuses to overwrite any existing conflicting identity
+ * - keeps physical-id enrichment as the default scope
+ * - requires an explicit scope to repair missing provider-order linkage
  *
  * Usage:
  *   npx tsx scripts/enrich-shipstation-physical-shipment-ids.ts --dry-run --limit=25
  *   npx tsx scripts/enrich-shipstation-physical-shipment-ids.ts --execute --limit=all
+ *   npx tsx scripts/enrich-shipstation-physical-shipment-ids.ts --dry-run --scope=provider-order-linkage --limit=all
  */
 
 import fs from "node:fs";
@@ -20,10 +22,12 @@ import { fileURLToPath } from "node:url";
 import { Pool, type PoolClient } from "pg";
 
 type Mode = "dry-run" | "execute";
+export type EnrichmentScope = "physical-id" | "provider-order-linkage";
 
 export interface Flags {
   help: boolean;
   mode: Mode;
+  scope: EnrichmentScope;
   limit: number | null;
   concurrency: number;
   delayMs: number;
@@ -34,6 +38,7 @@ export interface Flags {
   progressEvery: number;
   orderNumber: string | null;
   wmsShipmentId: number | null;
+  operator: string;
   json: boolean;
 }
 
@@ -47,6 +52,7 @@ interface CandidateRow {
   engine_shipment_ref: string | null;
   shipstation_order_id: number | null;
   shipstation_order_key: string | null;
+  external_fulfillment_id: string | null;
   tracking_number: string;
   carrier: string | null;
   shipped_at: string | Date | null;
@@ -62,15 +68,24 @@ export interface ShipStationShipmentCandidate {
   shipDate?: string | null;
 }
 
+export interface ShipStationProviderOrderLinkage {
+  shippingEngine: "shipstation";
+  engineOrderRef: string;
+  engineShipmentRef: string;
+  shipstationOrderId: number;
+  shipstationOrderKey: string;
+}
+
 type MatchDecision =
   | {
       kind: "match";
       shipment: ShipStationShipmentCandidate;
       externalFulfillmentId: string;
+      providerOrderLinkage?: ShipStationProviderOrderLinkage;
       reason: string;
     }
   | {
-      kind: "no_match" | "ambiguous" | "invalid_candidate" | "lookup_error";
+      kind: "no_match" | "ambiguous" | "invalid_candidate" | "identity_conflict" | "lookup_error";
       reason: string;
       matchingShipmentIds?: number[];
       providerStatus?: number | null;
@@ -97,12 +112,14 @@ export interface ShipStationRateLimitCircuit {
 interface EnrichmentResult {
   runId: string;
   mode: Mode;
+  scope: EnrichmentScope;
   candidates: number;
   matched: number;
   updated: number;
   noMatch: number;
   ambiguous: number;
   invalidCandidate: number;
+  identityConflicts: number;
   lookupErrors: number;
   updateSkipped: number;
   errors: number;
@@ -122,6 +139,7 @@ const DEFAULT_MAX_RATE_LIMIT_ERRORS = 25;
 const MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_PROGRESS_EVERY = 25;
 const DEFAULT_BASE_URL = "https://ssapi.shipstation.com";
+const DEFAULT_OPERATOR = "script:enrich-shipstation-identity";
 export const NOT_FOUND_REVIEW_REASON = "physical_identity_not_found_after_enrichment";
 
 function usage(): string {
@@ -130,10 +148,12 @@ function usage(): string {
     "  npx tsx scripts/enrich-shipstation-physical-shipment-ids.ts --dry-run --limit=25",
     "  npx tsx scripts/enrich-shipstation-physical-shipment-ids.ts --execute --limit=all",
     "  npx tsx scripts/enrich-shipstation-physical-shipment-ids.ts --order-number=#59453",
+    "  npx tsx scripts/enrich-shipstation-physical-shipment-ids.ts --dry-run --scope=provider-order-linkage --limit=all",
     "",
     "Flags:",
     "  --dry-run              Fetch and classify only. Default.",
     "  --execute              Persist exact one-to-one matches.",
+    "  --scope=VALUE          physical-id (default) or provider-order-linkage.",
     "  --limit=N|all          Max WMS shipment rows to inspect. Default 25.",
     "  --concurrency=N        Number of rows to process in parallel. Default 1, max 8.",
     "  --delay-ms=N           Delay between ShipStation lookups. Default 250.",
@@ -144,6 +164,7 @@ function usage(): string {
     "  --progress-every=N     Print aggregate progress every N rows. Use 0 to disable. Default 25.",
     "  --order-number=TEXT    Restrict to one WMS order number.",
     "  --wms-shipment-id=N    Restrict to one WMS outbound shipment id.",
+    `  --operator=IDENTITY     Audit actor for provider-order repairs. Default ${DEFAULT_OPERATOR}.`,
     "  --json                 Print machine-readable JSON summary.",
   ].join("\n");
 }
@@ -158,13 +179,19 @@ export function parseFlags(argv: string[]): Flags {
     throw new Error("Cannot pass both --execute and --dry-run");
   }
 
-  const knownFlag = /^(--help|-h|--dry-run|--execute|--limit=|--concurrency=|--delay-ms=|--request-timeout-ms=|--max-retries=|--retry-base-delay-ms=|--max-rate-limit-errors=|--progress-every=|--order-number=|--wms-shipment-id=|--json$)/;
+  const knownFlag = /^(--help|-h|--dry-run|--execute|--scope=|--limit=|--concurrency=|--delay-ms=|--request-timeout-ms=|--max-retries=|--retry-base-delay-ms=|--max-rate-limit-errors=|--progress-every=|--order-number=|--wms-shipment-id=|--operator=|--json$)/;
   const unknown = argv.find((arg) => !knownFlag.test(arg));
   if (unknown) {
     throw new Error(`Unknown flag: ${unknown}`);
   }
 
   const limit = parseOptionalPositiveIntegerFlag(argv, "--limit=", DEFAULT_LIMIT, true);
+  const scopeArg = argv.find((arg) => arg.startsWith("--scope="));
+  const scopeValue = scopeArg?.slice("--scope=".length).trim() || "physical-id";
+  if (scopeValue !== "physical-id" && scopeValue !== "provider-order-linkage") {
+    throw new Error("--scope must be physical-id or provider-order-linkage");
+  }
+  const scope: EnrichmentScope = scopeValue;
   const concurrency = parseOptionalBoundedPositiveIntegerFlag(
     argv,
     "--concurrency=",
@@ -200,10 +227,21 @@ export function parseFlags(argv: string[]): Flags {
   }
 
   const wmsShipmentId = parseOptionalPositiveIntegerFlag(argv, "--wms-shipment-id=", null, false);
+  const operatorArg = argv.find((arg) => arg.startsWith("--operator="));
+  const operator = operatorArg == null
+    ? DEFAULT_OPERATOR
+    : operatorArg.slice("--operator=".length).trim();
+  if (operator.length === 0) {
+    throw new Error("--operator cannot be blank");
+  }
+  if (operator.length > 120) {
+    throw new Error("--operator cannot exceed 120 characters");
+  }
 
   return {
     help,
     mode: execute ? "execute" : "dry-run",
+    scope,
     limit,
     concurrency,
     delayMs,
@@ -214,6 +252,7 @@ export function parseFlags(argv: string[]): Flags {
     progressEvery,
     orderNumber,
     wmsShipmentId,
+    operator,
     json,
   };
 }
@@ -271,6 +310,32 @@ function normalizeTrackingNumber(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length === 0 ? null : trimmed.toUpperCase();
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
+export function parsePersistedShipStationPhysicalShipmentId(value: unknown): number | null {
+  const normalized = normalizeOptionalString(value);
+  if (normalized === null) return null;
+
+  const match = /^(?:shipstation_shipment:|shipstation_combined:|provider_physical:v1:shipstation:)(\d+)/
+    .exec(normalized);
+  if (match === null) return null;
+
+  if (
+    !/^shipstation_shipment:\d+$/.test(normalized)
+    && !/^shipstation_combined:\d+:order:\d+$/.test(normalized)
+    && !/^provider_physical:v1:shipstation:\d+$/.test(normalized)
+  ) {
+    return null;
+  }
+
+  const shipmentId = Number(match[1]);
+  return Number.isSafeInteger(shipmentId) && shipmentId > 0 ? shipmentId : null;
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -369,16 +434,139 @@ export function decideShipStationPhysicalMatch(
   };
 }
 
-export function buildCandidateSql(flags: Pick<Flags, "limit" | "orderNumber" | "wmsShipmentId">): {
+export function decideShipStationProviderOrderLinkage(
+  candidate: {
+    external_fulfillment_id?: string | null;
+    shipping_engine?: string | null;
+    engine_order_ref?: string | null;
+    engine_shipment_ref?: string | null;
+    shipstation_order_id?: number | null;
+    shipstation_order_key?: string | null;
+  },
+  physicalDecision: MatchDecision,
+): MatchDecision {
+  if (physicalDecision.kind !== "match") return physicalDecision;
+
+  const expectedPhysicalShipmentId = parsePersistedShipStationPhysicalShipmentId(
+    candidate.external_fulfillment_id,
+  );
+  if (expectedPhysicalShipmentId === null) {
+    return {
+      kind: "invalid_candidate",
+      reason: "candidate has no valid persisted ShipStation physical shipment identity",
+    };
+  }
+
+  const actualPhysicalShipmentId = Number(physicalDecision.shipment.shipmentId);
+  if (
+    !Number.isSafeInteger(actualPhysicalShipmentId)
+    || actualPhysicalShipmentId <= 0
+    || actualPhysicalShipmentId !== expectedPhysicalShipmentId
+  ) {
+    return {
+      kind: "identity_conflict",
+      reason:
+        `persisted physical shipment ${expectedPhysicalShipmentId} does not match `
+        + `ShipStation shipment ${String(physicalDecision.shipment.shipmentId)}`,
+    };
+  }
+
+  const shipstationOrderId = Number(physicalDecision.shipment.orderId);
+  if (!Number.isSafeInteger(shipstationOrderId) || shipstationOrderId <= 0) {
+    return {
+      kind: "invalid_candidate",
+      reason: "matching ShipStation shipment has no positive integer orderId",
+    };
+  }
+
+  const shipstationOrderKey = normalizeOptionalString(physicalDecision.shipment.orderKey);
+  if (shipstationOrderKey === null) {
+    return {
+      kind: "invalid_candidate",
+      reason: "matching ShipStation shipment has no orderKey",
+    };
+  }
+  if (shipstationOrderKey.length > 100) {
+    return {
+      kind: "invalid_candidate",
+      reason: "matching ShipStation orderKey exceeds the 100-character legacy persistence limit",
+    };
+  }
+
+  const expectedOrderRef = String(shipstationOrderId);
+  const existingShippingEngine = normalizeOptionalString(candidate.shipping_engine)?.toLowerCase() ?? null;
+  const existingEngineOrderRef = normalizeOptionalString(candidate.engine_order_ref);
+  const existingEngineShipmentRef = normalizeOptionalString(candidate.engine_shipment_ref);
+  const existingShipstationOrderKey = normalizeOptionalString(candidate.shipstation_order_key);
+  const existingShipstationOrderId = candidate.shipstation_order_id == null
+    ? null
+    : Number(candidate.shipstation_order_id);
+
+  const conflicts: string[] = [];
+  if (existingShippingEngine !== null && existingShippingEngine !== "shipstation") {
+    conflicts.push(`shipping_engine=${existingShippingEngine}`);
+  }
+  if (existingEngineOrderRef !== null && existingEngineOrderRef !== expectedOrderRef) {
+    conflicts.push(`engine_order_ref=${existingEngineOrderRef}`);
+  }
+  if (existingEngineShipmentRef !== null && existingEngineShipmentRef !== shipstationOrderKey) {
+    conflicts.push(`engine_shipment_ref=${existingEngineShipmentRef}`);
+  }
+  if (existingShipstationOrderId !== null && existingShipstationOrderId !== shipstationOrderId) {
+    conflicts.push(`shipstation_order_id=${existingShipstationOrderId}`);
+  }
+  if (existingShipstationOrderKey !== null && existingShipstationOrderKey !== shipstationOrderKey) {
+    conflicts.push(`shipstation_order_key=${existingShipstationOrderKey}`);
+  }
+
+  if (conflicts.length > 0) {
+    return {
+      kind: "identity_conflict",
+      reason: `existing provider-order identity conflicts with ShipStation: ${conflicts.join(", ")}`,
+    };
+  }
+
+  return {
+    ...physicalDecision,
+    providerOrderLinkage: {
+      shippingEngine: "shipstation",
+      engineOrderRef: expectedOrderRef,
+      engineShipmentRef: shipstationOrderKey,
+      shipstationOrderId,
+      shipstationOrderKey,
+    },
+    reason: "exact physical-shipment and tracking match with compatible provider-order identity",
+  };
+}
+
+export function buildCandidateSql(flags: Pick<Flags, "limit" | "orderNumber" | "wmsShipmentId"> & {
+  scope?: EnrichmentScope;
+}): {
   sql: string;
   params: unknown[];
 } {
+  const scope = flags.scope ?? "physical-id";
   const where: string[] = [
     "s.status::text = 'shipped'",
     "NULLIF(BTRIM(COALESCE(s.tracking_number, '')), '') IS NOT NULL",
-    "NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL",
-    "COALESCE(NULLIF(BTRIM(s.shipping_engine), ''), 'shipstation') = 'shipstation'",
   ];
+  if (scope === "physical-id") {
+    where.push(
+      "NULLIF(BTRIM(COALESCE(s.external_fulfillment_id, '')), '') IS NULL",
+      "COALESCE(NULLIF(BTRIM(s.shipping_engine), ''), 'shipstation') = 'shipstation'",
+    );
+  } else {
+    where.push(
+      `(s.external_fulfillment_id ~ '^shipstation_shipment:[0-9]+$'
+        OR s.external_fulfillment_id ~ '^shipstation_combined:[0-9]+:order:[0-9]+$'
+        OR s.external_fulfillment_id ~ '^provider_physical:v1:shipstation:[0-9]+$')`,
+      `(NULLIF(BTRIM(COALESCE(s.shipping_engine, '')), '') IS NULL
+        OR NULLIF(BTRIM(COALESCE(s.engine_order_ref, '')), '') IS NULL
+        OR NULLIF(BTRIM(COALESCE(s.engine_shipment_ref, '')), '') IS NULL
+        OR s.shipstation_order_id IS NULL
+        OR NULLIF(BTRIM(COALESCE(s.shipstation_order_key, '')), '') IS NULL)`,
+    );
+  }
   const params: unknown[] = [];
 
   if (flags.orderNumber !== null) {
@@ -403,6 +591,7 @@ export function buildCandidateSql(flags: Pick<Flags, "limit" | "orderNumber" | "
         s.engine_shipment_ref,
         s.shipstation_order_id,
         s.shipstation_order_key,
+        s.external_fulfillment_id,
         s.tracking_number,
         s.carrier,
         s.shipped_at
@@ -639,7 +828,7 @@ async function fetchShipStationJsonWithRetries<T>(
       const waitMs = retryDelayMs(err, attempt, flags.retryBaseDelayMs);
       if (!flags.json) {
         console.warn(
-          `[ShipStation physical id enrich] RETRY attempt=${attempt + 1}/${flags.maxRetries} ` +
+          `[ShipStation identity enrich] RETRY attempt=${attempt + 1}/${flags.maxRetries} ` +
           `waitMs=${waitMs} reason="${errorReason(err)}"`,
         );
       }
@@ -750,14 +939,145 @@ async function applyExternalFulfillmentId(
   };
 }
 
-function printOutcome(outcome: CandidateOutcome, mode: Mode): void {
+export function applyProviderOrderLinkageSql(): string {
+  return `
+      UPDATE wms.outbound_shipments
+      SET shipping_engine = $1::varchar,
+          engine_order_ref = $2::varchar,
+          engine_shipment_ref = $3::varchar,
+          shipstation_order_id = $4::integer,
+          shipstation_order_key = $5::varchar,
+          updated_at = NOW()
+      WHERE id = $6::integer
+        AND status::text = 'shipped'
+        AND tracking_number IS NOT DISTINCT FROM $7::varchar
+        AND external_fulfillment_id IS NOT DISTINCT FROM $8::varchar
+        AND shipping_engine IS NOT DISTINCT FROM $9::varchar
+        AND engine_order_ref IS NOT DISTINCT FROM $10::varchar
+        AND engine_shipment_ref IS NOT DISTINCT FROM $11::varchar
+        AND shipstation_order_id IS NOT DISTINCT FROM $12::integer
+        AND shipstation_order_key IS NOT DISTINCT FROM $13::varchar
+      RETURNING
+        id,
+        status::text AS status,
+        tracking_number,
+        external_fulfillment_id,
+        shipping_engine,
+        engine_order_ref,
+        engine_shipment_ref,
+        shipstation_order_id,
+        shipstation_order_key
+    `;
+}
+
+export function insertProviderOrderLinkageAuditSql(): string {
+  return `
+      INSERT INTO wms.oms_wms_authority_cleanup_audit (
+        run_id,
+        operation,
+        source_table,
+        source_id,
+        action,
+        reason,
+        before_row,
+        after_row,
+        operator
+      ) VALUES (
+        $1::uuid,
+        'shipstation-provider-order-linkage',
+        'wms.outbound_shipments',
+        $2::bigint,
+        'update',
+        'Exact ShipStation physical shipment and tracking match supplied missing provider-order linkage',
+        $3::jsonb,
+        $4::jsonb,
+        $5::text
+      )
+    `;
+}
+
+async function applyProviderOrderLinkage(
+  client: PoolClient,
+  candidate: CandidateRow,
+  linkage: ShipStationProviderOrderLinkage,
+  runId: string,
+  operator: string,
+): Promise<{ updated: boolean; skippedReason: string | null }> {
+  const result = await client.query(
+    applyProviderOrderLinkageSql(),
+    [
+      linkage.shippingEngine,
+      linkage.engineOrderRef,
+      linkage.engineShipmentRef,
+      linkage.shipstationOrderId,
+      linkage.shipstationOrderKey,
+      candidate.legacy_shipment_id,
+      candidate.tracking_number,
+      candidate.external_fulfillment_id,
+      candidate.shipping_engine,
+      candidate.engine_order_ref,
+      candidate.engine_shipment_ref,
+      candidate.shipstation_order_id,
+      candidate.shipstation_order_key,
+    ],
+  );
+
+  if (result.rowCount === 1) {
+    const beforeRow = {
+      id: candidate.legacy_shipment_id,
+      status: candidate.legacy_shipment_status,
+      tracking_number: candidate.tracking_number,
+      external_fulfillment_id: candidate.external_fulfillment_id,
+      shipping_engine: candidate.shipping_engine,
+      engine_order_ref: candidate.engine_order_ref,
+      engine_shipment_ref: candidate.engine_shipment_ref,
+      shipstation_order_id: candidate.shipstation_order_id,
+      shipstation_order_key: candidate.shipstation_order_key,
+    };
+    await client.query(
+      insertProviderOrderLinkageAuditSql(),
+      [
+        runId,
+        candidate.legacy_shipment_id,
+        JSON.stringify(beforeRow),
+        JSON.stringify(result.rows[0]),
+        operator,
+      ],
+    );
+  }
+
+  return {
+    updated: result.rowCount === 1,
+    skippedReason: result.rowCount === 1 ? null : "guarded update matched no rows",
+  };
+}
+
+export function shouldPersistEnrichment(mode: Mode, decision: MatchDecision): boolean {
+  return mode === "execute" && decision.kind === "match";
+}
+
+function printOutcome(outcome: CandidateOutcome, mode: Mode, scope: EnrichmentScope): void {
   const c = outcome.candidate;
   if (outcome.decision.kind === "match") {
     const action = mode === "execute"
       ? outcome.updated ? "UPDATE" : "SKIP_UPDATE"
       : "PLAN";
+    if (scope === "provider-order-linkage" && outcome.decision.providerOrderLinkage) {
+      const linkage = outcome.decision.providerOrderLinkage;
+      console.log(
+        `[ShipStation identity enrich] ${action} scope=${scope} wms=${c.legacy_shipment_id} `
+        + `order=${c.order_number ?? "unknown"} physical=${outcome.decision.externalFulfillmentId} `
+        + `shippingEngine=${c.shipping_engine ?? "null"}->${linkage.shippingEngine} `
+        + `engineOrderRef=${c.engine_order_ref ?? "null"}->${linkage.engineOrderRef} `
+        + `engineShipmentRef=${c.engine_shipment_ref ?? "null"}->${linkage.engineShipmentRef} `
+        + `shipstationOrderId=${c.shipstation_order_id ?? "null"}->${linkage.shipstationOrderId} `
+        + `shipstationOrderKey=${c.shipstation_order_key ?? "null"}->${linkage.shipstationOrderKey}`
+        + `${outcome.updateSkippedReason ? ` reason="${outcome.updateSkippedReason}"` : ""}`,
+      );
+      return;
+    }
     console.log(
-      `[ShipStation physical id enrich] ${action} wms=${c.legacy_shipment_id} order=${c.order_number ?? "unknown"} ` +
+      `[ShipStation identity enrich] ${action} scope=${scope} wms=${c.legacy_shipment_id} order=${c.order_number ?? "unknown"} ` +
       `ssOrder=${c.shipstation_order_id ?? "unknown"} tracking=${c.tracking_number} -> ${outcome.decision.externalFulfillmentId}` +
       `${outcome.updateSkippedReason ? ` reason="${outcome.updateSkippedReason}"` : ""}`,
     );
@@ -765,7 +1085,7 @@ function printOutcome(outcome: CandidateOutcome, mode: Mode): void {
   }
 
   console.log(
-    `[ShipStation physical id enrich] ${outcome.decision.kind.toUpperCase()} wms=${c.legacy_shipment_id} ` +
+    `[ShipStation identity enrich] ${outcome.decision.kind.toUpperCase()} scope=${scope} wms=${c.legacy_shipment_id} ` +
     `order=${c.order_number ?? "unknown"} ssOrder=${c.shipstation_order_id ?? "unknown"} tracking=${c.tracking_number} ` +
     `${outcome.decision.providerStatus != null ? `status=${outcome.decision.providerStatus} ` : ""}` +
     `reason="${outcome.decision.reason}"`,
@@ -775,6 +1095,7 @@ function printOutcome(outcome: CandidateOutcome, mode: Mode): void {
 function summarizeOutcomes(
   runId: string,
   mode: Mode,
+  scope: EnrichmentScope,
   outcomes: CandidateOutcome[],
   errors: number,
   rateLimitResponses: number,
@@ -783,12 +1104,14 @@ function summarizeOutcomes(
   return {
     runId,
     mode,
+    scope,
     candidates: outcomes.length,
     matched: outcomes.filter((outcome) => outcome.decision.kind === "match").length,
     updated: outcomes.filter((outcome) => outcome.updated).length,
     noMatch: outcomes.filter((outcome) => outcome.decision.kind === "no_match").length,
     ambiguous: outcomes.filter((outcome) => outcome.decision.kind === "ambiguous").length,
     invalidCandidate: outcomes.filter((outcome) => outcome.decision.kind === "invalid_candidate").length,
+    identityConflicts: outcomes.filter((outcome) => outcome.decision.kind === "identity_conflict").length,
     lookupErrors: outcomes.filter((outcome) => outcome.decision.kind === "lookup_error").length,
     updateSkipped: outcomes.filter((outcome) => outcome.updateSkippedReason !== null).length,
     errors,
@@ -804,25 +1127,41 @@ async function enrichCandidate(
   authHeader: string,
   flags: Flags,
   rateLimitCircuit: ShipStationRateLimitCircuit,
+  runId: string,
 ): Promise<ProcessedCandidate> {
   try {
     const shipments = await fetchShipStationShipmentsByOrder(candidate, authHeader, flags, rateLimitCircuit);
-    const decision = decideShipStationPhysicalMatch(candidate, shipments);
+    const physicalDecision = decideShipStationPhysicalMatch(candidate, shipments);
+    const decision = flags.scope === "provider-order-linkage"
+      ? decideShipStationProviderOrderLinkage(candidate, physicalDecision)
+      : physicalDecision;
     let updated = false;
     let updateSkippedReason: string | null = null;
 
-    if (flags.mode === "execute" && decision.kind === "match") {
+    if (shouldPersistEnrichment(flags.mode, decision) && decision.kind === "match") {
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        const update = await applyExternalFulfillmentId(client, candidate, decision.externalFulfillmentId);
+        const update = flags.scope === "provider-order-linkage"
+          ? decision.providerOrderLinkage
+            ? await applyProviderOrderLinkage(
+              client,
+              candidate,
+              decision.providerOrderLinkage,
+              runId,
+              flags.operator,
+            )
+            : { updated: false, skippedReason: "provider-order linkage was not resolved" }
+          : await applyExternalFulfillmentId(client, candidate, decision.externalFulfillmentId);
         updated = update.updated;
         updateSkippedReason = update.skippedReason;
         await client.query("COMMIT");
       } catch (err) {
         await client.query("ROLLBACK").catch(() => undefined);
         if (isPostgresUniqueViolation(err)) {
-          updateSkippedReason = "external fulfillment id already belongs to another shipment";
+          updateSkippedReason = flags.scope === "provider-order-linkage"
+            ? "provider-order identity conflicts with another shipment"
+            : "external fulfillment id already belongs to another shipment";
         } else {
           throw err;
         }
@@ -855,9 +1194,14 @@ async function enrichCandidate(
   }
 }
 
-function printCandidateLookup(index: number, total: number, candidate: CandidateRow): void {
+function printCandidateLookup(
+  index: number,
+  total: number,
+  candidate: CandidateRow,
+  scope: EnrichmentScope,
+): void {
   console.log(
-    `[ShipStation physical id enrich] LOOKUP ${index}/${total} wms=${candidate.legacy_shipment_id} ` +
+    `[ShipStation identity enrich] LOOKUP ${index}/${total} scope=${scope} wms=${candidate.legacy_shipment_id} ` +
     `order=${candidate.order_number ?? "unknown"} ssOrder=${candidate.shipstation_order_id ?? "unknown"} ` +
     `tracking=${candidate.tracking_number}`,
   );
@@ -870,15 +1214,16 @@ function shouldPrintProgress(progressEvery: number, processed: number, total: nu
 function printProgress(
   runId: string,
   mode: Mode,
+  scope: EnrichmentScope,
   outcomes: CandidateOutcome[],
   errors: number,
   rateLimitResponses: number,
   total: number,
   startedAtMs: number,
 ): void {
-  const summary = summarizeOutcomes(runId, mode, outcomes, errors, rateLimitResponses);
+  const summary = summarizeOutcomes(runId, mode, scope, outcomes, errors, rateLimitResponses);
   console.log(
-    `[ShipStation physical id enrich] PROGRESS ${JSON.stringify({
+    `[ShipStation identity enrich] PROGRESS ${JSON.stringify({
       runId,
       processed: summary.candidates,
       total,
@@ -887,6 +1232,7 @@ function printProgress(
       noMatch: summary.noMatch,
       ambiguous: summary.ambiguous,
       invalidCandidate: summary.invalidCandidate,
+      identityConflicts: summary.identityConflicts,
       lookupErrors: summary.lookupErrors,
       rateLimitResponses: summary.rateLimitResponses,
       updateSkipped: summary.updateSkipped,
@@ -929,20 +1275,28 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
 
         const candidate = candidates[index];
         if (!flags.json) {
-          printCandidateLookup(index + 1, candidates.length, candidate);
+          printCandidateLookup(index + 1, candidates.length, candidate, flags.scope);
         }
 
-        const processedCandidate = await enrichCandidate(pool, candidate, authHeader, flags, rateLimitCircuit);
+        const processedCandidate = await enrichCandidate(
+          pool,
+          candidate,
+          authHeader,
+          flags,
+          rateLimitCircuit,
+          runId,
+        );
         outcomesByIndex[index] = processedCandidate.outcome;
         if (processedCandidate.error) errors += 1;
         outcomes.push(processedCandidate.outcome);
         processed += 1;
 
-        if (!flags.json) printOutcome(processedCandidate.outcome, flags.mode);
+        if (!flags.json) printOutcome(processedCandidate.outcome, flags.mode, flags.scope);
         if (!flags.json && shouldPrintProgress(flags.progressEvery, processed, candidates.length)) {
           printProgress(
             runId,
             flags.mode,
+            flags.scope,
             outcomes,
             errors,
             rateLimitCircuit.rateLimitResponses,
@@ -953,7 +1307,7 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
 
         if (rateLimitCircuit.stoppedEarlyReason !== null) {
           if (!flags.json) {
-            console.error(`[ShipStation physical id enrich] STOP ${rateLimitCircuit.stoppedEarlyReason}`);
+            console.error(`[ShipStation identity enrich] STOP ${rateLimitCircuit.stoppedEarlyReason}`);
           }
           return;
         }
@@ -969,6 +1323,7 @@ export async function runEnrichment(flags: Flags): Promise<EnrichmentResult> {
     return summarizeOutcomes(
       runId,
       flags.mode,
+      flags.scope,
       orderedOutcomes,
       errors,
       rateLimitCircuit.rateLimitResponses,
@@ -988,13 +1343,14 @@ async function main(): Promise<void> {
 
   if (!flags.json) {
     console.log(
-      `[ShipStation physical id enrich] mode=${flags.mode} limit=${flags.limit ?? "all"} ` +
+      `[ShipStation identity enrich] mode=${flags.mode} scope=${flags.scope} limit=${flags.limit ?? "all"} ` +
       `concurrency=${flags.concurrency} delayMs=${flags.delayMs}` +
       ` requestTimeoutMs=${flags.requestTimeoutMs} maxRetries=${flags.maxRetries}` +
       ` retryBaseDelayMs=${flags.retryBaseDelayMs} maxRateLimitErrors=${flags.maxRateLimitErrors}` +
       ` progressEvery=${flags.progressEvery}` +
       `${flags.orderNumber ? ` orderNumber=${flags.orderNumber}` : ""}` +
-      `${flags.wmsShipmentId ? ` wmsShipmentId=${flags.wmsShipmentId}` : ""}`,
+      `${flags.wmsShipmentId ? ` wmsShipmentId=${flags.wmsShipmentId}` : ""}` +
+      `${flags.scope === "provider-order-linkage" ? ` operator=${flags.operator}` : ""}`,
     );
   }
 
@@ -1003,14 +1359,16 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(result, null, 2));
   } else {
     console.log(
-      `[ShipStation physical id enrich] complete ${JSON.stringify({
+      `[ShipStation identity enrich] complete ${JSON.stringify({
         runId: result.runId,
+        scope: result.scope,
         candidates: result.candidates,
         matched: result.matched,
         updated: result.updated,
         noMatch: result.noMatch,
         ambiguous: result.ambiguous,
         invalidCandidate: result.invalidCandidate,
+        identityConflicts: result.identityConflicts,
         lookupErrors: result.lookupErrors,
         rateLimitResponses: result.rateLimitResponses,
         updateSkipped: result.updateSkipped,
@@ -1027,7 +1385,7 @@ async function main(): Promise<void> {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch((err) => {
-    console.error("[ShipStation physical id enrich] fatal:", err);
+    console.error("[ShipStation identity enrich] fatal:", err);
     process.exit(1);
   });
 }

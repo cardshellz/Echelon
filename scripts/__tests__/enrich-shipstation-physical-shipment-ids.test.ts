@@ -18,6 +18,7 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(parseFlags([])).toMatchObject({
       help: false,
       mode: "dry-run",
+      scope: "physical-id",
       limit: 25,
       concurrency: 1,
       delayMs: 250,
@@ -28,11 +29,13 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       progressEvery: 25,
       orderNumber: null,
       wmsShipmentId: null,
+      operator: "script:enrich-shipstation-identity",
       json: false,
     });
 
     expect(parseFlags([
       "--execute",
+      "--scope=provider-order-linkage",
       "--limit=all",
       "--concurrency=4",
       "--delay-ms=0",
@@ -43,9 +46,11 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       "--progress-every=10",
       "--order-number=#59453",
       "--wms-shipment-id=4313",
+      "--operator=operator@example.com",
       "--json",
     ])).toMatchObject({
       mode: "execute",
+      scope: "provider-order-linkage",
       limit: null,
       concurrency: 4,
       delayMs: 0,
@@ -56,6 +61,7 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
       progressEvery: 10,
       orderNumber: "#59453",
       wmsShipmentId: 4313,
+      operator: "operator@example.com",
       json: true,
     });
   });
@@ -64,6 +70,7 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     const { parseFlags } = await loadModule();
 
     expect(() => parseFlags(["--dry-run", "--execute"])).toThrow(/Cannot pass both/);
+    expect(() => parseFlags(["--scope=unknown"])).toThrow(/physical-id or provider-order-linkage/);
     expect(() => parseFlags(["--limit=0"])).toThrow(/positive integer or all/);
     expect(() => parseFlags(["--concurrency=0"])).toThrow(/positive integer no greater than 8/);
     expect(() => parseFlags(["--concurrency=9"])).toThrow(/positive integer no greater than 8/);
@@ -75,6 +82,8 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(() => parseFlags(["--progress-every=-1"])).toThrow(/non-negative integer/);
     expect(() => parseFlags(["--order-number="])).toThrow(/cannot be blank/);
     expect(() => parseFlags(["--wms-shipment-id=abc"])).toThrow(/positive integer/);
+    expect(() => parseFlags(["--operator="])).toThrow(/cannot be blank/);
+    expect(() => parseFlags([`--operator=${"x".repeat(121)}`])).toThrow(/cannot exceed 120/);
     expect(() => parseFlags(["--bogus"])).toThrow(/Unknown flag/);
   });
 
@@ -239,6 +248,103 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     });
   });
 
+  it("parses only supported persisted ShipStation physical identities", async () => {
+    const { parsePersistedShipStationPhysicalShipmentId } = await loadModule();
+
+    expect(parsePersistedShipStationPhysicalShipmentId("shipstation_shipment:419095185"))
+      .toBe(419095185);
+    expect(parsePersistedShipStationPhysicalShipmentId("shipstation_combined:419095185:order:34"))
+      .toBe(419095185);
+    expect(parsePersistedShipStationPhysicalShipmentId("provider_physical:v1:shipstation:419095185"))
+      .toBe(419095185);
+    expect(parsePersistedShipStationPhysicalShipmentId("shopify_fulfillment:419095185")).toBeNull();
+    expect(parsePersistedShipStationPhysicalShipmentId("shipstation_shipment:not-a-number")).toBeNull();
+    expect(parsePersistedShipStationPhysicalShipmentId(null)).toBeNull();
+  });
+
+  it("resolves provider-order linkage only from an exact compatible physical match", async () => {
+    const {
+      decideShipStationPhysicalMatch,
+      decideShipStationProviderOrderLinkage,
+    } = await loadModule();
+    const physicalDecision = decideShipStationPhysicalMatch(
+      { tracking_number: "9400150106151146065720" },
+      [{
+        shipmentId: 419095185,
+        orderId: 715057545,
+        orderKey: "echelon-oms-3033",
+        trackingNumber: "9400150106151146065720",
+      }],
+    );
+
+    expect(decideShipStationProviderOrderLinkage({
+      external_fulfillment_id: "shipstation_shipment:419095185",
+      shipping_engine: null,
+      engine_order_ref: null,
+      engine_shipment_ref: null,
+      shipstation_order_id: null,
+      shipstation_order_key: null,
+    }, physicalDecision)).toMatchObject({
+      kind: "match",
+      providerOrderLinkage: {
+        shippingEngine: "shipstation",
+        engineOrderRef: "715057545",
+        engineShipmentRef: "echelon-oms-3033",
+        shipstationOrderId: 715057545,
+        shipstationOrderKey: "echelon-oms-3033",
+      },
+    });
+
+    expect(decideShipStationProviderOrderLinkage({
+      external_fulfillment_id: "shipstation_shipment:419095186",
+    }, physicalDecision)).toMatchObject({
+      kind: "identity_conflict",
+      reason: expect.stringContaining("does not match"),
+    });
+
+    expect(decideShipStationProviderOrderLinkage({
+      external_fulfillment_id: "shipstation_shipment:419095185",
+      engine_order_ref: "999",
+    }, physicalDecision)).toMatchObject({
+      kind: "identity_conflict",
+      reason: expect.stringContaining("engine_order_ref=999"),
+    });
+  });
+
+  it("rejects provider-order linkage when ShipStation omits required order identity", async () => {
+    const {
+      decideShipStationPhysicalMatch,
+      decideShipStationProviderOrderLinkage,
+    } = await loadModule();
+    const physicalDecision = decideShipStationPhysicalMatch(
+      { tracking_number: "TRACKING" },
+      [{ shipmentId: 10, orderId: 20, orderKey: null, trackingNumber: "TRACKING" }],
+    );
+
+    expect(decideShipStationProviderOrderLinkage({
+      external_fulfillment_id: "shipstation_shipment:10",
+    }, physicalDecision)).toMatchObject({
+      kind: "invalid_candidate",
+      reason: "matching ShipStation shipment has no orderKey",
+    });
+  });
+
+  it("never persists a dry-run decision", async () => {
+    const { decideShipStationPhysicalMatch, shouldPersistEnrichment } = await loadModule();
+    const match = decideShipStationPhysicalMatch(
+      { tracking_number: "TRACKING" },
+      [{ shipmentId: 10, trackingNumber: "TRACKING" }],
+    );
+    const noMatch = decideShipStationPhysicalMatch(
+      { tracking_number: "TRACKING" },
+      [],
+    );
+
+    expect(shouldPersistEnrichment("dry-run", match)).toBe(false);
+    expect(shouldPersistEnrichment("execute", match)).toBe(true);
+    expect(shouldPersistEnrichment("execute", noMatch)).toBe(false);
+  });
+
   it("queries real WMS shipment columns and casts enum status comparisons to text", async () => {
     const { buildCandidateSql } = await loadModule();
     const query = buildCandidateSql({
@@ -257,6 +363,24 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(query.params).toEqual(["#59453", 4313]);
   });
 
+  it("selects only missing provider-order linkage under the explicit linkage scope", async () => {
+    const { buildCandidateSql } = await loadModule();
+    const query = buildCandidateSql({
+      scope: "provider-order-linkage",
+      limit: null,
+      orderNumber: null,
+      wmsShipmentId: null,
+    });
+
+    expect(query.sql).toContain("s.external_fulfillment_id ~ '^shipstation_shipment:[0-9]+$'");
+    expect(query.sql).toContain("s.external_fulfillment_id ~ '^shipstation_combined:[0-9]+:order:[0-9]+$'");
+    expect(query.sql).toContain("s.external_fulfillment_id ~ '^provider_physical:v1:shipstation:[0-9]+$'");
+    expect(query.sql).toContain("OR s.shipstation_order_id IS NULL");
+    expect(query.sql).toContain("s.external_fulfillment_id,");
+    expect(query.sql).not.toContain("LIMIT 25");
+    expect(query.params).toEqual([]);
+  });
+
   it("clears stale not-found review flags when enrichment writes a physical id", async () => {
     const {
       applyExternalFulfillmentIdSql,
@@ -270,5 +394,33 @@ describe("enrich-shipstation-physical-shipment-ids", () => {
     expect(sql).toContain("WHEN review_reason = $5 THEN NULL");
     expect(sql).toContain("AND NULLIF(BTRIM(COALESCE(external_fulfillment_id, '')), '') IS NULL");
     expect(sql).not.toContain("requires_review = false,");
+  });
+
+  it("atomically guards every prior identity field when writing provider-order linkage", async () => {
+    const {
+      applyProviderOrderLinkageSql,
+      insertProviderOrderLinkageAuditSql,
+    } = await loadModule();
+    const sql = applyProviderOrderLinkageSql();
+    const auditSql = insertProviderOrderLinkageAuditSql();
+
+    expect(sql).toContain("SET shipping_engine = $1::varchar");
+    expect(sql).toContain("engine_order_ref = $2::varchar");
+    expect(sql).toContain("engine_shipment_ref = $3::varchar");
+    expect(sql).toContain("shipstation_order_id = $4::integer");
+    expect(sql).toContain("shipstation_order_key = $5::varchar");
+    expect(sql).toContain("external_fulfillment_id IS NOT DISTINCT FROM $8::varchar");
+    expect(sql).toContain("shipping_engine IS NOT DISTINCT FROM $9::varchar");
+    expect(sql).toContain("engine_order_ref IS NOT DISTINCT FROM $10::varchar");
+    expect(sql).toContain("engine_shipment_ref IS NOT DISTINCT FROM $11::varchar");
+    expect(sql).toContain("shipstation_order_id IS NOT DISTINCT FROM $12::integer");
+    expect(sql).toContain("shipstation_order_key IS NOT DISTINCT FROM $13::varchar");
+    expect(sql).not.toContain("SET external_fulfillment_id");
+    expect(sql).toContain("RETURNING");
+    expect(auditSql).toContain("INSERT INTO wms.oms_wms_authority_cleanup_audit");
+    expect(auditSql).toContain("'shipstation-provider-order-linkage'");
+    expect(auditSql).toContain("$3::jsonb");
+    expect(auditSql).toContain("$4::jsonb");
+    expect(auditSql).toContain("$5::text");
   });
 });
