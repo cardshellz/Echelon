@@ -1896,7 +1896,10 @@ export function createChannelFulfillmentAuthorityRepository(
               lease_expires_at = NULL,
               last_error_code = 'LEASE_EXPIRED',
               last_error = 'Previous worker lease expired before completion',
-              completed_at = CASE WHEN attempt_count >= max_attempts THEN ${input.now} ELSE NULL END,
+              completed_at = CASE
+                WHEN attempt_count >= max_attempts THEN ${input.now}::timestamptz
+                ELSE NULL::timestamptz
+              END,
               updated_at = ${input.now}
           WHERE id = ${Number(row.id)}
         `);
@@ -2094,7 +2097,10 @@ export function createChannelFulfillmentAuthorityRepository(
             lease_expires_at = NULL,
             last_error_code = ${input.errorCode ?? null},
             last_error = ${input.errorMessage?.slice(0, 1_000) ?? null},
-            completed_at = CASE WHEN ${terminal} THEN ${input.completedAt} ELSE NULL END,
+            completed_at = CASE
+              WHEN ${terminal}::boolean THEN ${input.completedAt}::timestamptz
+              ELSE NULL::timestamptz
+            END,
             updated_at = ${input.completedAt}
         WHERE id = ${input.commandId}
       `);

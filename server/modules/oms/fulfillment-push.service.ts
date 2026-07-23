@@ -17,6 +17,10 @@
 import { eq, sql } from "drizzle-orm";
 import { omsOrders, omsOrderLines, omsOrderEvents, channels } from "@shared/schema";
 import { incr } from "../../instrumentation/metrics";
+import {
+  sqlBigintArray,
+  sqlTextArray,
+} from "../../infrastructure/postgres-array";
 import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
 import type { EbayShippingFulfillmentRequest } from "../channels/adapters/ebay/ebay-types";
 import type {
@@ -1416,8 +1420,8 @@ export function createFulfillmentPushService(
       FROM wms.outbound_shipment_items shipment_item
       JOIN wms.order_items order_item ON order_item.id = shipment_item.order_item_id
       JOIN oms.oms_order_lines order_line ON order_line.id = order_item.oms_order_line_id
-      WHERE shipment_item.id = ANY(${shipmentItemIds}::bigint[])
-        AND shipment_item.shipment_id = ANY(${command.legacyWmsShipmentIds}::bigint[])
+      WHERE shipment_item.id = ANY(${sqlBigintArray(shipmentItemIds)})
+        AND shipment_item.shipment_id = ANY(${sqlBigintArray(command.legacyWmsShipmentIds)})
         AND COALESCE(order_item.status, 'pending') <> 'cancelled'
       ORDER BY shipment_item.id
     `);
@@ -1619,7 +1623,7 @@ export function createFulfillmentPushService(
     const idempotencyResult: any = await db.execute(sql`
       SELECT id, shopify_fulfillment_id
       FROM wms.outbound_shipments
-      WHERE id = ANY(${legacyWmsShipmentIds}::bigint[])
+      WHERE id = ANY(${sqlBigintArray(legacyWmsShipmentIds)})
       ORDER BY id
     `);
     const existingFulfillmentIds: string[] = [...new Set<string>(
@@ -1860,8 +1864,10 @@ export function createFulfillmentPushService(
           FROM wms.outbound_shipment_items si
           JOIN wms.order_items oi ON oi.id = si.order_item_id
           JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
-          WHERE si.id = ANY(${command.items.map((item) => item.legacyWmsShipmentItemId)}::bigint[])
-            AND si.shipment_id = ANY(${command.legacyWmsShipmentIds}::bigint[])
+          WHERE si.id = ANY(${sqlBigintArray(
+            command.items.map((item) => item.legacyWmsShipmentItemId),
+          )})
+            AND si.shipment_id = ANY(${sqlBigintArray(command.legacyWmsShipmentIds)})
             AND COALESCE(oi.status, 'pending') <> 'cancelled'
           ORDER BY si.id
         `)
@@ -1963,7 +1969,7 @@ export function createFulfillmentPushService(
           UPDATE wms.outbound_shipments
              SET shopify_fulfillment_id = ${providerPackageState.fulfillmentId},
                  updated_at = NOW()
-           WHERE id = ANY(${command.legacyWmsShipmentIds}::bigint[])
+           WHERE id = ANY(${sqlBigintArray(command.legacyWmsShipmentIds)})
              AND (shopify_fulfillment_id IS NULL OR shopify_fulfillment_id = '')
         `);
         await recordShopifyWritebackEvidence({
@@ -2331,7 +2337,7 @@ export function createFulfillmentPushService(
       UPDATE wms.outbound_shipments
          SET shopify_fulfillment_id = ${fulfillmentGid},
              updated_at = NOW()
-       WHERE id = ANY(${legacyWmsShipmentIds}::bigint[])
+       WHERE id = ANY(${sqlBigintArray(legacyWmsShipmentIds)})
          AND (shopify_fulfillment_id IS NULL OR shopify_fulfillment_id = '')
     `);
 
@@ -3289,7 +3295,7 @@ export function createFulfillmentPushService(
       UPDATE wms.outbound_shipments
       SET shopify_fulfillment_id = NULL, updated_at = NOW()
       WHERE id = ${shipmentId}
-        AND shopify_fulfillment_id = ANY(${deadFulfillmentIds}::text[])
+        AND shopify_fulfillment_id = ANY(${sqlTextArray(deadFulfillmentIds)})
     `);
 
     const created = await pushShopifyFulfillment(shipmentId);
