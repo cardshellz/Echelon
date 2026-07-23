@@ -2070,7 +2070,7 @@ export function createChannelFulfillmentIngressRepository(
       )
       VALUES (
         'channel_fulfillment_ingress',
-        'data_conflict',
+        'manual_review',
         ${input.rule},
         'open',
         'review',
@@ -2087,7 +2087,9 @@ export function createChannelFulfillmentIngressRepository(
         NOW(),
         NOW()
       )
-      ON CONFLICT (idempotency_key) DO UPDATE
+      ON CONFLICT (idempotency_key)
+        WHERE status IN ('open', 'acknowledged')
+      DO UPDATE
       SET last_seen_at = NOW(),
           occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
           summary = EXCLUDED.summary,
