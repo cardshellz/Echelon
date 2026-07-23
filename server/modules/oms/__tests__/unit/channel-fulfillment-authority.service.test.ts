@@ -65,6 +65,28 @@ describe("channel fulfillment authority service", () => {
     expect(repositorySource).not.toContain("wms_order.oms_fulfillment_order_id::bigint");
   });
 
+  it("locks fulfillment plan lines before aggregating shipped quantity", () => {
+    const repositorySource = readFileSync(
+      resolve(__dirname, "../../channel-fulfillment-authority.repository.ts"),
+      "utf8",
+    );
+    const recalculateSource = repositorySource.match(
+      /async function recalculatePlanLine[\s\S]*?(?=\nasync function findLineWritebackEligibility)/,
+    )?.[0];
+
+    expect(recalculateSource).toBeDefined();
+    expect(recalculateSource).toMatch(
+      /FROM wms\.fulfillment_plan_lines AS line[\s\S]*FOR UPDATE OF line/,
+    );
+    expect(recalculateSource).toMatch(
+      /SUM\(item\.quantity_shipped\)[\s\S]*FROM wms\.physical_shipment_items AS item/,
+    );
+    expect(recalculateSource).not.toMatch(/GROUP BY[\s\S]*FOR UPDATE/);
+    expect(repositorySource).toContain(
+      ")].sort((left, right) => left - right);",
+    );
+  });
+
   it("completes a leased command only after its provider succeeds", async () => {
     const repository = repositoryMock([command()]);
     const providerExecutor = {
