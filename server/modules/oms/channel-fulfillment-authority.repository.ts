@@ -1179,24 +1179,18 @@ async function materializeNonCustomerItems(
 }
 
 async function recalculatePlanLine(tx: any, fulfillmentPlanLineId: number): Promise<void> {
-  const row = firstRow<{
+  const line = firstRow<{
     quantity_planned: number;
     quantity_cancelled: number;
-    calculated_quantity_shipped: number;
   }>(await tx.execute(sql`
     SELECT
       line.quantity_planned,
-      line.quantity_cancelled,
-      COALESCE(SUM(item.quantity_shipped), 0)::int AS calculated_quantity_shipped
+      line.quantity_cancelled
     FROM wms.fulfillment_plan_lines AS line
-    LEFT JOIN wms.physical_shipment_items AS item
-      ON item.fulfillment_plan_line_id = line.id
-     AND item.shipment_item_purpose = 'customer_fulfillment'
     WHERE line.id = ${fulfillmentPlanLineId}
-    GROUP BY line.id, line.quantity_planned, line.quantity_cancelled
     FOR UPDATE OF line
   `));
-  if (!row) {
+  if (!line) {
     throw new FulfillmentAuthorityError(
       "CANONICAL_STATE_CONFLICT",
       `Failed to recalculate fulfillment plan line ${fulfillmentPlanLineId}`,
@@ -1204,9 +1198,16 @@ async function recalculatePlanLine(tx: any, fulfillmentPlanLineId: number): Prom
     );
   }
 
-  const quantityPlanned = Number(row.quantity_planned);
-  const quantityCancelled = Number(row.quantity_cancelled);
-  const quantityShipped = Number(row.calculated_quantity_shipped);
+  const aggregate = firstRow<{ calculated_quantity_shipped: number }>(await tx.execute(sql`
+    SELECT COALESCE(SUM(item.quantity_shipped), 0)::int AS calculated_quantity_shipped
+    FROM wms.physical_shipment_items AS item
+    WHERE item.fulfillment_plan_line_id = ${fulfillmentPlanLineId}
+      AND item.shipment_item_purpose = 'customer_fulfillment'
+  `));
+
+  const quantityPlanned = Number(line.quantity_planned);
+  const quantityCancelled = Number(line.quantity_cancelled);
+  const quantityShipped = Number(aggregate?.calculated_quantity_shipped ?? 0);
   if (
     !Number.isInteger(quantityShipped)
     || quantityShipped < 0
@@ -1738,7 +1739,10 @@ export function createChannelFulfillmentAuthorityRepository(
         physicalShipmentId,
       );
 
-      for (const planLineId of new Set(materializedCustomerItems.map((item) => item.fulfillmentPlanLineId))) {
+      const planLineIds = [...new Set(
+        materializedCustomerItems.map((item) => item.fulfillmentPlanLineId),
+      )].sort((left, right) => left - right);
+      for (const planLineId of planLineIds) {
         await recalculatePlanLine(tx, planLineId);
       }
 
