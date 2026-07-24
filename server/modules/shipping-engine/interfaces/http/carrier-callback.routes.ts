@@ -8,6 +8,9 @@
  *     (constant-time compare) — with no env var the endpoint does not exist.
  *   - SHOPIFY_CHECKOUT_RATE_MODE defaults to off. Test mode requires every
  *     cart SKU to match SHOPIFY_CHECKOUT_RATE_TEST_SKUS before quoting.
+ *   - SHOPIFY_CHECKOUT_CHANNEL_ID explicitly binds this callback to one
+ *     canonical channel policy. Unset preserves the legacy ownership profile;
+ *     invalid explicit bindings fail empty.
  *   - Quotes require an ACTIVE shipping.service_level and matching ACTIVE
  *     local rate table. Provider-method routing is a later capability and is
  *     not consulted by checkout quoting in the initial rollout.
@@ -37,6 +40,10 @@ import {
 import { db } from "../../../../db";
 import { deliveryWindow, type DeliveryWindow } from "../../domain/eta";
 import type { RateQuoteLine, RateQuoteResult } from "../../application/rate-quote.service";
+import {
+  resolveRuntimeChannelShipping,
+  type RuntimeChannelShippingResolution,
+} from "../../application/channel-shipping-policy-runtime.service";
 import { quoteShipment } from "../../application/shipment-quote.service";
 import { localRateTableShippingRateProvider } from "../../application/shipping-rate-provider";
 import { resolveShipmentLineWeights } from "../../application/shipment-weight.service";
@@ -48,12 +55,18 @@ import {
   type CheckoutRateRolloutPolicy,
 } from "../../domain/checkout-rate-rollout-policy";
 import { resolveShopifyCheckoutRateOwnership } from "../../domain/destination-rate-ownership";
+import type {
+  LegacyChannelShippingFallback,
+} from "../../domain/channel-shipping-policy";
 import { normalizeUsPostalRegion } from "../../domain/us-geography";
 import {
   loadCatalogShippingFactsBySku,
   loadCatalogWeightsBySku,
   type CatalogShippingFact,
 } from "../../infrastructure/catalog-weight.repository";
+import {
+  PostgresChannelShippingPolicyRuntimeStore,
+} from "../../infrastructure/channel-shipping-policy-runtime.repository";
 
 /** Respond by this deadline even if the quote pipeline is still running. */
 const RESPONSE_DEADLINE_MS = 2000;
@@ -179,6 +192,8 @@ function callbackRateRolloutPolicy(): CheckoutRateRolloutPolicy {
 export type CheckoutRateDisposition =
   | "invalid_request"
   | "shopify_managed_destination"
+  | "channel_policy_disabled"
+  | "channel_policy_unavailable"
   | "rollout_disabled"
   | "rollout_test_bypassed"
   | "echelon_quote_unavailable"
@@ -257,6 +272,7 @@ export interface PersistCheckoutSnapshotInput {
   warnings: string[];
   disposition: CheckoutRateDisposition;
   rolloutDecision: CheckoutRateRolloutDecision | null;
+  channelRouting: RuntimeChannelShippingResolution | null;
 }
 
 export interface CheckoutRateDependencies {
@@ -264,9 +280,32 @@ export interface CheckoutRateDependencies {
   rolloutPolicy: () => CheckoutRateRolloutPolicy;
   loadCatalogWeightsBySku: typeof loadCatalogWeightsBySku;
   loadCatalogShippingFactsBySku?: typeof loadCatalogShippingFactsBySku;
+  resolveChannelShipping: typeof resolveShopifyCheckoutChannelShipping;
   quoteShipment: typeof quoteShipment;
   loadDeliveryEstimates: typeof loadDeliveryEstimates;
   persistSnapshot: typeof persistCheckoutSnapshot;
+}
+
+const channelShippingPolicyStore =
+  new PostgresChannelShippingPolicyRuntimeStore();
+
+async function resolveShopifyCheckoutChannelShipping(input: {
+  originWarehouseId: number;
+  destination: {
+    country: string;
+    region: string | null;
+    postalCode: string;
+  };
+  legacyFallback: LegacyChannelShippingFallback;
+}): Promise<RuntimeChannelShippingResolution> {
+  return resolveRuntimeChannelShipping(channelShippingPolicyStore, {
+    provider: "shopify",
+    configuredChannelId: process.env.SHOPIFY_CHECKOUT_CHANNEL_ID,
+    purpose: "customer_checkout",
+    originWarehouseId: input.originWarehouseId,
+    destination: input.destination,
+    legacyFallback: input.legacyFallback,
+  });
 }
 
 const DEFAULT_CHECKOUT_RATE_DEPENDENCIES: CheckoutRateDependencies = {
@@ -274,6 +313,7 @@ const DEFAULT_CHECKOUT_RATE_DEPENDENCIES: CheckoutRateDependencies = {
   rolloutPolicy: callbackRateRolloutPolicy,
   loadCatalogWeightsBySku,
   loadCatalogShippingFactsBySku,
+  resolveChannelShipping: resolveShopifyCheckoutChannelShipping,
   quoteShipment,
   loadDeliveryEstimates,
   persistSnapshot: persistCheckoutSnapshot,
@@ -290,6 +330,7 @@ export async function computeCheckoutRates(
       body, request: null, parcelPlan: null, rates: null,
       shopifyRates: [], warnings: [parsed.error], disposition: "invalid_request",
       rolloutDecision: null,
+      channelRouting: null,
     });
     return [];
   }
@@ -308,15 +349,94 @@ export async function computeCheckoutRates(
       warnings: [ownership.message],
       disposition: "invalid_request",
       rolloutDecision: null,
+      channelRouting: null,
     });
     return [];
   }
-  if (ownership.owner === "shopify") {
-    const warning = `${ownership.countryCode} checkout rates are managed by Shopify; Echelon did not quote this destination.`;
+
+  let originWarehouseId: number;
+  let channelRouting: RuntimeChannelShippingResolution;
+  try {
+    originWarehouseId = dependencies.originWarehouseId();
+    const legacyFallback: LegacyChannelShippingFallback =
+      ownership.owner === "shopify"
+        ? {
+            purpose: "customer_checkout",
+            mode: "channel_managed",
+            eligibilityMode: "channel",
+            rateContext: null,
+          }
+        : {
+            purpose: "customer_checkout",
+            mode: "engine_quoted",
+            eligibilityMode: "engine",
+            rateContext: {
+              pricingChannel: "shopify",
+              purpose: "customer_checkout",
+            },
+          };
+    channelRouting = await dependencies.resolveChannelShipping({
+      originWarehouseId,
+      destination: {
+        country: request.destCountry,
+        region: request.destRegion,
+        postalCode: request.destPostal,
+      },
+      legacyFallback,
+    });
+  } catch (error) {
+    const warning =
+      `channel shipping policy lookup failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    console.error("[CarrierCallback] channel policy lookup failed:", error);
+    await dependencies.persistSnapshot({
+      body,
+      request,
+      parcelPlan: null,
+      rates: null,
+      shopifyRates: [],
+      warnings: [warning],
+      disposition: "channel_policy_unavailable",
+      rolloutDecision: null,
+      channelRouting: null,
+    });
+    return [];
+  }
+  if (!channelRouting.ok) {
+    console.error(JSON.stringify({
+      code: "SHIPPING_CHECKOUT_CHANNEL_POLICY_UNAVAILABLE",
+      reasonCode: channelRouting.code,
+      message: channelRouting.message,
+      channelId: channelRouting.channel?.id ?? null,
+      destinationCountry: request.destCountry,
+    }));
+    await dependencies.persistSnapshot({
+      body,
+      request,
+      parcelPlan: null,
+      rates: null,
+      shopifyRates: [],
+      warnings: [channelRouting.message],
+      disposition: "channel_policy_unavailable",
+      rolloutDecision: null,
+      channelRouting,
+    });
+    return [];
+  }
+
+  const shippingDecision = channelRouting.decision;
+  if (shippingDecision.mode === "channel_managed") {
+    const warning =
+      `${ownership.countryCode} checkout rates are managed by Shopify; `
+      + "Echelon did not quote this destination.";
     console.info(JSON.stringify({
       code: "SHIPPING_CHECKOUT_DESTINATION_DELEGATED",
       destinationCountry: ownership.countryCode,
-      rateOwner: ownership.owner,
+      rateOwner: "shopify",
+      decisionSource: shippingDecision.source,
+      policyId: shippingDecision.policyId,
+      routeId: shippingDecision.routeId,
     }));
     await dependencies.persistSnapshot({
       body,
@@ -327,6 +447,57 @@ export async function computeCheckoutRates(
       warnings: [warning],
       disposition: "shopify_managed_destination",
       rolloutDecision: null,
+      channelRouting,
+    });
+    return [];
+  }
+  if (shippingDecision.mode === "disabled") {
+    const warning =
+      `shipping policy route ${shippingDecision.routeId} disables checkout `
+      + `shipping to ${request.destCountry}`;
+    console.info(JSON.stringify({
+      code: "SHIPPING_CHECKOUT_DESTINATION_DISABLED",
+      channelId: channelRouting.channel?.id ?? null,
+      policyId: shippingDecision.policyId,
+      routeId: shippingDecision.routeId,
+      destinationCountry: request.destCountry,
+    }));
+    await dependencies.persistSnapshot({
+      body,
+      request,
+      parcelPlan: null,
+      rates: null,
+      shopifyRates: [],
+      warnings: [warning],
+      disposition: "channel_policy_disabled",
+      rolloutDecision: null,
+      channelRouting,
+    });
+    return [];
+  }
+  if (
+    shippingDecision.source === "channel_policy"
+    && shippingDecision.rateBookId === null
+  ) {
+    const warning =
+      `active engine-quoted route ${shippingDecision.routeId} has no pricing program`;
+    console.error(JSON.stringify({
+      code: "SHIPPING_CHECKOUT_CHANNEL_POLICY_INVALID",
+      channelId: channelRouting.channel?.id ?? null,
+      policyId: shippingDecision.policyId,
+      routeId: shippingDecision.routeId,
+      message: warning,
+    }));
+    await dependencies.persistSnapshot({
+      body,
+      request,
+      parcelPlan: null,
+      rates: null,
+      shopifyRates: [],
+      warnings: [warning],
+      disposition: "channel_policy_unavailable",
+      rolloutDecision: null,
+      channelRouting,
     });
     return [];
   }
@@ -356,12 +527,12 @@ export async function computeCheckoutRates(
         ? "rollout_test_bypassed"
         : "rollout_disabled",
       rolloutDecision,
+      channelRouting,
     });
     return [];
   }
 
   try {
-    const originWarehouseId = dependencies.originWarehouseId();
     let catalogWeightBySku = new Map<string, number | null>();
     let catalogFactsBySku = new Map<string, CatalogShippingFact>();
     try {
@@ -398,6 +569,9 @@ export async function computeCheckoutRates(
     );
     const shipmentQuote = await dependencies.quoteShipment({
       channel: "shopify",
+      rateBookId: shippingDecision.source === "channel_policy"
+        ? shippingDecision.rateBookId ?? undefined
+        : undefined,
       originWarehouseId,
       destination: {
         country: request.destCountry,
@@ -415,6 +589,7 @@ export async function computeCheckoutRates(
         body, request, parcelPlan: null, rates: null,
         shopifyRates: [], warnings, disposition: "echelon_quote_unavailable",
         rolloutDecision,
+        channelRouting,
       });
       return [];
     }
@@ -443,6 +618,7 @@ export async function computeCheckoutRates(
       rates,
       shopifyRates, warnings, disposition: "echelon_quoted",
       rolloutDecision,
+      channelRouting,
     });
     return shopifyRates;
   } catch (error) {
@@ -457,6 +633,7 @@ export async function computeCheckoutRates(
       warnings,
       disposition: "echelon_quote_unavailable",
       rolloutDecision,
+      channelRouting,
     });
     return [];
   }
@@ -530,6 +707,7 @@ async function persistCheckoutSnapshot(input: PersistCheckoutSnapshotInput): Pro
       metadata: {
         disposition: input.disposition,
         rolloutDecision: input.rolloutDecision,
+        channelRouting: input.channelRouting,
         shopifyRates: input.shopifyRates,
         ratesReturned: input.shopifyRates.length,
         warnings: input.warnings,

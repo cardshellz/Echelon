@@ -84,6 +84,17 @@ Reusable `shipping.destination_scopes` contain country, region, and postal-prefi
 
 During the compatibility expansion, the new tables are empty and existing `shipping-channel.ts` behavior remains authoritative. Legacy fallback is permitted only when no active canonical policy exists. Once a policy is active, missing or ambiguous routes fail closed instead of escaping to legacy behavior. New channels have no legacy fallback and therefore remain disabled until explicitly configured.
 
+The Shopify CarrierService callback binds to a canonical channel only through
+`SHOPIFY_CHECKOUT_CHANNEL_ID`. An unset binding deliberately preserves the
+legacy US-engine/non-US-Shopify split without inferring a channel from provider
+name or store connection. A configured binding must identify an active Shopify
+channel; missing, inactive, or provider-mismatched bindings fail empty. The
+callback loads that channel's active `customer_checkout` policy, passes an
+`engine_quoted` route's exact `rate_book_id` to the shared quote service, and
+returns no Echelon rate for `channel_managed` or `disabled`. Checkout snapshots
+record the channel, policy version, route, authority mode, pricing program, and
+failure code. No policy or channel binding is seeded by migration.
+
 ### Product-aware pricing policies
 
 Destination pricing remains the required default. Product policies are explicit exceptions or restrictions attached to one draft `shipping.rate_tables` revision; they never replace destination coverage and they do not create a second rate-book resolver.
@@ -140,6 +151,15 @@ Implementation status on 2026-07-24:
 - Steps 1 and 2 are merged. Canonical policies remain configuration and shadow-comparison state only.
 - Step 3 was re-verified against Shellz Club's channel-ID policy projections and focused benefit tests; Shellz Club does not select Echelon pricing programs or adapters.
 - Step 4 declares immutable adapter capabilities in code. An engine-quoted route requires engine-quote support, a channel-managed route requires channel-rate support, and channel/intersection eligibility requires channel destination enforcement. A channel-managed route also requires destination enforcement because Echelon is not in that checkout request. Unknown providers may activate only an explicit `disabled` route. These checks do not cut over quote traffic.
+- Step 5 runtime wiring is implemented but dormant by default. With no
+  `SHOPIFY_CHECKOUT_CHANNEL_ID`, the callback records and uses the legacy
+  ownership decision. With an explicit active Shopify channel binding, an
+  active canonical policy controls the route and exact rate book; invalid
+  active policy state fails empty and never escapes to legacy. The existing
+  `SHOPIFY_CHECKOUT_RATE_MODE=off|test|live` gate still controls every
+  `engine_quoted` response. No policy activation, Heroku config change,
+  CarrierService assignment, or delivery-group benefit cutover is part of the
+  runtime-wiring PR.
 
 Initial capability declarations:
 

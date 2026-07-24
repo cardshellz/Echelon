@@ -14,6 +14,8 @@ import type { ShippingRateProvider } from "./shipping-rate-provider";
 
 export interface ShipmentQuoteRequest {
   channel: ShippingSalesChannel;
+  /** Exact pricing program selected by an active canonical channel policy. */
+  rateBookId?: number;
   originWarehouseId: number;
   destination: {
     country: string;
@@ -71,6 +73,7 @@ export async function quoteShipment(
       pricingChannel: request.channel,
       purpose: profile.ratePurpose,
     },
+    rateBookId: request.rateBookId,
     originWarehouseId: request.originWarehouseId,
     destination: request.destination,
     parcels: parcelResult.plan.parcels,

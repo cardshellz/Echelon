@@ -133,7 +133,15 @@ Each step is independently reversible; only allowlisted test carts can receive E
 4. **NEXT — Verify active US rates:** activate one reviewed rate-table revision, open its Pricing Program detail, and use `Test live US rates` with representative warehouses, states, ZIPs, and weights. This calls the production assignment selector and active tables, persists a `manual` quote snapshot, and reports if a different program owns the route. Drafts are never included.
 5. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
 6. **Controlled Shopify checkout validation:**
-   - Set Heroku config `SHIPPING_CALLBACK_TOKEN` (random secret), `SHOPIFY_CHECKOUT_RATE_MODE=off`, and, if origin ≠ warehouse 1, `SHIPPING_CALLBACK_ORIGIN_WAREHOUSE_ID`.
+   - Set Heroku config `SHIPPING_CALLBACK_TOKEN` (random secret),
+     `SHOPIFY_CHECKOUT_RATE_MODE=off`, and, if origin != warehouse 1,
+     `SHIPPING_CALLBACK_ORIGIN_WAREHOUSE_ID`.
+   - Before canonical-policy testing, verify the intended Card Shellz Shopify
+     row in `channels.channels`, then set its numeric ID as
+     `SHOPIFY_CHECKOUT_CHANNEL_ID`. Do not infer this from provider name or a
+     vendor store connection. With the binding unset, checkout keeps the legacy
+     US-engine/non-US-Shopify ownership split. A bad explicit binding fails
+     empty.
    - Deploy the callback, then register the CarrierService in Shopify pointing at `POST /api/shipping/rates-callback/<token>`. Re-audit delivery-zone assignments immediately; `off` must return no Echelon rates even if Shopify attaches the service unexpectedly.
    - Create an isolated Shopify test shipping profile with hidden test variants and US-only zones. Attach Echelon only to that profile; leave Parcelify and the two production profiles unchanged.
    - Set exact test variant SKUs in `SHOPIFY_CHECKOUT_RATE_TEST_SKUS`, then change `SHOPIFY_CHECKOUT_RATE_MODE=test`. Every cart line must be allowlisted or Echelon returns no rates.
@@ -152,6 +160,13 @@ Each step is independently reversible; only allowlisted test carts can receive E
 
 - **Fail-empty, never fail-wrong:** the callback returns `{rates: []}` on any parse/zone/band/timeout failure. An empty response blocks checkout for that address rather than mispricing it. Keep that property.
 - **Fail-closed rollout:** `SHOPIFY_CHECKOUT_RATE_MODE` accepts only `off`, `test`, or `live` and defaults to `off`; an invalid value also resolves to `off`. Test mode quotes only when every cart line has an exact SKU in `SHOPIFY_CHECKOUT_RATE_TEST_SKUS`. Bypassed requests never run weight lookup or rating and record their rollout reason in the checkout snapshot.
+- **Explicit channel-policy binding:** `SHOPIFY_CHECKOUT_CHANNEL_ID` is the
+  only bridge from this callback credential to `channels.channels.id`. When
+  bound, the active `customer_checkout` policy selects the authority and exact
+  rate book. `channel_managed` and `disabled` routes return no Echelon rates;
+  invalid active policy configuration fails empty; legacy fallback is used
+  only when there is no active policy. Deployment alone does not activate or
+  bind a policy.
 - **One destination owner:** Echelon owns `US` Shopify checkout rates. Every valid non-US country is delegated to Shopify/Global-e by wildcard; it does not need an Echelon country row. The Echelon CarrierService must be attached only to US delivery zones. A non-US callback is defense-in-depth: it bypasses all Echelon weight/rating work, returns no competing rate, and snapshots disposition `shopify_managed_destination`.
 - **Completed Shopify orders are authoritative:** order intake preserves Shopify's destination country, currency, and shipping charge. It must not reject or re-rate an international order because Echelon lacks a local country configuration.
 - **Sale over perfect weight data:** every positive physical-line weight contributes `unitWeight × quantity`; SKU-less lines are retained. Missing weights contribute zero, produce snapshot warnings, and never block checkout by themselves. An all-missing cart uses a 1g rate-band floor.
