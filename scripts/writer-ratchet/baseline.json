@@ -696,6 +696,9 @@
   "wms.carrier_tracking_subscription_labels": [
     "modules/shipping"
   ],
+  "wms.carrier_tracking_subscription_requeues": [
+    "modules/shipping"
+  ],
   "wms.carrier_tracking_subscriptions": [
     "modules/shipping"
   ],

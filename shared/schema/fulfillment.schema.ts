@@ -428,6 +428,27 @@ export const carrierTrackingSubscriptionAttempts = wmsSchema.table("carrier_trac
     .on(table.carrierTrackingSubscriptionId, table.attemptNumber),
 ]);
 
+export const carrierTrackingSubscriptionRequeues = wmsSchema.table("carrier_tracking_subscription_requeues", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  carrierTrackingSubscriptionId: bigint("carrier_tracking_subscription_id", { mode: "number" }).notNull().references(() => carrierTrackingSubscriptions.id, { onDelete: "restrict" }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  operator: varchar("operator", { length: 200 }).notNull(),
+  reason: text("reason").notNull(),
+  previousStatus: varchar("previous_status", { length: 30 }).notNull(),
+  previousAttemptCount: integer("previous_attempt_count").notNull(),
+  previousConsecutiveFailureCount: integer("previous_consecutive_failure_count").notNull(),
+  previousErrorCode: varchar("previous_error_code", { length: 100 }),
+  previousErrorMessage: text("previous_error_message"),
+  previousHttpStatus: integer("previous_http_status"),
+  previousResponseEvidence: jsonb("previous_response_evidence").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_carrier_tracking_subscription_requeues_idempotency")
+    .on(table.carrierTrackingSubscriptionId, table.idempotencyKey),
+  index("idx_carrier_tracking_subscription_requeues_subscription")
+    .on(table.carrierTrackingSubscriptionId, table.createdAt, table.id),
+]);
+
 export const carrierTrackingEvents = wmsSchema.table("carrier_tracking_events", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   provider: varchar("provider", { length: 40 }).notNull(),

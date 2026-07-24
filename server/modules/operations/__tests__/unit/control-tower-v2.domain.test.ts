@@ -280,6 +280,8 @@ describe("Control Tower V2 domain", () => {
     expect(queryText).toContain("wms.carrier_tracking_webhook_hydrations");
     expect(queryText).toContain("wms.carrier_tracking_subscriptions");
     expect(queryText).toContain("wms.carrier_tracking_subscription_labels");
+    expect(queryText).toContain("wms.carrier_tracking_subscription_attempts");
+    expect(queryText).toContain("subscription_response_evidence");
     expect(queryText).toContain("wms.carrier_dispatch_commands");
     expect(queryText).toContain("carrier_tracking_carrier_missing");
     expect(queryText).toContain("carrier_tracking_subscription_not_active");
@@ -370,6 +372,13 @@ describe("Control Tower V2 domain", () => {
       dispatch_evidence: null,
       match_status: "review",
       reason_code: "SHIPSTATION_TRACKING_HTTP",
+      subscription_carrier_code: "stamps_com",
+      subscription_http_status: 400,
+      subscription_last_error_message: "ShipStation tracking subscription returned HTTP 400",
+      subscription_response_evidence: {
+        status: 400,
+        responseBody: "Invalid carrier_code",
+      },
       first_seen_at: "2026-07-20T11:00:00.000Z",
       last_seen_at: "2026-07-20T11:05:00.000Z",
     }, new Date("2026-07-20T12:00:00.000Z"));
@@ -383,6 +392,15 @@ describe("Control Tower V2 domain", () => {
     });
     expect(item.actualState).toContain("match review");
     expect(item.actualState).toContain("SHIPSTATION_TRACKING_HTTP");
+    expect(item.actualState).toContain("provider HTTP 400");
+    expect(item.evidenceSummary).toMatchObject({
+      subscriptionCarrierCode: "stamps_com",
+      subscriptionHttpStatus: 400,
+      subscriptionLastErrorMessage: "ShipStation tracking subscription returned HTTP 400",
+      subscriptionResponseEvidence: {
+        responseBody: "Invalid carrier_code",
+      },
+    });
   });
 
   it("projects a failed carrier dispatch command as an order-linked blocker", () => {
