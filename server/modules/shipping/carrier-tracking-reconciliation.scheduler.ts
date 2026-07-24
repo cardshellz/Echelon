@@ -37,6 +37,7 @@ export function startCarrierTrackingReconciliationScheduler(
           || result.subscriptionsClaimed > 0
           || result.labelsScanned > 0
           || result.scanned > 0
+          || result.dispatchCommandsClaimed > 0
           || result.errors > 0) {
         logger.info({
           code: "CARRIER_TRACKING_RECONCILIATION_COMPLETED",
@@ -59,6 +60,11 @@ export function startCarrierTrackingReconciliationScheduler(
             scanned: result.scanned,
             matched: result.matched,
             unresolved: result.unresolved,
+            dispatchCommandsClaimed: result.dispatchCommandsClaimed,
+            dispatchCommandsSucceeded: result.dispatchCommandsSucceeded,
+            dispatchCommandsRetryScheduled: result.dispatchCommandsRetryScheduled,
+            dispatchCommandsReviewRequired: result.dispatchCommandsReviewRequired,
+            dispatchAuthorityConfigured: result.dispatchAuthorityConfigured,
             errors: result.errors,
           },
         });

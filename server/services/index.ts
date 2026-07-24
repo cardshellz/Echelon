@@ -75,6 +75,10 @@ import {
   makeCarrierTrackingLogger,
   systemCarrierTrackingClock,
 } from "../modules/shipping/carrier-tracking.service";
+import {
+  CarrierDispatchAuthorityError,
+  type CarrierDispatchAuthority,
+} from "../modules/shipping/carrier-dispatch-authority";
 import { createShipStationTrackingSubscriptionsClient } from "../modules/shipping/shipstation-tracking-subscriptions.client";
 import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-events.client";
 import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-physical-recovery.client";
@@ -293,17 +297,39 @@ export function createServices(db: any) {
 
   // ShipStation — order push + webhook integration
   const carrierTrackingLogger = makeCarrierTrackingLogger();
+  let providerDispatchAuthority: CarrierDispatchAuthority | null = null;
+  const dispatchAuthorityProxy: CarrierDispatchAuthority = {
+    async confirmDispatch(input) {
+      if (!providerDispatchAuthority) {
+        throw new CarrierDispatchAuthorityError(
+          "CARRIER_DISPATCH_AUTHORITY_UNAVAILABLE",
+          "Shipping-provider dispatch authority is not initialized",
+          {
+            retryable: true,
+            context: {
+              provider: input.provider,
+              providerLabelId: input.providerLabelId,
+              commandId: input.commandId,
+            },
+          },
+        );
+      }
+      return providerDispatchAuthority.confirmDispatch(input);
+    },
+  };
   const carrierTracking = new CarrierTrackingService({
     repository: createDrizzleCarrierTrackingRepository(db),
     clock: systemCarrierTrackingClock,
     logger: carrierTrackingLogger,
     subscriptionClient: createShipStationTrackingSubscriptionsClient(),
     trackingEventsClient: createShipStationTrackingEventsClient(),
+    dispatchAuthority: dispatchAuthorityProxy,
   });
   const shipStation = createShipStationService(db, inventoryCore as any, {
     providerLabelObserver: carrierTracking,
     fulfillmentAuthority: channelFulfillmentAuthority,
   });
+  providerDispatchAuthority = shipStation;
   const shipStationPhysicalRecovery = createShipStationPhysicalRecoveryService(db, {
     client: createShipStationPhysicalRecoveryClient(),
   });

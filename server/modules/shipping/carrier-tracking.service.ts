@@ -14,9 +14,14 @@ import type {
   ClaimedCarrierTrackingWebhookHydration,
   ClaimedCarrierTrackingSubscription,
   ShippingProviderLabelLinkResult,
+  StoredCarrierDispatchAttempt,
   StoredCarrierTrackingEvent,
   StoredShippingProviderLabelObservation,
 } from "./carrier-tracking.repository";
+import {
+  CarrierDispatchAuthorityError,
+  type CarrierDispatchAuthority,
+} from "./carrier-dispatch-authority";
 import {
   isRetryableTrackingSubscriptionError,
   trackingSubscriptionErrorEvidence,
@@ -42,6 +47,11 @@ const SUBSCRIPTION_MAX_CONSECUTIVE_FAILURES = 8;
 const HYDRATION_RETRY_BASE_MS = 5 * 60 * 1_000;
 const HYDRATION_RETRY_MAX_MS = 6 * 60 * 60 * 1_000;
 const HYDRATION_MAX_CONSECUTIVE_FAILURES = 8;
+const DEFAULT_DISPATCH_BATCH_LIMIT = 25;
+const DISPATCH_BATCH_LEASE_MS = 10 * 60 * 1_000;
+const DISPATCH_RETRY_BASE_MS = 5 * 60 * 1_000;
+const DISPATCH_RETRY_MAX_MS = 6 * 60 * 60 * 1_000;
+const DISPATCH_MAX_CONSECUTIVE_FAILURES = 8;
 
 export interface CarrierTrackingClock {
   now(): Date;
@@ -74,6 +84,8 @@ export interface CarrierTrackingNormalizedIngestResult {
   candidateCount: number;
   shippingProviderLabelId: number | null;
   dispatchEvidence: CarrierDispatchEvidence;
+  dispatchCommandId: number | null;
+  dispatchCommandInserted: boolean;
 }
 
 export interface CarrierTrackingRejectedIngestResult {
@@ -111,6 +123,20 @@ export interface CarrierTrackingReconciliationResult {
   matched: number;
   unresolved: number;
   attemptsAppended: number;
+  dispatchCommandsClaimed: number;
+  dispatchCommandsSucceeded: number;
+  dispatchCommandsRetryScheduled: number;
+  dispatchCommandsReviewRequired: number;
+  dispatchAuthorityConfigured: boolean;
+  errors: number;
+}
+
+export interface CarrierDispatchSweepResult {
+  dispatchCommandsClaimed: number;
+  dispatchCommandsSucceeded: number;
+  dispatchCommandsRetryScheduled: number;
+  dispatchCommandsReviewRequired: number;
+  dispatchAuthorityConfigured: boolean;
   errors: number;
 }
 
@@ -150,6 +176,8 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       subscriptionLeaseOwner?: string;
       trackingEventsClient?: ShipStationTrackingEventsClient;
       hydrationLeaseOwner?: string;
+      dispatchAuthority?: CarrierDispatchAuthority;
+      dispatchLeaseOwner?: string;
     },
   ) {}
 
@@ -267,6 +295,8 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       candidateCount: 0,
       shippingProviderLabelId: null,
       dispatchEvidence: event.dispatchEvidence,
+      dispatchCommandId: null,
+      dispatchCommandInserted: false,
     };
     this.dependencies.logger.info({
       code: "CARRIER_TRACKING_WEBHOOK_INGESTED",
@@ -313,6 +343,11 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       matched: 0,
       unresolved: 0,
       attemptsAppended: 0,
+      dispatchCommandsClaimed: 0,
+      dispatchCommandsSucceeded: 0,
+      dispatchCommandsRetryScheduled: 0,
+      dispatchCommandsReviewRequired: 0,
+      dispatchAuthorityConfigured: Boolean(this.dependencies.dispatchAuthority),
       errors: hydrationSummary.errors + subscriptionSummary.errors,
     };
 
@@ -355,6 +390,174 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
             trackingSuffix: trackingSuffix(event.normalizedTrackingNumber),
             eventHashPrefix: event.eventHash.slice(0, 12),
             error: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+    }
+
+    const dispatchSummary = await this.dispatchConfirmedPackages(
+      Math.min(limit, DEFAULT_DISPATCH_BATCH_LIMIT),
+    );
+    summary.dispatchCommandsClaimed = dispatchSummary.dispatchCommandsClaimed;
+    summary.dispatchCommandsSucceeded = dispatchSummary.dispatchCommandsSucceeded;
+    summary.dispatchCommandsRetryScheduled =
+      dispatchSummary.dispatchCommandsRetryScheduled;
+    summary.dispatchCommandsReviewRequired =
+      dispatchSummary.dispatchCommandsReviewRequired;
+    summary.dispatchAuthorityConfigured =
+      dispatchSummary.dispatchAuthorityConfigured;
+    summary.errors += dispatchSummary.errors;
+
+    return summary;
+  }
+
+  async dispatchConfirmedPackages(
+    limit: number = DEFAULT_DISPATCH_BATCH_LIMIT,
+  ): Promise<CarrierDispatchSweepResult> {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+      throw new Error("Carrier-dispatch sweep limit must be an integer between 1 and 100");
+    }
+
+    const authority = this.dependencies.dispatchAuthority;
+    const summary: CarrierDispatchSweepResult = {
+      dispatchCommandsClaimed: 0,
+      dispatchCommandsSucceeded: 0,
+      dispatchCommandsRetryScheduled: 0,
+      dispatchCommandsReviewRequired: 0,
+      dispatchAuthorityConfigured: Boolean(authority),
+      errors: 0,
+    };
+    if (!authority) return summary;
+
+    const asOf = this.dependencies.clock.now();
+    const leaseOwner =
+      this.dependencies.dispatchLeaseOwner ?? defaultCarrierDispatchLeaseOwner();
+    const commands = await this.dependencies.repository.claimDispatchCommands(
+      limit,
+      asOf,
+      leaseOwner,
+      new Date(asOf.getTime() + DISPATCH_BATCH_LEASE_MS),
+    );
+    summary.dispatchCommandsClaimed = commands.length;
+
+    for (const command of commands) {
+      const requestEvidence = {
+        commandId: command.id,
+        shippingProviderLabelId: command.shippingProviderLabelId,
+        carrierTrackingEventId: command.carrierTrackingEventId,
+        provider: command.provider,
+        providerLabelId: command.providerLabelId,
+        providerOrderId: command.providerOrderId,
+        providerOrderKey: command.providerOrderKey,
+        trackingSuffix: trackingSuffix(command.normalizedTrackingNumber),
+        dispatchOccurredAt: command.dispatchOccurredAt.toISOString(),
+      };
+
+      let requestedOutcome: StoredCarrierDispatchAttempt["outcome"];
+      let errorCode: string | null;
+      let errorMessage: string | null;
+      let responseEvidence: Record<string, unknown>;
+      let nextAttemptAt: Date | null;
+
+      try {
+        const result = await authority.confirmDispatch({
+          commandId: command.id,
+          shippingProviderLabelId: command.shippingProviderLabelId,
+          carrierTrackingEventId: command.carrierTrackingEventId,
+          provider: command.provider,
+          providerLabelId: command.providerLabelId,
+          providerOrderId: command.providerOrderId,
+          providerOrderKey: command.providerOrderKey,
+          trackingNumber: command.trackingNumber,
+          normalizedTrackingNumber: command.normalizedTrackingNumber,
+          carrier: command.carrier,
+          serviceCode: command.serviceCode,
+          dispatchOccurredAt: command.dispatchOccurredAt,
+        });
+        if (!result.processed) {
+          throw new CarrierDispatchAuthorityError(
+            "CARRIER_DISPATCH_NOT_APPLIED",
+            "Carrier dispatch authority did not apply the confirmed package",
+            {
+              retryable: false,
+              context: {
+                commandId: command.id,
+                providerLabelId: command.providerLabelId,
+              },
+            },
+          );
+        }
+
+        requestedOutcome = "succeeded";
+        errorCode = null;
+        errorMessage = null;
+        responseEvidence = { ...result.evidence, processed: true };
+        nextAttemptAt = null;
+      } catch (error) {
+        const evidence = carrierDispatchErrorEvidence(error);
+        const consecutiveFailureCount = command.consecutiveFailureCount + 1;
+        const retryable =
+          evidence.retryable
+          && consecutiveFailureCount < DISPATCH_MAX_CONSECUTIVE_FAILURES;
+        const completedAt = this.dependencies.clock.now();
+        const retryAt = retryable
+          ? new Date(
+              completedAt.getTime()
+              + carrierDispatchRetryDelayMs(consecutiveFailureCount),
+            )
+          : null;
+        requestedOutcome = retryable ? "retry_scheduled" : "review_required";
+        errorCode = evidence.code;
+        errorMessage = evidence.message;
+        responseEvidence = evidence.context;
+        nextAttemptAt = retryAt;
+      }
+
+      const completedAt = this.dependencies.clock.now();
+      try {
+        const finalized =
+          await this.dependencies.repository.finalizeDispatchAttempt({
+            commandId: command.id,
+            attemptNumber: command.attemptNumber,
+            leaseOwner: command.leaseOwner,
+            outcome: requestedOutcome,
+            errorCode,
+            errorMessage,
+            requestEvidence,
+            responseEvidence,
+            startedAt: command.startedAt,
+            completedAt,
+            nextAttemptAt,
+          });
+        incrementCarrierDispatchOutcome(summary, finalized.outcome);
+        const logEvent = carrierDispatchOutcomeLog(finalized.outcome);
+        this.dependencies.logger[logEvent.level]({
+          code: logEvent.code,
+          message: logEvent.message,
+          context: {
+            ...requestEvidence,
+            attemptNumber: command.attemptNumber,
+            attemptedOutcome: requestedOutcome,
+            persistedOutcome: finalized.outcome,
+            replayedAttempt: !finalized.inserted,
+            errorCode,
+            errorMessage,
+            nextAttemptAt: nextAttemptAt?.toISOString() ?? null,
+          },
+        });
+      } catch (finalizationError) {
+        summary.errors += 1;
+        this.dependencies.logger.error({
+          code: "CARRIER_DISPATCH_COMMAND_FINALIZATION_FAILED",
+          message: "A carrier dispatch attempt could not be durably finalized.",
+          context: {
+            ...requestEvidence,
+            attemptNumber: command.attemptNumber,
+            attemptedOutcome: requestedOutcome,
+            authorityErrorCode: errorCode,
+            finalizationError: finalizationError instanceof Error
+              ? finalizationError.message
+              : String(finalizationError),
           },
         });
       }
@@ -712,6 +915,20 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         resolution,
         reconciledAt,
       );
+      const selectedCandidate = resolution.selectedCandidate;
+      const dispatchCommand =
+        event.dispatchEvidence === "confirmed"
+        && resolution.status === "matched"
+        && selectedCandidate !== null
+        && selectedCandidate.linkCount > 0
+        && match.shippingProviderLabelId !== null
+          ? await transaction.enqueueDispatchCommand(
+              storedEvent.id,
+              match.shippingProviderLabelId,
+              event.eventOccurredAt ?? event.receivedAt,
+              reconciledAt,
+            )
+          : null;
       return {
         ingestStatus: "normalized",
         eventId: storedEvent.id,
@@ -727,6 +944,8 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         candidateCount: resolution.candidateCount,
         shippingProviderLabelId: match.shippingProviderLabelId,
         dispatchEvidence: event.dispatchEvidence,
+        dispatchCommandId: dispatchCommand?.id ?? null,
+        dispatchCommandInserted: dispatchCommand?.inserted ?? false,
       };
     });
   }
@@ -753,6 +972,8 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         matchReasonCode: result.matchReasonCode,
         candidateCount: result.candidateCount,
         matchAttemptInserted: result.matchAttemptInserted,
+        dispatchCommandId: result.dispatchCommandId,
+        dispatchCommandInserted: result.dispatchCommandInserted,
       },
     };
     if (result.matchStatus === "matched") this.dependencies.logger.info(logEvent);
@@ -881,9 +1102,84 @@ function trackingHydrationRetryDelayMs(consecutiveFailureCount: number): number 
   return Math.min(HYDRATION_RETRY_BASE_MS * (2 ** exponent), HYDRATION_RETRY_MAX_MS);
 }
 
+function carrierDispatchRetryDelayMs(consecutiveFailureCount: number): number {
+  const exponent = Math.max(0, Math.min(consecutiveFailureCount - 1, 6));
+  return Math.min(DISPATCH_RETRY_BASE_MS * (2 ** exponent), DISPATCH_RETRY_MAX_MS);
+}
+
+function incrementCarrierDispatchOutcome(
+  summary: CarrierDispatchSweepResult,
+  outcome: StoredCarrierDispatchAttempt["outcome"],
+): void {
+  if (outcome === "succeeded") {
+    summary.dispatchCommandsSucceeded += 1;
+    return;
+  }
+  if (outcome === "retry_scheduled") {
+    summary.dispatchCommandsRetryScheduled += 1;
+    return;
+  }
+  summary.dispatchCommandsReviewRequired += 1;
+}
+
+function carrierDispatchOutcomeLog(
+  outcome: StoredCarrierDispatchAttempt["outcome"],
+): {
+  level: "info" | "warn";
+  code: string;
+  message: string;
+} {
+  if (outcome === "succeeded") {
+    return {
+      level: "info",
+      code: "CARRIER_DISPATCH_COMMAND_SUCCEEDED",
+      message: "Confirmed carrier possession was promoted into physical shipment authority.",
+    };
+  }
+  if (outcome === "retry_scheduled") {
+    return {
+      level: "warn",
+      code: "CARRIER_DISPATCH_COMMAND_RETRY_SCHEDULED",
+      message: "Carrier dispatch promotion failed transiently and was scheduled for retry.",
+    };
+  }
+  return {
+    level: "warn",
+    code: "CARRIER_DISPATCH_COMMAND_REVIEW_REQUIRED",
+    message: "Carrier dispatch promotion requires operator review.",
+  };
+}
+
+function carrierDispatchErrorEvidence(error: unknown): {
+  code: string;
+  message: string;
+  retryable: boolean;
+  context: Record<string, unknown>;
+} {
+  if (error instanceof CarrierDispatchAuthorityError) {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: error.retryable,
+      context: { ...error.context },
+    };
+  }
+  return {
+    code: "CARRIER_DISPATCH_UNCLASSIFIED_FAILURE",
+    message: error instanceof Error ? error.message : String(error),
+    retryable: false,
+    context: {},
+  };
+}
+
 function defaultTrackingSubscriptionLeaseOwner(): string {
   const runtime = process.env.DYNO?.trim() || process.env.HOSTNAME?.trim() || "local";
   return `carrier-tracking:${runtime}:${process.pid}`.slice(0, 200);
+}
+
+function defaultCarrierDispatchLeaseOwner(): string {
+  const runtime = process.env.DYNO?.trim() || process.env.HOSTNAME?.trim() || "local";
+  return `carrier-dispatch:${runtime}:${process.pid}`.slice(0, 150);
 }
 
 function defaultTrackingHydrationLeaseOwner(): string {

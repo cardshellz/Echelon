@@ -30,6 +30,12 @@ import {
 } from "./shipstation-unmapped-physical";
 import type { ShippingProviderLabelObserver } from "../shipping/carrier-tracking.service";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
+import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
+import {
+  CarrierDispatchAuthorityError,
+  type ConfirmCarrierDispatchInput,
+  type ConfirmCarrierDispatchResult,
+} from "../shipping/carrier-dispatch-authority";
 
 const EBAY_CHANNEL_ID = 67;
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";
@@ -61,6 +67,20 @@ interface ShipNotifyV2Result {
   fallback: boolean;
   handled: boolean;
   legacyWmsShipmentIds?: readonly number[];
+}
+
+interface ShipmentAuthorityContext {
+  source: "shipstation_manual_remediation" | "carrier_tracking_confirmed_dispatch";
+  dispatchOccurredAt: Date | null;
+  carrierTrackingEventId: number | null;
+  carrierDispatchCommandId: number | null;
+  actor: string;
+  reason: string;
+}
+
+export interface ManualShipmentNotificationInput {
+  operator: string;
+  reason: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -2391,6 +2411,7 @@ export function createShipStationService(
     shipment: ShipStationShipment,
     event: Extract<ShipmentEvent, { kind: "shipped" }>,
     results: readonly ShipNotifyV2Result[],
+    authorityContext: ShipmentAuthorityContext,
   ): Promise<ShipNotifyV2Result> {
     const legacyWmsShipmentIds = [...new Set(
       results.flatMap((result) => result.legacyWmsShipmentIds ?? []),
@@ -2410,10 +2431,14 @@ export function createShipStationService(
       carrier: event.carrier,
       trackingUrl: event.trackingUrl ?? null,
       serviceCode: event.serviceCode ?? null,
-      shippedAt: event.shipDate,
-      source: "shipstation_ship_notify_v2",
-      correlationId: `shipstation-shipment:${shipment.shipmentId}`,
-      causationId: shipment.orderKey?.trim() || null,
+      shippedAt: authorityContext.dispatchOccurredAt ?? event.shipDate,
+      source: authorityContext.source,
+      correlationId: authorityContext.carrierTrackingEventId === null
+        ? `shipstation-shipment:${shipment.shipmentId}`
+        : `carrier-tracking-event:${authorityContext.carrierTrackingEventId}`,
+      causationId: authorityContext.carrierDispatchCommandId === null
+        ? `manual:${authorityContext.actor}:${authorityContext.reason}`
+        : `carrier-dispatch-command:${authorityContext.carrierDispatchCommandId}`,
     }, { executeImmediately: false });
     console.log(JSON.stringify({
       code: "SHIPSTATION_PHYSICAL_PACKAGE_MATERIALIZED",
@@ -2422,6 +2447,11 @@ export function createShipStationService(
       legacyWmsShipmentIds,
       channelCommandIds: authorityResult.materialized.channelCommands.map((command) => command.id),
       dispatch: authorityResult.dispatch,
+      authoritySource: authorityContext.source,
+      authorityActor: authorityContext.actor,
+      authorityReason: authorityContext.reason,
+      carrierTrackingEventId: authorityContext.carrierTrackingEventId,
+      carrierDispatchCommandId: authorityContext.carrierDispatchCommandId,
     }));
 
     return {
@@ -2444,6 +2474,7 @@ export function createShipStationService(
    */
   async function processShipNotifyV2(
     shipment: ShipStationShipment,
+    authorityContext: ShipmentAuthorityContext,
   ): Promise<ShipNotifyV2Result> {
     const carrier = mapShipStationCarrier(shipment.carrierCode);
     const event = deriveEventFromSSShipment(shipment, carrier);
@@ -2497,11 +2528,17 @@ export function createShipStationService(
               group.row,
               shipment,
               event,
+              authorityContext,
               group.sourceShipmentItemIds,
             );
             groupResults.push(result);
           }
-          return finalizeCanonicalShipNotifyPackage(shipment, event, groupResults);
+          return finalizeCanonicalShipNotifyPackage(
+            shipment,
+            event,
+            groupResults,
+            authorityContext,
+          );
         }
       }
       // Pre-cutover order (pushed via pushOrder, no shipstation_order_id on
@@ -2599,26 +2636,40 @@ export function createShipStationService(
             group.row,
             shipment,
             event,
+            authorityContext,
             group.sourceShipmentItemIds,
           );
           groupResults.push(result);
         }
-        return finalizeCanonicalShipNotifyPackage(shipment, event, groupResults);
+        return finalizeCanonicalShipNotifyPackage(
+          shipment,
+          event,
+          groupResults,
+          authorityContext,
+        );
       }
       const [singleGroup] = shipmentGroups;
       const result = await applyShipNotifyV2EventToResolvedShipment(
         singleGroup?.row ?? wmsShipmentRow,
         shipment,
         event,
+        authorityContext,
         singleGroup?.sourceShipmentItemIds,
       );
-      return finalizeCanonicalShipNotifyPackage(shipment, event, [result]);
+      return finalizeCanonicalShipNotifyPackage(
+        shipment,
+        event,
+        [result],
+        authorityContext,
+      );
     }
 
     return applyShipNotifyV2EventToResolvedShipment(
       wmsShipmentRow,
       shipment,
       event,
+      authorityContext,
+      undefined,
     );
   }
 
@@ -2626,6 +2677,7 @@ export function createShipStationService(
     wmsShipmentRow: any,
     shipment: ShipStationShipment,
     event: ShipmentEvent,
+    authorityContext: ShipmentAuthorityContext,
     allowedSourceShipmentItemIds?: Set<number>,
   ): Promise<ShipNotifyV2Result> {
     if (event.kind === "shipped") {
@@ -2745,6 +2797,7 @@ export function createShipStationService(
       await recordShipmentEventV2(omsOrderId, event, shipment, {
         wmsFirst: true,
         wmsShipmentId: wmsShipmentRow.id,
+        authorityContext,
       });
     }
 
@@ -2777,7 +2830,11 @@ export function createShipStationService(
     omsOrderId: number,
     event: ShipmentEvent,
     shipment: ShipStationShipment,
-    meta: { wmsFirst: boolean; wmsShipmentId: number },
+    meta: {
+      wmsFirst: boolean;
+      wmsShipmentId: number;
+      authorityContext: ShipmentAuthorityContext;
+    },
   ): Promise<void> {
     const eventType =
       event.kind === "shipped"
@@ -2793,6 +2850,11 @@ export function createShipStationService(
       serviceCode: shipment.serviceCode,
       shipDate: shipment.shipDate,
       wmsFirst: meta.wmsFirst,
+      authoritySource: meta.authorityContext.source,
+      authorityActor: meta.authorityContext.actor,
+      authorityReason: meta.authorityContext.reason,
+      carrierTrackingEventId: meta.authorityContext.carrierTrackingEventId,
+      carrierDispatchCommandId: meta.authorityContext.carrierDispatchCommandId,
     };
     if (event.kind === "shipped") {
       details.trackingNumber = event.trackingNumber;
@@ -2953,6 +3015,7 @@ export function createShipStationService(
    */
   async function processShipNotifyLegacy(
     shipment: ShipStationShipment,
+    authorityContext: ShipmentAuthorityContext,
   ): Promise<{ processed: boolean }> {
     const parsed = parseEchelonOrderKey(shipment.orderKey);
     if (!parsed || parsed.source !== "oms") {
@@ -2977,6 +3040,7 @@ export function createShipStationService(
             group.row,
             shipment,
             event,
+            authorityContext,
             group.sourceShipmentItemIds,
           ));
         }
@@ -2984,6 +3048,7 @@ export function createShipStationService(
           shipment,
           event,
           results,
+          authorityContext,
         );
         return { processed: finalized.processed };
       }
@@ -3083,6 +3148,8 @@ export function createShipStationService(
       resolved.row,
       shipment,
       event,
+      authorityContext,
+      undefined,
     );
     if (event.kind !== "shipped") {
       return { processed: result.processed };
@@ -3091,6 +3158,7 @@ export function createShipStationService(
       shipment,
       event,
       [result],
+      authorityContext,
     );
     return { processed: finalized.processed };
   }
@@ -3138,8 +3206,9 @@ export function createShipStationService(
 
   async function processShipmentNotification(
     shipment: ShipStationShipment,
+    authorityContext: ShipmentAuthorityContext,
   ): Promise<{ processed: boolean }> {
-    const v2Result = await processShipNotifyV2(shipment);
+    const v2Result = await processShipNotifyV2(shipment, authorityContext);
     if (v2Result.processed) {
       await resolveRecoveredNoMatchException(shipment);
       return { processed: true };
@@ -3148,7 +3217,10 @@ export function createShipStationService(
       return { processed: false };
     }
     if (v2Result.fallback) {
-      const legacyResult = await processShipNotifyLegacy(shipment);
+      const legacyResult = await processShipNotifyLegacy(
+        shipment,
+        authorityContext,
+      );
       if (legacyResult.processed) {
         await resolveRecoveredNoMatchException(shipment);
         return legacyResult;
@@ -3184,46 +3256,61 @@ export function createShipStationService(
     return { processed: false };
   }
 
-  async function observeProviderLabelShadow(shipment: ShipStationShipment): Promise<void> {
-    if (!dependencies.providerLabelObserver) return;
-    try {
-      await dependencies.providerLabelObserver.observeShipStationLabel(shipment);
-    } catch (error) {
-      // Shadow ingestion must not alter the established SHIP_NOTIFY result. It
-      // remains observational until carrier authority passes production validation.
-      console.error(JSON.stringify({
-        level: "error",
-        action: "shipping_provider_label_observation_failed",
-        outcome: "shadow_error",
-        provider: "shipstation",
-        provider_label_id: shipment.shipmentId ?? null,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-    }
+  async function processManualShipmentNotification(
+    shipment: ShipStationShipment,
+    input: ManualShipmentNotificationInput,
+  ): Promise<{ processed: boolean }> {
+    const operator = requiredAuthorityText(input.operator, "operator", 200);
+    const reason = requiredAuthorityText(input.reason, "reason", 120);
+    return processShipmentNotification(shipment, {
+      source: "shipstation_manual_remediation",
+      dispatchOccurredAt: null,
+      carrierTrackingEventId: null,
+      carrierDispatchCommandId: null,
+      actor: operator,
+      reason,
+    });
   }
 
-  async function observeProviderLabelsShadow(shipments: ShipStationShipment[]): Promise<void> {
+  function requireProviderLabelObserver(): ShippingProviderLabelObserver {
+    const observer = dependencies.providerLabelObserver;
+    if (!observer || typeof observer.observeShipStationLabel !== "function") {
+      throw Object.assign(
+        new Error("Carrier label authority is not initialized"),
+        { code: "CARRIER_LABEL_AUTHORITY_UNAVAILABLE" },
+      );
+    }
+    return observer;
+  }
+
+  async function observeProviderLabel(shipment: ShipStationShipment): Promise<void> {
+    await requireProviderLabelObserver().observeShipStationLabel(shipment);
+  }
+
+  async function observeProviderLabels(shipments: ShipStationShipment[]): Promise<void> {
     for (const shipment of shipments) {
-      await observeProviderLabelShadow(shipment);
+      await observeProviderLabel(shipment);
     }
   }
 
   async function processShipNotify(resourceUrl: string): Promise<number> {
-    // Fetch the actual shipment data from ShipStation
+    // SHIP_NOTIFY proves only that ShipStation created, changed, or voided a
+    // label. It does not prove carrier possession. Persist every label as
+    // provider evidence; the carrier tracking dispatcher is the sole runtime
+    // path allowed to promote it to shipped inventory and channel fulfillment.
     const data = await apiRequest<{ shipments: ShipStationShipment[] }>(
       "GET",
       withShipmentItemsIncluded(baseUrl, resourceUrl),
     );
 
     const shipments = data.shipments || [];
-    let processed = 0;
+    let observed = 0;
     const failures: Array<{ shipmentId: number | null; message: string }> = [];
 
     for (const shipment of shipments) {
-      await observeProviderLabelShadow(shipment);
       try {
-        const result = await processShipmentNotification(shipment);
-        if (result.processed) processed++;
+        await observeProviderLabel(shipment);
+        observed += 1;
       } catch (err: any) {
         failures.push({
           shipmentId: Number.isInteger(shipment.shipmentId) ? shipment.shipmentId : null,
@@ -3244,13 +3331,270 @@ export function createShipStationService(
         .join("; ");
       const suffix = failureSummary ? ` (${failureSummary})` : "";
       throw new ShipStationWebhookProcessingError(
-        `ShipStation SHIP_NOTIFY processed ${processed}/${shipments.length} shipment(s); ${failures.length} failed${suffix}`,
+        `ShipStation SHIP_NOTIFY observed ${observed}/${shipments.length} label(s); ${failures.length} failed${suffix}`,
         failures,
-        processed,
+        observed,
       );
     }
 
-    return processed;
+    return observed;
+  }
+
+  async function confirmDispatch(
+    input: ConfirmCarrierDispatchInput,
+  ): Promise<ConfirmCarrierDispatchResult> {
+    if (input.provider !== "shipstation") {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_PROVIDER_UNSUPPORTED",
+        `ShipStation dispatch authority cannot process provider ${input.provider}`,
+        {
+          retryable: false,
+          context: {
+            commandId: input.commandId,
+            provider: input.provider,
+          },
+        },
+      );
+    }
+
+    const shipmentId = Number(input.providerLabelId);
+    if (
+      !Number.isSafeInteger(shipmentId)
+      || shipmentId <= 0
+      || String(shipmentId) !== input.providerLabelId
+    ) {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_PROVIDER_LABEL_INVALID",
+        "ShipStation provider label id must be a positive integer",
+        {
+          retryable: false,
+          context: {
+            commandId: input.commandId,
+            providerLabelId: input.providerLabelId,
+          },
+        },
+      );
+    }
+
+    let shipment: ShipStationShipment | null;
+    try {
+      shipment = await getShipmentById(shipmentId);
+    } catch (error) {
+      throw shipStationDispatchError(
+        "CARRIER_DISPATCH_PROVIDER_LOOKUP_FAILED",
+        "ShipStation shipment could not be loaded for confirmed carrier dispatch",
+        input,
+        error,
+      );
+    }
+    if (!shipment) {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_PROVIDER_LABEL_NOT_FOUND",
+        "ShipStation shipment was not readable for confirmed carrier dispatch",
+        {
+          retryable: true,
+          context: {
+            commandId: input.commandId,
+            providerLabelId: input.providerLabelId,
+          },
+        },
+      );
+    }
+    if (shipment.shipmentId !== shipmentId) {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_PROVIDER_LABEL_MISMATCH",
+        "ShipStation returned a different shipment identity",
+        {
+          retryable: false,
+          context: {
+            commandId: input.commandId,
+            expectedProviderLabelId: input.providerLabelId,
+            actualProviderLabelId: shipment.shipmentId,
+          },
+        },
+      );
+    }
+    if (shipment.voidDate) {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_PROVIDER_LABEL_VOIDED",
+        "Carrier possession matched a ShipStation label that is now voided",
+        {
+          retryable: false,
+          context: {
+            commandId: input.commandId,
+            providerLabelId: input.providerLabelId,
+            voidDate: shipment.voidDate,
+          },
+        },
+      );
+    }
+
+    let actualNormalizedTracking: string;
+    try {
+      actualNormalizedTracking = normalizeTrackingNumber(
+        String(shipment.trackingNumber ?? ""),
+      );
+    } catch (error) {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_TRACKING_IDENTITY_INVALID",
+        "ShipStation shipment has no usable tracking identity",
+        {
+          retryable: false,
+          context: {
+            commandId: input.commandId,
+            providerLabelId: input.providerLabelId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          cause: error,
+        },
+      );
+    }
+    if (actualNormalizedTracking !== input.normalizedTrackingNumber) {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_TRACKING_IDENTITY_MISMATCH",
+        "ShipStation shipment tracking no longer matches the confirmed carrier event",
+        {
+          retryable: false,
+          context: {
+            commandId: input.commandId,
+            providerLabelId: input.providerLabelId,
+            expectedTrackingSuffix: trackingIdentitySuffix(
+              input.normalizedTrackingNumber,
+            ),
+            actualTrackingSuffix: trackingIdentitySuffix(
+              actualNormalizedTracking,
+            ),
+          },
+        },
+      );
+    }
+
+    const authoritativeShipment: ShipStationShipment = {
+      ...shipment,
+      shipDate: input.dispatchOccurredAt.toISOString(),
+    };
+    let result: { processed: boolean };
+    try {
+      result = await processShipmentNotification(authoritativeShipment, {
+        source: "carrier_tracking_confirmed_dispatch",
+        dispatchOccurredAt: input.dispatchOccurredAt,
+        carrierTrackingEventId: input.carrierTrackingEventId,
+        carrierDispatchCommandId: input.commandId,
+        actor: "system:carrier_tracking",
+        reason: "carrier_possession_confirmed",
+      });
+    } catch (error) {
+      if (error instanceof CarrierDispatchAuthorityError) throw error;
+      throw shipStationDispatchError(
+        "CARRIER_DISPATCH_APPLICATION_FAILED",
+        "Confirmed carrier dispatch could not be applied to WMS fulfillment",
+        input,
+        error,
+      );
+    }
+    if (!result.processed) {
+      throw new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_PACKAGE_NOT_RESOLVED",
+        "Confirmed carrier dispatch did not resolve to an authoritative WMS package",
+        {
+          retryable: false,
+          context: {
+            commandId: input.commandId,
+            providerLabelId: input.providerLabelId,
+            providerOrderId: shipment.orderId ?? null,
+            providerOrderKey: shipment.orderKey ?? null,
+          },
+        },
+      );
+    }
+
+    return {
+      processed: true,
+      evidence: Object.freeze({
+        provider: "shipstation",
+        providerLabelId: input.providerLabelId,
+        providerOrderId: String(shipment.orderId),
+        providerOrderKey: shipment.orderKey?.trim() || null,
+        trackingSuffix: trackingIdentitySuffix(actualNormalizedTracking),
+        carrierTrackingEventId: input.carrierTrackingEventId,
+        carrierDispatchCommandId: input.commandId,
+        dispatchOccurredAt: input.dispatchOccurredAt.toISOString(),
+      }),
+    };
+  }
+
+  function shipStationDispatchError(
+    code: string,
+    message: string,
+    input: ConfirmCarrierDispatchInput,
+    error: unknown,
+  ): CarrierDispatchAuthorityError {
+    if (error instanceof CarrierDispatchAuthorityError) return error;
+    const source = error && typeof error === "object"
+      ? error as { code?: unknown; name?: unknown; message?: unknown }
+      : {};
+    const sourceCode = typeof source.code === "string" ? source.code : null;
+    const sourceName = typeof source.name === "string" ? source.name : null;
+    const sourceMessage = error instanceof Error
+      ? error.message
+      : typeof source.message === "string"
+        ? source.message
+        : String(error);
+    const retryableDatabaseCode =
+      sourceCode !== null
+      && (
+        sourceCode.startsWith("08")
+        || ["40001", "40P01", "53300", "57P01", "57P02", "57P03"].includes(
+          sourceCode,
+        )
+      );
+    const retryableTransportCode =
+      sourceCode !== null
+      && [
+        "ECONNRESET",
+        "ECONNREFUSED",
+        "EAI_AGAIN",
+        "ENETUNREACH",
+        "ENOTFOUND",
+        "ETIMEDOUT",
+      ].includes(sourceCode);
+    const retryableHttpStatus =
+      /\((?:408|425|429|500|502|503|504)\)/.test(sourceMessage);
+    const retryable =
+      retryableDatabaseCode
+      || retryableTransportCode
+      || retryableHttpStatus
+      || sourceName === "AbortError";
+
+    return new CarrierDispatchAuthorityError(code, message, {
+      retryable,
+      context: {
+        commandId: input.commandId,
+        providerLabelId: input.providerLabelId,
+        sourceCode,
+        sourceName,
+        sourceMessage,
+      },
+      cause: error,
+    });
+  }
+
+  function trackingIdentitySuffix(normalizedTrackingNumber: string): string {
+    return normalizedTrackingNumber.slice(-8);
+  }
+
+  function requiredAuthorityText(
+    value: string,
+    field: string,
+    maxLength: number,
+  ): string {
+    const normalized = value?.trim();
+    if (!normalized || normalized.length > maxLength) {
+      throw new Error(
+        `Manual shipment authority ${field} must contain 1 through ${maxLength} characters`,
+      );
+    }
+    return normalized;
   }
 
   // -------------------------------------------------------------------------
@@ -4214,9 +4558,10 @@ export function createShipStationService(
     getOrderById,
     getOrderByKey,
     getOrderByNumber,
-    processShipmentNotification,
+    processManualShipmentNotification,
     processShipNotify,
-    observeProviderLabelsShadow,
+    observeProviderLabels,
+    confirmDispatch,
     registerWebhook,
     isConfigured,
     putOrderOnHold,

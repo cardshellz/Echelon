@@ -657,6 +657,12 @@
   "wms.allocation_exceptions": [
     "modules/orders"
   ],
+  "wms.carrier_dispatch_attempts": [
+    "modules/shipping"
+  ],
+  "wms.carrier_dispatch_commands": [
+    "modules/shipping"
+  ],
   "wms.carrier_tracking_event_matches": [
     "modules/shipping"
   ],

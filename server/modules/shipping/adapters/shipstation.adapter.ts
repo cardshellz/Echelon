@@ -96,7 +96,7 @@ export type ShipStationServiceHandle = {
   updateSortRankSingle(shipstationOrderId: number, sortRank: string): Promise<void>;
   getOrderById(shipstationOrderId: number): Promise<any | null>;
   getShipments(orderId: number, opts?: { orderNumber?: string }): Promise<any[]>;
-  observeProviderLabelsShadow(shipments: any[]): Promise<void>;
+  observeProviderLabels(shipments: any[]): Promise<void>;
   processShipNotify(resourceUrl: string): Promise<number>;
   registerWebhook(targetUrl: string): Promise<void>;
 };
@@ -185,7 +185,7 @@ export function createShipStationEngine(
         ssOrderId,
         orderNumber ? { orderNumber } : undefined,
       );
-      await ss.observeProviderLabelsShadow(ssShipments);
+      await ss.observeProviderLabels(ssShipments);
 
       return ssShipments.map((s: any) => {
         if (s.voidDate) {
@@ -226,6 +226,8 @@ export function createShipStationEngine(
       if (!normalizedOrderNumber) {
         throw new Error("ShipStation inbound shipment authority requires an order number");
       }
+      // Refresh provider-label evidence only. A label is not dispatch proof;
+      // authenticated carrier possession owns shipment-state transitions.
       return ss.processShipNotify(
         `/shipments?orderNumber=${encodeURIComponent(normalizedOrderNumber)}`,
       );
@@ -236,12 +238,9 @@ export function createShipStationEngine(
     },
 
     async normalizeWebhook(rawPayload: unknown): Promise<CanonicalShipmentEvent[]> {
-      // Phase 1: the existing processShipNotify handles the full
-      // webhook lifecycle (fetch resource URL, process each shipment,
-      // dispatch rollup). The canonical normalizeWebhook should only
-      // translate the payload — processing moves to C5. For now this
-      // is a no-op; callers still use ss.processShipNotify directly.
-      // This will be implemented when C5 (shipment-event applier) lands.
+      // SHIP_NOTIFY carries provider-label state, not carrier dispatch
+      // authority. processWebhook persists label evidence; authenticated
+      // carrier tracking owns shipment-state transitions.
       return [];
     },
 

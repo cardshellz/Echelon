@@ -8,6 +8,19 @@ const repositorySource = readFileSync(
   join(here, "..", "..", "carrier-tracking.repository.ts"),
   "utf8",
 );
+const migrationSource = readFileSync(
+  join(
+    here,
+    "..",
+    "..",
+    "..",
+    "..",
+    "..",
+    "migrations",
+    "165_carrier_dispatch_authority_cutover.sql",
+  ),
+  "utf8",
+);
 
 describe("carrier tracking repository concurrency contract", () => {
   it("serializes provider-label observation on tracking identity before label identity", () => {
@@ -149,5 +162,73 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(parseInsert).toBeGreaterThan(eventInsert);
     expect(attemptInsert).toBeGreaterThan(parseInsert);
     expect(projectionUpdate).toBeGreaterThan(attemptInsert);
+  });
+
+  it("enqueues one dispatch command per immutable provider label", () => {
+    const enqueueStart = repositorySource.indexOf("async enqueueDispatchCommand(");
+    const transactionEnd = repositorySource.indexOf(
+      "async function resolveProviderLabelLinks",
+      enqueueStart,
+    );
+    const enqueueSource = repositorySource.slice(enqueueStart, transactionEnd);
+
+    expect(enqueueStart).toBeGreaterThan(-1);
+    expect(enqueueSource).toContain(".insert(carrierDispatchCommands)");
+    expect(enqueueSource).toContain("shippingProviderLabelId");
+    expect(enqueueSource).toContain("onConflictDoNothing");
+    expect(migrationSource).toContain("UNIQUE(shipping_provider_label_id)");
+    expect(migrationSource).toContain("source VARCHAR(60) NOT NULL");
+    expect(migrationSource).toContain("created_by VARCHAR(200) NOT NULL");
+    expect(enqueueSource).toContain('source: "carrier_tracking_reconciler"');
+    expect(enqueueSource).toContain('createdBy: "system:carrier_tracking"');
+  });
+
+  it("claims dispatch work with expired-lease recovery and row-level skip locking", () => {
+    const claimStart = repositorySource.indexOf("async claimDispatchCommands(");
+    const finalizeStart = repositorySource.indexOf("async finalizeDispatchAttempt(input)");
+    const claimSource = repositorySource.slice(claimStart, finalizeStart);
+
+    expect(claimStart).toBeGreaterThan(-1);
+    expect(claimSource).toContain("FOR UPDATE SKIP LOCKED");
+    expect(claimSource).toContain("command.status = 'processing'");
+    expect(claimSource).toContain("command.lease_expires_at <= ${asOf}");
+    expect(claimSource).toContain("normalizedLeaseOwner.length > 150");
+    expect(claimSource).toContain("txid_current()::text");
+    expect(claimSource).toContain("|| ':' || command.id::text");
+  });
+
+  it("appends a dispatch attempt before projection finalization and replays its persisted outcome", () => {
+    const finalizationStart = repositorySource.indexOf(
+      "async finalizeDispatchAttempt(input)",
+    );
+    const finalizationSource = repositorySource.slice(finalizationStart);
+    const attemptInsert = finalizationSource.indexOf(".insert(carrierDispatchAttempts)");
+    const projectionUpdate = finalizationSource.indexOf(".update(carrierDispatchCommands)");
+
+    expect(finalizationStart).toBeGreaterThan(-1);
+    expect(finalizationSource).toContain("FOR UPDATE");
+    expect(finalizationSource).toContain(
+      "state.lease_owner !== input.leaseOwner",
+    );
+    expect(finalizationSource).toContain(
+      "Number(state.attempt_count) !== input.attemptNumber",
+    );
+    expect(finalizationSource).toContain(
+      "outcome: carrierDispatchAttempts.attemptOutcome",
+    );
+    expect(finalizationSource).toContain(
+      "outcome: carrierDispatchAttemptOutcome(existing[0].outcome)",
+    );
+    expect(attemptInsert).toBeGreaterThan(-1);
+    expect(projectionUpdate).toBeGreaterThan(attemptInsert);
+  });
+
+  it("makes dispatch attempts append-only at the database boundary", () => {
+    expect(migrationSource).toContain(
+      "CREATE TRIGGER carrier_dispatch_attempts_immutable",
+    );
+    expect(migrationSource).toContain(
+      "EXECUTE FUNCTION wms.reject_shipping_evidence_ledger_mutation()",
+    );
   });
 });

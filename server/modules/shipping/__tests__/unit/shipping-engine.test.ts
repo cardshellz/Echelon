@@ -21,7 +21,7 @@ function mockSsService(overrides: Partial<ShipStationServiceHandle> = {}): ShipS
     updateSortRankSingle: vi.fn().mockResolvedValue(undefined),
     getOrderById: vi.fn().mockResolvedValue({ orderId: 999, orderStatus: "awaiting_shipment" }),
     getShipments: vi.fn().mockResolvedValue([]),
-    observeProviderLabelsShadow: vi.fn().mockResolvedValue(undefined),
+    observeProviderLabels: vi.fn().mockResolvedValue(undefined),
     processShipNotify: vi.fn().mockResolvedValue(1),
     registerWebhook: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -181,7 +181,7 @@ describe("ShipStation Engine Adapter", () => {
       expect(ss.getShipments).toHaveBeenCalledWith(999, {
         orderNumber: "#59826",
       });
-      expect(ss.observeProviderLabelsShadow).toHaveBeenCalledWith([
+      expect(ss.observeProviderLabels).toHaveBeenCalledWith([
         expect.objectContaining({ shipmentId: 1001 }),
         expect.objectContaining({ shipmentId: 1002 }),
       ]);

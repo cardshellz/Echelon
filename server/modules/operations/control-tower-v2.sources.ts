@@ -894,6 +894,18 @@ const CARRIER_EVIDENCE_CONTENT: Record<string, {
     action: "Compare the provider label identities that share this tracking number and resolve the duplicate label data at its source.",
     severity: "high",
   },
+  carrier_dispatch_command_review: {
+    title: "Confirmed carrier dispatch could not be applied",
+    expected: "Confirmed carrier possession must atomically produce one physical shipment, inventory posting, and line-level channel fulfillment command.",
+    action: "Open the linked order and review the dispatch command error. Correct the underlying package lineage or provider identity before explicitly requeueing the command.",
+    severity: "blocker",
+  },
+  carrier_dispatch_retry_overdue: {
+    title: "Confirmed carrier dispatch retry is overdue",
+    expected: "A transient carrier-dispatch failure must be reclaimed and retried within the bounded dispatch retry window.",
+    action: "Check the carrier dispatch scheduler and the command's last error. Restore the failed dependency; the leased command remains safe to retry.",
+    severity: "high",
+  },
   voided_label_carrier_movement: {
     title: "Carrier moved a package tied to a voided label",
     expected: "A voided label must never receive confirmed carrier-possession evidence.",
@@ -918,7 +930,7 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
   name: "carrier_tracking_evidence",
   sourceNamespace: "wms.carrier_tracking_authority",
   sourceType: "carrier_tracking_exception",
-  projectionVersion: 1,
+  projectionVersion: 2,
   async loadRows(client, now) {
     const result = await client.query(`
       WITH label_link_targets AS (
@@ -1392,6 +1404,71 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         UNION ALL
 
         SELECT
+          'dispatch:' || command.id || ':review' AS source_key,
+          'carrier_dispatch_command_review' AS issue_code,
+          label.id AS label_id,
+          command.carrier_tracking_event_id AS event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          NULL::text AS provider_status_code,
+          'dispatch_command_' || command.status AS canonical_status,
+          'confirmed'::text AS dispatch_evidence,
+          command.status AS match_status,
+          COALESCE(command.last_error_code, 'carrier_dispatch_review_required') AS reason_code,
+          command.created_at AS first_seen_at,
+          command.updated_at AS last_seen_at
+        FROM wms.carrier_dispatch_commands AS command
+        JOIN label_context AS label
+          ON label.id = command.shipping_provider_label_id
+        WHERE command.status = 'review_required'
+
+        UNION ALL
+
+        SELECT
+          'dispatch:' || command.id || ':retry_overdue' AS source_key,
+          'carrier_dispatch_retry_overdue' AS issue_code,
+          label.id AS label_id,
+          command.carrier_tracking_event_id AS event_id,
+          NULL::bigint AS receipt_id,
+          label.provider,
+          label.provider_label_id,
+          label.tracking_number,
+          label.label_status,
+          label.link_count,
+          label.wms_order_id,
+          label.order_number,
+          label.order_numbers,
+          NULL::text AS provider_status_code,
+          'dispatch_command_' || command.status AS canonical_status,
+          'confirmed'::text AS dispatch_evidence,
+          command.status AS match_status,
+          COALESCE(command.last_error_code, 'carrier_dispatch_retry_overdue') AS reason_code,
+          command.created_at AS first_seen_at,
+          command.updated_at AS last_seen_at
+        FROM wms.carrier_dispatch_commands AS command
+        JOIN label_context AS label
+          ON label.id = command.shipping_provider_label_id
+        WHERE (
+            command.status = 'retry_scheduled'
+            AND command.next_attempt_at
+              <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+          )
+          OR (
+            command.status = 'processing'
+            AND command.lease_expires_at
+              <= $1::timestamptz - ($2::integer * INTERVAL '1 minute')
+          )
+
+        UNION ALL
+
+        SELECT
           'label:' || label.id || ':voided_movement' AS source_key,
           'voided_label_carrier_movement' AS issue_code,
           label.id AS label_id,
@@ -1501,6 +1578,10 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
     if (!content) throw new Error(`Unsupported carrier tracking issue code: ${code || "missing"}`);
     const sourceKey = String(row.source_key ?? "").trim();
     if (!sourceKey) throw new Error("Carrier tracking source_key is required");
+    const dispatchCommandMatch = sourceKey.match(/^dispatch:([1-9][0-9]*):/);
+    const dispatchCommandId = dispatchCommandMatch
+      ? positiveInteger(dispatchCommandMatch[1], "carrier dispatch command id")
+      : null;
     const labelId = row.label_id == null ? null : positiveInteger(row.label_id, "provider label id");
     const eventId = row.event_id == null ? null : positiveInteger(row.event_id, "carrier tracking event id");
     const receiptId = row.receipt_id == null ? null : positiveInteger(row.receipt_id, "carrier tracking webhook receipt id");
@@ -1534,15 +1615,17 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
       sourceNamespace: "wms.carrier_tracking_authority",
       sourceType: "carrier_tracking_exception",
       sourceKey,
-      projectionVersion: 1,
+      projectionVersion: 2,
       domain: "shipping",
       code,
-      entityType: labelId
+      entityType: dispatchCommandId
+        ? "carrier_dispatch_command"
+        : labelId
         ? "shipping_provider_label"
         : eventId
           ? "carrier_tracking_event"
           : "carrier_tracking_webhook_receipt",
-      entityId: String(labelId ?? eventId ?? receiptId),
+      entityId: String(dispatchCommandId ?? labelId ?? eventId ?? receiptId),
       entityRef,
       correlationId: null,
       rootCauseGroupKey: `shipping:${code}`,
@@ -1557,6 +1640,8 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         || code === "carrier_tracking_payload_rejected"
         || code === "carrier_tracking_receipt_unparsed"
         || code === "carrier_tracking_hydration_review"
+        || code === "carrier_dispatch_command_review"
+        || code === "carrier_dispatch_retry_overdue"
         ? "overdue"
         : "normal",
       impactTags: ["shipping", "dispatch_authority"],
@@ -1573,6 +1658,7 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
       worsenedCount: 0,
       evidenceSummary: {
         provider: row.provider,
+        carrierDispatchCommandId: dispatchCommandId,
         providerLabelId: row.provider_label_id,
         shippingProviderLabelId: labelId,
         carrierTrackingEventId: eventId,
@@ -1588,12 +1674,14 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         reasonCode: row.reason_code,
       },
       detailLocator: {
-        sourceTable: labelId
+        sourceTable: dispatchCommandId
+          ? "wms.carrier_dispatch_commands"
+          : labelId
           ? "wms.shipping_provider_labels"
           : eventId
             ? "wms.carrier_tracking_events"
             : "wms.carrier_tracking_webhook_receipts",
-        sourceId: labelId ?? eventId ?? receiptId,
+        sourceId: dispatchCommandId ?? labelId ?? eventId ?? receiptId,
         wmsOrderId,
         links: [{ label: orderNumber ? `Open ${orderNumber}` : "Open shipping", href: primaryHref }],
       },

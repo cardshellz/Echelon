@@ -137,7 +137,7 @@ function shipStation(overrides: Record<string, unknown> = {}) {
     getShipmentById: vi.fn(async () => providerShipment),
     getShipments: vi.fn(async () => [providerShipment]),
     getOrderByNumber: vi.fn(),
-    processShipmentNotification: vi.fn(async () => ({ processed: true })),
+    processManualShipmentNotification: vi.fn(async () => ({ processed: true })),
     ...overrides,
   } as any;
 }
@@ -660,8 +660,12 @@ describe("ShipStation unmapped physical remediation", () => {
       candidateShipmentId: 8000,
       originalPackageIdentityRepaired: true,
     });
-    expect(service.processShipmentNotification).toHaveBeenCalledWith(
+    expect(service.processManualShipmentNotification).toHaveBeenCalledWith(
       historicalReplacementProviderShipment,
+      {
+        operator: "ops:test",
+        reason: "adopt_unmapped_physical_as_reship",
+      },
     );
     const allSql = calls.join("\n");
     expect(allSql).toContain("shipstation_split_ghost_collapsed");
@@ -752,7 +756,13 @@ describe("ShipStation unmapped physical remediation", () => {
       exceptionId: 77,
       candidateShipmentId: 20,
     });
-    expect(service.processShipmentNotification).toHaveBeenCalledWith(providerShipment);
+    expect(service.processManualShipmentNotification).toHaveBeenCalledWith(
+      providerShipment,
+      {
+        operator: "ops:test",
+        reason: "adopt_unmapped_physical_as_reship",
+      },
+    );
     const allSql = calls.join("\n");
     expect(allSql).toContain("status = 'lost'");
     expect(allSql).toContain("replacement_for_order_item_id");
@@ -865,7 +875,13 @@ describe("ShipStation unmapped physical remediation", () => {
       candidateShipmentId: 22,
       originalPackageIdentityRepaired: true,
     });
-    expect(service.processShipmentNotification).toHaveBeenCalledWith(emptyProviderShipment);
+    expect(service.processManualShipmentNotification).toHaveBeenCalledWith(
+      emptyProviderShipment,
+      {
+        operator: "ops:test",
+        reason: "adopt_unmapped_physical_as_reship",
+      },
+    );
     const allSql = calls.join("\n");
     expect(allSql).toContain("replacement_for_order_item_id");
     expect(allSql).toContain("shipstation_original_identity_restored");
@@ -955,7 +971,13 @@ describe("ShipStation unmapped physical remediation", () => {
       exceptionId: 77,
       candidateShipmentId: 20,
     });
-    expect(service.processShipmentNotification).toHaveBeenCalledWith(emptyProviderShipment);
+    expect(service.processManualShipmentNotification).toHaveBeenCalledWith(
+      emptyProviderShipment,
+      {
+        operator: "ops:test",
+        reason: "adopt_unmapped_physical_as_reship",
+      },
+    );
     const allSql = calls.join("\n");
     expect(allSql).toContain('"shipmentItemPurpose":"concession"');
     expect(allSql).toContain("shipment_item_purpose, product_variant_id");
@@ -1104,7 +1126,13 @@ describe("ShipStation unmapped physical remediation", () => {
       candidateShipmentId: 21,
       providerIdentityRepaired: true,
     });
-    expect(service.processShipmentNotification).toHaveBeenCalledWith(activeProviderShipment);
+    expect(service.processManualShipmentNotification).toHaveBeenCalledWith(
+      activeProviderShipment,
+      {
+        operator: "ops:test",
+        reason: "adopt_unmapped_physical_as_reship",
+      },
+    );
     const allSql = calls.join("\n");
     expect(allSql).toContain("shipstation_superseded_label_reconciled");
     expect(allSql).toContain("status = 'queued'");
