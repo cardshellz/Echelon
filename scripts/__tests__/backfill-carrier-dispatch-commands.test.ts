@@ -117,6 +117,11 @@ describe("backfill carrier dispatch commands", () => {
     expect(source).toContain("wms.carrier_dispatch_commands");
   });
 
+  it("uses the canonical physical shipment provider column in preview and execution", () => {
+    expect(source).not.toContain("physical.shipping_provider");
+    expect(source.match(/physical\.provider = label\.provider/g)).toHaveLength(2);
+  });
+
   it("uses one idempotent command per label and retains the operator identity", () => {
     expect(source).toContain("ON CONFLICT (shipping_provider_label_id) DO NOTHING");
     expect(source).toContain("'shadow_cutover_backfill'");
