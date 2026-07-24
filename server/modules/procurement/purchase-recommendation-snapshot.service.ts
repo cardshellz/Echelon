@@ -50,6 +50,8 @@ export type PurchaseForecastObservationInput = {
   forwardDemandRawPieces: number;
   overlayCaptureVersion?: number;
   overlayCaptureComplete?: boolean;
+  overlayPlanningAsOfDate?: string | null;
+  overlayHorizonDays?: number | null;
   overlayContributions?: PurchasingForwardDemandContribution[];
   evidenceSnapshot: Record<string, unknown>;
 };
@@ -100,12 +102,20 @@ function validateCalendarDate(value: unknown, field: string): asserts value is s
   }
 }
 
+function addCalendarDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 function validateOverlayContributions(
   observation: PurchaseForecastObservationInput,
   observationIndex: number,
 ): PurchasingForwardDemandContribution[] {
   const complete = observation.overlayCaptureComplete ?? false;
   const version = observation.overlayCaptureVersion ?? 0;
+  const planningAsOfDate = observation.overlayPlanningAsOfDate ?? null;
+  const horizonDays = observation.overlayHorizonDays ?? null;
   const contributions = observation.overlayContributions ?? [];
   if (typeof complete !== "boolean") {
     throw new RangeError(`observations[${observationIndex}].overlayCaptureComplete must be boolean`);
@@ -117,6 +127,19 @@ function validateOverlayContributions(
   if ((complete && version <= 0) || (!complete && version !== 0)) {
     throw new RangeError(`observations[${observationIndex}] has inconsistent overlay capture state`);
   }
+  if (!complete && (planningAsOfDate !== null || horizonDays !== null)) {
+    throw new RangeError(`observations[${observationIndex}] cannot contain incomplete overlay coverage`);
+  }
+  if (complete && version === 1 && (planningAsOfDate !== null || horizonDays !== null)) {
+    throw new RangeError(`observations[${observationIndex}] version 1 cannot contain parent overlay coverage`);
+  }
+  if (complete && version >= 2) {
+    validateCalendarDate(planningAsOfDate, `observations[${observationIndex}].overlayPlanningAsOfDate`);
+    assertPositiveInteger(horizonDays, `observations[${observationIndex}].overlayHorizonDays`);
+    if (Number(horizonDays) > 365) {
+      throw new RangeError(`observations[${observationIndex}].overlayHorizonDays cannot exceed 365`);
+    }
+  }
   if (!complete && contributions.length > 0) {
     throw new RangeError(`observations[${observationIndex}] cannot contain incomplete overlay evidence`);
   }
@@ -124,6 +147,9 @@ function validateOverlayContributions(
   let rawPieces = BigInt(0);
   let weightedPieces = BigInt(0);
   const lineIds = new Set<number>();
+  const captureThroughDate = complete && version >= 2
+    ? addCalendarDays(planningAsOfDate!, Number(horizonDays))
+    : null;
   contributions.forEach((contribution, contributionIndex) => {
     const prefix = `observations[${observationIndex}].overlayContributions[${contributionIndex}]`;
     assertPositiveInteger(contribution.productId, `${prefix}.productId`);
@@ -163,6 +189,12 @@ function validateOverlayContributions(
       }
     }
     validateCalendarDate(contribution.planningAsOfDate, `${prefix}.planningAsOfDate`);
+    if (complete && version >= 2 && contribution.planningAsOfDate !== planningAsOfDate) {
+      throw new RangeError(`${prefix}.planningAsOfDate must match its forecast observation`);
+    }
+    if (captureThroughDate !== null && contribution.eventStartDate > captureThroughDate) {
+      throw new RangeError(`${prefix}.eventStartDate falls outside its forecast observation horizon`);
+    }
     if (contribution.eventEndDate !== null && contribution.eventEndDate < contribution.planningAsOfDate) {
       throw new RangeError(`${prefix}.eventEndDate cannot precede planningAsOfDate`);
     }
@@ -337,6 +369,12 @@ export function buildPurchaseRecommendationRunInput(input: {
       observationCount: observations.length,
       observationCoverageComplete: true,
       overlayCaptureComplete: observations.every((observation) => observation.overlayCaptureComplete === true),
+      overlayCoverageComplete: observations.every(
+        (observation) => observation.overlayCaptureComplete === true
+          && Number(observation.overlayCaptureVersion) >= 2
+          && observation.overlayPlanningAsOfDate != null
+          && observation.overlayHorizonDays != null,
+      ),
       overlayContributionCount: observations.reduce(
         (count, observation) => count + (observation.overlayContributions?.length ?? 0),
         0,
@@ -401,6 +439,12 @@ export function buildPurchaseForecastObservations(
       const overlayCaptureVersion = overlayCaptureComplete
         ? item.forwardDemandBasis.overlayCaptureVersion
         : 0;
+      const overlayPlanningAsOfDate = overlayCaptureComplete
+        ? item.forwardDemandBasis.overlayPlanningAsOfDate
+        : null;
+      const overlayHorizonDays = overlayCaptureComplete
+        ? item.forwardDemandBasis.overlayHorizonDays
+        : null;
       const overlayContributions = overlayCaptureComplete
         ? item.forwardDemandBasis.contributions
         : [];
@@ -426,6 +470,8 @@ export function buildPurchaseForecastObservations(
         forwardDemandRawPieces: item.forwardDemandBasis.forwardDemandRawPieces,
         overlayCaptureVersion,
         overlayCaptureComplete,
+        overlayPlanningAsOfDate,
+        overlayHorizonDays,
         overlayContributions,
         evidenceSnapshot: {
           recommendationId: item.recommendationId,
@@ -532,6 +578,8 @@ export function createPurchaseRecommendationSnapshotService(database: any) {
               forwardDemandRawPieces: observation.forwardDemandRawPieces,
               overlayCaptureVersion: observation.overlayCaptureVersion ?? 0,
               overlayCaptureComplete: observation.overlayCaptureComplete ?? false,
+              overlayPlanningAsOfDate: observation.overlayPlanningAsOfDate ?? null,
+              overlayHorizonDays: observation.overlayHorizonDays ?? null,
               evidenceSnapshot: observation.evidenceSnapshot,
             })),
           ).returning();

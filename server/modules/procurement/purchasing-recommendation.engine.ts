@@ -224,6 +224,8 @@ export interface PurchasingRecommendationRawRow {
   forward_demand_raw_pieces?: number | string | null;
   forward_demand_event_count?: number | string | null;
   forward_demand_contributions?: unknown;
+  forward_demand_planning_as_of_date?: unknown;
+  forward_demand_horizon_days?: unknown;
 }
 
 export interface PurchasingRecommendationProductMeta {
@@ -381,6 +383,8 @@ export interface PurchasingRecommendationItem {
     adjustedReorderPoint: number;
     overlayCaptureVersion: number;
     overlayCaptureComplete: boolean;
+    overlayPlanningAsOfDate: string | null;
+    overlayHorizonDays: number | null;
     contributions: PurchasingForwardDemandContribution[];
   };
   leadTimeBasis: {
@@ -1818,6 +1822,8 @@ export function generatePurchasingRecommendations(
     const forwardDemandEventCount = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_event_count) : 0;
     const forwardDemandContributionCapture = resolvePurchasingForwardDemandContributionCapture({
       rawContributions: row.forward_demand_contributions,
+      rawPlanningAsOfDate: row.forward_demand_planning_as_of_date,
+      rawHorizonDays: row.forward_demand_horizon_days,
       enabled: forecastPolicy.forwardDemandEnabled,
       productId,
       forwardDemandPieces,
@@ -2106,6 +2112,8 @@ export function generatePurchasingRecommendations(
         adjustedReorderPoint,
         overlayCaptureVersion: forwardDemandContributionCapture.overlayCaptureVersion,
         overlayCaptureComplete: forwardDemandContributionCapture.overlayCaptureComplete,
+        overlayPlanningAsOfDate: forwardDemandContributionCapture.overlayPlanningAsOfDate,
+        overlayHorizonDays: forwardDemandContributionCapture.overlayHorizonDays,
         contributions: forwardDemandContributionCapture.contributions,
       },
       demandBasis: {
