@@ -34,6 +34,12 @@ describe("forward demand columns in reorder analysis query", () => {
     expect(STORAGE_SRC).toMatch(/del\.updated_at AS line_updated_at/);
   });
 
+  it("returns parent coverage metadata even when no event lines qualify", () => {
+    expect(STORAGE_SRC).toMatch(/CURRENT_DATE AS forward_demand_planning_as_of_date/);
+    expect(STORAGE_SRC).toMatch(/forward_demand_horizon_days/);
+    expect(STORAGE_SRC).toMatch(/forecastPolicy\.forwardDemandHorizonDays/);
+  });
+
   it("joins demand_event_lines with confidence weighting", () => {
     expect(STORAGE_SRC).toMatch(/procurement\.demand_event_lines del/);
     expect(STORAGE_SRC).toMatch(/procurement\.demand_events de/);

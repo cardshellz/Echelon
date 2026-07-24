@@ -77,6 +77,8 @@ describe("forward demand integration into purchasing recommendations", () => {
         forward_demand_pieces: 175,
         forward_demand_raw_pieces: 250,
         forward_demand_event_count: 1,
+        forward_demand_planning_as_of_date: "2026-07-01",
+        forward_demand_horizon_days: 90,
         forward_demand_contributions: [{
           productId: 10,
           productVariantId: 101,
@@ -103,8 +105,10 @@ describe("forward demand integration into purchasing recommendations", () => {
       forwardDemandPieces: 175,
       forwardDemandRawPieces: 250,
       forwardDemandEventCount: 1,
-      overlayCaptureVersion: 1,
+      overlayCaptureVersion: 2,
       overlayCaptureComplete: true,
+      overlayPlanningAsOfDate: "2026-07-01",
+      overlayHorizonDays: 90,
       contributions: [{
         demandEventId: 700,
         demandEventLineId: 701,
@@ -120,6 +124,8 @@ describe("forward demand integration into purchasing recommendations", () => {
         forward_demand_pieces: 176,
         forward_demand_raw_pieces: 250,
         forward_demand_event_count: 1,
+        forward_demand_planning_as_of_date: "2026-07-01",
+        forward_demand_horizon_days: 90,
         forward_demand_contributions: [{
           productId: 10,
           productVariantId: null,
@@ -166,13 +172,17 @@ describe("forward demand integration into purchasing recommendations", () => {
         forward_demand_pieces: 0,
         forward_demand_raw_pieces: 0,
         forward_demand_event_count: 0,
+        forward_demand_planning_as_of_date: "2026-07-01",
+        forward_demand_horizon_days: 90,
         forward_demand_contributions: [],
       })],
     });
 
     expect(result.items[0].forwardDemandBasis).toMatchObject({
-      overlayCaptureVersion: 1,
+      overlayCaptureVersion: 2,
       overlayCaptureComplete: true,
+      overlayPlanningAsOfDate: "2026-07-01",
+      overlayHorizonDays: 90,
       contributions: [],
     });
   });

@@ -1,6 +1,6 @@
 import type { PurchasingForecastPolicy } from "./purchasing-forecast-policy";
 
-export const FORWARD_DEMAND_OVERLAY_CAPTURE_VERSION = 1;
+export const FORWARD_DEMAND_OVERLAY_CAPTURE_VERSION = 2;
 
 export interface PurchasingForwardDemandContribution {
   productId: number;
@@ -77,6 +77,12 @@ function contributionTimestamp(value: unknown, field: string): string {
     throw new RangeError(`${field} must be a valid timestamp`);
   }
   return value;
+}
+
+function addCalendarDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function parseForwardDemandContributions(value: unknown): {
@@ -196,6 +202,8 @@ function assertForwardDemandContributionTotals(input: {
   forwardDemandPieces: number;
   forwardDemandRawPieces: number;
   forwardDemandEventCount: number;
+  overlayPlanningAsOfDate: string;
+  overlayHorizonDays: number;
   contributions: PurchasingForwardDemandContribution[];
   confidenceWeights: PurchasingForecastPolicy["forwardDemandConfidenceWeights"];
 }) {
@@ -212,10 +220,21 @@ function assertForwardDemandContributionTotals(input: {
   let weightedPieces = BigInt(0);
   let rawPieces = BigInt(0);
   const eventIds = new Set<number>();
+  const captureThroughDate = addCalendarDays(input.overlayPlanningAsOfDate, input.overlayHorizonDays);
   for (const contribution of input.contributions) {
     if (contribution.productId !== input.productId) {
       throw new RangeError(
         `Forward-demand contribution product ${contribution.productId} does not match recommendation product ${input.productId}`,
+      );
+    }
+    if (contribution.planningAsOfDate !== input.overlayPlanningAsOfDate) {
+      throw new RangeError(
+        `Forward-demand contribution ${contribution.demandEventLineId} does not match the capture planning date`,
+      );
+    }
+    if (contribution.eventStartDate > captureThroughDate) {
+      throw new RangeError(
+        `Forward-demand contribution ${contribution.demandEventLineId} falls outside the capture horizon`,
       );
     }
     const expectedWeight = input.confidenceWeights[contribution.confidence];
@@ -247,6 +266,8 @@ function assertForwardDemandContributionTotals(input: {
 
 export function resolvePurchasingForwardDemandContributionCapture(input: {
   rawContributions: unknown;
+  rawPlanningAsOfDate: unknown;
+  rawHorizonDays: unknown;
   enabled: boolean;
   productId: number;
   forwardDemandPieces: number;
@@ -256,12 +277,25 @@ export function resolvePurchasingForwardDemandContributionCapture(input: {
 }) {
   const parsed = parseForwardDemandContributions(input.rawContributions);
   const contributions = input.enabled ? parsed.contributions : [];
+  const overlayPlanningAsOfDate = parsed.captureComplete
+    ? contributionDate(input.rawPlanningAsOfDate, "forwardDemandPlanningAsOfDate")
+    : null;
+  const overlayHorizonDays = parsed.captureComplete
+    ? contributionInteger(input.rawHorizonDays, "forwardDemandHorizonDays", { minimum: 1, maximum: 365 })
+    : null;
   if (parsed.captureComplete) {
-    assertForwardDemandContributionTotals({ ...input, contributions });
+    assertForwardDemandContributionTotals({
+      ...input,
+      overlayPlanningAsOfDate: overlayPlanningAsOfDate!,
+      overlayHorizonDays: overlayHorizonDays!,
+      contributions,
+    });
   }
   return {
     overlayCaptureVersion: parsed.captureComplete ? FORWARD_DEMAND_OVERLAY_CAPTURE_VERSION : 0,
     overlayCaptureComplete: parsed.captureComplete,
+    overlayPlanningAsOfDate,
+    overlayHorizonDays,
     contributions,
   };
 }
