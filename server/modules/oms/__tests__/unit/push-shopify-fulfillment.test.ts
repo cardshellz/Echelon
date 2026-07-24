@@ -1769,6 +1769,18 @@ describe("Shopify exact physical-package idempotency", () => {
     })).toEqual({ kind: "absent" });
   });
 
+  it("fails closed when the same tracking exists on a non-terminal fulfillment", () => {
+    expect(__test__.classifyExactShopifyPackageState({
+      response: response({ status: "OPEN" }),
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: [],
+      expectedItems,
+    })).toMatchObject({
+      kind: "conflict",
+      evidence: { reason: "provider_package_not_terminal" },
+    });
+  });
+
   it("fails closed when Shopify reports more fulfillments than the bounded list contains", () => {
     const providerResponse = response();
     providerResponse.order.fulfillmentsCount.count = 2;
@@ -1804,6 +1816,83 @@ describe("Shopify exact physical-package idempotency", () => {
       expectedFulfillmentIds: [],
       expectedItems,
     }).kind).toBe("conflict");
+  });
+
+  it("accepts cumulative same-tracking fulfillments for prior and supplemental commands", () => {
+    expect(__test__.classifyExactShopifyPackageState({
+      response: {
+        order: {
+          fulfillmentsCount: { count: 2 },
+          fulfillments: [
+            {
+              id: "gid://shopify/Fulfillment/7001",
+              status: "SUCCESS",
+              trackingInfo: [{ number: "1ZEXACT" }],
+              fulfillmentLineItems: {
+                nodes: [
+                  { quantity: 2, lineItem: { id: "gid://shopify/LineItem/1001" } },
+                ],
+              },
+            },
+            {
+              id: "gid://shopify/Fulfillment/7002",
+              status: "SUCCESS",
+              trackingInfo: [{ number: "1ZEXACT" }],
+              fulfillmentLineItems: {
+                nodes: [
+                  { quantity: 1, lineItem: { id: "gid://shopify/LineItem/1002" } },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: [],
+      priorItems: [{ channelOrderLineId: "1001", quantity: 2 }],
+      expectedItems: [{ channelOrderLineId: "1002", quantity: 1 }],
+    })).toEqual({
+      kind: "present",
+      fulfillmentId: "gid://shopify/Fulfillment/7001",
+    });
+  });
+
+  it("treats provider coverage of only prior commands as absent for a supplement", () => {
+    expect(__test__.classifyExactShopifyPackageState({
+      response: response({
+        fulfillmentLineItems: {
+          nodes: [
+            { quantity: 2, lineItem: { id: "gid://shopify/LineItem/1001" } },
+          ],
+        },
+      }),
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: [],
+      priorItems: [{ channelOrderLineId: "1001", quantity: 2 }],
+      expectedItems: [{ channelOrderLineId: "1002", quantity: 1 }],
+    })).toEqual({ kind: "absent" });
+  });
+
+  it("fails closed on partial or extra cumulative same-tracking coverage", () => {
+    const providerResponse = response({
+      fulfillmentLineItems: {
+        nodes: [
+          { quantity: 2, lineItem: { id: "gid://shopify/LineItem/1001" } },
+          { quantity: 1, lineItem: { id: "gid://shopify/LineItem/1002" } },
+          { quantity: 1, lineItem: { id: "gid://shopify/LineItem/9999" } },
+        ],
+      },
+    });
+    expect(__test__.classifyExactShopifyPackageState({
+      response: providerResponse,
+      expectedTrackingNumber: "1ZEXACT",
+      expectedFulfillmentIds: [],
+      priorItems: [{ channelOrderLineId: "1001", quantity: 2 }],
+      expectedItems: [{ channelOrderLineId: "1002", quantity: 1 }],
+    })).toMatchObject({
+      kind: "conflict",
+      evidence: { reason: "provider_package_identity_mismatch" },
+    });
   });
 });
 

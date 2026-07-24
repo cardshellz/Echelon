@@ -648,10 +648,15 @@ function normalizeShopifyLineAllocations(
   );
 }
 
-function shopifyLineAllocationSignature(
-  items: readonly { lineItemId: string; quantity: number }[],
-): string {
-  return JSON.stringify(items.map((item) => [item.lineItemId, item.quantity]));
+function lineAllocationMapsEqual(
+  left: ReadonlyMap<string, number>,
+  right: ReadonlyMap<string, number>,
+): boolean {
+  if (left.size !== right.size) return false;
+  for (const [lineItemId, quantity] of left) {
+    if (right.get(lineItemId) !== quantity) return false;
+  }
+  return true;
 }
 
 function classifyExactShopifyPackageState(input: {
@@ -659,21 +664,25 @@ function classifyExactShopifyPackageState(input: {
   expectedTrackingNumber: string;
   expectedFulfillmentIds: readonly string[];
   expectedItems: readonly { channelOrderLineId: string; quantity: number }[];
+  priorItems?: readonly { channelOrderLineId: string; quantity: number }[];
 }): ShopifyExactPackageState {
   const expectedTrackingNumber = input.expectedTrackingNumber.trim();
   const expectedItems = normalizeShopifyLineAllocations(input.expectedItems);
-  if (!expectedTrackingNumber || !expectedItems) {
+  const priorItems = input.priorItems?.length
+    ? normalizeShopifyLineAllocations(input.priorItems)
+    : Object.freeze([]);
+  if (!expectedTrackingNumber || !expectedItems || priorItems === null) {
     return {
       kind: "conflict",
       evidence: Object.freeze({
         reason: "invalid_expected_package",
         expectedTrackingNumber,
         expectedItems: input.expectedItems,
+        priorItems: input.priorItems ?? [],
       }),
     };
   }
 
-  const expectedSignature = shopifyLineAllocationSignature(expectedItems);
   const expectedFulfillmentIds = new Set(
     input.expectedFulfillmentIds.map((value) => value.trim()).filter(Boolean),
   );
@@ -724,15 +733,87 @@ function classifyExactShopifyPackageState(input: {
 
   if (candidates.length === 0) return { kind: "absent" };
 
-  const exact = candidates.filter((candidate) =>
+  const expectedIdentityConflicts = candidates.filter((candidate) =>
+    expectedFulfillmentIds.has(candidate.fulfillmentId)
+    && (
+      candidate.status !== "SUCCESS"
+      || !candidate.trackingNumbers.includes(expectedTrackingNumber)
+      || candidate.lineItems === null
+    ),
+  );
+  if (expectedIdentityConflicts.length > 0) {
+    return {
+      kind: "conflict",
+      evidence: Object.freeze({
+        reason: "provider_fulfillment_identity_changed",
+        expectedTrackingNumber,
+        expectedFulfillmentIds: [...expectedFulfillmentIds],
+        providerCandidates: expectedIdentityConflicts,
+      }),
+    };
+  }
+
+  const successfulTrackingCandidates = candidates.filter((candidate) =>
     candidate.status === "SUCCESS"
     && Boolean(candidate.fulfillmentId)
-    && candidate.trackingNumbers.includes(expectedTrackingNumber)
-    && candidate.lineItems !== null
-    && shopifyLineAllocationSignature(candidate.lineItems) === expectedSignature,
+    && candidate.trackingNumbers.includes(expectedTrackingNumber),
   );
-  if (candidates.length === 1 && exact.length === 1) {
-    return { kind: "present", fulfillmentId: exact[0].fulfillmentId };
+  const nonTerminalCandidates = candidates.filter((candidate) =>
+    candidate.status !== "SUCCESS",
+  );
+  if (nonTerminalCandidates.length > 0) {
+    return {
+      kind: "conflict",
+      evidence: Object.freeze({
+        reason: "provider_package_not_terminal",
+        expectedTrackingNumber,
+        providerCandidates: nonTerminalCandidates,
+      }),
+    };
+  }
+  if (successfulTrackingCandidates.some((candidate) => candidate.lineItems === null)) {
+    return {
+      kind: "conflict",
+      evidence: Object.freeze({
+        reason: "provider_package_lineage_incomplete",
+        expectedTrackingNumber,
+        providerCandidates: successfulTrackingCandidates,
+      }),
+    };
+  }
+
+  const providerQuantities = new Map<string, number>();
+  for (const candidate of successfulTrackingCandidates) {
+    for (const item of candidate.lineItems ?? []) {
+      providerQuantities.set(
+        item.lineItemId,
+        (providerQuantities.get(item.lineItemId) ?? 0) + item.quantity,
+      );
+    }
+  }
+  const priorQuantities = new Map(priorItems.map((item) => [item.lineItemId, item.quantity]));
+  const targetQuantities = new Map(priorQuantities);
+  for (const item of expectedItems) {
+    targetQuantities.set(
+      item.lineItemId,
+      (targetQuantities.get(item.lineItemId) ?? 0) + item.quantity,
+    );
+  }
+  const providerAtPriorState = lineAllocationMapsEqual(
+    providerQuantities,
+    priorQuantities,
+  );
+  if (providerAtPriorState) return { kind: "absent" };
+
+  const providerAtTargetState = lineAllocationMapsEqual(
+    providerQuantities,
+    targetQuantities,
+  );
+  if (providerAtTargetState && successfulTrackingCandidates.length > 0) {
+    const fulfillmentId = successfulTrackingCandidates
+      .map((candidate) => candidate.fulfillmentId)
+      .sort((left, right) => left.localeCompare(right))[0];
+    return { kind: "present", fulfillmentId };
   }
 
   return {
@@ -742,6 +823,9 @@ function classifyExactShopifyPackageState(input: {
       expectedTrackingNumber,
       expectedFulfillmentIds: [...expectedFulfillmentIds],
       expectedItems,
+      priorItems,
+      providerQuantities: Object.fromEntries(providerQuantities),
+      targetQuantities: Object.fromEntries(targetQuantities),
       providerCandidates: candidates,
     }),
   };
@@ -754,6 +838,7 @@ async function fetchExactShopifyPackageState(input: {
   trackingNumber: string;
   existingFulfillmentIds: readonly string[];
   items: readonly ChannelFulfillmentProviderCommandItem[];
+  priorItems: readonly { channelOrderLineId: string; quantity: number }[];
 }): Promise<ShopifyExactPackageState> {
   try {
     const response = await input.client.request<ShopifyFulfillmentPackageQueryResponse>(
@@ -783,6 +868,7 @@ async function fetchExactShopifyPackageState(input: {
       expectedTrackingNumber: input.trackingNumber,
       expectedFulfillmentIds: input.existingFulfillmentIds,
       expectedItems: input.items,
+      priorItems: input.priorItems,
     });
   } catch (error) {
     if (error instanceof ShopifyFulfillmentPushError) throw error;
@@ -1945,6 +2031,26 @@ export function createFulfillmentPushService(
     }
 
     if (command) {
+      const priorCommandItemsResult: any = await db.execute(sql`
+        SELECT
+          item.channel_order_line_id,
+          SUM(item.quantity_pushed)::int AS quantity
+        FROM oms.channel_fulfillment_pushes AS prior
+        JOIN oms.channel_fulfillment_push_items AS item
+          ON item.channel_fulfillment_push_id = prior.id
+        WHERE prior.physical_shipment_id = ${command.physicalShipmentId}
+          AND prior.oms_order_id = ${command.omsOrderId}
+          AND prior.channel_provider = 'shopify'
+          AND prior.id <> ${command.commandId}
+          AND prior.push_status IN ('success', 'ignored')
+          AND prior.tracking_number = ${trackingNumber}
+        GROUP BY item.channel_order_line_id
+        ORDER BY item.channel_order_line_id
+      `);
+      const priorCommandItems = (priorCommandItemsResult?.rows ?? []).map((row: any) => ({
+        channelOrderLineId: String(row.channel_order_line_id ?? ""),
+        quantity: Number(row.quantity),
+      }));
       const providerPackageState = await fetchExactShopifyPackageState({
         client: _shopifyClient,
         shopifyOrderGid,
@@ -1952,6 +2058,7 @@ export function createFulfillmentPushService(
         trackingNumber,
         existingFulfillmentIds,
         items: command.items,
+        priorItems: priorCommandItems,
       });
       if (providerPackageState.kind === "conflict") {
         throw new ShopifyFulfillmentPushError(

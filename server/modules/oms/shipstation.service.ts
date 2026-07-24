@@ -2439,6 +2439,11 @@ export function createShipStationService(
       causationId: authorityContext.carrierDispatchCommandId === null
         ? `manual:${authorityContext.actor}:${authorityContext.reason}`
         : `carrier-dispatch-command:${authorityContext.carrierDispatchCommandId}`,
+      // The V2 path has already resolved exact provider shipment-item keys.
+      // Legacy outbound-shipment headers are aggregate projections and can
+      // legitimately retain another package's order/tracking identity after
+      // a split or combined shipment.
+      legacyHeaderPolicy: "aggregate_projection",
     }, { executeImmediately: false });
     console.log(JSON.stringify({
       code: "SHIPSTATION_PHYSICAL_PACKAGE_MATERIALIZED",

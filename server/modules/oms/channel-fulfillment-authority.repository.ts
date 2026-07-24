@@ -8,6 +8,11 @@ import {
   planChannelFulfillmentCommands,
 } from "./channel-fulfillment-command";
 import {
+  buildSupplementalChannelFulfillmentScope,
+  reconcileChannelFulfillmentCommandSet,
+  type ExistingChannelFulfillmentCommandSnapshot,
+} from "./channel-fulfillment-command-reconciliation";
+import {
   evaluateChannelFulfillmentWritebackPolicy,
 } from "./channel-fulfillment-authority.policy";
 
@@ -32,6 +37,7 @@ const materializeInputSchema = z.object({
   suppressChannelProviders: z.array(
     z.string().trim().min(1).max(40).transform((value) => value.toLowerCase()),
   ).max(20).optional(),
+  legacyHeaderPolicy: z.enum(["strict", "aggregate_projection"]).optional().default("strict"),
 }).strict();
 
 export type MaterializePhysicalPackageInput = z.input<typeof materializeInputSchema>;
@@ -1291,7 +1297,7 @@ async function findLineWritebackEligibility(
   return eligibility;
 }
 
-async function persistChannelCommand(
+async function insertChannelCommand(
   tx: any,
   command: ChannelFulfillmentCommand,
   input: ReturnType<typeof canonicalizeInput>,
@@ -1421,6 +1427,259 @@ async function persistChannelCommand(
   };
 }
 
+async function loadExistingChannelCommandSnapshots(
+  tx: any,
+  command: ChannelFulfillmentCommand,
+): Promise<ExistingChannelFulfillmentCommandSnapshot[]> {
+  const rows = rowsOf<any>(await tx.execute(sql`
+    SELECT
+      command.id,
+      command.command_key,
+      command.request_hash,
+      command.push_status,
+      command.last_error_code,
+      command.tracking_number,
+      command.carrier,
+      command.metadata,
+      item.physical_shipment_item_id,
+      physical_item.shipment_request_item_id,
+      item.oms_order_line_id,
+      item.channel_order_line_id,
+      item.quantity_pushed
+    FROM oms.channel_fulfillment_pushes AS command
+    LEFT JOIN oms.channel_fulfillment_push_items AS item
+      ON item.channel_fulfillment_push_id = command.id
+    LEFT JOIN wms.physical_shipment_items AS physical_item
+      ON physical_item.id = item.physical_shipment_item_id
+    WHERE command.channel_provider = ${command.channelProvider}
+      AND command.oms_order_id = ${command.omsOrderId}
+      AND command.physical_shipment_id = ${command.physicalShipmentId}
+    ORDER BY command.id, item.physical_shipment_item_id
+    FOR UPDATE OF command
+  `));
+  const snapshots = new Map<number, {
+    id: number;
+    commandKey: string;
+    requestHash: string | null;
+    pushStatus: string;
+    lastErrorCode: string | null;
+    trackingNumber: string | null;
+    carrier: string | null;
+    shippingProvider: string | null;
+    providerPhysicalShipmentId: string | null;
+    items: ChannelFulfillmentCommand["items"][number][];
+  }>();
+  for (const row of rows) {
+    const id = Number(row.id);
+    const metadata = row.metadata && typeof row.metadata === "object"
+      ? row.metadata as Record<string, unknown>
+      : {};
+    const snapshot = snapshots.get(id) ?? {
+      id,
+      commandKey: String(row.command_key),
+      requestHash: normalizedNullable(row.request_hash),
+      pushStatus: String(row.push_status),
+      lastErrorCode: normalizedNullable(row.last_error_code),
+      trackingNumber: normalizedNullable(row.tracking_number),
+      carrier: normalizedNullable(row.carrier),
+      shippingProvider: normalizedNullable(metadata.shippingProvider)?.toLowerCase() ?? null,
+      providerPhysicalShipmentId: normalizedNullable(metadata.providerPhysicalShipmentId),
+      items: [],
+    };
+    const physicalShipmentItemId = asPositiveInteger(row.physical_shipment_item_id);
+    if (physicalShipmentItemId) {
+      const shipmentRequestItemId = asPositiveInteger(row.shipment_request_item_id);
+      const omsOrderLineId = asPositiveInteger(row.oms_order_line_id);
+      const channelOrderLineId = normalizedNullable(row.channel_order_line_id);
+      const quantity = asPositiveInteger(row.quantity_pushed);
+      if (!shipmentRequestItemId || !omsOrderLineId || !channelOrderLineId || !quantity) {
+        throw new FulfillmentAuthorityError(
+          "CANONICAL_STATE_CONFLICT",
+          `Channel fulfillment command ${id} has incomplete immutable item lineage`,
+          { commandId: id, physicalShipmentItemId },
+        );
+      }
+      snapshot.items.push({
+        physicalShipmentItemId,
+        shipmentRequestItemId,
+        omsOrderLineId,
+        channelOrderLineId,
+        quantity,
+      });
+    }
+    snapshots.set(id, snapshot);
+  }
+  return [...snapshots.values()].map((snapshot) => Object.freeze({
+    ...snapshot,
+    items: Object.freeze(snapshot.items),
+  }));
+}
+
+async function requeueCompatibleCommandConflict(
+  tx: any,
+  commandId: number,
+  incomingRequestHash: string,
+): Promise<boolean> {
+  const idempotencyKey = `canonical-command-repair:${incomingRequestHash}`;
+  const result = rowsOf<any>(await tx.execute(sql`
+    WITH audit AS (
+      INSERT INTO oms.channel_fulfillment_push_requeues (
+        channel_fulfillment_push_id,
+        idempotency_key,
+        operator,
+        reason,
+        previous_status,
+        previous_attempt_count,
+        previous_error_code,
+        previous_error_message,
+        previous_request_hash,
+        created_at
+      )
+      SELECT
+        command.id,
+        ${idempotencyKey},
+        'system:canonical_materializer',
+        'immutable command is an exact subset of the current canonical physical package',
+        command.push_status,
+        command.attempt_count,
+        command.last_error_code,
+        command.last_error,
+        command.request_hash,
+        NOW()
+      FROM oms.channel_fulfillment_pushes AS command
+      WHERE command.id = ${commandId}
+        AND command.push_status = 'review'
+        AND command.last_error_code = 'COMMAND_REQUEST_CONFLICT'
+      ON CONFLICT (channel_fulfillment_push_id, idempotency_key) DO NOTHING
+      RETURNING channel_fulfillment_push_id
+    )
+    UPDATE oms.channel_fulfillment_pushes AS command
+    SET push_status = 'pending',
+        next_attempt_at = NOW(),
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        last_error_code = NULL,
+        last_error = NULL,
+        completed_at = NULL,
+        updated_at = NOW()
+    FROM audit
+    WHERE command.id = audit.channel_fulfillment_push_id
+      AND command.push_status = 'review'
+      AND command.last_error_code = 'COMMAND_REQUEST_CONFLICT'
+    RETURNING command.id
+  `));
+  return result.length === 1;
+}
+
+async function persistChannelCommandSet(
+  tx: any,
+  command: ChannelFulfillmentCommand,
+  input: ReturnType<typeof canonicalizeInput>,
+  legacyShipmentIds: readonly number[],
+): Promise<MaterializedChannelCommand[]> {
+  const existing = await loadExistingChannelCommandSnapshots(tx, command);
+  if (existing.length === 0) {
+    return [await insertChannelCommand(tx, command, input, legacyShipmentIds)];
+  }
+
+  const reconciliation = reconcileChannelFulfillmentCommandSet({
+    existingCommands: existing,
+    incomingCommand: command,
+    shippingProvider: input.shippingProvider,
+    providerPhysicalShipmentId: input.providerPhysicalShipmentId,
+  });
+  if (reconciliation.kind === "conflict") {
+    const activeIds = existing
+      .filter((snapshot) => ACTIVE_COMMAND_STATUSES.has(snapshot.pushStatus))
+      .map((snapshot) => snapshot.id);
+    if (activeIds.length > 0) {
+      await tx.execute(sql`
+        UPDATE oms.channel_fulfillment_pushes
+        SET push_status = 'review',
+            last_error_code = 'COMMAND_REQUEST_CONFLICT',
+            last_error = ${`Canonical command reconciliation failed: ${reconciliation.reason}`},
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            updated_at = NOW()
+        WHERE id IN (${buildIdList(activeIds)})
+      `);
+    }
+    throw new FulfillmentAuthorityError(
+      "COMMAND_REQUEST_CONFLICT",
+      "Canonical physical package conflicts with prior immutable channel command coverage",
+      {
+        commandKey: command.commandKey,
+        reason: reconciliation.reason,
+        ...reconciliation.evidence,
+      },
+    );
+  }
+
+  const requeuedCommandIds = new Set<number>();
+  for (const commandId of reconciliation.requeueCommandIds) {
+    const requeued = await requeueCompatibleCommandConflict(
+      tx,
+      commandId,
+      command.requestHash,
+    );
+    if (!requeued) {
+      throw new FulfillmentAuthorityError(
+        "COMMAND_REQUEST_CONFLICT",
+        "Compatible channel command could not be requeued with a new audit record",
+        { commandId, commandKey: command.commandKey },
+      );
+    }
+    requeuedCommandIds.add(commandId);
+  }
+
+  const materialized: MaterializedChannelCommand[] = existing.map((snapshot) => ({
+    id: snapshot.id,
+    commandKey: snapshot.commandKey,
+    pushStatus: requeuedCommandIds.has(snapshot.id)
+      ? "pending"
+      : snapshot.pushStatus,
+    replayed: true,
+  }));
+  if (reconciliation.missingItems.length === 0) return materialized;
+
+  const supplementalScope = buildSupplementalChannelFulfillmentScope(
+    reconciliation.missingItems,
+  );
+  const supplemental = planChannelFulfillmentCommands({
+    physicalShipmentId: command.physicalShipmentId,
+    shippingProvider: input.shippingProvider,
+    providerPhysicalShipmentId: input.providerPhysicalShipmentId,
+    trackingNumber: command.trackingNumber,
+    carrier: command.carrier,
+    trackingUrl: command.trackingUrl,
+    shippedAt: command.shippedAt,
+    items: reconciliation.missingItems.map((item) => ({
+      physicalShipmentItemId: item.physicalShipmentItemId,
+      shipmentRequestItemId: item.shipmentRequestItemId,
+      omsOrderId: command.omsOrderId,
+      omsOrderLineId: item.omsOrderLineId,
+      channelProvider: command.channelProvider,
+      channelOrderLineId: item.channelOrderLineId,
+      channelFulfillmentScopeKey: supplementalScope,
+      quantityShipped: item.quantity,
+    })),
+  });
+  if (supplemental.length !== 1) {
+    throw new FulfillmentAuthorityError(
+      "CANONICAL_STATE_CONFLICT",
+      "Supplemental channel command planning did not produce exactly one command",
+      { commandKey: command.commandKey, supplementalCount: supplemental.length },
+    );
+  }
+  materialized.push(await insertChannelCommand(
+    tx,
+    supplemental[0],
+    input,
+    legacyShipmentIds,
+  ));
+  return materialized;
+}
+
 function validateLegacyHeaders(
   rows: readonly LegacyPackageRow[],
   input: ReturnType<typeof canonicalizeInput>,
@@ -1454,21 +1713,33 @@ function validateLegacyHeaders(
     const parsedPhysical = parseLegacyProviderPhysicalShipmentId(row.persisted_physical_identity);
     if (
       parsedPhysical
-      && (
-        parsedPhysical.provider !== input.shippingProvider
-        || parsedPhysical.providerPhysicalShipmentId !== input.providerPhysicalShipmentId
-      )
+      && parsedPhysical.provider !== input.shippingProvider
     ) {
       throw new FulfillmentAuthorityError(
         "PACKAGE_IDENTITY_CONFLICT",
-        `Legacy shipment ${row.legacy_shipment_id} belongs to another physical package`,
+        `Legacy shipment ${row.legacy_shipment_id} belongs to another shipping provider`,
         { persistedPhysicalIdentity: row.persisted_physical_identity, providerPhysicalShipmentId: input.providerPhysicalShipmentId },
       );
     }
-    assertCompatibleIdentity("providerOrderId", row.persisted_provider_order_id, input.providerOrderId, row.legacy_shipment_id);
-    assertCompatibleIdentity("providerOrderKey", row.persisted_provider_order_key, input.providerOrderKey, row.legacy_shipment_id);
-    assertCompatibleIdentity("trackingNumber", row.persisted_tracking_number, input.trackingNumber, row.legacy_shipment_id);
-    assertCompatibleIdentity("carrier", row.persisted_carrier, input.carrier, row.legacy_shipment_id);
+    if (input.legacyHeaderPolicy === "strict") {
+      if (
+        parsedPhysical
+        && parsedPhysical.providerPhysicalShipmentId !== input.providerPhysicalShipmentId
+      ) {
+        throw new FulfillmentAuthorityError(
+          "PACKAGE_IDENTITY_CONFLICT",
+          `Legacy shipment ${row.legacy_shipment_id} belongs to another physical package`,
+          {
+            persistedPhysicalIdentity: row.persisted_physical_identity,
+            providerPhysicalShipmentId: input.providerPhysicalShipmentId,
+          },
+        );
+      }
+      assertCompatibleIdentity("providerOrderId", row.persisted_provider_order_id, input.providerOrderId, row.legacy_shipment_id);
+      assertCompatibleIdentity("providerOrderKey", row.persisted_provider_order_key, input.providerOrderKey, row.legacy_shipment_id);
+      assertCompatibleIdentity("trackingNumber", row.persisted_tracking_number, input.trackingNumber, row.legacy_shipment_id);
+      assertCompatibleIdentity("carrier", row.persisted_carrier, input.carrier, row.legacy_shipment_id);
+    }
   }
 }
 
@@ -1797,7 +2068,7 @@ export function createChannelFulfillmentAuthorityRepository(
         const legacyShipmentIds = channelEligibleCustomerItems
           .filter((item) => item.omsOrderId === command.omsOrderId)
           .map((item) => item.legacyWmsShipmentId);
-        persistedCommands.push(await persistChannelCommand(
+        persistedCommands.push(...await persistChannelCommandSet(
           tx,
           command,
           input,

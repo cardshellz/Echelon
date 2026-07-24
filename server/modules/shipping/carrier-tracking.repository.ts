@@ -2,6 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import {
   carrierDispatchAttempts,
+  carrierDispatchCommandRequeues,
   carrierDispatchCommands,
   carrierTrackingSubscriptionRequeues,
   carrierTrackingSubscriptionAttempts,
@@ -175,6 +176,45 @@ export interface RequeueReviewedTrackingSubscriptionsResult {
   requeued: number;
 }
 
+export interface RequeueReviewedCarrierDispatchCommandsInput {
+  limit: number;
+  expectedCount: number;
+  operator: string;
+  reason: string;
+  idempotencyKey: string;
+  requeuedAt: Date;
+}
+
+export interface RequeueReviewedCarrierDispatchCommandsResult {
+  selected: number;
+  requeued: number;
+  byCohort: Readonly<Record<string, number>>;
+}
+
+export type HistoricalCarrierDispatchRepairCohort =
+  | "aggregate_package_identity_conflict"
+  | "immutable_command_request_conflict"
+  | "package_resolution_retry"
+  | "legacy_outbound_shipment_identity_conflict";
+
+export interface HistoricalCarrierDispatchRepairCandidate {
+  commandId: number;
+  shippingProviderLabelId: number;
+  providerLabelId: string;
+  providerOrderId: string | null;
+  trackingSuffix: string;
+  repairCohort: HistoricalCarrierDispatchRepairCohort;
+  lastErrorCode: string;
+  lastErrorMessage: string | null;
+}
+
+export interface HistoricalCarrierDispatchRepairPreview {
+  candidateCount: number;
+  selectedCount: number;
+  byCohort: Readonly<Record<string, number>>;
+  sample: readonly HistoricalCarrierDispatchRepairCandidate[];
+}
+
 export interface ClaimedCarrierTrackingWebhookHydration {
   receiptId: number;
   resourceUrl: string;
@@ -303,6 +343,12 @@ export interface CarrierTrackingRepository {
   requeueReviewedTrackingSubscriptions(
     input: RequeueReviewedTrackingSubscriptionsInput,
   ): Promise<RequeueReviewedTrackingSubscriptionsResult>;
+  previewReviewedCarrierDispatchCommands(
+    limit: number,
+  ): Promise<HistoricalCarrierDispatchRepairPreview>;
+  requeueReviewedCarrierDispatchCommands(
+    input: RequeueReviewedCarrierDispatchCommandsInput,
+  ): Promise<RequeueReviewedCarrierDispatchCommandsResult>;
   listEventsPendingReconciliation(
     limit: number,
     asOf: Date,
@@ -406,6 +452,87 @@ function requiredRecord(value: unknown, field: string): Record<string, unknown> 
     throw new Error(`Invalid ${field} returned by carrier tracking repository`);
   }
   return value as Record<string, unknown>;
+}
+
+const HISTORICAL_CARRIER_DISPATCH_REPAIR_COHORTS = [
+  "aggregate_package_identity_conflict",
+  "immutable_command_request_conflict",
+  "package_resolution_retry",
+  "legacy_outbound_shipment_identity_conflict",
+] as const satisfies readonly HistoricalCarrierDispatchRepairCohort[];
+
+function historicalCarrierDispatchRepairCohort(
+  value: unknown,
+): HistoricalCarrierDispatchRepairCohort {
+  const cohort = requiredString(value, "carrier_dispatch_repair_cohort");
+  if (!isStringEnumValue(HISTORICAL_CARRIER_DISPATCH_REPAIR_COHORTS, cohort)) {
+    throw new Error("Invalid carrier_dispatch_repair_cohort returned by carrier tracking repository");
+  }
+  return cohort;
+}
+
+function historicalCarrierDispatchRepairCohortSql() {
+  return sql`
+    CASE
+      WHEN command.last_error_code = 'PACKAGE_IDENTITY_CONFLICT'
+        OR (
+          command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+          AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') =
+            'PACKAGE_IDENTITY_CONFLICT'
+        )
+        THEN 'aggregate_package_identity_conflict'
+      WHEN command.last_error_code = 'COMMAND_REQUEST_CONFLICT'
+        OR (
+          command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+          AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') =
+            'COMMAND_REQUEST_CONFLICT'
+        )
+        THEN 'immutable_command_request_conflict'
+      WHEN command.last_error_code = 'CARRIER_DISPATCH_PACKAGE_NOT_RESOLVED'
+        THEN 'package_resolution_retry'
+      WHEN command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') = '23505'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceMessage'), '')
+          ILIKE '%uq_outbound_shipments_active_%'
+        THEN 'legacy_outbound_shipment_identity_conflict'
+      ELSE NULL
+    END
+  `;
+}
+
+function historicalCarrierDispatchRepairEligibilitySql() {
+  const repairCohort = historicalCarrierDispatchRepairCohortSql();
+  return sql`
+    command.status = 'review_required'
+    AND label.provider = 'shipstation'
+    AND label.label_status IN ('active', 'unknown')
+    AND label.voided_at IS NULL
+    AND event.dispatch_evidence = 'confirmed'
+    AND EXISTS (
+      SELECT 1
+      FROM wms.shipping_provider_label_links AS link
+      WHERE link.shipping_provider_label_id = label.id
+    )
+    AND ${repairCohort} IS NOT NULL
+  `;
+}
+
+function historicalCarrierDispatchRepairCandidateFromRow(
+  row: Record<string, unknown>,
+): HistoricalCarrierDispatchRepairCandidate {
+  return {
+    commandId: requiredId(row.id, "carrier_dispatch_command_id"),
+    shippingProviderLabelId: requiredId(
+      row.shipping_provider_label_id,
+      "shipping_provider_label_id",
+    ),
+    providerLabelId: requiredString(row.provider_label_id, "provider_label_id"),
+    providerOrderId: stringOrNull(row.provider_order_id),
+    trackingSuffix: requiredString(row.tracking_suffix, "tracking_suffix"),
+    repairCohort: historicalCarrierDispatchRepairCohort(row.repair_cohort),
+    lastErrorCode: requiredString(row.last_error_code, "last_error_code"),
+    lastErrorMessage: stringOrNull(row.last_error_message),
+  };
 }
 
 function claimedDispatchCommandFromRow(
@@ -1829,6 +1956,210 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           requeued += 1;
         }
         return { selected: candidates.length, requeued };
+      });
+    },
+
+    async previewReviewedCarrierDispatchCommands(limit) {
+      if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 500) {
+        throw new Error("Carrier-dispatch repair preview limit must be an integer between 1 and 500");
+      }
+      const repairCohort = historicalCarrierDispatchRepairCohortSql();
+      const eligibility = historicalCarrierDispatchRepairEligibilitySql();
+      const countResult = await db.execute(sql`
+        SELECT
+          ${repairCohort} AS repair_cohort,
+          COUNT(*)::integer AS candidate_count
+        FROM wms.carrier_dispatch_commands AS command
+        JOIN wms.shipping_provider_labels AS label
+          ON label.id = command.shipping_provider_label_id
+        JOIN wms.carrier_tracking_events AS event
+          ON event.id = command.carrier_tracking_event_id
+        WHERE ${eligibility}
+        GROUP BY ${repairCohort}
+        ORDER BY ${repairCohort}
+      `);
+      const counts = resultRows(countResult);
+      const byCohort: Record<string, number> = {};
+      let candidateCount = 0;
+      for (const row of counts) {
+        const cohort = historicalCarrierDispatchRepairCohort(row.repair_cohort);
+        const count = nonnegativeInteger(row.candidate_count, "candidate_count");
+        byCohort[cohort] = count;
+        candidateCount += count;
+      }
+
+      const sampleResult = await db.execute(sql`
+        SELECT
+          command.id,
+          command.shipping_provider_label_id,
+          command.last_error_code,
+          command.last_error_message,
+          label.provider_label_id,
+          label.provider_order_id,
+          RIGHT(label.normalized_tracking_number, 8) AS tracking_suffix,
+          ${repairCohort} AS repair_cohort
+        FROM wms.carrier_dispatch_commands AS command
+        JOIN wms.shipping_provider_labels AS label
+          ON label.id = command.shipping_provider_label_id
+        JOIN wms.carrier_tracking_events AS event
+          ON event.id = command.carrier_tracking_event_id
+        WHERE ${eligibility}
+        ORDER BY command.id
+        LIMIT ${Math.min(limit, 25)}
+      `);
+      return {
+        candidateCount,
+        selectedCount: Math.min(candidateCount, limit),
+        byCohort: Object.freeze(byCohort),
+        sample: Object.freeze(
+          resultRows(sampleResult).map(historicalCarrierDispatchRepairCandidateFromRow),
+        ),
+      };
+    },
+
+    async requeueReviewedCarrierDispatchCommands(input) {
+      const operator = input.operator.trim();
+      const reason = input.reason.trim();
+      const idempotencyKey = input.idempotencyKey.trim();
+      if (!Number.isSafeInteger(input.limit) || input.limit <= 0 || input.limit > 500) {
+        throw new Error("Carrier-dispatch repair limit must be an integer between 1 and 500");
+      }
+      if (!Number.isSafeInteger(input.expectedCount)
+          || input.expectedCount <= 0
+          || input.expectedCount > input.limit) {
+        throw new Error("Carrier-dispatch repair expectedCount must be between 1 and limit");
+      }
+      if (!operator || operator.length > 200) {
+        throw new Error("Carrier-dispatch repair operator must contain 1 through 200 characters");
+      }
+      if (!reason || reason.length > 2_000) {
+        throw new Error("Carrier-dispatch repair reason must contain 1 through 2000 characters");
+      }
+      if (!idempotencyKey || idempotencyKey.length > 200) {
+        throw new Error("Carrier-dispatch repair idempotencyKey must contain 1 through 200 characters");
+      }
+      if (Number.isNaN(input.requeuedAt.getTime())) {
+        throw new Error("Carrier-dispatch repair timestamp must be valid");
+      }
+
+      return db.transaction(async (databaseTx: any) => {
+        const repairCohort = historicalCarrierDispatchRepairCohortSql();
+        const eligibility = historicalCarrierDispatchRepairEligibilitySql();
+        const candidateResult = await databaseTx.execute(sql`
+          SELECT
+            command.id,
+            command.shipping_provider_label_id,
+            command.status,
+            command.attempt_count,
+            command.consecutive_failure_count,
+            command.last_error_code,
+            command.last_error_message,
+            command.result_evidence,
+            label.provider_label_id,
+            label.provider_order_id,
+            RIGHT(label.normalized_tracking_number, 8) AS tracking_suffix,
+            ${repairCohort} AS repair_cohort
+          FROM wms.carrier_dispatch_commands AS command
+          JOIN wms.shipping_provider_labels AS label
+            ON label.id = command.shipping_provider_label_id
+          JOIN wms.carrier_tracking_events AS event
+            ON event.id = command.carrier_tracking_event_id
+          WHERE ${eligibility}
+          ORDER BY command.id
+          FOR UPDATE OF command SKIP LOCKED
+          LIMIT ${input.limit}
+        `);
+        const candidates = resultRows(candidateResult);
+        if (candidates.length !== input.expectedCount) {
+          throw new Error(
+            `Carrier-dispatch repair expected ${input.expectedCount} candidate(s), found ${candidates.length}; rerun dry-run`,
+          );
+        }
+
+        let requeued = 0;
+        const byCohort: Record<string, number> = {};
+        for (const candidate of candidates) {
+          const commandId = requiredId(candidate.id, "carrier_dispatch_command_id");
+          const repairCohortValue = historicalCarrierDispatchRepairCohort(
+            candidate.repair_cohort,
+          );
+          byCohort[repairCohortValue] = (byCohort[repairCohortValue] ?? 0) + 1;
+          const previousResultEvidence = requiredRecord(
+            candidate.result_evidence,
+            "carrier_dispatch_result_evidence",
+          );
+          const [audit] = await databaseTx
+            .insert(carrierDispatchCommandRequeues)
+            .values({
+              carrierDispatchCommandId: commandId,
+              idempotencyKey,
+              operator,
+              reason,
+              repairCohort: repairCohortValue,
+              previousStatus: requiredString(candidate.status, "carrier_dispatch_status"),
+              previousAttemptCount: nonnegativeInteger(
+                candidate.attempt_count,
+                "carrier_dispatch_attempt_count",
+              ),
+              previousConsecutiveFailureCount: nonnegativeInteger(
+                candidate.consecutive_failure_count,
+                "carrier_dispatch_consecutive_failure_count",
+              ),
+              previousErrorCode: stringOrNull(candidate.last_error_code),
+              previousErrorMessage: stringOrNull(candidate.last_error_message),
+              previousResultEvidence,
+              createdAt: input.requeuedAt,
+            })
+            .onConflictDoNothing({
+              target: [
+                carrierDispatchCommandRequeues.carrierDispatchCommandId,
+                carrierDispatchCommandRequeues.idempotencyKey,
+              ],
+            })
+            .returning({ id: carrierDispatchCommandRequeues.id });
+          if (!audit) continue;
+
+          const updated = await databaseTx
+            .update(carrierDispatchCommands)
+            .set({
+              status: "pending",
+              consecutiveFailureCount: 0,
+              nextAttemptAt: null,
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              succeededAt: null,
+              lastErrorCode: null,
+              lastErrorMessage: null,
+              resultEvidence: {
+                ...previousResultEvidence,
+                historicalRepairRequeue: {
+                  idempotencyKey,
+                  operator,
+                  reason,
+                  repairCohort: repairCohortValue,
+                  requeuedAt: input.requeuedAt.toISOString(),
+                },
+              },
+              updatedAt: input.requeuedAt,
+            })
+            .where(and(
+              eq(carrierDispatchCommands.id, commandId),
+              eq(carrierDispatchCommands.status, "review_required"),
+            ))
+            .returning({ id: carrierDispatchCommands.id });
+          if (updated.length !== 1) {
+            throw new Error(
+              `Carrier-dispatch command ${commandId} changed while its requeue was being recorded`,
+            );
+          }
+          requeued += 1;
+        }
+
+        return {
+          selected: candidates.length,
+          requeued,
+          byCohort: Object.freeze(byCohort),
+        };
       });
     },
 
