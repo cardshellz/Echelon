@@ -79,7 +79,6 @@ import {
   CarrierDispatchAuthorityError,
   type CarrierDispatchAuthority,
 } from "../modules/shipping/carrier-dispatch-authority";
-import { createShipStationTrackingSubscriptionsClient } from "../modules/shipping/shipstation-tracking-subscriptions.client";
 import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-events.client";
 import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-physical-recovery.client";
 import { createShipStationPhysicalRecoveryService } from "../modules/oms/shipstation-physical-recovery.service";
@@ -331,7 +330,6 @@ export function createServices(db: any) {
     repository: createDrizzleCarrierTrackingRepository(db),
     clock: systemCarrierTrackingClock,
     logger: carrierTrackingLogger,
-    subscriptionClient: createShipStationTrackingSubscriptionsClient(),
     trackingEventsClient: createShipStationTrackingEventsClient(),
     dispatchAuthority: dispatchAuthorityProxy,
   });

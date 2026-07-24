@@ -756,12 +756,10 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
       throw new Error("Tracking-subscription sweep limit must be an integer between 1 and 100");
     }
-    const asOf = this.dependencies.clock.now();
-    const prepared = await this.dependencies.repository.prepareTrackingSubscriptions(limit, asOf);
     const client = this.dependencies.subscriptionClient;
     const summary = {
-      subscriptionsPrepared: prepared.subscriptionsInserted,
-      subscriptionLabelLinksPrepared: prepared.labelLinksInserted,
+      subscriptionsPrepared: 0,
+      subscriptionLabelLinksPrepared: 0,
       subscriptionsClaimed: 0,
       subscriptionsActivated: 0,
       subscriptionsRetryScheduled: 0,
@@ -770,6 +768,11 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       errors: 0,
     };
     if (!client?.isConfigured()) return summary;
+
+    const asOf = this.dependencies.clock.now();
+    const prepared = await this.dependencies.repository.prepareTrackingSubscriptions(limit, asOf);
+    summary.subscriptionsPrepared = prepared.subscriptionsInserted;
+    summary.subscriptionLabelLinksPrepared = prepared.labelLinksInserted;
 
     const leaseOwner = this.dependencies.subscriptionLeaseOwner?.trim()
       || defaultTrackingSubscriptionLeaseOwner();

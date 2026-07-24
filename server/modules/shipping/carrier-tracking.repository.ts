@@ -2084,16 +2084,14 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                   AND ${event.providerLabelId}::text IS NOT NULL
                   AND label.provider_label_id = ${event.providerLabelId}
               ),
+              -- A label carrier names the provider account (for example stamps_com),
+              -- while an event carrier names the parcel carrier (for example usps).
+              -- Provider plus immutable tracking identity is the cross-namespace join.
               exact_identity AS (
                 SELECT label.id
                 FROM wms.shipping_provider_labels AS label
                 WHERE label.id IN (SELECT id FROM provider_identity)
                   AND label.normalized_tracking_number = ${event.normalizedTrackingNumber}
-                  AND (
-                    ${event.carrier}::text IS NULL
-                    OR label.carrier IS NULL
-                    OR LOWER(BTRIM(label.carrier)) = ${event.carrier}
-                  )
               ),
               candidate_labels AS (
                 SELECT label.*
@@ -2104,8 +2102,6 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                     OR (
                       NOT EXISTS (SELECT 1 FROM provider_identity)
                       AND label.normalized_tracking_number = ${event.normalizedTrackingNumber}
-                      AND ${event.carrier}::text IS NOT NULL
-                      AND LOWER(BTRIM(label.carrier)) = ${event.carrier}
                     )
                   )
               )

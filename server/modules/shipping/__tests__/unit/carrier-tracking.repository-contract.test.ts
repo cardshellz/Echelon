@@ -62,16 +62,24 @@ describe("carrier tracking repository concurrency contract", () => {
     );
   });
 
-  it("requires carrier identity when matching by tracking-number fallback", () => {
-    expect(repositorySource).toContain(
-      "AND ${event.carrier}::text IS NOT NULL",
+  it("matches tracking identity without equating carrier-account and tracking-carrier codes", () => {
+    const matchStart = repositorySource.indexOf("async findMatchCandidates(event)");
+    const appendStart = repositorySource.indexOf("async appendMatchAttempt(", matchStart);
+    const matchSource = repositorySource.slice(matchStart, appendStart);
+
+    expect(matchStart).toBeGreaterThan(-1);
+    expect(matchSource).toContain(
+      "AND label.normalized_tracking_number = ${event.normalizedTrackingNumber}",
     );
-    expect(repositorySource).toContain(
+    expect(matchSource).not.toContain(
       "AND LOWER(BTRIM(label.carrier)) = ${event.carrier}",
+    );
+    expect(matchSource).not.toContain(
+      "AND ${event.carrier}::text IS NOT NULL",
     );
   });
 
-  it("does not fall back when an exact provider label exists with conflicting carrier identity", () => {
+  it("does not fall back when a provider label id exists with conflicting tracking identity", () => {
     const matchStart = repositorySource.indexOf("async findMatchCandidates(event)");
     const appendStart = repositorySource.indexOf("async appendMatchAttempt(", matchStart);
     const matchSource = repositorySource.slice(matchStart, appendStart);
