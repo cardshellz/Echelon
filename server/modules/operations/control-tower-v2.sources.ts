@@ -1063,16 +1063,28 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         SELECT DISTINCT ON (subscription_label.shipping_provider_label_id)
           subscription_label.shipping_provider_label_id,
           subscription.id AS subscription_id,
+          subscription.carrier_code,
           subscription.subscription_status,
           subscription.next_attempt_at,
           subscription.lease_expires_at,
           subscription.last_error_code,
           subscription.last_error_message,
+          latest_attempt.http_status,
+          latest_attempt.response_evidence,
           subscription.activated_at,
           subscription.updated_at
         FROM wms.carrier_tracking_subscription_labels AS subscription_label
         JOIN wms.carrier_tracking_subscriptions AS subscription
           ON subscription.id = subscription_label.carrier_tracking_subscription_id
+        LEFT JOIN LATERAL (
+          SELECT
+            attempt.http_status,
+            attempt.response_evidence
+          FROM wms.carrier_tracking_subscription_attempts AS attempt
+          WHERE attempt.carrier_tracking_subscription_id = subscription.id
+          ORDER BY attempt.attempt_number DESC, attempt.id DESC
+          LIMIT 1
+        ) AS latest_attempt ON TRUE
         ORDER BY
           subscription_label.shipping_provider_label_id,
           subscription_label.created_at DESC,
@@ -1566,8 +1578,19 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
             WHERE confirmed.shipping_provider_label_id = label.id
           )
       )
-      SELECT *
+      SELECT
+        issues.*,
+        subscription.carrier_code AS subscription_carrier_code,
+        subscription.last_error_message AS subscription_last_error_message,
+        subscription.http_status AS subscription_http_status,
+        subscription.response_evidence AS subscription_response_evidence
       FROM issues
+      LEFT JOIN latest_label_subscription AS subscription
+        ON subscription.shipping_provider_label_id = issues.label_id
+       AND issues.issue_code IN (
+         'carrier_tracking_subscription_not_active',
+         'carrier_tracking_subscription_review'
+       )
       ORDER BY first_seen_at, source_key
     `, [now.toISOString(), CARRIER_LABEL_LINK_GRACE_MINUTES, CARRIER_ACCEPTANCE_GRACE_MINUTES]);
     return result.rows;
@@ -1603,6 +1626,12 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
       stringOrNull(row.dispatch_evidence) ? `dispatch evidence ${row.dispatch_evidence}` : null,
       stringOrNull(row.match_status) ? `match ${row.match_status}` : null,
       stringOrNull(row.reason_code) ? `reason ${row.reason_code}` : null,
+      row.subscription_http_status == null
+        ? null
+        : `provider HTTP ${row.subscription_http_status}`,
+      stringOrNull(row.subscription_last_error_message)
+        ? `error ${row.subscription_last_error_message}`
+        : null,
     ].filter(Boolean).join(", ");
     const summary = `${content.title}${orderNumber ? ` for ${orderNumber}` : ""}${trackingNumber ? ` (${trackingNumber})` : ""}.`;
     const primaryHref = wmsOrderId
@@ -1615,7 +1644,7 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
       sourceNamespace: "wms.carrier_tracking_authority",
       sourceType: "carrier_tracking_exception",
       sourceKey,
-      projectionVersion: 2,
+      projectionVersion: 3,
       domain: "shipping",
       code,
       entityType: dispatchCommandId
@@ -1672,6 +1701,10 @@ export const carrierTrackingSource: ControlTowerSourceAdapter<Record<string, unk
         dispatchEvidence: row.dispatch_evidence,
         matchStatus: row.match_status,
         reasonCode: row.reason_code,
+        subscriptionCarrierCode: row.subscription_carrier_code,
+        subscriptionHttpStatus: row.subscription_http_status,
+        subscriptionLastErrorMessage: row.subscription_last_error_message,
+        subscriptionResponseEvidence: row.subscription_response_evidence,
       },
       detailLocator: {
         sourceTable: dispatchCommandId
