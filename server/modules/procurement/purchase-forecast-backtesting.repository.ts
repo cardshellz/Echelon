@@ -6,6 +6,7 @@ import {
 import type {
   PurchaseForecastEvaluationCandidate,
   PurchaseForecastEvaluationInput,
+  PurchaseForecastOverlayExclusionReason,
 } from "./purchase-forecast-backtesting.domain";
 
 export type PurchaseForecastEvaluationAggregateRow = {
@@ -23,6 +24,18 @@ export type PurchaseForecastEvaluationAggregateRow = {
   tieCount: number;
   zeroActualCount: number;
   observationsWithForwardDemand: number;
+  overlayEvaluationCount: number;
+  overlayActualDemandPieces: number;
+  overlayRawDemandPieces: number;
+  overlayWeightedDemandPieces: number;
+  overlayCohortForecastAbsoluteErrorMicros: number;
+  overlayAdjustedForecastDemandMicros: number;
+  overlayAdjustedAbsoluteErrorMicros: number;
+  overlayAdjustedBiasMicros: number;
+  overlayWinCount: number;
+  historicalForecastWinCount: number;
+  overlayTieCount: number;
+  observationsWithAttributedOverlay: number;
 };
 
 export type PurchaseForecastEvaluationReportItem = {
@@ -50,6 +63,19 @@ export type PurchaseForecastEvaluationReportItem = {
   baselineBiasMicros: number;
   forwardDemandPieces: number;
   forwardDemandRawPieces: number;
+  overlayCaptureVersion: number;
+  overlayCaptureComplete: boolean;
+  overlayPlanningAsOfDate: string | null;
+  overlayHorizonDays: number | null;
+  overlayAttributionVersion: number;
+  overlayEvaluable: boolean;
+  overlayExclusionReason: PurchaseForecastOverlayExclusionReason | null;
+  overlayContributionCount: number | null;
+  overlayRawDemandPieces: number | null;
+  overlayWeightedDemandPieces: number | null;
+  overlayAdjustedForecastDemandMicros: number | null;
+  overlayAdjustedAbsoluteErrorMicros: number | null;
+  overlayAdjustedBiasMicros: number | null;
   demandQueryVersion: string;
   evaluatedBy: string | null;
   evaluatedAt: Date;
@@ -71,6 +97,88 @@ function validDate(value: unknown, field: string): Date {
 
 function nullableDate(value: unknown, field: string): Date | null {
   return value == null ? null : validDate(value, field);
+}
+
+function booleanValue(value: unknown, field: string): boolean {
+  if (value === true || value === false) return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new RangeError(`${field} must be boolean`);
+}
+
+function nullableSafeInteger(value: unknown, field: string, minimum = Number.MIN_SAFE_INTEGER): number | null {
+  return value == null ? null : safeInteger(value, field, minimum);
+}
+
+function nullableCalendarDate(value: unknown, field: string): string | null {
+  if (value == null) return null;
+  const text = String(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    throw new RangeError(`${field} must be an ISO calendar date`);
+  }
+  const parsed = new Date(`${text}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== text) {
+    throw new RangeError(`${field} must be a valid ISO calendar date`);
+  }
+  return text;
+}
+
+function calendarDate(value: unknown, field: string): string {
+  const parsed = nullableCalendarDate(value, field);
+  if (parsed === null) throw new RangeError(`${field} is required`);
+  return parsed;
+}
+
+function overlayContributions(value: unknown): PurchaseForecastEvaluationCandidate["overlayContributions"] {
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new RangeError("overlayContributions must contain valid JSON");
+    }
+  }
+  if (!Array.isArray(parsed)) {
+    throw new RangeError("overlayContributions must be an array");
+  }
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new RangeError(`overlayContributions[${index}] must be an object`);
+    }
+    const row = entry as Record<string, unknown>;
+    return {
+      demandEventId: safeInteger(row.demandEventId, `overlayContributions[${index}].demandEventId`, 1),
+      demandEventLineId: safeInteger(
+        row.demandEventLineId,
+        `overlayContributions[${index}].demandEventLineId`,
+        1,
+      ),
+      eventStartDate: calendarDate(
+        row.eventStartDate,
+        `overlayContributions[${index}].eventStartDate`,
+      ),
+      planningAsOfDate: calendarDate(
+        row.planningAsOfDate,
+        `overlayContributions[${index}].planningAsOfDate`,
+      ),
+      expectedPieces: safeInteger(row.expectedPieces, `overlayContributions[${index}].expectedPieces`, 0),
+      weightedPieces: safeInteger(row.weightedPieces, `overlayContributions[${index}].weightedPieces`, 0),
+    };
+  });
+}
+
+function overlayExclusionReason(value: unknown): PurchaseForecastOverlayExclusionReason | null {
+  if (value == null) return null;
+  if (
+    value === "legacy_evaluation"
+    || value === "capture_incomplete"
+    || value === "capture_coverage_unavailable"
+    || value === "capture_horizon_insufficient"
+    || value === "capture_planning_date_mismatch"
+  ) {
+    return value;
+  }
+  throw new RangeError("overlayExclusionReason is not supported");
 }
 
 function horizonDays(value: unknown): PurchaseForecastEvaluationHorizonDays {
@@ -105,6 +213,11 @@ function mapCandidate(row: any): PurchaseForecastEvaluationCandidate {
     baselineDailyPiecesMicros: safeInteger(row.baseline_daily_pieces_micros, "baselineDailyPiecesMicros", 0),
     forwardDemandPieces: safeInteger(row.forward_demand_pieces, "forwardDemandPieces", 0),
     forwardDemandRawPieces: safeInteger(row.forward_demand_raw_pieces, "forwardDemandRawPieces", 0),
+    overlayCaptureVersion: safeInteger(row.overlay_capture_version, "overlayCaptureVersion", 0),
+    overlayCaptureComplete: booleanValue(row.overlay_capture_complete, "overlayCaptureComplete"),
+    overlayPlanningAsOfDate: nullableCalendarDate(row.overlay_planning_as_of_date, "overlayPlanningAsOfDate"),
+    overlayHorizonDays: nullableSafeInteger(row.overlay_horizon_days, "overlayHorizonDays", 1),
+    overlayContributions: overlayContributions(row.overlay_contributions),
     actualDemandPieces: safeInteger(row.actual_demand_pieces, "actualDemandPieces", 0),
     actualOrderCount: safeInteger(row.actual_order_count, "actualOrderCount", 0),
     actualActiveDays: safeInteger(row.actual_active_days, "actualActiveDays", 0),
@@ -128,10 +241,107 @@ function mapAggregate(row: any): PurchaseForecastEvaluationAggregateRow {
     tieCount: safeInteger(row.tie_count, "tieCount", 0),
     zeroActualCount: safeInteger(row.zero_actual_count, "zeroActualCount", 0),
     observationsWithForwardDemand: safeInteger(row.observations_with_forward_demand, "observationsWithForwardDemand", 0),
+    overlayEvaluationCount: safeInteger(row.overlay_evaluation_count, "overlayEvaluationCount", 0),
+    overlayActualDemandPieces: safeInteger(row.overlay_actual_demand_pieces, "overlayActualDemandPieces", 0),
+    overlayRawDemandPieces: safeInteger(row.overlay_raw_demand_pieces, "overlayRawDemandPieces", 0),
+    overlayWeightedDemandPieces: safeInteger(
+      row.overlay_weighted_demand_pieces,
+      "overlayWeightedDemandPieces",
+      0,
+    ),
+    overlayCohortForecastAbsoluteErrorMicros: safeInteger(
+      row.overlay_cohort_forecast_absolute_error_micros,
+      "overlayCohortForecastAbsoluteErrorMicros",
+      0,
+    ),
+    overlayAdjustedForecastDemandMicros: safeInteger(
+      row.overlay_adjusted_forecast_demand_micros,
+      "overlayAdjustedForecastDemandMicros",
+      0,
+    ),
+    overlayAdjustedAbsoluteErrorMicros: safeInteger(
+      row.overlay_adjusted_absolute_error_micros,
+      "overlayAdjustedAbsoluteErrorMicros",
+      0,
+    ),
+    overlayAdjustedBiasMicros: safeInteger(row.overlay_adjusted_bias_micros, "overlayAdjustedBiasMicros"),
+    overlayWinCount: safeInteger(row.overlay_win_count, "overlayWinCount", 0),
+    historicalForecastWinCount: safeInteger(
+      row.historical_forecast_win_count,
+      "historicalForecastWinCount",
+      0,
+    ),
+    overlayTieCount: safeInteger(row.overlay_tie_count, "overlayTieCount", 0),
+    observationsWithAttributedOverlay: safeInteger(
+      row.observations_with_attributed_overlay,
+      "observationsWithAttributedOverlay",
+      0,
+    ),
   };
 }
 
 function mapReportItem(row: any): PurchaseForecastEvaluationReportItem {
+  const overlayAttributionVersion = safeInteger(
+    row.overlay_attribution_version,
+    "overlayAttributionVersion",
+    0,
+  );
+  const overlayEvaluable = booleanValue(row.overlay_evaluable, "overlayEvaluable");
+  const parsedOverlayExclusionReason = overlayExclusionReason(row.overlay_exclusion_reason);
+  const overlayContributionCount = nullableSafeInteger(
+    row.overlay_contribution_count,
+    "overlayContributionCount",
+    0,
+  );
+  const overlayRawDemandPieces = nullableSafeInteger(row.overlay_raw_demand_pieces, "overlayRawDemandPieces", 0);
+  const overlayWeightedDemandPieces = nullableSafeInteger(
+    row.overlay_weighted_demand_pieces,
+    "overlayWeightedDemandPieces",
+    0,
+  );
+  const overlayAdjustedForecastDemandMicros = nullableSafeInteger(
+    row.overlay_adjusted_forecast_demand_micros,
+    "overlayAdjustedForecastDemandMicros",
+    0,
+  );
+  const overlayAdjustedAbsoluteErrorMicros = nullableSafeInteger(
+    row.overlay_adjusted_absolute_error_micros,
+    "overlayAdjustedAbsoluteErrorMicros",
+    0,
+  );
+  const overlayAdjustedBiasMicros = nullableSafeInteger(
+    row.overlay_adjusted_bias_micros,
+    "overlayAdjustedBiasMicros",
+  );
+  const overlayMetrics = [
+    overlayContributionCount,
+    overlayRawDemandPieces,
+    overlayWeightedDemandPieces,
+    overlayAdjustedForecastDemandMicros,
+    overlayAdjustedAbsoluteErrorMicros,
+    overlayAdjustedBiasMicros,
+  ];
+  if (
+    !overlayEvaluable
+    && (
+      overlayAttributionVersion !== 0
+      || parsedOverlayExclusionReason === null
+      || overlayMetrics.some((value) => value !== null)
+    )
+  ) {
+    throw new RangeError("Non-evaluable forecast report row contains overlay metrics");
+  }
+  if (
+    overlayEvaluable
+    && (
+      overlayAttributionVersion <= 0
+      || parsedOverlayExclusionReason !== null
+      || overlayMetrics.some((value) => value === null)
+    )
+  ) {
+    throw new RangeError("Evaluable forecast report row is missing overlay metrics");
+  }
+
   return {
     id: safeInteger(row.id, "id", 1),
     observationId: safeInteger(row.observation_id, "observationId", 1),
@@ -157,6 +367,19 @@ function mapReportItem(row: any): PurchaseForecastEvaluationReportItem {
     baselineBiasMicros: safeInteger(row.baseline_bias_micros, "baselineBiasMicros"),
     forwardDemandPieces: safeInteger(row.forward_demand_pieces, "forwardDemandPieces", 0),
     forwardDemandRawPieces: safeInteger(row.forward_demand_raw_pieces, "forwardDemandRawPieces", 0),
+    overlayCaptureVersion: safeInteger(row.overlay_capture_version, "overlayCaptureVersion", 0),
+    overlayCaptureComplete: booleanValue(row.overlay_capture_complete, "overlayCaptureComplete"),
+    overlayPlanningAsOfDate: nullableCalendarDate(row.overlay_planning_as_of_date, "overlayPlanningAsOfDate"),
+    overlayHorizonDays: nullableSafeInteger(row.overlay_horizon_days, "overlayHorizonDays", 1),
+    overlayAttributionVersion,
+    overlayEvaluable,
+    overlayExclusionReason: parsedOverlayExclusionReason,
+    overlayContributionCount,
+    overlayRawDemandPieces,
+    overlayWeightedDemandPieces,
+    overlayAdjustedForecastDemandMicros,
+    overlayAdjustedAbsoluteErrorMicros,
+    overlayAdjustedBiasMicros,
     demandQueryVersion: String(row.demand_query_version ?? ""),
     evaluatedBy: row.evaluated_by == null ? null : String(row.evaluated_by),
     evaluatedAt: validDate(row.evaluated_at, "evaluatedAt"),
@@ -186,6 +409,28 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
           observation.baseline_daily_pieces_micros,
           observation.forward_demand_pieces,
           observation.forward_demand_raw_pieces,
+          observation.overlay_capture_version,
+          observation.overlay_capture_complete,
+          observation.overlay_planning_as_of_date,
+          observation.overlay_horizon_days,
+          COALESCE((
+            SELECT JSONB_AGG(
+              JSONB_BUILD_OBJECT(
+                'demandEventId', contribution.demand_event_id,
+                'demandEventLineId', contribution.demand_event_line_id,
+                'eventStartDate', contribution.event_start_date,
+                'planningAsOfDate', contribution.planning_as_of_date,
+                'expectedPieces', contribution.expected_pieces,
+                'weightedPieces', contribution.weighted_pieces
+              )
+              ORDER BY
+                contribution.event_start_date,
+                contribution.demand_event_id,
+                contribution.demand_event_line_id
+            )
+            FROM procurement.purchase_forecast_overlay_contributions contribution
+            WHERE contribution.observation_id = observation.id
+          ), '[]'::jsonb) AS overlay_contributions,
           recommendation_run.as_of AS observed_from,
           horizon.horizon_days,
           recommendation_run.as_of + MAKE_INTERVAL(days => horizon.horizon_days) AS observed_through_exclusive
@@ -242,6 +487,11 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
         candidate.baseline_daily_pieces_micros,
         candidate.forward_demand_pieces,
         candidate.forward_demand_raw_pieces,
+        candidate.overlay_capture_version,
+        candidate.overlay_capture_complete,
+        candidate.overlay_planning_as_of_date,
+        candidate.overlay_horizon_days,
+        candidate.overlay_contributions,
         candidate.observed_from,
         candidate.horizon_days,
         candidate.observed_through_exclusive
@@ -290,7 +540,45 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
           WHERE evaluation.forecast_absolute_error_micros = evaluation.baseline_absolute_error_micros
         )::int AS tie_count,
         COUNT(*) FILTER (WHERE evaluation.actual_demand_pieces = 0)::int AS zero_actual_count,
-        COUNT(*) FILTER (WHERE observation.forward_demand_pieces > 0)::int AS observations_with_forward_demand
+        COUNT(*) FILTER (WHERE observation.forward_demand_pieces > 0)::int AS observations_with_forward_demand,
+        COUNT(*) FILTER (WHERE evaluation.overlay_evaluable)::int AS overlay_evaluation_count,
+        COALESCE(SUM(evaluation.actual_demand_pieces) FILTER (
+          WHERE evaluation.overlay_evaluable
+        ), 0)::bigint AS overlay_actual_demand_pieces,
+        COALESCE(SUM(evaluation.overlay_raw_demand_pieces) FILTER (
+          WHERE evaluation.overlay_evaluable
+        ), 0)::bigint AS overlay_raw_demand_pieces,
+        COALESCE(SUM(evaluation.overlay_weighted_demand_pieces) FILTER (
+          WHERE evaluation.overlay_evaluable
+        ), 0)::bigint AS overlay_weighted_demand_pieces,
+        COALESCE(SUM(evaluation.forecast_absolute_error_micros) FILTER (
+          WHERE evaluation.overlay_evaluable
+        ), 0)::bigint AS overlay_cohort_forecast_absolute_error_micros,
+        COALESCE(SUM(evaluation.overlay_adjusted_forecast_demand_micros) FILTER (
+          WHERE evaluation.overlay_evaluable
+        ), 0)::bigint AS overlay_adjusted_forecast_demand_micros,
+        COALESCE(SUM(evaluation.overlay_adjusted_absolute_error_micros) FILTER (
+          WHERE evaluation.overlay_evaluable
+        ), 0)::bigint AS overlay_adjusted_absolute_error_micros,
+        COALESCE(SUM(evaluation.overlay_adjusted_bias_micros) FILTER (
+          WHERE evaluation.overlay_evaluable
+        ), 0)::bigint AS overlay_adjusted_bias_micros,
+        COUNT(*) FILTER (
+          WHERE evaluation.overlay_evaluable
+            AND evaluation.overlay_adjusted_absolute_error_micros < evaluation.forecast_absolute_error_micros
+        )::int AS overlay_win_count,
+        COUNT(*) FILTER (
+          WHERE evaluation.overlay_evaluable
+            AND evaluation.forecast_absolute_error_micros < evaluation.overlay_adjusted_absolute_error_micros
+        )::int AS historical_forecast_win_count,
+        COUNT(*) FILTER (
+          WHERE evaluation.overlay_evaluable
+            AND evaluation.overlay_adjusted_absolute_error_micros = evaluation.forecast_absolute_error_micros
+        )::int AS overlay_tie_count,
+        COUNT(*) FILTER (
+          WHERE evaluation.overlay_evaluable
+            AND evaluation.overlay_weighted_demand_pieces > 0
+        )::int AS observations_with_attributed_overlay
       FROM procurement.purchase_forecast_evaluations evaluation
       JOIN procurement.purchase_forecast_observations observation
         ON observation.id = evaluation.observation_id
@@ -333,6 +621,19 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
         evaluation.baseline_bias_micros,
         observation.forward_demand_pieces,
         observation.forward_demand_raw_pieces,
+        observation.overlay_capture_version,
+        observation.overlay_capture_complete,
+        observation.overlay_planning_as_of_date,
+        observation.overlay_horizon_days,
+        evaluation.overlay_attribution_version,
+        evaluation.overlay_evaluable,
+        evaluation.overlay_exclusion_reason,
+        evaluation.overlay_contribution_count,
+        evaluation.overlay_raw_demand_pieces,
+        evaluation.overlay_weighted_demand_pieces,
+        evaluation.overlay_adjusted_forecast_demand_micros,
+        evaluation.overlay_adjusted_absolute_error_micros,
+        evaluation.overlay_adjusted_bias_micros,
         evaluation.demand_query_version,
         evaluation.evaluated_by,
         evaluation.evaluated_at

@@ -1049,6 +1049,7 @@ export const purchaseForecastOverlayContributions = procurementSchema.table("pur
 
 export const purchaseForecastEvaluationHorizonDaysEnum = [7, 30, 90] as const;
 export type PurchaseForecastEvaluationHorizonDays = typeof purchaseForecastEvaluationHorizonDaysEnum[number];
+const PURCHASE_FORECAST_EVALUATION_PIECE_MICRO_SCALE_SQL = sql.raw("1000000");
 
 export const purchaseForecastEvaluations = procurementSchema.table("purchase_forecast_evaluations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -1068,6 +1069,15 @@ export const purchaseForecastEvaluations = procurementSchema.table("purchase_for
   baselineAbsoluteErrorMicros: bigint("baseline_absolute_error_micros", { mode: "number" }).notNull(),
   forecastBiasMicros: bigint("forecast_bias_micros", { mode: "number" }).notNull(),
   baselineBiasMicros: bigint("baseline_bias_micros", { mode: "number" }).notNull(),
+  overlayAttributionVersion: integer("overlay_attribution_version").notNull().default(0),
+  overlayEvaluable: boolean("overlay_evaluable").notNull().default(false),
+  overlayExclusionReason: varchar("overlay_exclusion_reason", { length: 64 }).default("legacy_evaluation"),
+  overlayContributionCount: integer("overlay_contribution_count"),
+  overlayRawDemandPieces: bigint("overlay_raw_demand_pieces", { mode: "number" }),
+  overlayWeightedDemandPieces: bigint("overlay_weighted_demand_pieces", { mode: "number" }),
+  overlayAdjustedForecastDemandMicros: bigint("overlay_adjusted_forecast_demand_micros", { mode: "number" }),
+  overlayAdjustedAbsoluteErrorMicros: bigint("overlay_adjusted_absolute_error_micros", { mode: "number" }),
+  overlayAdjustedBiasMicros: bigint("overlay_adjusted_bias_micros", { mode: "number" }),
   evidenceSnapshot: jsonb("evidence_snapshot").notNull(),
   evaluatedBy: varchar("evaluated_by", { length: 255 }),
   evaluatedAt: timestamp("evaluated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -1082,6 +1092,38 @@ export const purchaseForecastEvaluations = procurementSchema.table("purchase_for
   check("purchase_forecast_evaluations_actual_chk", sql`${table.actualDemandPieces} >= 0 AND ${table.actualOrderCount} >= 0 AND ${table.actualActiveDays} >= 0`),
   check("purchase_forecast_evaluations_prediction_chk", sql`${table.forecastDemandMicros} >= 0 AND ${table.baselineDemandMicros} >= 0`),
   check("purchase_forecast_evaluations_error_chk", sql`${table.forecastAbsoluteErrorMicros} >= 0 AND ${table.baselineAbsoluteErrorMicros} >= 0`),
+  check(
+    "purchase_forecast_evaluations_overlay_scoring_chk",
+    sql`(
+        ${table.overlayEvaluable} = FALSE
+        AND ${table.overlayAttributionVersion} = 0
+        AND ${table.overlayExclusionReason} IS NOT NULL
+        AND ${table.overlayContributionCount} IS NULL
+        AND ${table.overlayRawDemandPieces} IS NULL
+        AND ${table.overlayWeightedDemandPieces} IS NULL
+        AND ${table.overlayAdjustedForecastDemandMicros} IS NULL
+        AND ${table.overlayAdjustedAbsoluteErrorMicros} IS NULL
+        AND ${table.overlayAdjustedBiasMicros} IS NULL
+      )
+      OR (
+        ${table.overlayEvaluable} = TRUE
+        AND ${table.overlayAttributionVersion} > 0
+        AND ${table.overlayExclusionReason} IS NULL
+        AND ${table.overlayContributionCount} >= 0
+        AND ${table.overlayRawDemandPieces} >= 0
+        AND ${table.overlayWeightedDemandPieces} >= 0
+        AND ${table.overlayAdjustedForecastDemandMicros} >= 0
+        AND ${table.overlayAdjustedAbsoluteErrorMicros} >= 0
+        AND ${table.overlayAdjustedBiasMicros} IS NOT NULL
+        AND ${table.overlayAdjustedForecastDemandMicros}
+          = ${table.forecastDemandMicros}
+            + ${table.overlayWeightedDemandPieces} * ${PURCHASE_FORECAST_EVALUATION_PIECE_MICRO_SCALE_SQL}
+        AND ${table.overlayAdjustedBiasMicros}
+          = ${table.overlayAdjustedForecastDemandMicros}
+            - ${table.actualDemandPieces} * ${PURCHASE_FORECAST_EVALUATION_PIECE_MICRO_SCALE_SQL}
+        AND ${table.overlayAdjustedAbsoluteErrorMicros} = ABS(${table.overlayAdjustedBiasMicros})
+      )`,
+  ),
 ]);
 
 export const requestForQuoteStatusEnum = [

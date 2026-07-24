@@ -4,6 +4,7 @@ import {
   buildPurchaseForecastEvaluationSummariesFromAggregates,
   PURCHASE_FORECAST_EVALUATION_HORIZONS,
   PURCHASE_FORECAST_EVALUATION_VERSION,
+  PURCHASE_FORECAST_OVERLAY_ATTRIBUTION_VERSION,
 } from "./purchase-forecast-backtesting.domain";
 import {
   createPurchaseForecastBacktestingRepository,
@@ -152,13 +153,15 @@ export function createPurchaseForecastBacktestingService(input: {
         evaluationVersion: PURCHASE_FORECAST_EVALUATION_VERSION,
         measurement: {
           scope: "product_all_warehouses",
-          predictionScope: "historical_rate_only",
+          predictionScope: "historical_rate_with_optional_start_date_overlay",
+          historicalPredictionScope: "historical_rate_only",
           horizons: [...PURCHASE_FORECAST_EVALUATION_HORIZONS],
           wapeUnit: "basis_points",
           quantityUnit: "base_piece",
           predictionPrecision: "micro_piece",
-          forwardDemandOverlayIncluded: false,
-          overlayNote: "Forward-demand evidence remains visible on each result but is excluded until event-level horizon attribution is stored.",
+          overlayAttributionVersion: PURCHASE_FORECAST_OVERLAY_ATTRIBUTION_VERSION,
+          overlayAttributionInterval: "[planningAsOfDate, planningAsOfDate + horizonDays)",
+          overlayEligibility: "capture_version_2_and_capture_horizon_covers_evaluation_horizon",
         },
         summaries,
         itemCount: items.length,
@@ -172,7 +175,19 @@ export function createPurchaseForecastBacktestingService(input: {
                 : "tie",
           forecastErrorImprovementMicros:
             item.baselineAbsoluteErrorMicros - item.forecastAbsoluteErrorMicros,
-          forwardDemandOverlayIncluded: false,
+          forwardDemandOverlayIncluded:
+            item.overlayEvaluable && Number(item.overlayWeightedDemandPieces) > 0,
+          overlayExclusionReason: item.overlayExclusionReason,
+          overlayOutcome: !item.overlayEvaluable
+            ? null
+            : item.overlayAdjustedAbsoluteErrorMicros! < item.forecastAbsoluteErrorMicros
+              ? "overlay_wins"
+              : item.forecastAbsoluteErrorMicros < item.overlayAdjustedAbsoluteErrorMicros!
+                ? "historical_forecast_wins"
+                : "tie",
+          overlayErrorImprovementMicros: !item.overlayEvaluable
+            ? null
+            : item.forecastAbsoluteErrorMicros - item.overlayAdjustedAbsoluteErrorMicros!,
         })),
       };
     });

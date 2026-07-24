@@ -80,12 +80,21 @@ migrations after pulling newer work rather than relying indefinitely on this sna
   confidence weight, weighted quantity, and source update timestamp in the same
   transaction as the recommendation run. Legacy observations remain marked incomplete
   rather than being misclassified as zero-overlay evidence.
-- Branch `codex/forecast-overlay-evaluation` adds migration
-  `169_purchase_forecast_overlay_capture_coverage.sql`. Capture version 2 records the
+- PR #1010 (`codex/forecast-overlay-evaluation`) is merged at `2d68b478`. Migration
+  `169_purchase_forecast_overlay_capture_coverage.sql` records the
   database planning date and configured source-query horizon on the parent observation,
   including complete captures with zero child rows. Version 1 observations remain valid
   immutable evidence but are not horizon-scoreable because that parent coverage is
-  missing. Overlay scoring remains a separate follow-up after version 2 capture deploys.
+  missing.
+- Branch `codex/forecast-overlay-scoring` adds migration
+  `170_purchase_forecast_overlay_scoring.sql` and evaluation version 2. It attributes
+  immutable contribution rows by event start date to the half-open 7/30/90-day
+  evaluation horizon, persists overlay-adjusted prediction/error/bias in integer
+  micro-pieces, labels every excluded row with an immutable reason, and compares
+  historical and overlay-adjusted WAPE on the same eligible cohort. A planning-date
+  mismatch, incomplete capture, unavailable coverage, or insufficient capture horizon
+  is excluded rather than treated as zero overlay. This evaluator remains read-only:
+  it creates no recommendations, RFQs, or POs.
 - No production mutation, policy change, demand event, recommendation run, RFQ, or
   automatic purchasing pilot was performed during this continuation.
 
@@ -111,7 +120,8 @@ Current source migration sequence:
   - `166_shipping_channel_routing_foundation.sql` (newer, unrelated shipping work)
   - `167_shipping_channel_routing_operations.sql` (newer, unrelated shipping work)
   - `168_purchase_forecast_overlay_contributions.sql` (merged in PR #1009)
-  - `169_purchase_forecast_overlay_capture_coverage.sql` (current branch; not deployed yet)
+  - `169_purchase_forecast_overlay_capture_coverage.sql` (merged in PR #1010)
+  - `170_purchase_forecast_overlay_scoring.sql` (current branch; not deployed yet)
 
 ## Executive state
 
