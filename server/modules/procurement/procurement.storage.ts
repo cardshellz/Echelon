@@ -1420,7 +1420,9 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(fwd.weighted_pieces, 0)::bigint AS forward_demand_pieces,
         COALESCE(fwd.raw_pieces, 0)::bigint AS forward_demand_raw_pieces,
         COALESCE(fwd.event_count, 0)::int AS forward_demand_event_count,
-        COALESCE(fwd.contributions, '[]'::jsonb) AS forward_demand_contributions
+        COALESCE(fwd.contributions, '[]'::jsonb) AS forward_demand_contributions,
+        CURRENT_DATE AS forward_demand_planning_as_of_date,
+        ${forecastPolicy.forwardDemandHorizonDays}::int AS forward_demand_horizon_days
       FROM catalog.products p
       LEFT JOIN (
         SELECT pv.product_id,

@@ -74,13 +74,18 @@ migrations after pulling newer work rather than relying indefinitely on this sna
   the first accuracy metric. The current observation stores one total for the configured
   planning horizon, so prorating it across 7/30/90-day horizons would be false. Capture
   immutable event-level/date-level overlay contributions before evaluating overlay lift.
-- Branch `codex/forecast-overlay-attribution` adds migration
-  `168_purchase_forecast_overlay_contributions.sql`. New observations explicitly mark
+- PR #1009 (`codex/forecast-overlay-attribution`) is merged at `176913d5`. Migration
+  `168_purchase_forecast_overlay_contributions.sql` makes new observations explicitly mark
   contribution capture complete and retain every eligible demand-event line, date,
   confidence weight, weighted quantity, and source update timestamp in the same
   transaction as the recommendation run. Legacy observations remain marked incomplete
-  rather than being misclassified as zero-overlay evidence. Overlay scoring remains a
-  separate follow-up after this capture foundation is deployed and producing data.
+  rather than being misclassified as zero-overlay evidence.
+- Branch `codex/forecast-overlay-evaluation` adds migration
+  `169_purchase_forecast_overlay_capture_coverage.sql`. Capture version 2 records the
+  database planning date and configured source-query horizon on the parent observation,
+  including complete captures with zero child rows. Version 1 observations remain valid
+  immutable evidence but are not horizon-scoreable because that parent coverage is
+  missing. Overlay scoring remains a separate follow-up after version 2 capture deploys.
 - No production mutation, policy change, demand event, recommendation run, RFQ, or
   automatic purchasing pilot was performed during this continuation.
 
@@ -105,7 +110,8 @@ Current source migration sequence:
   - `165_carrier_dispatch_authority_cutover.sql` (newer, unrelated fulfillment work)
   - `166_shipping_channel_routing_foundation.sql` (newer, unrelated shipping work)
   - `167_shipping_channel_routing_operations.sql` (newer, unrelated shipping work)
-  - `168_purchase_forecast_overlay_contributions.sql` (current branch; not deployed yet)
+  - `168_purchase_forecast_overlay_contributions.sql` (merged in PR #1009)
+  - `169_purchase_forecast_overlay_capture_coverage.sql` (current branch; not deployed yet)
 
 ## Executive state
 

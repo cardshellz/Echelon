@@ -950,6 +950,8 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
   forwardDemandRawPieces: integer("forward_demand_raw_pieces").notNull().default(0),
   overlayCaptureVersion: integer("overlay_capture_version").notNull().default(0),
   overlayCaptureComplete: boolean("overlay_capture_complete").notNull().default(false),
+  overlayPlanningAsOfDate: date("overlay_planning_as_of_date"),
+  overlayHorizonDays: integer("overlay_horizon_days"),
   evidenceSnapshot: jsonb("evidence_snapshot").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
@@ -963,8 +965,24 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
   check("purchase_forecast_observations_forward_qty_chk", sql`${table.forwardDemandPieces} >= 0 AND ${table.forwardDemandRawPieces} >= 0`),
   check(
     "purchase_forecast_observations_overlay_capture_chk",
-    sql`(${table.overlayCaptureComplete} = FALSE AND ${table.overlayCaptureVersion} = 0)
-      OR (${table.overlayCaptureComplete} = TRUE AND ${table.overlayCaptureVersion} > 0)`,
+    sql`(
+        ${table.overlayCaptureComplete} = FALSE
+        AND ${table.overlayCaptureVersion} = 0
+        AND ${table.overlayPlanningAsOfDate} IS NULL
+        AND ${table.overlayHorizonDays} IS NULL
+      )
+      OR (
+        ${table.overlayCaptureComplete} = TRUE
+        AND ${table.overlayCaptureVersion} = 1
+        AND ${table.overlayPlanningAsOfDate} IS NULL
+        AND ${table.overlayHorizonDays} IS NULL
+      )
+      OR (
+        ${table.overlayCaptureComplete} = TRUE
+        AND ${table.overlayCaptureVersion} >= 2
+        AND ${table.overlayPlanningAsOfDate} IS NOT NULL
+        AND ${table.overlayHorizonDays} BETWEEN 1 AND 365
+      )`,
   ),
   foreignKey({
     columns: [table.selectedReceiveVariantId, table.productId],

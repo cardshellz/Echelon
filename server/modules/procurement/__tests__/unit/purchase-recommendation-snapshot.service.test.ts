@@ -44,8 +44,10 @@ function recommendation(overrides: Partial<PurchasingRecommendationItem> = {}): 
       forwardDemandRawPieces: 10,
       forwardDemandEventCount: 1,
       adjustedReorderPoint: 58,
-      overlayCaptureVersion: 1,
+      overlayCaptureVersion: 2,
       overlayCaptureComplete: true,
+      overlayPlanningAsOfDate: "2026-07-17",
+      overlayHorizonDays: 90,
       contributions: [{
         productId: 10,
         productVariantId: 100,
@@ -91,6 +93,7 @@ describe("purchase recommendation snapshot service", () => {
         observationCount: 1,
         observationCoverageComplete: true,
         overlayCaptureComplete: true,
+        overlayCoverageComplete: true,
         overlayContributionCount: 1,
       },
       lines: [{
@@ -113,8 +116,10 @@ describe("purchase recommendation snapshot service", () => {
         baselineDailyPiecesMicros: 4_000_000,
         forwardDemandPieces: 8,
         forwardDemandRawPieces: 10,
-        overlayCaptureVersion: 1,
+        overlayCaptureVersion: 2,
         overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: "2026-07-17",
+        overlayHorizonDays: 90,
         overlayContributions: [{
           demandEventId: 700,
           demandEventLineId: 701,
@@ -305,6 +310,14 @@ describe("purchase recommendation snapshot service", () => {
     expect(insert).toHaveBeenCalledTimes(4);
     expect(result.observations).toHaveLength(1);
     expect(result.overlayContributions).toHaveLength(1);
+    expect(writtenBatches[2]).toEqual([
+      expect.objectContaining({
+        overlayCaptureVersion: 2,
+        overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: "2026-07-17",
+        overlayHorizonDays: 90,
+      }),
+    ]);
     expect(writtenBatches[3]).toEqual([
       expect.objectContaining({
         observationId: 300,
@@ -336,6 +349,87 @@ describe("purchase recommendation snapshot service", () => {
       observations: [{ ...observation, forwardDemandPieces: 9 }],
     })).rejects.toThrow("overlay contribution totals do not match its aggregate");
     expect(database.transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects version 2 capture without complete parent coverage metadata", async () => {
+    const database = { select: vi.fn(), transaction: vi.fn() };
+    const service = createPurchaseRecommendationSnapshotService(database);
+    const observation = buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [recommendation()], skippedItems: [], summary: {} },
+      settings: { autoDraftMode: "review_only" },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+    }).observations![0];
+
+    await expect(service.createRun({
+      calculationVersion: "v2",
+      source: "manual",
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+      lookbackDays: 30,
+      policySnapshot: {},
+      lines: [],
+      observations: [{ ...observation, overlayPlanningAsOfDate: null }],
+    })).rejects.toThrow("overlayPlanningAsOfDate");
+    expect(database.transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects version 2 child evidence outside its parent coverage", async () => {
+    const database = { select: vi.fn(), transaction: vi.fn() };
+    const service = createPurchaseRecommendationSnapshotService(database);
+    const observation = buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [recommendation()], skippedItems: [], summary: {} },
+      settings: { autoDraftMode: "review_only" },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+    }).observations![0];
+
+    await expect(service.createRun({
+      calculationVersion: "v2",
+      source: "manual",
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+      lookbackDays: 30,
+      policySnapshot: {},
+      lines: [],
+      observations: [{
+        ...observation,
+        overlayContributions: observation.overlayContributions!.map((contribution) => ({
+          ...contribution,
+          planningAsOfDate: "2026-07-16",
+        })),
+      }],
+    })).rejects.toThrow("planningAsOfDate must match its forecast observation");
+    expect(database.transaction).not.toHaveBeenCalled();
+  });
+
+  it("keeps immutable version 1 captures valid without parent coverage metadata", async () => {
+    const transactionError = new Error("transaction reached");
+    const database = {
+      select: vi.fn(),
+      transaction: vi.fn().mockRejectedValue(transactionError),
+    };
+    const service = createPurchaseRecommendationSnapshotService(database);
+    const observation = buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [recommendation()], skippedItems: [], summary: {} },
+      settings: { autoDraftMode: "review_only" },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+    }).observations![0];
+
+    await expect(service.createRun({
+      calculationVersion: "v2",
+      source: "manual",
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+      lookbackDays: 30,
+      policySnapshot: {},
+      lines: [],
+      observations: [{
+        ...observation,
+        overlayCaptureVersion: 1,
+        overlayPlanningAsOfDate: null,
+        overlayHorizonDays: null,
+      }],
+    })).rejects.toThrow("transaction reached");
+    expect(database.transaction).toHaveBeenCalledTimes(1);
   });
 
   it("replays an existing source-scoped run without opening a write transaction", async () => {

@@ -29,6 +29,8 @@ describe("purchasing forward-demand contribution capture", () => {
   it("returns complete, normalized evidence when every aggregate reconciles", () => {
     const result = resolvePurchasingForwardDemandContributionCapture({
       rawContributions: JSON.stringify([contribution()]),
+      rawPlanningAsOfDate: "2026-07-24",
+      rawHorizonDays: 90,
       enabled: true,
       productId: 10,
       forwardDemandPieces: 175,
@@ -38,8 +40,10 @@ describe("purchasing forward-demand contribution capture", () => {
     });
 
     expect(result).toMatchObject({
-      overlayCaptureVersion: 1,
+      overlayCaptureVersion: 2,
       overlayCaptureComplete: true,
+      overlayPlanningAsOfDate: "2026-07-24",
+      overlayHorizonDays: 90,
       contributions: [{ demandEventLineId: 701, weightedPieces: 175 }],
     });
   });
@@ -47,6 +51,8 @@ describe("purchasing forward-demand contribution capture", () => {
   it("marks omitted legacy evidence incomplete instead of treating it as an empty overlay", () => {
     expect(resolvePurchasingForwardDemandContributionCapture({
       rawContributions: undefined,
+      rawPlanningAsOfDate: undefined,
+      rawHorizonDays: undefined,
       enabled: true,
       productId: 10,
       forwardDemandPieces: 0,
@@ -56,6 +62,8 @@ describe("purchasing forward-demand contribution capture", () => {
     })).toEqual({
       overlayCaptureVersion: 0,
       overlayCaptureComplete: false,
+      overlayPlanningAsOfDate: null,
+      overlayHorizonDays: null,
       contributions: [],
     });
   });
@@ -63,6 +71,8 @@ describe("purchasing forward-demand contribution capture", () => {
   it("rejects duplicate source line identities", () => {
     expect(() => resolvePurchasingForwardDemandContributionCapture({
       rawContributions: [contribution(), contribution()],
+      rawPlanningAsOfDate: "2026-07-24",
+      rawHorizonDays: 90,
       enabled: true,
       productId: 10,
       forwardDemandPieces: 350,
@@ -75,6 +85,8 @@ describe("purchasing forward-demand contribution capture", () => {
   it("rejects a captured weight that differs from the active policy", () => {
     expect(() => resolvePurchasingForwardDemandContributionCapture({
       rawContributions: [contribution({ confidenceWeightPercent: 80, weightedPieces: 200 })],
+      rawPlanningAsOfDate: "2026-07-24",
+      rawHorizonDays: 90,
       enabled: true,
       productId: 10,
       forwardDemandPieces: 200,
@@ -82,5 +94,47 @@ describe("purchasing forward-demand contribution capture", () => {
       forwardDemandEventCount: 1,
       confidenceWeights,
     })).toThrow("does not match the active confidence weight");
+  });
+
+  it("requires parent coverage metadata for complete captures, including empty captures", () => {
+    expect(() => resolvePurchasingForwardDemandContributionCapture({
+      rawContributions: [],
+      rawPlanningAsOfDate: undefined,
+      rawHorizonDays: undefined,
+      enabled: true,
+      productId: 10,
+      forwardDemandPieces: 0,
+      forwardDemandRawPieces: 0,
+      forwardDemandEventCount: 0,
+      confidenceWeights,
+    })).toThrow("forwardDemandPlanningAsOfDate");
+  });
+
+  it("rejects contribution rows that fall outside parent capture coverage", () => {
+    expect(() => resolvePurchasingForwardDemandContributionCapture({
+      rawContributions: [contribution({ eventStartDate: "2026-08-02" })],
+      rawPlanningAsOfDate: "2026-07-24",
+      rawHorizonDays: 8,
+      enabled: true,
+      productId: 10,
+      forwardDemandPieces: 175,
+      forwardDemandRawPieces: 250,
+      forwardDemandEventCount: 1,
+      confidenceWeights,
+    })).toThrow("falls outside the capture horizon");
+  });
+
+  it("rejects child planning dates that differ from parent coverage", () => {
+    expect(() => resolvePurchasingForwardDemandContributionCapture({
+      rawContributions: [contribution({ planningAsOfDate: "2026-07-23" })],
+      rawPlanningAsOfDate: "2026-07-24",
+      rawHorizonDays: 90,
+      enabled: true,
+      productId: 10,
+      forwardDemandPieces: 175,
+      forwardDemandRawPieces: 250,
+      forwardDemandEventCount: 1,
+      confidenceWeights,
+    })).toThrow("does not match the capture planning date");
   });
 });
