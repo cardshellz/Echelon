@@ -187,6 +187,30 @@ describe("quoteShipment", () => {
     }));
   });
 
+  it("forwards the exact pricing program selected by a canonical policy", async () => {
+    const observe = vi.fn();
+
+    const result = await quoteShipment({
+      channel: "shopify",
+      rateBookId: 42,
+      originWarehouseId: 1,
+      destination: { country: "US", postalCode: "16066" },
+      lines: [{ sku: "SKU-1", quantity: 1, unitWeightGrams: 200 }],
+    }, {
+      parcelProvider: weightOnlyParcelProvider,
+      rateProvider: fakeRateProvider(observe),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(observe).toHaveBeenCalledWith(expect.objectContaining({
+      rateBookId: 42,
+      rateContext: {
+        pricingChannel: "shopify",
+        purpose: "customer_checkout",
+      },
+    }));
+  });
+
   it("still calls the rate provider when a shipment line has no weight", async () => {
     const observe = vi.fn();
     const result = await quoteShipment({

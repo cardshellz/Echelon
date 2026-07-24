@@ -283,6 +283,25 @@ export function resolveChannelShippingDecision(
   if (canonical.ok || canonical.code !== "NO_ACTIVE_POLICY" || legacyFallback === null) {
     return canonical;
   }
+  return resolveLegacyChannelShippingFallback(input, legacyFallback);
+}
+
+/**
+ * Resolve the compatibility profile before a callback is explicitly bound to
+ * a canonical channel ID. No synthetic channel identity is invented.
+ */
+export function resolveLegacyChannelShippingFallback(
+  input: Omit<ChannelShippingPolicyResolutionInput, "channelId">,
+  legacyFallback: LegacyChannelShippingFallback,
+): ChannelShippingDecision {
+  const invalidInput = validateResolutionDetails(input);
+  if (invalidInput) {
+    return {
+      ok: false,
+      code: "INVALID_INPUT",
+      message: invalidInput,
+    };
+  }
   if (legacyFallback.purpose !== input.purpose) {
     return {
       ok: false,
@@ -308,6 +327,12 @@ function validateInput(input: ChannelShippingPolicyResolutionInput): string | nu
   if (!Number.isInteger(input.channelId) || input.channelId <= 0) {
     return "channelId must be a positive integer";
   }
+  return validateResolutionDetails(input);
+}
+
+function validateResolutionDetails(
+  input: Omit<ChannelShippingPolicyResolutionInput, "channelId">,
+): string | null {
   if (!Number.isInteger(input.originWarehouseId) || input.originWarehouseId <= 0) {
     return "originWarehouseId must be a positive integer";
   }

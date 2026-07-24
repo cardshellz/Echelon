@@ -11,6 +11,8 @@ import {
 export interface ShippingRateProviderRequest {
   /** Selects a rate book; it does not imply that channels share prices. */
   rateContext: ShippingRateContext;
+  /** Exact pricing program selected by an active canonical channel policy. */
+  rateBookId?: number;
   originWarehouseId: number;
   destination: {
     country: string;
@@ -38,6 +40,7 @@ export const localRateTableShippingRateProvider: ShippingRateProvider = {
   quote(input) {
     return quoteShipmentRates({
       rateContext: input.rateContext,
+      rateBookId: input.rateBookId,
       originWarehouseId: input.originWarehouseId,
       destCountry: input.destination.country,
       destRegion: input.destination.region,

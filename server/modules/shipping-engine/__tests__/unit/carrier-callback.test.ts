@@ -3,6 +3,9 @@ import type { RateQuoteLine } from "../../application/rate-quote.service";
 import { parseCheckoutRateRolloutPolicy } from "../../domain/checkout-rate-rollout-policy";
 import type { DeliveryWindow } from "../../domain/eta";
 import { resolveShopifyCheckoutRateOwnership } from "../../domain/destination-rate-ownership";
+import type {
+  RuntimeChannelShippingResolution,
+} from "../../application/channel-shipping-policy-runtime.service";
 import {
   computeCheckoutRates,
   isCallbackTokenAuthorized,
@@ -31,6 +34,60 @@ function shopifyBody(overrides: Record<string, unknown> = {}): unknown {
       ],
       currency: "USD",
       ...overrides,
+    },
+  };
+}
+
+function legacyRouting(
+  mode: "engine_quoted" | "channel_managed",
+): RuntimeChannelShippingResolution {
+  return {
+    ok: true,
+    channel: null,
+    decision: {
+      ok: true,
+      source: "legacy_profile",
+      policyId: null,
+      policyVersion: null,
+      routeId: null,
+      mode,
+      eligibilityMode: mode === "engine_quoted" ? "engine" : "channel",
+      rateBookId: null,
+      legacyRateContext: mode === "engine_quoted"
+        ? {
+            pricingChannel: "shopify",
+            purpose: "customer_checkout",
+          }
+        : null,
+    },
+  };
+}
+
+function canonicalRouting(
+  mode: "engine_quoted" | "channel_managed" | "disabled",
+): RuntimeChannelShippingResolution {
+  return {
+    ok: true,
+    channel: {
+      id: 36,
+      provider: "shopify",
+      status: "active",
+      isDefault: 1,
+    },
+    decision: {
+      ok: true,
+      source: "channel_policy",
+      policyId: 100,
+      policyVersion: 3,
+      routeId: 200,
+      mode,
+      eligibilityMode: mode === "disabled"
+        ? "none"
+        : mode === "channel_managed"
+          ? "channel"
+          : "intersection",
+      rateBookId: mode === "engine_quoted" ? 300 : null,
+      legacyRateContext: null,
     },
   };
 }
@@ -106,18 +163,18 @@ describe("Shopify checkout destination ownership", () => {
     });
   });
 
-  it("bypasses every Echelon quote dependency for a Shopify-managed country", async () => {
+  it("resolves policy authority but bypasses the quote pipeline for a Shopify-managed country", async () => {
     const persistSnapshot = vi.fn(async () => undefined);
     const dependencies: CheckoutRateDependencies = {
-      originWarehouseId: vi.fn(() => {
-        throw new Error("origin resolution must not run for Shopify-managed destinations");
-      }),
+      originWarehouseId: vi.fn(() => 1),
       rolloutPolicy: vi.fn(() => {
         throw new Error("rollout policy must not run for Shopify-managed destinations");
       }),
       loadCatalogWeightsBySku: vi.fn(async () => {
         throw new Error("catalog lookup must not run for Shopify-managed destinations");
       }),
+      resolveChannelShipping: vi.fn(async () =>
+        legacyRouting("channel_managed")),
       quoteShipment: vi.fn(async () => {
         throw new Error("Echelon quote must not run for Shopify-managed destinations");
       }),
@@ -130,7 +187,8 @@ describe("Shopify checkout destination ownership", () => {
     }), dependencies);
 
     expect(rates).toEqual([]);
-    expect(dependencies.originWarehouseId).not.toHaveBeenCalled();
+    expect(dependencies.originWarehouseId).toHaveBeenCalledOnce();
+    expect(dependencies.resolveChannelShipping).toHaveBeenCalledOnce();
     expect(dependencies.rolloutPolicy).not.toHaveBeenCalled();
     expect(dependencies.loadCatalogWeightsBySku).not.toHaveBeenCalled();
     expect(dependencies.quoteShipment).not.toHaveBeenCalled();
@@ -139,19 +197,20 @@ describe("Shopify checkout destination ownership", () => {
       disposition: "shopify_managed_destination",
       request: expect.objectContaining({ destCountry: "DK" }),
       shopifyRates: [],
+      channelRouting: expect.objectContaining({ ok: true }),
     }));
   });
 
   it("bypasses every quote dependency for US traffic while rollout is off", async () => {
     const persistSnapshot = vi.fn(async () => undefined);
     const dependencies: CheckoutRateDependencies = {
-      originWarehouseId: vi.fn(() => {
-        throw new Error("origin resolution must not run while rollout is off");
-      }),
+      originWarehouseId: vi.fn(() => 1),
       rolloutPolicy: vi.fn(() => parseCheckoutRateRolloutPolicy({ mode: "off" })),
       loadCatalogWeightsBySku: vi.fn(async () => {
         throw new Error("catalog lookup must not run while rollout is off");
       }),
+      resolveChannelShipping: vi.fn(async () =>
+        legacyRouting("engine_quoted")),
       quoteShipment: vi.fn(async () => {
         throw new Error("Echelon quote must not run while rollout is off");
       }),
@@ -163,7 +222,8 @@ describe("Shopify checkout destination ownership", () => {
 
     expect(rates).toEqual([]);
     expect(dependencies.rolloutPolicy).toHaveBeenCalledOnce();
-    expect(dependencies.originWarehouseId).not.toHaveBeenCalled();
+    expect(dependencies.originWarehouseId).toHaveBeenCalledOnce();
+    expect(dependencies.resolveChannelShipping).toHaveBeenCalledOnce();
     expect(dependencies.loadCatalogWeightsBySku).not.toHaveBeenCalled();
     expect(dependencies.quoteShipment).not.toHaveBeenCalled();
     expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
@@ -179,9 +239,7 @@ describe("Shopify checkout destination ownership", () => {
   it("bypasses the quote pipeline when a test cart contains a non-allowlisted SKU", async () => {
     const persistSnapshot = vi.fn(async () => undefined);
     const dependencies: CheckoutRateDependencies = {
-      originWarehouseId: vi.fn(() => {
-        throw new Error("origin resolution must not run for a blocked test cart");
-      }),
+      originWarehouseId: vi.fn(() => 1),
       rolloutPolicy: vi.fn(() => parseCheckoutRateRolloutPolicy({
         mode: "test",
         testSkus: "SLV-100",
@@ -189,6 +247,8 @@ describe("Shopify checkout destination ownership", () => {
       loadCatalogWeightsBySku: vi.fn(async () => {
         throw new Error("catalog lookup must not run for a blocked test cart");
       }),
+      resolveChannelShipping: vi.fn(async () =>
+        legacyRouting("engine_quoted")),
       quoteShipment: vi.fn(async () => {
         throw new Error("Echelon quote must not run for a blocked test cart");
       }),
@@ -199,7 +259,8 @@ describe("Shopify checkout destination ownership", () => {
     const rates = await computeCheckoutRates(shopifyBody(), dependencies);
 
     expect(rates).toEqual([]);
-    expect(dependencies.originWarehouseId).not.toHaveBeenCalled();
+    expect(dependencies.originWarehouseId).toHaveBeenCalledOnce();
+    expect(dependencies.resolveChannelShipping).toHaveBeenCalledOnce();
     expect(dependencies.loadCatalogWeightsBySku).not.toHaveBeenCalled();
     expect(dependencies.quoteShipment).not.toHaveBeenCalled();
     expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
@@ -225,6 +286,8 @@ describe("Shopify checkout destination ownership", () => {
         ["SLV-100", 120],
         ["CASE-9", 2_500],
       ])),
+      resolveChannelShipping: vi.fn(async () =>
+        legacyRouting("engine_quoted")),
       quoteShipment: vi.fn(async () => ({
         ok: false as const,
         code: "INVALID_SHIPMENT" as const,
@@ -250,6 +313,177 @@ describe("Shopify checkout destination ownership", () => {
         reasonCode: "TEST_CART_ALLOWED",
       }),
       shopifyRates: [],
+    }));
+  });
+
+  it("passes the canonical policy pricing program into the quote pipeline", async () => {
+    const persistSnapshot = vi.fn(async () => undefined);
+    const dependencies: CheckoutRateDependencies = {
+      originWarehouseId: vi.fn(() => 1),
+      rolloutPolicy: vi.fn(() => parseCheckoutRateRolloutPolicy({
+        mode: "live",
+      })),
+      loadCatalogWeightsBySku: vi.fn(async () => new Map([
+        ["SLV-100", 120],
+        ["CASE-9", 2_500],
+      ])),
+      resolveChannelShipping: vi.fn(async () =>
+        canonicalRouting("engine_quoted")),
+      quoteShipment: vi.fn(async () => ({
+        ok: false as const,
+        code: "INVALID_SHIPMENT" as const,
+        errors: ["intentional test quote failure"],
+      })),
+      loadDeliveryEstimates: vi.fn(async () => new Map()),
+      persistSnapshot,
+    };
+
+    await computeCheckoutRates(shopifyBody(), dependencies);
+
+    expect(dependencies.quoteShipment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "shopify",
+        rateBookId: 300,
+        originWarehouseId: 1,
+      }),
+      expect.any(Object),
+    );
+    expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      channelRouting: expect.objectContaining({
+        decision: expect.objectContaining({
+          source: "channel_policy",
+          rateBookId: 300,
+        }),
+      }),
+    }));
+  });
+
+  it("routes a canonical non-US engine route instead of legacy delegation", async () => {
+    const persistSnapshot = vi.fn(async () => undefined);
+    const dependencies: CheckoutRateDependencies = {
+      originWarehouseId: vi.fn(() => 1),
+      rolloutPolicy: vi.fn(() => parseCheckoutRateRolloutPolicy({
+        mode: "live",
+      })),
+      loadCatalogWeightsBySku: vi.fn(async () => new Map([
+        ["SLV-100", 120],
+        ["CASE-9", 2_500],
+      ])),
+      resolveChannelShipping: vi.fn(async () =>
+        canonicalRouting("engine_quoted")),
+      quoteShipment: vi.fn(async () => ({
+        ok: false as const,
+        code: "INVALID_SHIPMENT" as const,
+        errors: ["intentional test quote failure"],
+      })),
+      loadDeliveryEstimates: vi.fn(async () => new Map()),
+      persistSnapshot,
+    };
+
+    await computeCheckoutRates(shopifyBody({
+      destination: {
+        postal_code: "2100",
+        country: "DK",
+        province: null,
+      },
+    }), dependencies);
+
+    expect(dependencies.quoteShipment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rateBookId: 300,
+        destination: {
+          country: "DK",
+          region: null,
+          postalCode: "2100",
+        },
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it.each([
+    {
+      mode: "channel_managed" as const,
+      disposition: "shopify_managed_destination",
+    },
+    {
+      mode: "disabled" as const,
+      disposition: "channel_policy_disabled",
+    },
+  ])(
+    "does not quote a canonical $mode route",
+    async ({ mode, disposition }) => {
+      const persistSnapshot = vi.fn(async () => undefined);
+      const dependencies: CheckoutRateDependencies = {
+        originWarehouseId: vi.fn(() => 1),
+        rolloutPolicy: vi.fn(() => {
+          throw new Error("rollout must not run for a non-engine route");
+        }),
+        loadCatalogWeightsBySku: vi.fn(async () => {
+          throw new Error("catalog lookup must not run for a non-engine route");
+        }),
+        resolveChannelShipping: vi.fn(async () =>
+          canonicalRouting(mode)),
+        quoteShipment: vi.fn(async () => {
+          throw new Error("quote must not run for a non-engine route");
+        }),
+        loadDeliveryEstimates: vi.fn(async () => new Map()),
+        persistSnapshot,
+      };
+
+      const rates = await computeCheckoutRates(shopifyBody(), dependencies);
+
+      expect(rates).toEqual([]);
+      expect(dependencies.rolloutPolicy).not.toHaveBeenCalled();
+      expect(dependencies.loadCatalogWeightsBySku).not.toHaveBeenCalled();
+      expect(dependencies.quoteShipment).not.toHaveBeenCalled();
+      expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+        disposition,
+        channelRouting: expect.objectContaining({ ok: true }),
+      }));
+    },
+  );
+
+  it("fails closed when canonical policy resolution fails", async () => {
+    const persistSnapshot = vi.fn(async () => undefined);
+    const dependencies: CheckoutRateDependencies = {
+      originWarehouseId: vi.fn(() => 1),
+      rolloutPolicy: vi.fn(() => {
+        throw new Error("rollout must not run after policy failure");
+      }),
+      loadCatalogWeightsBySku: vi.fn(async () => {
+        throw new Error("catalog lookup must not run after policy failure");
+      }),
+      resolveChannelShipping: vi.fn(async () => ({
+        ok: false as const,
+        code: "NO_MATCHING_ROUTE" as const,
+        message: "active policy has no matching route",
+        channel: {
+          id: 36,
+          provider: "shopify",
+          status: "active",
+          isDefault: 1,
+        },
+        decision: {
+          ok: false as const,
+          code: "NO_MATCHING_ROUTE" as const,
+          message: "active policy has no matching route",
+        },
+      })),
+      quoteShipment: vi.fn(async () => {
+        throw new Error("quote must not run after policy failure");
+      }),
+      loadDeliveryEstimates: vi.fn(async () => new Map()),
+      persistSnapshot,
+    };
+
+    const rates = await computeCheckoutRates(shopifyBody(), dependencies);
+
+    expect(rates).toEqual([]);
+    expect(dependencies.quoteShipment).not.toHaveBeenCalled();
+    expect(persistSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "channel_policy_unavailable",
+      warnings: ["active policy has no matching route"],
     }));
   });
 });

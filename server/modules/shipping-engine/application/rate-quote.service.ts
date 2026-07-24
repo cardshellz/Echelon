@@ -10,9 +10,11 @@ import { createHash } from "crypto";
 import { and, asc, eq, gt, isNull, lte, or } from "drizzle-orm";
 import {
   shippingQuoteSnapshots,
+  shippingRateBooks,
   shippingRateTableRows,
   shippingRateTables,
   shippingServiceLevels,
+  shippingZoneSets,
   shippingZoneRules,
 } from "@shared/schema";
 import { db } from "../../../db";
@@ -57,6 +59,11 @@ export interface FreightRatingContext {
 
 export interface RateQuoteRequest {
   rateContext: ShippingRateContext;
+  /**
+   * Canonical channel policies select an exact pricing program. When omitted,
+   * the compatibility rate-book assignment resolver remains authoritative.
+   */
+  rateBookId?: number;
   originWarehouseId: number;
   destCountry: string;
   destRegion?: string | null;
@@ -142,31 +149,19 @@ export async function quoteShipmentRates(
     return { rateBook: null, zone: null, quotes: [], warnings };
   }
 
-  const candidates = await loadActiveRateBookAssignments(
-    request.rateContext,
-    request.originWarehouseId,
-  );
-  const selection = selectRateBookAssignment(candidates, {
-    ...request.rateContext,
-    originWarehouseId: request.originWarehouseId,
-  });
-  if (!selection.ok) {
-    warnings.push(selection.message);
+  const rateBook = await resolveRateBook(request, warnings);
+  if (!rateBook) {
     await maybePersistSnapshot({
       request, destCountry, destPostal, rateBook: null, zone: null,
       quotes: [], quotedAt, warnings, opts,
     });
     return { rateBook: null, zone: null, quotes: [], warnings };
   }
-  const rateBook = {
-    id: selection.assignment.rateBookId,
-    code: selection.assignment.rateBookCode,
-  };
 
   // Zones remain useful for transit observability and later carrier-method
   // enforcement, but customer charge selection no longer depends on them.
   const zone = await resolveZoneForOrigin(
-    selection.assignment.zoneSetId,
+    rateBook.zoneSetId,
     request.originWarehouseId,
     destCountry,
     destPostal,
@@ -272,7 +267,75 @@ export async function quoteShipmentRates(
   }
 
   await maybePersistSnapshot({ request, destCountry, destPostal, rateBook, zone, quotes, quotedAt, warnings, opts });
-  return { rateBook, zone, quotes, warnings };
+  return {
+    rateBook: { id: rateBook.id, code: rateBook.code },
+    zone,
+    quotes,
+    warnings,
+  };
+}
+
+interface ResolvedRateBook {
+  id: number;
+  code: string;
+  zoneSetId: number;
+}
+
+async function resolveRateBook(
+  request: RateQuoteRequest,
+  warnings: string[],
+): Promise<ResolvedRateBook | null> {
+  if (request.rateBookId !== undefined) {
+    if (
+      !Number.isInteger(request.rateBookId)
+      || request.rateBookId <= 0
+    ) {
+      warnings.push("explicit rate book ID must be a positive integer");
+      return null;
+    }
+    const [rateBook] = await db
+      .select({
+        id: shippingRateBooks.id,
+        code: shippingRateBooks.code,
+        zoneSetId: shippingRateBooks.zoneSetId,
+      })
+      .from(shippingRateBooks)
+      .innerJoin(
+        shippingZoneSets,
+        eq(shippingZoneSets.id, shippingRateBooks.zoneSetId),
+      )
+      .where(and(
+        eq(shippingRateBooks.id, request.rateBookId),
+        eq(shippingRateBooks.status, "active"),
+        eq(shippingZoneSets.status, "active"),
+      ))
+      .limit(1);
+    if (!rateBook) {
+      warnings.push(
+        `explicit rate book ${request.rateBookId} or its zone set is not active`,
+      );
+      return null;
+    }
+    return rateBook;
+  }
+
+  const candidates = await loadActiveRateBookAssignments(
+    request.rateContext,
+    request.originWarehouseId,
+  );
+  const selection = selectRateBookAssignment(candidates, {
+    ...request.rateContext,
+    originWarehouseId: request.originWarehouseId,
+  });
+  if (!selection.ok) {
+    warnings.push(selection.message);
+    return null;
+  }
+  return {
+    id: selection.assignment.rateBookId,
+    code: selection.assignment.rateBookCode,
+    zoneSetId: selection.assignment.zoneSetId,
+  };
 }
 
 async function resolveZoneForOrigin(
@@ -372,6 +435,7 @@ async function maybePersistSnapshot(input: {
 
   const normalizedRequest = {
     rateContext: input.request.rateContext,
+    rateBookId: input.request.rateBookId ?? null,
     originWarehouseId: input.request.originWarehouseId,
     destCountry: input.destCountry,
     destRegion: input.request.destRegion?.trim().toUpperCase() || null,
