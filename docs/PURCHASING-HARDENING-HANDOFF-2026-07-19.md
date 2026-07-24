@@ -61,8 +61,8 @@ migrations after pulling newer work rather than relying indefinitely on this sna
 - Migration `162_purchase_forecast_observations.sql` is merged. It starts collecting
   unbiased observations only for recommendation runs created after deploy;
   do not relabel legacy candidate-only runs as complete historical forecast evidence.
-- Branch `codex/forecast-backtesting-evaluator` adds migration
-  `163_purchase_forecast_evaluations.sql` and deterministic 7/30/90-day evaluation.
+- PR #992 (`codex/forecast-backtesting-evaluator`) is merged at `e697fff2`. Migration
+  `163_purchase_forecast_evaluations.sql` adds deterministic 7/30/90-day evaluation.
   It compares the weighted historical-rate forecast with the standard-window baseline
   against actual eligible WMS order demand in integer micro-pieces. Evaluation is
   idempotent, repeatable-read, versioned, immutable, and available through a manual API
@@ -74,6 +74,13 @@ migrations after pulling newer work rather than relying indefinitely on this sna
   the first accuracy metric. The current observation stores one total for the configured
   planning horizon, so prorating it across 7/30/90-day horizons would be false. Capture
   immutable event-level/date-level overlay contributions before evaluating overlay lift.
+- Branch `codex/forecast-overlay-attribution` adds migration
+  `168_purchase_forecast_overlay_contributions.sql`. New observations explicitly mark
+  contribution capture complete and retain every eligible demand-event line, date,
+  confidence weight, weighted quantity, and source update timestamp in the same
+  transaction as the recommendation run. Legacy observations remain marked incomplete
+  rather than being misclassified as zero-overlay evidence. Overlay scoring remains a
+  separate follow-up after this capture foundation is deployed and producing data.
 - No production mutation, policy change, demand event, recommendation run, RFQ, or
   automatic purchasing pilot was performed during this continuation.
 
@@ -93,7 +100,12 @@ Current source migration sequence:
   - `160_shipping_rate_charge_models.sql` (newer, unrelated shipping work)
   - `161_shipping_preload_cent_adjustment.sql` (newer, unrelated shipping work)
   - `162_purchase_forecast_observations.sql` (merged in PR #990)
-  - `163_purchase_forecast_evaluations.sql` (current branch; not deployed yet)
+  - `163_purchase_forecast_evaluations.sql` (merged in PR #992)
+  - `164_channel_fulfillment_receipt_retry_control.sql` (newer, unrelated fulfillment work)
+  - `165_carrier_dispatch_authority_cutover.sql` (newer, unrelated fulfillment work)
+  - `166_shipping_channel_routing_foundation.sql` (newer, unrelated shipping work)
+  - `167_shipping_channel_routing_operations.sql` (newer, unrelated shipping work)
+  - `168_purchase_forecast_overlay_contributions.sql` (current branch; not deployed yet)
 
 ## Executive state
 

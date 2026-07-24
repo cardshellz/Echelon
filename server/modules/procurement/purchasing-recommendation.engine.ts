@@ -16,6 +16,10 @@ import {
   type PurchasingForecastPolicy,
 } from "./purchasing-forecast-policy";
 import {
+  resolvePurchasingForwardDemandContributionCapture,
+  type PurchasingForwardDemandContribution,
+} from "./purchasing-forward-demand-contribution";
+import {
   assessSupplierQuoteValidity,
   RECOMMENDATION_SUPPLIER_QUOTE_MAX_AGE_DAYS,
 } from "./supplier-quote-validity";
@@ -219,6 +223,7 @@ export interface PurchasingRecommendationRawRow {
   forward_demand_pieces?: number | string | null;
   forward_demand_raw_pieces?: number | string | null;
   forward_demand_event_count?: number | string | null;
+  forward_demand_contributions?: unknown;
 }
 
 export interface PurchasingRecommendationProductMeta {
@@ -374,6 +379,9 @@ export interface PurchasingRecommendationItem {
     forwardDemandRawPieces: number;
     forwardDemandEventCount: number;
     adjustedReorderPoint: number;
+    overlayCaptureVersion: number;
+    overlayCaptureComplete: boolean;
+    contributions: PurchasingForwardDemandContribution[];
   };
   leadTimeBasis: {
     leadTimeDays: number;
@@ -1808,6 +1816,15 @@ export function generatePurchasingRecommendations(
     const forwardDemandPieces = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_pieces) : 0;
     const forwardDemandRawPieces = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_raw_pieces) : 0;
     const forwardDemandEventCount = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_event_count) : 0;
+    const forwardDemandContributionCapture = resolvePurchasingForwardDemandContributionCapture({
+      rawContributions: row.forward_demand_contributions,
+      enabled: forecastPolicy.forwardDemandEnabled,
+      productId,
+      forwardDemandPieces,
+      forwardDemandRawPieces,
+      forwardDemandEventCount,
+      confidenceWeights: forecastPolicy.forwardDemandConfidenceWeights,
+    });
     const adjustedReorderPoint = reorderPoint + forwardDemandPieces;
     const effectiveSupply = available + onOrderPieces;
     const rawOrderQtyPieces = Math.max(0, adjustedReorderPoint - effectiveSupply);
@@ -2087,6 +2104,9 @@ export function generatePurchasingRecommendations(
         forwardDemandRawPieces,
         forwardDemandEventCount,
         adjustedReorderPoint,
+        overlayCaptureVersion: forwardDemandContributionCapture.overlayCaptureVersion,
+        overlayCaptureComplete: forwardDemandContributionCapture.overlayCaptureComplete,
+        contributions: forwardDemandContributionCapture.contributions,
       },
       demandBasis: {
         lookbackDays,

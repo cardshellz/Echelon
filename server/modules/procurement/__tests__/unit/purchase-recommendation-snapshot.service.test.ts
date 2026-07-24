@@ -39,7 +39,32 @@ function recommendation(overrides: Partial<PurchasingRecommendationItem> = {}): 
       demandWindowDiagnostics: { standardWindow: { avgDailyUsagePieces: 4 } },
       forecastTrust: { signal: "trusted" },
     },
-    forwardDemandBasis: { forwardDemandPieces: 8, forwardDemandRawPieces: 10 },
+    forwardDemandBasis: {
+      forwardDemandPieces: 8,
+      forwardDemandRawPieces: 10,
+      forwardDemandEventCount: 1,
+      adjustedReorderPoint: 58,
+      overlayCaptureVersion: 1,
+      overlayCaptureComplete: true,
+      contributions: [{
+        productId: 10,
+        productVariantId: 100,
+        demandEventId: 700,
+        demandEventLineId: 701,
+        eventName: "Launch",
+        eventType: "drop",
+        eventStatus: "planned",
+        eventStartDate: "2026-07-25",
+        eventEndDate: null,
+        planningAsOfDate: "2026-07-17",
+        expectedPieces: 10,
+        confidence: "high",
+        confidenceWeightPercent: 80,
+        weightedPieces: 8,
+        eventUpdatedAt: "2026-07-16T12:00:00.000Z",
+        lineUpdatedAt: "2026-07-16T12:05:00.000Z",
+      }],
+    },
     ...overrides,
   } as PurchasingRecommendationItem;
 }
@@ -65,6 +90,8 @@ describe("purchase recommendation snapshot service", () => {
         evaluatedCount: 1,
         observationCount: 1,
         observationCoverageComplete: true,
+        overlayCaptureComplete: true,
+        overlayContributionCount: 1,
       },
       lines: [{
         recommendationKey: "10:100:30",
@@ -86,6 +113,13 @@ describe("purchase recommendation snapshot service", () => {
         baselineDailyPiecesMicros: 4_000_000,
         forwardDemandPieces: 8,
         forwardDemandRawPieces: 10,
+        overlayCaptureVersion: 1,
+        overlayCaptureComplete: true,
+        overlayContributions: [{
+          demandEventId: 700,
+          demandEventLineId: 701,
+          weightedPieces: 8,
+        }],
       }],
     });
   });
@@ -230,6 +264,78 @@ describe("purchase recommendation snapshot service", () => {
     expect(result).toMatchObject({ run: { id: 91 }, reused: false });
     expect(result.lines).toHaveLength(1);
     expect(result.observations).toHaveLength(1);
+    expect(result.overlayContributions).toEqual([]);
+  });
+
+  it("writes complete overlay contribution evidence in the same transaction as its observation", async () => {
+    const run = { id: 93, source: "manual", sourceRunKey: null };
+    const writtenBatches: unknown[] = [];
+    let insertCall = 0;
+    const insert = vi.fn(() => ({
+      values: vi.fn((values: any) => {
+        writtenBatches.push(values);
+        insertCall += 1;
+        return {
+          returning: vi.fn().mockResolvedValue(
+            insertCall === 1
+              ? [run]
+              : Array.isArray(values)
+                ? values.map((value, index) => ({ id: insertCall * 100 + index, ...value }))
+                : [],
+          ),
+        };
+      }),
+    }));
+    const database = {
+      select: vi.fn(),
+      transaction: vi.fn(async (work: (tx: any) => unknown) => work({ insert })),
+    };
+    const service = createPurchaseRecommendationSnapshotService(database);
+    const input = buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [recommendation()], skippedItems: [], summary: {} },
+      settings: { autoDraftMode: "review_only" },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+      source: "manual",
+    });
+
+    const result = await service.createRun(input, "buyer-1");
+
+    expect(database.transaction).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalledTimes(4);
+    expect(result.observations).toHaveLength(1);
+    expect(result.overlayContributions).toHaveLength(1);
+    expect(writtenBatches[3]).toEqual([
+      expect.objectContaining({
+        observationId: 300,
+        demandEventId: 700,
+        demandEventLineId: 701,
+        expectedPieces: 10,
+        weightedPieces: 8,
+      }),
+    ]);
+  });
+
+  it("rejects complete overlay capture when child evidence does not reconcile", async () => {
+    const database = { select: vi.fn(), transaction: vi.fn() };
+    const service = createPurchaseRecommendationSnapshotService(database);
+    const observation = buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [recommendation()], skippedItems: [], summary: {} },
+      settings: { autoDraftMode: "review_only" },
+      lookbackDays: 30,
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+    }).observations![0];
+
+    await expect(service.createRun({
+      calculationVersion: "v2",
+      source: "manual",
+      asOf: new Date("2026-07-17T12:00:00.000Z"),
+      lookbackDays: 30,
+      policySnapshot: {},
+      lines: [],
+      observations: [{ ...observation, forwardDemandPieces: 9 }],
+    })).rejects.toThrow("overlay contribution totals do not match its aggregate");
+    expect(database.transaction).not.toHaveBeenCalled();
   });
 
   it("replays an existing source-scoped run without opening a write transaction", async () => {
@@ -237,12 +343,14 @@ describe("purchase recommendation snapshot service", () => {
       [{ id: 92, source: "auto_draft", sourceRunKey: "500" }],
       [{ id: 101, runId: 92, recommendationKey: "10:100:30" }],
       [{ id: 201, runId: 92, observationKey: "10:product_all_warehouses" }],
+      [{ id: 301, observationId: 201, demandEventLineId: 701 }],
     ];
     const select = vi.fn(() => {
       const rows = selectResults.shift() ?? [];
       const chain: any = {
         from: vi.fn(() => chain),
         where: vi.fn(() => chain),
+        orderBy: vi.fn().mockResolvedValue(rows),
         limit: vi.fn().mockResolvedValue(rows),
         then: (resolve: (value: any[]) => unknown) => Promise.resolve(rows).then(resolve),
       };
@@ -263,6 +371,7 @@ describe("purchase recommendation snapshot service", () => {
     expect(result).toMatchObject({ run: { id: 92 }, reused: true });
     expect(result.lines).toHaveLength(1);
     expect(result.observations).toHaveLength(1);
+    expect(result.overlayContributions).toHaveLength(1);
     expect(database.transaction).not.toHaveBeenCalled();
   });
 });

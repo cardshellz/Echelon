@@ -66,6 +66,80 @@ describe("forward demand integration into purchasing recommendations", () => {
     expect(item.forwardDemandBasis.forwardDemandRawPieces).toBe(250);
     expect(item.forwardDemandBasis.forwardDemandEventCount).toBe(3);
     expect(item.forwardDemandBasis.adjustedReorderPoint).toBe(item.reorderPoint);
+    expect(item.forwardDemandBasis.overlayCaptureComplete).toBe(false);
+    expect(item.forwardDemandBasis.overlayCaptureVersion).toBe(0);
+  });
+
+  it("validates and preserves the exact event-line contributions behind the aggregate", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [baseRow({
+        forward_demand_pieces: 175,
+        forward_demand_raw_pieces: 250,
+        forward_demand_event_count: 1,
+        forward_demand_contributions: [{
+          productId: 10,
+          productVariantId: 101,
+          demandEventId: 700,
+          demandEventLineId: 701,
+          eventName: "Holiday promotion",
+          eventType: "promotion",
+          eventStatus: "planned",
+          eventStartDate: "2026-07-15",
+          eventEndDate: "2026-07-20",
+          planningAsOfDate: "2026-07-01",
+          expectedPieces: 250,
+          confidence: "medium",
+          confidenceWeightPercent: 70,
+          weightedPieces: 175,
+          eventUpdatedAt: "2026-06-30T12:00:00.000Z",
+          lineUpdatedAt: "2026-06-30T12:05:00.000Z",
+        }],
+      })],
+      defaults: { leadTimeDays: 14, safetyStockDays: 7 },
+    });
+
+    expect(result.items[0].forwardDemandBasis).toMatchObject({
+      forwardDemandPieces: 175,
+      forwardDemandRawPieces: 250,
+      forwardDemandEventCount: 1,
+      overlayCaptureVersion: 1,
+      overlayCaptureComplete: true,
+      contributions: [{
+        demandEventId: 700,
+        demandEventLineId: 701,
+        weightedPieces: 175,
+      }],
+    });
+  });
+
+  it("fails closed when contribution evidence does not equal the recommendation aggregate", () => {
+    expect(() => generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [baseRow({
+        forward_demand_pieces: 176,
+        forward_demand_raw_pieces: 250,
+        forward_demand_event_count: 1,
+        forward_demand_contributions: [{
+          productId: 10,
+          productVariantId: null,
+          demandEventId: 700,
+          demandEventLineId: 701,
+          eventName: "Holiday promotion",
+          eventType: "promotion",
+          eventStatus: "active",
+          eventStartDate: "2026-07-15",
+          eventEndDate: null,
+          planningAsOfDate: "2026-07-01",
+          expectedPieces: 250,
+          confidence: "medium",
+          confidenceWeightPercent: 70,
+          weightedPieces: 175,
+          eventUpdatedAt: "2026-06-30T12:00:00.000Z",
+          lineUpdatedAt: "2026-06-30T12:05:00.000Z",
+        }],
+      })],
+    })).toThrow("Forward-demand contribution totals do not match the recommendation aggregate");
   });
 
   it("treats zero forward demand as no change to reorder point", () => {
@@ -83,6 +157,24 @@ describe("forward demand integration into purchasing recommendations", () => {
 
     expect(noForward.items[0].reorderPoint).toBe(zeroForward.items[0].reorderPoint);
     expect(noForward.items[0].suggestedOrderPieces).toBe(zeroForward.items[0].suggestedOrderPieces);
+  });
+
+  it("distinguishes a complete empty overlay capture from legacy missing evidence", () => {
+    const result = generatePurchasingRecommendations({
+      lookbackDays: 30,
+      rows: [baseRow({
+        forward_demand_pieces: 0,
+        forward_demand_raw_pieces: 0,
+        forward_demand_event_count: 0,
+        forward_demand_contributions: [],
+      })],
+    });
+
+    expect(result.items[0].forwardDemandBasis).toMatchObject({
+      overlayCaptureVersion: 1,
+      overlayCaptureComplete: true,
+      contributions: [],
+    });
   });
 
   it("forward demand can push a product from ok to order_now status", () => {

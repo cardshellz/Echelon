@@ -47,6 +47,17 @@ import {
 } from "./purchasing-forecast-policy";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
+function buildReorderAnalysisResponseItem(item: PurchasingRecommendationItem) {
+  const {
+    contributions: _overlayContributionEvidence,
+    ...forwardDemandBasis
+  } = item.forwardDemandBasis;
+  return {
+    ...item,
+    forwardDemandBasis,
+  };
+}
+
 function parseRunHistoryLimit(value: unknown): number {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return 10;
@@ -1757,10 +1768,10 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       });
 
       res.json({
-        items: recommendationResult.items,
+        items: recommendationResult.items.map(buildReorderAnalysisResponseItem),
         summary: recommendationResult.summary,
         approvalPolicyImpact: buildApprovalPolicyImpact(recommendationResult, approvalPolicySettings),
-        skippedItems: recommendationResult.skippedItems,
+        skippedItems: recommendationResult.skippedItems.map(buildReorderAnalysisResponseItem),
         lookbackDays,
       });
     } catch (error) {

@@ -1419,7 +1419,8 @@ export const procurementMethods: IProcurementStorage = {
            AND it2.transaction_type = 'receipt') AS last_received_at,
         COALESCE(fwd.weighted_pieces, 0)::bigint AS forward_demand_pieces,
         COALESCE(fwd.raw_pieces, 0)::bigint AS forward_demand_raw_pieces,
-        COALESCE(fwd.event_count, 0)::int AS forward_demand_event_count
+        COALESCE(fwd.event_count, 0)::int AS forward_demand_event_count,
+        COALESCE(fwd.contributions, '[]'::jsonb) AS forward_demand_contributions
       FROM catalog.products p
       LEFT JOIN (
         SELECT pv.product_id,
@@ -1664,24 +1665,75 @@ export const procurementMethods: IProcurementStorage = {
         GROUP BY pol.product_id
       ) on_order ON on_order.product_id = p.id
       LEFT JOIN (
-        SELECT del.product_id,
-               SUM(
-                 CASE del.confidence
-                    WHEN 'high'   THEN CEIL(del.expected_pieces * ${forecastPolicy.forwardDemandConfidenceWeights.high} / 100.0)
-                    WHEN 'medium' THEN CEIL(del.expected_pieces * ${forecastPolicy.forwardDemandConfidenceWeights.medium} / 100.0)
-                    WHEN 'low'    THEN CEIL(del.expected_pieces * ${forecastPolicy.forwardDemandConfidenceWeights.low} / 100.0)
-                   ELSE 0
-                 END
-               ) AS weighted_pieces,
-               SUM(del.expected_pieces) AS raw_pieces,
-               COUNT(DISTINCT de.id) AS event_count
-        FROM procurement.demand_event_lines del
-        JOIN procurement.demand_events de ON de.id = del.demand_event_id
-        WHERE ${forecastPolicy.forwardDemandEnabled}
-          AND de.status IN ('planned', 'active')
-          AND de.start_date <= CURRENT_DATE + MAKE_INTERVAL(days => ${forecastPolicy.forwardDemandHorizonDays})
-          AND (de.end_date IS NULL OR de.end_date >= CURRENT_DATE)
-        GROUP BY del.product_id
+        SELECT
+          contribution.product_id,
+          SUM(contribution.weighted_pieces) AS weighted_pieces,
+          SUM(contribution.expected_pieces) AS raw_pieces,
+          COUNT(DISTINCT contribution.demand_event_id) AS event_count,
+          JSONB_AGG(
+            JSONB_BUILD_OBJECT(
+              'productId', contribution.product_id,
+              'productVariantId', contribution.product_variant_id,
+              'demandEventId', contribution.demand_event_id,
+              'demandEventLineId', contribution.demand_event_line_id,
+              'eventName', contribution.event_name,
+              'eventType', contribution.event_type,
+              'eventStatus', contribution.event_status,
+              'eventStartDate', contribution.event_start_date,
+              'eventEndDate', contribution.event_end_date,
+              'planningAsOfDate', contribution.planning_as_of_date,
+              'expectedPieces', contribution.expected_pieces,
+              'confidence', contribution.confidence,
+              'confidenceWeightPercent', contribution.confidence_weight_percent,
+              'weightedPieces', contribution.weighted_pieces,
+              'eventUpdatedAt', contribution.event_updated_at,
+              'lineUpdatedAt', contribution.line_updated_at
+            )
+            ORDER BY
+              contribution.event_start_date,
+              contribution.demand_event_id,
+              contribution.demand_event_line_id
+          ) AS contributions
+        FROM (
+          SELECT
+            del.product_id,
+            del.product_variant_id,
+            de.id AS demand_event_id,
+            del.id AS demand_event_line_id,
+            de.name AS event_name,
+            de.event_type,
+            de.status AS event_status,
+            de.start_date AS event_start_date,
+            de.end_date AS event_end_date,
+            CURRENT_DATE AS planning_as_of_date,
+            del.expected_pieces,
+            del.confidence,
+            CASE del.confidence
+              WHEN 'high'   THEN ${forecastPolicy.forwardDemandConfidenceWeights.high}
+              WHEN 'medium' THEN ${forecastPolicy.forwardDemandConfidenceWeights.medium}
+              WHEN 'low'    THEN ${forecastPolicy.forwardDemandConfidenceWeights.low}
+              ELSE 0
+            END AS confidence_weight_percent,
+            (
+              del.expected_pieces::bigint
+              * CASE del.confidence
+                  WHEN 'high'   THEN ${forecastPolicy.forwardDemandConfidenceWeights.high}
+                  WHEN 'medium' THEN ${forecastPolicy.forwardDemandConfidenceWeights.medium}
+                  WHEN 'low'    THEN ${forecastPolicy.forwardDemandConfidenceWeights.low}
+                  ELSE 0
+                END::bigint
+              + 99
+            ) / 100 AS weighted_pieces,
+            de.updated_at AS event_updated_at,
+            del.updated_at AS line_updated_at
+          FROM procurement.demand_event_lines del
+          JOIN procurement.demand_events de ON de.id = del.demand_event_id
+          WHERE ${forecastPolicy.forwardDemandEnabled}
+            AND de.status IN ('planned', 'active')
+            AND de.start_date <= CURRENT_DATE + MAKE_INTERVAL(days => ${forecastPolicy.forwardDemandHorizonDays})
+            AND (de.end_date IS NULL OR de.end_date >= CURRENT_DATE)
+        ) contribution
+        GROUP BY contribution.product_id
       ) fwd ON fwd.product_id = p.id
       WHERE p.is_active = true
       ORDER BY p.sku, p.name

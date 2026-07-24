@@ -503,6 +503,9 @@
   "procurement.purchase_forecast_observations": [
     "modules/procurement"
   ],
+  "procurement.purchase_forecast_overlay_contributions": [
+    "modules/procurement"
+  ],
   "procurement.purchase_order_lines": [
     "modules/procurement"
   ],
