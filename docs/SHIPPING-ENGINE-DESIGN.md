@@ -66,7 +66,23 @@ order ingest ─► test/shadow SHIP PLAN (cartonize with order-final items)
 
 The engine receives a pricing context separately from the physical shipment: `pricingChannel` identifies the program selecting prices and `purpose` distinguishes customer checkout from vendor fulfillment. Shopify retail and dropship vendor fulfillment therefore share weight, zone, effective-date, band-selection, quote, and audit behavior while resolving different rate books. A dropship order sourced from eBay still uses the dropship vendor rate book; eBay's fulfillment policy controls only what the marketplace buyer sees.
 
-Storage is `shipping.rate_books` plus deterministic `shipping.rate_book_assignments`, with `shipping.rate_tables` attached to a book and reusable `shipping.zone_sets` shared when geography matches. Assignment resolution uses an exact warehouse assignment first, then the channel-wide assignment. Partial unique indexes prevent overlapping active assignments at either scope instead of settling ambiguity with an operator-entered priority. Store/vendor-specific mappings can later reference a book explicitly without changing the rating core.
+Rate tables remain attached to reusable `shipping.rate_books`, and geography remains reusable through `shipping.zone_sets`. The current runtime selects a book through string-keyed `shipping.rate_book_assignments`; those assignments are compatibility state. A canonical `engine_quoted` channel-policy route references the selected rate book directly. The old assignments are removed only after shadow parity and per-channel cutover.
+
+### Canonical channel routing and destination authority
+
+`channels.channels.id` is the canonical business-channel key. Marketplace store connections are adapter context and never create per-store shipping policy. Customer checkout pricing and dropship vendor fulfillment charges are different policy purposes, so an eBay buyer-facing rate may remain marketplace-managed while the dropship vendor charge for that order is still engine-quoted.
+
+One versioned `shipping.channel_policies` revision owns the complete decision set for a channel and purpose. Its `shipping.channel_policy_routes` choose one of three modes:
+
+- `engine_quoted`: Echelon selects the referenced rate book and returns the price.
+- `channel_managed`: the marketplace or storefront owns the displayed price.
+- `disabled`: the destination is not offered for that channel and purpose.
+
+Eligibility authority is explicit and independent where a route is enabled: `engine`, `channel`, or `intersection`. A disabled route has no eligibility authority and no rate book. This supports the initial Shopify shape of engine-quoted US destinations plus channel-managed international destinations without requiring Echelon to duplicate Shopify Markets. It also allows eBay checkout shipping to remain marketplace-managed while other channels opt into the engine.
+
+Reusable `shipping.destination_scopes` contain country, region, and postal-prefix members as authoring aids. Saving a policy route copies those members into `shipping.channel_policy_route_destinations`; later edits to the reusable scope cannot silently change an active policy revision. Resolution is deterministic: an exact warehouse route wins over a global route; within that warehouse scope, postal prefix wins over region, region wins over country, and country wins over catch-all. A longer postal prefix wins between postal matches. Equal-specificity matches fail closed as configuration ambiguity; operator-entered priority is not used.
+
+During the compatibility expansion, the new tables are empty and existing `shipping-channel.ts` behavior remains authoritative. Legacy fallback is permitted only when no active canonical policy exists. Once a policy is active, missing or ambiguous routes fail closed instead of escaping to legacy behavior. New channels have no legacy fallback and therefore remain disabled until explicitly configured.
 
 ### Product-aware pricing policies
 
@@ -109,6 +125,15 @@ The admin workflow is organized by destination group: **Default pricing**, **Pro
 - **P3 — Channel expansion:** import dropship's distinct vendor rates into a dropship-assigned `shipping.*` book, dual-run old/new providers, then switch only after parity; add the first-party authenticated quote API and Shellz Club benefit-policy adapter; retain eBay fulfillment-policy selection in its adapter.
 - **P4 — Service levels and providers:** Priority/Overnight/Pallet Freight, live/direct carrier and freight providers where they add value, fulfillment-method enforcement, and multi-origin routing when required.
 - **P5 — Optional cartonization:** dimensions/box capture, explicit plan tests, non-blocking shadow, pack-station actuals, calibration, and only then a separately approved enforcement proposal.
+
+### Cross-channel rollout approved 2026-07-24
+
+1. **Foundation:** add destination scopes, versioned channel policies, deterministic pure resolution, and observable legacy fallback. No policy seed and no runtime behavior change.
+2. **Runtime and admin:** add transactional draft/activate/retire commands, shared audit events, dynamic channel administration, and shadow comparison against legacy decisions.
+3. **Membership contract:** Shellz Club continues to own plan benefits and projects channel-ID-aware benefit facts; it does not select rate books or channel adapters.
+4. **Adapter capabilities:** each thin channel adapter declares whether it can accept engine quotes, manage its own rates, and enforce destination eligibility. Unsupported combinations fail validation before activation.
+5. **Shopify enforcement:** connect US engine quotes and channel-managed international eligibility, then verify delivery-group benefit behavior against the same canonical shipping-group IDs.
+6. **Cutover and cleanup:** activate one channel/purpose at a time behind a kill switch, compare production evidence, remove string-keyed legacy routing only after parity, and retain a rollback revision.
 
 ## Walkthrough decisions from 2026-07-02
 
