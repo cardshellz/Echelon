@@ -28,6 +28,7 @@ export type ShipStationTrackingWebhook = z.infer<typeof shipStationTrackingWebho
 
 export interface ShipStationTrackingWebhooksClient {
   listWebhooks(): Promise<ShipStationTrackingWebhook[]>;
+  getWebhook(webhookId: string): Promise<ShipStationTrackingWebhook>;
   createWebhook(input: {
     name: string;
     event: "track";
@@ -74,6 +75,17 @@ export function createShipStationTrackingWebhooksClient(
   }
   const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const fetchImpl = config.fetchImpl ?? fetch;
+
+  function normalizeWebhookId(webhookId: string): string {
+    const normalizedWebhookId = webhookId.trim();
+    if (!normalizedWebhookId || normalizedWebhookId.length > 100) {
+      throw new ShipStationTrackingWebhooksClientError(
+        "CONFIGURATION",
+        "ShipStation tracking webhook id must contain 1 through 100 characters",
+      );
+    }
+    return normalizedWebhookId;
+  }
 
   if (!apiKey) {
     throw new ShipStationTrackingWebhooksClientError(
@@ -176,6 +188,24 @@ export function createShipStationTrackingWebhooksClient(
       return parsed.data;
     },
 
+    async getWebhook(webhookId): Promise<ShipStationTrackingWebhook> {
+      const normalizedWebhookId = normalizeWebhookId(webhookId);
+      const parsed = shipStationTrackingWebhookSchema.safeParse(
+        await request(
+          "GET",
+          `/environment/webhooks/${encodeURIComponent(normalizedWebhookId)}`,
+        ),
+      );
+      if (!parsed.success) {
+        throw new ShipStationTrackingWebhooksClientError(
+          "INVALID_RESPONSE",
+          "ShipStation get-webhook response did not match the documented contract",
+          { issues: parsed.error.issues, webhookId: normalizedWebhookId },
+        );
+      }
+      return parsed.data;
+    },
+
     async createWebhook(input): Promise<ShipStationTrackingWebhook> {
       const parsed = shipStationTrackingWebhookSchema.safeParse(
         await request("POST", "/environment/webhooks", input),
@@ -191,13 +221,7 @@ export function createShipStationTrackingWebhooksClient(
     },
 
     async updateWebhook(webhookId, input): Promise<void> {
-      const normalizedWebhookId = webhookId.trim();
-      if (!normalizedWebhookId || normalizedWebhookId.length > 100) {
-        throw new ShipStationTrackingWebhooksClientError(
-          "CONFIGURATION",
-          "ShipStation tracking webhook id must contain 1 through 100 characters",
-        );
-      }
+      const normalizedWebhookId = normalizeWebhookId(webhookId);
       await request(
         "PUT",
         `/environment/webhooks/${encodeURIComponent(normalizedWebhookId)}`,
