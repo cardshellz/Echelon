@@ -24,4 +24,12 @@ describe("purchase forecast backtesting actual-demand query", () => {
     expect(source).toContain("variant.product_id = candidate.product_id");
     expect(source).toContain("order_item.quantity::bigint * variant.units_per_variant::bigint");
   });
+
+  it("loads immutable overlay contributions with deterministic event-line ordering", () => {
+    expect(source).toContain("FROM procurement.purchase_forecast_overlay_contributions contribution");
+    expect(source).toContain("WHERE contribution.observation_id = observation.id");
+    expect(source).toContain("contribution.event_start_date");
+    expect(source).toContain("contribution.demand_event_id");
+    expect(source).toContain("contribution.demand_event_line_id");
+  });
 });

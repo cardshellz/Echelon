@@ -32,6 +32,11 @@ describe("purchase forecast backtesting service", () => {
         baselineDailyPiecesMicros: 1_000_000,
         forwardDemandPieces: 0,
         forwardDemandRawPieces: 0,
+        overlayCaptureVersion: 2,
+        overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: "2026-01-01",
+        overlayHorizonDays: 90,
+        overlayContributions: [],
         actualDemandPieces: 12,
         actualOrderCount: 3,
         actualActiveDays: 2,
@@ -53,6 +58,11 @@ describe("purchase forecast backtesting service", () => {
         baselineDailyPiecesMicros: 1_000_000,
         forwardDemandPieces: 5,
         forwardDemandRawPieces: 5,
+        overlayCaptureVersion: 1,
+        overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: null,
+        overlayHorizonDays: null,
+        overlayContributions: [],
         actualDemandPieces: 30,
         actualOrderCount: 8,
         actualActiveDays: 7,
@@ -69,7 +79,7 @@ describe("purchase forecast backtesting service", () => {
     expect(repo.loadMaturedCandidates).toHaveBeenCalledWith({
       asOf: now,
       horizons: [7, 30],
-      evaluationVersion: 1,
+      evaluationVersion: 2,
       limit: 25,
     });
     expect(repo.insertEvaluations).toHaveBeenCalledWith([
@@ -104,6 +114,18 @@ describe("purchase forecast backtesting service", () => {
       tieCount: 0,
       zeroActualCount: 0,
       observationsWithForwardDemand: 1,
+      overlayEvaluationCount: 1,
+      overlayActualDemandPieces: 10,
+      overlayRawDemandPieces: 5,
+      overlayWeightedDemandPieces: 2,
+      overlayCohortForecastAbsoluteErrorMicros: 2_000_000,
+      overlayAdjustedForecastDemandMicros: 10_000_000,
+      overlayAdjustedAbsoluteErrorMicros: 0,
+      overlayAdjustedBiasMicros: 0,
+      overlayWinCount: 1,
+      historicalForecastWinCount: 0,
+      overlayTieCount: 0,
+      observationsWithAttributedOverlay: 1,
     }]);
     repo.loadRecent.mockResolvedValue([{
       id: 1,
@@ -115,7 +137,7 @@ describe("purchase forecast backtesting service", () => {
       horizonDays: 7,
       forecastMethod: "weighted_blend_v1",
       forecastVersion: 2,
-      evaluationVersion: 1,
+      evaluationVersion: 2,
       observedFrom: new Date("2026-01-01T00:00:00.000Z"),
       observedThroughExclusive: new Date("2026-01-08T00:00:00.000Z"),
       actualDemandPieces: 10,
@@ -130,6 +152,19 @@ describe("purchase forecast backtesting service", () => {
       baselineBiasMicros: 5_000_000,
       forwardDemandPieces: 4,
       forwardDemandRawPieces: 5,
+      overlayCaptureVersion: 2,
+      overlayCaptureComplete: true,
+      overlayPlanningAsOfDate: "2026-01-01",
+      overlayHorizonDays: 90,
+      overlayAttributionVersion: 1,
+      overlayEvaluable: true,
+      overlayExclusionReason: null,
+      overlayContributionCount: 1,
+      overlayRawDemandPieces: 5,
+      overlayWeightedDemandPieces: 2,
+      overlayAdjustedForecastDemandMicros: 14_000_000,
+      overlayAdjustedAbsoluteErrorMicros: 4_000_000,
+      overlayAdjustedBiasMicros: 4_000_000,
       demandQueryVersion: "wms_order_items_product_v1",
       evaluatedBy: "system",
       evaluatedAt: new Date("2026-01-09T00:00:00.000Z"),
@@ -138,21 +173,27 @@ describe("purchase forecast backtesting service", () => {
 
     const report = await service.getReport({ horizonDays: "7", limit: 10 });
 
-    expect(repo.loadAggregates).toHaveBeenCalledWith({ evaluationVersion: 1, horizonDays: 7 });
+    expect(repo.loadAggregates).toHaveBeenCalledWith({ evaluationVersion: 2, horizonDays: 7 });
     expect(report.measurement).toMatchObject({
       scope: "product_all_warehouses",
-      predictionScope: "historical_rate_only",
-      forwardDemandOverlayIncluded: false,
+      predictionScope: "historical_rate_with_optional_start_date_overlay",
+      overlayAttributionVersion: 1,
     });
     expect(report.summaries[0]).toMatchObject({
       forecastWapeBasisPoints: 2_000,
       baselineWapeBasisPoints: 5_000,
       forecastWapeImprovementBasisPoints: 3_000,
+      overlayCohortForecastWapeBasisPoints: 2_000,
+      overlayAdjustedWapeBasisPoints: 0,
+      overlayWapeImprovementBasisPoints: 2_000,
     });
     expect(report.items[0]).toMatchObject({
       outcome: "forecast_wins",
       forecastErrorImprovementMicros: 3_000_000,
-      forwardDemandOverlayIncluded: false,
+      forwardDemandOverlayIncluded: true,
+      overlayOutcome: "historical_forecast_wins",
+      overlayErrorImprovementMicros: -2_000_000,
+      overlayExclusionReason: null,
     });
   });
 

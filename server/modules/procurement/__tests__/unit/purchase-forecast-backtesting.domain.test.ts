@@ -24,6 +24,11 @@ function candidate(overrides: Partial<PurchaseForecastEvaluationCandidate> = {})
     baselineDailyPiecesMicros: 1_000_000,
     forwardDemandPieces: 20,
     forwardDemandRawPieces: 25,
+    overlayCaptureVersion: 0,
+    overlayCaptureComplete: false,
+    overlayPlanningAsOfDate: null,
+    overlayHorizonDays: null,
+    overlayContributions: [],
     actualDemandPieces: 10,
     actualOrderCount: 4,
     actualActiveDays: 3,
@@ -43,7 +48,7 @@ describe("purchase forecast backtesting domain", () => {
     expect(result).toMatchObject({
       observationId: 11,
       horizonDays: 7,
-      evaluationVersion: 1,
+      evaluationVersion: 2,
       actualDemandPieces: 10,
       forecastDemandMicros: 14_000_000,
       baselineDemandMicros: 7_000_000,
@@ -58,6 +63,156 @@ describe("purchase forecast backtesting domain", () => {
       forwardDemandOverlayIncluded: false,
       forwardDemandPieces: 20,
       forwardDemandRawPieces: 25,
+      overlayEvaluation: {
+        evaluable: false,
+        exclusionReason: "capture_incomplete",
+      },
+    });
+  });
+
+  it("attributes weighted demand by event start date using an exclusive horizon end", () => {
+    const result = buildPurchaseForecastEvaluation({
+      candidate: candidate({
+        forwardDemandPieces: 11,
+        forwardDemandRawPieces: 14,
+        overlayCaptureVersion: 2,
+        overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: "2026-01-01",
+        overlayHorizonDays: 90,
+        overlayContributions: [
+          {
+            demandEventId: 1,
+            demandEventLineId: 11,
+            eventStartDate: "2026-01-03",
+            planningAsOfDate: "2026-01-01",
+            expectedPieces: 5,
+            weightedPieces: 4,
+          },
+          {
+            demandEventId: 2,
+            demandEventLineId: 12,
+            eventStartDate: "2026-01-08",
+            planningAsOfDate: "2026-01-01",
+            expectedPieces: 6,
+            weightedPieces: 5,
+          },
+          {
+            demandEventId: 3,
+            demandEventLineId: 13,
+            eventStartDate: "2025-12-31",
+            planningAsOfDate: "2026-01-01",
+            expectedPieces: 3,
+            weightedPieces: 2,
+          },
+        ],
+      }),
+      evaluatedAt: new Date("2026-01-09T00:00:00.000Z"),
+    });
+
+    expect(result).toMatchObject({
+      overlayAttributionVersion: 1,
+      overlayEvaluable: true,
+      overlayExclusionReason: null,
+      overlayContributionCount: 1,
+      overlayRawDemandPieces: 5,
+      overlayWeightedDemandPieces: 4,
+      overlayAdjustedForecastDemandMicros: 18_000_000,
+      overlayAdjustedAbsoluteErrorMicros: 8_000_000,
+      overlayAdjustedBiasMicros: 8_000_000,
+    });
+  });
+
+  it("excludes overlay scoring when the captured planning date differs from the forecast window", () => {
+    const result = buildPurchaseForecastEvaluation({
+      candidate: candidate({
+        forwardDemandPieces: 0,
+        forwardDemandRawPieces: 0,
+        overlayCaptureVersion: 2,
+        overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: "2025-12-31",
+        overlayHorizonDays: 90,
+        overlayContributions: [],
+      }),
+      evaluatedAt: new Date("2026-01-09T00:00:00.000Z"),
+    });
+
+    expect(result).toMatchObject({
+      overlayEvaluable: false,
+      overlayExclusionReason: "capture_planning_date_mismatch",
+      overlayAdjustedForecastDemandMicros: null,
+    });
+    expect(result.evidenceSnapshot).toMatchObject({
+      overlayEvaluation: { exclusionReason: "capture_planning_date_mismatch" },
+    });
+  });
+
+  it("rejects contribution evidence that does not reconcile to the immutable observation", () => {
+    expect(() => buildPurchaseForecastEvaluation({
+      candidate: candidate({
+        forwardDemandPieces: 5,
+        forwardDemandRawPieces: 7,
+        overlayCaptureVersion: 2,
+        overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: "2026-01-01",
+        overlayHorizonDays: 90,
+        overlayContributions: [{
+          demandEventId: 1,
+          demandEventLineId: 11,
+          eventStartDate: "2026-01-03",
+          planningAsOfDate: "2026-01-01",
+          expectedPieces: 6,
+          weightedPieces: 5,
+        }],
+      }),
+      evaluatedAt: new Date("2026-01-09T00:00:00.000Z"),
+    })).toThrow("totals do not match");
+  });
+
+  it("rejects contribution evidence outside the captured planning horizon", () => {
+    expect(() => buildPurchaseForecastEvaluation({
+      candidate: candidate({
+        forwardDemandPieces: 5,
+        forwardDemandRawPieces: 6,
+        overlayCaptureVersion: 2,
+        overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: "2026-01-01",
+        overlayHorizonDays: 30,
+        overlayContributions: [{
+          demandEventId: 1,
+          demandEventLineId: 11,
+          eventStartDate: "2026-02-01",
+          planningAsOfDate: "2026-01-01",
+          expectedPieces: 6,
+          weightedPieces: 5,
+        }],
+      }),
+      evaluatedAt: new Date("2026-01-09T00:00:00.000Z"),
+    })).toThrow("falls outside capture coverage");
+  });
+
+  it("does not score overlays when immutable capture coverage is shorter than the evaluation horizon", () => {
+    const result = buildPurchaseForecastEvaluation({
+      candidate: candidate({
+        horizonDays: 90,
+        observedThroughExclusive: new Date("2026-04-01T00:00:00.000Z"),
+        forwardDemandPieces: 0,
+        forwardDemandRawPieces: 0,
+        overlayCaptureVersion: 2,
+        overlayCaptureComplete: true,
+        overlayPlanningAsOfDate: "2026-01-01",
+        overlayHorizonDays: 30,
+        overlayContributions: [],
+      }),
+      evaluatedAt: new Date("2026-04-02T00:00:00.000Z"),
+    });
+
+    expect(result).toMatchObject({
+      overlayAttributionVersion: 0,
+      overlayEvaluable: false,
+      overlayAdjustedForecastDemandMicros: null,
+    });
+    expect(result.evidenceSnapshot).toMatchObject({
+      overlayEvaluation: { exclusionReason: "capture_horizon_insufficient" },
     });
   });
 
@@ -88,6 +243,12 @@ describe("purchase forecast backtesting domain", () => {
       forecastBiasMicros: evaluation.forecastBiasMicros,
       baselineBiasMicros: evaluation.baselineBiasMicros,
       forwardDemandPieces: 20,
+      overlayEvaluable: false,
+      overlayRawDemandPieces: null,
+      overlayWeightedDemandPieces: null,
+      overlayAdjustedForecastDemandMicros: null,
+      overlayAdjustedAbsoluteErrorMicros: null,
+      overlayAdjustedBiasMicros: null,
     }]);
 
     expect(summaries[0]).toMatchObject({
@@ -112,6 +273,12 @@ describe("purchase forecast backtesting domain", () => {
         forecastBiasMicros: -10 * PIECE_MICRO_SCALE,
         baselineBiasMicros: -20 * PIECE_MICRO_SCALE,
         forwardDemandPieces: 0,
+        overlayEvaluable: true,
+        overlayRawDemandPieces: 12,
+        overlayWeightedDemandPieces: 10,
+        overlayAdjustedForecastDemandMicros: 100 * PIECE_MICRO_SCALE,
+        overlayAdjustedAbsoluteErrorMicros: 0,
+        overlayAdjustedBiasMicros: 0,
       },
       {
         horizonDays: 30,
@@ -123,6 +290,12 @@ describe("purchase forecast backtesting domain", () => {
         forecastBiasMicros: 10 * PIECE_MICRO_SCALE,
         baselineBiasMicros: 5 * PIECE_MICRO_SCALE,
         forwardDemandPieces: 5,
+        overlayEvaluable: false,
+        overlayRawDemandPieces: null,
+        overlayWeightedDemandPieces: null,
+        overlayAdjustedForecastDemandMicros: null,
+        overlayAdjustedAbsoluteErrorMicros: null,
+        overlayAdjustedBiasMicros: null,
       },
     ]);
 
@@ -139,6 +312,14 @@ describe("purchase forecast backtesting domain", () => {
       baselineWinCount: 1,
       tieCount: 0,
       observationsWithForwardDemand: 1,
+      overlayEvaluationCount: 1,
+      overlayCohortForecastWapeBasisPoints: 1_000,
+      overlayAdjustedWapeBasisPoints: 0,
+      overlayWapeImprovementBasisPoints: 1_000,
+      overlayWinCount: 1,
+      historicalForecastWinCount: 0,
+      overlayTieCount: 0,
+      observationsWithAttributedOverlay: 1,
     })]);
   });
 
@@ -158,6 +339,49 @@ describe("purchase forecast backtesting domain", () => {
       tieCount: 1,
       zeroActualCount: 0,
       observationsWithForwardDemand: 0,
+      overlayEvaluationCount: 0,
+      overlayActualDemandPieces: 0,
+      overlayRawDemandPieces: 0,
+      overlayWeightedDemandPieces: 0,
+      overlayCohortForecastAbsoluteErrorMicros: 0,
+      overlayAdjustedForecastDemandMicros: 0,
+      overlayAdjustedAbsoluteErrorMicros: 0,
+      overlayAdjustedBiasMicros: 0,
+      overlayWinCount: 0,
+      historicalForecastWinCount: 0,
+      overlayTieCount: 0,
+      observationsWithAttributedOverlay: 0,
     }])).toThrow("outcome counts do not match");
+  });
+
+  it("rejects aggregate subset counts larger than the evaluation cohort", () => {
+    expect(() => buildPurchaseForecastEvaluationSummariesFromAggregates([{
+      horizonDays: 7,
+      evaluationCount: 1,
+      actualDemandPieces: 10,
+      forecastDemandMicros: 10_000_000,
+      baselineDemandMicros: 10_000_000,
+      forecastAbsoluteErrorMicros: 0,
+      baselineAbsoluteErrorMicros: 0,
+      forecastBiasMicros: 0,
+      baselineBiasMicros: 0,
+      forecastWinCount: 0,
+      baselineWinCount: 0,
+      tieCount: 1,
+      zeroActualCount: 0,
+      observationsWithForwardDemand: 2,
+      overlayEvaluationCount: 0,
+      overlayActualDemandPieces: 0,
+      overlayRawDemandPieces: 0,
+      overlayWeightedDemandPieces: 0,
+      overlayCohortForecastAbsoluteErrorMicros: 0,
+      overlayAdjustedForecastDemandMicros: 0,
+      overlayAdjustedAbsoluteErrorMicros: 0,
+      overlayAdjustedBiasMicros: 0,
+      overlayWinCount: 0,
+      historicalForecastWinCount: 0,
+      overlayTieCount: 0,
+      observationsWithAttributedOverlay: 0,
+    }])).toThrow("subset counts cannot exceed");
   });
 });
