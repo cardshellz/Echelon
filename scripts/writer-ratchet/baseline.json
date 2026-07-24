@@ -583,6 +583,21 @@
   "shipping.box_warehouse_stock": [
     "modules/shipping-engine"
   ],
+  "shipping.channel_policies": [
+    "modules/shipping-engine"
+  ],
+  "shipping.channel_policy_route_destinations": [
+    "modules/shipping-engine"
+  ],
+  "shipping.channel_policy_routes": [
+    "modules/shipping-engine"
+  ],
+  "shipping.destination_scope_members": [
+    "modules/shipping-engine"
+  ],
+  "shipping.destination_scopes": [
+    "modules/shipping-engine"
+  ],
   "shipping.pack_plan_parcel_items": [
     "modules/cartonization"
   ],

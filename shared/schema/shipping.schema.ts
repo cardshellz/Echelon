@@ -212,6 +212,7 @@ export const shippingDestinationScopes = shippingSchema.table("destination_scope
     .default("draft"),
   metadata: jsonb("metadata"),
   createdBy: varchar("created_by", { length: 200 }).notNull(),
+  lockVersion: integer("lock_version").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
@@ -226,6 +227,7 @@ export const shippingDestinationScopes = shippingSchema.table("destination_scope
   check("shipping_destination_scope_actor_chk", sql`
     ${table.createdBy} = btrim(${table.createdBy}) AND ${table.createdBy} <> ''
   `),
+  check("shipping_destination_scope_lock_version_chk", sql`${table.lockVersion} > 0`),
 ]);
 
 export const shippingDestinationScopeMembers = shippingSchema.table("destination_scope_members", {
@@ -284,6 +286,7 @@ export const shippingChannelPolicies = shippingSchema.table("channel_policies", 
   activatedBy: varchar("activated_by", { length: 200 }),
   activatedAt: timestamp("activated_at", { withTimezone: true }),
   retiredAt: timestamp("retired_at", { withTimezone: true }),
+  lockVersion: integer("lock_version").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
@@ -292,6 +295,9 @@ export const shippingChannelPolicies = shippingSchema.table("channel_policies", 
   uniqueIndex("shipping_channel_policy_active_idx")
     .on(table.channelId, table.purpose)
     .where(sql`${table.status} = 'active'`),
+  uniqueIndex("shipping_channel_policy_draft_idx")
+    .on(table.channelId, table.purpose)
+    .where(sql`${table.status} = 'draft'`),
   index("shipping_channel_policy_lookup_idx")
     .on(table.channelId, table.purpose, table.status),
   check("shipping_channel_policy_purpose_chk", sql`
@@ -301,6 +307,7 @@ export const shippingChannelPolicies = shippingSchema.table("channel_policies", 
     ${table.status} IN ('draft', 'active', 'retired')
   `),
   check("shipping_channel_policy_version_chk", sql`${table.version} > 0`),
+  check("shipping_channel_policy_lock_version_chk", sql`${table.lockVersion} > 0`),
   check("shipping_channel_policy_actor_chk", sql`
     ${table.createdBy} = btrim(${table.createdBy})
     AND ${table.createdBy} <> ''
@@ -324,10 +331,18 @@ export const shippingChannelPolicies = shippingSchema.table("channel_policies", 
     )
     OR (
       ${table.status} = 'retired'
-      AND ${table.activatedBy} IS NOT NULL
-      AND ${table.activatedAt} IS NOT NULL
       AND ${table.retiredAt} IS NOT NULL
-      AND ${table.retiredAt} >= ${table.activatedAt}
+      AND (
+        (
+          ${table.activatedBy} IS NULL
+          AND ${table.activatedAt} IS NULL
+        )
+        OR (
+          ${table.activatedBy} IS NOT NULL
+          AND ${table.activatedAt} IS NOT NULL
+          AND ${table.retiredAt} >= ${table.activatedAt}
+        )
+      )
     )
   `),
 ]);

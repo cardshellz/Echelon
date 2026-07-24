@@ -1,5 +1,7 @@
 import {
+  SHIPPING_CHANNEL_ELIGIBILITY_MODES,
   SHIPPING_CHANNEL_POLICY_PURPOSES,
+  SHIPPING_CHANNEL_ROUTE_MODES,
   type ShippingChannelEligibilityMode,
   type ShippingChannelPolicyPurpose,
   type ShippingChannelPolicyStatus,
@@ -139,7 +141,84 @@ export function resolveActiveChannelShippingPolicy(
     };
   }
 
-  const policy = activePolicies[0];
+  return resolvePolicyRoutes(activePolicies[0], input);
+}
+
+/**
+ * Resolve one explicit revision, including a draft used by admin preview and
+ * shadow comparison. The caller chooses the revision; this function still
+ * verifies that its channel and purpose match the request.
+ */
+export function resolveChannelShippingPolicyCandidate(
+  policy: ChannelShippingPolicyCandidate,
+  input: ChannelShippingPolicyResolutionInput,
+): ChannelShippingDecision {
+  const invalidInput = validateInput(input);
+  if (invalidInput) {
+    return {
+      ok: false,
+      code: "INVALID_INPUT",
+      message: invalidInput,
+    };
+  }
+  if (policy.channelId !== input.channelId || policy.purpose !== input.purpose) {
+    return {
+      ok: false,
+      code: "INVALID_INPUT",
+      message: `policy ${policy.policyId} does not belong to channel ${input.channelId}/${input.purpose}`,
+    };
+  }
+
+  return resolvePolicyRoutes(policy, input);
+}
+
+/**
+ * Activation requires a complete, deterministic decision set. A global
+ * catch-all makes every warehouse/destination resolve explicitly; operators
+ * can set that route to disabled when unspecified destinations must be blocked.
+ */
+export function validateChannelShippingPolicyForActivation(
+  routes: readonly ChannelShippingRouteCandidate[],
+): string[] {
+  const errors: string[] = [];
+  if (routes.length === 0) {
+    return ["Add at least one route before activation."];
+  }
+
+  const routeIds = new Set<number>();
+  for (const route of routes) {
+    const invalid = invalidRouteConfiguration(route);
+    if (invalid !== null) {
+      errors.push(`Route ${route.routeId}: ${invalid}.`);
+    }
+    if (routeIds.has(route.routeId)) {
+      errors.push(`Route ID ${route.routeId} appears more than once.`);
+    }
+    routeIds.add(route.routeId);
+  }
+
+  const globalCatchAll = routes.filter((route) =>
+    route.originWarehouseId === null && route.sourceDestinationScopeId === null);
+  if (globalCatchAll.length !== 1) {
+    errors.push(
+      "Define exactly one all-warehouses, all-destinations fallback route. "
+      + "Use Disabled when unmatched destinations must not be offered.",
+    );
+  }
+
+  for (const [leftRouteId, rightRouteId] of findEqualSpecificityOverlaps(routes)) {
+    errors.push(
+      `Routes ${leftRouteId} and ${rightRouteId} overlap at equal specificity.`,
+    );
+  }
+
+  return [...new Set(errors)];
+}
+
+function resolvePolicyRoutes(
+  policy: ChannelShippingPolicyCandidate,
+  input: ChannelShippingPolicyResolutionInput,
+): ChannelShippingDecision {
   const invalidRoute = policy.routes.find((route) => invalidRouteConfiguration(route) !== null);
   if (invalidRoute) {
     return {
@@ -250,6 +329,12 @@ function invalidRouteConfiguration(route: ChannelShippingRouteCandidate): string
     && (!Number.isInteger(route.originWarehouseId) || route.originWarehouseId <= 0)
   ) {
     return "originWarehouseId must be null or a positive integer";
+  }
+  if (!SHIPPING_CHANNEL_ROUTE_MODES.includes(route.mode)) {
+    return `unsupported mode: ${String(route.mode)}`;
+  }
+  if (!SHIPPING_CHANNEL_ELIGIBILITY_MODES.includes(route.eligibilityMode)) {
+    return `unsupported eligibility mode: ${String(route.eligibilityMode)}`;
   }
   if (route.sourceDestinationScopeId === null && route.destinationMembers.length > 0) {
     return "a catch-all route cannot contain destination members";
@@ -386,6 +471,123 @@ function compareRouteMatches(left: RouteMatch, right: RouteMatch): number {
   return left.warehouseSpecificity - right.warehouseSpecificity
     || left.destinationSpecificity - right.destinationSpecificity
     || left.postalPrefixLength - right.postalPrefixLength;
+}
+
+function findEqualSpecificityOverlaps(
+  routes: readonly ChannelShippingRouteCandidate[],
+): Array<readonly [number, number]> {
+  const catchAllRoutes = new Map<string, number>();
+  const countryRoutes = new Map<string, number>();
+  const regionRoutes = new Map<string, number>();
+  const postalRoutes = new Map<string, {
+    globalRouteId: number | null;
+    regionRouteIds: Map<string, number>;
+  }>();
+  const overlaps = new Map<string, readonly [number, number]>();
+
+  for (const route of routes) {
+    const warehouse = route.originWarehouseId === null
+      ? "*"
+      : String(route.originWarehouseId);
+    if (route.sourceDestinationScopeId === null) {
+      registerIndexedOverlap(
+        catchAllRoutes,
+        warehouse,
+        route.routeId,
+        overlaps,
+      );
+      continue;
+    }
+
+    for (const member of route.destinationMembers) {
+      const country = member.country.trim().toUpperCase();
+      const region = normalizeOptional(member.region);
+      const postalPrefix = normalizePostal(member.postalPrefix);
+      if (postalPrefix !== null) {
+        const key = `${warehouse}:${country}:${postalPrefix}`;
+        const bucket = postalRoutes.get(key) ?? {
+          globalRouteId: null,
+          regionRouteIds: new Map<string, number>(),
+        };
+        const conflictingRouteId = region === null
+          ? firstDifferentRoute(
+              route.routeId,
+              bucket.globalRouteId,
+              ...bucket.regionRouteIds.values(),
+            )
+          : firstDifferentRoute(
+              route.routeId,
+              bucket.globalRouteId,
+              bucket.regionRouteIds.get(region),
+            );
+        if (conflictingRouteId !== null) {
+          recordOverlap(conflictingRouteId, route.routeId, overlaps);
+        }
+        if (region === null && bucket.globalRouteId === null) {
+          bucket.globalRouteId = route.routeId;
+        } else if (
+          region !== null
+          && !bucket.regionRouteIds.has(region)
+        ) {
+          bucket.regionRouteIds.set(region, route.routeId);
+        }
+        postalRoutes.set(key, bucket);
+        continue;
+      }
+
+      if (region !== null) {
+        registerIndexedOverlap(
+          regionRoutes,
+          `${warehouse}:${country}:${region}`,
+          route.routeId,
+          overlaps,
+        );
+        continue;
+      }
+      registerIndexedOverlap(
+        countryRoutes,
+        `${warehouse}:${country}`,
+        route.routeId,
+        overlaps,
+      );
+    }
+  }
+
+  return [...overlaps.values()];
+}
+
+function registerIndexedOverlap(
+  index: Map<string, number>,
+  key: string,
+  routeId: number,
+  overlaps: Map<string, readonly [number, number]>,
+): void {
+  const existingRouteId = index.get(key);
+  if (existingRouteId !== undefined) {
+    recordOverlap(existingRouteId, routeId, overlaps);
+    return;
+  }
+  index.set(key, routeId);
+}
+
+function firstDifferentRoute(
+  routeId: number,
+  ...candidates: Array<number | null | undefined>
+): number | null {
+  return candidates.find((candidate) =>
+    candidate !== null && candidate !== undefined && candidate !== routeId) ?? null;
+}
+
+function recordOverlap(
+  leftRouteId: number,
+  rightRouteId: number,
+  overlaps: Map<string, readonly [number, number]>,
+): void {
+  if (leftRouteId === rightRouteId) return;
+  const pair = leftRouteId < rightRouteId
+    ? [leftRouteId, rightRouteId] as const
+    : [rightRouteId, leftRouteId] as const;
+  overlaps.set(`${pair[0]}:${pair[1]}`, pair);
 }
 
 function normalizeDestination(destination: ShippingDestinationInput): NormalizedDestination {

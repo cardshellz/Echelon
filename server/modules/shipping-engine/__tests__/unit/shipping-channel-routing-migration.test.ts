@@ -6,6 +6,10 @@ const migration = readFileSync(
   resolve(process.cwd(), "migrations/166_shipping_channel_routing_foundation.sql"),
   "utf8",
 );
+const operationsMigration = readFileSync(
+  resolve(process.cwd(), "migrations/167_shipping_channel_routing_operations.sql"),
+  "utf8",
+);
 
 describe("shipping channel routing foundation migration", () => {
   it("creates reusable destination scopes and versioned channel policies", () => {
@@ -54,5 +58,43 @@ describe("shipping channel routing foundation migration", () => {
     expect(migration).toContain("source_destination_scope_id");
     expect(migration).toContain("shipping_channel_policy_route_destination_idx");
     expect(migration).toContain("Frozen destination membership");
+  });
+});
+
+describe("shipping channel routing operations migration", () => {
+  it("adds optimistic locking to operator-managed records", () => {
+    expect(operationsMigration).toContain(
+      "ALTER TABLE shipping.destination_scopes",
+    );
+    expect(operationsMigration).toContain(
+      "ALTER TABLE shipping.channel_policies",
+    );
+    expect(operationsMigration).toContain(
+      "ADD COLUMN lock_version INTEGER NOT NULL DEFAULT 1",
+    );
+    expect(operationsMigration).toContain("CHECK (lock_version > 0)");
+  });
+
+  it("enforces one draft per channel and purpose under concurrency", () => {
+    expect(operationsMigration).toContain(
+      "shipping_channel_policy_draft_idx",
+    );
+    expect(operationsMigration).toContain("WHERE status = 'draft'");
+  });
+
+  it("preserves discarded drafts as retired revisions without pretending they activated", () => {
+    expect(operationsMigration).toContain(
+      "DROP CONSTRAINT shipping_channel_policy_lifecycle_chk",
+    );
+    expect(operationsMigration).toMatch(
+      /status = 'retired'[\s\S]*activated_by IS NULL[\s\S]*activated_at IS NULL/,
+    );
+  });
+
+  it("does not seed or activate any channel policy", () => {
+    expect(operationsMigration).not.toMatch(
+      /(?:INSERT|UPDATE|DELETE)\s+(?:INTO\s+|FROM\s+)?shipping\.channel_policies/i,
+    );
+    expect(operationsMigration).not.toMatch(/\b(?:36|37|67|103)\b/);
   });
 });

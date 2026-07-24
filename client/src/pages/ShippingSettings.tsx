@@ -22,6 +22,7 @@ import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { PricingProgramsTab } from "@/components/shipping/pricing-programs/PricingProgramsTab";
+import { ChannelRoutingTab } from "@/components/shipping/channel-routing/ChannelRoutingTab";
 import {
   Archive,
   Box,
@@ -1281,6 +1282,7 @@ export default function ShippingSettings() {
           <TabsTrigger value="boxes">Box catalog</TabsTrigger>
           <TabsTrigger value="packing-attrs">Packing attributes</TabsTrigger>
           <TabsTrigger value="pricing-programs">Pricing programs</TabsTrigger>
+          <TabsTrigger value="channel-routing">Channel routing</TabsTrigger>
         </TabsList>
         <TabsContent value="boxes" className="mt-4">
           <BoxCatalogTab boxes={config?.boxes || []} warehouses={warehouses} isLoading={configLoading} />
@@ -1290,6 +1292,9 @@ export default function ShippingSettings() {
         </TabsContent>
         <TabsContent value="pricing-programs" className="mt-4">
           <PricingProgramsTab />
+        </TabsContent>
+        <TabsContent value="channel-routing" className="mt-4">
+          <ChannelRoutingTab />
         </TabsContent>
       </Tabs>
     </div>

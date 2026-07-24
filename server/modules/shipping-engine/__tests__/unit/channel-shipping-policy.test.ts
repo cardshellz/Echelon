@@ -3,6 +3,7 @@ import { buildLegacyChannelShippingFallback } from "../../application/legacy-cha
 import {
   resolveActiveChannelShippingPolicy,
   resolveChannelShippingDecision,
+  validateChannelShippingPolicyForActivation,
   type ChannelShippingPolicyCandidate,
   type ChannelShippingRouteCandidate,
 } from "../../domain/channel-shipping-policy";
@@ -318,5 +319,156 @@ describe("resolveChannelShippingDecision compatibility behavior", () => {
       ok: false,
       code: "INVALID_LEGACY_FALLBACK",
     });
+  });
+});
+
+describe("validateChannelShippingPolicyForActivation", () => {
+  const disabledCatchAll: ChannelShippingRouteCandidate = {
+    routeId: 99,
+    originWarehouseId: null,
+    sourceDestinationScopeId: null,
+    destinationMembers: [],
+    mode: "disabled",
+    eligibilityMode: "none",
+    rateBookId: null,
+    rateBookStatus: null,
+  };
+
+  it("requires exactly one global catch-all route", () => {
+    const scopedRoute: ChannelShippingRouteCandidate = {
+      ...catchAllEngineRoute,
+      routeId: 2,
+      sourceDestinationScopeId: 20,
+      destinationMembers: [{
+        country: "US",
+        region: "PA",
+        postalPrefix: null,
+      }],
+    };
+
+    expect(validateChannelShippingPolicyForActivation([scopedRoute]))
+      .toContain(
+        "Define exactly one all-warehouses, all-destinations fallback route. "
+        + "Use Disabled when unmatched destinations must not be offered.",
+      );
+  });
+
+  it("accepts a disabled global catch-all as an explicit fail-closed fallback", () => {
+    expect(validateChannelShippingPolicyForActivation([disabledCatchAll]))
+      .toEqual([]);
+  });
+
+  it("rejects country scopes that overlap at equal specificity", () => {
+    const countryRoute = (
+      routeId: number,
+      scopeId: number,
+    ): ChannelShippingRouteCandidate => ({
+      ...catchAllEngineRoute,
+      routeId,
+      sourceDestinationScopeId: scopeId,
+      destinationMembers: [{
+        country: "US",
+        region: null,
+        postalPrefix: null,
+      }],
+    });
+
+    expect(validateChannelShippingPolicyForActivation([
+      disabledCatchAll,
+      countryRoute(1, 10),
+      countryRoute(2, 11),
+    ])).toContain("Routes 1 and 2 overlap at equal specificity.");
+  });
+
+  it("allows nested postal prefixes because the longer prefix wins", () => {
+    const postalRoute = (
+      routeId: number,
+      scopeId: number,
+      prefix: string,
+    ): ChannelShippingRouteCandidate => ({
+      ...catchAllEngineRoute,
+      routeId,
+      sourceDestinationScopeId: scopeId,
+      destinationMembers: [{
+        country: "US",
+        region: "PA",
+        postalPrefix: prefix,
+      }],
+    });
+
+    expect(validateChannelShippingPolicyForActivation([
+      disabledCatchAll,
+      postalRoute(1, 10, "16"),
+      postalRoute(2, 11, "160"),
+    ])).toEqual([]);
+  });
+
+  it("rejects equal postal prefixes when one route covers every region", () => {
+    const postalRoute = (
+      routeId: number,
+      scopeId: number,
+      region: string | null,
+    ): ChannelShippingRouteCandidate => ({
+      ...catchAllEngineRoute,
+      routeId,
+      sourceDestinationScopeId: scopeId,
+      destinationMembers: [{
+        country: "US",
+        region,
+        postalPrefix: "160",
+      }],
+    });
+
+    expect(validateChannelShippingPolicyForActivation([
+      disabledCatchAll,
+      postalRoute(1, 10, null),
+      postalRoute(2, 11, "PA"),
+    ])).toContain("Routes 1 and 2 overlap at equal specificity.");
+  });
+
+  it("allows equal postal prefixes in different explicit regions", () => {
+    const postalRoute = (
+      routeId: number,
+      scopeId: number,
+      region: string,
+    ): ChannelShippingRouteCandidate => ({
+      ...catchAllEngineRoute,
+      routeId,
+      sourceDestinationScopeId: scopeId,
+      destinationMembers: [{
+        country: "US",
+        region,
+        postalPrefix: "100",
+      }],
+    });
+
+    expect(validateChannelShippingPolicyForActivation([
+      disabledCatchAll,
+      postalRoute(1, 10, "NY"),
+      postalRoute(2, 11, "PA"),
+    ])).toEqual([]);
+  });
+
+  it("allows the same destination coverage at different warehouse scopes", () => {
+    const route = (
+      routeId: number,
+      warehouseId: number,
+    ): ChannelShippingRouteCandidate => ({
+      ...catchAllEngineRoute,
+      routeId,
+      originWarehouseId: warehouseId,
+      sourceDestinationScopeId: 10 + routeId,
+      destinationMembers: [{
+        country: "US",
+        region: "PA",
+        postalPrefix: null,
+      }],
+    });
+
+    expect(validateChannelShippingPolicyForActivation([
+      disabledCatchAll,
+      route(1, 1),
+      route(2, 2),
+    ])).toEqual([]);
   });
 });
