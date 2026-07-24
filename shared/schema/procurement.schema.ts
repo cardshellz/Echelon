@@ -948,6 +948,8 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
   baselineDailyPiecesMicros: bigint("baseline_daily_pieces_micros", { mode: "number" }).notNull(),
   forwardDemandPieces: integer("forward_demand_pieces").notNull().default(0),
   forwardDemandRawPieces: integer("forward_demand_raw_pieces").notNull().default(0),
+  overlayCaptureVersion: integer("overlay_capture_version").notNull().default(0),
+  overlayCaptureComplete: boolean("overlay_capture_complete").notNull().default(false),
   evidenceSnapshot: jsonb("evidence_snapshot").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
@@ -959,11 +961,72 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
   check("purchase_forecast_observations_forecast_qty_chk", sql`${table.forecastDailyPiecesMicros} >= 0`),
   check("purchase_forecast_observations_baseline_qty_chk", sql`${table.baselineDailyPiecesMicros} >= 0`),
   check("purchase_forecast_observations_forward_qty_chk", sql`${table.forwardDemandPieces} >= 0 AND ${table.forwardDemandRawPieces} >= 0`),
+  check(
+    "purchase_forecast_observations_overlay_capture_chk",
+    sql`(${table.overlayCaptureComplete} = FALSE AND ${table.overlayCaptureVersion} = 0)
+      OR (${table.overlayCaptureComplete} = TRUE AND ${table.overlayCaptureVersion} > 0)`,
+  ),
   foreignKey({
     columns: [table.selectedReceiveVariantId, table.productId],
     foreignColumns: [productVariants.id, productVariants.productId],
     name: "purchase_forecast_observations_receive_variant_product_fk",
   }),
+]);
+
+export const purchaseForecastOverlayContributions = procurementSchema.table("purchase_forecast_overlay_contributions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  observationId: integer("observation_id").notNull().references(() => purchaseForecastObservations.id, { onDelete: "restrict" }),
+  demandEventId: integer("demand_event_id").notNull(),
+  demandEventLineId: integer("demand_event_line_id").notNull(),
+  productVariantId: integer("product_variant_id"),
+  eventName: varchar("event_name", { length: 255 }).notNull(),
+  eventType: varchar("event_type", { length: 50 }).notNull(),
+  eventStatus: varchar("event_status", { length: 20 }).notNull(),
+  eventStartDate: date("event_start_date").notNull(),
+  eventEndDate: date("event_end_date"),
+  planningAsOfDate: date("planning_as_of_date").notNull(),
+  expectedPieces: integer("expected_pieces").notNull(),
+  confidence: varchar("confidence", { length: 10 }).notNull(),
+  confidenceWeightPercent: integer("confidence_weight_percent").notNull(),
+  weightedPieces: bigint("weighted_pieces", { mode: "number" }).notNull(),
+  eventUpdatedAt: timestamp("event_updated_at", { withTimezone: true }).notNull(),
+  lineUpdatedAt: timestamp("line_updated_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("purchase_forecast_overlay_contributions_observation_line_uidx")
+    .on(table.observationId, table.demandEventLineId),
+  index("purchase_forecast_overlay_contributions_observation_date_idx")
+    .on(table.observationId, table.eventStartDate, table.demandEventId, table.demandEventLineId),
+  check(
+    "purchase_forecast_overlay_contributions_event_dates_chk",
+    sql`(${table.eventEndDate} IS NULL OR ${table.eventEndDate} >= ${table.eventStartDate})
+      AND (${table.eventEndDate} IS NULL OR ${table.eventEndDate} >= ${table.planningAsOfDate})`,
+  ),
+  check(
+    "purchase_forecast_overlay_contributions_qty_chk",
+    sql`${table.expectedPieces} >= 0 AND ${table.weightedPieces} >= 0`,
+  ),
+  check(
+    "purchase_forecast_overlay_contributions_weighted_qty_chk",
+    sql`${table.weightedPieces}
+      = ((${table.expectedPieces}::BIGINT * ${table.confidenceWeightPercent}::BIGINT + 99) / 100)`,
+  ),
+  check(
+    "purchase_forecast_overlay_contributions_event_type_chk",
+    sql`${table.eventType} IN ('drop', 'preorder', 'promotion', 'wholesale', 'seasonal', 'manual_forecast')`,
+  ),
+  check(
+    "purchase_forecast_overlay_contributions_confidence_chk",
+    sql`${table.confidence} IN ('high', 'medium', 'low')`,
+  ),
+  check(
+    "purchase_forecast_overlay_contributions_weight_chk",
+    sql`${table.confidenceWeightPercent} BETWEEN 0 AND 100`,
+  ),
+  check(
+    "purchase_forecast_overlay_contributions_status_chk",
+    sql`${table.eventStatus} IN ('planned', 'active')`,
+  ),
 ]);
 
 export const purchaseForecastEvaluationHorizonDaysEnum = [7, 30, 90] as const;
@@ -1095,6 +1158,7 @@ export const requestForQuoteLines = procurementSchema.table("request_for_quote_l
 export const insertPurchaseRecommendationRunSchema = createInsertSchema(purchaseRecommendationRuns).omit({ id: true, generatedAt: true });
 export const insertPurchaseRecommendationLineSchema = createInsertSchema(purchaseRecommendationLines).omit({ id: true, createdAt: true });
 export const insertPurchaseForecastObservationSchema = createInsertSchema(purchaseForecastObservations).omit({ id: true, createdAt: true });
+export const insertPurchaseForecastOverlayContributionSchema = createInsertSchema(purchaseForecastOverlayContributions).omit({ id: true, createdAt: true });
 export const insertPurchaseForecastEvaluationSchema = createInsertSchema(purchaseForecastEvaluations).omit({ id: true, evaluatedAt: true });
 export const insertRequestForQuoteSchema = createInsertSchema(requestForQuotes).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertRequestForQuoteLineSchema = createInsertSchema(requestForQuoteLines).omit({ id: true, createdAt: true, updatedAt: true });
@@ -1102,6 +1166,7 @@ export const insertRequestForQuoteLineSchema = createInsertSchema(requestForQuot
 export type PurchaseRecommendationRun = typeof purchaseRecommendationRuns.$inferSelect;
 export type PurchaseRecommendationLine = typeof purchaseRecommendationLines.$inferSelect;
 export type PurchaseForecastObservation = typeof purchaseForecastObservations.$inferSelect;
+export type PurchaseForecastOverlayContribution = typeof purchaseForecastOverlayContributions.$inferSelect;
 export type PurchaseForecastEvaluation = typeof purchaseForecastEvaluations.$inferSelect;
 export type RequestForQuote = typeof requestForQuotes.$inferSelect;
 export type RequestForQuoteLine = typeof requestForQuoteLines.$inferSelect;

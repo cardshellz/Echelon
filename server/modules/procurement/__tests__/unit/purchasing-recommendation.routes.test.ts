@@ -331,6 +331,7 @@ describe("purchasing recommendation routes", () => {
         },
       ],
     });
+    expect(body.items[0].forwardDemandBasis).not.toHaveProperty("contributions");
   });
 
   it("returns manual reorder approval-policy impact using active candidate score settings", async () => {

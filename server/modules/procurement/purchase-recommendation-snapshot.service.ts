@@ -1,17 +1,22 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
+  purchaseForecastOverlayContributions as purchaseForecastOverlayContributionsTable,
   purchaseForecastObservations as purchaseForecastObservationsTable,
   purchaseRecommendationLines as purchaseRecommendationLinesTable,
   purchaseRecommendationRuns as purchaseRecommendationRunsTable,
+  type PurchaseForecastOverlayContribution,
 } from "@shared/schema";
 import type {
   AutoDraftRecommendationSettings,
   PurchasingRecommendationItem,
 } from "./purchasing-recommendation.engine";
+import type { PurchasingForwardDemandContribution } from "./purchasing-forward-demand-contribution";
 import { buildPurchasingRfqQueue } from "./purchasing-rfq.service";
 
 const MAX_RECOMMENDATION_LINES = 2_000;
 const MAX_FORECAST_OBSERVATIONS = 10_000;
+const MAX_FORECAST_OVERLAY_CONTRIBUTIONS = 100_000;
+const OVERLAY_INSERT_BATCH_SIZE = 1_000;
 const PIECE_MICRO_SCALE = 1_000_000;
 
 export type PurchaseRecommendationRunSource = "manual" | "auto_draft" | "api";
@@ -43,6 +48,9 @@ export type PurchaseForecastObservationInput = {
   baselineDailyPiecesMicros: number;
   forwardDemandPieces: number;
   forwardDemandRawPieces: number;
+  overlayCaptureVersion?: number;
+  overlayCaptureComplete?: boolean;
+  overlayContributions?: PurchasingForwardDemandContribution[];
   evidenceSnapshot: Record<string, unknown>;
 };
 
@@ -80,6 +88,122 @@ function piecesToMicros(value: unknown, field: string): number {
     throw new RangeError(`${field} exceeds the supported precision range`);
   }
   return micros;
+}
+
+function validateCalendarDate(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new RangeError(`${field} must be an ISO calendar date`);
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new RangeError(`${field} must be a valid ISO calendar date`);
+  }
+}
+
+function validateOverlayContributions(
+  observation: PurchaseForecastObservationInput,
+  observationIndex: number,
+): PurchasingForwardDemandContribution[] {
+  const complete = observation.overlayCaptureComplete ?? false;
+  const version = observation.overlayCaptureVersion ?? 0;
+  const contributions = observation.overlayContributions ?? [];
+  if (typeof complete !== "boolean") {
+    throw new RangeError(`observations[${observationIndex}].overlayCaptureComplete must be boolean`);
+  }
+  assertNonnegativeInteger(version, `observations[${observationIndex}].overlayCaptureVersion`);
+  if (!Array.isArray(contributions)) {
+    throw new RangeError(`observations[${observationIndex}].overlayContributions must be an array`);
+  }
+  if ((complete && version <= 0) || (!complete && version !== 0)) {
+    throw new RangeError(`observations[${observationIndex}] has inconsistent overlay capture state`);
+  }
+  if (!complete && contributions.length > 0) {
+    throw new RangeError(`observations[${observationIndex}] cannot contain incomplete overlay evidence`);
+  }
+
+  let rawPieces = BigInt(0);
+  let weightedPieces = BigInt(0);
+  const lineIds = new Set<number>();
+  contributions.forEach((contribution, contributionIndex) => {
+    const prefix = `observations[${observationIndex}].overlayContributions[${contributionIndex}]`;
+    assertPositiveInteger(contribution.productId, `${prefix}.productId`);
+    if (contribution.productId !== observation.productId) {
+      throw new RangeError(`${prefix}.productId must match its forecast observation`);
+    }
+    if (contribution.productVariantId !== null) {
+      assertPositiveInteger(contribution.productVariantId, `${prefix}.productVariantId`);
+    }
+    assertPositiveInteger(contribution.demandEventId, `${prefix}.demandEventId`);
+    assertPositiveInteger(contribution.demandEventLineId, `${prefix}.demandEventLineId`);
+    if (lineIds.has(contribution.demandEventLineId)) {
+      throw new RangeError(`${prefix}.demandEventLineId must be unique within its observation`);
+    }
+    lineIds.add(contribution.demandEventLineId);
+    if (
+      typeof contribution.eventName !== "string"
+      || !contribution.eventName.trim()
+      || contribution.eventName.length > 255
+    ) {
+      throw new RangeError(`${prefix}.eventName is required and cannot exceed 255 characters`);
+    }
+    if (!["drop", "preorder", "promotion", "wholesale", "seasonal", "manual_forecast"].includes(contribution.eventType)) {
+      throw new RangeError(`${prefix}.eventType is invalid`);
+    }
+    if (!["planned", "active"].includes(contribution.eventStatus)) {
+      throw new RangeError(`${prefix}.eventStatus is invalid`);
+    }
+    if (!["high", "medium", "low"].includes(contribution.confidence)) {
+      throw new RangeError(`${prefix}.confidence is invalid`);
+    }
+    validateCalendarDate(contribution.eventStartDate, `${prefix}.eventStartDate`);
+    if (contribution.eventEndDate !== null) {
+      validateCalendarDate(contribution.eventEndDate, `${prefix}.eventEndDate`);
+      if (contribution.eventEndDate < contribution.eventStartDate) {
+        throw new RangeError(`${prefix}.eventEndDate cannot precede eventStartDate`);
+      }
+    }
+    validateCalendarDate(contribution.planningAsOfDate, `${prefix}.planningAsOfDate`);
+    if (contribution.eventEndDate !== null && contribution.eventEndDate < contribution.planningAsOfDate) {
+      throw new RangeError(`${prefix}.eventEndDate cannot precede planningAsOfDate`);
+    }
+    assertNonnegativeInteger(contribution.expectedPieces, `${prefix}.expectedPieces`);
+    assertNonnegativeInteger(contribution.weightedPieces, `${prefix}.weightedPieces`);
+    assertNonnegativeInteger(contribution.confidenceWeightPercent, `${prefix}.confidenceWeightPercent`);
+    if (contribution.confidenceWeightPercent > 100) {
+      throw new RangeError(`${prefix}.confidenceWeightPercent cannot exceed 100`);
+    }
+    if (
+      typeof contribution.eventUpdatedAt !== "string"
+      || Number.isNaN(new Date(contribution.eventUpdatedAt).getTime())
+    ) {
+      throw new RangeError(`${prefix}.eventUpdatedAt must be a valid timestamp`);
+    }
+    if (
+      typeof contribution.lineUpdatedAt !== "string"
+      || Number.isNaN(new Date(contribution.lineUpdatedAt).getTime())
+    ) {
+      throw new RangeError(`${prefix}.lineUpdatedAt must be a valid timestamp`);
+    }
+    const expectedWeightedPieces = (
+      BigInt(contribution.expectedPieces) * BigInt(contribution.confidenceWeightPercent) + BigInt(99)
+    ) / BigInt(100);
+    if (BigInt(contribution.weightedPieces) !== expectedWeightedPieces) {
+      throw new RangeError(`${prefix}.weightedPieces does not match expectedPieces and confidenceWeightPercent`);
+    }
+    rawPieces += BigInt(contribution.expectedPieces);
+    weightedPieces += BigInt(contribution.weightedPieces);
+  });
+
+  if (
+    complete
+    && (
+      rawPieces !== BigInt(observation.forwardDemandRawPieces)
+      || weightedPieces !== BigInt(observation.forwardDemandPieces)
+    )
+  ) {
+    throw new RangeError(`observations[${observationIndex}] overlay contribution totals do not match its aggregate`);
+  }
+  return contributions;
 }
 
 function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
@@ -122,6 +246,7 @@ function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
   }
   const observedProducts = new Set<number>();
   const observationKeys = new Set<string>();
+  let overlayContributionCount = 0;
   observations.forEach((observation, index) => {
     const key = observation.observationKey?.trim();
     if (!key || key.length > 160 || observationKeys.has(key)) {
@@ -153,6 +278,12 @@ function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
     assertNonnegativeInteger(observation.baselineDailyPiecesMicros, `observations[${index}].baselineDailyPiecesMicros`);
     assertNonnegativeInteger(observation.forwardDemandPieces, `observations[${index}].forwardDemandPieces`);
     assertNonnegativeInteger(observation.forwardDemandRawPieces, `observations[${index}].forwardDemandRawPieces`);
+    overlayContributionCount += validateOverlayContributions(observation, index).length;
+    if (overlayContributionCount > MAX_FORECAST_OVERLAY_CONTRIBUTIONS) {
+      throw new RangeError(
+        `observations cannot contain more than ${MAX_FORECAST_OVERLAY_CONTRIBUTIONS} overlay contributions`,
+      );
+    }
   });
   return { source, sourceRunKey };
 }
@@ -205,6 +336,11 @@ export function buildPurchaseRecommendationRunInput(input: {
       evaluatedCount,
       observationCount: observations.length,
       observationCoverageComplete: true,
+      overlayCaptureComplete: observations.every((observation) => observation.overlayCaptureComplete === true),
+      overlayContributionCount: observations.reduce(
+        (count, observation) => count + (observation.overlayContributions?.length ?? 0),
+        0,
+      ),
       summary: input.recommendationResult.summary,
     },
     lines: candidates.map((item) => ({
@@ -261,6 +397,17 @@ export function buildPurchaseForecastObservations(
       const baselineDailyPieces = item.demandBasis.lookbackDays > 0
         ? item.demandBasis.periodUsagePieces / item.demandBasis.lookbackDays
         : 0;
+      const overlayCaptureComplete = item.forwardDemandBasis.overlayCaptureComplete === true;
+      const overlayCaptureVersion = overlayCaptureComplete
+        ? item.forwardDemandBasis.overlayCaptureVersion
+        : 0;
+      const overlayContributions = overlayCaptureComplete
+        ? item.forwardDemandBasis.contributions
+        : [];
+      const {
+        contributions: _overlayContributions,
+        ...forwardDemandBasisSummary
+      } = item.forwardDemandBasis;
       return {
         observationKey: `${item.productId}:product_all_warehouses`,
         productId: item.productId,
@@ -277,6 +424,9 @@ export function buildPurchaseForecastObservations(
         baselineDailyPiecesMicros: piecesToMicros(baselineDailyPieces, "baselineDailyPieces"),
         forwardDemandPieces: item.forwardDemandBasis.forwardDemandPieces,
         forwardDemandRawPieces: item.forwardDemandBasis.forwardDemandRawPieces,
+        overlayCaptureVersion,
+        overlayCaptureComplete,
+        overlayContributions,
         evidenceSnapshot: {
           recommendationId: item.recommendationId,
           status: item.status,
@@ -286,7 +436,7 @@ export function buildPurchaseForecastObservations(
           forecastBlend: item.forecastProvenance.forecastBlend,
           demandWindowDiagnostics: item.forecastProvenance.demandWindowDiagnostics,
           forecastTrust: item.forecastProvenance.forecastTrust,
-          forwardDemandBasis: item.forwardDemandBasis,
+          forwardDemandBasis: forwardDemandBasisSummary,
         },
       };
     })
@@ -307,7 +457,20 @@ export function createPurchaseRecommendationSnapshotService(database: any) {
     const observations = await database.select().from(purchaseForecastObservationsTable).where(
       eq(purchaseForecastObservationsTable.runId, run.id),
     );
-    return { run, lines, observations, reused: true as const };
+    const overlayContributions = observations.length === 0
+      ? []
+      : await database.select().from(purchaseForecastOverlayContributionsTable).where(
+        inArray(
+          purchaseForecastOverlayContributionsTable.observationId,
+          observations.map((observation: { id: number }) => observation.id),
+        ),
+      ).orderBy(
+        purchaseForecastOverlayContributionsTable.observationId,
+        purchaseForecastOverlayContributionsTable.eventStartDate,
+        purchaseForecastOverlayContributionsTable.demandEventId,
+        purchaseForecastOverlayContributionsTable.demandEventLineId,
+      );
+    return { run, lines, observations, overlayContributions, reused: true as const };
   }
 
   async function createRun(input: CreatePurchaseRecommendationRunInput, generatedBy?: string | null) {
@@ -367,10 +530,53 @@ export function createPurchaseRecommendationSnapshotService(database: any) {
               baselineDailyPiecesMicros: observation.baselineDailyPiecesMicros,
               forwardDemandPieces: observation.forwardDemandPieces,
               forwardDemandRawPieces: observation.forwardDemandRawPieces,
+              overlayCaptureVersion: observation.overlayCaptureVersion ?? 0,
+              overlayCaptureComplete: observation.overlayCaptureComplete ?? false,
               evidenceSnapshot: observation.evidenceSnapshot,
             })),
           ).returning();
-        return { run, lines, observations, reused: false as const };
+        const observationByProductId = new Map<number, { id: number }>(
+          observations.map((observation: { id: number; productId: number }) => [
+            observation.productId,
+            observation,
+          ]),
+        );
+        const overlayContributionInputs = (input.observations ?? []).flatMap((observation) => {
+          const savedObservation = observationByProductId.get(observation.productId);
+          if (!savedObservation) {
+            throw new Error(`Saved forecast observation is missing for product ${observation.productId}`);
+          }
+          return (observation.overlayContributions ?? []).map((contribution) => ({
+            observationId: savedObservation.id,
+            demandEventId: contribution.demandEventId,
+            demandEventLineId: contribution.demandEventLineId,
+            productVariantId: contribution.productVariantId,
+            eventName: contribution.eventName.trim(),
+            eventType: contribution.eventType,
+            eventStatus: contribution.eventStatus,
+            eventStartDate: contribution.eventStartDate,
+            eventEndDate: contribution.eventEndDate,
+            planningAsOfDate: contribution.planningAsOfDate,
+            expectedPieces: contribution.expectedPieces,
+            confidence: contribution.confidence,
+            confidenceWeightPercent: contribution.confidenceWeightPercent,
+            weightedPieces: contribution.weightedPieces,
+            eventUpdatedAt: new Date(contribution.eventUpdatedAt),
+            lineUpdatedAt: new Date(contribution.lineUpdatedAt),
+          }));
+        });
+        const overlayContributions: PurchaseForecastOverlayContribution[] = [];
+        for (
+          let offset = 0;
+          offset < overlayContributionInputs.length;
+          offset += OVERLAY_INSERT_BATCH_SIZE
+        ) {
+          const inserted = await tx.insert(purchaseForecastOverlayContributionsTable).values(
+            overlayContributionInputs.slice(offset, offset + OVERLAY_INSERT_BATCH_SIZE),
+          ).returning();
+          overlayContributions.push(...inserted);
+        }
+        return { run, lines, observations, overlayContributions, reused: false as const };
       });
     } catch (error: any) {
       if (sourceRunKey && error?.code === "23505" && error?.constraint === "purchase_recommendation_runs_source_key_uidx") {
