@@ -118,11 +118,22 @@ export interface ShippingChannelPolicySlotSummary {
   } | null;
 }
 
+/**
+ * Shipping behavior a channel adapter can enforce at the order boundary.
+ * These are code capabilities, not operator-configurable channel settings.
+ */
+export interface ShippingChannelAdapterCapabilities {
+  readonly acceptsEngineQuotes: boolean;
+  readonly managesOwnRates: boolean;
+  readonly enforcesDestinationEligibility: boolean;
+}
+
 export interface ShippingChannelRoutingChannelSummary {
   id: number;
   name: string;
   provider: string;
   status: string;
+  shippingCapabilities: ShippingChannelAdapterCapabilities | null;
   customerCheckout: ShippingChannelPolicySlotSummary;
   vendorFulfillmentCharge: ShippingChannelPolicySlotSummary;
 }

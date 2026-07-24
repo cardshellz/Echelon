@@ -98,6 +98,10 @@ import { createSourceLockService } from "../modules/channels/source-lock.service
 import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
 import { ChannelAdapterRegistry } from "../modules/channels/channel-adapter.interface";
+import {
+  ChannelShippingCapabilityRegistry,
+  MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
+} from "../modules/channels/channel-shipping-capability.registry";
 import { createEchelonSyncOrchestrator } from "../modules/channels/echelon-sync-orchestrator.service";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
@@ -215,6 +219,12 @@ export function createServices(db: any) {
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
   adapterRegistry.register(ebayAdapter);
+  const channelShippingCapabilities = new ChannelShippingCapabilityRegistry();
+  channelShippingCapabilities.register(shopifyAdapter);
+  channelShippingCapabilities.register(ebayAdapter);
+  channelShippingCapabilities.register(
+    MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
+  );
   const echelonOrchestrator = createEchelonSyncOrchestrator(
     db, allocationEngine, sourceLockService, adapterRegistry, channelProductPush, atp,
   );
@@ -405,6 +415,7 @@ export function createServices(db: any) {
     recommendationPoHandoff,
     shipmentTracking,
     syncSettings,
+    channelShippingCapabilities,
     echelonOrchestrator,
     oms,
     fulfillmentPush,

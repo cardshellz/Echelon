@@ -23,7 +23,6 @@ import type {
   ShippingChannelPolicyPurpose,
   ShippingChannelPolicyStatus,
   ShippingChannelPolicyView,
-  ShippingChannelRoutingOverview,
   ShippingDestinationScopeMember,
   ShippingDestinationScopeSummary,
 } from "@shared/types/shipping-channel-routing";
@@ -34,6 +33,7 @@ import {
 } from "../../../infrastructure/auditLogger";
 import type {
   ChannelShippingPolicyAdminStore,
+  ChannelShippingPolicyStoreOverview,
   ChannelShippingPolicyAdminTransaction,
   PreparedPolicyRoute,
 } from "../application/channel-shipping-policy-admin.service";
@@ -50,7 +50,7 @@ interface PolicyMetadata {
 
 export class PostgresChannelShippingPolicyAdminStore
 implements ChannelShippingPolicyAdminStore {
-  async listOverview(): Promise<ShippingChannelRoutingOverview> {
+  async listOverview(): Promise<ChannelShippingPolicyStoreOverview> {
     const channelRows = await db
       .select({
         id: channels.id,
@@ -118,6 +118,19 @@ implements ChannelShippingPolicyAdminStore {
 
   async getPolicy(policyId: number): Promise<ShippingChannelPolicyView | null> {
     return loadPolicy(db, policyId);
+  }
+
+  async getChannel(channelId: number) {
+    const [channel] = await db
+      .select({
+        id: channels.id,
+        name: channels.name,
+        provider: channels.provider,
+      })
+      .from(channels)
+      .where(eq(channels.id, channelId))
+      .limit(1);
+    return channel ?? null;
   }
 
   async transaction<T>(
@@ -200,7 +213,11 @@ implements ChannelShippingPolicyAdminTransaction {
       FOR UPDATE
     `);
     const [channel] = await this.tx
-      .select({ id: channels.id, name: channels.name })
+      .select({
+        id: channels.id,
+        name: channels.name,
+        provider: channels.provider,
+      })
       .from(channels)
       .where(eq(channels.id, channelId))
       .limit(1);

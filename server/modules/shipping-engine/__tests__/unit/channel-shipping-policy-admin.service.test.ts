@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type {
   ShippingChannelPolicyPurpose,
   ShippingChannelPolicyView,
-  ShippingChannelRoutingOverview,
   ShippingDestinationScopeMember,
   ShippingDestinationScopeSummary,
 } from "@shared/types/shipping-channel-routing";
@@ -10,6 +9,7 @@ import type { AuditLogPayload } from "../../../../infrastructure/auditLogger";
 import {
   ChannelShippingPolicyAdminService,
   type ChannelShippingPolicyAdminStore,
+  type ChannelShippingPolicyStoreOverview,
   type ChannelShippingPolicyAdminTransaction,
   type PreparedPolicyRoute,
 } from "../../application/channel-shipping-policy-admin.service";
@@ -52,6 +52,23 @@ describe("ChannelShippingPolicyAdminService", () => {
         actor: "operator-1",
       }),
     ]);
+  });
+
+  it("projects immutable adapter capabilities into the routing overview", async () => {
+    const store = new FakeStore();
+    const service = createService(store);
+
+    const overview = await service.listOverview();
+
+    expect(overview.channels[0]).toMatchObject({
+      id: 36,
+      provider: "shopify",
+      shippingCapabilities: {
+        acceptsEngineQuotes: true,
+        managesOwnRates: true,
+        enforcesDestinationEligibility: true,
+      },
+    });
   });
 
   it("clones the active revision into a new draft without sharing route state", async () => {
@@ -148,6 +165,69 @@ describe("ChannelShippingPolicyAdminService", () => {
         expect.stringContaining("Retired warehouse"),
       ],
     });
+  });
+
+  it("refuses an engine quote route when the provider cannot accept it", async () => {
+    const store = new FakeStore();
+    store.channel.provider = "ebay";
+    const draft = draftPolicy();
+    store.policies.set(draft.id, draft);
+    const service = createService(store);
+
+    await expect(service.activatePolicyDraft({
+      policyId: draft.id,
+      expectedLockVersion: draft.lockVersion,
+    }, "operator-1")).rejects.toMatchObject({
+      status: 409,
+      code: "SHIPPING_CHANNEL_POLICY_NOT_READY",
+      details: [
+        expect.stringContaining("cannot accept Echelon rate quotes"),
+      ],
+    });
+  });
+
+  it("refuses channel-managed rates when the provider has no channel checkout", async () => {
+    const store = new FakeStore();
+    store.channel.provider = "manual";
+    const draft = draftPolicy();
+    draft.routes[0] = {
+      ...draft.routes[0],
+      mode: "channel_managed",
+      eligibilityMode: "channel",
+      rateBookId: null,
+      rateBookName: null,
+      rateBookStatus: null,
+      activeRateTableCount: 0,
+    };
+    store.policies.set(draft.id, draft);
+    const service = createService(store);
+
+    await expect(service.activatePolicyDraft({
+      policyId: draft.id,
+      expectedLockVersion: draft.lockVersion,
+    }, "operator-1")).rejects.toMatchObject({
+      details: expect.arrayContaining([
+        expect.stringContaining("cannot manage checkout rates"),
+        expect.stringContaining("cannot enforce the selected destination"),
+      ]),
+    });
+  });
+
+  it("allows an explicit disabled policy for an unregistered provider", async () => {
+    const store = new FakeStore();
+    store.channel.provider = "amazon";
+    const draft = draftPolicy();
+    draft.routes = [draft.routes[1]];
+    store.policies.set(draft.id, draft);
+    const service = createService(store);
+
+    const activated = await service.activatePolicyDraft({
+      policyId: draft.id,
+      expectedLockVersion: draft.lockVersion,
+    }, "operator-1");
+
+    expect(activated.status).toBe("active");
+    expect(activated.activationErrors).toEqual([]);
   });
 
   it("retires the previous active policy and activates the draft in one command", async () => {
@@ -280,11 +360,41 @@ describe("ChannelShippingPolicyAdminService", () => {
 });
 
 function createService(store: FakeStore) {
-  return new ChannelShippingPolicyAdminService(store, { now: () => NOW });
+  return new ChannelShippingPolicyAdminService(
+    store,
+    {
+      resolve: (provider) => {
+        if (provider === "shopify") {
+          return {
+            acceptsEngineQuotes: true,
+            managesOwnRates: true,
+            enforcesDestinationEligibility: true,
+          };
+        }
+        if (provider === "ebay") {
+          return {
+            acceptsEngineQuotes: false,
+            managesOwnRates: true,
+            enforcesDestinationEligibility: true,
+          };
+        }
+        if (provider === "manual") {
+          return {
+            acceptsEngineQuotes: true,
+            managesOwnRates: false,
+            enforcesDestinationEligibility: false,
+          };
+        }
+        return null;
+      },
+    },
+    { now: () => NOW },
+  );
 }
 
 class FakeStore
 implements ChannelShippingPolicyAdminStore, ChannelShippingPolicyAdminTransaction {
+  channel = { id: 36, name: "Shopify", provider: "shopify" };
   policies = new Map<number, ShippingChannelPolicyView>();
   scopes = new Map<number, ShippingDestinationScopeSummary>();
   audits: AuditLogPayload[] = [];
@@ -295,13 +405,22 @@ implements ChannelShippingPolicyAdminStore, ChannelShippingPolicyAdminTransactio
   private nextScopeId = 20;
   private nextRouteId = 500;
 
-  async listOverview(): Promise<ShippingChannelRoutingOverview> {
+  async listOverview(): Promise<ChannelShippingPolicyStoreOverview> {
     return {
-      channels: [],
+      channels: [{
+        ...this.channel,
+        status: "active",
+        customerCheckout: { active: null, draft: null },
+        vendorFulfillmentCharge: { active: null, draft: null },
+      }],
       destinationScopes: [...this.scopes.values()].map(cloneScope),
       rateBooks: [],
       warehouses: [],
     };
+  }
+
+  async getChannel(channelId: number) {
+    return channelId === this.channel.id ? { ...this.channel } : null;
   }
 
   async getPolicy(policyId: number) {
@@ -325,7 +444,7 @@ implements ChannelShippingPolicyAdminStore, ChannelShippingPolicyAdminTransactio
   }
 
   async getChannelForUpdate(channelId: number) {
-    return channelId === 36 ? { id: 36, name: "Shopify" } : null;
+    return channelId === this.channel.id ? { ...this.channel } : null;
   }
 
   async getPolicyForUpdate(policyId: number) {
