@@ -173,9 +173,9 @@ export async function loadTrackingEnrollmentPreview(
     SELECT
       subscription.carrier_code,
       subscription.last_error_code,
-      subscription.last_error_message,
+      MIN(subscription.last_error_message) AS last_error_message,
       latest.http_status,
-      latest.response_body,
+      MIN(latest.response_body) AS response_body,
       COUNT(*)::integer AS subscription_count
     FROM wms.carrier_tracking_subscriptions AS subscription
     LEFT JOIN latest_attempt AS latest
@@ -184,9 +184,7 @@ export async function loadTrackingEnrollmentPreview(
     GROUP BY
       subscription.carrier_code,
       subscription.last_error_code,
-      subscription.last_error_message,
-      latest.http_status,
-      latest.response_body
+      latest.http_status
     ORDER BY
       COUNT(*) DESC,
       subscription.carrier_code,
