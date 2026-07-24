@@ -52,6 +52,7 @@ import {
 } from "@/components/ui/select";
 import { reorderAnalysisSearchParams } from "@/features/purchasing/reorderAnalysisDeepLink";
 import { ExclusionRulesModal } from "@/components/purchasing/ExclusionRulesModal";
+import { ForecastAccuracyPanel } from "@/components/purchasing/ForecastAccuracyPanel";
 import {
   Table,
   TableBody,
@@ -1420,6 +1421,8 @@ export default function PurchasingView() {
             </CardContent>
           </Card>
         )}
+
+        <ForecastAccuracyPanel />
 
         {approvalPolicyImpact && (
           <Card className="mb-6 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm">
