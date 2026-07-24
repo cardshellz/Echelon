@@ -117,6 +117,15 @@ describe("ShipStation carrier tracking enrollment script", () => {
       }],
     });
     expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[2][0]).toContain(
+      "MIN(subscription.last_error_message) AS last_error_message",
+    );
+    expect(query.mock.calls[2][0]).toContain(
+      "MIN(latest.response_body) AS response_body",
+    );
+    expect(query.mock.calls[2][0]).not.toContain(
+      "subscription.last_error_message,\n      latest.http_status,\n      latest.response_body",
+    );
   });
 
   it("fails before database mutation when execute mode lacks provider configuration", async () => {

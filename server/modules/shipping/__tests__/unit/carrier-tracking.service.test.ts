@@ -128,6 +128,30 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
 }
 
 describe("CarrierTrackingService", () => {
+  it("does not prepare paid tracking subscriptions without an explicitly configured client", async () => {
+    const { repository } = repositoryWithCandidates([]);
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+    });
+
+    const result = await service.reconcileTrackingSubscriptions(25);
+
+    expect(result).toEqual({
+      subscriptionsPrepared: 0,
+      subscriptionLabelLinksPrepared: 0,
+      subscriptionsClaimed: 0,
+      subscriptionsActivated: 0,
+      subscriptionsRetryScheduled: 0,
+      subscriptionsReviewRequired: 0,
+      subscriptionClientConfigured: false,
+      errors: 0,
+    });
+    expect(repository.prepareTrackingSubscriptions).not.toHaveBeenCalled();
+    expect(repository.claimTrackingSubscriptions).not.toHaveBeenCalled();
+  });
+
   it("activates a prepared provider-label tracking subscription without changing fulfillment", async () => {
     const { repository } = repositoryWithCandidates([]);
     vi.mocked(repository.prepareTrackingSubscriptions).mockResolvedValue({
