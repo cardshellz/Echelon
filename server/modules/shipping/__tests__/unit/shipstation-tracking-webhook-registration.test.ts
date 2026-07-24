@@ -30,11 +30,17 @@ function webhook(overrides: Partial<ShipStationTrackingWebhook> = {}): ShipStati
 
 function client(existing: ShipStationTrackingWebhook[] = []): ShipStationTrackingWebhooksClient & {
   listWebhooks: ReturnType<typeof vi.fn>;
+  getWebhook: ReturnType<typeof vi.fn>;
   createWebhook: ReturnType<typeof vi.fn>;
   updateWebhook: ReturnType<typeof vi.fn>;
 } {
   return {
     listWebhooks: vi.fn().mockResolvedValue(existing),
+    getWebhook: vi.fn().mockImplementation(async (webhookId: string) => {
+      const match = existing.find((candidate) => candidate.webhook_id === webhookId);
+      if (!match) throw new Error(`Missing test webhook ${webhookId}`);
+      return match;
+    }),
     createWebhook: vi.fn().mockImplementation(async (input) => webhook({
       webhook_id: "se-created",
       ...input,
@@ -168,9 +174,9 @@ describe("ShipStation tracking webhook registration", () => {
     expect(dryRunApi.updateWebhook).not.toHaveBeenCalled();
 
     const executeApi = client([existing]);
-    executeApi.listWebhooks
-      .mockResolvedValueOnce([existing])
-      .mockResolvedValueOnce([webhook({ webhook_id: "43350" })]);
+    executeApi.getWebhook
+      .mockResolvedValueOnce(existing)
+      .mockResolvedValueOnce(webhook({ webhook_id: "43350" }));
     await expect(configureShipStationTrackingWebhook({
       client: executeApi,
       targetUrl: TARGET,
@@ -238,15 +244,15 @@ describe("ShipStation tracking webhook registration", () => {
     expect(dryRunApi.updateWebhook).not.toHaveBeenCalled();
 
     const executeApi = client([existing]);
-    executeApi.listWebhooks
-      .mockResolvedValueOnce([existing])
-      .mockResolvedValueOnce([webhook({
+    executeApi.getWebhook
+      .mockResolvedValueOnce(existing)
+      .mockResolvedValueOnce(webhook({
         webhook_id: "43350",
         headers: [
           { key: "x-owner", value: "preserve-me" },
           { key: "x-echelon-shipstation-tracking-secret", value: WEBHOOK_SECRET },
         ],
-      })]);
+      }));
     await expect(configureShipStationTrackingWebhook({
       client: executeApi,
       targetUrl: TARGET,
@@ -300,7 +306,6 @@ describe("ShipStation tracking webhook registration", () => {
     const legacyUrl = "https://archon.example.com/api/shipstation/tracking-webhook";
     const existing = webhook({ webhook_id: "43350", url: legacyUrl, headers: [] });
     const api = client([existing]);
-    api.listWebhooks.mockResolvedValueOnce([existing]).mockResolvedValueOnce([existing]);
 
     await expect(configureShipStationTrackingWebhook({
       client: api,
@@ -316,6 +321,7 @@ describe("ShipStation tracking webhook registration", () => {
     api.listWebhooks
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([webhook({ webhook_id: "se-raced" })]);
+    api.getWebhook.mockResolvedValueOnce(webhook({ webhook_id: "se-raced" }));
     api.createWebhook.mockRejectedValueOnce(new ShipStationTrackingWebhooksClientError(
       "HTTP",
       "ShipStation tracking webhook POST /environment/webhooks returned HTTP 409",
@@ -343,6 +349,10 @@ describe("ShipStation tracking webhook registration", () => {
         webhook_id: "se-other",
         url: "https://other.example.com/track",
       })]);
+    api.getWebhook.mockResolvedValueOnce(webhook({
+      webhook_id: "se-other",
+      url: "https://other.example.com/track",
+    }));
     api.createWebhook.mockRejectedValueOnce(new ShipStationTrackingWebhooksClientError(
       "HTTP",
       "ShipStation tracking webhook POST /environment/webhooks returned HTTP 409",
@@ -388,6 +398,28 @@ describe("ShipStation tracking webhook registration", () => {
       webhook: { headerNames: ["x-echelon-shipstation-tracking-secret"] },
     });
   });
+
+  it("hydrates a redacted list result before comparing the webhook secret", async () => {
+    const redacted = webhook({
+      headers: [{
+        key: "x-echelon-shipstation-tracking-secret",
+        value: "*****",
+      }],
+    });
+    const api = client([redacted]);
+    api.getWebhook.mockResolvedValueOnce(webhook());
+
+    await expect(configureShipStationTrackingWebhook({
+      client: api,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: false,
+    })).resolves.toMatchObject({
+      status: "already_configured",
+      webhook: { webhookId: "se-123" },
+    });
+    expect(api.getWebhook).toHaveBeenCalledWith("se-123");
+  });
 });
 
 describe("ShipStation tracking webhooks client", () => {
@@ -404,6 +436,26 @@ describe("ShipStation tracking webhooks client", () => {
     await expect(api.listWebhooks()).resolves.toEqual([webhook()]);
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://api.shipstation.com/v2/environment/webhooks",
+      expect.objectContaining({
+        method: "GET",
+        headers: expect.objectContaining({ "API-Key": "test-key" }),
+      }),
+    );
+  });
+
+  it("retrieves one webhook by id to obtain unredacted header details", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify(webhook()), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const api = createShipStationTrackingWebhooksClient({
+      apiKey: "test-key",
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    await expect(api.getWebhook("43350")).resolves.toEqual(webhook());
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.shipstation.com/v2/environment/webhooks/43350",
       expect.objectContaining({
         method: "GET",
         headers: expect.objectContaining({ "API-Key": "test-key" }),

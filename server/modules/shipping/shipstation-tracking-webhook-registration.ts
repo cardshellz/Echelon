@@ -141,6 +141,17 @@ function isAlreadyExistsConflict(error: unknown): boolean {
     && error.context.status === 409;
 }
 
+async function hydrateTrackingWebhooks(
+  client: ShipStationTrackingWebhooksClient,
+  listedWebhooks: ShipStationTrackingWebhook[],
+): Promise<ShipStationTrackingWebhook[]> {
+  return Promise.all(listedWebhooks.map((webhook) => (
+    webhook.event.toLowerCase() === "track"
+      ? client.getWebhook(webhook.webhook_id)
+      : Promise.resolve(webhook)
+  )));
+}
+
 export async function configureShipStationTrackingWebhook(
   input: ConfigureShipStationTrackingWebhookInput,
 ): Promise<ShipStationTrackingWebhookRegistrationResult> {
@@ -150,7 +161,10 @@ export async function configureShipStationTrackingWebhook(
   if (input.takeover && input.secretRotation) {
     throw new Error("Tracking webhook takeover and secret rotation are mutually exclusive");
   }
-  const webhooks = await input.client.listWebhooks();
+  const webhooks = await hydrateTrackingWebhooks(
+    input.client,
+    await input.client.listWebhooks(),
+  );
   const currentState = classifyExistingTrackingWebhooks(webhooks, targetUrl, webhookSecret);
   if (currentState?.status === "already_configured") return currentState;
 
@@ -198,7 +212,7 @@ export async function configureShipStationTrackingWebhook(
       ],
     });
     const verifiedState = classifyExistingTrackingWebhooks(
-      await input.client.listWebhooks(),
+      [await input.client.getWebhook(current.webhook_id)],
       targetUrl,
       webhookSecret,
     );
@@ -249,7 +263,7 @@ export async function configureShipStationTrackingWebhook(
       }],
     });
     const verifiedState = classifyExistingTrackingWebhooks(
-      await input.client.listWebhooks(),
+      [await input.client.getWebhook(current.webhook_id)],
       targetUrl,
       webhookSecret,
     );
@@ -287,7 +301,10 @@ export async function configureShipStationTrackingWebhook(
     if (!isAlreadyExistsConflict(error)) throw error;
 
     const racedState = classifyExistingTrackingWebhooks(
-      await input.client.listWebhooks(),
+      await hydrateTrackingWebhooks(
+        input.client,
+        await input.client.listWebhooks(),
+      ),
       targetUrl,
       webhookSecret,
     );
