@@ -3,12 +3,12 @@ import type {
   ShipStationCompletedPhysicalPackage,
   ShipStationPhysicalRecoveryClient,
 } from "../shipping/shipstation-physical-recovery.client";
-import { enqueueShipStationRetry } from "./webhook-retry.worker";
+import type { CarrierTrackingService } from "../shipping/carrier-tracking.service";
 
-const SHIPSTATION_V1_SHIPMENT_RESOURCE = "https://ssapi.shipstation.com/shipments";
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 500;
 const DEFAULT_MIN_AGE_HOURS = 6;
+const MAX_MIN_AGE_MINUTES = 24 * 30 * 60;
 
 export type ShipStationPhysicalRecoveryMode = "dry-run" | "execute";
 
@@ -16,6 +16,7 @@ export interface ShipStationPhysicalRecoveryOptions {
   mode?: ShipStationPhysicalRecoveryMode;
   limit?: number | null;
   minAgeHours?: number;
+  minAgeMinutes?: number;
   maxAgeDays?: number | null;
   orderNumber?: string | null;
 }
@@ -33,15 +34,21 @@ export interface ShipStationPhysicalRecoveryCandidate {
 export interface ShipStationPhysicalRecoveryCandidateResult {
   candidate: ShipStationPhysicalRecoveryCandidate;
   matchedPackages: ShipStationCompletedPhysicalPackage[];
-  outcome: "planned" | "enqueued" | "no_match" | "client_not_configured" | "error";
+  outcome: "planned" | "recovered" | "no_match" | "client_not_configured" | "error";
   error: string | null;
+  trackingWarnings: string[];
 }
 
 export interface ShipStationPhysicalRecoveryRunResult {
   mode: ShipStationPhysicalRecoveryMode;
   candidates: number;
   matchedPackages: number;
-  enqueueRequests: number;
+  labelsObserved: number;
+  labelsInserted: number;
+  labelLinksInserted: number;
+  trackingSnapshotsHydrated: number;
+  dispatchCommandsCreated: number;
+  trackingWarnings: number;
   noMatch: number;
   errors: number;
   results: ShipStationPhysicalRecoveryCandidateResult[];
@@ -55,7 +62,12 @@ export interface ShipStationPhysicalRecoveryService {
 
 export interface ShipStationPhysicalRecoveryDependencies {
   client: ShipStationPhysicalRecoveryClient;
-  enqueueRetry?: (dbArg: any, payload: { resource_url: string }) => Promise<void>;
+  carrierTracking: Pick<
+    CarrierTrackingService,
+    | "observeShipStationLabel"
+    | "reconcileShipStationLabel"
+    | "hydrateShipStationTrackingIdentity"
+  >;
 }
 
 function positiveInteger(
@@ -128,12 +140,22 @@ export async function findShipStationPhysicalRecoveryCandidates(
   dbArg: any,
   options: ShipStationPhysicalRecoveryOptions = {},
 ): Promise<ShipStationPhysicalRecoveryCandidate[]> {
-  const minAgeHours = positiveInteger(
-    options.minAgeHours,
-    DEFAULT_MIN_AGE_HOURS,
-    24 * 30,
-    "minAgeHours",
-  );
+  if (options.minAgeHours !== undefined && options.minAgeMinutes !== undefined) {
+    throw new Error("Pass either minAgeHours or minAgeMinutes, not both");
+  }
+  const minAgeMinutes = options.minAgeMinutes !== undefined
+    ? positiveInteger(
+        options.minAgeMinutes,
+        DEFAULT_MIN_AGE_HOURS * 60,
+        MAX_MIN_AGE_MINUTES,
+        "minAgeMinutes",
+      )
+    : positiveInteger(
+        options.minAgeHours,
+        DEFAULT_MIN_AGE_HOURS,
+        MAX_MIN_AGE_MINUTES / 60,
+        "minAgeHours",
+      ) * 60;
   const limit = options.limit === null
     ? null
     : positiveInteger(options.limit, DEFAULT_LIMIT, MAX_LIMIT, "limit");
@@ -151,38 +173,69 @@ export async function findShipStationPhysicalRecoveryCandidates(
     : sql`AND eligible.created_at > NOW() - (${maxAgeDays} * INTERVAL '1 day')`;
 
   const result = await dbArg.execute(sql`
-    WITH eligible_shipments AS (
+    WITH covered_provider_item_ids AS (
+      SELECT DISTINCT
+        substring(
+          provider_item->>'lineItemKey'
+          FROM '^wms-item-([1-9][0-9]*)$'
+        )::integer AS shipment_item_id
+      FROM wms.shipping_provider_labels AS label
+      JOIN wms.shipping_provider_label_events AS event
+        ON event.shipping_provider_label_id = label.id
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE
+          WHEN jsonb_typeof(event.sanitized_payload->'shipmentItems') = 'array'
+          THEN event.sanitized_payload->'shipmentItems'
+          ELSE '[]'::jsonb
+        END
+      ) AS provider_item
+      WHERE label.provider = 'shipstation'
+        AND label.label_status = 'active'
+        AND EXISTS (
+          SELECT 1
+          FROM wms.carrier_tracking_event_matches AS event_match
+          WHERE event_match.shipping_provider_label_id = label.id
+            AND event_match.match_status = 'matched'
+        )
+        AND provider_item->>'lineItemKey' ~ '^wms-item-[1-9][0-9]*$'
+    ),
+    eligible_items AS (
       SELECT
-        os.id,
+        os.id AS shipment_id,
         os.order_id,
-        os.created_at
+        os.created_at,
+        osi.id AS shipment_item_id
       FROM wms.outbound_shipments AS os
       JOIN wms.outbound_shipment_items AS osi ON osi.shipment_id = os.id
       JOIN wms.order_items AS oi ON oi.id = osi.order_item_id
-      WHERE os.status IN ('planned', 'queued', 'labeled')
-        AND os.shipped_at IS NULL
-        AND NULLIF(BTRIM(COALESCE(os.tracking_number, '')), '') IS NULL
-        AND COALESCE(os.held, false) = false
+      WHERE COALESCE(os.held, false) = false
         AND COALESCE(os.shipment_purpose, 'customer_fulfillment') = 'customer_fulfillment'
-        AND os.created_at < NOW() - (${minAgeHours} * INTERVAL '1 hour')
+        AND COALESCE(osi.shipment_item_purpose, 'customer_fulfillment') = 'customer_fulfillment'
+        AND os.created_at < NOW() - (${minAgeMinutes} * INTERVAL '1 minute')
         AND COALESCE(osi.qty, 0) > 0
         AND COALESCE(oi.requires_shipping, 1) <> 0
-      GROUP BY os.id, os.order_id, os.created_at
-      HAVING BOOL_AND(
-        COALESCE(oi.picked_quantity, 0) >= COALESCE(osi.qty, 0)
+        AND COALESCE(oi.picked_quantity, 0) >= COALESCE(osi.qty, 0)
         AND oi.status = 'completed'
         AND COALESCE(oi.on_hold, false) = false
-      )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM covered_provider_item_ids AS covered
+          WHERE covered.shipment_item_id = osi.id
+        )
     )
     SELECT
       wo.id AS wms_order_id,
       oo.id AS oms_order_id,
       wo.order_number,
       channel.provider,
-      ARRAY_AGG(DISTINCT eligible.id ORDER BY eligible.id)::int[] AS wms_shipment_ids,
-      ARRAY_AGG(DISTINCT osi.id ORDER BY osi.id)::int[] AS wms_shipment_item_ids,
+      ARRAY_AGG(DISTINCT eligible.shipment_id ORDER BY eligible.shipment_id)::int[]
+        AS wms_shipment_ids,
+      ARRAY_AGG(
+        DISTINCT eligible.shipment_item_id
+        ORDER BY eligible.shipment_item_id
+      )::int[] AS wms_shipment_item_ids,
       MIN(eligible.created_at) AS oldest_shipment_created_at
-    FROM eligible_shipments AS eligible
+    FROM eligible_items AS eligible
     JOIN wms.orders AS wo ON wo.id = eligible.order_id
     JOIN oms.oms_orders AS oo
       ON (
@@ -190,12 +243,11 @@ export async function findShipStationPhysicalRecoveryCandidates(
         OR (wo.source_table_id = oo.id::text)
     )
     JOIN channels.channels AS channel ON channel.id = oo.channel_id
-    JOIN wms.outbound_shipment_items AS osi ON osi.shipment_id = eligible.id
     WHERE channel.provider IN ('shopify', 'ebay')
       AND oo.status NOT IN ('cancelled', 'refunded')
       AND COALESCE(oo.fulfillment_status, '') <> 'fulfilled'
       AND wo.cancelled_at IS NULL
-      AND wo.warehouse_status NOT IN ('cancelled', 'shipped')
+      AND wo.warehouse_status <> 'cancelled'
       ${maxAgeSql}
       ${orderSql}
     GROUP BY wo.id, oo.id, wo.order_number, channel.provider
@@ -213,20 +265,28 @@ function packageBelongsToCandidate(
   return physicalPackage.wmsShipmentItemIds.some((itemId) => candidateItemIds.has(itemId));
 }
 
-function shipNotifyResourceUrl(legacyShipStationShipmentId: number): string {
-  const query = new URLSearchParams({
-    shipmentId: String(legacyShipStationShipmentId),
-    includeShipmentItems: "false",
-  });
-  return `${SHIPSTATION_V1_SHIPMENT_RESOURCE}?${query.toString()}`;
+export function buildShipStationRecoveredLabelObservation(
+  physicalPackage: ShipStationCompletedPhysicalPackage,
+): Record<string, unknown> {
+  return {
+    shipmentId: physicalPackage.legacyShipStationShipmentId,
+    orderId: null,
+    orderKey: null,
+    trackingNumber: physicalPackage.trackingNumber,
+    carrierCode: physicalPackage.carrierCode,
+    serviceCode: physicalPackage.serviceCode,
+    shipDate: physicalPackage.shipDate,
+    voidDate: null,
+    shipmentItems: physicalPackage.wmsShipmentItemIds.map((shipmentItemId) => ({
+      lineItemKey: `wms-item-${shipmentItemId}`,
+    })),
+  };
 }
 
 export function createShipStationPhysicalRecoveryService(
   dbArg: any,
   dependencies: ShipStationPhysicalRecoveryDependencies,
 ): ShipStationPhysicalRecoveryService {
-  const enqueueRetry = dependencies.enqueueRetry ?? enqueueShipStationRetry;
-
   return {
     async recover(options = {}) {
       const mode = options.mode ?? "dry-run";
@@ -235,8 +295,17 @@ export function createShipStationPhysicalRecoveryService(
       }
       const candidates = await findShipStationPhysicalRecoveryCandidates(dbArg, options);
       const results: ShipStationPhysicalRecoveryCandidateResult[] = [];
+      const processedLabels = new Map<string, {
+        error: string | null;
+        trackingWarning: string | null;
+      }>();
       let matchedPackages = 0;
-      let enqueueRequests = 0;
+      let labelsObserved = 0;
+      let labelsInserted = 0;
+      let labelLinksInserted = 0;
+      let trackingSnapshotsHydrated = 0;
+      let dispatchCommandsCreated = 0;
+      let trackingWarnings = 0;
       let noMatch = 0;
       let errors = 0;
 
@@ -248,6 +317,7 @@ export function createShipStationPhysicalRecoveryService(
             matchedPackages: [],
             outcome: "client_not_configured",
             error: "SHIPSTATION_V2_API_KEY is not configured",
+            trackingWarnings: [],
           });
           continue;
         }
@@ -267,26 +337,93 @@ export function createShipStationPhysicalRecoveryService(
               matchedPackages: [],
               outcome: "no_match",
               error: null,
+              trackingWarnings: [],
             });
             continue;
           }
 
           matchedPackages += authorizedPackages.length;
-          if (mode === "execute") {
-            for (const physicalPackage of authorizedPackages) {
-              await enqueueRetry(dbArg, {
-                resource_url: shipNotifyResourceUrl(
-                  physicalPackage.legacyShipStationShipmentId,
-                ),
-              });
-              enqueueRequests += 1;
+          if (mode === "dry-run") {
+            results.push({
+              candidate,
+              matchedPackages: authorizedPackages,
+              outcome: "planned",
+              error: null,
+              trackingWarnings: [],
+            });
+            continue;
+          }
+
+          const candidateErrors: string[] = [];
+          const candidateTrackingWarnings: string[] = [];
+          for (const physicalPackage of authorizedPackages) {
+            const providerLabelId = String(physicalPackage.legacyShipStationShipmentId);
+            let processed = processedLabels.get(providerLabelId);
+            if (!processed) {
+              let hardError: string | null = null;
+              let trackingWarning: string | null = null;
+              try {
+                const observation =
+                  await dependencies.carrierTracking.observeShipStationLabel(
+                    buildShipStationRecoveredLabelObservation(physicalPackage),
+                  );
+                labelsObserved += 1;
+                if (observation.labelInserted) labelsInserted += 1;
+
+                const links = await dependencies.carrierTracking
+                  .reconcileShipStationLabel(providerLabelId);
+                labelLinksInserted += links.linksInserted;
+                if (links.totalLinks === 0) {
+                  throw new Error(
+                    `Recovered provider label ${providerLabelId} did not link to any authorized shipment`,
+                  );
+                }
+
+                if (!physicalPackage.carrierCode) {
+                  trackingWarning =
+                    `Provider label ${providerLabelId} has no carrier code; tracking hydration was deferred`;
+                } else {
+                  try {
+                    const hydration = await dependencies.carrierTracking
+                      .hydrateShipStationTrackingIdentity({
+                        carrierCode: physicalPackage.carrierCode,
+                        trackingNumber: physicalPackage.trackingNumber,
+                      });
+                    trackingSnapshotsHydrated += 1;
+                    if (hydration.dispatchCommandInserted) {
+                      dispatchCommandsCreated += 1;
+                    }
+                  } catch (error) {
+                    trackingWarning =
+                      `Provider label ${providerLabelId} tracking hydration failed: ${
+                        error instanceof Error ? error.message : String(error)
+                      }`;
+                  }
+                }
+              } catch (error) {
+                hardError = error instanceof Error ? error.message : String(error);
+              }
+              processed = { error: hardError, trackingWarning };
+              processedLabels.set(providerLabelId, processed);
+            }
+            if (processed.error) candidateErrors.push(processed.error);
+            if (processed.trackingWarning) {
+              candidateTrackingWarnings.push(processed.trackingWarning);
             }
           }
+
+          errors += candidateErrors.length;
+          trackingWarnings += candidateTrackingWarnings.length;
           results.push({
             candidate,
             matchedPackages: authorizedPackages,
-            outcome: mode === "execute" ? "enqueued" : "planned",
-            error: null,
+            outcome: candidateErrors.length === authorizedPackages.length
+              ? "error"
+              : "recovered",
+            error: candidateErrors.length > 0
+              ? [...new Set(candidateErrors)].join("; ")
+              : null,
+            trackingWarnings: [...new Set(candidateTrackingWarnings)],
           });
         } catch (error) {
           errors += 1;
@@ -295,6 +432,7 @@ export function createShipStationPhysicalRecoveryService(
             matchedPackages: [],
             outcome: "error",
             error: error instanceof Error ? error.message : String(error),
+            trackingWarnings: [],
           });
         }
       }
@@ -303,7 +441,12 @@ export function createShipStationPhysicalRecoveryService(
         mode,
         candidates: candidates.length,
         matchedPackages,
-        enqueueRequests,
+        labelsObserved,
+        labelsInserted,
+        labelLinksInserted,
+        trackingSnapshotsHydrated,
+        dispatchCommandsCreated,
+        trackingWarnings,
         noMatch,
         errors,
         results,

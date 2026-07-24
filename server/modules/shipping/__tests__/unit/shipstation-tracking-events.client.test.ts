@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  createShipStationTrackingHydrationRequest,
   createShipStationTrackingEventsClient,
   isRetryableTrackingEventsError,
   parseShipStationTrackingResourceUrl,
@@ -11,6 +12,23 @@ const resourceUrl = "https://api.shipstation.com/v2/tracking"
   + "?carrier_code=ups&tracking_number=1Z999AA10123456784";
 
 describe("ShipStation tracking event hydration client", () => {
+  it("builds an allowlisted tracking request from a validated provider identity", () => {
+    expect(createShipStationTrackingHydrationRequest({
+      carrierCode: " UPS ",
+      trackingNumber: " 1Z999AA10123456784 ",
+    })).toEqual({
+      resourceUrl: "https://api.shipstation.com/v2/tracking"
+        + "?carrier_code=ups&tracking_number=1Z999AA10123456784",
+      carrierCode: "ups",
+      trackingNumber: "1Z999AA10123456784",
+      normalizedTrackingNumber: "1Z999AA10123456784",
+    });
+    expect(() => createShipStationTrackingHydrationRequest({
+      carrierCode: "",
+      trackingNumber: "1Z999AA10123456784",
+    })).toThrow(ShipStationTrackingEventsError);
+  });
+
   it("accepts only the configured HTTPS tracking endpoint and exact identity parameters", () => {
     expect(parseShipStationTrackingResourceUrl(resourceUrl)).toEqual({
       resourceUrl,

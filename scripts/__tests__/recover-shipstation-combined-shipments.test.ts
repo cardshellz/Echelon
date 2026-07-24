@@ -14,6 +14,7 @@ describe("recover-shipstation-combined-shipments", () => {
       limit: 25,
       orderNumber: null,
       minAgeHours: 6,
+      minAgeMinutes: null,
       maxAgeDays: null,
       requestTimeoutMs: 20_000,
       minimumRequestIntervalMs: 500,
@@ -44,12 +45,25 @@ describe("recover-shipstation-combined-shipments", () => {
     });
   });
 
+  it("accepts minute-granularity recovery windows for the recurring policy", async () => {
+    const { parseFlags } = await loadModule();
+
+    expect(parseFlags(["--min-age-minutes=15"])).toMatchObject({
+      minAgeHours: 6,
+      minAgeMinutes: 15,
+    });
+  });
+
   it("rejects conflicting or malformed flags", async () => {
     const { parseFlags } = await loadModule();
 
     expect(() => parseFlags(["--execute", "--dry-run"])).toThrow(/Cannot pass both/);
     expect(() => parseFlags(["--delay-ms=-1"])).toThrow(/non-negative integer/);
     expect(() => parseFlags(["--max-retries=-1"])).toThrow(/non-negative integer/);
+    expect(() => parseFlags([
+      "--min-age-hours=6",
+      "--min-age-minutes=15",
+    ])).toThrow(/either --min-age-hours or --min-age-minutes/);
     expect(() => parseFlags(["--unknown"])).toThrow(/Unknown flag/);
   });
 });

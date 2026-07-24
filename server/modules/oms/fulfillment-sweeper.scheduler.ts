@@ -21,6 +21,10 @@ const INBOUND_RECEIPT_RECOVERY_LIMIT = 100;
 const INBOUND_RECEIPT_RECOVERY_MIN_AGE_MINUTES = 5;
 const INBOUND_RECEIPT_RECOVERY_MAX_FAILURES = 5;
 const INBOUND_RECEIPT_RECOVERY_INTERVAL_MS = 60_000;
+const SHIPSTATION_LABEL_RECOVERY_LIMIT = 10;
+const SHIPSTATION_LABEL_RECOVERY_MIN_AGE_MINUTES = 15;
+const SHIPSTATION_LABEL_RECOVERY_MAX_AGE_DAYS = 30;
+const SHIPSTATION_LABEL_RECOVERY_INTERVAL_MS = 10 * 60 * 1_000;
 
 type InboundReceiptEventKind = "created" | "updated" | "reconciled";
 
@@ -359,33 +363,14 @@ export async function runFulfillmentSweep(
       );
     }
 
-    // Recover labels that ShipStation combined under a sibling order before
-    // the ordinary channel-writeback scan runs. This does not mutate
-    // fulfillment directly: it only enqueues the canonical SHIP_NOTIFY path,
-    // which revalidates provider item identity and applies the existing
-    // idempotent shipment/inventory/channel cascade.
+    // Recover missing provider-label evidence before the ordinary channel
+    // writeback scan. Carrier tracking remains the sole dispatch authority.
     if (physicalRecovery?.recover) {
       try {
-        const result = await physicalRecovery.recover({
-          mode: "execute",
-          limit: 10,
-          minAgeHours: 6,
-          maxAgeDays: 30,
-        });
-        if (result.matchedPackages > 0 || result.errors > 0) {
-          console.log(
-            `${LOG_PREFIX} ShipStation physical recovery: ${JSON.stringify({
-              candidates: result.candidates,
-              matchedPackages: result.matchedPackages,
-              enqueueRequests: result.enqueueRequests,
-              noMatch: result.noMatch,
-              errors: result.errors,
-            })}`,
-          );
-        }
+        await runShipStationProviderLabelRecoverySweep(physicalRecovery);
       } catch (error: any) {
         console.error(
-          `${LOG_PREFIX} ShipStation physical recovery failed: ${error?.message ?? String(error)}`,
+          `${LOG_PREFIX} ShipStation provider-label recovery failed: ${error?.message ?? String(error)}`,
         );
       }
     }
@@ -562,6 +547,38 @@ export async function runInboundReceiptRecoverySweep(
   }
 }
 
+export async function runShipStationProviderLabelRecoverySweep(
+  physicalRecovery: ShipStationPhysicalRecoveryService,
+) {
+  const result = await physicalRecovery.recover({
+    mode: "execute",
+    limit: SHIPSTATION_LABEL_RECOVERY_LIMIT,
+    minAgeMinutes: SHIPSTATION_LABEL_RECOVERY_MIN_AGE_MINUTES,
+    maxAgeDays: SHIPSTATION_LABEL_RECOVERY_MAX_AGE_DAYS,
+  });
+  if (
+    result.matchedPackages > 0
+    || result.trackingWarnings > 0
+    || result.errors > 0
+  ) {
+    console.log(
+      `${LOG_PREFIX} ShipStation provider-label recovery: ${JSON.stringify({
+        candidates: result.candidates,
+        matchedPackages: result.matchedPackages,
+        labelsObserved: result.labelsObserved,
+        labelsInserted: result.labelsInserted,
+        labelLinksInserted: result.labelLinksInserted,
+        trackingSnapshotsHydrated: result.trackingSnapshotsHydrated,
+        dispatchCommandsCreated: result.dispatchCommandsCreated,
+        trackingWarnings: result.trackingWarnings,
+        noMatch: result.noMatch,
+        errors: result.errors,
+      })}`,
+    );
+  }
+  return result;
+}
+
 export function startFulfillmentSweeper(
   dbArg: any,
   fulfillmentAuthority: ChannelFulfillmentAuthorityService,
@@ -572,11 +589,14 @@ export function startFulfillmentSweeper(
     return;
   }
 
-  console.log(`${LOG_PREFIX} Scheduler started (runs every hour, dyno-safe lock)`);
+  console.log(
+    `${LOG_PREFIX} Scheduler started (hourly fulfillment sweep, 10-minute provider-label recovery, dyno-safe locks)`,
+  );
 
   const SWEEPER_LOCK_ID = 8484;
   const INBOUND_LOCK_ID = 8485;
   const RECEIPT_RECOVERY_LOCK_ID = 8486;
+  const SHIPSTATION_LABEL_RECOVERY_LOCK_ID = 8487;
 
   // Run immediately on boot
   setTimeout(() => {
@@ -599,6 +619,17 @@ export function startFulfillmentSweeper(
         await runInboundReceiptRecoverySweep(dbArg, channelFulfillmentIngress);
       }).catch((err) => console.error(`${LOG_PREFIX} Receipt recovery error: ${err.message}`));
     }, INBOUND_RECEIPT_RECOVERY_INTERVAL_MS);
+  }
+
+  if (physicalRecovery) {
+    setInterval(() => {
+      withAdvisoryLock(SHIPSTATION_LABEL_RECOVERY_LOCK_ID, async () => {
+        await runShipStationProviderLabelRecoverySweep(physicalRecovery);
+      }).catch((err) =>
+        console.error(
+          `${LOG_PREFIX} ShipStation provider-label recovery error: ${err.message}`,
+        ));
+    }, SHIPSTATION_LABEL_RECOVERY_INTERVAL_MS);
   }
 
   // Inbound provider poll on boot (staggered from receipt recovery).

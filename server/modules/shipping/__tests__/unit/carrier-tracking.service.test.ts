@@ -457,6 +457,57 @@ describe("CarrierTrackingService", () => {
     );
   });
 
+  it("hydrates a provider tracking identity and creates dispatch authority from confirmed carrier evidence", async () => {
+    const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
+      shippingProviderLabelId: 10,
+      providerLabelId: "442000001",
+      labelStatus: "active",
+      linkCount: 1,
+      orderNumbers: ["#60001"],
+      carrier: "ups",
+      serviceCode: "ups_ground",
+    }]);
+    const getTrackingSnapshot = vi.fn().mockResolvedValue({
+      httpStatus: 200,
+      payload: payload().data,
+    });
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+      trackingEventsClient: { isConfigured: () => true, getTrackingSnapshot },
+    });
+
+    const result = await service.hydrateShipStationTrackingIdentity({
+      carrierCode: "UPS",
+      trackingNumber: "1Z999AA10123456784",
+    });
+
+    expect(getTrackingSnapshot).toHaveBeenCalledWith({
+      resourceUrl: "https://api.shipstation.com/v2/tracking"
+        + "?carrier_code=ups&tracking_number=1Z999AA10123456784",
+      carrierCode: "ups",
+      trackingNumber: "1Z999AA10123456784",
+      normalizedTrackingNumber: "1Z999AA10123456784",
+    });
+    expect(result).toMatchObject({
+      ingestStatus: "normalized",
+      matchStatus: "matched",
+      shippingProviderLabelId: 10,
+      dispatchEvidence: "confirmed",
+      dispatchCommandId: 701,
+      dispatchCommandInserted: true,
+      webhookReceiptId: null,
+    });
+    expect(enqueueDispatchCommand).toHaveBeenCalledWith(
+      101,
+      10,
+      new Date("2026-07-20T11:30:00.000Z"),
+      now,
+    );
+    expect(repository.persistVerifiedWebhookReceipt).not.toHaveBeenCalled();
+  });
+
   it("retries transient hydration failures with deterministic bounded backoff", async () => {
     const { repository } = repositoryWithCandidates([]);
     vi.mocked(repository.claimWebhookHydrations).mockResolvedValue([{

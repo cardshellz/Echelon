@@ -20,6 +20,11 @@ export interface ShipStationTrackingHydrationRequest {
   normalizedTrackingNumber: string;
 }
 
+export interface ShipStationTrackingIdentity {
+  carrierCode: string;
+  trackingNumber: string;
+}
+
 export interface ShipStationTrackingSnapshotResult {
   httpStatus: 200;
   payload: Record<string, unknown>;
@@ -145,6 +150,17 @@ export function parseShipStationTrackingResourceUrl(
     trackingNumber,
     normalizedTrackingNumber: normalizeTrackingNumber(trackingNumber),
   };
+}
+
+export function createShipStationTrackingHydrationRequest(
+  input: ShipStationTrackingIdentity,
+  configuredBaseUrl: string = SHIPSTATION_TRACKING_API_BASE_URL,
+): ShipStationTrackingHydrationRequest {
+  const baseUrl = normalizeShipStationTrackingApiBaseUrl(configuredBaseUrl);
+  const resourceUrl = new URL(`${baseUrl}/tracking`);
+  resourceUrl.searchParams.set("carrier_code", input.carrierCode.trim().toLowerCase());
+  resourceUrl.searchParams.set("tracking_number", input.trackingNumber.trim());
+  return parseShipStationTrackingResourceUrl(resourceUrl.toString(), baseUrl);
 }
 
 export function createShipStationTrackingEventsClient(

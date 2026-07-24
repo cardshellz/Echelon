@@ -332,6 +332,7 @@ export function createServices(db: any) {
   providerDispatchAuthority = shipStation;
   const shipStationPhysicalRecovery = createShipStationPhysicalRecoveryService(db, {
     client: createShipStationPhysicalRecoveryClient(),
+    carrierTracking,
   });
 
   // C9 ShippingEngine — engine-agnostic port over ShipStation (adapter #1)
