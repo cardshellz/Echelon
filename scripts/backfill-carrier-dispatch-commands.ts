@@ -200,7 +200,7 @@ export async function loadCarrierDispatchBackfillCandidates(
         AND NOT EXISTS (
           SELECT 1
           FROM wms.physical_shipments AS physical
-          WHERE physical.shipping_provider = label.provider
+          WHERE physical.provider = label.provider
             AND physical.provider_physical_shipment_id = label.provider_label_id
         )
       ORDER BY
@@ -294,7 +294,7 @@ export async function enqueueCarrierDispatchBackfillCommand(
       AND NOT EXISTS (
         SELECT 1
         FROM wms.physical_shipments AS physical
-        WHERE physical.shipping_provider = label.provider
+        WHERE physical.provider = label.provider
           AND physical.provider_physical_shipment_id = label.provider_label_id
       )
     ON CONFLICT (shipping_provider_label_id) DO NOTHING
