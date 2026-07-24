@@ -1,14 +1,16 @@
 /**
- * Discover completed ShipStation packages that were combined under a sibling
- * order and replay them through Echelon's canonical SHIP_NOTIFY path.
+ * Discover completed ShipStation packages whose label callback never reached
+ * Echelon, including combined-order and void/relabel shapes.
  *
  * The script never writes fulfillment or inventory directly. Execute mode
- * enqueues an idempotent SHIP_NOTIFY retry only after an exact wms-item-* key
- * in the provider shipment proves that the package belongs to the WMS order.
+ * records canonical provider-label evidence only after an exact wms-item-* key
+ * proves package ownership, then hydrates carrier state through the same
+ * carrier-confirmed dispatch authority used by live webhooks.
  */
 
 import { fileURLToPath } from "node:url";
 import { db } from "../server/db";
+import { createServices } from "../server/services";
 import { createShipStationPhysicalRecoveryService } from "../server/modules/oms/shipstation-physical-recovery.service";
 import { createShipStationPhysicalRecoveryClient } from "../server/modules/shipping/shipstation-physical-recovery.client";
 
@@ -17,6 +19,7 @@ interface Flags {
   limit: number | null;
   orderNumber: string | null;
   minAgeHours: number;
+  minAgeMinutes: number | null;
   maxAgeDays: number | null;
   requestTimeoutMs: number;
   minimumRequestIntervalMs: number;
@@ -56,6 +59,7 @@ export function parseFlags(argv: string[]): Flags {
     "--limit=",
     "--order-number=",
     "--min-age-hours=",
+    "--min-age-minutes=",
     "--max-age-days=",
     "--request-timeout-ms=",
     "--delay-ms=",
@@ -77,12 +81,20 @@ export function parseFlags(argv: string[]): Flags {
   if (orderNumber !== null && (!orderNumber || orderNumber.length > 50)) {
     throw new Error("--order-number must contain 1 through 50 characters");
   }
+  const minAgeHoursRaw = readFlag(argv, "min-age-hours");
+  const minAgeMinutesRaw = readFlag(argv, "min-age-minutes");
+  if (minAgeHoursRaw !== null && minAgeMinutesRaw !== null) {
+    throw new Error("Pass either --min-age-hours or --min-age-minutes, not both");
+  }
 
   return {
     mode: execute ? "execute" : "dry-run",
     limit,
     orderNumber,
-    minAgeHours: parsePositiveInteger(readFlag(argv, "min-age-hours") ?? "6", "--min-age-hours"),
+    minAgeHours: parsePositiveInteger(minAgeHoursRaw ?? "6", "--min-age-hours"),
+    minAgeMinutes: minAgeMinutesRaw === null
+      ? null
+      : parsePositiveInteger(minAgeMinutesRaw, "--min-age-minutes"),
     maxAgeDays,
     requestTimeoutMs: parsePositiveInteger(
       readFlag(argv, "request-timeout-ms") ?? "20000",
@@ -113,10 +125,11 @@ function usage(): string {
     "",
     "Flags:",
     "  --dry-run                 Discover and print only. Default.",
-    "  --execute                 Enqueue canonical SHIP_NOTIFY retries.",
+    "  --execute                 Record canonical labels and hydrate carrier state.",
     "  --limit=N|all             Candidate order limit. Default 25.",
     "  --order-number=TEXT       Restrict to one channel order number.",
     "  --min-age-hours=N         Ignore recent active shipments. Default 6.",
+    "  --min-age-minutes=N       Minute-granularity alternative to --min-age-hours.",
     "  --max-age-days=N|all      Historical lookback. Default all.",
     "  --request-timeout-ms=N    Per-request timeout. Default 20000.",
     "  --delay-ms=N              Minimum API request interval. Default 500.",
@@ -131,6 +144,7 @@ export async function run(flags: Flags): Promise<void> {
     return;
   }
 
+  const services = createServices(db);
   const service = createShipStationPhysicalRecoveryService(db, {
     client: createShipStationPhysicalRecoveryClient({
       requestTimeoutMs: flags.requestTimeoutMs,
@@ -138,36 +152,47 @@ export async function run(flags: Flags): Promise<void> {
       maxRetries: flags.maxRetries,
       retryBaseDelayMs: flags.retryBaseDelayMs,
     }),
+    carrierTracking: services.carrierTracking,
   });
   const result = await service.recover({
     mode: flags.mode,
     limit: flags.limit,
-    minAgeHours: flags.minAgeHours,
+    ...(flags.minAgeMinutes === null
+      ? { minAgeHours: flags.minAgeHours }
+      : { minAgeMinutes: flags.minAgeMinutes }),
     maxAgeDays: flags.maxAgeDays,
     orderNumber: flags.orderNumber,
   });
 
   console.log(
-    `[ShipStation combined shipment recovery] mode=${flags.mode} candidates=${result.candidates}`,
+    `[ShipStation provider-label recovery] mode=${flags.mode} candidates=${result.candidates}`,
   );
   for (const item of result.results) {
     const packages = item.matchedPackages.map((physicalPackage) =>
       `${physicalPackage.providerLabelId}:${physicalPackage.trackingNumber}`
     ).join(",");
     console.log(
-      `[ShipStation combined shipment recovery] ${item.outcome.toUpperCase()}`
+      `[ShipStation provider-label recovery] ${item.outcome.toUpperCase()}`
         + ` wms=${item.candidate.wmsOrderId}`
         + ` order=${item.candidate.orderNumber}`
         + ` localShipments=${item.candidate.wmsShipmentIds.join(",")}`
         + ` localItems=${item.candidate.wmsShipmentItemIds.join(",")}`
         + ` packages=${packages || "none"}`
-        + (item.error ? ` error=${JSON.stringify(item.error)}` : ""),
+        + (item.error ? ` error=${JSON.stringify(item.error)}` : "")
+        + (item.trackingWarnings.length > 0
+          ? ` trackingWarnings=${JSON.stringify(item.trackingWarnings)}`
+          : ""),
     );
   }
   console.log(JSON.stringify({
     candidates: result.candidates,
     matchedPackages: result.matchedPackages,
-    enqueueRequests: result.enqueueRequests,
+    labelsObserved: result.labelsObserved,
+    labelsInserted: result.labelsInserted,
+    labelLinksInserted: result.labelLinksInserted,
+    trackingSnapshotsHydrated: result.trackingSnapshotsHydrated,
+    dispatchCommandsCreated: result.dispatchCommandsCreated,
+    trackingWarnings: result.trackingWarnings,
     noMatch: result.noMatch,
     errors: result.errors,
   }));
@@ -176,7 +201,7 @@ export async function run(flags: Flags): Promise<void> {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   run(parseFlags(process.argv.slice(2))).catch((error) => {
-    console.error("[ShipStation combined shipment recovery] fatal:", error);
+    console.error("[ShipStation provider-label recovery] fatal:", error);
     process.exit(1);
   });
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildShipStationRecoveredLabelObservation,
   createShipStationPhysicalRecoveryService,
   findShipStationPhysicalRecoveryCandidates,
 } from "../../shipstation-physical-recovery.service";
@@ -11,7 +12,7 @@ function queryText(query: any): string {
     .join(" ");
 }
 
-function candidateRow() {
+function candidateRow(overrides: Record<string, unknown> = {}) {
   return {
     wms_order_id: 204657,
     oms_order_id: 232103,
@@ -20,6 +21,7 @@ function candidateRow() {
     wms_shipment_ids: [4842],
     wms_shipment_item_ids: [9638],
     oldest_shipment_created_at: "2026-06-28T18:08:50.782Z",
+    ...overrides,
   };
 }
 
@@ -38,13 +40,32 @@ function combinedPackage(
   };
 }
 
+function carrierTracking(overrides: Record<string, unknown> = {}) {
+  return {
+    observeShipStationLabel: vi.fn(async () => ({
+      shippingProviderLabelId: 10,
+      labelInserted: true,
+      eventInserted: true,
+    })),
+    reconcileShipStationLabel: vi.fn(async () => ({
+      shippingProviderLabelId: 10,
+      linksInserted: 2,
+      totalLinks: 2,
+    })),
+    hydrateShipStationTrackingIdentity: vi.fn(async () => ({
+      dispatchCommandInserted: true,
+    })),
+    ...overrides,
+  };
+}
+
 describe("shipstation physical recovery service", () => {
-  it("selects only old, fully picked customer-fulfillment shipments", async () => {
+  it("selects old completed pick lines until active label carrier evidence matches them", async () => {
     const execute = vi.fn(async () => ({ rows: [candidateRow()] }));
 
     const candidates = await findShipStationPhysicalRecoveryCandidates(
       { execute },
-      { orderNumber: "#59564", minAgeHours: 6, maxAgeDays: null, limit: null },
+      { orderNumber: "#59564", minAgeMinutes: 15, maxAgeDays: null, limit: null },
     );
 
     expect(candidates).toEqual([expect.objectContaining({
@@ -54,85 +75,230 @@ describe("shipstation physical recovery service", () => {
       wmsShipmentIds: [4842],
       wmsShipmentItemIds: [9638],
     })]);
-    const sql = queryText(execute.mock.calls[0]?.[0]);
-    expect(sql).toContain("wo.source IN ('oms', 'ebay')");
-    expect(sql).toContain("WITH eligible_shipments AS");
-    expect(sql).toContain("os.status IN ('planned', 'queued', 'labeled')");
-    expect(sql).toContain("os.shipped_at IS NULL");
-    expect(sql).toContain("COALESCE(oi.picked_quantity, 0) >= COALESCE(osi.qty, 0)");
-    expect(sql).toContain("oi.status = 'completed'");
-    expect(sql.indexOf("HAVING BOOL_AND")).toBeLessThan(
-      sql.indexOf("ARRAY_AGG(DISTINCT eligible.id"),
-    );
+    const query = queryText(execute.mock.calls[0]?.[0]);
+    expect(query).toContain("WITH covered_provider_item_ids AS");
+    expect(query).toContain("label.label_status = 'active'");
+    expect(query).toContain("event_match.match_status = 'matched'");
+    expect(query).toContain("provider_item->>'lineItemKey' ~ '^wms-item-[1-9][0-9]*$'");
+    expect(query).toContain("COALESCE(oi.picked_quantity, 0) >= COALESCE(osi.qty, 0)");
+    expect(query).toContain("oi.status = 'completed'");
+    expect(query).toContain("wo.warehouse_status <> 'cancelled'");
+    expect(query).not.toContain("os.status IN ('planned', 'queued', 'labeled')");
+    expect(query).not.toContain("os.shipped_at IS NULL");
   });
 
-  it("rejects invalid scan bounds instead of silently changing them", async () => {
+  it("rejects invalid or conflicting scan bounds instead of changing them", async () => {
     const execute = vi.fn();
 
     await expect(findShipStationPhysicalRecoveryCandidates(
       { execute },
       { limit: 501 },
     )).rejects.toThrow(/limit must be an integer from 1 through 500/);
+    await expect(findShipStationPhysicalRecoveryCandidates(
+      { execute },
+      { minAgeHours: 6, minAgeMinutes: 15 },
+    )).rejects.toThrow(/either minAgeHours or minAgeMinutes/);
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("enqueues the canonical SHIP_NOTIFY path for a combined package containing this order's item", async () => {
+  it("builds a canonical label observation with only exact WMS item identities", () => {
+    expect(buildShipStationRecoveredLabelObservation(combinedPackage())).toEqual({
+      shipmentId: 442730042,
+      orderId: null,
+      orderKey: null,
+      trackingNumber: "9400150206217759204396",
+      carrierCode: "stamps_com",
+      serviceCode: "usps_ground_advantage",
+      shipDate: "2026-07-01",
+      voidDate: null,
+      shipmentItems: [
+        { lineItemKey: "wms-item-9636" },
+        { lineItemKey: "wms-item-9638" },
+      ],
+    });
+  });
+
+  it("recovers a missed label through exact lineage and carrier dispatch authority", async () => {
     const db = { execute: vi.fn(async () => ({ rows: [candidateRow()] })) };
-    const enqueueRetry = vi.fn(async () => undefined);
     const client = {
       isConfigured: () => true,
       listCompletedPackagesForOrder: vi.fn(async () => [combinedPackage()]),
     };
-    const service = createShipStationPhysicalRecoveryService(db, { client, enqueueRetry });
+    const tracking = carrierTracking();
+    const service = createShipStationPhysicalRecoveryService(db, {
+      client,
+      carrierTracking: tracking as any,
+    });
 
     const result = await service.recover({ mode: "execute", orderNumber: "#59564" });
 
     expect(client.listCompletedPackagesForOrder).toHaveBeenCalledWith("#59564");
-    expect(enqueueRetry).toHaveBeenCalledWith(db, {
-      resource_url: "https://ssapi.shipstation.com/shipments?shipmentId=442730042&includeShipmentItems=false",
+    expect(tracking.observeShipStationLabel).toHaveBeenCalledWith(
+      buildShipStationRecoveredLabelObservation(combinedPackage()),
+    );
+    expect(tracking.reconcileShipStationLabel).toHaveBeenCalledWith("442730042");
+    expect(tracking.hydrateShipStationTrackingIdentity).toHaveBeenCalledWith({
+      carrierCode: "stamps_com",
+      trackingNumber: "9400150206217759204396",
     });
     expect(result).toMatchObject({
       candidates: 1,
       matchedPackages: 1,
-      enqueueRequests: 1,
+      labelsObserved: 1,
+      labelsInserted: 1,
+      labelLinksInserted: 2,
+      trackingSnapshotsHydrated: 1,
+      dispatchCommandsCreated: 1,
+      trackingWarnings: 0,
       noMatch: 0,
       errors: 0,
-      results: [{ outcome: "enqueued" }],
+      results: [{ outcome: "recovered" }],
     });
   });
 
-  it("does not authorize a sibling package that lacks this order's exact item identity", async () => {
+  it("does not authorize a provider package without this order's exact item identity", async () => {
     const db = { execute: vi.fn(async () => ({ rows: [candidateRow()] })) };
-    const enqueueRetry = vi.fn(async () => undefined);
+    const tracking = carrierTracking();
     const service = createShipStationPhysicalRecoveryService(db, {
       client: {
         isConfigured: () => true,
         listCompletedPackagesForOrder: vi.fn(async () => [combinedPackage([9636])]),
       },
-      enqueueRetry,
+      carrierTracking: tracking as any,
     });
 
     const result = await service.recover({ mode: "execute", orderNumber: "#59564" });
 
-    expect(result).toMatchObject({ matchedPackages: 0, enqueueRequests: 0, noMatch: 1 });
-    expect(enqueueRetry).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      matchedPackages: 0,
+      labelsObserved: 0,
+      noMatch: 1,
+      errors: 0,
+    });
+    expect(tracking.observeShipStationLabel).not.toHaveBeenCalled();
+    expect(tracking.hydrateShipStationTrackingIdentity).not.toHaveBeenCalled();
   });
 
-  it("reports the same repair in dry-run mode without enqueueing it", async () => {
+  it("reports the repair in dry-run mode without writing label or tracking evidence", async () => {
     const db = { execute: vi.fn(async () => ({ rows: [candidateRow()] })) };
-    const enqueueRetry = vi.fn(async () => undefined);
+    const tracking = carrierTracking();
     const service = createShipStationPhysicalRecoveryService(db, {
       client: {
         isConfigured: () => true,
         listCompletedPackagesForOrder: vi.fn(async () => [combinedPackage()]),
       },
-      enqueueRetry,
+      carrierTracking: tracking as any,
     });
 
     const result = await service.recover({ mode: "dry-run", orderNumber: "#59564" });
 
     expect(result.results[0]?.outcome).toBe("planned");
-    expect(result.enqueueRequests).toBe(0);
-    expect(enqueueRetry).not.toHaveBeenCalled();
+    expect(result.labelsObserved).toBe(0);
+    expect(tracking.observeShipStationLabel).not.toHaveBeenCalled();
+    expect(tracking.reconcileShipStationLabel).not.toHaveBeenCalled();
+    expect(tracking.hydrateShipStationTrackingIdentity).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates one physical label spanning multiple WMS orders within a run", async () => {
+    const db = {
+      execute: vi.fn(async () => ({
+        rows: [
+          candidateRow(),
+          candidateRow({
+            wms_order_id: 204658,
+            oms_order_id: 232104,
+            order_number: "#59565",
+            wms_shipment_ids: [4843],
+            wms_shipment_item_ids: [9640],
+          }),
+        ],
+      })),
+    };
+    const physicalPackage = combinedPackage([9638, 9640]);
+    const tracking = carrierTracking();
+    const service = createShipStationPhysicalRecoveryService(db, {
+      client: {
+        isConfigured: () => true,
+        listCompletedPackagesForOrder: vi.fn(async () => [physicalPackage]),
+      },
+      carrierTracking: tracking as any,
+    });
+
+    const result = await service.recover({ mode: "execute" });
+
+    expect(result).toMatchObject({
+      candidates: 2,
+      matchedPackages: 2,
+      labelsObserved: 1,
+      trackingSnapshotsHydrated: 1,
+      dispatchCommandsCreated: 1,
+      errors: 0,
+    });
+    expect(tracking.observeShipStationLabel).toHaveBeenCalledOnce();
+    expect(tracking.reconcileShipStationLabel).toHaveBeenCalledOnce();
+    expect(tracking.hydrateShipStationTrackingIdentity).toHaveBeenCalledOnce();
+  });
+
+  it("retains recovered label evidence but exposes transient tracking hydration debt", async () => {
+    const db = { execute: vi.fn(async () => ({ rows: [candidateRow()] })) };
+    const tracking = carrierTracking({
+      hydrateShipStationTrackingIdentity: vi.fn(async () => {
+        throw new Error("provider timeout");
+      }),
+    });
+    const service = createShipStationPhysicalRecoveryService(db, {
+      client: {
+        isConfigured: () => true,
+        listCompletedPackagesForOrder: vi.fn(async () => [combinedPackage()]),
+      },
+      carrierTracking: tracking as any,
+    });
+
+    const result = await service.recover({ mode: "execute" });
+
+    expect(result).toMatchObject({
+      labelsObserved: 1,
+      trackingSnapshotsHydrated: 0,
+      dispatchCommandsCreated: 0,
+      trackingWarnings: 1,
+      errors: 0,
+      results: [{
+        outcome: "recovered",
+        trackingWarnings: [
+          expect.stringContaining("tracking hydration failed: provider timeout"),
+        ],
+      }],
+    });
+  });
+
+  it("fails closed when exact label lineage cannot be linked", async () => {
+    const db = { execute: vi.fn(async () => ({ rows: [candidateRow()] })) };
+    const tracking = carrierTracking({
+      reconcileShipStationLabel: vi.fn(async () => ({
+        shippingProviderLabelId: 10,
+        linksInserted: 0,
+        totalLinks: 0,
+      })),
+    });
+    const service = createShipStationPhysicalRecoveryService(db, {
+      client: {
+        isConfigured: () => true,
+        listCompletedPackagesForOrder: vi.fn(async () => [combinedPackage()]),
+      },
+      carrierTracking: tracking as any,
+    });
+
+    const result = await service.recover({ mode: "execute" });
+
+    expect(result).toMatchObject({
+      labelsObserved: 1,
+      trackingSnapshotsHydrated: 0,
+      errors: 1,
+      results: [{
+        outcome: "error",
+        error: expect.stringContaining("did not link to any authorized shipment"),
+      }],
+    });
+    expect(tracking.hydrateShipStationTrackingIdentity).not.toHaveBeenCalled();
   });
 });

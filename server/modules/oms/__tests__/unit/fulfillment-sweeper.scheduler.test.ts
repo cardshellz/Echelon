@@ -3,6 +3,7 @@ import {
   recoverStaleChannelFulfillmentReceipts,
   resolveRecoveredShopifyWritebackDebt,
   runFulfillmentSweep,
+  runShipStationProviderLabelRecoverySweep,
 } from "../../fulfillment-sweeper.scheduler";
 
 function queryText(query: any): string {
@@ -193,7 +194,12 @@ describe("fulfillment-sweeper.scheduler", () => {
     const recover = vi.fn(async () => ({
       candidates: 1,
       matchedPackages: 1,
-      enqueueRequests: 1,
+      labelsObserved: 1,
+      labelsInserted: 1,
+      labelLinksInserted: 1,
+      trackingSnapshotsHydrated: 1,
+      dispatchCommandsCreated: 1,
+      trackingWarnings: 0,
       noMatch: 0,
       errors: 0,
     }));
@@ -207,7 +213,32 @@ describe("fulfillment-sweeper.scheduler", () => {
     expect(recover).toHaveBeenCalledWith({
       mode: "execute",
       limit: 10,
-      minAgeHours: 6,
+      minAgeMinutes: 15,
+      maxAgeDays: 30,
+    });
+  });
+
+  it("uses the same bounded provider-label recovery policy for recurring runs", async () => {
+    const recover = vi.fn(async () => ({
+      candidates: 1,
+      matchedPackages: 1,
+      labelsObserved: 1,
+      labelsInserted: 0,
+      labelLinksInserted: 0,
+      trackingSnapshotsHydrated: 1,
+      dispatchCommandsCreated: 0,
+      trackingWarnings: 0,
+      noMatch: 0,
+      errors: 0,
+    }));
+
+    await runShipStationProviderLabelRecoverySweep({ recover } as any);
+
+    expect(recover).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledWith({
+      mode: "execute",
+      limit: 10,
+      minAgeMinutes: 15,
       maxAgeDays: 30,
     });
   });

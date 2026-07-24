@@ -28,11 +28,13 @@ import {
   type ShipStationTrackingSubscriptionsClient,
 } from "./shipstation-tracking-subscriptions.client";
 import {
+  createShipStationTrackingHydrationRequest,
   isRetryableTrackingEventsError,
   parseShipStationTrackingResourceUrl,
   ShipStationTrackingEventsError,
   trackingEventsErrorEvidence,
   type ShipStationTrackingEventsClient,
+  type ShipStationTrackingIdentity,
   type ShipStationTrackingHydrationRequest,
 } from "./shipstation-tracking-events.client";
 
@@ -222,6 +224,29 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         totalLinks: result.totalLinks,
       },
     });
+    return result;
+  }
+
+  async hydrateShipStationTrackingIdentity(
+    input: ShipStationTrackingIdentity,
+  ): Promise<CarrierTrackingNormalizedIngestResult> {
+    const client = this.dependencies.trackingEventsClient;
+    if (!client?.isConfigured()) {
+      throw new ShipStationTrackingEventsError(
+        "CONFIGURATION",
+        "SHIPSTATION_V2_API_KEY is required to hydrate carrier tracking evidence",
+      );
+    }
+
+    const request = createShipStationTrackingHydrationRequest(input);
+    const snapshot = await client.getTrackingSnapshot(request);
+    const event = normalizeTrackingSnapshot(
+      snapshot.payload,
+      request,
+      this.dependencies.clock.now(),
+    );
+    const result = await this.persistAndMatch(event);
+    this.logResult("CARRIER_TRACKING_PROVIDER_SNAPSHOT_INGESTED", event, result);
     return result;
   }
 
@@ -598,41 +623,18 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       let event: NormalizedCarrierTrackingEvent | null = null;
       let providerError: unknown = null;
       try {
-        const snapshot = await client.getTrackingSnapshot({
+        const request = {
           resourceUrl: hydration.resourceUrl,
           carrierCode: hydration.carrierCode,
           trackingNumber: hydration.trackingNumber,
           normalizedTrackingNumber: hydration.normalizedTrackingNumber,
-        });
-        let normalizedEvent: NormalizedCarrierTrackingEvent;
-        try {
-          normalizedEvent = normalizeShipStationTrackingWebhook({
-            resource_type: "API_TRACK",
-            resource_url: hydration.resourceUrl,
-            data: snapshot.payload,
-          }, hydration.webhookVerifiedAt);
-        } catch (error) {
-          if (!(error instanceof CarrierTrackingPayloadError)) throw error;
-          throw new ShipStationTrackingEventsError(
-            "INVALID_RESPONSE",
-            "ShipStation tracking hydration response failed normalization",
-            { parserCode: error.code, parserDetails: error.details },
-          );
-        }
-        if (normalizedEvent.normalizedTrackingNumber !== hydration.normalizedTrackingNumber
-            || normalizedEvent.carrier !== hydration.carrierCode) {
-          throw new ShipStationTrackingEventsError(
-            "INVALID_RESPONSE",
-            "ShipStation tracking hydration response returned a different tracking identity",
-            {
-              requestedTrackingSuffix: trackingSuffix(hydration.normalizedTrackingNumber),
-              returnedTrackingSuffix: trackingSuffix(normalizedEvent.normalizedTrackingNumber),
-              requestedCarrierCode: hydration.carrierCode,
-              returnedCarrierCode: normalizedEvent.carrier,
-            },
-          );
-        }
-        event = normalizedEvent;
+        };
+        const snapshot = await client.getTrackingSnapshot(request);
+        event = normalizeTrackingSnapshot(
+          snapshot.payload,
+          request,
+          hydration.webhookVerifiedAt,
+        );
       } catch (error) {
         providerError = error;
       }
@@ -1039,6 +1041,44 @@ export function makeCarrierTrackingLogger(): CarrierTrackingLogger {
 
 function trackingSuffix(normalizedTrackingNumber: string): string {
   return normalizedTrackingNumber.slice(-6);
+}
+
+function normalizeTrackingSnapshot(
+  payload: Record<string, unknown>,
+  request: ShipStationTrackingHydrationRequest,
+  observedAt: Date,
+): NormalizedCarrierTrackingEvent {
+  let event: NormalizedCarrierTrackingEvent;
+  try {
+    event = normalizeShipStationTrackingWebhook({
+      resource_type: "API_TRACK",
+      resource_url: request.resourceUrl,
+      data: payload,
+    }, observedAt);
+  } catch (error) {
+    if (!(error instanceof CarrierTrackingPayloadError)) throw error;
+    throw new ShipStationTrackingEventsError(
+      "INVALID_RESPONSE",
+      "ShipStation tracking hydration response failed normalization",
+      { parserCode: error.code, parserDetails: error.details },
+    );
+  }
+  if (
+    event.normalizedTrackingNumber !== request.normalizedTrackingNumber
+    || event.carrier !== request.carrierCode
+  ) {
+    throw new ShipStationTrackingEventsError(
+      "INVALID_RESPONSE",
+      "ShipStation tracking hydration response returned a different tracking identity",
+      {
+        requestedTrackingSuffix: trackingSuffix(request.normalizedTrackingNumber),
+        returnedTrackingSuffix: trackingSuffix(event.normalizedTrackingNumber),
+        requestedCarrierCode: request.carrierCode,
+        returnedCarrierCode: event.carrier,
+      },
+    );
+  }
+  return event;
 }
 
 function trackingSubscriptionRequestEvidence(
