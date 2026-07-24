@@ -15,9 +15,17 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { productVariants } from "./catalog.schema";
+import { channels } from "./channels.schema";
 import { shipmentRequests } from "./fulfillment.schema";
 import { orders } from "./orders.schema";
 import { warehouses } from "./warehouse.schema";
+import type {
+  ShippingChannelEligibilityMode,
+  ShippingChannelPolicyPurpose,
+  ShippingChannelPolicyStatus,
+  ShippingChannelRouteMode,
+  ShippingDestinationScopeStatus,
+} from "../types/shipping-channel-routing";
 
 // First-party shipping engine (quote plane). Design: docs/SHIPPING-ENGINE-DESIGN.md.
 // The fulfillment plane (wms.fulfillment_plans → shipment_requests → physical_shipments)
@@ -184,6 +192,242 @@ export const shippingRateBookAssignments = shippingSchema.table("rate_book_assig
     .on(table.pricingChannel, table.ratePurpose, table.originWarehouseId)
     .where(sql`${table.isActive} = true AND ${table.originWarehouseId} IS NOT NULL`),
 ]);
+
+// ---------------------------------------------------------------------------
+// Channel routing policy
+//
+// A versioned policy owns one complete channel + purpose decision set. Routes
+// select the rate authority and destination eligibility authority; marketplace
+// store connections remain adapter context and are deliberately not persisted
+// here. No policy rows are seeded during the compatibility expansion phase.
+// ---------------------------------------------------------------------------
+
+export const shippingDestinationScopes = shippingSchema.table("destination_scopes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 100 }).notNull(),
+  name: varchar("name", { length: 160 }).notNull(),
+  status: varchar("status", { length: 20 })
+    .$type<ShippingDestinationScopeStatus>()
+    .notNull()
+    .default("draft"),
+  metadata: jsonb("metadata"),
+  createdBy: varchar("created_by", { length: 200 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_destination_scope_code_idx").on(table.code),
+  check("shipping_destination_scope_status_chk", sql`
+    ${table.status} IN ('draft', 'active', 'retired')
+  `),
+  check("shipping_destination_scope_code_chk", sql`
+    ${table.code} = btrim(${table.code})
+    AND ${table.code} ~ '^[a-z0-9][a-z0-9-]{0,99}$'
+  `),
+  check("shipping_destination_scope_actor_chk", sql`
+    ${table.createdBy} = btrim(${table.createdBy}) AND ${table.createdBy} <> ''
+  `),
+]);
+
+export const shippingDestinationScopeMembers = shippingSchema.table("destination_scope_members", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  destinationScopeId: integer("destination_scope_id")
+    .notNull()
+    .references(() => shippingDestinationScopes.id, { onDelete: "cascade" }),
+  destinationCountry: varchar("destination_country", { length: 2 }).notNull(),
+  destinationRegion: varchar("destination_region", { length: 10 }),
+  postalPrefix: varchar("postal_prefix", { length: 20 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_destination_scope_member_idx").on(
+    table.destinationScopeId,
+    table.destinationCountry,
+    sql`COALESCE(${table.destinationRegion}, '')`,
+    sql`COALESCE(${table.postalPrefix}, '')`,
+  ),
+  index("shipping_destination_scope_member_lookup_idx").on(
+    table.destinationCountry,
+    table.destinationRegion,
+    table.postalPrefix,
+    table.destinationScopeId,
+  ),
+  check("shipping_destination_scope_member_country_chk", sql`
+    ${table.destinationCountry} ~ '^[A-Z]{2}$'
+  `),
+  check("shipping_destination_scope_member_region_chk", sql`
+    ${table.destinationRegion} IS NULL
+    OR ${table.destinationRegion} ~ '^[A-Z0-9][A-Z0-9-]{0,9}$'
+  `),
+  check("shipping_destination_scope_member_postal_chk", sql`
+    ${table.postalPrefix} IS NULL
+    OR (
+      ${table.postalPrefix} = btrim(${table.postalPrefix})
+      AND ${table.postalPrefix} ~ '^[A-Z0-9][A-Z0-9 -]{0,19}$'
+    )
+  `),
+]);
+
+export const shippingChannelPolicies = shippingSchema.table("channel_policies", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id")
+    .notNull()
+    .references(() => channels.id, { onDelete: "restrict" }),
+  purpose: varchar("purpose", { length: 60 })
+    .$type<ShippingChannelPolicyPurpose>()
+    .notNull(),
+  version: integer("version").notNull(),
+  status: varchar("status", { length: 20 })
+    .$type<ShippingChannelPolicyStatus>()
+    .notNull()
+    .default("draft"),
+  metadata: jsonb("metadata"),
+  createdBy: varchar("created_by", { length: 200 }).notNull(),
+  activatedBy: varchar("activated_by", { length: 200 }),
+  activatedAt: timestamp("activated_at", { withTimezone: true }),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_channel_policy_version_idx")
+    .on(table.channelId, table.purpose, table.version),
+  uniqueIndex("shipping_channel_policy_active_idx")
+    .on(table.channelId, table.purpose)
+    .where(sql`${table.status} = 'active'`),
+  index("shipping_channel_policy_lookup_idx")
+    .on(table.channelId, table.purpose, table.status),
+  check("shipping_channel_policy_purpose_chk", sql`
+    ${table.purpose} IN ('customer_checkout', 'vendor_fulfillment_charge')
+  `),
+  check("shipping_channel_policy_status_chk", sql`
+    ${table.status} IN ('draft', 'active', 'retired')
+  `),
+  check("shipping_channel_policy_version_chk", sql`${table.version} > 0`),
+  check("shipping_channel_policy_actor_chk", sql`
+    ${table.createdBy} = btrim(${table.createdBy})
+    AND ${table.createdBy} <> ''
+    AND (
+      ${table.activatedBy} IS NULL
+      OR (${table.activatedBy} = btrim(${table.activatedBy}) AND ${table.activatedBy} <> '')
+    )
+  `),
+  check("shipping_channel_policy_lifecycle_chk", sql`
+    (
+      ${table.status} = 'draft'
+      AND ${table.activatedBy} IS NULL
+      AND ${table.activatedAt} IS NULL
+      AND ${table.retiredAt} IS NULL
+    )
+    OR (
+      ${table.status} = 'active'
+      AND ${table.activatedBy} IS NOT NULL
+      AND ${table.activatedAt} IS NOT NULL
+      AND ${table.retiredAt} IS NULL
+    )
+    OR (
+      ${table.status} = 'retired'
+      AND ${table.activatedBy} IS NOT NULL
+      AND ${table.activatedAt} IS NOT NULL
+      AND ${table.retiredAt} IS NOT NULL
+      AND ${table.retiredAt} >= ${table.activatedAt}
+    )
+  `),
+]);
+
+export const shippingChannelPolicyRoutes = shippingSchema.table("channel_policy_routes", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  policyId: integer("policy_id")
+    .notNull()
+    .references(() => shippingChannelPolicies.id, { onDelete: "cascade" }),
+  sourceDestinationScopeId: integer("source_destination_scope_id")
+    .references(() => shippingDestinationScopes.id, { onDelete: "restrict" }),
+  originWarehouseId: integer("origin_warehouse_id")
+    .references(() => warehouses.id, { onDelete: "restrict" }),
+  mode: varchar("mode", { length: 30 })
+    .$type<ShippingChannelRouteMode>()
+    .notNull(),
+  eligibilityMode: varchar("eligibility_mode", { length: 30 })
+    .$type<ShippingChannelEligibilityMode>()
+    .notNull(),
+  rateBookId: integer("rate_book_id")
+    .references(() => shippingRateBooks.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("shipping_channel_policy_route_scope_idx").on(
+    table.policyId,
+    sql`COALESCE(${table.originWarehouseId}, 0)`,
+    sql`COALESCE(${table.sourceDestinationScopeId}, 0)`,
+  ),
+  index("shipping_channel_policy_route_lookup_idx").on(
+    table.policyId,
+    table.originWarehouseId,
+    table.sourceDestinationScopeId,
+  ),
+  check("shipping_channel_policy_route_mode_chk", sql`
+    ${table.mode} IN ('engine_quoted', 'channel_managed', 'disabled')
+  `),
+  check("shipping_channel_policy_route_eligibility_chk", sql`
+    ${table.eligibilityMode} IN ('engine', 'channel', 'intersection', 'none')
+  `),
+  check("shipping_channel_policy_route_rate_book_chk", sql`
+    (
+      ${table.mode} = 'engine_quoted'
+      AND ${table.rateBookId} IS NOT NULL
+      AND ${table.eligibilityMode} <> 'none'
+    )
+    OR (
+      ${table.mode} = 'channel_managed'
+      AND ${table.rateBookId} IS NULL
+      AND ${table.eligibilityMode} <> 'none'
+    )
+    OR (
+      ${table.mode} = 'disabled'
+      AND ${table.rateBookId} IS NULL
+      AND ${table.eligibilityMode} = 'none'
+    )
+  `),
+]);
+
+export const shippingChannelPolicyRouteDestinations = shippingSchema.table(
+  "channel_policy_route_destinations",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    routeId: integer("route_id")
+      .notNull()
+      .references(() => shippingChannelPolicyRoutes.id, { onDelete: "cascade" }),
+    destinationCountry: varchar("destination_country", { length: 2 }).notNull(),
+    destinationRegion: varchar("destination_region", { length: 10 }),
+    postalPrefix: varchar("postal_prefix", { length: 20 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("shipping_channel_policy_route_destination_idx").on(
+      table.routeId,
+      table.destinationCountry,
+      sql`COALESCE(${table.destinationRegion}, '')`,
+      sql`COALESCE(${table.postalPrefix}, '')`,
+    ),
+    index("shipping_channel_policy_route_destination_lookup_idx").on(
+      table.destinationCountry,
+      table.destinationRegion,
+      table.postalPrefix,
+      table.routeId,
+    ),
+    check("shipping_channel_policy_route_destination_country_chk", sql`
+      ${table.destinationCountry} ~ '^[A-Z]{2}$'
+    `),
+    check("shipping_channel_policy_route_destination_region_chk", sql`
+      ${table.destinationRegion} IS NULL
+      OR ${table.destinationRegion} ~ '^[A-Z0-9][A-Z0-9-]{0,9}$'
+    `),
+    check("shipping_channel_policy_route_destination_postal_chk", sql`
+      ${table.postalPrefix} IS NULL
+      OR (
+        ${table.postalPrefix} = btrim(${table.postalPrefix})
+        AND ${table.postalPrefix} ~ '^[A-Z0-9][A-Z0-9 -]{0,19}$'
+      )
+    `),
+  ],
+);
 
 export const shippingZoneRules = shippingSchema.table("zone_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
