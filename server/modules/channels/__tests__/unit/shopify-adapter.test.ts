@@ -67,6 +67,14 @@ describe("Shopify Adapter", () => {
     it("should have correct provider key", () => {
       expect(adapter.providerKey).toBe("shopify");
     });
+
+    it("declares the shipping behavior Shopify can enforce", () => {
+      expect(adapter.shippingCapabilities).toEqual({
+        acceptsEngineQuotes: true,
+        managesOwnRates: true,
+        enforcesDestinationEligibility: true,
+      });
+    });
   });
 
   // -----------------------------------------------------------------------

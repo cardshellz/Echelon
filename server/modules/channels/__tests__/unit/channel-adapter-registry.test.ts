@@ -30,6 +30,11 @@ function createStubAdapter(name: string, providerKey: string): IChannelAdapter {
   return {
     adapterName: name,
     providerKey,
+    shippingCapabilities: {
+      acceptsEngineQuotes: true,
+      managesOwnRates: true,
+      enforcesDestinationEligibility: true,
+    },
     pushListings: async () => [],
     pushInventory: async () => [],
     pushPricing: async () => [],

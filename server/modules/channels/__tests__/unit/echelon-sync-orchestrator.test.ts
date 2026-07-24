@@ -112,6 +112,11 @@ function createMockAdapter(): IChannelAdapter {
   return {
     adapterName: "MockShopify",
     providerKey: "shopify",
+    shippingCapabilities: {
+      acceptsEngineQuotes: true,
+      managesOwnRates: true,
+      enforcesDestinationEligibility: true,
+    },
     pushListings: vi.fn().mockResolvedValue([]),
     pushInventory: vi.fn().mockResolvedValue([
       { variantId: 100, pushedQty: 20, status: "success" },

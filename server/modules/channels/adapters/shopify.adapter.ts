@@ -65,6 +65,11 @@ const RATE_LIMIT_DELAY_MS = 1000;
 export class ShopifyAdapter implements IChannelAdapter {
   readonly adapterName = "Shopify";
   readonly providerKey = "shopify";
+  readonly shippingCapabilities = Object.freeze({
+    acceptsEngineQuotes: true,
+    managesOwnRates: true,
+    enforcesDestinationEligibility: true,
+  });
   private readonly listingConnector = new ShopifyMarketplaceListingConnector();
 
   constructor(private readonly db: DrizzleDb) {}

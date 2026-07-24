@@ -11,6 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type {
+  ShippingChannelAdapterCapabilities,
   ShippingChannelEligibilityMode,
   ShippingChannelPolicyPurpose,
   ShippingChannelPolicyResolutionView,
@@ -318,6 +319,9 @@ export function PolicyEditorDialog({
             <DialogDescription>
               Channel {channel.id} / {channel.provider}
             </DialogDescription>
+            <AdapterCapabilitySummary
+              capabilities={channel.shippingCapabilities}
+            />
           </DialogHeader>
 
           {policyQuery.isLoading ? (
@@ -407,6 +411,7 @@ export function PolicyEditorDialog({
                         destinationScopes={selectableScopes}
                         rateBooks={selectableRateBooks}
                         warehouses={selectableWarehouses}
+                        capabilities={channel.shippingCapabilities}
                         canRemove={routes.length > 1}
                         onChange={(next) => setRoutes(routes.map((candidate, routeIndex) =>
                           routeIndex === index ? next : candidate))}
@@ -630,6 +635,7 @@ function RouteEditor({
   destinationScopes,
   rateBooks,
   warehouses,
+  capabilities,
   canRemove,
   onChange,
   onRemove,
@@ -640,6 +646,7 @@ function RouteEditor({
   destinationScopes: ShippingDestinationScopeSummary[];
   rateBooks: ShippingChannelRoutingRateBookOption[];
   warehouses: ShippingChannelRoutingWarehouseOption[];
+  capabilities: ShippingChannelAdapterCapabilities | null;
   canRemove: boolean;
   onChange: (route: ShippingChannelPolicyRouteInput) => void;
   onRemove: () => void;
@@ -650,12 +657,23 @@ function RouteEditor({
       mode,
       eligibilityMode: mode === "disabled"
         ? "none"
-        : route.eligibilityMode === "none"
-          ? "engine"
-          : route.eligibilityMode,
+        : mode === "channel_managed"
+          ? "channel"
+          : "engine",
       rateBookId: mode === "engine_quoted" ? route.rateBookId : null,
     });
   };
+  const acceptsEngineQuotes =
+    capabilities?.acceptsEngineQuotes === true;
+  const managesOwnRates =
+    capabilities?.managesOwnRates === true;
+  const enforcesDestinationEligibility =
+    capabilities?.enforcesDestinationEligibility === true;
+  const canUseEngineEligibility = route.mode === "engine_quoted"
+    || (
+      route.mode === "channel_managed"
+      && enforcesDestinationEligibility
+    );
 
   return (
     <div className="grid gap-3 border p-3 lg:grid-cols-[2fr_1.5fr_1.5fr_1.5fr_2fr_2.5rem]">
@@ -716,8 +734,18 @@ function RouteEditor({
         >
           <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="engine_quoted">Echelon rates</SelectItem>
-            <SelectItem value="channel_managed">Channel rates</SelectItem>
+            <SelectItem
+              value="engine_quoted"
+              disabled={!acceptsEngineQuotes}
+            >
+              Echelon rates{acceptsEngineQuotes ? "" : " (unsupported)"}
+            </SelectItem>
+            <SelectItem
+              value="channel_managed"
+              disabled={!managesOwnRates}
+            >
+              Channel rates{managesOwnRates ? "" : " (unsupported)"}
+            </SelectItem>
             <SelectItem value="disabled">Do not ship</SelectItem>
           </SelectContent>
         </Select>
@@ -739,9 +767,27 @@ function RouteEditor({
               <SelectItem value="none">Not allowed</SelectItem>
             ) : (
               <>
-                <SelectItem value="engine">Echelon rules</SelectItem>
-                <SelectItem value="channel">Channel rules</SelectItem>
-                <SelectItem value="intersection">Both must allow</SelectItem>
+                <SelectItem
+                  value="engine"
+                  disabled={!canUseEngineEligibility}
+                >
+                  Echelon rules
+                  {canUseEngineEligibility ? "" : " (unsupported)"}
+                </SelectItem>
+                <SelectItem
+                  value="channel"
+                  disabled={!enforcesDestinationEligibility}
+                >
+                  Channel rules
+                  {enforcesDestinationEligibility ? "" : " (unsupported)"}
+                </SelectItem>
+                <SelectItem
+                  value="intersection"
+                  disabled={!enforcesDestinationEligibility}
+                >
+                  Both must allow
+                  {enforcesDestinationEligibility ? "" : " (unsupported)"}
+                </SelectItem>
               </>
             )}
           </SelectContent>
@@ -783,6 +829,32 @@ function RouteEditor({
         </Button>
       </div>
     </div>
+  );
+}
+
+function AdapterCapabilitySummary({
+  capabilities,
+}: {
+  capabilities: ShippingChannelAdapterCapabilities | null;
+}) {
+  if (!capabilities) {
+    return (
+      <p className="text-sm font-medium text-destructive">
+        No shipping adapter is registered. Only Do not ship can be activated.
+      </p>
+    );
+  }
+  const supported = [
+    capabilities.acceptsEngineQuotes ? "Echelon rates" : null,
+    capabilities.managesOwnRates ? "channel rates" : null,
+    capabilities.enforcesDestinationEligibility
+      ? "channel destination rules"
+      : null,
+  ].filter((value): value is string => value !== null);
+  return (
+    <p className="text-sm text-muted-foreground">
+      Supported: {supported.length > 0 ? supported.join(", ") : "disable only"}.
+    </p>
   );
 }
 

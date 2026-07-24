@@ -9,6 +9,10 @@
  * format to the channel's native API format and back.
  */
 
+import type {
+  ShippingChannelAdapterCapabilities,
+} from "@shared/types/shipping-channel-routing";
+
 // ---------------------------------------------------------------------------
 // Canonical Types — channel-agnostic data structures
 // ---------------------------------------------------------------------------
@@ -220,6 +224,9 @@ export interface IChannelAdapter {
 
   /** Provider key matching channels.provider column */
   readonly providerKey: string;
+
+  /** Shipping behavior this adapter can enforce at the order boundary. */
+  readonly shippingCapabilities: ShippingChannelAdapterCapabilities;
 
   // -------------------------------------------------------------------------
   // Listings

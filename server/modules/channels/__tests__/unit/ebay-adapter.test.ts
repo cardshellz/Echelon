@@ -212,6 +212,14 @@ describe("eBay Adapter", () => {
     it("should have correct provider key", () => {
       expect(adapter.providerKey).toBe("ebay");
     });
+
+    it("declares that eBay owns rates and does not accept engine quotes", () => {
+      expect(adapter.shippingCapabilities).toEqual({
+        acceptsEngineQuotes: false,
+        managesOwnRates: true,
+        enforcesDestinationEligibility: true,
+      });
+    });
   });
 
   // -----------------------------------------------------------------------

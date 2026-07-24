@@ -7,6 +7,9 @@ import {
   SHIPPING_LEGACY_PROFILE_KEYS,
 } from "@shared/types/shipping-channel-routing";
 import { requirePermission } from "../../../../routes/middleware";
+import type {
+  ChannelShippingCapabilityResolver,
+} from "../../../channels/channel-shipping-capability.registry";
 import {
   ChannelShippingPolicyAdminError,
   ChannelShippingPolicyAdminService,
@@ -79,6 +82,7 @@ type AdminService = Pick<
 
 export interface ChannelShippingPolicyAdminRouteDependencies {
   service?: AdminService;
+  capabilityResolver?: ChannelShippingCapabilityResolver;
 }
 
 export function registerChannelShippingPolicyAdminRoutes(
@@ -87,6 +91,7 @@ export function registerChannelShippingPolicyAdminRoutes(
 ): void {
   const service = dependencies.service ?? new ChannelShippingPolicyAdminService(
     new PostgresChannelShippingPolicyAdminStore(),
+    requireCapabilityResolver(app, dependencies.capabilityResolver),
   );
 
   app.get(
@@ -278,6 +283,20 @@ export function registerChannelShippingPolicyAdminRoutes(
       }
     },
   );
+}
+
+function requireCapabilityResolver(
+  app: Express,
+  injected: ChannelShippingCapabilityResolver | undefined,
+): ChannelShippingCapabilityResolver {
+  const resolver = injected
+    ?? app.locals.services?.channelShippingCapabilities;
+  if (!resolver || typeof resolver.resolve !== "function") {
+    throw new Error(
+      "Channel shipping capability resolver is not configured.",
+    );
+  }
+  return resolver;
 }
 
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {

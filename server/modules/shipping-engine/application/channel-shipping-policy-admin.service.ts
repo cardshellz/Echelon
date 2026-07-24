@@ -3,18 +3,23 @@ import {
   SHIPPING_CHANNEL_POLICY_PURPOSES,
   SHIPPING_CHANNEL_ROUTE_MODES,
   type ShippingChannelEligibilityMode,
+  type ShippingChannelAdapterCapabilities,
   type ShippingChannelPolicyPurpose,
   type ShippingChannelPolicyResolutionView,
   type ShippingChannelPolicyRouteInput,
   type ShippingChannelPolicyShadowComparison,
   type ShippingChannelPolicyView,
   type ShippingChannelRouteMode,
+  type ShippingChannelRoutingChannelSummary,
   type ShippingChannelRoutingOverview,
   type ShippingDestinationScopeMember,
   type ShippingDestinationScopeSummary,
   type ShippingLegacyProfileKey,
 } from "@shared/types/shipping-channel-routing";
 import type { AuditLogPayload } from "../../../infrastructure/auditLogger";
+import type {
+  ChannelShippingCapabilityResolver,
+} from "../../channels/channel-shipping-capability.registry";
 import { buildLegacyChannelShippingFallback } from "./legacy-channel-shipping-fallback";
 import {
   resolveChannelShippingPolicyCandidate,
@@ -73,6 +78,7 @@ export interface PolicyShadowComparisonInput extends PolicyResolutionPreviewInpu
 interface ChannelRecord {
   id: number;
   name: string;
+  provider: string;
 }
 
 interface RateBookReference {
@@ -179,7 +185,8 @@ export interface ChannelShippingPolicyAdminTransaction {
 }
 
 export interface ChannelShippingPolicyAdminStore {
-  listOverview(): Promise<ShippingChannelRoutingOverview>;
+  listOverview(): Promise<ChannelShippingPolicyStoreOverview>;
+  getChannel(channelId: number): Promise<ChannelRecord | null>;
   getPolicy(policyId: number): Promise<ShippingChannelPolicyView | null>;
   transaction<T>(
     work: (tx: ChannelShippingPolicyAdminTransaction) => Promise<T>,
@@ -204,6 +211,13 @@ export interface ChannelShippingPolicyAdminStore {
   }): Promise<number>;
 }
 
+export type ChannelShippingPolicyStoreOverview =
+  Omit<ShippingChannelRoutingOverview, "channels"> & {
+    channels: Array<
+      Omit<ShippingChannelRoutingChannelSummary, "shippingCapabilities">
+    >;
+  };
+
 export interface ChannelShippingPolicyAdminClock {
   now(): Date;
 }
@@ -227,17 +241,30 @@ export class ChannelShippingPolicyAdminError extends Error {
 export class ChannelShippingPolicyAdminService {
   constructor(
     private readonly store: ChannelShippingPolicyAdminStore,
+    private readonly capabilityResolver: ChannelShippingCapabilityResolver,
     private readonly clock: ChannelShippingPolicyAdminClock = systemClock,
   ) {}
 
   async listOverview(): Promise<ShippingChannelRoutingOverview> {
-    return this.store.listOverview();
+    const overview = await this.store.listOverview();
+    return {
+      ...overview,
+      channels: overview.channels.map((channel) => ({
+        ...channel,
+        shippingCapabilities:
+          this.capabilityResolver.resolve(channel.provider),
+      })),
+    };
   }
 
   async getPolicy(policyId: number): Promise<ShippingChannelPolicyView> {
     const policy = await this.store.getPolicy(requirePositiveId(policyId, "policyId"));
     if (!policy) throw policyNotFound();
-    return withActivationErrors(policy);
+    const channel = await this.store.getChannel(policy.channelId);
+    if (!channel) {
+      throw internalError("The policy's channel could not be loaded.");
+    }
+    return this.withActivationErrors(policy, channel);
   }
 
   async createDestinationScope(
@@ -403,7 +430,7 @@ export class ChannelShippingPolicyAdminService {
           clonedFromPolicyId: active?.id ?? null,
         },
       }, now);
-      return withActivationErrors(created);
+      return this.withActivationErrors(created, channel);
     });
   }
 
@@ -426,6 +453,10 @@ export class ChannelShippingPolicyAdminService {
       if (!before) throw policyNotFound();
       assertDraft(before);
       assertExpectedVersion(before.lockVersion, expectedLockVersion);
+      const channel = await tx.getChannelForUpdate(before.channelId);
+      if (!channel) {
+        throw internalError("The policy's channel could not be loaded.");
+      }
       const preparedRoutes = await prepareRoutes(tx, routes);
       await tx.replacePolicyRoutes(policyId, preparedRoutes, now);
       const updated = await tx.updatePolicyDraft({
@@ -443,7 +474,7 @@ export class ChannelShippingPolicyAdminService {
         target: `shipping.channel_policy:${policyId}`,
         changes: { before: auditPolicy(before), after: auditPolicy(after) },
       }, now);
-      return withActivationErrors(after);
+      return this.withActivationErrors(after, channel);
     });
   }
 
@@ -464,8 +495,11 @@ export class ChannelShippingPolicyAdminService {
       if (!draft) throw policyNotFound();
       assertDraft(draft);
       assertExpectedVersion(draft.lockVersion, expectedLockVersion);
-      await tx.getChannelForUpdate(draft.channelId);
-      const validationErrors = policyActivationErrors(draft);
+      const channel = await tx.getChannelForUpdate(draft.channelId);
+      if (!channel) {
+        throw internalError("The policy's channel could not be loaded.");
+      }
+      const validationErrors = this.activationErrors(draft, channel);
       if (validationErrors.length > 0) {
         throw new ChannelShippingPolicyAdminError(
           409,
@@ -511,7 +545,7 @@ export class ChannelShippingPolicyAdminService {
           supersededPolicyId: previousActive?.id ?? null,
         },
       }, now);
-      return withActivationErrors(active);
+      return this.withActivationErrors(active, channel);
     });
   }
 
@@ -532,6 +566,10 @@ export class ChannelShippingPolicyAdminService {
       if (!before) throw policyNotFound();
       assertDraft(before);
       assertExpectedVersion(before.lockVersion, expectedLockVersion);
+      const channel = await tx.getChannelForUpdate(before.channelId);
+      if (!channel) {
+        throw internalError("The policy's channel could not be loaded.");
+      }
       if (!await tx.discardPolicyDraft({ policyId, expectedLockVersion, now })) {
         throw concurrencyConflict();
       }
@@ -547,7 +585,7 @@ export class ChannelShippingPolicyAdminService {
           purpose: before.purpose,
         },
       }, now);
-      return withActivationErrors(after);
+      return this.withActivationErrors(after, channel);
     });
   }
 
@@ -572,7 +610,10 @@ export class ChannelShippingPolicyAdminService {
         );
       }
       assertExpectedVersion(before.lockVersion, expectedLockVersion);
-      await tx.getChannelForUpdate(before.channelId);
+      const channel = await tx.getChannelForUpdate(before.channelId);
+      if (!channel) {
+        throw internalError("The policy's channel could not be loaded.");
+      }
       if (!await tx.retirePolicy({ policyId, expectedLockVersion, now })) {
         throw concurrencyConflict();
       }
@@ -589,7 +630,7 @@ export class ChannelShippingPolicyAdminService {
           fallbackBehavior: "legacy_profile_when_available",
         },
       }, now);
-      return withActivationErrors(after);
+      return this.withActivationErrors(after, channel);
     });
   }
 
@@ -692,14 +733,38 @@ export class ChannelShippingPolicyAdminService {
       message: null,
     };
   }
+
+  private activationErrors(
+    policy: ShippingChannelPolicyView,
+    channel: ChannelRecord,
+  ): string[] {
+    return policyActivationErrors(
+      policy,
+      channel.provider,
+      this.capabilityResolver.resolve(channel.provider),
+    );
+  }
+
+  private withActivationErrors(
+    policy: ShippingChannelPolicyView,
+    channel: ChannelRecord,
+  ): ShippingChannelPolicyView {
+    return {
+      ...policy,
+      activationErrors: this.activationErrors(policy, channel),
+    };
+  }
 }
 
 export function policyActivationErrors(
   policy: ShippingChannelPolicyView,
+  provider: string,
+  capabilities: ShippingChannelAdapterCapabilities | null,
 ): string[] {
   const errors = validateChannelShippingPolicyForActivation(
     policyViewToCandidate(policy).routes,
   );
+  errors.push(...adapterCapabilityErrors(policy, provider, capabilities));
   for (const route of policy.routes) {
     if (
       route.originWarehouseId !== null
@@ -722,10 +787,51 @@ export function policyActivationErrors(
   return [...new Set(errors)];
 }
 
-function withActivationErrors(
+function adapterCapabilityErrors(
   policy: ShippingChannelPolicyView,
-): ShippingChannelPolicyView {
-  return { ...policy, activationErrors: policyActivationErrors(policy) };
+  providerInput: string,
+  capabilities: ShippingChannelAdapterCapabilities | null,
+): string[] {
+  const provider = providerInput.trim().toLowerCase();
+  const errors: string[] = [];
+  for (const route of policy.routes) {
+    if (route.mode === "disabled") continue;
+    if (!capabilities) {
+      errors.push(
+        `Route ${route.id}: provider "${provider}" has no declared shipping adapter capabilities.`,
+      );
+      continue;
+    }
+    if (
+      route.mode === "engine_quoted"
+      && !capabilities.acceptsEngineQuotes
+    ) {
+      errors.push(
+        `Route ${route.id}: provider "${provider}" cannot accept Echelon rate quotes.`,
+      );
+    }
+    if (
+      route.mode === "channel_managed"
+      && !capabilities.managesOwnRates
+    ) {
+      errors.push(
+        `Route ${route.id}: provider "${provider}" cannot manage checkout rates.`,
+      );
+    }
+    const requiresChannelEligibility =
+      route.mode === "channel_managed"
+      || route.eligibilityMode === "channel"
+      || route.eligibilityMode === "intersection";
+    if (
+      requiresChannelEligibility
+      && !capabilities.enforcesDestinationEligibility
+    ) {
+      errors.push(
+        `Route ${route.id}: provider "${provider}" cannot enforce the selected destination eligibility.`,
+      );
+    }
+  }
+  return errors;
 }
 
 async function prepareRoutes(

@@ -100,6 +100,11 @@ function formatEbayOfferError(
 export class EbayAdapter implements IChannelAdapter {
   readonly adapterName = "eBay";
   readonly providerKey = "ebay";
+  readonly shippingCapabilities = Object.freeze({
+    acceptsEngineQuotes: false,
+    managesOwnRates: true,
+    enforcesDestinationEligibility: true,
+  });
 
   private authService: EbayAuthService | null = null;
   private apiClients = new Map<number, EbayApiClient>();

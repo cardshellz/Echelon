@@ -135,6 +135,20 @@ The admin workflow is organized by destination group: **Default pricing**, **Pro
 5. **Shopify enforcement:** connect US engine quotes and channel-managed international eligibility, then verify delivery-group benefit behavior against the same canonical shipping-group IDs.
 6. **Cutover and cleanup:** activate one channel/purpose at a time behind a kill switch, compare production evidence, remove string-keyed legacy routing only after parity, and retain a rollback revision.
 
+Implementation status on 2026-07-24:
+
+- Steps 1 and 2 are merged. Canonical policies remain configuration and shadow-comparison state only.
+- Step 3 was re-verified against Shellz Club's channel-ID policy projections and focused benefit tests; Shellz Club does not select Echelon pricing programs or adapters.
+- Step 4 declares immutable adapter capabilities in code. An engine-quoted route requires engine-quote support, a channel-managed route requires channel-rate support, and channel/intersection eligibility requires channel destination enforcement. A channel-managed route also requires destination enforcement because Echelon is not in that checkout request. Unknown providers may activate only an explicit `disabled` route. These checks do not cut over quote traffic.
+
+Initial capability declarations:
+
+| Provider | Accepts Echelon quotes | Manages channel rates | Enforces channel destination eligibility |
+| --- | --- | --- | --- |
+| Shopify | Yes | Yes | Yes |
+| eBay | No | Yes | Yes |
+| Manual/internal | Yes | No | No |
+
 ## Walkthrough decisions from 2026-07-02
 
 These remain useful design inputs except where the July 14 shipping-first decision supersedes their launch order. Cartonization, multi-origin splitting, and a ShipStation v2 key are no longer v1 checkout gates.

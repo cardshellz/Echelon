@@ -134,6 +134,11 @@ export function ChannelRoutingTab() {
                     </TableCell>
                     <TableCell>
                       <div className="capitalize">{channel.provider}</div>
+                      {channel.shippingCapabilities === null && (
+                        <div className="mt-1 text-xs font-medium text-destructive">
+                          No shipping adapter
+                        </div>
+                      )}
                       <Badge
                         variant={channel.status === "active" ? "outline" : "secondary"}
                         className="mt-1 capitalize"
