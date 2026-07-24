@@ -84,6 +84,13 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
     projectPhysicalPackage: vi.fn(),
     runDueBatch: vi.fn(),
   };
+  const providerLabelObserver = {
+    observeShipStationLabel: vi.fn().mockResolvedValue({
+      shippingProviderLabelId: 60001,
+      labelInserted: true,
+      eventInserted: true,
+    }),
+  };
 
   const execute = vi.fn(async (query: any) => {
     const chunks: unknown[] = query?.queryChunks ?? [];
@@ -147,12 +154,19 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
     }),
   };
 
-  return { db, execute, calls, fulfillmentAuthority };
+  return {
+    db,
+    execute,
+    calls,
+    fulfillmentAuthority,
+    providerLabelObserver,
+  };
 }
 
 function createTestShipStationService(mock: ReturnType<typeof makeDb>, inventoryCore?: any) {
   return createShipStationService(mock.db, inventoryCore, {
     fulfillmentAuthority: mock.fulfillmentAuthority as any,
+    providerLabelObserver: mock.providerLabelObserver as any,
   });
 }
 
@@ -186,7 +200,40 @@ function makeShipmentPayload(overrides: Partial<any> = {}) {
   };
 }
 
+function makeDispatchInput(overrides: Partial<any> = {}) {
+  return {
+    commandId: 701,
+    shippingProviderLabelId: 60001,
+    carrierTrackingEventId: 101,
+    provider: "shipstation",
+    providerLabelId: "77777",
+    providerOrderId: "555000",
+    providerOrderKey: "echelon-wms-shp-501",
+    trackingNumber: "1Z12345",
+    normalizedTrackingNumber: "1Z12345",
+    carrier: "ups",
+    serviceCode: "ups_ground",
+    dispatchOccurredAt: new Date("2026-04-24T15:30:00.000Z"),
+    ...overrides,
+  };
+}
+
 // ─── V2 tests ───────────────────────────────────────────────────────
+
+async function processTestShipment(
+  mock: ReturnType<typeof makeDb>,
+  shipment: ReturnType<typeof makeShipmentPayload>,
+  inventoryCore?: any,
+): Promise<number> {
+  const result = await createTestShipStationService(
+    mock,
+    inventoryCore,
+  ).processManualShipmentNotification(shipment, {
+    operator: "test:ship-notify-v2",
+    reason: "unit_test",
+  });
+  return result.processed ? 1 : 0;
+}
 
 describe("processShipNotify V2 :: shipment found by shipstation_order_id", () => {
   beforeEach(() => {
@@ -249,10 +296,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createTestShipStationService(mock);
-    const processed = await svc.processShipNotify(
-      "https://ssapi.shipstation.com/shipments?foo=bar",
-    );
+    const processed = await processTestShipment(mock, shipmentPayload);
 
     expect(processed).toBe(1);
 
@@ -322,8 +366,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createTestShipStationService(mock);
-    const processed = await svc.processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload);
 
     expect(processed).toBe(1);
 
@@ -419,8 +462,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createTestShipStationService(mock);
-    const processed = await svc.processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload);
 
     expect(processed).toBe(1);
 
@@ -470,8 +512,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createTestShipStationService(mock);
-    const processed = await svc.processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload);
 
     expect(processed).toBe(1);
 
@@ -511,7 +552,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [splitButNotShipped],
     }) as any;
 
-    const processed = await createTestShipStationService(mock).processShipNotify("/foo");
+    const processed = await processTestShipment(mock, splitButNotShipped);
 
     expect(processed).toBe(0);
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
@@ -639,8 +680,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const processed = await createTestShipStationService(mock, inventoryCore)
-      .processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
@@ -756,8 +796,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await createTestShipStationService(mock, inventoryCore)
-      .processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
@@ -840,8 +879,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const processed = await createTestShipStationService(mock, inventoryCore)
-      .processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
@@ -932,8 +970,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await createTestShipStationService(mock, inventoryCore)
-      .processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
@@ -1030,8 +1067,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await createTestShipStationService(mock, inventoryCore)
-      .processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({
@@ -1077,8 +1113,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createTestShipStationService(mock);
-    const processed = await svc.processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload);
 
     expect(processed).toBe(0);
 
@@ -1120,8 +1155,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createTestShipStationService(mock);
-    const processed = await svc.processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload);
 
     expect(processed).toBe(0);
 
@@ -1179,7 +1213,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
       shipments: [makeShipmentPayload()],
     }) as any;
 
-    const processed = await createTestShipStationService(mock).processShipNotify("/foo");
+    const processed = await processTestShipment(mock, makeShipmentPayload());
 
     expect(processed).toBe(1);
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
@@ -1193,7 +1227,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
         trackingNumber: "1Z12345",
         carrier: "UPS",
         serviceCode: "ups_ground",
-        source: "shipstation_ship_notify_v2",
+        source: "shipstation_manual_remediation",
       }),
       { executeImmediately: false },
     );
@@ -1204,6 +1238,73 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
     expect(source).not.toContain("__fulfillmentPush");
   });
 
+  it("promotes an exact non-voided label only after confirmed carrier possession", async () => {
+    const mock = makeDb(happyPathRows());
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload()],
+    }) as any;
+
+    const result = await createTestShipStationService(mock).confirmDispatch(
+      makeDispatchInput(),
+    );
+
+    expect(result).toMatchObject({
+      processed: true,
+      evidence: {
+        provider: "shipstation",
+        providerLabelId: "77777",
+        carrierTrackingEventId: 101,
+        carrierDispatchCommandId: 701,
+        dispatchOccurredAt: "2026-04-24T15:30:00.000Z",
+      },
+    });
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerPhysicalShipmentId: "77777",
+        trackingNumber: "1Z12345",
+        source: "carrier_tracking_confirmed_dispatch",
+        shippedAt: new Date("2026-04-24T15:30:00.000Z"),
+        correlationId: "carrier-tracking-event:101",
+        causationId: "carrier-dispatch-command:701",
+      }),
+      { executeImmediately: false },
+    );
+  });
+
+  it("rejects a voided label before any WMS or inventory transition", async () => {
+    const mock = makeDb([]);
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload({
+        voidDate: "2026-04-24T15:00:00.000Z",
+      })],
+    }) as any;
+
+    await expect(
+      createTestShipStationService(mock).confirmDispatch(makeDispatchInput()),
+    ).rejects.toMatchObject({
+      code: "CARRIER_DISPATCH_PROVIDER_LABEL_VOIDED",
+      retryable: false,
+    });
+    expect(mock.execute).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+  });
+
+  it("rejects tracking identity drift before any WMS or inventory transition", async () => {
+    const mock = makeDb([]);
+    globalThis.fetch = mockFetchOnceOk({
+      shipments: [makeShipmentPayload({ trackingNumber: "1Z-DIFFERENT" })],
+    }) as any;
+
+    await expect(
+      createTestShipStationService(mock).confirmDispatch(makeDispatchInput()),
+    ).rejects.toMatchObject({
+      code: "CARRIER_DISPATCH_TRACKING_IDENTITY_MISMATCH",
+      retryable: false,
+    });
+    expect(mock.execute).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+  });
+
   it("cannot be disabled by the retired Shopify fulfillment feature flag", async () => {
     process.env.SHOPIFY_FULFILLMENT_PUSH_ENABLED = "false";
     const mock = makeDb(happyPathRows());
@@ -1211,7 +1312,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
       shipments: [makeShipmentPayload()],
     }) as any;
 
-    await createTestShipStationService(mock).processShipNotify("/foo");
+    await processTestShipment(mock, makeShipmentPayload());
 
     expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
   });
@@ -1223,7 +1324,13 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
     }) as any;
 
     await expect(
-      createShipStationService(mock.db).processShipNotify("/foo"),
+      createShipStationService(mock.db).processManualShipmentNotification(
+        makeShipmentPayload(),
+        {
+          operator: "test:ship-notify-v2",
+          reason: "unit_test",
+        },
+      ),
     ).rejects.toThrow(/Canonical channel fulfillment authority is not initialized/);
   });
 });
@@ -1258,48 +1365,16 @@ describe("processShipNotify V2 :: error resilience", () => {
       orderId: 3,
       orderKey: "echelon-wms-shp-12",
     });
-    const path = (shipmentId: number, wmsOrderId: number, omsOrderId: number) => [
-      { rows: [{ id: shipmentId, order_id: wmsOrderId, status: "planned" }] },
-      {
-        rows: [{
-          id: shipmentId,
-          order_id: wmsOrderId,
-          status: "planned",
-          tracking_number: null,
-          carrier: null,
-          tracking_url: null,
-        }],
-      },
-      { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: String(omsOrderId) }] },
-      { rows: [{ status: "confirmed", financial_status: "paid" }] },
-    ];
-    const mock = makeDb([
-      ...path(10, 100, 200),
-      ...path(11, 101, 201),
-      ...path(12, 102, 202),
-    ]);
-    mock.fulfillmentAuthority.recordPhysicalPackage.mockImplementation(
-      async (input: any) => {
-        if (input.providerPhysicalShipmentId === "1002") {
-          throw new Error("simulated canonical authority failure");
+    const mock = makeDb([]);
+    mock.providerLabelObserver.observeShipStationLabel.mockImplementation(
+      async (shipment: any) => {
+        if (shipment.shipmentId === 1002) {
+          throw new Error("simulated label authority failure");
         }
         return {
-          materialized: {
-            physicalShipmentId: 90001,
-            shippingEngineOrderId: 80001,
-            channelCommands: [{ id: 70001, pushStatus: "pending" }],
-            customerFulfillmentItemCount: 1,
-            nonCustomerItemCount: 0,
-          },
-          dispatch: {
-            claimed: 0,
-            succeeded: 0,
-            ignored: 0,
-            retryScheduled: 0,
-            reviewRequired: 0,
-            deadLettered: 0,
-          },
+          shippingProviderLabelId: 60001,
+          labelInserted: true,
+          eventInserted: true,
         };
       },
     );
@@ -1311,9 +1386,10 @@ describe("processShipNotify V2 :: error resilience", () => {
     const svc = createTestShipStationService(mock);
     await expect(svc.processShipNotify("/foo")).rejects.toMatchObject({
       processed: 2,
-      failures: [{ shipmentId: 1002, message: "simulated canonical authority failure" }],
+      failures: [{ shipmentId: 1002, message: "simulated label authority failure" }],
     });
-    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(3);
+    expect(mock.providerLabelObserver.observeShipStationLabel).toHaveBeenCalledTimes(3);
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
   });
 });
 
@@ -1398,8 +1474,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createTestShipStationService(mock);
-    const processed = await svc.processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload);
 
     expect(processed).toBe(1);
 
@@ -1444,8 +1519,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       shipments: [shipmentPayload],
     }) as any;
 
-    const svc = createTestShipStationService(mock);
-    const processed = await svc.processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload);
 
     // Should not have processed — no WMS shipment to operate on.
     expect(processed).toBe(0);
@@ -1495,8 +1569,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
 
     globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-    const processed = await createTestShipStationService(mock, inventoryCore)
-      .processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(0);
     expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
@@ -1532,8 +1605,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
 
       globalThis.fetch = mockFetchOnceOk({ shipments: [shipmentPayload] }) as any;
 
-      const processed = await createTestShipStationService(mock, inventoryCore)
-        .processShipNotify("/foo");
+      const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
       expect(processed).toBe(0);
       expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
@@ -1815,8 +1887,7 @@ describe("processShipNotify V2 :: duplicate orderKey repair", () => {
       shipments: [shipmentPayload],
     }) as any;
 
-    const processed = await createTestShipStationService(mock, inventoryCore)
-      .processShipNotify("/foo");
+    const processed = await processTestShipment(mock, shipmentPayload, inventoryCore);
 
     expect(processed).toBe(1);
     expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({

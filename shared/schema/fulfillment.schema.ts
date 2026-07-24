@@ -572,6 +572,54 @@ export const carrierTrackingReconciliationState = wmsSchema.table("carrier_track
     .on(table.nextReconcileAt, table.lastReconciledAt),
 ]);
 
+export const carrierDispatchCommands = wmsSchema.table("carrier_dispatch_commands", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  shippingProviderLabelId: bigint("shipping_provider_label_id", { mode: "number" }).notNull().references(() => shippingProviderLabels.id, { onDelete: "restrict" }),
+  carrierTrackingEventId: bigint("carrier_tracking_event_id", { mode: "number" }).notNull().references(() => carrierTrackingEvents.id, { onDelete: "restrict" }),
+  commandKey: varchar("command_key", { length: 400 }).notNull(),
+  source: varchar("source", { length: 60 }).notNull(),
+  createdBy: varchar("created_by", { length: 200 }).notNull(),
+  status: varchar("status", { length: 30 }).notNull().default("pending"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  consecutiveFailureCount: integer("consecutive_failure_count").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+  leaseOwner: varchar("lease_owner", { length: 200 }),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  dispatchOccurredAt: timestamp("dispatch_occurred_at", { withTimezone: true }).notNull(),
+  succeededAt: timestamp("succeeded_at", { withTimezone: true }),
+  lastErrorCode: varchar("last_error_code", { length: 100 }),
+  lastErrorMessage: text("last_error_message"),
+  resultEvidence: jsonb("result_evidence").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_carrier_dispatch_commands_label").on(table.shippingProviderLabelId),
+  uniqueIndex("uq_carrier_dispatch_commands_key").on(table.commandKey),
+  index("idx_carrier_dispatch_commands_due")
+    .on(table.nextAttemptAt, table.leaseExpiresAt, table.id),
+  index("idx_carrier_dispatch_commands_status")
+    .on(table.status, table.updatedAt, table.id),
+]);
+
+export const carrierDispatchAttempts = wmsSchema.table("carrier_dispatch_attempts", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  carrierDispatchCommandId: bigint("carrier_dispatch_command_id", { mode: "number" }).notNull().references(() => carrierDispatchCommands.id, { onDelete: "restrict" }),
+  attemptNumber: integer("attempt_number").notNull(),
+  attemptOutcome: varchar("attempt_outcome", { length: 30 }).notNull(),
+  errorCode: varchar("error_code", { length: 100 }),
+  errorMessage: text("error_message"),
+  requestEvidence: jsonb("request_evidence").notNull(),
+  responseEvidence: jsonb("response_evidence").notNull().default({}),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_carrier_dispatch_attempts_number")
+    .on(table.carrierDispatchCommandId, table.attemptNumber),
+  index("idx_carrier_dispatch_attempts_command")
+    .on(table.carrierDispatchCommandId, table.attemptNumber),
+]);
+
 export const channelFulfillmentPushes = omsSchema.table("channel_fulfillment_pushes", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "restrict" }),
@@ -763,6 +811,8 @@ export const insertCarrierTrackingWebhookHydrationSchema = createInsertSchema(ca
 export const insertCarrierTrackingWebhookHydrationAttemptSchema = createInsertSchema(carrierTrackingWebhookHydrationAttempts).omit({ id: true, createdAt: true });
 export const insertCarrierTrackingEventMatchSchema = createInsertSchema(carrierTrackingEventMatches).omit({ id: true });
 export const insertCarrierTrackingReconciliationStateSchema = createInsertSchema(carrierTrackingReconciliationState);
+export const insertCarrierDispatchCommandSchema = createInsertSchema(carrierDispatchCommands).omit({ id: true });
+export const insertCarrierDispatchAttemptSchema = createInsertSchema(carrierDispatchAttempts).omit({ id: true });
 export const insertChannelFulfillmentPushSchema = createInsertSchema(channelFulfillmentPushes).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertChannelFulfillmentPushItemSchema = createInsertSchema(channelFulfillmentPushItems).omit({ id: true, createdAt: true });
 export const insertChannelFulfillmentPushAttemptSchema = createInsertSchema(channelFulfillmentPushAttempts).omit({ id: true, createdAt: true });
@@ -812,6 +862,8 @@ export type InsertCarrierTrackingEventMatch = z.infer<typeof insertCarrierTracki
 export type CarrierTrackingEventMatch = typeof carrierTrackingEventMatches.$inferSelect;
 export type InsertCarrierTrackingReconciliationState = z.infer<typeof insertCarrierTrackingReconciliationStateSchema>;
 export type CarrierTrackingReconciliationState = typeof carrierTrackingReconciliationState.$inferSelect;
+export type CarrierDispatchCommand = typeof carrierDispatchCommands.$inferSelect;
+export type CarrierDispatchAttempt = typeof carrierDispatchAttempts.$inferSelect;
 export type InsertChannelFulfillmentPush = z.infer<typeof insertChannelFulfillmentPushSchema>;
 export type ChannelFulfillmentPush = typeof channelFulfillmentPushes.$inferSelect;
 export type InsertChannelFulfillmentPushItem = z.infer<typeof insertChannelFulfillmentPushItemSchema>;

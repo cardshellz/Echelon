@@ -1689,7 +1689,13 @@ export async function adoptShipStationUnmappedPhysicalAsReship(
     originalProviderShipment,
   );
 
-  const processed = await shipStation.processShipmentNotification(shipment);
+  const processed = await shipStation.processManualShipmentNotification(
+    shipment,
+    {
+      operator,
+      reason: "adopt_unmapped_physical_as_reship",
+    },
+  );
   if (!processed.processed) {
     throw new Error("classified shipment did not complete the guarded ShipStation cascade");
   }

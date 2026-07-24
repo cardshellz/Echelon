@@ -1,6 +1,8 @@
 import { and, eq, sql } from "drizzle-orm";
 
 import {
+  carrierDispatchAttempts,
+  carrierDispatchCommands,
   carrierTrackingSubscriptionAttempts,
   carrierTrackingSubscriptionLabels,
   carrierTrackingSubscriptions,
@@ -37,6 +39,52 @@ export interface StoredCarrierTrackingMatch {
   id: number;
   inserted: boolean;
   shippingProviderLabelId: number | null;
+}
+
+export interface StoredCarrierDispatchCommand {
+  id: number;
+  inserted: boolean;
+  status: string;
+}
+
+export interface ClaimedCarrierDispatchCommand {
+  id: number;
+  shippingProviderLabelId: number;
+  carrierTrackingEventId: number;
+  provider: string;
+  providerLabelId: string;
+  providerOrderId: string | null;
+  providerOrderKey: string | null;
+  trackingNumber: string;
+  normalizedTrackingNumber: string;
+  carrier: string | null;
+  serviceCode: string | null;
+  dispatchOccurredAt: Date;
+  attemptNumber: number;
+  consecutiveFailureCount: number;
+  startedAt: Date;
+  leaseOwner: string;
+  leaseExpiresAt: Date;
+}
+
+export interface FinalizeCarrierDispatchAttemptInput {
+  commandId: number;
+  attemptNumber: number;
+  leaseOwner: string;
+  outcome: "succeeded" | "retry_scheduled" | "review_required";
+  errorCode: string | null;
+  errorMessage: string | null;
+  requestEvidence: Record<string, unknown>;
+  responseEvidence: Record<string, unknown>;
+  startedAt: Date;
+  completedAt: Date;
+  nextAttemptAt: Date | null;
+}
+
+export interface StoredCarrierDispatchAttempt {
+  id: number;
+  inserted: boolean;
+  outcome: "succeeded" | "retry_scheduled" | "review_required";
 }
 
 export interface StoredCarrierTrackingWebhookReceipt {
@@ -166,6 +214,12 @@ export interface CarrierTrackingTransaction {
     resolution: CarrierTrackingMatchResolution,
     reconciledAt: Date,
   ): Promise<void>;
+  enqueueDispatchCommand(
+    eventId: number,
+    shippingProviderLabelId: number,
+    dispatchOccurredAt: Date,
+    createdAt: Date,
+  ): Promise<StoredCarrierDispatchCommand>;
 }
 
 export interface CarrierTrackingRepository {
@@ -232,6 +286,15 @@ export interface CarrierTrackingRepository {
     limit: number,
     asOf: Date,
   ): Promise<NormalizedCarrierTrackingEvent[]>;
+  claimDispatchCommands(
+    limit: number,
+    asOf: Date,
+    leaseOwner: string,
+    leaseExpiresAt: Date,
+  ): Promise<ClaimedCarrierDispatchCommand[]>;
+  finalizeDispatchAttempt(
+    input: FinalizeCarrierDispatchAttemptInput,
+  ): Promise<StoredCarrierDispatchAttempt>;
   transaction<T>(work: (tx: CarrierTrackingTransaction) => Promise<T>): Promise<T>;
 }
 
@@ -271,6 +334,20 @@ function requiredString(value: unknown, field: string): string {
   return parsed;
 }
 
+function carrierDispatchAttemptOutcome(
+  value: unknown,
+): StoredCarrierDispatchAttempt["outcome"] {
+  const outcome = requiredString(value, "carrier_dispatch_attempt_outcome");
+  if (
+    outcome !== "succeeded"
+    && outcome !== "retry_scheduled"
+    && outcome !== "review_required"
+  ) {
+    throw new Error("Invalid carrier_dispatch_attempt_outcome returned by carrier tracking repository");
+  }
+  return outcome;
+}
+
 function dateOrNull(value: unknown, field: string): Date | null {
   if (value === null || value === undefined || value === "") return null;
   const date = value instanceof Date ? new Date(value) : new Date(String(value));
@@ -291,6 +368,45 @@ function requiredRecord(value: unknown, field: string): Record<string, unknown> 
     throw new Error(`Invalid ${field} returned by carrier tracking repository`);
   }
   return value as Record<string, unknown>;
+}
+
+function claimedDispatchCommandFromRow(
+  row: Record<string, unknown>,
+): ClaimedCarrierDispatchCommand {
+  return {
+    id: requiredId(row.id, "carrier_dispatch_command_id"),
+    shippingProviderLabelId: requiredId(
+      row.shipping_provider_label_id,
+      "shipping_provider_label_id",
+    ),
+    carrierTrackingEventId: requiredId(
+      row.carrier_tracking_event_id,
+      "carrier_tracking_event_id",
+    ),
+    provider: requiredString(row.provider, "provider"),
+    providerLabelId: requiredString(row.provider_label_id, "provider_label_id"),
+    providerOrderId: stringOrNull(row.provider_order_id),
+    providerOrderKey: stringOrNull(row.provider_order_key),
+    trackingNumber: requiredString(row.tracking_number, "tracking_number"),
+    normalizedTrackingNumber: requiredString(
+      row.normalized_tracking_number,
+      "normalized_tracking_number",
+    ),
+    carrier: stringOrNull(row.carrier),
+    serviceCode: stringOrNull(row.service_code),
+    dispatchOccurredAt: requiredDate(
+      row.dispatch_occurred_at,
+      "dispatch_occurred_at",
+    ),
+    attemptNumber: nonNegativeInteger(row.attempt_number, "attempt_number"),
+    consecutiveFailureCount: nonNegativeInteger(
+      row.consecutive_failure_count,
+      "consecutive_failure_count",
+    ),
+    startedAt: requiredDate(row.started_at, "started_at"),
+    leaseOwner: requiredString(row.lease_owner, "lease_owner"),
+    leaseExpiresAt: requiredDate(row.lease_expires_at, "lease_expires_at"),
+  };
 }
 
 const CANONICAL_CARRIER_TRACKING_STATUSES = [
@@ -970,6 +1086,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               labelCreatedAt: observation.labelCreatedAt ?? existing[0].labelCreatedAt,
               voidedAt: observation.voidedAt ?? existing[0].voidedAt,
               lastObservedAt: observation.observedAt,
+              metadata: { authorityMode: "carrier_dispatch_cutover" },
               updatedAt: observation.observedAt,
             })
             .where(eq(shippingProviderLabels.id, existing[0].id))
@@ -993,7 +1110,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               firstObservedAt: observation.observedAt,
               lastObservedAt: observation.observedAt,
               source: "shipstation_shipment_observation",
-              metadata: { shadowOnly: true },
+              metadata: { authorityMode: "carrier_dispatch_cutover" },
               createdAt: observation.observedAt,
               updatedAt: observation.observedAt,
             })
@@ -1542,6 +1659,180 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
       });
     },
 
+    async claimDispatchCommands(limit, asOf, leaseOwner, leaseExpiresAt) {
+      if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+        throw new Error("Carrier-dispatch claim limit must be an integer between 1 and 100");
+      }
+      if (Number.isNaN(asOf.getTime()) || Number.isNaN(leaseExpiresAt.getTime())) {
+        throw new Error("Carrier-dispatch claim timestamps must be valid");
+      }
+      if (leaseExpiresAt.getTime() <= asOf.getTime()) {
+        throw new Error("Carrier-dispatch lease must expire after asOf");
+      }
+      const normalizedLeaseOwner = leaseOwner.trim();
+      if (!normalizedLeaseOwner || normalizedLeaseOwner.length > 150) {
+        throw new Error("Carrier-dispatch leaseOwner must contain 1 through 150 characters");
+      }
+
+      const result = await db.execute(sql`
+        WITH due AS (
+          SELECT command.id
+          FROM wms.carrier_dispatch_commands AS command
+          WHERE command.status = 'pending'
+             OR (
+               command.status = 'retry_scheduled'
+               AND command.next_attempt_at <= ${asOf}
+             )
+             OR (
+               command.status = 'processing'
+               AND command.lease_expires_at <= ${asOf}
+             )
+          ORDER BY
+            CASE WHEN command.status = 'processing' THEN 0 ELSE 1 END,
+            COALESCE(
+              command.lease_expires_at,
+              command.next_attempt_at,
+              command.created_at
+            ),
+            command.id
+          FOR UPDATE SKIP LOCKED
+          LIMIT ${limit}
+        ),
+        claimed AS (
+          UPDATE wms.carrier_dispatch_commands AS command
+          SET
+            status = 'processing',
+            attempt_count = CASE
+              WHEN command.status = 'processing'
+                THEN GREATEST(command.attempt_count, 1)
+              ELSE command.attempt_count + 1
+            END,
+            next_attempt_at = NULL,
+            lease_owner = LEFT(${normalizedLeaseOwner}, 150)
+              || ':' || txid_current()::text
+              || ':' || command.id::text,
+            lease_expires_at = ${leaseExpiresAt},
+            updated_at = ${asOf}
+          FROM due
+          WHERE command.id = due.id
+          RETURNING
+            command.id,
+            command.shipping_provider_label_id,
+            command.carrier_tracking_event_id,
+            command.dispatch_occurred_at,
+            command.attempt_count AS attempt_number,
+            command.consecutive_failure_count,
+            command.lease_owner,
+            command.lease_expires_at
+        )
+        SELECT
+          claimed.*,
+          label.provider,
+          label.provider_label_id,
+          label.provider_order_id,
+          label.provider_order_key,
+          label.tracking_number,
+          label.normalized_tracking_number,
+          label.carrier,
+          label.service_code,
+          ${asOf}::timestamptz AS started_at
+        FROM claimed
+        JOIN wms.shipping_provider_labels AS label
+          ON label.id = claimed.shipping_provider_label_id
+        ORDER BY claimed.id
+      `);
+      return resultRows(result).map(claimedDispatchCommandFromRow);
+    },
+
+    async finalizeDispatchAttempt(input) {
+      if (Number.isNaN(input.startedAt.getTime())
+          || Number.isNaN(input.completedAt.getTime())
+          || (input.nextAttemptAt && Number.isNaN(input.nextAttemptAt.getTime()))) {
+        throw new Error("Carrier-dispatch finalization timestamps must be valid");
+      }
+      if (input.completedAt.getTime() < input.startedAt.getTime()) {
+        throw new Error("Carrier-dispatch attempt cannot complete before it starts");
+      }
+      if (input.outcome === "retry_scheduled" && !input.nextAttemptAt) {
+        throw new Error("Retryable carrier-dispatch attempts require nextAttemptAt");
+      }
+      if (input.outcome !== "retry_scheduled" && input.nextAttemptAt) {
+        throw new Error("Only retryable carrier-dispatch attempts may set nextAttemptAt");
+      }
+
+      return db.transaction(async (databaseTx: any) => {
+        const existing = await databaseTx
+          .select({
+            id: carrierDispatchAttempts.id,
+            outcome: carrierDispatchAttempts.attemptOutcome,
+          })
+          .from(carrierDispatchAttempts)
+          .where(and(
+            eq(carrierDispatchAttempts.carrierDispatchCommandId, input.commandId),
+            eq(carrierDispatchAttempts.attemptNumber, input.attemptNumber),
+          ))
+          .limit(1);
+        if (existing[0]) {
+          return {
+            id: requiredId(existing[0].id, "carrier_dispatch_attempt_id"),
+            inserted: false,
+            outcome: carrierDispatchAttemptOutcome(existing[0].outcome),
+          };
+        }
+
+        const stateResult = await databaseTx.execute(sql`
+          SELECT status, attempt_count, lease_owner
+          FROM wms.carrier_dispatch_commands
+          WHERE id = ${input.commandId}
+          FOR UPDATE
+        `);
+        const state = resultRows(stateResult)[0];
+        if (!state) throw new Error("Carrier-dispatch command no longer exists");
+        if (state.status !== "processing"
+            || state.lease_owner !== input.leaseOwner
+            || Number(state.attempt_count) !== input.attemptNumber) {
+          throw new Error("Carrier-dispatch command lease was lost before finalization");
+        }
+
+        const [attempt] = await databaseTx
+          .insert(carrierDispatchAttempts)
+          .values({
+            carrierDispatchCommandId: input.commandId,
+            attemptNumber: input.attemptNumber,
+            attemptOutcome: input.outcome,
+            errorCode: input.errorCode,
+            errorMessage: input.errorMessage,
+            requestEvidence: input.requestEvidence,
+            responseEvidence: input.responseEvidence,
+            startedAt: input.startedAt,
+            completedAt: input.completedAt,
+            createdAt: input.completedAt,
+          })
+          .returning({ id: carrierDispatchAttempts.id });
+        const attemptId = requiredId(attempt?.id, "carrier_dispatch_attempt_id");
+
+        await databaseTx
+          .update(carrierDispatchCommands)
+          .set({
+            status: input.outcome,
+            consecutiveFailureCount: input.outcome === "succeeded"
+              ? 0
+              : sql`${carrierDispatchCommands.consecutiveFailureCount} + 1`,
+            nextAttemptAt: input.nextAttemptAt,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            succeededAt: input.outcome === "succeeded" ? input.completedAt : null,
+            lastErrorCode: input.errorCode,
+            lastErrorMessage: input.errorMessage,
+            resultEvidence: input.responseEvidence,
+            updatedAt: input.completedAt,
+          })
+          .where(eq(carrierDispatchCommands.id, input.commandId));
+
+        return { id: attemptId, inserted: true, outcome: input.outcome };
+      });
+    },
+
     async listEventsPendingReconciliation(limit, asOf) {
       if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 500) {
         throw new Error("Carrier tracking reconciliation limit must be an integer between 1 and 500");
@@ -1736,7 +2027,12 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           },
 
           async markEventReconciled(eventId, matchAttemptId, resolution, reconciledAt) {
-            const nextReconcileAt = ["unmatched", "ambiguous", "review"].includes(resolution.status)
+            const matchedWithoutLineage =
+              resolution.status === "matched"
+              && (resolution.selectedCandidate?.linkCount ?? 0) === 0;
+            const nextReconcileAt =
+              ["unmatched", "ambiguous", "review"].includes(resolution.status)
+              || matchedWithoutLineage
               ? new Date(reconciledAt.getTime() + 30 * 60 * 1_000)
               : null;
             await databaseTx
@@ -1763,6 +2059,63 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                   updatedAt: reconciledAt,
                 },
               });
+          },
+
+          async enqueueDispatchCommand(
+            eventId,
+            shippingProviderLabelId,
+            dispatchOccurredAt,
+            createdAt,
+          ) {
+            const commandKey =
+              `carrier-dispatch:shipping-provider-label:${shippingProviderLabelId}`;
+            const inserted = await databaseTx
+              .insert(carrierDispatchCommands)
+              .values({
+                shippingProviderLabelId,
+                carrierTrackingEventId: eventId,
+                commandKey,
+                source: "carrier_tracking_reconciler",
+                createdBy: "system:carrier_tracking",
+                status: "pending",
+                dispatchOccurredAt,
+                createdAt,
+                updatedAt: createdAt,
+              })
+              .onConflictDoNothing({
+                target: carrierDispatchCommands.shippingProviderLabelId,
+              })
+              .returning({
+                id: carrierDispatchCommands.id,
+                status: carrierDispatchCommands.status,
+              });
+            if (inserted[0]) {
+              return {
+                id: requiredId(inserted[0].id, "carrier_dispatch_command_id"),
+                inserted: true,
+                status: requiredString(inserted[0].status, "carrier_dispatch_status"),
+              };
+            }
+
+            const existing = await databaseTx
+              .select({
+                id: carrierDispatchCommands.id,
+                status: carrierDispatchCommands.status,
+              })
+              .from(carrierDispatchCommands)
+              .where(eq(
+                carrierDispatchCommands.shippingProviderLabelId,
+                shippingProviderLabelId,
+              ))
+              .limit(1);
+            if (!existing[0]) {
+              throw new Error("Carrier-dispatch command conflict could not be re-read");
+            }
+            return {
+              id: requiredId(existing[0].id, "carrier_dispatch_command_id"),
+              inserted: false,
+              status: requiredString(existing[0].status, "carrier_dispatch_status"),
+            };
           },
         };
         return work(tx);

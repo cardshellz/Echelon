@@ -280,6 +280,7 @@ describe("Control Tower V2 domain", () => {
     expect(queryText).toContain("wms.carrier_tracking_webhook_hydrations");
     expect(queryText).toContain("wms.carrier_tracking_subscriptions");
     expect(queryText).toContain("wms.carrier_tracking_subscription_labels");
+    expect(queryText).toContain("wms.carrier_dispatch_commands");
     expect(queryText).toContain("carrier_tracking_carrier_missing");
     expect(queryText).toContain("carrier_tracking_subscription_not_active");
     expect(queryText).toContain("carrier_tracking_subscription_review");
@@ -290,6 +291,8 @@ describe("Control Tower V2 domain", () => {
     expect(queryText).toContain("carrier_tracking_receipt_unparsed");
     expect(queryText).toContain("carrier_tracking_hydration_not_complete");
     expect(queryText).toContain("carrier_tracking_hydration_review");
+    expect(queryText).toContain("carrier_dispatch_command_review");
+    expect(queryText).toContain("carrier_dispatch_retry_overdue");
     expect(queryText).toContain("acceptance_subscription.activated_at");
     expect(queryText).toContain("latest_confirmed_label_event");
     expect(queryText).toContain("JOIN latest_confirmed_label_event AS confirmed");
@@ -380,6 +383,46 @@ describe("Control Tower V2 domain", () => {
     });
     expect(item.actualState).toContain("match review");
     expect(item.actualState).toContain("SHIPSTATION_TRACKING_HTTP");
+  });
+
+  it("projects a failed carrier dispatch command as an order-linked blocker", () => {
+    const item = carrierTrackingSource.projectRow({
+      source_key: "dispatch:701:review",
+      issue_code: "carrier_dispatch_command_review",
+      label_id: 12,
+      event_id: 101,
+      receipt_id: null,
+      provider: "shipstation",
+      provider_label_id: "442000003",
+      tracking_number: "1Z999AA10123456785",
+      label_status: "active",
+      link_count: 1,
+      wms_order_id: 204_901,
+      order_number: "#60002",
+      order_numbers: ["#60002"],
+      provider_status_code: null,
+      canonical_status: "dispatch_command_review_required",
+      dispatch_evidence: "confirmed",
+      match_status: "review_required",
+      reason_code: "CARRIER_DISPATCH_PACKAGE_NOT_RESOLVED",
+      first_seen_at: "2026-07-20T11:00:00.000Z",
+      last_seen_at: "2026-07-20T11:05:00.000Z",
+    }, new Date("2026-07-20T12:00:00.000Z"));
+
+    expect(item).toMatchObject({
+      code: "carrier_dispatch_command_review",
+      entityType: "carrier_dispatch_command",
+      entityId: "701",
+      entityRef: "Order #60002 / 1Z999AA10123456785",
+      severity: "blocker",
+      urgency: "overdue",
+      detailLocator: {
+        sourceTable: "wms.carrier_dispatch_commands",
+        sourceId: 701,
+        wmsOrderId: 204_901,
+      },
+    });
+    expect(item.actualState).toContain("CARRIER_DISPATCH_PACKAGE_NOT_RESOLVED");
   });
 
   it("projects an overdue carrier acceptance scan as a shipping exception", () => {

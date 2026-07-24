@@ -5,6 +5,7 @@ import type {
   CarrierTrackingRepository,
   CarrierTrackingTransaction,
 } from "../../carrier-tracking.repository";
+import { CarrierDispatchAuthorityError } from "../../carrier-dispatch-authority";
 import { CarrierTrackingService, type CarrierTrackingLogger } from "../../carrier-tracking.service";
 import { ShipStationTrackingEventsError } from "../../shipstation-tracking-events.client";
 import { ShipStationTrackingSubscriptionError } from "../../shipstation-tracking-subscriptions.client";
@@ -58,12 +59,18 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
       shippingProviderLabelId,
     }),
   );
+  const enqueueDispatchCommand = vi.fn().mockResolvedValue({
+    id: 701,
+    inserted: true,
+    status: "pending",
+  });
   const tx: CarrierTrackingTransaction = {
     acquireTrackingLock: vi.fn().mockResolvedValue(undefined),
     insertOrGetEvent,
     findMatchCandidates: vi.fn().mockResolvedValue(candidates),
     appendMatchAttempt,
     markEventReconciled: vi.fn().mockResolvedValue(undefined),
+    enqueueDispatchCommand,
   };
   const repository: CarrierTrackingRepository = {
     persistVerifiedWebhookReceipt: vi.fn().mockResolvedValue({ id: 301, inserted: true }),
@@ -103,9 +110,21 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
     claimTrackingSubscriptions: vi.fn().mockResolvedValue([]),
     finalizeTrackingSubscriptionAttempt: vi.fn().mockResolvedValue({ id: 501, inserted: true }),
     listEventsPendingReconciliation: vi.fn().mockResolvedValue([]),
+    claimDispatchCommands: vi.fn().mockResolvedValue([]),
+    finalizeDispatchAttempt: vi.fn().mockImplementation(async (input) => ({
+      id: 801,
+      inserted: true,
+      outcome: input.outcome,
+    })),
     transaction: async (work) => work(tx),
   };
-  return { repository, tx, insertOrGetEvent, appendMatchAttempt };
+  return {
+    repository,
+    tx,
+    insertOrGetEvent,
+    appendMatchAttempt,
+    enqueueDispatchCommand,
+  };
 }
 
 describe("CarrierTrackingService", () => {
@@ -528,7 +547,7 @@ describe("CarrierTrackingService", () => {
   });
 
   it("matches carrier evidence to one existing provider label during reconciliation", async () => {
-    const { repository } = repositoryWithCandidates([{
+    const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
       shippingProviderLabelId: 10,
       providerLabelId: "442000001",
       labelStatus: "active",
@@ -553,6 +572,244 @@ describe("CarrierTrackingService", () => {
       unresolved: 0,
     });
     expect(repository.listEventsPendingReconciliation).toHaveBeenCalledWith(25, now);
+    expect(enqueueDispatchCommand).toHaveBeenCalledWith(
+      101,
+      10,
+      new Date("2026-07-20T11:30:00.000Z"),
+      now,
+    );
+  });
+
+  it("does not enqueue dispatch for carrier evidence that does not prove possession", async () => {
+    const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
+      shippingProviderLabelId: 10,
+      providerLabelId: "442000001",
+      labelStatus: "active",
+      linkCount: 1,
+      orderNumbers: ["#60001"],
+      carrier: "ups",
+      serviceCode: "ups_ground",
+    }]);
+    const notDispatched = normalizeShipStationTrackingWebhook({
+      ...payload(),
+      data: {
+        ...payload().data,
+        status_code: "NY",
+        status_detail_code: "LABEL_CREATED",
+        events: [],
+      },
+    }, now);
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+    });
+    vi.mocked(repository.listEventsPendingReconciliation).mockResolvedValue([
+      notDispatched,
+    ]);
+
+    await service.reconcileUnresolved(25);
+
+    expect(notDispatched.dispatchEvidence).toBe("not_confirmed");
+    expect(enqueueDispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("executes a leased dispatch command once and records a successful attempt", async () => {
+    const { repository } = repositoryWithCandidates([]);
+    vi.mocked(repository.claimDispatchCommands).mockResolvedValue([{
+      id: 701,
+      shippingProviderLabelId: 10,
+      carrierTrackingEventId: 101,
+      provider: "shipstation",
+      providerLabelId: "442000001",
+      providerOrderId: "755000001",
+      providerOrderKey: "echelon-wms-shp-4814",
+      trackingNumber: "1Z999AA10123456784",
+      normalizedTrackingNumber: "1Z999AA10123456784",
+      carrier: "ups",
+      serviceCode: "ups_ground",
+      dispatchOccurredAt: new Date("2026-07-20T11:30:00.000Z"),
+      attemptNumber: 1,
+      consecutiveFailureCount: 0,
+      startedAt: new Date(now),
+      leaseOwner: "dispatch-worker",
+      leaseExpiresAt: new Date("2026-07-20T12:10:00.000Z"),
+    }]);
+    const confirmDispatch = vi.fn().mockResolvedValue({
+      processed: true,
+      evidence: { physicalShipmentId: 999 },
+    });
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+      dispatchAuthority: { confirmDispatch },
+      dispatchLeaseOwner: "dispatch-worker",
+    });
+
+    const result = await service.dispatchConfirmedPackages(25);
+
+    expect(result).toEqual({
+      dispatchCommandsClaimed: 1,
+      dispatchCommandsSucceeded: 1,
+      dispatchCommandsRetryScheduled: 0,
+      dispatchCommandsReviewRequired: 0,
+      dispatchAuthorityConfigured: true,
+      errors: 0,
+    });
+    expect(confirmDispatch).toHaveBeenCalledWith(expect.objectContaining({
+      commandId: 701,
+      providerLabelId: "442000001",
+      carrierTrackingEventId: 101,
+      dispatchOccurredAt: new Date("2026-07-20T11:30:00.000Z"),
+    }));
+    expect(repository.finalizeDispatchAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commandId: 701,
+        attemptNumber: 1,
+        leaseOwner: "dispatch-worker",
+        outcome: "succeeded",
+        errorCode: null,
+        nextAttemptAt: null,
+      }),
+    );
+  });
+
+  it("retries transient dispatch failures and sends deterministic failures to review", async () => {
+    const { repository } = repositoryWithCandidates([]);
+    const command = {
+      id: 701,
+      shippingProviderLabelId: 10,
+      carrierTrackingEventId: 101,
+      provider: "shipstation",
+      providerLabelId: "442000001",
+      providerOrderId: "755000001",
+      providerOrderKey: "echelon-wms-shp-4814",
+      trackingNumber: "1Z999AA10123456784",
+      normalizedTrackingNumber: "1Z999AA10123456784",
+      carrier: "ups",
+      serviceCode: "ups_ground",
+      dispatchOccurredAt: new Date("2026-07-20T11:30:00.000Z"),
+      attemptNumber: 1,
+      consecutiveFailureCount: 0,
+      startedAt: new Date(now),
+      leaseOwner: "dispatch-worker",
+      leaseExpiresAt: new Date("2026-07-20T12:10:00.000Z"),
+    };
+    vi.mocked(repository.claimDispatchCommands)
+      .mockResolvedValueOnce([command])
+      .mockResolvedValueOnce([{ ...command, id: 702 }]);
+    const confirmDispatch = vi.fn()
+      .mockRejectedValueOnce(new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_PROVIDER_LOOKUP_FAILED",
+        "provider temporarily unavailable",
+        { retryable: true },
+      ))
+      .mockRejectedValueOnce(new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_TRACKING_IDENTITY_MISMATCH",
+        "tracking identity changed",
+        { retryable: false },
+      ));
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+      dispatchAuthority: { confirmDispatch },
+      dispatchLeaseOwner: "dispatch-worker",
+    });
+
+    await expect(service.dispatchConfirmedPackages(25)).resolves.toMatchObject({
+      dispatchCommandsRetryScheduled: 1,
+      dispatchCommandsReviewRequired: 0,
+    });
+    await expect(service.dispatchConfirmedPackages(25)).resolves.toMatchObject({
+      dispatchCommandsRetryScheduled: 0,
+      dispatchCommandsReviewRequired: 1,
+    });
+    expect(repository.finalizeDispatchAttempt).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        commandId: 701,
+        outcome: "retry_scheduled",
+        errorCode: "CARRIER_DISPATCH_PROVIDER_LOOKUP_FAILED",
+        nextAttemptAt: new Date("2026-07-20T12:05:00.000Z"),
+      }),
+    );
+    expect(repository.finalizeDispatchAttempt).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        commandId: 702,
+        outcome: "review_required",
+        errorCode: "CARRIER_DISPATCH_TRACKING_IDENTITY_MISMATCH",
+        nextAttemptAt: null,
+      }),
+    );
+  });
+
+  it("reports the persisted dispatch outcome when finalization replays an existing attempt", async () => {
+    const { repository } = repositoryWithCandidates([]);
+    vi.mocked(repository.claimDispatchCommands).mockResolvedValue([{
+      id: 703,
+      shippingProviderLabelId: 10,
+      carrierTrackingEventId: 101,
+      provider: "shipstation",
+      providerLabelId: "442000001",
+      providerOrderId: "755000001",
+      providerOrderKey: "echelon-wms-shp-4814",
+      trackingNumber: "1Z999AA10123456784",
+      normalizedTrackingNumber: "1Z999AA10123456784",
+      carrier: "ups",
+      serviceCode: "ups_ground",
+      dispatchOccurredAt: new Date("2026-07-20T11:30:00.000Z"),
+      attemptNumber: 2,
+      consecutiveFailureCount: 1,
+      startedAt: new Date(now),
+      leaseOwner: "dispatch-worker:9001:703",
+      leaseExpiresAt: new Date("2026-07-20T12:10:00.000Z"),
+    }]);
+    vi.mocked(repository.finalizeDispatchAttempt).mockResolvedValue({
+      id: 802,
+      inserted: false,
+      outcome: "succeeded",
+    });
+    const confirmDispatch = vi.fn().mockRejectedValue(
+      new CarrierDispatchAuthorityError(
+        "CARRIER_DISPATCH_PROVIDER_LOOKUP_FAILED",
+        "provider temporarily unavailable",
+        { retryable: true },
+      ),
+    );
+    const dispatchLogger = logger();
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: dispatchLogger,
+      dispatchAuthority: { confirmDispatch },
+      dispatchLeaseOwner: "dispatch-worker",
+    });
+
+    await expect(service.dispatchConfirmedPackages(25)).resolves.toEqual({
+      dispatchCommandsClaimed: 1,
+      dispatchCommandsSucceeded: 1,
+      dispatchCommandsRetryScheduled: 0,
+      dispatchCommandsReviewRequired: 0,
+      dispatchAuthorityConfigured: true,
+      errors: 0,
+    });
+    expect(repository.finalizeDispatchAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commandId: 703,
+        outcome: "retry_scheduled",
+      }),
+    );
+    expect(dispatchLogger.info).toHaveBeenCalledWith(expect.objectContaining({
+      code: "CARRIER_DISPATCH_COMMAND_SUCCEEDED",
+      context: expect.objectContaining({
+        attemptedOutcome: "retry_scheduled",
+        persistedOutcome: "succeeded",
+        replayedAttempt: true,
+      }),
+    }));
   });
 
   it("observes ShipStation labels through the dedicated label boundary", async () => {
@@ -621,6 +878,11 @@ describe("CarrierTrackingService", () => {
       matched: 1,
       unresolved: 0,
       attemptsAppended: 1,
+      dispatchCommandsClaimed: 0,
+      dispatchCommandsSucceeded: 0,
+      dispatchCommandsRetryScheduled: 0,
+      dispatchCommandsReviewRequired: 0,
+      dispatchAuthorityConfigured: false,
       errors: 0,
     });
     expect(repository.reconcileProviderLabelLinks).toHaveBeenCalledWith(
