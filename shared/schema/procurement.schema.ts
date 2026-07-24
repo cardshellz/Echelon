@@ -944,6 +944,9 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
   productName: text("product_name").notNull(),
   forecastMethod: varchar("forecast_method", { length: 40 }).notNull(),
   forecastVersion: integer("forecast_version").notNull(),
+  forecastPolicyCaptureVersion: integer("forecast_policy_capture_version").notNull().default(0),
+  forecastPolicyFingerprint: varchar("forecast_policy_fingerprint", { length: 64 }),
+  forecastPolicySnapshot: jsonb("forecast_policy_snapshot"),
   forecastDailyPiecesMicros: bigint("forecast_daily_pieces_micros", { mode: "number" }).notNull(),
   baselineDailyPiecesMicros: bigint("baseline_daily_pieces_micros", { mode: "number" }).notNull(),
   forwardDemandPieces: integer("forward_demand_pieces").notNull().default(0),
@@ -958,8 +961,23 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
   uniqueIndex("purchase_forecast_observations_run_product_scope_uidx")
     .on(table.runId, table.productId, table.scope),
   index("purchase_forecast_observations_product_run_idx").on(table.productId, table.runId),
+  index("purchase_forecast_observations_policy_cohort_idx")
+    .on(table.forecastPolicyFingerprint, table.forecastMethod, table.forecastVersion, table.productId, table.createdAt),
   check("purchase_forecast_observations_scope_chk", sql`${table.scope} IN ('product_all_warehouses')`),
   check("purchase_forecast_observations_version_chk", sql`${table.forecastVersion} > 0`),
+  check(
+    "purchase_forecast_observations_policy_capture_chk",
+    sql`(
+        ${table.forecastPolicyCaptureVersion} = 0
+        AND ${table.forecastPolicyFingerprint} IS NULL
+        AND ${table.forecastPolicySnapshot} IS NULL
+      )
+      OR (
+        ${table.forecastPolicyCaptureVersion} = 1
+        AND ${table.forecastPolicyFingerprint} ~ '^[0-9a-f]{64}$'
+        AND jsonb_typeof(${table.forecastPolicySnapshot}) = 'object'
+      )`,
+  ),
   check("purchase_forecast_observations_forecast_qty_chk", sql`${table.forecastDailyPiecesMicros} >= 0`),
   check("purchase_forecast_observations_baseline_qty_chk", sql`${table.baselineDailyPiecesMicros} >= 0`),
   check("purchase_forecast_observations_forward_qty_chk", sql`${table.forwardDemandPieces} >= 0 AND ${table.forwardDemandRawPieces} >= 0`),

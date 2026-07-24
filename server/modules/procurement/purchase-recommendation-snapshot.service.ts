@@ -10,6 +10,11 @@ import type {
   AutoDraftRecommendationSettings,
   PurchasingRecommendationItem,
 } from "./purchasing-recommendation.engine";
+import {
+  buildPurchasingForecastPolicyCohort,
+  PURCHASING_FORECAST_POLICY_CAPTURE_VERSION,
+  type PurchasingForecastPolicyCohortSnapshot,
+} from "./purchasing-forecast-policy";
 import type { PurchasingForwardDemandContribution } from "./purchasing-forward-demand-contribution";
 import { buildPurchasingRfqQueue } from "./purchasing-rfq.service";
 
@@ -44,6 +49,9 @@ export type PurchaseForecastObservationInput = {
   productName: string;
   forecastMethod: string;
   forecastVersion: number;
+  forecastPolicyCaptureVersion: typeof PURCHASING_FORECAST_POLICY_CAPTURE_VERSION;
+  forecastPolicyFingerprint: string;
+  forecastPolicySnapshot: PurchasingForecastPolicyCohortSnapshot;
   forecastDailyPiecesMicros: number;
   baselineDailyPiecesMicros: number;
   forwardDemandPieces: number;
@@ -238,6 +246,40 @@ function validateOverlayContributions(
   return contributions;
 }
 
+function validateForecastPolicyCapture(
+  observation: PurchaseForecastObservationInput,
+  observationIndex: number,
+) {
+  const prefix = `observations[${observationIndex}]`;
+  assertNonnegativeInteger(
+    observation.forecastPolicyCaptureVersion,
+    `${prefix}.forecastPolicyCaptureVersion`,
+  );
+  if (observation.forecastPolicyCaptureVersion !== PURCHASING_FORECAST_POLICY_CAPTURE_VERSION) {
+    throw new RangeError(`${prefix}.forecastPolicyCaptureVersion is unsupported`);
+  }
+  if (
+    typeof observation.forecastPolicyFingerprint !== "string"
+    || !/^[0-9a-f]{64}$/.test(observation.forecastPolicyFingerprint)
+  ) {
+    throw new RangeError(`${prefix}.forecastPolicyFingerprint must be a lowercase SHA-256`);
+  }
+  if (
+    observation.forecastPolicySnapshot === null
+    || typeof observation.forecastPolicySnapshot !== "object"
+    || Array.isArray(observation.forecastPolicySnapshot)
+  ) {
+    throw new RangeError(`${prefix}.forecastPolicySnapshot must be an object`);
+  }
+  const canonical = buildPurchasingForecastPolicyCohort(observation.forecastPolicySnapshot);
+  if (
+    canonical.fingerprint !== observation.forecastPolicyFingerprint
+    || JSON.stringify(canonical.snapshot) !== JSON.stringify(observation.forecastPolicySnapshot)
+  ) {
+    throw new RangeError(`${prefix} forecast policy cohort does not match its canonical snapshot`);
+  }
+}
+
 function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
   if (!input.calculationVersion?.trim() || input.calculationVersion.length > 80) {
     throw new RangeError("calculationVersion is required and cannot exceed 80 characters");
@@ -306,6 +348,7 @@ function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
       throw new RangeError(`observations[${index}].forecastMethod is required and cannot exceed 40 characters`);
     }
     assertPositiveInteger(observation.forecastVersion, `observations[${index}].forecastVersion`);
+    validateForecastPolicyCapture(observation, index);
     assertNonnegativeInteger(observation.forecastDailyPiecesMicros, `observations[${index}].forecastDailyPiecesMicros`);
     assertNonnegativeInteger(observation.baselineDailyPiecesMicros, `observations[${index}].baselineDailyPiecesMicros`);
     assertNonnegativeInteger(observation.forwardDemandPieces, `observations[${index}].forwardDemandPieces`);
@@ -427,11 +470,24 @@ export function buildPurchaseForecastObservations(
     if (!existing) byProduct.set(item.productId, item);
   }
 
+  let runPolicyFingerprint: string | null = null;
   return Array.from(byProduct.values())
     .map((item) => {
       const forecastMethod = item.forecastProvenance.forecastMethod;
       const forecastVersion = item.forecastProvenance.forecastVersion
         ?? (forecastMethod === "weighted_blend_v1" ? 2 : 1);
+      const policyCohort = buildPurchasingForecastPolicyCohort(
+        item.forecastProvenance.planningPolicy,
+      );
+      if (policyCohort.snapshot.method !== forecastMethod) {
+        throw new RangeError(
+          `Product ${item.productId} forecast method does not match its planning policy cohort`,
+        );
+      }
+      if (runPolicyFingerprint !== null && runPolicyFingerprint !== policyCohort.fingerprint) {
+        throw new RangeError("Recommendation run produced multiple forecast policy cohorts");
+      }
+      runPolicyFingerprint = policyCohort.fingerprint;
       const baselineDailyPieces = item.demandBasis.lookbackDays > 0
         ? item.demandBasis.periodUsagePieces / item.demandBasis.lookbackDays
         : 0;
@@ -461,6 +517,9 @@ export function buildPurchaseForecastObservations(
         productName: item.productName.trim(),
         forecastMethod,
         forecastVersion,
+        forecastPolicyCaptureVersion: policyCohort.captureVersion,
+        forecastPolicyFingerprint: policyCohort.fingerprint,
+        forecastPolicySnapshot: policyCohort.snapshot,
         forecastDailyPiecesMicros: piecesToMicros(
           item.forecastProvenance.forecastBlend.avgDailyUsagePieces,
           "forecastDailyPieces",
@@ -572,6 +631,9 @@ export function createPurchaseRecommendationSnapshotService(database: any) {
               productName: observation.productName.trim(),
               forecastMethod: observation.forecastMethod.trim(),
               forecastVersion: observation.forecastVersion,
+              forecastPolicyCaptureVersion: observation.forecastPolicyCaptureVersion,
+              forecastPolicyFingerprint: observation.forecastPolicyFingerprint,
+              forecastPolicySnapshot: observation.forecastPolicySnapshot,
               forecastDailyPiecesMicros: observation.forecastDailyPiecesMicros,
               baselineDailyPiecesMicros: observation.baselineDailyPiecesMicros,
               forwardDemandPieces: observation.forwardDemandPieces,
