@@ -641,6 +641,27 @@ export const carrierDispatchAttempts = wmsSchema.table("carrier_dispatch_attempt
     .on(table.carrierDispatchCommandId, table.attemptNumber),
 ]);
 
+export const carrierDispatchCommandRequeues = wmsSchema.table("carrier_dispatch_command_requeues", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  carrierDispatchCommandId: bigint("carrier_dispatch_command_id", { mode: "number" }).notNull().references(() => carrierDispatchCommands.id, { onDelete: "restrict" }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  operator: varchar("operator", { length: 200 }).notNull(),
+  reason: text("reason").notNull(),
+  repairCohort: varchar("repair_cohort", { length: 100 }).notNull(),
+  previousStatus: varchar("previous_status", { length: 30 }).notNull(),
+  previousAttemptCount: integer("previous_attempt_count").notNull(),
+  previousConsecutiveFailureCount: integer("previous_consecutive_failure_count").notNull(),
+  previousErrorCode: varchar("previous_error_code", { length: 100 }),
+  previousErrorMessage: text("previous_error_message"),
+  previousResultEvidence: jsonb("previous_result_evidence").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_carrier_dispatch_command_requeues_idempotency")
+    .on(table.carrierDispatchCommandId, table.idempotencyKey),
+  index("idx_carrier_dispatch_command_requeues_command")
+    .on(table.carrierDispatchCommandId, table.createdAt, table.id),
+]);
+
 export const channelFulfillmentPushes = omsSchema.table("channel_fulfillment_pushes", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "restrict" }),
@@ -721,6 +742,25 @@ export const channelFulfillmentPushAttempts = omsSchema.table("channel_fulfillme
 }, (table) => [
   uniqueIndex("channel_fulfillment_push_attempts_unique").on(table.channelFulfillmentPushId, table.attemptNumber),
   index("idx_channel_fulfillment_push_attempts_push").on(table.channelFulfillmentPushId, table.attemptNumber),
+]);
+
+export const channelFulfillmentPushRequeues = omsSchema.table("channel_fulfillment_push_requeues", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  channelFulfillmentPushId: bigint("channel_fulfillment_push_id", { mode: "number" }).notNull().references(() => channelFulfillmentPushes.id, { onDelete: "restrict" }),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  operator: varchar("operator", { length: 200 }).notNull(),
+  reason: text("reason").notNull(),
+  previousStatus: varchar("previous_status", { length: 30 }).notNull(),
+  previousAttemptCount: integer("previous_attempt_count").notNull(),
+  previousErrorCode: varchar("previous_error_code", { length: 100 }),
+  previousErrorMessage: text("previous_error_message"),
+  previousRequestHash: varchar("previous_request_hash", { length: 64 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_channel_fulfillment_push_requeues_idempotency")
+    .on(table.channelFulfillmentPushId, table.idempotencyKey),
+  index("idx_channel_fulfillment_push_requeues_command")
+    .on(table.channelFulfillmentPushId, table.createdAt, table.id),
 ]);
 
 /**

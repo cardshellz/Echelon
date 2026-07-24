@@ -329,6 +329,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
         providerPhysicalShipmentId: "77777",
         providerOrderId: "555000",
         trackingNumber: "1Z12345",
+        legacyHeaderPolicy: "aggregate_projection",
       }),
       { executeImmediately: false },
     );

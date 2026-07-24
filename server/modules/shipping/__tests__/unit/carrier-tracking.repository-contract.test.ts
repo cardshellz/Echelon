@@ -34,6 +34,19 @@ const requeueMigrationSource = readFileSync(
   ),
   "utf8",
 );
+const historicalRepairMigrationSource = readFileSync(
+  join(
+    here,
+    "..",
+    "..",
+    "..",
+    "..",
+    "..",
+    "migrations",
+    "171_historical_fulfillment_repair_audit.sql",
+  ),
+  "utf8",
+);
 
 describe("carrier tracking repository concurrency contract", () => {
   it("serializes provider-label observation on tracking identity before label identity", () => {
@@ -183,6 +196,38 @@ describe("carrier tracking repository concurrency contract", () => {
       "uq_carrier_tracking_subscription_requeues_idempotency",
     );
     expect(requeueMigrationSource).toContain("previous_status = 'review'");
+  });
+
+  it("audits narrowly classified carrier-dispatch repairs before requeueing", () => {
+    const requeueStart = repositorySource.indexOf(
+      "async requeueReviewedCarrierDispatchCommands(input)",
+    );
+    const nextMethod = repositorySource.indexOf(
+      "async claimDispatchCommands(",
+      requeueStart,
+    );
+    const requeueSource = repositorySource.slice(requeueStart, nextMethod);
+    const auditInsert = requeueSource.indexOf(".insert(carrierDispatchCommandRequeues)");
+    const projectionUpdate = requeueSource.indexOf(".update(carrierDispatchCommands)");
+
+    expect(requeueStart).toBeGreaterThan(-1);
+    expect(requeueSource).toContain("FOR UPDATE OF command SKIP LOCKED");
+    expect(requeueSource).toContain("rerun dry-run");
+    expect(requeueSource).toContain('eq(carrierDispatchCommands.status, "review_required")');
+    expect(auditInsert).toBeGreaterThan(-1);
+    expect(projectionUpdate).toBeGreaterThan(auditInsert);
+    expect(historicalRepairMigrationSource).toContain(
+      "uq_carrier_dispatch_command_requeues_idempotency",
+    );
+    expect(historicalRepairMigrationSource).toContain(
+      "carrier_dispatch_command_requeues_immutable",
+    );
+    expect(historicalRepairMigrationSource).toContain(
+      "previous_status = 'review_required'",
+    );
+    expect(historicalRepairMigrationSource).toContain(
+      "EXECUTE FUNCTION wms.reject_shipping_evidence_ledger_mutation()",
+    );
   });
 
   it("atomically appends hydrated evidence and its attempt before updating the hydration projection", () => {

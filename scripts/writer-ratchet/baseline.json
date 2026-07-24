@@ -378,6 +378,9 @@
   "oms.channel_fulfillment_push_items": [
     "modules/oms"
   ],
+  "oms.channel_fulfillment_push_requeues": [
+    "modules/oms"
+  ],
   "oms.channel_fulfillment_pushes": [
     "modules/oms"
   ],
@@ -676,6 +679,9 @@
     "modules/orders"
   ],
   "wms.carrier_dispatch_attempts": [
+    "modules/shipping"
+  ],
+  "wms.carrier_dispatch_command_requeues": [
     "modules/shipping"
   ],
   "wms.carrier_dispatch_commands": [
