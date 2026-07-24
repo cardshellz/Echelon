@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import {
   carrierDispatchAttempts,
   carrierDispatchCommands,
+  carrierTrackingSubscriptionRequeues,
   carrierTrackingSubscriptionAttempts,
   carrierTrackingSubscriptionLabels,
   carrierTrackingSubscriptions,
@@ -157,6 +158,23 @@ export interface StoredCarrierTrackingSubscriptionAttempt {
   inserted: boolean;
 }
 
+export interface RequeueReviewedTrackingSubscriptionsInput {
+  errorCode: string;
+  carrierCode: string | null;
+  httpStatus: number | null;
+  limit: number;
+  expectedCount: number;
+  operator: string;
+  reason: string;
+  idempotencyKey: string;
+  requeuedAt: Date;
+}
+
+export interface RequeueReviewedTrackingSubscriptionsResult {
+  selected: number;
+  requeued: number;
+}
+
 export interface ClaimedCarrierTrackingWebhookHydration {
   receiptId: number;
   resourceUrl: string;
@@ -282,6 +300,9 @@ export interface CarrierTrackingRepository {
   finalizeTrackingSubscriptionAttempt(
     input: FinalizeCarrierTrackingSubscriptionAttemptInput,
   ): Promise<StoredCarrierTrackingSubscriptionAttempt>;
+  requeueReviewedTrackingSubscriptions(
+    input: RequeueReviewedTrackingSubscriptionsInput,
+  ): Promise<RequeueReviewedTrackingSubscriptionsResult>;
   listEventsPendingReconciliation(
     limit: number,
     asOf: Date,
@@ -320,6 +341,23 @@ function requiredId(value: unknown, field: string): number {
   const id = integerOrNull(value, field);
   if (id === null) throw new Error(`Missing ${field} returned by carrier tracking repository`);
   return id;
+}
+
+function nonnegativeInteger(value: unknown, field: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`Invalid ${field} returned by carrier tracking repository`);
+  }
+  return parsed;
+}
+
+function httpStatusOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 100 || parsed > 599) {
+    throw new Error("Invalid http_status returned by carrier tracking repository");
+  }
+  return parsed;
 }
 
 function stringOrNull(value: unknown): string | null {
@@ -1656,6 +1694,141 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           .where(eq(carrierTrackingSubscriptions.id, input.subscriptionId));
 
         return { id: attemptId, inserted: true };
+      });
+    },
+
+    async requeueReviewedTrackingSubscriptions(input) {
+      const errorCode = input.errorCode.trim();
+      const carrierCode = input.carrierCode?.trim() || null;
+      const operator = input.operator.trim();
+      const reason = input.reason.trim();
+      const idempotencyKey = input.idempotencyKey.trim();
+      if (!errorCode || errorCode.length > 100) {
+        throw new Error("Tracking-subscription requeue errorCode must contain 1 through 100 characters");
+      }
+      if (carrierCode && carrierCode.length > 100) {
+        throw new Error("Tracking-subscription requeue carrierCode must not exceed 100 characters");
+      }
+      if (input.httpStatus !== null
+          && (!Number.isSafeInteger(input.httpStatus)
+            || input.httpStatus < 100
+            || input.httpStatus > 599)) {
+        throw new Error("Tracking-subscription requeue httpStatus must be null or an integer from 100 through 599");
+      }
+      if (!Number.isSafeInteger(input.limit) || input.limit <= 0 || input.limit > 500) {
+        throw new Error("Tracking-subscription requeue limit must be an integer between 1 and 500");
+      }
+      if (!Number.isSafeInteger(input.expectedCount)
+          || input.expectedCount <= 0
+          || input.expectedCount > input.limit) {
+        throw new Error("Tracking-subscription requeue expectedCount must be between 1 and limit");
+      }
+      if (!operator || operator.length > 200) {
+        throw new Error("Tracking-subscription requeue operator must contain 1 through 200 characters");
+      }
+      if (!reason || reason.length > 2_000) {
+        throw new Error("Tracking-subscription requeue reason must contain 1 through 2000 characters");
+      }
+      if (!idempotencyKey || idempotencyKey.length > 200) {
+        throw new Error("Tracking-subscription requeue idempotencyKey must contain 1 through 200 characters");
+      }
+      if (Number.isNaN(input.requeuedAt.getTime())) {
+        throw new Error("Tracking-subscription requeue timestamp must be valid");
+      }
+
+      return db.transaction(async (databaseTx: any) => {
+        const candidateResult = await databaseTx.execute(sql`
+          SELECT
+            subscription.id,
+            subscription.subscription_status,
+            subscription.attempt_count,
+            subscription.consecutive_failure_count,
+            subscription.last_error_code,
+            subscription.last_error_message,
+            latest_attempt.http_status,
+            COALESCE(latest_attempt.response_evidence, '{}'::jsonb) AS response_evidence
+          FROM wms.carrier_tracking_subscriptions AS subscription
+          LEFT JOIN LATERAL (
+            SELECT attempt.http_status, attempt.response_evidence
+            FROM wms.carrier_tracking_subscription_attempts AS attempt
+            WHERE attempt.carrier_tracking_subscription_id = subscription.id
+            ORDER BY attempt.attempt_number DESC, attempt.id DESC
+            LIMIT 1
+          ) AS latest_attempt ON TRUE
+          WHERE subscription.subscription_status = 'review'
+            AND subscription.last_error_code = ${errorCode}
+            AND (${carrierCode}::text IS NULL OR subscription.carrier_code = ${carrierCode}::text)
+            AND (${input.httpStatus}::integer IS NULL
+              OR latest_attempt.http_status = ${input.httpStatus}::integer)
+          ORDER BY subscription.id
+          FOR UPDATE OF subscription SKIP LOCKED
+          LIMIT ${input.limit}
+        `);
+        const candidates = resultRows(candidateResult);
+        if (candidates.length !== input.expectedCount) {
+          throw new Error(
+            `Tracking-subscription requeue expected ${input.expectedCount} candidate(s), found ${candidates.length}; rerun dry-run`,
+          );
+        }
+
+        let requeued = 0;
+        for (const candidate of candidates) {
+          const subscriptionId = requiredId(candidate.id, "carrier_tracking_subscription_id");
+          const [audit] = await databaseTx
+            .insert(carrierTrackingSubscriptionRequeues)
+            .values({
+              carrierTrackingSubscriptionId: subscriptionId,
+              idempotencyKey,
+              operator,
+              reason,
+              previousStatus: requiredString(
+                candidate.subscription_status,
+                "subscription_status",
+              ),
+              previousAttemptCount: nonnegativeInteger(
+                candidate.attempt_count,
+                "attempt_count",
+              ),
+              previousConsecutiveFailureCount: nonnegativeInteger(
+                candidate.consecutive_failure_count,
+                "consecutive_failure_count",
+              ),
+              previousErrorCode: stringOrNull(candidate.last_error_code),
+              previousErrorMessage: stringOrNull(candidate.last_error_message),
+              previousHttpStatus: httpStatusOrNull(candidate.http_status),
+              previousResponseEvidence: candidate.response_evidence ?? {},
+              createdAt: input.requeuedAt,
+            })
+            .onConflictDoNothing()
+            .returning({ id: carrierTrackingSubscriptionRequeues.id });
+          if (!audit) continue;
+
+          const updated = await databaseTx
+            .update(carrierTrackingSubscriptions)
+            .set({
+              subscriptionStatus: "pending",
+              consecutiveFailureCount: 0,
+              nextAttemptAt: input.requeuedAt,
+              activatedAt: null,
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              lastErrorCode: null,
+              lastErrorMessage: null,
+              updatedAt: input.requeuedAt,
+            })
+            .where(and(
+              eq(carrierTrackingSubscriptions.id, subscriptionId),
+              eq(carrierTrackingSubscriptions.subscriptionStatus, "review"),
+            ))
+            .returning({ id: carrierTrackingSubscriptions.id });
+          if (updated.length !== 1) {
+            throw new Error(
+              `Tracking subscription ${subscriptionId} changed while its requeue was being recorded`,
+            );
+          }
+          requeued += 1;
+        }
+        return { selected: candidates.length, requeued };
       });
     },
 

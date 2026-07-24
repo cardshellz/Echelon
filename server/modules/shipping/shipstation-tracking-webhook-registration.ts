@@ -44,6 +44,16 @@ export type ShipStationTrackingWebhookRegistrationResult =
     webhook: ShipStationTrackingWebhookSummary;
   }
   | {
+    status: "secret_rotation_planned";
+    targetUrl: string;
+    webhook: ShipStationTrackingWebhookSummary;
+  }
+  | {
+    status: "secret_rotated";
+    targetUrl: string;
+    webhook: ShipStationTrackingWebhookSummary;
+  }
+  | {
     status: "conflict";
     targetUrl: string;
     trackingWebhooks: ShipStationTrackingWebhookSummary[];
@@ -61,6 +71,7 @@ export interface ConfigureShipStationTrackingWebhookInput {
   webhookSecret: string;
   execute: boolean;
   takeover?: ShipStationTrackingWebhookTakeoverExpectation | null;
+  secretRotation?: ShipStationTrackingWebhookTakeoverExpectation | null;
 }
 
 export function normalizeTrackingWebhookTargetUrl(value: string): string {
@@ -136,9 +147,73 @@ export async function configureShipStationTrackingWebhook(
   const targetUrl = normalizeTrackingWebhookTargetUrl(input.targetUrl);
   const webhookSecret = input.webhookSecret.trim();
   assertValidShipStationTrackingWebhookSecret(webhookSecret);
+  if (input.takeover && input.secretRotation) {
+    throw new Error("Tracking webhook takeover and secret rotation are mutually exclusive");
+  }
   const webhooks = await input.client.listWebhooks();
   const currentState = classifyExistingTrackingWebhooks(webhooks, targetUrl, webhookSecret);
   if (currentState?.status === "already_configured") return currentState;
+
+  if (currentState?.status === "conflict" && input.secretRotation) {
+    const expectedCurrentUrl = normalizeTrackingWebhookTargetUrl(
+      input.secretRotation.currentUrl,
+    );
+    const expectedWebhookId = input.secretRotation.webhookId.trim();
+    const trackingWebhooks = webhooks.filter(
+      (webhook) => webhook.event.toLowerCase() === "track",
+    );
+    const current = trackingWebhooks[0];
+    const currentUrl = current ? normalizedProviderUrl(current.url) : null;
+    const matchesExpectation = trackingWebhooks.length === 1
+      && current.webhook_id === expectedWebhookId
+      && currentUrl === expectedCurrentUrl
+      && currentUrl === targetUrl;
+    if (!matchesExpectation) {
+      return {
+        ...currentState,
+        reason: "Existing tracking webhook does not exactly match the guarded secret-rotation expectation",
+      };
+    }
+    if (!input.execute) {
+      return {
+        status: "secret_rotation_planned",
+        targetUrl,
+        webhook: summarizeWebhook(current),
+      };
+    }
+
+    const preservedHeaders = (current.headers ?? []).filter(
+      (header) => header.key.trim().toLowerCase()
+        !== SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER,
+    );
+    await input.client.updateWebhook(current.webhook_id, {
+      name: TRACKING_WEBHOOK_NAME,
+      url: targetUrl,
+      headers: [
+        ...preservedHeaders,
+        {
+          key: SHIPSTATION_TRACKING_WEBHOOK_SECRET_HEADER,
+          value: webhookSecret,
+        },
+      ],
+    });
+    const verifiedState = classifyExistingTrackingWebhooks(
+      await input.client.listWebhooks(),
+      targetUrl,
+      webhookSecret,
+    );
+    if (verifiedState?.status !== "already_configured"
+        || verifiedState.webhook.webhookId !== current.webhook_id) {
+      throw new Error(
+        "ShipStation tracking webhook secret rotation could not be verified after the in-place update",
+      );
+    }
+    return {
+      status: "secret_rotated",
+      targetUrl,
+      webhook: verifiedState.webhook,
+    };
+  }
 
   if (currentState?.status === "conflict" && input.takeover) {
     const expectedCurrentUrl = normalizeTrackingWebhookTargetUrl(input.takeover.currentUrl);

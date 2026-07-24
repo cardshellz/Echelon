@@ -35,6 +35,16 @@ export interface TrackingEnrollmentPreview {
   labelsMissingSubscriptionLink: number;
   subscriptionsByStatus: Record<string, number>;
   dueSubscriptions: number;
+  reviewFailures: TrackingEnrollmentReviewFailure[];
+}
+
+export interface TrackingEnrollmentReviewFailure {
+  carrierCode: string;
+  errorCode: string;
+  errorMessage: string | null;
+  httpStatus: number | null;
+  responseBody: string | null;
+  subscriptionCount: number;
 }
 
 export interface TrackingEnrollmentRunResult {
@@ -148,6 +158,41 @@ export async function loadTrackingEnrollmentPreview(
     GROUP BY subscription.subscription_status
     ORDER BY subscription.subscription_status
   `);
+  const reviewFailureResult = await queryable.query(`
+    WITH latest_attempt AS (
+      SELECT DISTINCT ON (attempt.carrier_tracking_subscription_id)
+        attempt.carrier_tracking_subscription_id,
+        attempt.http_status,
+        NULLIF(BTRIM(attempt.response_evidence ->> 'responseBody'), '') AS response_body
+      FROM wms.carrier_tracking_subscription_attempts AS attempt
+      ORDER BY
+        attempt.carrier_tracking_subscription_id,
+        attempt.attempt_number DESC,
+        attempt.id DESC
+    )
+    SELECT
+      subscription.carrier_code,
+      subscription.last_error_code,
+      subscription.last_error_message,
+      latest.http_status,
+      latest.response_body,
+      COUNT(*)::integer AS subscription_count
+    FROM wms.carrier_tracking_subscriptions AS subscription
+    LEFT JOIN latest_attempt AS latest
+      ON latest.carrier_tracking_subscription_id = subscription.id
+    WHERE subscription.subscription_status = 'review'
+    GROUP BY
+      subscription.carrier_code,
+      subscription.last_error_code,
+      subscription.last_error_message,
+      latest.http_status,
+      latest.response_body
+    ORDER BY
+      COUNT(*) DESC,
+      subscription.carrier_code,
+      subscription.last_error_code,
+      latest.http_status NULLS LAST
+  `);
 
   const labelRow = labelResult.rows[0] ?? {};
   const subscriptionsByStatus: Record<string, number> = {};
@@ -173,6 +218,14 @@ export async function loadTrackingEnrollmentPreview(
     ),
     subscriptionsByStatus,
     dueSubscriptions,
+    reviewFailures: reviewFailureResult.rows.map((row) => ({
+      carrierCode: requiredString(row.carrier_code, "carrier_code"),
+      errorCode: requiredString(row.last_error_code, "last_error_code"),
+      errorMessage: optionalString(row.last_error_message),
+      httpStatus: optionalHttpStatus(row.http_status),
+      responseBody: optionalString(row.response_body),
+      subscriptionCount: nonnegativeInteger(row.subscription_count, "subscription_count"),
+    })),
   };
 }
 
@@ -259,6 +312,21 @@ function requiredString(value: unknown, field: string): string {
     throw new Error(`Invalid ${field} returned by carrier tracking enrollment query`);
   }
   return value.trim();
+}
+
+function optionalString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function optionalHttpStatus(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 100 || parsed > 599) {
+    throw new Error("Invalid http_status returned by carrier tracking enrollment query");
+  }
+  return parsed;
 }
 
 function emptySweepSummary(configured: boolean): CarrierTrackingSubscriptionSweepResult {

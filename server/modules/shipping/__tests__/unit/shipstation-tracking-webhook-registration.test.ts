@@ -50,6 +50,7 @@ describe("ShipStation tracking webhook registration", () => {
       execute: false,
       targetUrl: null,
       replaceWebhookId: null,
+      rotateSecretWebhookId: null,
       expectedCurrentUrl: null,
     });
     expect(parseFlags(["--execute", `--target-url=${TARGET}`])).toEqual({
@@ -57,11 +58,17 @@ describe("ShipStation tracking webhook registration", () => {
       execute: true,
       targetUrl: TARGET,
       replaceWebhookId: null,
+      rotateSecretWebhookId: null,
       expectedCurrentUrl: null,
     });
     expect(() => parseFlags(["--dry-run", "--execute"])).toThrow(/either/);
     expect(() => parseFlags(["--replace-existing"])).toThrow(/Unknown flag/);
     expect(() => parseFlags(["--replace-webhook-id=43350"])).toThrow(/provided together/);
+    expect(() => parseFlags([
+      "--replace-webhook-id=43350",
+      "--rotate-secret-webhook-id=43350",
+      `--expected-current-url=${TARGET}`,
+    ])).toThrow(/mutually exclusive/);
   });
 
   it("requires a credential-free HTTPS endpoint without query or fragment data", () => {
@@ -202,6 +209,88 @@ describe("ShipStation tracking webhook registration", () => {
         webhookSecret: WEBHOOK_SECRET,
         execute: true,
         takeover: { webhookId: "43350", currentUrl: legacyUrl },
+      })).resolves.toMatchObject({ status: "conflict", reason: expect.any(String) });
+      expect(api.updateWebhook).not.toHaveBeenCalled();
+    }
+  });
+
+  it("plans and executes guarded secret rotation while preserving unrelated headers", async () => {
+    const oldSecret = "o".repeat(32);
+    const existing = webhook({
+      webhook_id: "43350",
+      headers: [
+        { key: "x-owner", value: "preserve-me" },
+        { key: "x-echelon-shipstation-tracking-secret", value: oldSecret },
+        { key: "X-Echelon-ShipStation-Tracking-Secret", value: oldSecret },
+      ],
+    });
+    const dryRunApi = client([existing]);
+    await expect(configureShipStationTrackingWebhook({
+      client: dryRunApi,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: false,
+      secretRotation: { webhookId: "43350", currentUrl: TARGET },
+    })).resolves.toMatchObject({
+      status: "secret_rotation_planned",
+      webhook: { webhookId: "43350", url: TARGET },
+    });
+    expect(dryRunApi.updateWebhook).not.toHaveBeenCalled();
+
+    const executeApi = client([existing]);
+    executeApi.listWebhooks
+      .mockResolvedValueOnce([existing])
+      .mockResolvedValueOnce([webhook({
+        webhook_id: "43350",
+        headers: [
+          { key: "x-owner", value: "preserve-me" },
+          { key: "x-echelon-shipstation-tracking-secret", value: WEBHOOK_SECRET },
+        ],
+      })]);
+    await expect(configureShipStationTrackingWebhook({
+      client: executeApi,
+      targetUrl: TARGET,
+      webhookSecret: WEBHOOK_SECRET,
+      execute: true,
+      secretRotation: { webhookId: "43350", currentUrl: TARGET },
+    })).resolves.toMatchObject({
+      status: "secret_rotated",
+      webhook: { webhookId: "43350", url: TARGET },
+    });
+    expect(executeApi.updateWebhook).toHaveBeenCalledWith("43350", {
+      name: "Echelon carrier tracking",
+      url: TARGET,
+      headers: [
+        { key: "x-owner", value: "preserve-me" },
+        { key: "x-echelon-shipstation-tracking-secret", value: WEBHOOK_SECRET },
+      ],
+    });
+  });
+
+  it("refuses secret rotation when identity, URL, or cardinality drift", async () => {
+    const staleSecretHeader = [{
+      key: "x-echelon-shipstation-tracking-secret",
+      value: "o".repeat(32),
+    }];
+    for (const existing of [
+      [webhook({ webhook_id: "different", headers: staleSecretHeader })],
+      [webhook({
+        webhook_id: "43350",
+        url: "https://other.example.com/track",
+        headers: staleSecretHeader,
+      })],
+      [
+        webhook({ webhook_id: "43350", headers: staleSecretHeader }),
+        webhook({ webhook_id: "second", headers: staleSecretHeader }),
+      ],
+    ]) {
+      const api = client(existing);
+      await expect(configureShipStationTrackingWebhook({
+        client: api,
+        targetUrl: TARGET,
+        webhookSecret: WEBHOOK_SECRET,
+        execute: true,
+        secretRotation: { webhookId: "43350", currentUrl: TARGET },
       })).resolves.toMatchObject({ status: "conflict", reason: expect.any(String) });
       expect(api.updateWebhook).not.toHaveBeenCalled();
     }

@@ -21,6 +21,19 @@ const migrationSource = readFileSync(
   ),
   "utf8",
 );
+const requeueMigrationSource = readFileSync(
+  join(
+    here,
+    "..",
+    "..",
+    "..",
+    "..",
+    "..",
+    "migrations",
+    "0594_carrier_tracking_subscription_requeues.sql",
+  ),
+  "utf8",
+);
 
 describe("carrier tracking repository concurrency contract", () => {
   it("serializes provider-label observation on tracking identity before label identity", () => {
@@ -139,6 +152,29 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(finalizationStart).toBeGreaterThan(-1);
     expect(attemptInsert).toBeGreaterThan(-1);
     expect(projectionUpdate).toBeGreaterThan(attemptInsert);
+  });
+
+  it("audits guarded subscription requeues before moving review state back to pending", () => {
+    const requeueStart = repositorySource.indexOf(
+      "async requeueReviewedTrackingSubscriptions(input)",
+    );
+    const nextMethod = repositorySource.indexOf(
+      "async claimDispatchCommands(",
+      requeueStart,
+    );
+    const requeueSource = repositorySource.slice(requeueStart, nextMethod);
+    const auditInsert = requeueSource.indexOf(".insert(carrierTrackingSubscriptionRequeues)");
+    const projectionUpdate = requeueSource.indexOf(".update(carrierTrackingSubscriptions)");
+
+    expect(requeueStart).toBeGreaterThan(-1);
+    expect(requeueSource).toContain("FOR UPDATE OF subscription SKIP LOCKED");
+    expect(requeueSource).toContain("rerun dry-run");
+    expect(auditInsert).toBeGreaterThan(-1);
+    expect(projectionUpdate).toBeGreaterThan(auditInsert);
+    expect(requeueMigrationSource).toContain(
+      "uq_carrier_tracking_subscription_requeues_idempotency",
+    );
+    expect(requeueMigrationSource).toContain("previous_status = 'review'");
   });
 
   it("atomically appends hydrated evidence and its attempt before updating the hydration projection", () => {

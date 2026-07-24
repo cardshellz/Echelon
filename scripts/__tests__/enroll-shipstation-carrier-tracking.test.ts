@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  loadTrackingEnrollmentPreview,
   parseFlags,
   runTrackingEnrollment,
   type TrackingEnrollmentDependencies,
@@ -14,6 +15,7 @@ const preview: TrackingEnrollmentPreview = {
   labelsMissingSubscriptionLink: 4,
   subscriptionsByStatus: { active: 5 },
   dueSubscriptions: 0,
+  reviewFailures: [],
 };
 
 function sweep(overrides: Partial<CarrierTrackingSubscriptionSweepResult> = {}) {
@@ -73,6 +75,48 @@ describe("ShipStation carrier tracking enrollment script", () => {
       before: preview,
       after: null,
     });
+  });
+
+  it("reports exact grouped provider failures retained by review attempts", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [{
+        active_or_unknown_labels: 10,
+        labels_missing_carrier_code: 0,
+        labels_missing_subscription_link: 4,
+      }],
+    }).mockResolvedValueOnce({
+      rows: [{
+        subscription_status: "review",
+        status_count: 3,
+        due_count: 0,
+      }],
+    }).mockResolvedValueOnce({
+      rows: [{
+        carrier_code: "stamps_com",
+        last_error_code: "SHIPSTATION_TRACKING_HTTP",
+        last_error_message: "ShipStation tracking subscription returned HTTP 400",
+        http_status: 400,
+        response_body: "Invalid carrier_code",
+        subscription_count: 3,
+      }],
+    });
+
+    await expect(loadTrackingEnrollmentPreview({ query })).resolves.toEqual({
+      activeOrUnknownLabels: 10,
+      labelsMissingCarrierCode: 0,
+      labelsMissingSubscriptionLink: 4,
+      subscriptionsByStatus: { review: 3 },
+      dueSubscriptions: 0,
+      reviewFailures: [{
+        carrierCode: "stamps_com",
+        errorCode: "SHIPSTATION_TRACKING_HTTP",
+        errorMessage: "ShipStation tracking subscription returned HTTP 400",
+        httpStatus: 400,
+        responseBody: "Invalid carrier_code",
+        subscriptionCount: 3,
+      }],
+    });
+    expect(query).toHaveBeenCalledTimes(3);
   });
 
   it("fails before database mutation when execute mode lacks provider configuration", async () => {
