@@ -9,9 +9,53 @@ const positiveSafeInteger = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER)
 const nullableNonnegativeSafeInteger = nonnegativeSafeInteger.nullable();
 const nullableSafeInteger = safeInteger.nullable();
 const horizonSchema = z.union([z.literal(7), z.literal(30), z.literal(90)]);
+const policyFingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/);
+const forecastMethodSchema = z.enum(["recent_order_velocity_v1", "weighted_blend_v1"]);
+const forecastPolicySnapshotSchema = z.object({
+  method: forecastMethodSchema,
+  shortWindowDays: z.number().int().min(1).max(60),
+  standardWindowDays: z.number().int().min(7).max(180),
+  longWindowDays: z.number().int().min(30).max(730),
+  seasonalEnabled: z.boolean(),
+  seasonalWindowDays: z.number().int().min(7).max(120),
+  weights: z.object({
+    short: z.number().int().min(0).max(100),
+    standard: z.number().int().min(0).max(100),
+    long: z.number().int().min(0).max(100),
+    seasonal: z.number().int().min(0).max(100),
+  }).strict(),
+  forwardDemandEnabled: z.boolean(),
+  forwardDemandHorizonDays: z.number().int().min(1).max(365),
+  forwardDemandConfidenceWeights: z.object({
+    high: z.number().int().min(0).max(100),
+    medium: z.number().int().min(0).max(100),
+    low: z.number().int().min(0).max(100),
+  }).strict(),
+}).strict();
+
+const forecastPolicyCohortSchema = z.object({
+  captureVersion: z.literal(1),
+  fingerprint: policyFingerprintSchema,
+  snapshot: forecastPolicySnapshotSchema,
+  forecastMethod: forecastMethodSchema,
+  forecastVersion: positiveSafeInteger,
+  observationCount: positiveSafeInteger,
+  evaluationCount: nonnegativeSafeInteger,
+  firstObservedFrom: z.string().datetime(),
+  latestObservedFrom: z.string().datetime(),
+  latestEvaluationAt: z.string().datetime().nullable(),
+}).strict().superRefine((cohort, context) => {
+  if (cohort.forecastMethod !== cohort.snapshot.method) {
+    context.addIssue({ code: "custom", message: "Forecast policy cohort method does not match snapshot" });
+  }
+});
 
 const forecastBacktestSummarySchema = z.object({
   horizonDays: horizonSchema,
+  forecastPolicyCaptureVersion: z.literal(1),
+  forecastPolicyFingerprint: policyFingerprintSchema,
+  forecastMethod: forecastMethodSchema,
+  forecastVersion: positiveSafeInteger,
   evaluationCount: nonnegativeSafeInteger,
   actualDemandPieces: nonnegativeSafeInteger,
   forecastDemandMicros: nonnegativeSafeInteger,
@@ -80,6 +124,10 @@ const forecastBacktestItemSchema = z.object({
   productSku: z.string().min(1),
   productName: z.string().min(1),
   horizonDays: horizonSchema,
+  forecastMethod: forecastMethodSchema,
+  forecastVersion: positiveSafeInteger,
+  forecastPolicyCaptureVersion: z.literal(1),
+  forecastPolicyFingerprint: policyFingerprintSchema,
   observedFrom: z.string().datetime(),
   observedThroughExclusive: z.string().datetime(),
   actualDemandPieces: nonnegativeSafeInteger,
@@ -138,7 +186,31 @@ export const forecastBacktestReportSchema = z.object({
     overlayAttributionVersion: positiveSafeInteger,
     overlayAttributionInterval: z.string(),
     overlayEligibility: z.string(),
+    policyCohortIsolation: z.literal("exact_policy_fingerprint_method_and_forecast_version"),
   }).passthrough(),
+  policyCohorts: z.array(forecastPolicyCohortSchema),
+  selectedPolicyCohort: forecastPolicyCohortSchema.nullable(),
+  cohortCoverage: z.object({
+    capturedPolicyCohortCount: nonnegativeSafeInteger,
+    capturedObservationCount: nonnegativeSafeInteger,
+    capturedEvaluationCount: nonnegativeSafeInteger,
+    legacyObservationCount: nonnegativeSafeInteger,
+    legacyEvaluationCount: nonnegativeSafeInteger,
+  }).strict(),
+  accuracyTrustAssessment: z.object({
+    status: z.literal("not_assessed"),
+    reason: z.enum([
+      "no_captured_policy_cohort",
+      "no_mature_evaluations",
+      "accuracy_thresholds_not_configured",
+    ]),
+    selectedPolicyFingerprint: policyFingerprintSchema.nullable(),
+    selectedForecastVersion: positiveSafeInteger.nullable(),
+    cohortIsolated: z.boolean(),
+    selectedCohortEvaluationCount: nonnegativeSafeInteger,
+    excludedLegacyEvaluationCount: nonnegativeSafeInteger,
+    excludedOtherPolicyCohortEvaluationCount: nonnegativeSafeInteger,
+  }).strict(),
   summaries: z.array(forecastBacktestSummarySchema),
   itemCount: nonnegativeSafeInteger,
   items: z.array(forecastBacktestItemSchema),
@@ -149,6 +221,72 @@ export const forecastBacktestReportSchema = z.object({
   const horizons = report.summaries.map((summary) => summary.horizonDays);
   if (new Set(horizons).size !== horizons.length) {
     context.addIssue({ code: "custom", message: "Forecast report contains duplicate horizon summaries" });
+  }
+  const cohortKeys = report.policyCohorts.map(
+    (cohort) => `${cohort.fingerprint}:${cohort.forecastVersion}`,
+  );
+  if (
+    new Set(cohortKeys).size !== cohortKeys.length
+    || report.cohortCoverage.capturedPolicyCohortCount !== report.policyCohorts.length
+  ) {
+    context.addIssue({ code: "custom", message: "Forecast report policy cohort inventory is inconsistent" });
+  }
+  const capturedObservationCount = report.policyCohorts.reduce(
+    (total, cohort) => total + cohort.observationCount,
+    0,
+  );
+  const capturedEvaluationCount = report.policyCohorts.reduce(
+    (total, cohort) => total + cohort.evaluationCount,
+    0,
+  );
+  if (
+    report.cohortCoverage.capturedObservationCount !== capturedObservationCount
+    || report.cohortCoverage.capturedEvaluationCount !== capturedEvaluationCount
+  ) {
+    context.addIssue({ code: "custom", message: "Forecast report cohort coverage does not reconcile" });
+  }
+  const selectedFingerprint = report.selectedPolicyCohort?.fingerprint ?? null;
+  const selectedForecastVersion = report.selectedPolicyCohort?.forecastVersion ?? null;
+  const selectedCohortKey = selectedFingerprint === null || selectedForecastVersion === null
+    ? null
+    : `${selectedFingerprint}:${selectedForecastVersion}`;
+  if (
+    report.accuracyTrustAssessment.selectedPolicyFingerprint !== selectedFingerprint
+    || report.accuracyTrustAssessment.selectedForecastVersion !== selectedForecastVersion
+    || report.accuracyTrustAssessment.cohortIsolated !== (selectedFingerprint !== null)
+    || report.accuracyTrustAssessment.selectedCohortEvaluationCount
+      !== (report.selectedPolicyCohort?.evaluationCount ?? 0)
+    || report.accuracyTrustAssessment.excludedLegacyEvaluationCount
+      !== report.cohortCoverage.legacyEvaluationCount
+    || report.accuracyTrustAssessment.excludedOtherPolicyCohortEvaluationCount
+      !== capturedEvaluationCount - (report.selectedPolicyCohort?.evaluationCount ?? 0)
+  ) {
+    context.addIssue({ code: "custom", message: "Forecast trust assessment does not match selected policy cohort" });
+  }
+  if (
+    selectedFingerprint === null
+    && (report.summaries.length > 0 || report.items.length > 0)
+  ) {
+    context.addIssue({ code: "custom", message: "Unscoped forecast report contains accuracy evidence" });
+  }
+  if (
+    selectedFingerprint !== null
+    && (
+      selectedCohortKey === null
+      || !cohortKeys.includes(selectedCohortKey)
+      || report.summaries.some((summary) => (
+        summary.forecastPolicyFingerprint !== selectedFingerprint
+        || summary.forecastVersion !== selectedForecastVersion
+        || summary.forecastMethod !== report.selectedPolicyCohort?.forecastMethod
+      ))
+      || report.items.some((item) => (
+        item.forecastPolicyFingerprint !== selectedFingerprint
+        || item.forecastVersion !== selectedForecastVersion
+        || item.forecastMethod !== report.selectedPolicyCohort?.forecastMethod
+      ))
+    )
+  ) {
+    context.addIssue({ code: "custom", message: "Forecast report mixes policy cohort evidence" });
   }
 });
 

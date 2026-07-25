@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPurchaseForecastBacktestingService } from "../../purchase-forecast-backtesting.service";
+import { buildPurchasingForecastPolicyCohort } from "../../purchasing-forecast-policy";
+
+const policyCohort = buildPurchasingForecastPolicyCohort();
 
 function repository() {
   const repo: any = {
+    loadPolicyCohorts: vi.fn(),
     loadMaturedCandidates: vi.fn(),
     insertEvaluations: vi.fn(),
     loadAggregates: vi.fn(),
@@ -97,8 +101,34 @@ describe("purchase forecast backtesting service", () => {
     });
   });
 
-  it("returns aggregate accuracy and recent evidence without including overlays", async () => {
+  it("returns accuracy isolated to one canonical policy cohort and excludes legacy evidence", async () => {
     const repo = repository();
+    repo.loadPolicyCohorts.mockResolvedValue([
+      {
+        captureVersion: 1,
+        fingerprint: policyCohort.fingerprint,
+        snapshot: policyCohort.snapshot,
+        forecastMethod: "weighted_blend_v1",
+        forecastVersion: 2,
+        observationCount: 3,
+        evaluationCount: 1,
+        firstObservedFrom: new Date("2026-01-01T00:00:00.000Z"),
+        latestObservedFrom: new Date("2026-01-03T00:00:00.000Z"),
+        latestEvaluationAt: new Date("2026-01-09T00:00:00.000Z"),
+      },
+      {
+        captureVersion: 0,
+        fingerprint: null,
+        snapshot: null,
+        forecastMethod: null,
+        forecastVersion: null,
+        observationCount: 9,
+        evaluationCount: 8,
+        firstObservedFrom: new Date("2025-12-01T00:00:00.000Z"),
+        latestObservedFrom: new Date("2025-12-31T00:00:00.000Z"),
+        latestEvaluationAt: new Date("2026-01-08T00:00:00.000Z"),
+      },
+    ]);
     repo.loadAggregates.mockResolvedValue([{
       horizonDays: 7,
       evaluationCount: 1,
@@ -137,6 +167,8 @@ describe("purchase forecast backtesting service", () => {
       horizonDays: 7,
       forecastMethod: "weighted_blend_v1",
       forecastVersion: 2,
+      forecastPolicyCaptureVersion: 1,
+      forecastPolicyFingerprint: policyCohort.fingerprint,
       evaluationVersion: 2,
       observedFrom: new Date("2026-01-01T00:00:00.000Z"),
       observedThroughExclusive: new Date("2026-01-08T00:00:00.000Z"),
@@ -173,13 +205,32 @@ describe("purchase forecast backtesting service", () => {
 
     const report = await service.getReport({ horizonDays: "7", limit: 10 });
 
-    expect(repo.loadAggregates).toHaveBeenCalledWith({ evaluationVersion: 2, horizonDays: 7 });
+    expect(repo.loadPolicyCohorts).toHaveBeenCalledWith({ evaluationVersion: 2, horizonDays: 7 });
+    expect(repo.loadAggregates).toHaveBeenCalledWith({
+      evaluationVersion: 2,
+      horizonDays: 7,
+      policyFingerprint: policyCohort.fingerprint,
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion: 2,
+    });
+    expect(repo.loadRecent).toHaveBeenCalledWith({
+      evaluationVersion: 2,
+      horizonDays: 7,
+      limit: 10,
+      policyFingerprint: policyCohort.fingerprint,
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion: 2,
+    });
     expect(report.measurement).toMatchObject({
       scope: "product_all_warehouses",
       predictionScope: "historical_rate_with_optional_start_date_overlay",
       overlayAttributionVersion: 1,
     });
     expect(report.summaries[0]).toMatchObject({
+      forecastPolicyCaptureVersion: 1,
+      forecastPolicyFingerprint: policyCohort.fingerprint,
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion: 2,
       forecastWapeBasisPoints: 2_000,
       baselineWapeBasisPoints: 5_000,
       forecastWapeImprovementBasisPoints: 3_000,
@@ -195,6 +246,86 @@ describe("purchase forecast backtesting service", () => {
       overlayErrorImprovementMicros: -2_000_000,
       overlayExclusionReason: null,
     });
+    expect(report.accuracyTrustAssessment).toEqual({
+      status: "not_assessed",
+      reason: "accuracy_thresholds_not_configured",
+      selectedPolicyFingerprint: policyCohort.fingerprint,
+      selectedForecastVersion: 2,
+      cohortIsolated: true,
+      selectedCohortEvaluationCount: 1,
+      excludedLegacyEvaluationCount: 8,
+      excludedOtherPolicyCohortEvaluationCount: 0,
+    });
+  });
+
+  it("returns no accuracy metrics when only legacy observations exist", async () => {
+    const repo = repository();
+    repo.loadPolicyCohorts.mockResolvedValue([{
+      captureVersion: 0,
+      fingerprint: null,
+      snapshot: null,
+      forecastMethod: null,
+      forecastVersion: null,
+      observationCount: 5,
+      evaluationCount: 4,
+      firstObservedFrom: new Date("2025-12-01T00:00:00.000Z"),
+      latestObservedFrom: new Date("2025-12-31T00:00:00.000Z"),
+      latestEvaluationAt: new Date("2026-01-08T00:00:00.000Z"),
+    }]);
+    const service = createPurchaseForecastBacktestingService({ repository: repo });
+
+    const report = await service.getReport({ horizonDays: 30 });
+
+    expect(report.selectedPolicyCohort).toBeNull();
+    expect(report.summaries).toEqual([]);
+    expect(report.items).toEqual([]);
+    expect(report.accuracyTrustAssessment).toMatchObject({
+      status: "not_assessed",
+      reason: "no_captured_policy_cohort",
+      cohortIsolated: false,
+      excludedLegacyEvaluationCount: 4,
+    });
+    expect(repo.loadAggregates).not.toHaveBeenCalled();
+    expect(repo.loadRecent).not.toHaveBeenCalled();
+  });
+
+  it("selects one exact forecast version when policy settings share a fingerprint", async () => {
+    const repo = repository();
+    const cohortEvidence = (forecastVersion: number, evaluationCount: number) => ({
+      captureVersion: 1 as const,
+      fingerprint: policyCohort.fingerprint,
+      snapshot: policyCohort.snapshot,
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion,
+      observationCount: 2,
+      evaluationCount,
+      firstObservedFrom: new Date("2026-01-01T00:00:00.000Z"),
+      latestObservedFrom: new Date("2026-01-10T00:00:00.000Z"),
+      latestEvaluationAt: new Date("2026-01-18T00:00:00.000Z"),
+    });
+    repo.loadPolicyCohorts.mockResolvedValue([
+      cohortEvidence(3, 2),
+      cohortEvidence(2, 1),
+    ]);
+    repo.loadAggregates.mockResolvedValue([]);
+    repo.loadRecent.mockResolvedValue([]);
+    const service = createPurchaseForecastBacktestingService({ repository: repo });
+
+    const report = await service.getReport({
+      forecastPolicyFingerprint: policyCohort.fingerprint,
+      forecastVersion: 2,
+    });
+
+    expect(report.selectedPolicyCohort?.forecastVersion).toBe(2);
+    expect(repo.loadAggregates).toHaveBeenCalledWith(expect.objectContaining({
+      policyFingerprint: policyCohort.fingerprint,
+      forecastVersion: 2,
+    }));
+    expect(report.accuracyTrustAssessment).toMatchObject({
+      selectedForecastVersion: 2,
+      selectedCohortEvaluationCount: 1,
+      excludedOtherPolicyCohortEvaluationCount: 2,
+    });
   });
 
   it("rejects unsupported horizons and limits before repository access", async () => {
@@ -203,6 +334,10 @@ describe("purchase forecast backtesting service", () => {
 
     await expect(service.evaluateMatured({ horizons: [14] })).rejects.toThrow("only 7, 30, or 90");
     await expect(service.getReport({ limit: 501 })).rejects.toThrow("between 1 and 500");
+    await expect(service.getReport({ forecastPolicyFingerprint: "not-a-fingerprint" }))
+      .rejects.toThrow("lowercase SHA-256");
+    await expect(service.getReport({ forecastPolicyFingerprint: "a".repeat(64) }))
+      .rejects.toThrow("must be provided together");
     expect(repo.inRepeatableReadTransaction).not.toHaveBeenCalled();
   });
 

@@ -15,6 +15,8 @@ const evaluateBodySchema = z.object({
 const reportQuerySchema = z.object({
   horizonDays: z.union([z.literal("7"), z.literal("30"), z.literal("90")]).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
+  forecastPolicyFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  forecastVersion: z.coerce.number().int().positive().optional(),
 });
 
 function requestActor(req: any): string | null {

@@ -9,9 +9,27 @@ import {
   formatWapeImprovement,
 } from "../forecastBacktesting";
 
+const policyFingerprint = "87bdbe7ba1ec6b5d2aea618c28cc86c90fd58aff5fc937c67db81c87d388f75f";
+const policySnapshot = {
+  method: "weighted_blend_v1",
+  shortWindowDays: 7,
+  standardWindowDays: 30,
+  longWindowDays: 90,
+  seasonalEnabled: true,
+  seasonalWindowDays: 30,
+  weights: { short: 30, standard: 35, long: 20, seasonal: 15 },
+  forwardDemandEnabled: true,
+  forwardDemandHorizonDays: 90,
+  forwardDemandConfidenceWeights: { high: 100, medium: 70, low: 40 },
+};
+
 function summary() {
   return {
     horizonDays: 30,
+    forecastPolicyCaptureVersion: 1,
+    forecastPolicyFingerprint: policyFingerprint,
+    forecastMethod: "weighted_blend_v1",
+    forecastVersion: 2,
     evaluationCount: 2,
     actualDemandPieces: 100,
     forecastDemandMicros: 100_000_000,
@@ -55,6 +73,10 @@ function excludedItem() {
     productSku: "SKU-4",
     productName: "Product 4",
     horizonDays: 30,
+    forecastMethod: "weighted_blend_v1",
+    forecastVersion: 2,
+    forecastPolicyCaptureVersion: 1,
+    forecastPolicyFingerprint: policyFingerprint,
     observedFrom: "2026-01-01T00:00:00.000Z",
     observedThroughExclusive: "2026-01-31T00:00:00.000Z",
     actualDemandPieces: 50,
@@ -93,6 +115,48 @@ function report() {
       overlayAttributionVersion: 1,
       overlayAttributionInterval: "[planningAsOfDate, planningAsOfDate + horizonDays)",
       overlayEligibility: "capture_version_2_and_capture_horizon_covers_evaluation_horizon",
+      policyCohortIsolation: "exact_policy_fingerprint_method_and_forecast_version",
+    },
+    policyCohorts: [{
+      captureVersion: 1,
+      fingerprint: policyFingerprint,
+      snapshot: policySnapshot,
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion: 2,
+      observationCount: 3,
+      evaluationCount: 2,
+      firstObservedFrom: "2026-01-01T00:00:00.000Z",
+      latestObservedFrom: "2026-01-10T00:00:00.000Z",
+      latestEvaluationAt: "2026-02-01T00:00:00.000Z",
+    }],
+    selectedPolicyCohort: {
+      captureVersion: 1,
+      fingerprint: policyFingerprint,
+      snapshot: policySnapshot,
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion: 2,
+      observationCount: 3,
+      evaluationCount: 2,
+      firstObservedFrom: "2026-01-01T00:00:00.000Z",
+      latestObservedFrom: "2026-01-10T00:00:00.000Z",
+      latestEvaluationAt: "2026-02-01T00:00:00.000Z",
+    },
+    cohortCoverage: {
+      capturedPolicyCohortCount: 1,
+      capturedObservationCount: 3,
+      capturedEvaluationCount: 2,
+      legacyObservationCount: 4,
+      legacyEvaluationCount: 3,
+    },
+    accuracyTrustAssessment: {
+      status: "not_assessed",
+      reason: "accuracy_thresholds_not_configured",
+      selectedPolicyFingerprint: policyFingerprint,
+      selectedForecastVersion: 2,
+      cohortIsolated: true,
+      selectedCohortEvaluationCount: 2,
+      excludedLegacyEvaluationCount: 3,
+      excludedOtherPolicyCohortEvaluationCount: 0,
     },
     summaries: [summary()],
     itemCount: 1,
@@ -127,6 +191,20 @@ describe("forecast backtesting client contract", () => {
       ...report(),
       summaries: [{ ...summary(), overlayEvaluationCount: 2 }],
     })).toThrow("Overlay outcome counts");
+    expect(() => forecastBacktestReportSchema.parse({
+      ...report(),
+      items: [{
+        ...excludedItem(),
+        forecastPolicyFingerprint: "a".repeat(64),
+      }],
+    })).toThrow("mixes policy cohort");
+    expect(() => forecastBacktestReportSchema.parse({
+      ...report(),
+      summaries: [{
+        ...summary(),
+        forecastVersion: 3,
+      }],
+    })).toThrow("mixes policy cohort");
   });
 
   it("rejects evaluation batch results whose counts do not reconcile", () => {

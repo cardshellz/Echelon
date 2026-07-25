@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPurchaseForecastBacktestingRepository } from "../../purchase-forecast-backtesting.repository";
+import { buildPurchasingForecastPolicyCohort } from "../../purchasing-forecast-policy";
+
+const policyCohort = buildPurchasingForecastPolicyCohort();
 
 function reportRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -12,6 +15,9 @@ function reportRow(overrides: Record<string, unknown> = {}) {
     horizon_days: "7",
     forecast_method: "weighted_blend_v1",
     forecast_version: "2",
+    forecast_policy_capture_version: "1",
+    forecast_policy_fingerprint: policyCohort.fingerprint,
+    forecast_policy_snapshot: policyCohort.snapshot,
     evaluation_version: "2",
     observed_from: "2026-01-01T00:00:00.000Z",
     observed_through_exclusive: "2026-01-08T00:00:00.000Z",
@@ -48,6 +54,121 @@ function reportRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe("purchase forecast backtesting repository", () => {
+  it("maps canonical captured and legacy policy cohort evidence", async () => {
+    const reorderedSnapshot = {
+      forwardDemandConfidenceWeights: policyCohort.snapshot.forwardDemandConfidenceWeights,
+      forwardDemandHorizonDays: policyCohort.snapshot.forwardDemandHorizonDays,
+      forwardDemandEnabled: policyCohort.snapshot.forwardDemandEnabled,
+      weights: policyCohort.snapshot.weights,
+      seasonalWindowDays: policyCohort.snapshot.seasonalWindowDays,
+      seasonalEnabled: policyCohort.snapshot.seasonalEnabled,
+      longWindowDays: policyCohort.snapshot.longWindowDays,
+      standardWindowDays: policyCohort.snapshot.standardWindowDays,
+      shortWindowDays: policyCohort.snapshot.shortWindowDays,
+      method: policyCohort.snapshot.method,
+    };
+    const repository = createPurchaseForecastBacktestingRepository({
+      execute: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            forecast_policy_capture_version: "1",
+            forecast_policy_fingerprint: policyCohort.fingerprint,
+            forecast_policy_snapshot: reorderedSnapshot,
+            forecast_method: "weighted_blend_v1",
+            forecast_version: "2",
+            observation_count: "4",
+            evaluation_count: "3",
+            first_observed_from: "2026-01-01T00:00:00.000Z",
+            latest_observed_from: "2026-01-10T00:00:00.000Z",
+            latest_evaluation_at: "2026-01-18T00:00:00.000Z",
+          },
+          {
+            forecast_policy_capture_version: "0",
+            forecast_policy_fingerprint: null,
+            forecast_policy_snapshot: null,
+            forecast_method: null,
+            forecast_version: null,
+            observation_count: "8",
+            evaluation_count: "7",
+            first_observed_from: "2025-12-01T00:00:00.000Z",
+            latest_observed_from: "2025-12-31T00:00:00.000Z",
+            latest_evaluation_at: "2026-01-08T00:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const rows = await repository.loadPolicyCohorts({
+      evaluationVersion: 2,
+      horizonDays: 7,
+    });
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        captureVersion: 1,
+        fingerprint: policyCohort.fingerprint,
+        snapshot: policyCohort.snapshot,
+        forecastMethod: "weighted_blend_v1",
+        forecastVersion: 2,
+        observationCount: 4,
+        evaluationCount: 3,
+      }),
+      expect.objectContaining({
+        captureVersion: 0,
+        fingerprint: null,
+        snapshot: null,
+        observationCount: 8,
+        evaluationCount: 7,
+      }),
+    ]);
+  });
+
+  it("rejects a policy fingerprint that does not match its persisted snapshot", async () => {
+    const repository = createPurchaseForecastBacktestingRepository({
+      execute: vi.fn().mockResolvedValue({
+        rows: [{
+          forecast_policy_capture_version: "1",
+          forecast_policy_fingerprint: "0".repeat(64),
+          forecast_policy_snapshot: policyCohort.snapshot,
+          forecast_method: "weighted_blend_v1",
+          forecast_version: "2",
+          observation_count: "1",
+          evaluation_count: "1",
+          first_observed_from: "2026-01-01T00:00:00.000Z",
+          latest_observed_from: "2026-01-01T00:00:00.000Z",
+          latest_evaluation_at: "2026-01-08T00:00:00.000Z",
+        }],
+      }),
+    });
+
+    await expect(repository.loadPolicyCohorts({
+      evaluationVersion: 2,
+    })).rejects.toThrow("canonical policy snapshot");
+  });
+
+  it("rejects a captured cohort whose forecast method disagrees with the policy snapshot", async () => {
+    const repository = createPurchaseForecastBacktestingRepository({
+      execute: vi.fn().mockResolvedValue({
+        rows: [{
+          forecast_policy_capture_version: "1",
+          forecast_policy_fingerprint: policyCohort.fingerprint,
+          forecast_policy_snapshot: policyCohort.snapshot,
+          forecast_method: "recent_order_velocity_v1",
+          forecast_version: "2",
+          observation_count: "1",
+          evaluation_count: "1",
+          first_observed_from: "2026-01-01T00:00:00.000Z",
+          latest_observed_from: "2026-01-01T00:00:00.000Z",
+          latest_evaluation_at: "2026-01-08T00:00:00.000Z",
+        }],
+      }),
+    });
+
+    await expect(repository.loadPolicyCohorts({
+      evaluationVersion: 2,
+    })).rejects.toThrow("forecast method");
+  });
+
   it("maps exact database values for mature actual-demand candidates", async () => {
     const database = {
       execute: vi.fn().mockResolvedValue({ rows: [{
@@ -164,9 +285,14 @@ describe("purchase forecast backtesting repository", () => {
       evaluationVersion: 2,
       horizonDays: 7,
       limit: 10,
+      policyFingerprint: policyCohort.fingerprint,
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion: 2,
     });
 
     expect(rows).toEqual([expect.objectContaining({
+      forecastPolicyCaptureVersion: 1,
+      forecastPolicyFingerprint: policyCohort.fingerprint,
       overlayEvaluable: false,
       overlayExclusionReason: "capture_incomplete",
       overlayContributionCount: null,
@@ -185,6 +311,9 @@ describe("purchase forecast backtesting repository", () => {
       evaluationVersion: 2,
       horizonDays: 7,
       limit: 10,
+      policyFingerprint: policyCohort.fingerprint,
+      forecastMethod: "weighted_blend_v1",
+      forecastVersion: 2,
     })).rejects.toThrow("Non-evaluable forecast report row");
   });
 

@@ -9,6 +9,7 @@ import {
 import {
   createPurchaseForecastBacktestingRepository,
   type PurchaseForecastBacktestingRepository,
+  type PurchaseForecastPolicyCohortEvidence,
 } from "./purchase-forecast-backtesting.repository";
 
 const DEFAULT_EVALUATION_LIMIT = 1_000;
@@ -58,6 +59,23 @@ function actor(value: unknown): string | null {
     throw new RangeError("actor must be a string no longer than 255 characters");
   }
   return value.trim();
+}
+
+function normalizePolicyFingerprint(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new RangeError("forecastPolicyFingerprint must be a lowercase SHA-256");
+  }
+  return value;
+}
+
+function normalizeForecastVersion(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new RangeError("forecastVersion must be a positive safe integer");
+  }
+  return parsed;
 }
 
 export function createPurchaseForecastBacktestingService(input: {
@@ -133,22 +151,92 @@ export function createPurchaseForecastBacktestingService(input: {
   async function getReport(options: {
     horizonDays?: number | string;
     limit?: number;
+    forecastPolicyFingerprint?: string;
+    forecastVersion?: number | string;
   } = {}) {
     const horizonDays = normalizeHorizon(options.horizonDays);
     const limit = boundedLimit(options.limit, DEFAULT_REPORT_LIMIT, MAX_REPORT_LIMIT, "limit");
+    const requestedPolicyFingerprint = normalizePolicyFingerprint(options.forecastPolicyFingerprint);
+    const requestedForecastVersion = normalizeForecastVersion(options.forecastVersion);
+    if ((requestedPolicyFingerprint === undefined) !== (requestedForecastVersion === undefined)) {
+      throw new RangeError("forecastPolicyFingerprint and forecastVersion must be provided together");
+    }
     return repository.inRepeatableReadTransaction(async (transactionRepository) => {
-      const [aggregates, items] = await Promise.all([
-        transactionRepository.loadAggregates({
-          evaluationVersion: PURCHASE_FORECAST_EVALUATION_VERSION,
-          horizonDays,
-        }),
-        transactionRepository.loadRecent({
-          evaluationVersion: PURCHASE_FORECAST_EVALUATION_VERSION,
-          horizonDays,
-          limit,
-        }),
-      ]);
-      const summaries = buildPurchaseForecastEvaluationSummariesFromAggregates(aggregates);
+      const policyEvidence = await transactionRepository.loadPolicyCohorts({
+        evaluationVersion: PURCHASE_FORECAST_EVALUATION_VERSION,
+        horizonDays,
+      });
+      const policyCohorts = policyEvidence.filter(
+        (
+          cohort,
+        ): cohort is Extract<PurchaseForecastPolicyCohortEvidence, { captureVersion: 1 }> => (
+          cohort.captureVersion === 1
+        ),
+      );
+      const seenCohortKeys = new Set<string>();
+      for (const cohort of policyCohorts) {
+        const cohortKey = `${cohort.fingerprint}:${cohort.forecastVersion}`;
+        if (seenCohortKeys.has(cohortKey)) {
+          throw new Error(`Forecast policy cohort ${cohortKey} maps to multiple policy snapshots`);
+        }
+        seenCohortKeys.add(cohortKey);
+      }
+      const legacyEvidence = policyEvidence.filter((cohort) => cohort.captureVersion === 0);
+      if (legacyEvidence.length > 1) {
+        throw new Error("Forecast backtesting returned multiple legacy policy evidence groups");
+      }
+      const selectedPolicyCohort = requestedPolicyFingerprint === undefined
+        ? policyCohorts[0] ?? null
+        : policyCohorts.find((cohort) => (
+            cohort.fingerprint === requestedPolicyFingerprint
+            && cohort.forecastVersion === requestedForecastVersion
+          )) ?? null;
+      if (requestedPolicyFingerprint !== undefined && selectedPolicyCohort === null) {
+        throw new RangeError("No forecast backtesting evidence exists for forecastPolicyFingerprint");
+      }
+
+      let aggregates: Awaited<ReturnType<typeof transactionRepository.loadAggregates>> = [];
+      let items: Awaited<ReturnType<typeof transactionRepository.loadRecent>> = [];
+      if (selectedPolicyCohort !== null) {
+        [aggregates, items] = await Promise.all([
+          transactionRepository.loadAggregates({
+            evaluationVersion: PURCHASE_FORECAST_EVALUATION_VERSION,
+            horizonDays,
+            policyFingerprint: selectedPolicyCohort.fingerprint,
+            forecastMethod: selectedPolicyCohort.forecastMethod,
+            forecastVersion: selectedPolicyCohort.forecastVersion,
+          }),
+          transactionRepository.loadRecent({
+            evaluationVersion: PURCHASE_FORECAST_EVALUATION_VERSION,
+            horizonDays,
+            limit,
+            policyFingerprint: selectedPolicyCohort.fingerprint,
+            forecastMethod: selectedPolicyCohort.forecastMethod,
+            forecastVersion: selectedPolicyCohort.forecastVersion,
+          }),
+        ]);
+      }
+      const summaries = selectedPolicyCohort === null
+        ? []
+        : buildPurchaseForecastEvaluationSummariesFromAggregates(aggregates).map((summary) => ({
+            ...summary,
+            forecastPolicyCaptureVersion: selectedPolicyCohort.captureVersion,
+            forecastPolicyFingerprint: selectedPolicyCohort.fingerprint,
+            forecastMethod: selectedPolicyCohort.forecastMethod,
+            forecastVersion: selectedPolicyCohort.forecastVersion,
+          }));
+      const legacyObservationCount = legacyEvidence[0]?.observationCount ?? 0;
+      const legacyEvaluationCount = legacyEvidence[0]?.evaluationCount ?? 0;
+      const selectedCohortEvaluationCount = selectedPolicyCohort?.evaluationCount ?? 0;
+      const otherPolicyCohortEvaluationCount = policyCohorts.reduce(
+        (total, cohort) => total + (
+          cohort.fingerprint === selectedPolicyCohort?.fingerprint
+            && cohort.forecastVersion === selectedPolicyCohort.forecastVersion
+            ? 0
+            : cohort.evaluationCount
+        ),
+        0,
+      );
       return {
         evaluationVersion: PURCHASE_FORECAST_EVALUATION_VERSION,
         measurement: {
@@ -162,6 +250,36 @@ export function createPurchaseForecastBacktestingService(input: {
           overlayAttributionVersion: PURCHASE_FORECAST_OVERLAY_ATTRIBUTION_VERSION,
           overlayAttributionInterval: "[planningAsOfDate, planningAsOfDate + horizonDays)",
           overlayEligibility: "capture_version_2_and_capture_horizon_covers_evaluation_horizon",
+          policyCohortIsolation: "exact_policy_fingerprint_method_and_forecast_version",
+        },
+        policyCohorts,
+        selectedPolicyCohort,
+        cohortCoverage: {
+          capturedPolicyCohortCount: policyCohorts.length,
+          capturedObservationCount: policyCohorts.reduce(
+            (total, cohort) => total + cohort.observationCount,
+            0,
+          ),
+          capturedEvaluationCount: policyCohorts.reduce(
+            (total, cohort) => total + cohort.evaluationCount,
+            0,
+          ),
+          legacyObservationCount,
+          legacyEvaluationCount,
+        },
+        accuracyTrustAssessment: {
+          status: "not_assessed" as const,
+          reason: selectedPolicyCohort === null
+            ? "no_captured_policy_cohort" as const
+            : selectedCohortEvaluationCount === 0
+              ? "no_mature_evaluations" as const
+              : "accuracy_thresholds_not_configured" as const,
+          selectedPolicyFingerprint: selectedPolicyCohort?.fingerprint ?? null,
+          selectedForecastVersion: selectedPolicyCohort?.forecastVersion ?? null,
+          cohortIsolated: selectedPolicyCohort !== null,
+          selectedCohortEvaluationCount,
+          excludedLegacyEvaluationCount: legacyEvaluationCount,
+          excludedOtherPolicyCohortEvaluationCount: otherPolicyCohortEvaluationCount,
         },
         summaries,
         itemCount: items.length,
