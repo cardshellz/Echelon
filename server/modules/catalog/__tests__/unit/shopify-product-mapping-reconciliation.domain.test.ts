@@ -135,6 +135,214 @@ describe("Shopify product mapping reconciliation", () => {
       expect(item.ownerProductIds).toEqual([10, 11]);
       expect(item.issueCodes).toEqual(["duplicate_local_owner"]);
     }
+    expect(result.ownershipGroups).toHaveLength(1);
+    expect(result.ownershipGroups[0]).toMatchObject({
+      shopifyProductId: "9001",
+      ownerProductIds: [10, 11],
+      decision: "manual_review",
+      reason: "multiple_active_owners",
+      recommendedProductId: null,
+    });
+  });
+
+  it("recommends the only active owner with matching catalog and channel evidence", () => {
+    const result = report({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          productName: "Legacy 100PT Toploader - Each",
+          productSku: "SHLZ-TOP-100PT-EACH",
+          mappingStatus: "catalog_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+      ],
+    });
+
+    expect(result.summary).toMatchObject({
+      duplicateOwnershipGroupCount: 1,
+      canonicalOwnerRecommendationCount: 1,
+      manualReviewOwnershipGroupCount: 0,
+    });
+    expect(result.ownershipGroups[0]).toMatchObject({
+      shopifyProductId: "9001",
+      ownerProductIds: [10, 11],
+      decision: "canonical_owner_recommended",
+      reason: "single_active_owner_with_matching_evidence",
+      recommendedProductId: 10,
+      nonCanonicalProductIds: [11],
+      owners: [
+        {
+          productId: 10,
+          activeVariantCount: 2,
+          hasChannelEvidence: true,
+        },
+        {
+          productId: 11,
+          activeVariantCount: 0,
+          hasChannelEvidence: false,
+        },
+      ],
+    });
+  });
+
+  it("blocks a recommendation when any owner has conflicting product evidence", () => {
+    const result = report({
+      products: [
+        localProduct({ mappingStatus: "conflict" }),
+        localProduct({
+          productId: 11,
+          mappingStatus: "catalog_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+      ],
+    });
+
+    expect(result.ownershipGroups[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "owner_mapping_conflict",
+      recommendedProductId: null,
+      nonCanonicalProductIds: [],
+    });
+  });
+
+  it("blocks a recommendation when neither local owner has active variants", () => {
+    const result = report({
+      products: [
+        localProduct({
+          mappingStatus: "catalog_only",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+        localProduct({
+          productId: 11,
+          mappingStatus: "catalog_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+      ],
+    });
+
+    expect(result.ownershipGroups[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "no_active_owner",
+      recommendedProductId: null,
+    });
+  });
+
+  it("blocks a recommendation when the active owner's catalog ID differs", () => {
+    const result = report({
+      products: [
+        localProduct({
+          rawShopifyProductId: "9002",
+          shopifyProductId: "9002",
+          mappingStatus: "mismatch",
+          evidenceProductIds: ["9001"],
+        }),
+        localProduct({
+          productId: 11,
+          mappingStatus: "catalog_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+      ],
+    });
+
+    expect(
+      result.ownershipGroups.find(
+        (group) => group.shopifyProductId === "9001",
+      ),
+    ).toMatchObject({
+      decision: "manual_review",
+      reason: "active_owner_catalog_id_mismatch",
+      recommendedProductId: null,
+    });
+  });
+
+  it("blocks a recommendation when the active owner lacks channel evidence", () => {
+    const result = report({
+      products: [
+        localProduct({
+          mappingStatus: "catalog_only",
+          evidenceProductIds: [],
+        }),
+        localProduct({
+          productId: 11,
+          mappingStatus: "catalog_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+      ],
+    });
+
+    expect(result.ownershipGroups[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "active_owner_missing_channel_evidence",
+      recommendedProductId: null,
+    });
+  });
+
+  it("routes missing remote products to the verified retirement workflow", () => {
+    const result = report({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          mappingStatus: "catalog_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+      ],
+      remote: [remoteProduct({
+        exists: false,
+        title: null,
+        status: null,
+        shippingGroupCode: null,
+      })],
+    });
+
+    expect(result.ownershipGroups[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "remote_product_missing",
+      recommendedProductId: null,
+    });
+  });
+
+  it("blocks complex ownership groups with more than two local products", () => {
+    const result = report({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          mappingStatus: "catalog_only",
+          mappingFingerprint: "fingerprint-11",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+        localProduct({
+          productId: 12,
+          mappingStatus: "catalog_only",
+          mappingFingerprint: "fingerprint-12",
+          evidenceProductIds: [],
+          activeVariantCount: 0,
+        }),
+      ],
+    });
+
+    expect(result.ownershipGroups[0]).toMatchObject({
+      ownerProductIds: [10, 11, 12],
+      decision: "manual_review",
+      reason: "owner_count_exceeds_two",
+      recommendedProductId: null,
+    });
   });
 
   it("separately identifies duplicate owners with conflicting shipping groups", () => {
@@ -160,6 +368,10 @@ describe("Shopify product mapping reconciliation", () => {
         "shipping_group_conflict",
         "storefront_shipping_group_drift",
       ]);
+    expect(result.ownershipGroups[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "shipping_group_conflict",
+    });
   });
 
   it("marks a missing remote product as eligible for verified retirement", () => {
