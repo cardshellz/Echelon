@@ -1,6 +1,7 @@
 import type { StaleAutoDraftPoDiagnostics } from "./auto-draft-po-aging.service";
 import type { ForecastTrustHealth } from "./forecast-trust-health.service";
 import type { InFlightPoAgingDiagnostics } from "./in-flight-po-aging.service";
+import type { PurchaseRecommendationPipelineHealth } from "./purchase-recommendation-pipeline-health.service";
 import type { SupplierSetupGaps } from "./supplier-setup-gaps.service";
 
 export type ProcurementHealthSeverity = "critical" | "warning" | "healthy";
@@ -35,6 +36,10 @@ type LandedCostHealthLike = {
 type SupplierSetupGapsLike = Pick<SupplierSetupGaps, "totalGapItems" | "counts">;
 type InFlightPoAgingLike = Pick<InFlightPoAgingDiagnostics, "totalAging" | "counts">;
 type ForecastTrustHealthLike = Pick<ForecastTrustHealth, "totalTrustItems" | "counts" | "actions">;
+type PurchaseRecommendationPipelineHealthLike = Pick<
+  PurchaseRecommendationPipelineHealth,
+  "status" | "critical" | "warning" | "detail"
+>;
 
 function statusFromCounts(critical: number, warning: number): ProcurementHealthSeverity {
   if (critical > 0) return "critical";
@@ -56,6 +61,7 @@ export function buildProcurementHealthSummary(input: {
   supplierSetupGaps?: SupplierSetupGapsLike;
   inFlightPoAging?: InFlightPoAgingLike;
   forecastTrustHealth?: ForecastTrustHealthLike;
+  recommendationPipelineHealth?: PurchaseRecommendationPipelineHealthLike;
   generatedAt?: Date;
 }): ProcurementHealthSummary {
   const staleCritical = input.staleAutoDraftPos.counts.critical;
@@ -136,6 +142,20 @@ export function buildProcurementHealthSummary(input: {
       detail: topForecastAction
         ? `${topForecastAction.count} forecast recommendation${topForecastAction.count === 1 ? "" : "s"} need ${topForecastAction.label.toLowerCase()}.`
         : "Forecast freshness and input gaps that can hold or weaken automated purchasing recommendations.",
+    });
+  }
+
+  if (input.recommendationPipelineHealth) {
+    sources.push({
+      key: "recommendation_pipeline_health",
+      label: "Recommendation pipeline",
+      status: input.recommendationPipelineHealth.status,
+      critical: input.recommendationPipelineHealth.critical,
+      warning: input.recommendationPipelineHealth.warning,
+      total: input.recommendationPipelineHealth.critical + input.recommendationPipelineHealth.warning,
+      href: "/reorder-analysis",
+      actionLabel: "Open Forecasts",
+      detail: input.recommendationPipelineHealth.detail,
     });
   }
 

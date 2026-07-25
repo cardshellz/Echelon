@@ -817,7 +817,7 @@ export default function PurchasingDashboard() {
         .map(([label, value]) => ({ label: formatGapCode(label), value }))
     : [];
   const showStaleAutoDraftPos = Boolean(staleAutoDraftPos?.totalStale);
-  const showProcurementHealth = Boolean(procurementHealth && procurementHealth.status !== "healthy");
+  const showProcurementHealth = Boolean(procurementHealth);
   const staleAutoDraftPoCounts = staleAutoDraftPos
     ? [
         { label: "Review", value: staleAutoDraftPos.counts.reviewPending + staleAutoDraftPos.counts.exceptionBlocked },
