@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { createPurchaseForecastBacktestingRepository } from "../../purchase-forecast-backtesting.repository";
 import { buildPurchasingForecastPolicyCohort } from "../../purchasing-forecast-policy";
 
@@ -67,7 +68,7 @@ describe("purchase forecast backtesting repository", () => {
       shortWindowDays: policyCohort.snapshot.shortWindowDays,
       method: policyCohort.snapshot.method,
     };
-    const repository = createPurchaseForecastBacktestingRepository({
+    const database = {
       execute: vi.fn().mockResolvedValue({
         rows: [
           {
@@ -96,7 +97,8 @@ describe("purchase forecast backtesting repository", () => {
           },
         ],
       }),
-    });
+    };
+    const repository = createPurchaseForecastBacktestingRepository(database);
 
     const rows = await repository.loadPolicyCohorts({
       evaluationVersion: 2,
@@ -121,6 +123,12 @@ describe("purchase forecast backtesting repository", () => {
         evaluationCount: 7,
       }),
     ]);
+
+    const renderedQuery = new PgDialect().sqlToQuery(database.execute.mock.calls[0][0]);
+    const groupByClause = renderedQuery.sql.slice(renderedQuery.sql.indexOf("GROUP BY"));
+    expect(renderedQuery.sql).toContain("WITH cohort_observations AS");
+    expect(groupByClause).toContain("cohort_observation.forecast_method");
+    expect(groupByClause).not.toContain("CASE");
   });
 
   it("rejects a policy fingerprint that does not match its persisted snapshot", async () => {

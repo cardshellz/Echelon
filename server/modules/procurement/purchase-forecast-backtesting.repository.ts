@@ -519,50 +519,54 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
     horizonDays?: PurchaseForecastEvaluationHorizonDays;
   }): Promise<PurchaseForecastPolicyCohortEvidence[]> {
     const result = await database.execute(sql`
+      WITH cohort_observations AS (
+        SELECT
+          observation.id,
+          observation.created_at,
+          recommendation_run.as_of AS observed_from,
+          observation.forecast_policy_capture_version,
+          observation.forecast_policy_fingerprint,
+          observation.forecast_policy_snapshot,
+          CASE
+            WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+              THEN observation.forecast_method
+            ELSE NULL
+          END AS forecast_method,
+          CASE
+            WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+              THEN observation.forecast_version
+            ELSE NULL
+          END AS forecast_version
+        FROM procurement.purchase_forecast_observations observation
+        JOIN procurement.purchase_recommendation_runs recommendation_run
+          ON recommendation_run.id = observation.run_id
+        WHERE recommendation_run.status = 'completed'
+      )
       SELECT
-        observation.forecast_policy_capture_version,
-        observation.forecast_policy_fingerprint,
-        observation.forecast_policy_snapshot,
-        CASE
-          WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
-            THEN observation.forecast_method
-          ELSE NULL
-        END AS forecast_method,
-        CASE
-          WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
-            THEN observation.forecast_version
-          ELSE NULL
-        END AS forecast_version,
-        COUNT(DISTINCT observation.id)::int AS observation_count,
+        cohort_observation.forecast_policy_capture_version,
+        cohort_observation.forecast_policy_fingerprint,
+        cohort_observation.forecast_policy_snapshot,
+        cohort_observation.forecast_method,
+        cohort_observation.forecast_version,
+        COUNT(DISTINCT cohort_observation.id)::int AS observation_count,
         COUNT(evaluation.id)::int AS evaluation_count,
-        MIN(recommendation_run.as_of) AS first_observed_from,
-        MAX(recommendation_run.as_of) AS latest_observed_from,
+        MIN(cohort_observation.observed_from) AS first_observed_from,
+        MAX(cohort_observation.observed_from) AS latest_observed_from,
         MAX(evaluation.evaluated_at) AS latest_evaluation_at
-      FROM procurement.purchase_forecast_observations observation
-      JOIN procurement.purchase_recommendation_runs recommendation_run
-        ON recommendation_run.id = observation.run_id
+      FROM cohort_observations cohort_observation
       LEFT JOIN procurement.purchase_forecast_evaluations evaluation
-        ON evaluation.observation_id = observation.id
+        ON evaluation.observation_id = cohort_observation.id
        AND evaluation.evaluation_version = ${input.evaluationVersion}
        AND (${input.horizonDays ?? null}::int IS NULL OR evaluation.horizon_days = ${input.horizonDays ?? null})
-      WHERE recommendation_run.status = 'completed'
       GROUP BY
-        observation.forecast_policy_capture_version,
-        observation.forecast_policy_fingerprint,
-        observation.forecast_policy_snapshot,
-        CASE
-          WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
-            THEN observation.forecast_method
-          ELSE NULL
-        END,
-        CASE
-          WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
-            THEN observation.forecast_version
-          ELSE NULL
-        END
+        cohort_observation.forecast_policy_capture_version,
+        cohort_observation.forecast_policy_fingerprint,
+        cohort_observation.forecast_policy_snapshot,
+        cohort_observation.forecast_method,
+        cohort_observation.forecast_version
       ORDER BY
-        MAX(observation.created_at) DESC,
-        observation.forecast_policy_fingerprint NULLS LAST
+        MAX(cohort_observation.created_at) DESC,
+        cohort_observation.forecast_policy_fingerprint NULLS LAST
     `);
     return rowsOf(result).map(mapPolicyCohort);
   }
