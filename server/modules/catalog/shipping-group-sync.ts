@@ -20,7 +20,7 @@
  */
 import { db } from "../../db";
 import { products, shippingGroups } from "@shared/schema";
-import { eq, inArray, sql, type SQL } from "drizzle-orm";
+import { eq, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 
 const NAMESPACE = "cardshellz";
 const KEY = "shipping_group";
@@ -43,6 +43,14 @@ export interface ShippingGroupMetafieldSyncResult {
   requestedProductCount: number;
   queuedProductCount: number;
   skippedUnmappedProductCount: number;
+}
+
+interface ShippingGroupProjection {
+  productId: number;
+  shopifyProductId: string;
+  shopifyProductGid: string;
+  shippingGroupId: number | null;
+  shippingGroupCode: string | null;
 }
 
 export class ShippingGroupMetafieldSyncError extends Error {
@@ -81,6 +89,79 @@ function assertCanonicalShippingGroupCode(
       "INVALID_SHIPPING_GROUP_CODE",
       "Shipping-group metafield synchronization requires a canonical lowercase snake-case group code",
       { shippingGroupCode },
+    );
+  }
+}
+
+async function assertSingleLocalOwnerPerShopifyProduct(
+  client: ShippingGroupSyncClient,
+  projections: readonly ShippingGroupProjection[],
+): Promise<void> {
+  if (projections.length === 0) return;
+
+  const requestedGids = new Set(
+    projections.map((projection) => projection.shopifyProductGid),
+  );
+  const mappedProducts = await client
+    .select({
+      productId: products.id,
+      shopifyProductId: products.shopifyProductId,
+      shippingGroupId: products.shippingGroupId,
+      shippingGroupCode: shippingGroups.code,
+    })
+    .from(products)
+    .leftJoin(shippingGroups, eq(products.shippingGroupId, shippingGroups.id))
+    .where(isNotNull(products.shopifyProductId));
+
+  const ownersByGid = new Map<
+    string,
+    Array<{
+      productId: number;
+      shippingGroupId: number | null;
+      shippingGroupCode: string | null;
+    }>
+  >();
+  for (const mappedProduct of mappedProducts) {
+    if (!mappedProduct.shopifyProductId) continue;
+
+    let gid: string;
+    try {
+      gid = toProductGid(mappedProduct.shopifyProductId);
+    } catch {
+      // An unrelated malformed mapping cannot own a valid requested target.
+      continue;
+    }
+    if (!requestedGids.has(gid)) continue;
+
+    const owners = ownersByGid.get(gid) ?? [];
+    owners.push({
+      productId: mappedProduct.productId,
+      shippingGroupId: mappedProduct.shippingGroupId,
+      shippingGroupCode: mappedProduct.shippingGroupCode,
+    });
+    ownersByGid.set(gid, owners);
+  }
+
+  for (const gid of [...requestedGids].sort()) {
+    const owners = (ownersByGid.get(gid) ?? [])
+      .sort((left, right) => left.productId - right.productId);
+    if (owners.length <= 1) continue;
+
+    const distinctGroupCodes = new Set(
+      owners.map((owner) => owner.shippingGroupCode),
+    );
+    const hasConflictingGroups = distinctGroupCodes.size > 1;
+    throw new ShippingGroupMetafieldSyncError(
+      hasConflictingGroups
+        ? "SHOPIFY_PRODUCT_MAPPING_CONFLICT"
+        : "SHOPIFY_PRODUCT_MAPPING_DUPLICATE",
+      hasConflictingGroups
+        ? "Multiple Echelon products with different shipping groups map to the same Shopify product"
+        : "Multiple Echelon products map to the same Shopify product",
+      {
+        shopifyProductId: gid,
+        owners,
+      },
     );
   }
 }
@@ -169,7 +250,7 @@ export async function enqueueShippingGroupMetafields(
     );
   }
 
-  let queuedProductCount = 0;
+  const projections: ShippingGroupProjection[] = [];
   let skippedUnmappedProductCount = 0;
   for (const row of rows) {
     if (
@@ -190,16 +271,28 @@ export async function enqueueShippingGroupMetafields(
       skippedUnmappedProductCount++;
       continue;
     }
-    await enqueueShippingGroupMetafieldWrite(client, {
+    const shopifyProductGid = toProductGid(row.shopifyProductId);
+    projections.push({
+      productId: row.productId,
       shopifyProductId: row.shopifyProductId,
+      shopifyProductGid,
+      shippingGroupId: row.shippingGroupId,
       shippingGroupCode: row.code,
     });
-    queuedProductCount++;
+  }
+
+  await assertSingleLocalOwnerPerShopifyProduct(client, projections);
+
+  for (const projection of projections) {
+    await enqueueShippingGroupMetafieldWrite(client, {
+      shopifyProductId: projection.shopifyProductId,
+      shippingGroupCode: projection.shippingGroupCode,
+    });
   }
 
   return {
     requestedProductCount: uniqueProductIds.length,
-    queuedProductCount,
+    queuedProductCount: projections.length,
     skippedUnmappedProductCount,
   };
 }
