@@ -93,42 +93,6 @@ interface ShopifyMappingReconciliationItem {
   canRetireDeadMapping: boolean;
 }
 
-type ShopifyOwnershipDecisionReason =
-  | "single_active_owner_with_matching_evidence"
-  | "remote_product_missing"
-  | "owner_count_exceeds_two"
-  | "shipping_group_conflict"
-  | "owner_mapping_conflict"
-  | "multiple_active_owners"
-  | "no_active_owner"
-  | "active_owner_catalog_id_mismatch"
-  | "active_owner_missing_channel_evidence";
-
-interface ShopifyDuplicateOwnershipOwner {
-  productId: number;
-  productName: string;
-  productSku: string | null;
-  shopifyProductId: string | null;
-  shippingGroupCode: string | null;
-  mappingStatus: string;
-  activeVariantCount: number;
-  activeVariantIssueCount: number;
-  hasChannelEvidence: boolean;
-}
-
-interface ShopifyDuplicateOwnershipGroup {
-  shopifyProductId: string;
-  remoteTitle: string | null;
-  remoteStatus: string | null;
-  shippingGroupCode: string | null;
-  ownerProductIds: number[];
-  owners: ShopifyDuplicateOwnershipOwner[];
-  decision: "canonical_owner_recommended" | "manual_review";
-  reason: ShopifyOwnershipDecisionReason;
-  recommendedProductId: number | null;
-  nonCanonicalProductIds: number[];
-}
-
 interface ShopifyMappingReconciliationReport {
   generatedAt: string;
   channel: {
@@ -142,16 +106,11 @@ interface ShopifyMappingReconciliationReport {
     healthyProductCount: number;
     issueProductCount: number;
     issueCounts: Record<ShopifyMappingIssueCode, number>;
-    duplicateOwnershipGroupCount: number;
-    canonicalOwnerRecommendationCount: number;
-    manualReviewOwnershipGroupCount: number;
   };
   items: ShopifyMappingReconciliationItem[];
-  ownershipGroups: ShopifyDuplicateOwnershipGroup[];
 }
 
 type FeedStatus = "all" | "listed" | "not_listed" | "errors";
-type MappingView = "issues" | "ownership" | "all";
 const MAPPING_PAGE_SIZE = 20;
 
 const mappingIssueLabels: Record<ShopifyMappingIssueCode, string> = {
@@ -164,134 +123,6 @@ const mappingIssueLabels: Record<ShopifyMappingIssueCode, string> = {
   storefront_shipping_group_drift: "Storefront group drift",
 };
 
-const ownershipReasonLabels: Record<
-  ShopifyOwnershipDecisionReason,
-  string
-> = {
-  single_active_owner_with_matching_evidence: "Clear canonical owner",
-  remote_product_missing: "Missing in Shopify",
-  owner_count_exceeds_two: "Complex ownership group",
-  shipping_group_conflict: "Shipping group conflict",
-  owner_mapping_conflict: "Conflicting product evidence",
-  multiple_active_owners: "Multiple active products",
-  no_active_owner: "No active product",
-  active_owner_catalog_id_mismatch: "Catalog ID mismatch",
-  active_owner_missing_channel_evidence: "Channel evidence missing",
-};
-
-function DuplicateOwnershipTable({
-  groups,
-  onOpenProduct,
-}: {
-  groups: ShopifyDuplicateOwnershipGroup[];
-  onOpenProduct: (productId: number) => void;
-}) {
-  return (
-    <div className="space-y-3">
-      <div className="border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
-        Recommendations are read-only. The scan does not change product or
-        Shopify mappings.
-      </div>
-      <div className="border rounded-lg overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Shopify product</TableHead>
-              <TableHead>Local owners</TableHead>
-              <TableHead className="w-[240px]">Decision</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {groups.map((group) => (
-              <TableRow key={group.shopifyProductId}>
-                <TableCell className="align-top">
-                  <div className="font-medium text-sm">
-                    {group.remoteTitle ?? "Not found"}
-                  </div>
-                  <code className="text-xs text-muted-foreground">
-                    {group.shopifyProductId}
-                  </code>
-                  <div className="text-xs text-muted-foreground">
-                    {group.shippingGroupCode ?? "No shared shipping group"}
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <div className="space-y-2">
-                    {group.owners.map((owner) => {
-                      const isRecommended =
-                        owner.productId === group.recommendedProductId;
-                      return (
-                        <div key={owner.productId}>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Button
-                              variant="link"
-                              size="sm"
-                              className="h-auto p-0 text-left font-medium"
-                              onClick={() => onOpenProduct(owner.productId)}
-                            >
-                              {owner.productName}
-                            </Button>
-                            {isRecommended && (
-                              <Badge
-                                variant="outline"
-                                className="border-green-300 text-green-700"
-                              >
-                                Recommended owner
-                              </Badge>
-                            )}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            #{owner.productId}
-                            {" · "}
-                            {owner.activeVariantCount} active variants
-                            {" · "}
-                            {owner.mappingStatus}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </TableCell>
-                <TableCell className="align-top">
-                  <Badge
-                    variant={
-                      group.decision === "canonical_owner_recommended"
-                        ? "outline"
-                        : "destructive"
-                    }
-                    className={
-                      group.decision === "canonical_owner_recommended"
-                        ? "border-green-300 text-green-700"
-                        : undefined
-                    }
-                  >
-                    {group.decision === "canonical_owner_recommended"
-                      ? "Clear owner"
-                      : "Manual review"}
-                  </Badge>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {ownershipReasonLabels[group.reason]}
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-            {groups.length === 0 && (
-              <TableRow>
-                <TableCell
-                  colSpan={3}
-                  className="py-8 text-center text-sm text-muted-foreground"
-                >
-                  No duplicate Shopify ownership groups were found.
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
-    </div>
-  );
-}
-
 export default function ShopifyChannelPage() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
@@ -299,7 +130,7 @@ export default function ShopifyChannelPage() {
   const [feedFilter, setFeedFilter] = useState<FeedStatus>("all");
   const [feedSearch, setFeedSearch] = useState("");
   const [pushingProductId, setPushingProductId] = useState<number | null>(null);
-  const [mappingView, setMappingView] = useState<MappingView>("issues");
+  const [showHealthyMappings, setShowHealthyMappings] = useState(false);
   const [mappingPage, setMappingPage] = useState(1);
   const [retireCandidate, setRetireCandidate] =
     useState<ShopifyMappingReconciliationItem | null>(null);
@@ -658,25 +489,16 @@ export default function ShopifyChannelPage() {
 
   const visibleMappingItems = useMemo(() => {
     const items = mappingReconciliationQuery.data?.items ?? [];
-    return mappingView === "all"
+    return showHealthyMappings
       ? items
       : items.filter((item) => item.issueCodes.length > 0);
-  }, [mappingReconciliationQuery.data, mappingView]);
-  const ownershipGroups =
-    mappingReconciliationQuery.data?.ownershipGroups ?? [];
-  const mappingRowCount = mappingView === "ownership"
-    ? ownershipGroups.length
-    : visibleMappingItems.length;
+  }, [mappingReconciliationQuery.data, showHealthyMappings]);
   const mappingPageCount = Math.max(
     1,
-    Math.ceil(mappingRowCount / MAPPING_PAGE_SIZE),
+    Math.ceil(visibleMappingItems.length / MAPPING_PAGE_SIZE),
   );
   const currentMappingPage = Math.min(mappingPage, mappingPageCount);
   const paginatedMappingItems = visibleMappingItems.slice(
-    (currentMappingPage - 1) * MAPPING_PAGE_SIZE,
-    currentMappingPage * MAPPING_PAGE_SIZE,
-  );
-  const paginatedOwnershipGroups = ownershipGroups.slice(
     (currentMappingPage - 1) * MAPPING_PAGE_SIZE,
     currentMappingPage * MAPPING_PAGE_SIZE,
   );
@@ -801,22 +623,6 @@ export default function ShopifyChannelPage() {
                   </strong>{" "}
                   healthy
                 </span>
-                <span>
-                  <strong>
-                    {
-                      mappingReconciliationQuery.data.summary
-                        .duplicateOwnershipGroupCount
-                    }
-                  </strong>{" "}
-                  duplicate ownership groups
-                </span>
-                <span className="text-muted-foreground">
-                  {
-                    mappingReconciliationQuery.data.summary
-                      .canonicalOwnerRecommendationCount
-                  }{" "}
-                  have a clear owner
-                </span>
                 <span className="text-muted-foreground">
                   {mappingReconciliationQuery.data.summary.localProductCount}{" "}
                   mapped products checked
@@ -831,34 +637,22 @@ export default function ShopifyChannelPage() {
                 </span>
               </div>
 
-              <div className="flex flex-wrap gap-2">
+              <div className="flex gap-2">
                 <Button
-                  variant={mappingView === "issues" ? "default" : "outline"}
+                  variant={!showHealthyMappings ? "default" : "outline"}
                   size="sm"
                   onClick={() => {
-                    setMappingView("issues");
+                    setShowHealthyMappings(false);
                     setMappingPage(1);
                   }}
                 >
                   Issues
                 </Button>
                 <Button
-                  variant={
-                    mappingView === "ownership" ? "default" : "outline"
-                  }
+                  variant={showHealthyMappings ? "default" : "outline"}
                   size="sm"
                   onClick={() => {
-                    setMappingView("ownership");
-                    setMappingPage(1);
-                  }}
-                >
-                  Duplicate ownership
-                </Button>
-                <Button
-                  variant={mappingView === "all" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => {
-                    setMappingView("all");
+                    setShowHealthyMappings(true);
                     setMappingPage(1);
                   }}
                 >
@@ -866,128 +660,119 @@ export default function ShopifyChannelPage() {
                 </Button>
               </div>
 
-              {mappingView === "ownership" ? (
-                <DuplicateOwnershipTable
-                  groups={paginatedOwnershipGroups}
-                  onOpenProduct={(productId) =>
-                    navigate(`/products/${productId}?tab=channels`)}
-                />
-              ) : (
-                <div className="border rounded-lg overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Product</TableHead>
-                        <TableHead>Shopify product</TableHead>
-                        <TableHead>Shipping group</TableHead>
-                        <TableHead>Issues</TableHead>
-                        <TableHead className="w-[210px] text-right">
-                          Actions
-                        </TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {paginatedMappingItems.map((item) => (
-                        <TableRow key={item.productId}>
-                          <TableCell>
-                            <div className="font-medium text-sm">
-                              {item.productName}
-                            </div>
+              <div className="border rounded-lg overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Product</TableHead>
+                      <TableHead>Shopify product</TableHead>
+                      <TableHead>Shipping group</TableHead>
+                      <TableHead>Issues</TableHead>
+                      <TableHead className="w-[210px] text-right">
+                        Actions
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {paginatedMappingItems.map((item) => (
+                      <TableRow key={item.productId}>
+                        <TableCell>
+                          <div className="font-medium text-sm">
+                            {item.productName}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {item.productSku ?? "No base SKU"}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-sm">
+                            {item.remoteTitle ?? "Not found"}
+                          </div>
+                          <code className="text-xs text-muted-foreground">
+                            Catalog: {item.shopifyProductId ?? "missing"}
+                          </code>
+                          {item.evidenceProductIds.length > 0 && (
                             <div className="text-xs text-muted-foreground">
-                              {item.productSku ?? "No base SKU"}
+                              Channel: {item.evidenceProductIds.join(", ")}
                             </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="text-sm">
-                              {item.remoteTitle ?? "Not found"}
-                            </div>
-                            <code className="text-xs text-muted-foreground">
-                              Catalog: {item.shopifyProductId ?? "missing"}
-                            </code>
-                            {item.evidenceProductIds.length > 0 && (
-                              <div className="text-xs text-muted-foreground">
-                                Channel: {item.evidenceProductIds.join(", ")}
-                              </div>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <div className="text-sm">
-                              Echelon: {item.shippingGroupCode ?? "None"}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              Shopify:{" "}
-                              {item.remoteShippingGroupCode ?? "None"}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            {item.issueCodes.length === 0 ? (
-                              <Badge
-                                variant="outline"
-                                className="border-green-300 text-green-700"
-                              >
-                                Healthy
-                              </Badge>
-                            ) : (
-                              <div className="flex flex-wrap gap-1">
-                                {item.issueCodes.map((issueCode) => (
-                                  <Badge
-                                    key={issueCode}
-                                    variant={
-                                      issueCode === "remote_product_missing"
-                                      || issueCode
-                                        === "shipping_group_conflict"
-                                        ? "destructive"
-                                        : "outline"
-                                    }
-                                    className="text-xs"
-                                  >
-                                    {mappingIssueLabels[issueCode]}
-                                  </Badge>
-                                ))}
-                              </div>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex justify-end gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() =>
-                                  navigate(
-                                    `/products/${item.productId}?tab=channels`,
-                                  )}
-                              >
-                                Open product
-                              </Button>
-                              {item.canRetireDeadMapping && (
-                                <Button
-                                  variant="destructive"
-                                  size="sm"
-                                  onClick={() => setRetireCandidate(item)}
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-sm">
+                            Echelon: {item.shippingGroupCode ?? "None"}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            Shopify:{" "}
+                            {item.remoteShippingGroupCode ?? "None"}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {item.issueCodes.length === 0 ? (
+                            <Badge
+                              variant="outline"
+                              className="border-green-300 text-green-700"
+                            >
+                              Healthy
+                            </Badge>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {item.issueCodes.map((issueCode) => (
+                                <Badge
+                                  key={issueCode}
+                                  variant={
+                                    issueCode === "remote_product_missing"
+                                    || issueCode === "shipping_group_conflict"
+                                      ? "destructive"
+                                      : "outline"
+                                  }
+                                  className="text-xs"
                                 >
-                                  Retire mapping
-                                </Button>
-                              )}
+                                  {mappingIssueLabels[issueCode]}
+                                </Badge>
+                              ))}
                             </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                      {paginatedMappingItems.length === 0 && (
-                        <TableRow>
-                          <TableCell
-                            colSpan={5}
-                            className="text-center text-sm text-muted-foreground py-8"
-                          >
-                            {mappingView === "all"
-                              ? "No mapped Shopify products were returned."
-                              : "No mapping issues were found."}
-                          </TableCell>
-                        </TableRow>
-                      )}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex justify-end gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                navigate(
+                                  `/products/${item.productId}?tab=channels`,
+                                )}
+                            >
+                              Open product
+                            </Button>
+                            {item.canRetireDeadMapping && (
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                onClick={() => setRetireCandidate(item)}
+                              >
+                                Retire mapping
+                              </Button>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {paginatedMappingItems.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={5}
+                          className="text-center text-sm text-muted-foreground py-8"
+                        >
+                          {showHealthyMappings
+                            ? "No mapped Shopify products were returned."
+                            : "No mapping issues were found."}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
 
               {mappingPageCount > 1 && (
                 <div className="flex items-center justify-end gap-2">
