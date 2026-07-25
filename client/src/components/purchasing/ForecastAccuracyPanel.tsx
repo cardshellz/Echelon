@@ -32,6 +32,7 @@ import {
   purchaseRecommendationPipelineHealthSchema,
   type ForecastBacktestItem,
   type ForecastEvaluationHorizon,
+  type PurchaseRecommendationPipelineHealth,
 } from "@/features/purchasing/forecastBacktesting";
 
 const FORECAST_EVALUATION_BATCH_LIMIT = 5_000;
@@ -67,6 +68,15 @@ function overlayBadge(item: ForecastBacktestItem) {
     return <Badge variant="outline" className="border-amber-300 text-amber-700">Historical wins</Badge>;
   }
   return <Badge variant="outline">Overlay tie</Badge>;
+}
+
+function jobRunSummary(
+  label: string,
+  run: PurchaseRecommendationPipelineHealth["jobs"]["recommendationSnapshot"],
+): string {
+  if (!run) return `${label}: no execution`;
+  const timestamp = run.finishedAt ?? run.heartbeatAt;
+  return `${label}: ${run.status} ${new Date(timestamp).toLocaleString()}`;
 }
 
 export function ForecastAccuracyPanel() {
@@ -220,7 +230,7 @@ export function ForecastAccuracyPanel() {
             : !pipelineHealth
               ? "bg-zinc-50 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
               : pipelineHealth.status === "critical"
-            ? "bg-red-50 text-red-900 dark:bg-red-950/30 dark:text-red-100"
+                ? "bg-red-50 text-red-900 dark:bg-red-950/30 dark:text-red-100"
                 : pipelineHealth.status === "warning"
                   ? "bg-amber-50 text-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
                   : "bg-emerald-50/60 text-emerald-900 dark:bg-emerald-950/20 dark:text-emerald-100"
@@ -260,10 +270,14 @@ export function ForecastAccuracyPanel() {
                   <div className="mt-0.5 leading-5">{pipelineHealth.detail}</div>
                 </div>
               </div>
-              <div className="flex-none text-zinc-600 dark:text-zinc-300">
-                {pipelineHealth.latestEvaluationAt
-                  ? `Last evaluation ${new Date(pipelineHealth.latestEvaluationAt).toLocaleString()}`
-                  : "No completed forecast evaluations yet"}
+              <div className="flex-none space-y-0.5 text-zinc-600 dark:text-zinc-300 lg:text-right">
+                <div>{jobRunSummary("Snapshot", pipelineHealth.jobs.recommendationSnapshot)}</div>
+                <div>{jobRunSummary("Evaluation", pipelineHealth.jobs.forecastEvaluation)}</div>
+                <div>
+                  {pipelineHealth.latestEvaluationAt
+                    ? `Latest scored forecast ${new Date(pipelineHealth.latestEvaluationAt).toLocaleString()}`
+                    : "No forecast outcome has matured yet"}
+                </div>
               </div>
             </div>
           )}
