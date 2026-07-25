@@ -18,6 +18,8 @@ import {
   ExternalLink,
   RadioTower,
   RotateCcw,
+  AlertTriangle,
+  Loader2,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -109,8 +111,11 @@ interface OmsOrder {
   createdAt: string;
   lines: OmsOrderLine[];
   events?: OmsOrderEvent[];
-  flowHistory?: OmsOrderFlowHistoryEntry[];
   channelName?: string;
+}
+
+interface OmsOrderFlowHistoryResponse {
+  flowHistory: OmsOrderFlowHistoryEntry[];
 }
 
 interface OmsStats {
@@ -226,14 +231,53 @@ export default function OmsOrders() {
   });
 
   // Fetch selected order detail
-  const { data: selectedOrder } = useQuery<OmsOrder>({
-    queryKey: ["/api/oms/orders", selectedOrderId],
+  const {
+    data: selectedOrder,
+    error: selectedOrderError,
+    isError: isSelectedOrderError,
+    isLoading: isSelectedOrderLoading,
+    refetch: refetchSelectedOrder,
+  } = useQuery<OmsOrder>({
+    queryKey: ["/api/oms/orders", "detail", selectedOrderId],
     queryFn: async () => {
+      if (!selectedOrderId) throw new Error("A valid order ID is required");
       const res = await fetch(`/api/oms/orders/${selectedOrderId}`);
-      if (!res.ok) throw new Error("Failed to fetch order");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        const message =
+          body && typeof body.error === "string" && body.error.trim()
+            ? body.error
+            : `Order details request failed (${res.status})`;
+        throw new Error(message);
+      }
       return res.json();
     },
     enabled: !!selectedOrderId,
+    retry: 1,
+  });
+
+  const {
+    data: selectedOrderFlowHistory,
+    isError: isSelectedOrderFlowHistoryError,
+    isLoading: isSelectedOrderFlowHistoryLoading,
+    refetch: refetchSelectedOrderFlowHistory,
+  } = useQuery<OmsOrderFlowHistoryResponse>({
+    queryKey: ["/api/oms/orders", "flow-history", selectedOrderId],
+    queryFn: async () => {
+      if (!selectedOrderId) throw new Error("A valid order ID is required");
+      const res = await fetch(`/api/oms/orders/${selectedOrderId}/flow-history`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        const message =
+          body && typeof body.error === "string" && body.error.trim()
+            ? body.error
+            : `Order activity request failed (${res.status})`;
+        throw new Error(message);
+      }
+      return res.json();
+    },
+    enabled: !!selectedOrderId,
+    retry: 1,
   });
 
   // Mutations
@@ -492,6 +536,48 @@ export default function OmsOrders() {
       {/* Order Detail Dialog */}
       <Dialog open={!!selectedOrderId} onOpenChange={(open) => { if (!open) setSelectedOrderId(null); }}>
         <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          {isSelectedOrderLoading && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Loading order details</DialogTitle>
+              </DialogHeader>
+              <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+                Loading order details...
+              </div>
+            </>
+          )}
+
+          {isSelectedOrderError && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Order details unavailable</DialogTitle>
+              </DialogHeader>
+              <div role="alert" className="space-y-4 rounded-md border border-red-200 bg-red-50 p-4 text-red-900">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+                  <div>
+                    <p className="font-medium">The order could not be loaded.</p>
+                    <p className="mt-1 text-sm">
+                      {selectedOrderError instanceof Error
+                        ? selectedOrderError.message
+                        : "An unexpected error occurred while loading this order."}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void refetchSelectedOrder()}
+                >
+                  <RotateCcw className="mr-2 h-4 w-4" aria-hidden="true" />
+                  Retry
+                </Button>
+              </div>
+            </>
+          )}
+
           {selectedOrder && (
             <>
               <DialogHeader>
@@ -526,12 +612,35 @@ export default function OmsOrders() {
                 <Separator />
 
                 {/* Flow History */}
-                {selectedOrder.flowHistory && selectedOrder.flowHistory.length > 0 && (
+                {isSelectedOrderFlowHistoryLoading && (
+                  <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    Loading activity history...
+                  </div>
+                )}
+                {isSelectedOrderFlowHistoryError && (
+                  <div role="status" className="flex items-start justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                      <span>Order details loaded, but activity history is temporarily unavailable.</span>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void refetchSelectedOrderFlowHistory()}
+                    >
+                      <RotateCcw className="mr-2 h-4 w-4" aria-hidden="true" />
+                      Retry
+                    </Button>
+                  </div>
+                )}
+                {selectedOrderFlowHistory && selectedOrderFlowHistory.flowHistory.length > 0 && (
                   <>
                     <div>
                       <h4 className="font-semibold text-sm mb-2">Flow History</h4>
                       <div className="space-y-2">
-                        {selectedOrder.flowHistory.slice(0, 12).map((entry) => (
+                        {selectedOrderFlowHistory.flowHistory.slice(0, 12).map((entry) => (
                           <div key={entry.id} className="rounded-md border p-2 text-sm">
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">

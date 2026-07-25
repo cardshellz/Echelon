@@ -103,7 +103,6 @@ export interface LineItemData {
 export interface OmsOrderWithLines extends OmsOrder {
   lines: OmsOrderLine[];
   events?: Array<{ id: number; eventType: string; details: unknown; createdAt: Date }>;
-  flowHistory?: OmsOrderFlowHistoryEntry[];
   channelName?: string;
 }
 
@@ -695,68 +694,91 @@ export function createOmsService(db: any, reservationService?: any) {
       .where(eq(channels.id, order.channelId))
       .limit(1);
 
-    const flowHistory = await getOrderFlowHistory(order);
-
-    return { ...order, lines, events, flowHistory, channelName: channel?.name };
+    return { ...order, lines, events, channelName: channel?.name };
   }
 
-  async function getOrderFlowHistory(order: OmsOrder): Promise<OmsOrderFlowHistoryEntry[]> {
-    const externalOrderIds = [
-      order.externalOrderId,
-      order.externalOrderNumber,
-      order.id != null ? String(order.id) : null,
-    ].filter((value): value is string => Boolean(value));
-    const externalOrderIdList = sql.join(
-      externalOrderIds.map((externalOrderId) => sql`${externalOrderId}`),
-      sql`, `,
-    );
+  /**
+   * Load optional audit history separately from the core order detail. The
+   * admin order modal must remain usable if an audit source is unavailable.
+   */
+  async function getOrderFlowHistoryById(
+    orderId: number,
+  ): Promise<OmsOrderFlowHistoryEntry[] | null> {
+    const order = await getOrderById(orderId);
+    if (!order) return null;
+    return getOrderFlowHistory(order, order.lines, order.events ?? []);
+  }
 
-    const [webhooks, retries, flowEvents] = await Promise.all([
-      db.execute(sql`
+  async function getOrderFlowHistory(
+    order: OmsOrder,
+    lines: OmsOrderLine[],
+    events: Array<{ id: number; eventType: string; details: unknown; createdAt: Date }>,
+  ): Promise<OmsOrderFlowHistoryEntry[]> {
+    const sourceInboxIds = new Set<number>();
+    const addSourceInboxId = (value: unknown): void => {
+      const parsed = Number(value);
+      if (Number.isSafeInteger(parsed) && parsed > 0) {
+        sourceInboxIds.add(parsed);
+      }
+    };
+    const addSourceEventReference = (value: unknown): void => {
+      if (typeof value !== "string") return;
+      const match = /^webhook_inbox:(\d+)$/.exec(value.trim());
+      if (match) addSourceInboxId(match[1]);
+    };
+
+    for (const line of lines) {
+      addSourceInboxId(line.authoritySourceInboxId);
+      addSourceEventReference(line.authorizedByEventId);
+    }
+    for (const event of events) {
+      if (!event.details || typeof event.details !== "object" || Array.isArray(event.details)) continue;
+      const details = event.details as Record<string, unknown>;
+      addSourceInboxId(details.sourceInboxId);
+      addSourceInboxId(details.source_inbox_id);
+      addSourceEventReference(details.sourceEventId);
+    }
+
+    // The intake ledger is the canonical indexed link from an OMS order to its
+    // source webhook. Searching arbitrary JSON payload fields here caused full
+    // scans of both webhook tables and blocked the entire order-detail response.
+    const intakeLinks = await db.execute(sql`
+      SELECT source_inbox_id
+      FROM oms.channel_order_intakes
+      WHERE oms_order_id = ${order.id}
+        AND source_inbox_id IS NOT NULL
+      ORDER BY updated_at DESC
+      LIMIT 20
+    `);
+    for (const row of Array.isArray(intakeLinks?.rows) ? intakeLinks.rows : []) {
+      addSourceInboxId(row.source_inbox_id);
+    }
+
+    const linkedInboxIds = [...sourceInboxIds].sort((left, right) => left - right);
+    let webhooks: any = { rows: [] };
+    let retries: any = { rows: [] };
+    if (linkedInboxIds.length > 0) {
+      const inboxIdList = sql.join(
+        linkedInboxIds.map((sourceInboxId) => sql`${sourceInboxId}`),
+        sql`, `,
+      );
+      webhooks = await db.execute(sql`
         SELECT id, provider, topic, event_id, status, attempts, last_error,
                first_received_at, last_attempt_at, processed_at, updated_at
         FROM oms.webhook_inbox
-        WHERE (
-             payload->>'id' IN (${externalOrderIdList})
-          OR payload->>'order_id' IN (${externalOrderIdList})
-          OR payload->>'admin_graphql_api_id' IN (${externalOrderIdList})
-          OR payload->>'name' IN (${externalOrderIdList})
-          OR payload #>> '{notification,data,orderId}' IN (${externalOrderIdList})
-        )
+        WHERE id IN (${inboxIdList})
         ORDER BY COALESCE(processed_at, last_attempt_at, first_received_at, updated_at) DESC NULLS LAST
         LIMIT 20
-      `),
-      db.execute(sql`
+      `);
+      retries = await db.execute(sql`
         SELECT id, provider, topic, attempts, status, last_error, source_inbox_id,
                next_retry_at, created_at, updated_at
         FROM oms.webhook_retry_queue
-        WHERE (
-             payload->>'id' IN (${externalOrderIdList})
-          OR payload->>'order_id' IN (${externalOrderIdList})
-          OR payload->>'admin_graphql_api_id' IN (${externalOrderIdList})
-          OR payload->>'name' IN (${externalOrderIdList})
-          OR payload->>'orderId' = ${String(order.id)}
-          OR payload #>> '{notification,data,orderId}' IN (${externalOrderIdList})
-        )
+        WHERE source_inbox_id IN (${inboxIdList})
         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
         LIMIT 20
-      `),
-      db.execute(sql`
-        SELECT id, event_type, details, created_at
-        FROM oms.oms_order_events
-        WHERE order_id = ${order.id}
-          AND event_type IN (
-            'flow_reconciliation_remediated',
-            'tracking_push_failed',
-            'shopify_fulfillment_push_failed',
-            'shopify_fulfillment_pushed',
-            'shopify_fulfillment_reconciled',
-            'tracking_pushed'
-          )
-        ORDER BY created_at DESC
-        LIMIT 20
-      `),
-    ]);
+      `);
+    }
 
     const entries: OmsOrderFlowHistoryEntry[] = [];
 
@@ -791,20 +813,28 @@ export function createOmsService(db: any, reservationService?: any) {
       });
     }
 
-    for (const row of Array.isArray(flowEvents?.rows) ? flowEvents.rows : []) {
+    const flowEventTypes = new Set([
+      "flow_reconciliation_remediated",
+      "tracking_push_failed",
+      "shopify_fulfillment_push_failed",
+      "shopify_fulfillment_pushed",
+      "shopify_fulfillment_reconciled",
+      "tracking_pushed",
+    ]);
+    for (const row of events.filter((event) => flowEventTypes.has(event.eventType)).slice(-20)) {
       const source =
-        row.event_type === "flow_reconciliation_remediated"
+        row.eventType === "flow_reconciliation_remediated"
           ? "reconciliation"
-          : row.event_type.includes("failed")
+          : row.eventType.includes("failed")
             ? "alert"
             : "event";
       entries.push({
         id: `event:${row.id}`,
         source,
-        status: row.event_type,
-        label: row.event_type,
+        status: row.eventType,
+        label: row.eventType,
         details: row.details,
-        createdAt: row.created_at ?? null,
+        createdAt: row.createdAt ?? null,
       });
     }
 
@@ -1149,6 +1179,7 @@ export function createOmsService(db: any, reservationService?: any) {
     markShipped,
     markShippedByExternalId,
     getOrderById,
+    getOrderFlowHistoryById,
     listOrders,
     getStats,
     populateShopifyFulfillmentOrderIds,
