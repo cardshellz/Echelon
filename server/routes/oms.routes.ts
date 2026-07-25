@@ -345,11 +345,39 @@ export function registerOmsRoutes(app: Express) {
   });
 
   // -----------------------------------------------------------------------
+  // GET /api/oms/orders/:id/flow-history — optional audit history
+  // -----------------------------------------------------------------------
+  app.get("/api/oms/orders/:id/flow-history", requireAuth, async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "Order ID must be a positive integer" });
+    }
+
+    try {
+      const flowHistory = await getOms(req).getOrderFlowHistoryById(id);
+      if (!flowHistory) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      res.json({ flowHistory });
+    } catch (err: any) {
+      console.error("[OMS Routes] Get order flow history error:", {
+        code: "OMS_FLOW_HISTORY_UNAVAILABLE",
+        orderId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(500).json({ error: "Order activity history is temporarily unavailable" });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // GET /api/oms/orders/:id — order detail with lines and events
   // -----------------------------------------------------------------------
   app.get("/api/oms/orders/:id", requireAuth, async (req: Request, res: Response) => {
     try {
       const id = Number(req.params.id);
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Order ID must be a positive integer" });
+      }
       const order = await getOms(req).getOrderById(id);
 
       if (!order) {
