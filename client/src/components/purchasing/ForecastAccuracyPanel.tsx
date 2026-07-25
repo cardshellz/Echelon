@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BarChart3, RefreshCw } from "lucide-react";
+import { Activity, AlertTriangle, BarChart3, CheckCircle2, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +29,7 @@ import {
   formatOverlayExclusionReason,
   formatWapeBasisPoints,
   formatWapeImprovement,
+  purchaseRecommendationPipelineHealthSchema,
   type ForecastBacktestItem,
   type ForecastEvaluationHorizon,
 } from "@/features/purchasing/forecastBacktesting";
@@ -99,6 +100,17 @@ export function ForecastAccuracyPanel() {
       return forecastBacktestReportSchema.parse(await response.json());
     },
   });
+  const pipelineHealthQuery = useQuery({
+    queryKey: ["/api/procurement/health/recommendation-pipeline"],
+    queryFn: async () => {
+      const response = await fetch("/api/procurement/health/recommendation-pipeline");
+      if (!response.ok) {
+        throw new Error(await errorMessage(response, "Failed to load recommendation pipeline health"));
+      }
+      return purchaseRecommendationPipelineHealthSchema.parse(await response.json());
+    },
+    refetchInterval: 5 * 60 * 1_000,
+  });
 
   const evaluateMutation = useMutation({
     mutationFn: async () => {
@@ -114,6 +126,7 @@ export function ForecastAccuracyPanel() {
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/forecast-backtests"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/procurement/health/recommendation-pipeline"] });
       toast({
         title: "Forecast evaluation complete",
         description: result.batchLimitReached
@@ -131,6 +144,7 @@ export function ForecastAccuracyPanel() {
   });
 
   const report = reportQuery.data;
+  const pipelineHealth = pipelineHealthQuery.data;
   const summary = report?.summaries.find((item) => item.horizonDays === horizon);
   const selectedPolicyCohort = report?.selectedPolicyCohort ?? null;
   const overlayCoverage = summary && summary.evaluationCount > 0
@@ -200,6 +214,60 @@ export function ForecastAccuracyPanel() {
         </div>
       </CardHeader>
       <CardContent className="p-0">
+        <div className={`border-b px-4 py-3 text-xs dark:border-zinc-800 ${
+          pipelineHealthQuery.isError
+            ? "bg-red-50 text-red-900 dark:bg-red-950/30 dark:text-red-100"
+            : !pipelineHealth
+              ? "bg-zinc-50 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+              : pipelineHealth.status === "critical"
+            ? "bg-red-50 text-red-900 dark:bg-red-950/30 dark:text-red-100"
+                : pipelineHealth.status === "warning"
+                  ? "bg-amber-50 text-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
+                  : "bg-emerald-50/60 text-emerald-900 dark:bg-emerald-950/20 dark:text-emerald-100"
+        }`}>
+          {pipelineHealthQuery.isLoading ? (
+            <div className="flex items-center gap-2">
+              <Activity className="h-4 w-4 animate-pulse" />
+              Checking recommendation pipeline...
+            </div>
+          ) : pipelineHealthQuery.isError || !pipelineHealth ? (
+            <div className="flex items-center gap-2 text-red-700 dark:text-red-300">
+              <AlertTriangle className="h-4 w-4" />
+              {pipelineHealthQuery.error instanceof Error
+                ? pipelineHealthQuery.error.message
+                : "Recommendation pipeline health is unavailable"}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex min-w-0 items-start gap-2">
+                {pipelineHealth.status === "healthy" ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 flex-none text-emerald-600" />
+                ) : (
+                  <AlertTriangle className={`mt-0.5 h-4 w-4 flex-none ${
+                    pipelineHealth.status === "critical" ? "text-red-600" : "text-amber-600"
+                  }`} />
+                )}
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-semibold">Recommendation evidence pipeline</span>
+                    <Badge
+                      variant={pipelineHealth.status === "critical" ? "destructive" : "outline"}
+                      className="text-[10px] uppercase"
+                    >
+                      {pipelineHealth.status}
+                    </Badge>
+                  </div>
+                  <div className="mt-0.5 leading-5">{pipelineHealth.detail}</div>
+                </div>
+              </div>
+              <div className="flex-none text-zinc-600 dark:text-zinc-300">
+                {pipelineHealth.latestEvaluationAt
+                  ? `Last evaluation ${new Date(pipelineHealth.latestEvaluationAt).toLocaleString()}`
+                  : "No completed forecast evaluations yet"}
+              </div>
+            </div>
+          )}
+        </div>
         {reportQuery.isLoading ? (
           <div className="px-4 py-8 text-center text-sm text-zinc-500">Loading forecast accuracy...</div>
         ) : reportQuery.isError ? (

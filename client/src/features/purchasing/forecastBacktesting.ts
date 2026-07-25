@@ -308,10 +308,47 @@ export const forecastBacktestEvaluationResultSchema = z.object({
   }
 });
 
+export const purchaseRecommendationPipelineHealthSchema = z.object({
+  generatedAt: z.string().datetime(),
+  status: z.enum(["healthy", "warning", "critical"]),
+  critical: z.union([z.literal(0), z.literal(1)]),
+  warning: z.union([z.literal(0), z.literal(1)]),
+  latestScheduledRun: z.object({
+    id: positiveSafeInteger,
+    status: z.enum(["completed", "failed"]),
+    asOf: z.string().datetime(),
+    generatedAt: z.string().datetime(),
+    ageHours: nonnegativeSafeInteger,
+    recommendationLineCount: nonnegativeSafeInteger,
+    observationCount: nonnegativeSafeInteger,
+  }).strict().nullable(),
+  latestEvaluationAt: z.string().datetime().nullable(),
+  maturedEvaluationBacklog: nonnegativeSafeInteger,
+  thresholds: z.object({
+    warningAgeHours: positiveSafeInteger,
+    criticalAgeHours: positiveSafeInteger,
+  }).strict(),
+  detail: z.string().min(1),
+}).strict().superRefine((health, context) => {
+  if (
+    (health.status === "healthy" && (health.critical !== 0 || health.warning !== 0))
+    || (health.status === "warning" && (health.critical !== 0 || health.warning !== 1))
+    || (health.status === "critical" && (health.critical !== 1 || health.warning !== 0))
+  ) {
+    context.addIssue({ code: "custom", message: "Pipeline health counts do not match status" });
+  }
+  if (health.thresholds.criticalAgeHours <= health.thresholds.warningAgeHours) {
+    context.addIssue({ code: "custom", message: "Pipeline health age thresholds are invalid" });
+  }
+});
+
 export type ForecastBacktestReport = z.infer<typeof forecastBacktestReportSchema>;
 export type ForecastBacktestSummary = z.infer<typeof forecastBacktestSummarySchema>;
 export type ForecastBacktestItem = z.infer<typeof forecastBacktestItemSchema>;
 export type ForecastBacktestEvaluationResult = z.infer<typeof forecastBacktestEvaluationResultSchema>;
+export type PurchaseRecommendationPipelineHealth = z.infer<
+  typeof purchaseRecommendationPipelineHealthSchema
+>;
 
 export function formatWapeBasisPoints(value: number | null): string {
   return value === null ? "N/A" : `${(value / 100).toFixed(2)}%`;

@@ -183,4 +183,44 @@ describe("buildProcurementHealthSummary", () => {
       }),
     ]));
   });
+
+  it("adds scheduled recommendation pipeline evidence as a first-class health source", () => {
+    const summary = buildProcurementHealthSummary({
+      staleAutoDraftPos: buildStaleAutoDraftPoDiagnostics([], {
+        now: new Date("2026-07-26T12:00:00.000Z"),
+      }),
+      landedCostHealth: {
+        status: "healthy",
+        critical: 0,
+        warning: 0,
+      },
+      recommendationPipelineHealth: {
+        status: "warning",
+        critical: 0,
+        warning: 1,
+        detail: "17 matured evaluations await processing.",
+      },
+      generatedAt: new Date("2026-07-26T12:00:00.000Z"),
+    });
+
+    expect(summary).toMatchObject({
+      status: "warning",
+      critical: 0,
+      warning: 1,
+      total: 1,
+    });
+    expect(summary.sources).toEqual(expect.arrayContaining([
+      {
+        key: "recommendation_pipeline_health",
+        label: "Recommendation pipeline",
+        status: "warning",
+        critical: 0,
+        warning: 1,
+        total: 1,
+        href: "/reorder-analysis",
+        actionLabel: "Open Forecasts",
+        detail: "17 matured evaluations await processing.",
+      },
+    ]));
+  });
 });

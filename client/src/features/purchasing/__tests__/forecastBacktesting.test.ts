@@ -7,6 +7,7 @@ import {
   formatOverlayExclusionReason,
   formatWapeBasisPoints,
   formatWapeImprovement,
+  purchaseRecommendationPipelineHealthSchema,
 } from "../forecastBacktesting";
 
 const policyFingerprint = "87bdbe7ba1ec6b5d2aea618c28cc86c90fd58aff5fc937c67db81c87d388f75f";
@@ -221,5 +222,43 @@ describe("forecast backtesting client contract", () => {
       insertedCountsByHorizon: { "7": 1 },
       serializationRetryCount: 0,
     })).toThrow("do not reconcile");
+  });
+
+  it("validates recommendation pipeline health without trusting inconsistent status counts", () => {
+    const health = {
+      generatedAt: "2026-07-26T12:00:00.000Z",
+      status: "healthy",
+      critical: 0,
+      warning: 0,
+      latestScheduledRun: {
+        id: 41,
+        status: "completed",
+        asOf: "2026-07-26T05:00:00.000Z",
+        generatedAt: "2026-07-26T05:02:00.000Z",
+        ageHours: 6,
+        recommendationLineCount: 32,
+        observationCount: 278,
+      },
+      latestEvaluationAt: "2026-07-26T05:31:00.000Z",
+      maturedEvaluationBacklog: 0,
+      thresholds: {
+        warningAgeHours: 30,
+        criticalAgeHours: 54,
+      },
+      detail: "Scheduled snapshot #41 is healthy.",
+    };
+
+    expect(purchaseRecommendationPipelineHealthSchema.parse(health)).toEqual(health);
+    expect(() => purchaseRecommendationPipelineHealthSchema.parse({
+      ...health,
+      status: "critical",
+    })).toThrow("counts do not match status");
+    expect(() => purchaseRecommendationPipelineHealthSchema.parse({
+      ...health,
+      thresholds: {
+        warningAgeHours: 54,
+        criticalAgeHours: 30,
+      },
+    })).toThrow("thresholds are invalid");
   });
 });

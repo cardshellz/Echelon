@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   fetchAutoDraftPoAgingRows: vi.fn(),
   fetchInFlightPoAgingRows: vi.fn(),
   loadPurchasingRecommendationContext: vi.fn(),
+  loadPurchaseRecommendationPipelineHealth: vi.fn(),
   sendProcurementHealthCriticalEscalation: vi.fn(),
   shipmentTracking: {
     getLandedCostHealth: vi.fn(),
@@ -40,6 +41,9 @@ vi.mock("../../in-flight-po-aging.repository", () => ({
 }));
 vi.mock("../../purchasing-recommendation-context.service", () => ({
   loadPurchasingRecommendationContext: mocks.loadPurchasingRecommendationContext,
+}));
+vi.mock("../../purchase-recommendation-pipeline-health.service", () => ({
+  loadPurchaseRecommendationPipelineHealth: mocks.loadPurchaseRecommendationPipelineHealth,
 }));
 vi.mock("../../procurement-health-escalation.service", () => ({
   sendProcurementHealthCriticalEscalation: mocks.sendProcurementHealthCriticalEscalation,
@@ -95,6 +99,28 @@ describe("procurement health routes", () => {
       defaults: { leadTimeDays: 5, safetyStockDays: 2 },
       rules: [],
       productMetaById: new Map(),
+    });
+    mocks.loadPurchaseRecommendationPipelineHealth.mockResolvedValue({
+      generatedAt: "2026-07-26T12:00:00.000Z",
+      status: "healthy",
+      critical: 0,
+      warning: 0,
+      latestScheduledRun: {
+        id: 41,
+        status: "completed",
+        asOf: "2026-07-26T05:00:00.000Z",
+        generatedAt: "2026-07-26T05:02:00.000Z",
+        ageHours: 6,
+        recommendationLineCount: 32,
+        observationCount: 278,
+      },
+      latestEvaluationAt: "2026-07-26T05:31:00.000Z",
+      maturedEvaluationBacklog: 0,
+      thresholds: {
+        warningAgeHours: 30,
+        criticalAgeHours: 54,
+      },
+      detail: "Scheduled snapshot #41 is healthy.",
     });
     mocks.shipmentTracking.getLandedCostHealth.mockResolvedValue({
       status: "healthy",
@@ -162,6 +188,27 @@ describe("procurement health routes", () => {
         href: "/suppliers",
       }),
     ]));
+  });
+
+  it("returns the recommendation pipeline health contract", async () => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(
+      server.url,
+      "GET",
+      "/api/procurement/health/recommendation-pipeline",
+    );
+
+    expect(status).toBe(200);
+    expect(mocks.loadPurchaseRecommendationPipelineHealth).toHaveBeenCalledTimes(1);
+    expect(body).toMatchObject({
+      status: "healthy",
+      latestScheduledRun: {
+        id: 41,
+        observationCount: 278,
+      },
+      maturedEvaluationBacklog: 0,
+    });
   });
 
   it("includes in-flight PO aging in the health summary", async () => {
