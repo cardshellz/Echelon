@@ -17,8 +17,29 @@ export type ScheduledPurchaseRecommendationRunEvidence = {
   observationCount: number;
 };
 
+export type PurchasePipelineJobRunEvidence = {
+  id: number;
+  jobType: "recommendation_snapshot" | "forecast_evaluation";
+  status: "running" | "succeeded" | "failed" | "interrupted";
+  asOf: Date;
+  startedAt: Date;
+  heartbeatAt: Date;
+  leaseExpiresAt: Date | null;
+  finishedAt: Date | null;
+  recommendationRunId: number | null;
+  recommendationLineCount: number | null;
+  forecastObservationCount: number | null;
+  evaluationInsertedCount: number | null;
+  evaluationBatchCount: number | null;
+  evaluationBacklogMayRemain: boolean | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+};
+
 export type PurchaseRecommendationPipelineEvidence = {
   latestScheduledRun: ScheduledPurchaseRecommendationRunEvidence | null;
+  latestSnapshotJobRun: PurchasePipelineJobRunEvidence | null;
+  latestEvaluationJobRun: PurchasePipelineJobRunEvidence | null;
   latestEvaluationAt: Date | null;
   maturedEvaluationBacklog: number;
 };
@@ -47,6 +68,22 @@ function nullableDate(value: unknown, field: string): Date | null {
   return value == null ? null : validDate(value, field);
 }
 
+function nullableInteger(value: unknown, field: string, minimum = 0): number | null {
+  return value == null ? null : safeInteger(value, field, minimum);
+}
+
+function nullableBoolean(value: unknown, field: string): boolean | null {
+  if (value == null) return null;
+  if (value === true || value === false) return value;
+  throw new RangeError(`${field} must be a boolean or null`);
+}
+
+function nullableString(value: unknown, field: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") throw new RangeError(`${field} must be a string or null`);
+  return value;
+}
+
 function mapLatestScheduledRun(row: any): ScheduledPurchaseRecommendationRunEvidence | null {
   if (row.latest_scheduled_run_id == null) return null;
   if (row.latest_scheduled_run_status !== "completed" && row.latest_scheduled_run_status !== "failed") {
@@ -65,6 +102,62 @@ function mapLatestScheduledRun(row: any): ScheduledPurchaseRecommendationRunEvid
       row.latest_scheduled_run_observation_count,
       "latestScheduledRun.observationCount",
     ),
+  };
+}
+
+function mapPipelineJobRun(
+  row: any,
+  prefix: "snapshot_job" | "evaluation_job",
+  expectedJobType: PurchasePipelineJobRunEvidence["jobType"],
+): PurchasePipelineJobRunEvidence | null {
+  if (row[`${prefix}_id`] == null) return null;
+  const jobType = row[`${prefix}_job_type`];
+  if (jobType !== expectedJobType) {
+    throw new RangeError(`${prefix}.jobType is unsupported`);
+  }
+  const status = row[`${prefix}_status`];
+  if (!["running", "succeeded", "failed", "interrupted"].includes(status)) {
+    throw new RangeError(`${prefix}.status is unsupported`);
+  }
+  return {
+    id: safeInteger(row[`${prefix}_id`], `${prefix}.id`, 1),
+    jobType,
+    status,
+    asOf: validDate(row[`${prefix}_as_of`], `${prefix}.asOf`),
+    startedAt: validDate(row[`${prefix}_started_at`], `${prefix}.startedAt`),
+    heartbeatAt: validDate(row[`${prefix}_heartbeat_at`], `${prefix}.heartbeatAt`),
+    leaseExpiresAt: nullableDate(
+      row[`${prefix}_lease_expires_at`],
+      `${prefix}.leaseExpiresAt`,
+    ),
+    finishedAt: nullableDate(row[`${prefix}_finished_at`], `${prefix}.finishedAt`),
+    recommendationRunId: nullableInteger(
+      row[`${prefix}_recommendation_run_id`],
+      `${prefix}.recommendationRunId`,
+      1,
+    ),
+    recommendationLineCount: nullableInteger(
+      row[`${prefix}_recommendation_line_count`],
+      `${prefix}.recommendationLineCount`,
+    ),
+    forecastObservationCount: nullableInteger(
+      row[`${prefix}_forecast_observation_count`],
+      `${prefix}.forecastObservationCount`,
+    ),
+    evaluationInsertedCount: nullableInteger(
+      row[`${prefix}_evaluation_inserted_count`],
+      `${prefix}.evaluationInsertedCount`,
+    ),
+    evaluationBatchCount: nullableInteger(
+      row[`${prefix}_evaluation_batch_count`],
+      `${prefix}.evaluationBatchCount`,
+    ),
+    evaluationBacklogMayRemain: nullableBoolean(
+      row[`${prefix}_evaluation_backlog_may_remain`],
+      `${prefix}.evaluationBacklogMayRemain`,
+    ),
+    errorCode: nullableString(row[`${prefix}_error_code`], `${prefix}.errorCode`),
+    errorMessage: nullableString(row[`${prefix}_error_message`], `${prefix}.errorMessage`),
   };
 }
 
@@ -106,6 +199,14 @@ export function createPurchaseRecommendationPipelineHealthRepository(database: D
             ) AS observation_count
           FROM latest_scheduled_run recommendation_run
         ),
+        latest_job_runs AS (
+          SELECT DISTINCT ON (job_run.job_type)
+            job_run.*
+          FROM procurement.purchase_pipeline_job_runs job_run
+          WHERE job_run.trigger_type = 'scheduled'
+            AND job_run.job_type IN ('recommendation_snapshot', 'forecast_evaluation')
+          ORDER BY job_run.job_type, job_run.started_at DESC, job_run.id DESC
+        ),
         evaluation_state AS (
           SELECT MAX(evaluation.evaluated_at) AS latest_evaluation_at
           FROM procurement.purchase_forecast_evaluations evaluation
@@ -133,11 +234,47 @@ export function createPurchaseRecommendationPipelineHealthRepository(database: D
           latest.generated_at AS latest_scheduled_run_generated_at,
           latest.recommendation_line_count AS latest_scheduled_run_line_count,
           latest.observation_count AS latest_scheduled_run_observation_count,
+          snapshot_job.id AS snapshot_job_id,
+          snapshot_job.job_type AS snapshot_job_job_type,
+          snapshot_job.status AS snapshot_job_status,
+          snapshot_job.as_of AS snapshot_job_as_of,
+          snapshot_job.started_at AS snapshot_job_started_at,
+          snapshot_job.heartbeat_at AS snapshot_job_heartbeat_at,
+          snapshot_job.lease_expires_at AS snapshot_job_lease_expires_at,
+          snapshot_job.finished_at AS snapshot_job_finished_at,
+          snapshot_job.recommendation_run_id AS snapshot_job_recommendation_run_id,
+          snapshot_job.recommendation_line_count AS snapshot_job_recommendation_line_count,
+          snapshot_job.forecast_observation_count AS snapshot_job_forecast_observation_count,
+          snapshot_job.evaluation_inserted_count AS snapshot_job_evaluation_inserted_count,
+          snapshot_job.evaluation_batch_count AS snapshot_job_evaluation_batch_count,
+          snapshot_job.evaluation_backlog_may_remain AS snapshot_job_evaluation_backlog_may_remain,
+          snapshot_job.error_code AS snapshot_job_error_code,
+          snapshot_job.error_message AS snapshot_job_error_message,
+          evaluation_job.id AS evaluation_job_id,
+          evaluation_job.job_type AS evaluation_job_job_type,
+          evaluation_job.status AS evaluation_job_status,
+          evaluation_job.as_of AS evaluation_job_as_of,
+          evaluation_job.started_at AS evaluation_job_started_at,
+          evaluation_job.heartbeat_at AS evaluation_job_heartbeat_at,
+          evaluation_job.lease_expires_at AS evaluation_job_lease_expires_at,
+          evaluation_job.finished_at AS evaluation_job_finished_at,
+          evaluation_job.recommendation_run_id AS evaluation_job_recommendation_run_id,
+          evaluation_job.recommendation_line_count AS evaluation_job_recommendation_line_count,
+          evaluation_job.forecast_observation_count AS evaluation_job_forecast_observation_count,
+          evaluation_job.evaluation_inserted_count AS evaluation_job_evaluation_inserted_count,
+          evaluation_job.evaluation_batch_count AS evaluation_job_evaluation_batch_count,
+          evaluation_job.evaluation_backlog_may_remain AS evaluation_job_evaluation_backlog_may_remain,
+          evaluation_job.error_code AS evaluation_job_error_code,
+          evaluation_job.error_message AS evaluation_job_error_message,
           evaluation_state.latest_evaluation_at,
           matured_evaluation_backlog.backlog_count AS matured_evaluation_backlog
         FROM evaluation_state
         CROSS JOIN matured_evaluation_backlog
         LEFT JOIN latest_scheduled_evidence latest ON TRUE
+        LEFT JOIN latest_job_runs snapshot_job
+          ON snapshot_job.job_type = 'recommendation_snapshot'
+        LEFT JOIN latest_job_runs evaluation_job
+          ON evaluation_job.job_type = 'forecast_evaluation'
       `);
       const row = rowsOf(result)[0];
       if (!row) {
@@ -145,6 +282,16 @@ export function createPurchaseRecommendationPipelineHealthRepository(database: D
       }
       return {
         latestScheduledRun: mapLatestScheduledRun(row),
+        latestSnapshotJobRun: mapPipelineJobRun(
+          row,
+          "snapshot_job",
+          "recommendation_snapshot",
+        ),
+        latestEvaluationJobRun: mapPipelineJobRun(
+          row,
+          "evaluation_job",
+          "forecast_evaluation",
+        ),
         latestEvaluationAt: nullableDate(row.latest_evaluation_at, "latestEvaluationAt"),
         maturedEvaluationBacklog: safeInteger(
           row.matured_evaluation_backlog,

@@ -308,6 +308,66 @@ export const forecastBacktestEvaluationResultSchema = z.object({
   }
 });
 
+const purchasePipelineJobRunHealthSchema = z.object({
+  id: positiveSafeInteger,
+  jobType: z.enum(["recommendation_snapshot", "forecast_evaluation"]),
+  status: z.enum(["running", "succeeded", "failed", "interrupted"]),
+  asOf: z.string().datetime(),
+  startedAt: z.string().datetime(),
+  heartbeatAt: z.string().datetime(),
+  leaseExpiresAt: z.string().datetime().nullable(),
+  finishedAt: z.string().datetime().nullable(),
+  ageHours: nonnegativeSafeInteger,
+  leaseExpired: z.boolean(),
+  recommendationRunId: positiveSafeInteger.nullable(),
+  recommendationLineCount: nonnegativeSafeInteger.nullable(),
+  forecastObservationCount: nonnegativeSafeInteger.nullable(),
+  evaluationInsertedCount: nonnegativeSafeInteger.nullable(),
+  evaluationBatchCount: nonnegativeSafeInteger.nullable(),
+  evaluationBacklogMayRemain: z.boolean().nullable(),
+  errorCode: z.string().min(1).nullable(),
+  errorMessage: z.string().min(1).nullable(),
+}).strict().superRefine((run, context) => {
+  const running = run.status === "running";
+  if (
+    (running && (run.finishedAt !== null || run.leaseExpiresAt === null))
+    || (!running && (run.finishedAt === null || run.leaseExpiresAt !== null))
+  ) {
+    context.addIssue({ code: "custom", message: "Pipeline job lifecycle fields are inconsistent" });
+  }
+  if (
+    (run.status === "succeeded" && (run.errorCode !== null || run.errorMessage !== null))
+    || (
+      (run.status === "failed" || run.status === "interrupted")
+      && (run.errorCode === null || run.errorMessage === null)
+    )
+  ) {
+    context.addIssue({ code: "custom", message: "Pipeline job error fields are inconsistent" });
+  }
+  if (run.status !== "succeeded") return;
+  const snapshotEvidenceIsValid = (
+    run.jobType === "recommendation_snapshot"
+    && run.recommendationRunId !== null
+    && run.recommendationLineCount !== null
+    && run.forecastObservationCount !== null
+    && run.evaluationInsertedCount === null
+    && run.evaluationBatchCount === null
+    && run.evaluationBacklogMayRemain === null
+  );
+  const evaluationEvidenceIsValid = (
+    run.jobType === "forecast_evaluation"
+    && run.recommendationRunId === null
+    && run.recommendationLineCount === null
+    && run.forecastObservationCount === null
+    && run.evaluationInsertedCount !== null
+    && run.evaluationBatchCount !== null
+    && run.evaluationBacklogMayRemain !== null
+  );
+  if (!snapshotEvidenceIsValid && !evaluationEvidenceIsValid) {
+    context.addIssue({ code: "custom", message: "Pipeline job success evidence is inconsistent" });
+  }
+});
+
 export const purchaseRecommendationPipelineHealthSchema = z.object({
   generatedAt: z.string().datetime(),
   status: z.enum(["healthy", "warning", "critical"]),
@@ -322,6 +382,10 @@ export const purchaseRecommendationPipelineHealthSchema = z.object({
     recommendationLineCount: nonnegativeSafeInteger,
     observationCount: nonnegativeSafeInteger,
   }).strict().nullable(),
+  jobs: z.object({
+    recommendationSnapshot: purchasePipelineJobRunHealthSchema.nullable(),
+    forecastEvaluation: purchasePipelineJobRunHealthSchema.nullable(),
+  }).strict(),
   latestEvaluationAt: z.string().datetime().nullable(),
   maturedEvaluationBacklog: nonnegativeSafeInteger,
   thresholds: z.object({
