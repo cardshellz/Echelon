@@ -65,11 +65,21 @@ describe("purchase forecast backtesting routes", () => {
   it("returns a filtered read-only report", async () => {
     mocks.service.getReport.mockResolvedValue({ summaries: [], items: [] });
     server = await startServer(buildApp());
+    const fingerprint = "a".repeat(64);
 
-    const response = await requestJson(server.url, "GET", "/api/purchasing/forecast-backtests?horizonDays=30&limit=25");
+    const response = await requestJson(
+      server.url,
+      "GET",
+      `/api/purchasing/forecast-backtests?horizonDays=30&limit=25&forecastPolicyFingerprint=${fingerprint}&forecastVersion=2`,
+    );
 
     expect(response).toEqual({ status: 200, body: { summaries: [], items: [] } });
-    expect(mocks.service.getReport).toHaveBeenCalledWith({ horizonDays: "30", limit: 25 });
+    expect(mocks.service.getReport).toHaveBeenCalledWith({
+      horizonDays: "30",
+      limit: 25,
+      forecastPolicyFingerprint: fingerprint,
+      forecastVersion: 2,
+    });
   });
 
   it("runs an attributed, bounded on-demand evaluation", async () => {
@@ -104,5 +114,19 @@ describe("purchase forecast backtesting routes", () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toBe("Invalid forecast backtesting request");
     expect(mocks.service.evaluateMatured).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed policy fingerprint before invoking the service", async () => {
+    server = await startServer(buildApp());
+
+    const response = await requestJson(
+      server.url,
+      "GET",
+      "/api/purchasing/forecast-backtests?forecastPolicyFingerprint=ABC",
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("Invalid forecast backtesting request");
+    expect(mocks.service.getReport).not.toHaveBeenCalled();
   });
 });

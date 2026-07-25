@@ -5,6 +5,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -63,9 +70,15 @@ function overlayBadge(item: ForecastBacktestItem) {
 
 export function ForecastAccuracyPanel() {
   const [horizon, setHorizon] = useState<ForecastEvaluationHorizon>(30);
+  const [policySelection, setPolicySelection] = useState("latest");
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const reportQueryKey = ["/api/purchasing/forecast-backtests", horizon, RECENT_EVALUATION_LIMIT] as const;
+  const reportQueryKey = [
+    "/api/purchasing/forecast-backtests",
+    horizon,
+    policySelection,
+    RECENT_EVALUATION_LIMIT,
+  ] as const;
 
   const reportQuery = useQuery({
     queryKey: reportQueryKey,
@@ -74,6 +87,11 @@ export function ForecastAccuracyPanel() {
         horizonDays: String(horizon),
         limit: String(RECENT_EVALUATION_LIMIT),
       });
+      if (policySelection !== "latest") {
+        const [fingerprint, forecastVersion] = policySelection.split(":");
+        params.set("forecastPolicyFingerprint", fingerprint);
+        params.set("forecastVersion", forecastVersion);
+      }
       const response = await fetch(`/api/purchasing/forecast-backtests?${params.toString()}`);
       if (!response.ok) {
         throw new Error(await errorMessage(response, "Failed to load forecast accuracy"));
@@ -114,6 +132,7 @@ export function ForecastAccuracyPanel() {
 
   const report = reportQuery.data;
   const summary = report?.summaries.find((item) => item.horizonDays === horizon);
+  const selectedPolicyCohort = report?.selectedPolicyCohort ?? null;
   const overlayCoverage = summary && summary.evaluationCount > 0
     ? (summary.overlayEvaluationCount / summary.evaluationCount) * 100
     : null;
@@ -128,10 +147,30 @@ export function ForecastAccuracyPanel() {
               Forecast Accuracy
             </CardTitle>
             <CardDescription>
-              Matured product forecasts compared with eligible order demand.
+              Matured product forecasts compared within one immutable policy cohort.
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <Select value={policySelection} onValueChange={setPolicySelection}>
+              <SelectTrigger className="h-8 w-[210px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="latest">Latest observed policy</SelectItem>
+                {(report?.policyCohorts ?? []).map((cohort) => (
+                  <SelectItem
+                    key={`${cohort.fingerprint}:${cohort.forecastVersion}`}
+                    value={`${cohort.fingerprint}:${cohort.forecastVersion}`}
+                  >
+                    {cohort.snapshot.method === "weighted_blend_v1" ? "Weighted blend" : "Standard velocity"}
+                    {" v"}
+                    {cohort.forecastVersion}
+                    {" "}
+                    {cohort.fingerprint.slice(0, 8)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <div className="flex overflow-hidden rounded-md border" aria-label="Forecast evaluation horizon">
               {forecastEvaluationHorizons.map((value) => (
                 <Button
@@ -170,11 +209,38 @@ export function ForecastAccuracyPanel() {
           </div>
         ) : !summary ? (
           <div className="px-4 py-8 text-center">
-            <div className="font-medium">No mature {horizon}-day evaluations</div>
-            <div className="mt-1 text-sm text-zinc-500">The next evaluation run will add forecasts whose demand windows have closed.</div>
+            <div className="font-medium">
+              {selectedPolicyCohort
+                ? `No mature ${horizon}-day evaluations for policy ${selectedPolicyCohort.fingerprint.slice(0, 10)}`
+                : "No captured forecast-policy cohort"}
+            </div>
+            <div className="mt-1 text-sm text-zinc-500">
+              {selectedPolicyCohort
+                ? "The next evaluation run will add forecasts from this policy after their demand windows close."
+                : `${report?.cohortCoverage.legacyEvaluationCount.toLocaleString() ?? "0"} legacy evaluations are excluded from accuracy metrics.`}
+            </div>
           </div>
         ) : (
           <>
+            <div className="flex flex-col gap-2 border-b px-4 py-3 text-xs md:flex-row md:items-center md:justify-between dark:border-zinc-800">
+              <div>
+                <span className="font-semibold">Policy cohort</span>{" "}
+                <span className="font-mono">{selectedPolicyCohort?.fingerprint.slice(0, 12)}</span>
+                <span className="text-zinc-500">
+                  {" "}(forecast v{selectedPolicyCohort?.forecastVersion},{" "}
+                  {selectedPolicyCohort?.snapshot.method.replace(/_/g, " ")})
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline" className="border-amber-300 text-amber-700">
+                  Accuracy trust not assessed
+                </Badge>
+                <span className="text-zinc-500">
+                  {report?.accuracyTrustAssessment.excludedLegacyEvaluationCount.toLocaleString()} legacy and{" "}
+                  {report?.accuracyTrustAssessment.excludedOtherPolicyCohortEvaluationCount.toLocaleString()} other-cohort evaluations excluded
+                </span>
+              </div>
+            </div>
             <div className="grid grid-cols-2 divide-x divide-y border-b md:grid-cols-4 md:divide-y-0 dark:divide-zinc-800 dark:border-zinc-800">
               <div className="p-4">
                 <div className="text-xs text-zinc-500">Historical WAPE</div>

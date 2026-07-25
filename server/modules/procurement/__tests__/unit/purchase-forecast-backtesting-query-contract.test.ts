@@ -32,4 +32,16 @@ describe("purchase forecast backtesting actual-demand query", () => {
     expect(source).toContain("contribution.demand_event_id");
     expect(source).toContain("contribution.demand_event_line_id");
   });
+
+  it("isolates accuracy aggregates and recent evidence to one captured policy fingerprint", () => {
+    expect(source).toContain("observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}");
+    expect(source.match(/observation\.forecast_policy_fingerprint = \$\{input\.policyFingerprint\}/g))
+      .toHaveLength(2);
+    expect(source.match(/observation\.forecast_method = \$\{input\.forecastMethod\}/g))
+      .toHaveLength(2);
+    expect(source.match(/observation\.forecast_version = \$\{input\.forecastVersion\}/g))
+      .toHaveLength(2);
+    expect(source).toContain("observation.forecast_policy_snapshot");
+    expect(source).toContain("COUNT(evaluation.id)::int AS evaluation_count");
+  });
 });

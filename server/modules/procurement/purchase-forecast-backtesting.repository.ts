@@ -1,13 +1,45 @@
 import { sql } from "drizzle-orm";
+import { isDeepStrictEqual } from "node:util";
 import {
   purchaseForecastEvaluations as purchaseForecastEvaluationsTable,
   type PurchaseForecastEvaluationHorizonDays,
 } from "@shared/schema";
+import {
+  buildPurchasingForecastPolicyCohort,
+  PURCHASING_FORECAST_POLICY_CAPTURE_VERSION,
+  type PurchasingForecastPolicyCohortSnapshot,
+} from "./purchasing-forecast-policy";
 import type {
   PurchaseForecastEvaluationCandidate,
   PurchaseForecastEvaluationInput,
   PurchaseForecastOverlayExclusionReason,
 } from "./purchase-forecast-backtesting.domain";
+
+export type PurchaseForecastPolicyCohortEvidence =
+  | {
+      captureVersion: 0;
+      fingerprint: null;
+      snapshot: null;
+      forecastMethod: null;
+      forecastVersion: null;
+      observationCount: number;
+      evaluationCount: number;
+      firstObservedFrom: Date;
+      latestObservedFrom: Date;
+      latestEvaluationAt: Date | null;
+    }
+  | {
+      captureVersion: typeof PURCHASING_FORECAST_POLICY_CAPTURE_VERSION;
+      fingerprint: string;
+      snapshot: PurchasingForecastPolicyCohortSnapshot;
+      forecastMethod: string;
+      forecastVersion: number;
+      observationCount: number;
+      evaluationCount: number;
+      firstObservedFrom: Date;
+      latestObservedFrom: Date;
+      latestEvaluationAt: Date | null;
+    };
 
 export type PurchaseForecastEvaluationAggregateRow = {
   horizonDays: PurchaseForecastEvaluationHorizonDays;
@@ -48,6 +80,8 @@ export type PurchaseForecastEvaluationReportItem = {
   horizonDays: PurchaseForecastEvaluationHorizonDays;
   forecastMethod: string;
   forecastVersion: number;
+  forecastPolicyCaptureVersion: typeof PURCHASING_FORECAST_POLICY_CAPTURE_VERSION;
+  forecastPolicyFingerprint: string;
   evaluationVersion: number;
   observedFrom: Date;
   observedThroughExclusive: Date;
@@ -193,6 +227,87 @@ function rowsOf(result: any): any[] {
   return Array.isArray(result?.rows) ? result.rows : Array.isArray(result) ? result : [];
 }
 
+function jsonObject(value: unknown, field: string): Record<string, unknown> {
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new RangeError(`${field} must contain valid JSON`);
+    }
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new RangeError(`${field} must be an object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function capturedPolicyCohort(input: {
+  captureVersion: unknown;
+  fingerprint: unknown;
+  snapshot: unknown;
+  field: string;
+}) {
+  const captureVersion = safeInteger(input.captureVersion, `${input.field}.captureVersion`, 0);
+  if (captureVersion !== PURCHASING_FORECAST_POLICY_CAPTURE_VERSION) {
+    throw new RangeError(`${input.field}.captureVersion is unsupported`);
+  }
+  if (typeof input.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(input.fingerprint)) {
+    throw new RangeError(`${input.field}.fingerprint must be a lowercase SHA-256`);
+  }
+  const snapshot = jsonObject(input.snapshot, `${input.field}.snapshot`);
+  const canonical = buildPurchasingForecastPolicyCohort(snapshot);
+  if (
+    canonical.fingerprint !== input.fingerprint
+    || !isDeepStrictEqual(canonical.snapshot, snapshot)
+  ) {
+    throw new RangeError(`${input.field} does not match its canonical policy snapshot`);
+  }
+  return canonical;
+}
+
+function mapPolicyCohort(row: any): PurchaseForecastPolicyCohortEvidence {
+  const captureVersion = safeInteger(row.forecast_policy_capture_version, "policyCohort.captureVersion", 0);
+  const common = {
+    observationCount: safeInteger(row.observation_count, "policyCohort.observationCount", 1),
+    evaluationCount: safeInteger(row.evaluation_count, "policyCohort.evaluationCount", 0),
+    firstObservedFrom: validDate(row.first_observed_from, "policyCohort.firstObservedFrom"),
+    latestObservedFrom: validDate(row.latest_observed_from, "policyCohort.latestObservedFrom"),
+    latestEvaluationAt: nullableDate(row.latest_evaluation_at, "policyCohort.latestEvaluationAt"),
+  };
+  if (captureVersion === 0) {
+    if (row.forecast_policy_fingerprint != null || row.forecast_policy_snapshot != null) {
+      throw new RangeError("Legacy policy cohort cannot contain captured policy evidence");
+    }
+    return {
+      captureVersion: 0,
+      fingerprint: null,
+      snapshot: null,
+      forecastMethod: null,
+      forecastVersion: null,
+      ...common,
+    };
+  }
+  const canonical = capturedPolicyCohort({
+    captureVersion,
+    fingerprint: row.forecast_policy_fingerprint,
+    snapshot: row.forecast_policy_snapshot,
+    field: "policyCohort",
+  });
+  const forecastMethod = String(row.forecast_method ?? "");
+  if (forecastMethod !== canonical.snapshot.method) {
+    throw new RangeError("policyCohort forecast method does not match its canonical policy snapshot");
+  }
+  return {
+    captureVersion: canonical.captureVersion,
+    fingerprint: canonical.fingerprint,
+    snapshot: canonical.snapshot,
+    forecastMethod,
+    forecastVersion: safeInteger(row.forecast_version, "policyCohort.forecastVersion", 1),
+    ...common,
+  };
+}
+
 function mapCandidate(row: any): PurchaseForecastEvaluationCandidate {
   if (row.scope !== "product_all_warehouses") {
     throw new RangeError(`Unsupported forecast observation scope: ${String(row.scope)}`);
@@ -281,6 +396,16 @@ function mapAggregate(row: any): PurchaseForecastEvaluationAggregateRow {
 }
 
 function mapReportItem(row: any): PurchaseForecastEvaluationReportItem {
+  const policyCohort = capturedPolicyCohort({
+    captureVersion: row.forecast_policy_capture_version,
+    fingerprint: row.forecast_policy_fingerprint,
+    snapshot: row.forecast_policy_snapshot,
+    field: "forecastReportItem.policyCohort",
+  });
+  const forecastMethod = String(row.forecast_method ?? "");
+  if (forecastMethod !== policyCohort.snapshot.method) {
+    throw new RangeError("Forecast report method does not match its policy cohort");
+  }
   const overlayAttributionVersion = safeInteger(
     row.overlay_attribution_version,
     "overlayAttributionVersion",
@@ -350,8 +475,10 @@ function mapReportItem(row: any): PurchaseForecastEvaluationReportItem {
     productSku: String(row.product_sku ?? ""),
     productName: String(row.product_name ?? ""),
     horizonDays: horizonDays(row.horizon_days),
-    forecastMethod: String(row.forecast_method ?? ""),
+    forecastMethod,
     forecastVersion: safeInteger(row.forecast_version, "forecastVersion", 1),
+    forecastPolicyCaptureVersion: policyCohort.captureVersion,
+    forecastPolicyFingerprint: policyCohort.fingerprint,
     evaluationVersion: safeInteger(row.evaluation_version, "evaluationVersion", 1),
     observedFrom: validDate(row.observed_from, "observedFrom"),
     observedThroughExclusive: validDate(row.observed_through_exclusive, "observedThroughExclusive"),
@@ -387,6 +514,59 @@ function mapReportItem(row: any): PurchaseForecastEvaluationReportItem {
 }
 
 export function createPurchaseForecastBacktestingRepository(database: any) {
+  async function loadPolicyCohorts(input: {
+    evaluationVersion: number;
+    horizonDays?: PurchaseForecastEvaluationHorizonDays;
+  }): Promise<PurchaseForecastPolicyCohortEvidence[]> {
+    const result = await database.execute(sql`
+      SELECT
+        observation.forecast_policy_capture_version,
+        observation.forecast_policy_fingerprint,
+        observation.forecast_policy_snapshot,
+        CASE
+          WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+            THEN observation.forecast_method
+          ELSE NULL
+        END AS forecast_method,
+        CASE
+          WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+            THEN observation.forecast_version
+          ELSE NULL
+        END AS forecast_version,
+        COUNT(DISTINCT observation.id)::int AS observation_count,
+        COUNT(evaluation.id)::int AS evaluation_count,
+        MIN(recommendation_run.as_of) AS first_observed_from,
+        MAX(recommendation_run.as_of) AS latest_observed_from,
+        MAX(evaluation.evaluated_at) AS latest_evaluation_at
+      FROM procurement.purchase_forecast_observations observation
+      JOIN procurement.purchase_recommendation_runs recommendation_run
+        ON recommendation_run.id = observation.run_id
+      LEFT JOIN procurement.purchase_forecast_evaluations evaluation
+        ON evaluation.observation_id = observation.id
+       AND evaluation.evaluation_version = ${input.evaluationVersion}
+       AND (${input.horizonDays ?? null}::int IS NULL OR evaluation.horizon_days = ${input.horizonDays ?? null})
+      WHERE recommendation_run.status = 'completed'
+      GROUP BY
+        observation.forecast_policy_capture_version,
+        observation.forecast_policy_fingerprint,
+        observation.forecast_policy_snapshot,
+        CASE
+          WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+            THEN observation.forecast_method
+          ELSE NULL
+        END,
+        CASE
+          WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+            THEN observation.forecast_version
+          ELSE NULL
+        END
+      ORDER BY
+        MAX(observation.created_at) DESC,
+        observation.forecast_policy_fingerprint NULLS LAST
+    `);
+    return rowsOf(result).map(mapPolicyCohort);
+  }
+
   async function loadMaturedCandidates(input: {
     asOf: Date;
     horizons: PurchaseForecastEvaluationHorizonDays[];
@@ -518,6 +698,9 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
   async function loadAggregates(input: {
     evaluationVersion: number;
     horizonDays?: PurchaseForecastEvaluationHorizonDays;
+    policyFingerprint: string;
+    forecastMethod: string;
+    forecastVersion: number;
   }): Promise<PurchaseForecastEvaluationAggregateRow[]> {
     const result = await database.execute(sql`
       SELECT
@@ -584,6 +767,10 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
         ON observation.id = evaluation.observation_id
       WHERE evaluation.evaluation_version = ${input.evaluationVersion}
         AND (${input.horizonDays ?? null}::int IS NULL OR evaluation.horizon_days = ${input.horizonDays ?? null})
+        AND observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+        AND observation.forecast_policy_fingerprint = ${input.policyFingerprint}
+        AND observation.forecast_method = ${input.forecastMethod}
+        AND observation.forecast_version = ${input.forecastVersion}
       GROUP BY evaluation.horizon_days
       ORDER BY evaluation.horizon_days
     `);
@@ -594,6 +781,9 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
     evaluationVersion: number;
     horizonDays?: PurchaseForecastEvaluationHorizonDays;
     limit: number;
+    policyFingerprint: string;
+    forecastMethod: string;
+    forecastVersion: number;
   }): Promise<PurchaseForecastEvaluationReportItem[]> {
     const result = await database.execute(sql`
       SELECT
@@ -606,6 +796,9 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
         evaluation.horizon_days,
         observation.forecast_method,
         observation.forecast_version,
+        observation.forecast_policy_capture_version,
+        observation.forecast_policy_fingerprint,
+        observation.forecast_policy_snapshot,
         evaluation.evaluation_version,
         evaluation.observed_from,
         evaluation.observed_through_exclusive,
@@ -642,6 +835,10 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
         ON observation.id = evaluation.observation_id
       WHERE evaluation.evaluation_version = ${input.evaluationVersion}
         AND (${input.horizonDays ?? null}::int IS NULL OR evaluation.horizon_days = ${input.horizonDays ?? null})
+        AND observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+        AND observation.forecast_policy_fingerprint = ${input.policyFingerprint}
+        AND observation.forecast_method = ${input.forecastMethod}
+        AND observation.forecast_version = ${input.forecastVersion}
       ORDER BY evaluation.evaluated_at DESC, evaluation.id DESC
       LIMIT ${input.limit}
     `);
@@ -658,6 +855,7 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
   }
 
   return {
+    loadPolicyCohorts,
     loadMaturedCandidates,
     insertEvaluations,
     loadAggregates,
