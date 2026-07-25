@@ -905,6 +905,116 @@ export const purchaseRecommendationRuns = procurementSchema.table("purchase_reco
   check("purchase_recommendation_runs_lookback_chk", sql`${table.lookbackDays} > 0`),
 ]);
 
+export const purchasePipelineJobRuns = procurementSchema.table("purchase_pipeline_job_runs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  jobType: varchar("job_type", { length: 40 }).notNull(),
+  triggerType: varchar("trigger_type", { length: 20 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull(),
+  asOf: timestamp("as_of", { withTimezone: true }).notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+  heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).defaultNow().notNull(),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  recommendationRunId: integer("recommendation_run_id")
+    .references(() => purchaseRecommendationRuns.id, { onDelete: "restrict" }),
+  recommendationLineCount: integer("recommendation_line_count"),
+  forecastObservationCount: integer("forecast_observation_count"),
+  evaluationInsertedCount: integer("evaluation_inserted_count"),
+  evaluationBatchCount: integer("evaluation_batch_count"),
+  evaluationBacklogMayRemain: boolean("evaluation_backlog_may_remain"),
+  resultJson: jsonb("result_json"),
+  errorCode: varchar("error_code", { length: 100 }),
+  errorMessage: varchar("error_message", { length: 2_000 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("purchase_pipeline_job_runs_single_running_uidx")
+    .on(table.jobType)
+    .where(sql`${table.status} = 'running'`),
+  index("purchase_pipeline_job_runs_latest_idx")
+    .on(table.jobType, table.startedAt.desc(), table.id.desc()),
+  index("purchase_pipeline_job_runs_recommendation_run_idx")
+    .on(table.recommendationRunId)
+    .where(sql`${table.recommendationRunId} IS NOT NULL`),
+  check(
+    "purchase_pipeline_job_runs_job_type_chk",
+    sql`${table.jobType} IN ('recommendation_snapshot', 'forecast_evaluation')`,
+  ),
+  check(
+    "purchase_pipeline_job_runs_trigger_type_chk",
+    sql`${table.triggerType} IN ('scheduled', 'manual')`,
+  ),
+  check(
+    "purchase_pipeline_job_runs_status_chk",
+    sql`${table.status} IN ('running', 'succeeded', 'failed', 'interrupted')`,
+  ),
+  check(
+    "purchase_pipeline_job_runs_lifecycle_chk",
+    sql`(
+        ${table.status} = 'running'
+        AND ${table.finishedAt} IS NULL
+        AND ${table.leaseExpiresAt} IS NOT NULL
+        AND ${table.errorCode} IS NULL
+        AND ${table.errorMessage} IS NULL
+      )
+      OR (
+        ${table.status} = 'succeeded'
+        AND ${table.finishedAt} IS NOT NULL
+        AND ${table.leaseExpiresAt} IS NULL
+        AND ${table.errorCode} IS NULL
+        AND ${table.errorMessage} IS NULL
+      )
+      OR (
+        ${table.status} IN ('failed', 'interrupted')
+        AND ${table.finishedAt} IS NOT NULL
+        AND ${table.leaseExpiresAt} IS NULL
+        AND ${table.errorCode} IS NOT NULL
+        AND BTRIM(${table.errorCode}) <> ''
+        AND ${table.errorMessage} IS NOT NULL
+        AND BTRIM(${table.errorMessage}) <> ''
+      )`,
+  ),
+  check(
+    "purchase_pipeline_job_runs_time_chk",
+    sql`${table.heartbeatAt} >= ${table.startedAt}
+      AND (${table.leaseExpiresAt} IS NULL OR ${table.leaseExpiresAt} > ${table.heartbeatAt})
+      AND (${table.finishedAt} IS NULL OR ${table.finishedAt} >= ${table.startedAt})`,
+  ),
+  check(
+    "purchase_pipeline_job_runs_counts_chk",
+    sql`(${table.recommendationLineCount} IS NULL OR ${table.recommendationLineCount} >= 0)
+      AND (${table.forecastObservationCount} IS NULL OR ${table.forecastObservationCount} >= 0)
+      AND (${table.evaluationInsertedCount} IS NULL OR ${table.evaluationInsertedCount} >= 0)
+      AND (${table.evaluationBatchCount} IS NULL OR ${table.evaluationBatchCount} >= 0)`,
+  ),
+  check(
+    "purchase_pipeline_job_runs_success_result_chk",
+    sql`${table.status} <> 'succeeded'
+      OR (
+        ${table.jobType} = 'recommendation_snapshot'
+        AND ${table.recommendationRunId} IS NOT NULL
+        AND ${table.recommendationLineCount} IS NOT NULL
+        AND ${table.forecastObservationCount} IS NOT NULL
+        AND ${table.evaluationInsertedCount} IS NULL
+        AND ${table.evaluationBatchCount} IS NULL
+        AND ${table.evaluationBacklogMayRemain} IS NULL
+        AND ${table.resultJson} IS NOT NULL
+        AND jsonb_typeof(${table.resultJson}) = 'object'
+      )
+      OR (
+        ${table.jobType} = 'forecast_evaluation'
+        AND ${table.recommendationRunId} IS NULL
+        AND ${table.recommendationLineCount} IS NULL
+        AND ${table.forecastObservationCount} IS NULL
+        AND ${table.evaluationInsertedCount} IS NOT NULL
+        AND ${table.evaluationBatchCount} IS NOT NULL
+        AND ${table.evaluationBacklogMayRemain} IS NOT NULL
+        AND ${table.resultJson} IS NOT NULL
+        AND jsonb_typeof(${table.resultJson}) = 'object'
+      )`,
+  ),
+]);
+
 export const purchaseRecommendationLines = procurementSchema.table("purchase_recommendation_lines", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   runId: integer("run_id").notNull().references(() => purchaseRecommendationRuns.id, { onDelete: "restrict" }),
@@ -1234,6 +1344,13 @@ export const requestForQuoteLines = procurementSchema.table("request_for_quote_l
 ]);
 
 export const insertPurchaseRecommendationRunSchema = createInsertSchema(purchaseRecommendationRuns).omit({ id: true, generatedAt: true });
+export const insertPurchasePipelineJobRunSchema = createInsertSchema(purchasePipelineJobRuns).omit({
+  id: true,
+  startedAt: true,
+  heartbeatAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
 export const insertPurchaseRecommendationLineSchema = createInsertSchema(purchaseRecommendationLines).omit({ id: true, createdAt: true });
 export const insertPurchaseForecastObservationSchema = createInsertSchema(purchaseForecastObservations).omit({ id: true, createdAt: true });
 export const insertPurchaseForecastOverlayContributionSchema = createInsertSchema(purchaseForecastOverlayContributions).omit({ id: true, createdAt: true });
@@ -1242,6 +1359,7 @@ export const insertRequestForQuoteSchema = createInsertSchema(requestForQuotes).
 export const insertRequestForQuoteLineSchema = createInsertSchema(requestForQuoteLines).omit({ id: true, createdAt: true, updatedAt: true });
 
 export type PurchaseRecommendationRun = typeof purchaseRecommendationRuns.$inferSelect;
+export type PurchasePipelineJobRun = typeof purchasePipelineJobRuns.$inferSelect;
 export type PurchaseRecommendationLine = typeof purchaseRecommendationLines.$inferSelect;
 export type PurchaseForecastObservation = typeof purchaseForecastObservations.$inferSelect;
 export type PurchaseForecastOverlayContribution = typeof purchaseForecastOverlayContributions.$inferSelect;

@@ -515,6 +515,9 @@
   "procurement.purchase_orders": [
     "modules/procurement"
   ],
+  "procurement.purchase_pipeline_job_runs": [
+    "modules/procurement"
+  ],
   "procurement.purchase_recommendation_lines": [
     "modules/procurement"
   ],
