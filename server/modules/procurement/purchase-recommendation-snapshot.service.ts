@@ -24,7 +24,7 @@ const MAX_FORECAST_OVERLAY_CONTRIBUTIONS = 100_000;
 const OVERLAY_INSERT_BATCH_SIZE = 1_000;
 const PIECE_MICRO_SCALE = 1_000_000;
 
-export type PurchaseRecommendationRunSource = "manual" | "auto_draft" | "api";
+export type PurchaseRecommendationRunSource = "manual" | "auto_draft" | "api" | "scheduled";
 
 export type PurchaseRecommendationSnapshotLine = {
   recommendationKey: string;
@@ -285,15 +285,15 @@ function validateRunInput(input: CreatePurchaseRecommendationRunInput) {
     throw new RangeError("calculationVersion is required and cannot exceed 80 characters");
   }
   const source = input.source ?? "manual";
-  if (!(["manual", "auto_draft", "api"] as const).includes(source)) {
+  if (!(["manual", "auto_draft", "api", "scheduled"] as const).includes(source)) {
     throw new RangeError("source is invalid");
   }
   const sourceRunKey = input.sourceRunKey?.trim() || null;
   if (sourceRunKey && sourceRunKey.length > 160) {
     throw new RangeError("sourceRunKey cannot exceed 160 characters");
   }
-  if (source === "auto_draft" && !sourceRunKey) {
-    throw new RangeError("sourceRunKey is required for auto-draft recommendation runs");
+  if ((source === "auto_draft" || source === "scheduled") && !sourceRunKey) {
+    throw new RangeError("sourceRunKey is required for automated recommendation runs");
   }
   if (!(input.asOf instanceof Date) || Number.isNaN(input.asOf.getTime())) {
     throw new RangeError("asOf must be a valid date");

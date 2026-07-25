@@ -16,9 +16,8 @@ import {
   passesAutoDraftApprovalPolicy,
   type AutoDraftRecommendationSettings,
   type PurchasingRecommendationItem,
-  type PurchasingRecommendationRawRow,
 } from "../modules/procurement/purchasing-recommendation.engine";
-import { loadPurchasingRecommendationContext } from "../modules/procurement/purchasing-recommendation-context.service";
+import { loadPurchaseRecommendationSnapshotAnalysis } from "../modules/procurement/purchase-recommendation-analysis.service";
 import { createDrizzleAutoDraftRunLifecycleRepository } from "../modules/procurement/auto-draft-run-lifecycle.repository";
 import {
   createAutoDraftRunLifecycleService,
@@ -530,20 +529,15 @@ const readinessStatusRank: Record<AutomaticPurchasingReadinessStatus, number> = 
 
 async function loadAutoDraftAnalysis() {
   const storage = { ...procurementMethods, ...inventoryStorage };
-  const settings = await storage.getAutoDraftSettings() as AutoDraftJobSettings;
-  const lookbackDays = await storage.getVelocityLookbackDays();
-  const [rawData, context] = await Promise.all([
-    storage.getReorderAnalysisData(lookbackDays),
-    loadPurchasingRecommendationContext(),
-  ]);
-  const recommendationResult = generatePurchasingRecommendations({
-    rows: rawData as PurchasingRecommendationRawRow[],
-    lookbackDays,
-    autoDraftSettings: settings,
-    requireVendor: Boolean(settings.skipNoVendor),
-    ...context,
+  const analysis = await loadPurchaseRecommendationSnapshotAnalysis<AutoDraftJobSettings>({
+    storage,
   });
-  return { settings, lookbackDays, rawData, recommendationResult };
+  return {
+    settings: analysis.settings,
+    lookbackDays: analysis.lookbackDays,
+    rawData: analysis.rawRows,
+    recommendationResult: analysis.recommendationResult,
+  };
 }
 
 export async function previewAutomaticPurchasingPilot(
