@@ -179,6 +179,7 @@ export interface RequeueReviewedTrackingSubscriptionsResult {
 export interface RequeueReviewedCarrierDispatchCommandsInput {
   limit: number;
   expectedCount: number;
+  cohort: HistoricalCarrierDispatchRepairCohort | null;
   operator: string;
   reason: string;
   idempotencyKey: string;
@@ -345,6 +346,7 @@ export interface CarrierTrackingRepository {
   ): Promise<RequeueReviewedTrackingSubscriptionsResult>;
   previewReviewedCarrierDispatchCommands(
     limit: number,
+    cohort?: HistoricalCarrierDispatchRepairCohort | null,
   ): Promise<HistoricalCarrierDispatchRepairPreview>;
   requeueReviewedCarrierDispatchCommands(
     input: RequeueReviewedCarrierDispatchCommandsInput,
@@ -500,7 +502,9 @@ function historicalCarrierDispatchRepairCohortSql() {
   `;
 }
 
-function historicalCarrierDispatchRepairEligibilitySql() {
+function historicalCarrierDispatchRepairEligibilitySql(
+  cohort: HistoricalCarrierDispatchRepairCohort | null = null,
+) {
   const repairCohort = historicalCarrierDispatchRepairCohortSql();
   return sql`
     command.status = 'review_required'
@@ -513,7 +517,12 @@ function historicalCarrierDispatchRepairEligibilitySql() {
       FROM wms.shipping_provider_label_links AS link
       WHERE link.shipping_provider_label_id = label.id
     )
-    AND ${repairCohort} IS NOT NULL
+    AND ${repairCohort} IN (
+      'aggregate_package_identity_conflict',
+      'immutable_command_request_conflict',
+      'legacy_outbound_shipment_identity_conflict'
+    )
+    AND (${cohort}::text IS NULL OR ${repairCohort} = ${cohort})
   `;
 }
 
@@ -1454,6 +1463,13 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
              AND (
                engine.provider_order_id = label.provider_order_id
                OR engine.provider_order_key = label.provider_order_key
+               OR EXISTS (
+                 SELECT 1
+                 FROM wms.shipping_engine_order_provider_refs AS provider_ref
+                 WHERE provider_ref.shipping_engine_order_id = engine.id
+                   AND provider_ref.provider = label.provider
+                   AND provider_ref.provider_order_id = label.provider_order_id
+               )
                OR engine.shipment_request_id IN (
                  SELECT shipment_request_id FROM request_targets
                )
@@ -1959,12 +1975,12 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
       });
     },
 
-    async previewReviewedCarrierDispatchCommands(limit) {
+    async previewReviewedCarrierDispatchCommands(limit, cohort = null) {
       if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 500) {
         throw new Error("Carrier-dispatch repair preview limit must be an integer between 1 and 500");
       }
       const repairCohort = historicalCarrierDispatchRepairCohortSql();
-      const eligibility = historicalCarrierDispatchRepairEligibilitySql();
+      const eligibility = historicalCarrierDispatchRepairEligibilitySql(cohort);
       const countResult = await db.execute(sql`
         SELECT
           ${repairCohort} AS repair_cohort,
@@ -2044,7 +2060,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
 
       return db.transaction(async (databaseTx: any) => {
         const repairCohort = historicalCarrierDispatchRepairCohortSql();
-        const eligibility = historicalCarrierDispatchRepairEligibilitySql();
+        const eligibility = historicalCarrierDispatchRepairEligibilitySql(input.cohort);
         const candidateResult = await databaseTx.execute(sql`
           SELECT
             command.id,

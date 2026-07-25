@@ -21,6 +21,7 @@ describe("historical carrier-dispatch repair", () => {
       help: false,
       mode: "dry-run",
       limit: 100,
+      cohort: null,
       confirmCount: null,
       operator: null,
       reason: null,
@@ -28,6 +29,9 @@ describe("historical carrier-dispatch repair", () => {
       json: false,
     });
     expect(() => parseFlags(["--limit=501"])).toThrow(/1 through 500/);
+    expect(() => parseFlags(["--cohort=package_resolution_retry"])).toThrow(
+      /Unsupported --cohort/,
+    );
   });
 
   it("requires exact confirmation and audit fields in execute mode", () => {
@@ -52,7 +56,7 @@ describe("historical carrier-dispatch repair", () => {
       preview,
       result: null,
     });
-    expect(previewReviewedCarrierDispatchCommands).toHaveBeenCalledWith(100);
+    expect(previewReviewedCarrierDispatchCommands).toHaveBeenCalledWith(100, null);
     expect(requeueReviewedCarrierDispatchCommands).not.toHaveBeenCalled();
   });
 
@@ -84,6 +88,7 @@ describe("historical carrier-dispatch repair", () => {
     const flags = parseFlags([
       "--execute",
       "--limit=25",
+      "--cohort=aggregate_package_identity_conflict",
       "--confirm-count=2",
       "--operator=owner@cardshellz.com",
       "--reason=post-authority-repair",
@@ -100,6 +105,7 @@ describe("historical carrier-dispatch repair", () => {
     expect(requeueReviewedCarrierDispatchCommands).toHaveBeenCalledWith({
       limit: 25,
       expectedCount: 2,
+      cohort: "aggregate_package_identity_conflict",
       operator: "owner@cardshellz.com",
       reason: "post-authority-repair",
       idempotencyKey: "carrier-dispatch-repair-batch-1",

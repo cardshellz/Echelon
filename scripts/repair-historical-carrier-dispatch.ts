@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import type {
   CarrierTrackingRepository,
+  HistoricalCarrierDispatchRepairCohort,
   HistoricalCarrierDispatchRepairPreview,
   RequeueReviewedCarrierDispatchCommandsResult,
 } from "../server/modules/shipping/carrier-tracking.repository";
@@ -16,6 +17,7 @@ export interface Flags {
   help: boolean;
   mode: Mode;
   limit: number;
+  cohort: HistoricalCarrierDispatchRepairCohort | null;
   confirmCount: number | null;
   operator: string | null;
   reason: string | null;
@@ -33,11 +35,16 @@ export function usage(): string {
     "  --dry-run                 Preview only. Default.",
     "  --execute                 Requeue the exact guarded selection.",
     "  --limit=N                 Max rows selected in this batch. Default 100, max 500.",
+    "  --cohort=NAME             Restrict repair to one proven failure cohort.",
     "  --confirm-count=N         Required in execute mode; must match the selected dry-run count.",
     "  --operator=TEXT           Required in execute mode.",
     "  --reason=TEXT             Required in execute mode.",
     "  --idempotency-key=TEXT    Required in execute mode and reused only for the same batch.",
     "  --json                    Print machine-readable output.",
+    "",
+    "Supported cohorts: aggregate_package_identity_conflict,",
+    "immutable_command_request_conflict, legacy_outbound_shipment_identity_conflict.",
+    "Unresolved package-resolution reviews are intentionally excluded.",
     "",
     "Only known historical carrier-dispatch failures with confirmed carrier",
     "evidence, a linked non-voided ShipStation label, and a repaired code path",
@@ -48,7 +55,7 @@ export function usage(): string {
 export function parseFlags(argv: string[]): Flags {
   for (const arg of argv) {
     if (["--help", "-h", "--dry-run", "--execute", "--json"].includes(arg)) continue;
-    if (/^--(limit|confirm-count|operator|reason|idempotency-key)=/.test(arg)) continue;
+    if (/^--(limit|cohort|confirm-count|operator|reason|idempotency-key)=/.test(arg)) continue;
     throw new Error(`Unknown flag: ${arg}`);
   }
   if (argv.includes("--dry-run") && argv.includes("--execute")) {
@@ -60,6 +67,7 @@ export function parseFlags(argv: string[]): Flags {
     help: argv.includes("--help") || argv.includes("-h"),
     mode,
     limit: integerFlag(argv, "--limit=", DEFAULT_LIMIT, 1, MAX_LIMIT),
+    cohort: cohortFlag(argv),
     confirmCount: optionalIntegerFlag(argv, "--confirm-count=", 1, MAX_LIMIT),
     operator: textFlag(argv, "--operator="),
     reason: textFlag(argv, "--reason="),
@@ -95,6 +103,7 @@ export async function runHistoricalCarrierDispatchRepair(
 }> {
   const preview = await dependencies.repository.previewReviewedCarrierDispatchCommands(
     flags.limit,
+    flags.cohort,
   );
   if (flags.mode === "dry-run") return { mode: flags.mode, preview, result: null };
   if (flags.confirmCount !== preview.selectedCount) {
@@ -105,6 +114,7 @@ export async function runHistoricalCarrierDispatchRepair(
   const result = await dependencies.repository.requeueReviewedCarrierDispatchCommands({
     limit: flags.limit,
     expectedCount: flags.confirmCount,
+    cohort: flags.cohort,
     operator: flags.operator!,
     reason: flags.reason!,
     idempotencyKey: flags.idempotencyKey!,
@@ -119,6 +129,21 @@ function textFlag(argv: string[], prefix: string): string | null {
   const value = raw.slice(prefix.length).trim();
   if (!value) throw new Error(`${prefix.slice(0, -1)} must not be blank`);
   return value;
+}
+
+const REPAIR_COHORTS = new Set<HistoricalCarrierDispatchRepairCohort>([
+  "aggregate_package_identity_conflict",
+  "immutable_command_request_conflict",
+  "legacy_outbound_shipment_identity_conflict",
+]);
+
+function cohortFlag(argv: string[]): HistoricalCarrierDispatchRepairCohort | null {
+  const value = textFlag(argv, "--cohort=");
+  if (value === null) return null;
+  if (!REPAIR_COHORTS.has(value as HistoricalCarrierDispatchRepairCohort)) {
+    throw new Error(`Unsupported --cohort=${value}`);
+  }
+  return value as HistoricalCarrierDispatchRepairCohort;
 }
 
 function integerFlag(
