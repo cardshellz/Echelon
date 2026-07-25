@@ -22,8 +22,19 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   ArrowLeft, Store, CheckCircle2, XCircle, AlertCircle, ExternalLink,
-  RefreshCw, Send, Search, Loader2, Package, Clock, Download, Upload, Image as ImageIcon,
+  RefreshCw, Send, Search, Loader2, Package, Clock, Download, Upload,
+  Image as ImageIcon, ShieldCheck,
 } from "lucide-react";
 
 interface Channel {
@@ -31,6 +42,7 @@ interface Channel {
   name: string;
   provider: string;
   status: string;
+  isDefault: number;
 }
 
 interface Product {
@@ -54,7 +66,62 @@ interface ChannelListing {
   lastSyncedAt: string | null;
 }
 
+type ShopifyMappingIssueCode =
+  | "catalog_product_id_missing"
+  | "invalid_shopify_product_id"
+  | "remote_product_missing"
+  | "duplicate_local_owner"
+  | "local_mapping_inconsistent"
+  | "shipping_group_conflict"
+  | "storefront_shipping_group_drift";
+
+interface ShopifyMappingReconciliationItem {
+  productId: number;
+  productName: string;
+  productSku: string | null;
+  shopifyProductId: string | null;
+  shippingGroupCode: string | null;
+  mappingStatus: string;
+  mappingFingerprint: string;
+  evidenceProductIds: string[];
+  remoteTitle: string | null;
+  remoteStatus: string | null;
+  remoteShippingGroupCode: string | null;
+  comparedShopifyProductId: string | null;
+  ownerProductIds: number[];
+  issueCodes: ShopifyMappingIssueCode[];
+  canRetireDeadMapping: boolean;
+}
+
+interface ShopifyMappingReconciliationReport {
+  generatedAt: string;
+  channel: {
+    id: number;
+    name: string;
+    shopDomain: string;
+  };
+  summary: {
+    localProductCount: number;
+    uniqueShopifyProductCount: number;
+    healthyProductCount: number;
+    issueProductCount: number;
+    issueCounts: Record<ShopifyMappingIssueCode, number>;
+  };
+  items: ShopifyMappingReconciliationItem[];
+}
+
 type FeedStatus = "all" | "listed" | "not_listed" | "errors";
+const MAPPING_PAGE_SIZE = 20;
+
+const mappingIssueLabels: Record<ShopifyMappingIssueCode, string> = {
+  catalog_product_id_missing: "Catalog product ID missing",
+  invalid_shopify_product_id: "Invalid Shopify ID",
+  remote_product_missing: "Missing in Shopify",
+  duplicate_local_owner: "Duplicate local owner",
+  local_mapping_inconsistent: "Local mapping incomplete",
+  shipping_group_conflict: "Shipping group conflict",
+  storefront_shipping_group_drift: "Storefront group drift",
+};
 
 export default function ShopifyChannelPage() {
   const [, navigate] = useLocation();
@@ -63,6 +130,10 @@ export default function ShopifyChannelPage() {
   const [feedFilter, setFeedFilter] = useState<FeedStatus>("all");
   const [feedSearch, setFeedSearch] = useState("");
   const [pushingProductId, setPushingProductId] = useState<number | null>(null);
+  const [showHealthyMappings, setShowHealthyMappings] = useState(false);
+  const [mappingPage, setMappingPage] = useState(1);
+  const [retireCandidate, setRetireCandidate] =
+    useState<ShopifyMappingReconciliationItem | null>(null);
 
   // --- Fetch channels, find active Shopify channel ---
   const { data: channels = [] } = useQuery<Channel[]>({
@@ -73,8 +144,92 @@ export default function ShopifyChannelPage() {
       return res.json();
     },
   });
-  const shopifyChannel = channels.find((c) => c.provider === "shopify" && c.status === "active")
+  const shopifyChannel = channels.find(
+    (c) =>
+      c.provider === "shopify"
+      && c.isDefault === 1
+      && c.status === "active",
+  )
+    ?? channels.find(
+      (c) => c.provider === "shopify" && c.isDefault === 1,
+    )
+    ?? channels.find((c) => c.provider === "shopify" && c.status === "active")
     ?? channels.find((c) => c.provider === "shopify");
+
+  const mappingReconciliationQuery =
+    useQuery<ShopifyMappingReconciliationReport>({
+      queryKey: [
+        "/api/channels",
+        shopifyChannel?.id,
+        "shopify-mapping-reconciliation",
+      ],
+      queryFn: async () => {
+        const response = await fetch(
+          `/api/channels/${shopifyChannel!.id}/shopify-mapping-reconciliation`,
+          { credentials: "include" },
+        );
+        const body = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(
+            body?.error ?? `Mapping health scan failed (${response.status})`,
+          );
+        }
+        return body;
+      },
+      enabled: false,
+      retry: false,
+    });
+
+  const retireMappingMutation = useMutation({
+    mutationFn: async (item: ShopifyMappingReconciliationItem) => {
+      if (!shopifyChannel || !item.shopifyProductId) {
+        throw new Error("The stale Shopify mapping is no longer available");
+      }
+      const response = await fetch(
+        `/api/channels/${shopifyChannel.id}/shopify-mapping-reconciliation/products/${item.productId}/retire`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expectedProductId: item.shopifyProductId,
+            expectedFingerprint: item.mappingFingerprint,
+            expectedShopDomain:
+              mappingReconciliationQuery.data?.channel.shopDomain,
+          }),
+        },
+      );
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(
+          body?.error ?? `Stale mapping retirement failed (${response.status})`,
+        );
+      }
+      return body;
+    },
+    onSuccess: async () => {
+      setRetireCandidate(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/products"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["/api/channels", shopifyChannel?.id, "listings"],
+        }),
+      ]);
+      await mappingReconciliationQuery.refetch();
+      toast({
+        title: "Stale mapping retired",
+        description:
+          "The dead Shopify identity was removed. The Echelon product and history were preserved.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Mapping was not changed",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
 
   // --- Fetch products ---
   const { data: products = [], isLoading: productsLoading } = useQuery<Product[]>({
@@ -332,6 +487,22 @@ export default function ShopifyChannelPage() {
     return items;
   }, [feed, feedFilter, feedSearch]);
 
+  const visibleMappingItems = useMemo(() => {
+    const items = mappingReconciliationQuery.data?.items ?? [];
+    return showHealthyMappings
+      ? items
+      : items.filter((item) => item.issueCodes.length > 0);
+  }, [mappingReconciliationQuery.data, showHealthyMappings]);
+  const mappingPageCount = Math.max(
+    1,
+    Math.ceil(visibleMappingItems.length / MAPPING_PAGE_SIZE),
+  );
+  const currentMappingPage = Math.min(mappingPage, mappingPageCount);
+  const paginatedMappingItems = visibleMappingItems.slice(
+    (currentMappingPage - 1) * MAPPING_PAGE_SIZE,
+    currentMappingPage * MAPPING_PAGE_SIZE,
+  );
+
   const isLoading = productsLoading || listingsLoading;
 
   return (
@@ -392,7 +563,249 @@ export default function ShopifyChannelPage() {
         </CardContent>
       </Card>
 
-      {/* Section 2: Listing Feed */}
+      {/* Section 2: Mapping Health */}
+      <Card>
+        <CardHeader>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <ShieldCheck className="h-5 w-5" />
+                Mapping Health
+              </CardTitle>
+              <CardDescription>
+                Compare Echelon product identities and shipping groups with the
+                provider-default Shopify store.
+              </CardDescription>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={
+                !shopifyChannel || mappingReconciliationQuery.isFetching
+              }
+              onClick={() => {
+                setMappingPage(1);
+                void mappingReconciliationQuery.refetch();
+              }}
+            >
+              {mappingReconciliationQuery.isFetching ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4 mr-2" />
+              )}
+              Run health scan
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {mappingReconciliationQuery.error ? (
+            <div className="flex items-start gap-2 border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+              <span>{mappingReconciliationQuery.error.message}</span>
+            </div>
+          ) : !mappingReconciliationQuery.data ? (
+            <p className="text-sm text-muted-foreground">
+              Run the live scan before changing shipping policies or product
+              mappings.
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+                <span>
+                  <strong>
+                    {mappingReconciliationQuery.data.summary.issueProductCount}
+                  </strong>{" "}
+                  need attention
+                </span>
+                <span>
+                  <strong>
+                    {mappingReconciliationQuery.data.summary.healthyProductCount}
+                  </strong>{" "}
+                  healthy
+                </span>
+                <span className="text-muted-foreground">
+                  {mappingReconciliationQuery.data.summary.localProductCount}{" "}
+                  mapped products checked
+                </span>
+                <span className="text-muted-foreground">
+                  {mappingReconciliationQuery.data.channel.shopDomain}
+                </span>
+                <span className="text-xs text-muted-foreground sm:ml-auto">
+                  {new Date(
+                    mappingReconciliationQuery.data.generatedAt,
+                  ).toLocaleString()}
+                </span>
+              </div>
+
+              <div className="flex gap-2">
+                <Button
+                  variant={!showHealthyMappings ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    setShowHealthyMappings(false);
+                    setMappingPage(1);
+                  }}
+                >
+                  Issues
+                </Button>
+                <Button
+                  variant={showHealthyMappings ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    setShowHealthyMappings(true);
+                    setMappingPage(1);
+                  }}
+                >
+                  All
+                </Button>
+              </div>
+
+              <div className="border rounded-lg overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Product</TableHead>
+                      <TableHead>Shopify product</TableHead>
+                      <TableHead>Shipping group</TableHead>
+                      <TableHead>Issues</TableHead>
+                      <TableHead className="w-[210px] text-right">
+                        Actions
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {paginatedMappingItems.map((item) => (
+                      <TableRow key={item.productId}>
+                        <TableCell>
+                          <div className="font-medium text-sm">
+                            {item.productName}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {item.productSku ?? "No base SKU"}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-sm">
+                            {item.remoteTitle ?? "Not found"}
+                          </div>
+                          <code className="text-xs text-muted-foreground">
+                            Catalog: {item.shopifyProductId ?? "missing"}
+                          </code>
+                          {item.evidenceProductIds.length > 0 && (
+                            <div className="text-xs text-muted-foreground">
+                              Channel: {item.evidenceProductIds.join(", ")}
+                            </div>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-sm">
+                            Echelon: {item.shippingGroupCode ?? "None"}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            Shopify:{" "}
+                            {item.remoteShippingGroupCode ?? "None"}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {item.issueCodes.length === 0 ? (
+                            <Badge
+                              variant="outline"
+                              className="border-green-300 text-green-700"
+                            >
+                              Healthy
+                            </Badge>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {item.issueCodes.map((issueCode) => (
+                                <Badge
+                                  key={issueCode}
+                                  variant={
+                                    issueCode === "remote_product_missing"
+                                    || issueCode === "shipping_group_conflict"
+                                      ? "destructive"
+                                      : "outline"
+                                  }
+                                  className="text-xs"
+                                >
+                                  {mappingIssueLabels[issueCode]}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex justify-end gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                navigate(
+                                  `/products/${item.productId}?tab=channels`,
+                                )}
+                            >
+                              Open product
+                            </Button>
+                            {item.canRetireDeadMapping && (
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                onClick={() => setRetireCandidate(item)}
+                              >
+                                Retire mapping
+                              </Button>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {paginatedMappingItems.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={5}
+                          className="text-center text-sm text-muted-foreground py-8"
+                        >
+                          {showHealthyMappings
+                            ? "No mapped Shopify products were returned."
+                            : "No mapping issues were found."}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {mappingPageCount > 1 && (
+                <div className="flex items-center justify-end gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    Page {currentMappingPage} of {mappingPageCount}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentMappingPage === 1}
+                    onClick={() =>
+                      setMappingPage((page) => Math.max(1, page - 1))}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentMappingPage === mappingPageCount}
+                    onClick={() =>
+                      setMappingPage((page) =>
+                        Math.min(mappingPageCount, page + 1))}
+                  >
+                    Next
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Section 3: Listing Feed */}
       <Card>
         <CardHeader>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -607,6 +1020,61 @@ export default function ShopifyChannelPage() {
           )}
         </CardContent>
       </Card>
+
+      <AlertDialog
+        open={retireCandidate !== null}
+        onOpenChange={(open) => {
+          if (!open && !retireMappingMutation.isPending) {
+            setRetireCandidate(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Retire dead Shopify mapping?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Shopify will be checked again before any change. If the product
+              or any referenced variant still exists, nothing will be changed.
+              The Echelon product and historical records are always preserved.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {retireCandidate && (
+            <div className="border p-3 text-sm">
+              <div className="font-medium">{retireCandidate.productName}</div>
+              <div className="text-muted-foreground">
+                Shopify product {retireCandidate.shopifyProductId}
+              </div>
+              <div className="text-muted-foreground">
+                {mappingReconciliationQuery.data?.channel.shopDomain}
+              </div>
+            </div>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={retireMappingMutation.isPending}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={
+                !retireCandidate || retireMappingMutation.isPending
+              }
+              onClick={(event) => {
+                event.preventDefault();
+                if (retireCandidate) {
+                  retireMappingMutation.mutate(retireCandidate);
+                }
+              }}
+            >
+              {retireMappingMutation.isPending && (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              )}
+              Verify and retire
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

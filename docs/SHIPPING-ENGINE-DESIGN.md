@@ -175,6 +175,11 @@ Implementation status on 2026-07-24:
   malformed Shopify product identities, or outbox failures abort the catalog
   change. Products not yet mapped to Shopify are explicitly counted as skipped
   and remain eligible for reconciliation after a mapping exists.
+- Shipping-group projection also verifies that exactly one Echelon product owns
+  each Shopify product identity before any outbox command is written. Duplicate
+  owners abort the complete batch; owners with different group codes are
+  reported as an explicit mapping conflict. The pending-outbox dedupe key must
+  never become an implicit last-writer-wins resolver for catalog identity.
 - A Shellz Club per-group threshold change and both shop-metafield outbox
   commands commit in one transaction. New thresholds may target only active
   catalog groups; an inactive or deleted group may still be cleared. Catalog
@@ -184,6 +189,34 @@ Implementation status on 2026-07-24:
   drain, exact Shopify product/shop metafield values, delivery-profile
   separation, and Function behavior still require controlled verification
   before checkout activation.
+
+#### Shopify mapping readiness gate
+
+The global Shopify IDs on `catalog.products` and
+`catalog.product_variants` describe only the provider-default Shopify channel.
+A live mapping-health scan therefore runs only against that channel. Its
+candidate set includes products with a catalog parent ID plus products whose
+active feed or listing evidence survives without that parent ID, and checks:
+
+1. Shopify product IDs are valid and the remote products still exist.
+2. One and only one Echelon product owns each remote Shopify product.
+3. Catalog, feed, and listing identities remain internally consistent.
+4. A duplicate owner cannot project conflicting shipping-group codes.
+5. The live `cardshellz.shipping_group` product metafield matches Echelon.
+
+A remote-missing mapping may be retired only through the audited reconciliation
+command. The command rechecks the optimistic-lock fingerprint, then asks Shopify
+again for the product and every referenced active or archived variant. It makes
+no change if any node still exists. When every node is absent, one transaction
+clears current catalog Shopify identities, disables current channel feeds,
+resets current listing identities, and records before/after audit evidence.
+Echelon products, variants, orders, and historical audit records are preserved.
+
+Before Shopify checkout activation, operators must run this scan, resolve every
+duplicate-owner and shipping-group conflict, retire or repair remote-missing
+mappings, drain the metafield outbox, and verify the resulting storefront
+metafields. The scan is evidence for this gate; it does not activate a shipping
+policy or change checkout routing.
 
 Initial capability declarations:
 
