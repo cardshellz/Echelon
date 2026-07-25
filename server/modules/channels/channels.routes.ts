@@ -24,6 +24,7 @@ import { channelConnections } from "@shared/schema";
 import { ShopifyAdapter } from "./adapters/shopify.adapter";
 import { runShopifyWeightBackfill, createShopifyWeightBackfillDeps } from "./shopify-weight-backfill.service";
 import { rowToListingDto } from "./channel-listings.transform";
+import { toPublicChannelConnection } from "./channel-connection.transform";
 import { createOmsService } from "../oms/oms.service";
 import { enqueueShipStationHoldSyncRetry } from "../oms/webhook-retry.worker";
 import { reserveAndPushAfterHoldRelease } from "../orders/release-hold-push";
@@ -543,7 +544,7 @@ export function registerChannelRoutes(app: Express) {
             : null;
           return {
             ...channel,
-            connection: connection || null,
+            connection: toPublicChannelConnection(connection),
             partnerProfile: partnerProfile || null
           };
         })
@@ -573,7 +574,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json({
         ...channel,
-        connection: connection || null,
+        connection: toPublicChannelConnection(connection),
         partnerProfile: partnerProfile || null
       });
     } catch (error) {
@@ -654,7 +655,7 @@ export function registerChannelRoutes(app: Express) {
         ...req.body
       });
 
-      res.json(connection);
+      res.json(toPublicChannelConnection(connection));
     } catch (error) {
       console.error("Error updating channel connection:", error);
       res.status(500).json({ error: "Failed to update channel connection" });
@@ -791,7 +792,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json({
         success: true,
-        connection,
+        connection: toPublicChannelConnection(connection),
         shop: {
           name: shopData.shop?.name,
           domain: shopData.shop?.domain,
