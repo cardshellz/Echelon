@@ -20,10 +20,7 @@ import {
   type ShopifyProductSearchResult,
   fetchShopifyProductsForSearch,
 } from "./shopify-product-search";
-import {
-  enqueueShippingGroupMetafieldWrite,
-  enqueueShippingGroupMetafields,
-} from "./shipping-group-sync";
+import { enqueueShippingGroupMetafields } from "./shipping-group-sync";
 import {
   createShopifyProductMappingService,
   ShopifyProductMappingError,
@@ -486,12 +483,14 @@ export async function registerProductRoutes(app: Express) {
   // automatically replaces the old one, so there is no separate "remove".
   app.post("/api/shipping-groups/assign", requirePermission("inventory", "edit"), async (req, res) => {
     try {
-      const productIds: number[] = Array.isArray(req.body.productIds)
-        ? req.body.productIds.filter((n: any) => Number.isInteger(n) && n > 0)
-        : [];
-      if (productIds.length === 0) {
+      const requestedProductIds: unknown = req.body.productIds;
+      if (!Array.isArray(requestedProductIds) || requestedProductIds.length === 0) {
         return res.status(400).json({ error: "productIds must be a non-empty array of positive integers" });
       }
+      if (requestedProductIds.some((value) => !Number.isInteger(value) || Number(value) <= 0)) {
+        return res.status(400).json({ error: "Every productId must be a positive integer" });
+      }
+      const productIds = [...new Set(requestedProductIds as number[])];
 
       const rawGroup = req.body.shippingGroupId;
       let shippingGroupId: number | null = null;
@@ -500,22 +499,114 @@ export async function registerProductRoutes(app: Express) {
         if (!Number.isInteger(gid) || gid <= 0) {
           return res.status(400).json({ error: "Invalid shippingGroupId" });
         }
-        const grp = await db.select({ id: shippingGroups.id }).from(shippingGroups).where(eq(shippingGroups.id, gid));
-        if (!grp[0]) return res.status(404).json({ error: "Shipping group not found" });
         shippingGroupId = gid;
       }
 
-      const updated = await db
-        .update(products)
-        .set({ shippingGroupId, updatedAt: new Date() })
-        .where(inArray(products.id, productIds))
-        .returning({ id: products.id });
+      const actor = authenticatedActor(req);
+      const changedAt = new Date();
+      const result = await db.transaction(async (tx) => {
+        if (shippingGroupId !== null) {
+          await tx.execute(sql`
+            SELECT id
+            FROM catalog.shipping_groups
+            WHERE id = ${shippingGroupId}
+            FOR SHARE
+          `);
+          const [group] = await tx
+            .select({
+              id: shippingGroups.id,
+              isActive: shippingGroups.isActive,
+            })
+            .from(shippingGroups)
+            .where(eq(shippingGroups.id, shippingGroupId))
+            .limit(1);
+          if (!group) {
+            throw Object.assign(new Error("Shipping group not found"), { statusCode: 404 });
+          }
+          if (!group.isActive) {
+            throw Object.assign(new Error("Inactive shipping groups cannot receive products"), { statusCode: 409 });
+          }
+        }
 
-      // Propagate the new group to Shopify (cardshellz.shipping_group metafield).
-      await enqueueShippingGroupMetafields(updated.map((r) => r.id));
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.products
+          WHERE id IN (${sql.join(productIds.map((id) => sql`${id}`), sql`, `)})
+          ORDER BY id
+          FOR UPDATE
+        `);
+        const currentProducts = await tx
+          .select({
+            id: products.id,
+            shippingGroupId: products.shippingGroupId,
+          })
+          .from(products)
+          .where(inArray(products.id, productIds))
+          .orderBy(asc(products.id));
+        if (currentProducts.length !== productIds.length) {
+          const foundIds = new Set(currentProducts.map((product) => product.id));
+          const missingProductIds = productIds.filter((id) => !foundIds.has(id));
+          throw Object.assign(
+            new Error(`Products not found: ${missingProductIds.join(", ")}`),
+            { statusCode: 404 },
+          );
+        }
 
-      res.json({ shippingGroupId, requested: productIds.length, updated: updated.length });
-    } catch (error) {
+        const updated = await tx
+          .update(products)
+          .set({ shippingGroupId, updatedAt: changedAt })
+          .where(inArray(products.id, productIds))
+          .returning({ id: products.id });
+        if (updated.length !== productIds.length) {
+          throw new Error("Shipping-group assignment did not update every locked product");
+        }
+
+        const syncResult = await enqueueShippingGroupMetafields(tx, productIds);
+        await persistAuditEvent(
+          tx,
+          {
+            actor,
+            action: "catalog.shipping_group_assignment.changed",
+            target: "catalog.products.shipping_group_id",
+            changes: {
+              before: {
+                assignments: currentProducts.map((product) => ({
+                  productId: product.id,
+                  shippingGroupId: product.shippingGroupId,
+                })),
+              },
+              after: {
+                assignments: currentProducts.map((product) => ({
+                  productId: product.id,
+                  shippingGroupId,
+                })),
+              },
+            },
+            context: {
+              requestedProductCount: requestedProductIds.length,
+              uniqueProductCount: productIds.length,
+              queuedShopifyMetafieldCount: syncResult.queuedProductCount,
+              skippedUnmappedProductCount: syncResult.skippedUnmappedProductCount,
+            },
+          },
+          { timestamp: changedAt },
+        );
+
+        return { updatedCount: updated.length, syncResult };
+      });
+
+      res.json({
+        shippingGroupId,
+        requested: requestedProductIds.length,
+        uniqueRequested: productIds.length,
+        updated: result.updatedCount,
+        shopifyMetafieldsQueued: result.syncResult.queuedProductCount,
+        unmappedProductsSkipped: result.syncResult.skippedUnmappedProductCount,
+      });
+    } catch (error: any) {
+      if (Number.isInteger(error?.statusCode)) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
       console.error("Error assigning shipping group:", error);
       res.status(500).json({ error: "Failed to assign shipping group" });
     }
@@ -827,6 +918,18 @@ export async function registerProductRoutes(app: Express) {
       if ("categoryId" in updates || "category" in updates) {
         Object.assign(normalizedUpdates, await resolveProductCategory(updates));
       }
+      if ("shippingGroupId" in updates) {
+        const rawShippingGroupId = updates.shippingGroupId;
+        if (rawShippingGroupId === null || rawShippingGroupId === "") {
+          normalizedUpdates.shippingGroupId = null;
+        } else {
+          const shippingGroupId = Number(rawShippingGroupId);
+          if (!Number.isInteger(shippingGroupId) || shippingGroupId <= 0) {
+            return res.status(400).json({ error: "Invalid shippingGroupId" });
+          }
+          normalizedUpdates.shippingGroupId = shippingGroupId;
+        }
+      }
 
       const actor = authenticatedActor(req);
       const updateResult = await db.transaction(async (tx) => {
@@ -846,6 +949,32 @@ export async function registerProductRoutes(app: Express) {
         const currentProduct = await storage.getProductById(id, tx);
         if (!currentProduct) {
           return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
+        }
+
+        if (
+          "shippingGroupId" in normalizedUpdates &&
+          normalizedUpdates.shippingGroupId !== null
+        ) {
+          await tx.execute(sql`
+            SELECT id
+            FROM catalog.shipping_groups
+            WHERE id = ${normalizedUpdates.shippingGroupId}
+            FOR SHARE
+          `);
+          const [group] = await tx
+            .select({
+              id: shippingGroups.id,
+              isActive: shippingGroups.isActive,
+            })
+            .from(shippingGroups)
+            .where(eq(shippingGroups.id, normalizedUpdates.shippingGroupId))
+            .limit(1);
+          if (!group) {
+            throw Object.assign(new Error("Shipping group not found"), { statusCode: 404 });
+          }
+          if (!group.isActive) {
+            throw Object.assign(new Error("Inactive shipping groups cannot receive products"), { statusCode: 409 });
+          }
         }
 
         const product = await storage.updateProduct(id, normalizedUpdates, tx);
@@ -892,16 +1021,30 @@ export async function registerProductRoutes(app: Express) {
           }
         }
 
+        if ("shippingGroupId" in normalizedUpdates) {
+          const syncResult = await enqueueShippingGroupMetafields(tx, [id]);
+          if (currentProduct.shippingGroupId !== product.shippingGroupId) {
+            await persistAuditEvent(tx, {
+              actor,
+              action: "catalog.shipping_group_assignment.changed",
+              target: `catalog.products:${id}`,
+              changes: {
+                before: { shippingGroupId: currentProduct.shippingGroupId },
+                after: { shippingGroupId: product.shippingGroupId },
+              },
+              context: {
+                queuedShopifyMetafieldCount: syncResult.queuedProductCount,
+                skippedUnmappedProductCount: syncResult.skippedUnmappedProductCount,
+              },
+            });
+          }
+        }
+
         return { product, renamedVariants, renamedFrom: lockedOldSku };
       });
 
       if (!updateResult.product) {
         return res.status(404).json({ error: "Product not found" });
-      }
-
-      // If the shipping group changed via this update, propagate to Shopify.
-      if ("shippingGroupId" in updates) {
-        await enqueueShippingGroupMetafields([id]);
       }
 
       if (newProductSku && updateResult.renamedFrom && updateResult.renamedVariants > 0) {

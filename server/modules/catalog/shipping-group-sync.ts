@@ -14,9 +14,9 @@
  * The metafield type `cardshellz.shipping_group` must be registered in the club
  * app's server/sync/metafield-registry.ts, or its worker terminal-fails the rows.
  *
- * Best-effort: failures are logged, never thrown into the caller's request path.
- * The one-time/periodic backfill (scripts/backfill-shipping-group-metafields.ts)
- * is the safety net for anything missed (e.g. a product synced to Shopify later).
+ * Source changes and outbox writes must share one transaction. Enqueue failures
+ * are surfaced instead of committing catalog/storefront drift. The backfill
+ * script remains a reconciliation safety net for historical data.
  */
 import { db } from "../../db";
 import { products, shippingGroups } from "@shared/schema";
@@ -24,31 +24,77 @@ import { eq, inArray, sql, type SQL } from "drizzle-orm";
 
 const NAMESPACE = "cardshellz";
 const KEY = "shipping_group";
-
-function toProductGid(shopifyProductId: string): string {
-  return shopifyProductId.startsWith("gid://")
-    ? shopifyProductId
-    : `gid://shopify/Product/${shopifyProductId}`;
-}
+const SHIPPING_GROUP_CODE_PATTERN = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
 
 interface SqlExecutor {
   execute(query: SQL): PromiseLike<unknown>;
 }
+
+type TransactionCallback = Parameters<typeof db.transaction>[0];
+type TransactionClient = Parameters<TransactionCallback>[0];
+export type ShippingGroupSyncClient = typeof db | TransactionClient;
 
 export interface ShippingGroupMetafieldWrite {
   shopifyProductId: string;
   shippingGroupCode: string | null;
 }
 
+export interface ShippingGroupMetafieldSyncResult {
+  requestedProductCount: number;
+  queuedProductCount: number;
+  skippedUnmappedProductCount: number;
+}
+
+export class ShippingGroupMetafieldSyncError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly context: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "ShippingGroupMetafieldSyncError";
+  }
+}
+
+function toProductGid(shopifyProductId: string): string {
+  if (/^\d+$/.test(shopifyProductId)) {
+    return `gid://shopify/Product/${shopifyProductId}`;
+  }
+  if (/^gid:\/\/shopify\/Product\/\d+$/.test(shopifyProductId)) {
+    return shopifyProductId;
+  }
+  throw new ShippingGroupMetafieldSyncError(
+    "INVALID_SHOPIFY_PRODUCT_ID",
+    "Shipping-group metafield synchronization requires a numeric Shopify product id or Product GID",
+    { shopifyProductId },
+  );
+}
+
+function assertCanonicalShippingGroupCode(
+  shippingGroupCode: string | null,
+): void {
+  if (
+    shippingGroupCode !== null &&
+    !SHIPPING_GROUP_CODE_PATTERN.test(shippingGroupCode)
+  ) {
+    throw new ShippingGroupMetafieldSyncError(
+      "INVALID_SHIPPING_GROUP_CODE",
+      "Shipping-group metafield synchronization requires a canonical lowercase snake-case group code",
+      { shippingGroupCode },
+    );
+  }
+}
+
 /**
- * Transaction-compatible primitive used by mapping repair. Unlike the public
- * best-effort wrapper, this throws so the catalog identity, audit event, and
- * outbox command either commit together or roll back together.
+ * Transaction-compatible primitive used by every catalog writer. This throws
+ * so catalog identity and the durable outbox command commit or roll back
+ * together.
  */
 export async function enqueueShippingGroupMetafieldWrite(
   executor: SqlExecutor,
   input: ShippingGroupMetafieldWrite,
 ): Promise<void> {
+  assertCanonicalShippingGroupCode(input.shippingGroupCode);
   const gid = toProductGid(input.shopifyProductId);
   const dedupeKey = `product:${gid}:${NAMESPACE}:${KEY}`;
   const operation = input.shippingGroupCode === null ? "delete" : "set";
@@ -80,29 +126,80 @@ export async function enqueueShippingGroupMetafieldWrite(
  * (shipping_group_id NULL) enqueues a delete. Products with no shopify_product_id
  * (not pushed to Shopify yet) are skipped — the backfill catches them later.
  */
-export async function enqueueShippingGroupMetafields(productIds: number[]): Promise<void> {
-  if (!productIds || productIds.length === 0) return;
-  try {
-    const rows = await db
-      .select({
-        shopifyProductId: products.shopifyProductId,
-        code: shippingGroups.code,
-      })
-      .from(products)
-      .leftJoin(shippingGroups, eq(products.shippingGroupId, shippingGroups.id))
-      .where(inArray(products.id, productIds));
-
-    for (const row of rows) {
-      if (!row.shopifyProductId) continue; // not on Shopify yet
-      await enqueueShippingGroupMetafieldWrite(db, {
-        shopifyProductId: row.shopifyProductId,
-        shippingGroupCode: row.code,
-      });
-    }
-  } catch (err) {
-    // Never fail the catalog write because the cross-app enqueue failed (e.g. a
-    // missing cross-schema grant). The backfill script reconciles. If this logs
-    // in prod, grant the Echelon DB role INSERT on membership.shopify_metafield_outbox.
-    console.error("[shipping-group-sync] enqueue failed:", err);
+export async function enqueueShippingGroupMetafields(
+  client: ShippingGroupSyncClient,
+  productIds: readonly number[],
+): Promise<ShippingGroupMetafieldSyncResult> {
+  const uniqueProductIds = [...new Set(productIds)];
+  if (uniqueProductIds.length === 0) {
+    return {
+      requestedProductCount: 0,
+      queuedProductCount: 0,
+      skippedUnmappedProductCount: 0,
+    };
   }
+  if (uniqueProductIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new ShippingGroupMetafieldSyncError(
+      "INVALID_PRODUCT_IDS",
+      "Shipping-group metafield synchronization requires positive integer product ids",
+      { productIds: uniqueProductIds },
+    );
+  }
+
+  const rows = await client
+    .select({
+      productId: products.id,
+      shopifyProductId: products.shopifyProductId,
+      shippingGroupId: products.shippingGroupId,
+      code: shippingGroups.code,
+    })
+    .from(products)
+    .leftJoin(shippingGroups, eq(products.shippingGroupId, shippingGroups.id))
+    .where(inArray(products.id, uniqueProductIds));
+
+  if (rows.length !== uniqueProductIds.length) {
+    const foundProductIds = new Set(rows.map((row) => row.productId));
+    throw new ShippingGroupMetafieldSyncError(
+      "PRODUCT_SET_INCOMPLETE",
+      "Shipping-group metafield synchronization could not load every product",
+      {
+        requestedProductIds: uniqueProductIds,
+        missingProductIds: uniqueProductIds.filter((id) => !foundProductIds.has(id)),
+      },
+    );
+  }
+
+  let queuedProductCount = 0;
+  let skippedUnmappedProductCount = 0;
+  for (const row of rows) {
+    if (
+      row.shippingGroupId !== null &&
+      (row.code === null || !SHIPPING_GROUP_CODE_PATTERN.test(row.code))
+    ) {
+      throw new ShippingGroupMetafieldSyncError(
+        "SHIPPING_GROUP_CODE_INVALID",
+        `Product ${row.productId} references shipping group ${row.shippingGroupId} without a valid canonical code`,
+        {
+          productId: row.productId,
+          shippingGroupId: row.shippingGroupId,
+          shippingGroupCode: row.code,
+        },
+      );
+    }
+    if (!row.shopifyProductId) {
+      skippedUnmappedProductCount++;
+      continue;
+    }
+    await enqueueShippingGroupMetafieldWrite(client, {
+      shopifyProductId: row.shopifyProductId,
+      shippingGroupCode: row.code,
+    });
+    queuedProductCount++;
+  }
+
+  return {
+    requestedProductCount: uniqueProductIds.length,
+    queuedProductCount,
+    skippedUnmappedProductCount,
+  };
 }

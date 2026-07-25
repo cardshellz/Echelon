@@ -19,7 +19,11 @@ async function main() {
   );
   const ids = (res.rows as Array<{ id: number | string }>).map((r) => Number(r.id));
   console.log(`[backfill] enqueuing cardshellz.shipping_group for ${ids.length} product(s)...`);
-  await enqueueShippingGroupMetafields(ids);
+  const result = await enqueueShippingGroupMetafields(db, ids);
+  console.log(
+    `[backfill] queued ${result.queuedProductCount} product(s); ` +
+    `${result.skippedUnmappedProductCount} skipped without a Shopify mapping`,
+  );
   console.log("[backfill] done — the shellz-club-app outbox worker will drain these to Shopify.");
   process.exit(0);
 }
