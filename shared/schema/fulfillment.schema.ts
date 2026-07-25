@@ -229,6 +229,24 @@ export const shippingEngineOrders = wmsSchema.table("shipping_engine_orders", {
   index("idx_shipping_engine_orders_request").on(table.shipmentRequestId),
 ]);
 
+export const shippingEngineOrderProviderRefs = wmsSchema.table("shipping_engine_order_provider_refs", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  shippingEngineOrderId: bigint("shipping_engine_order_id", { mode: "number" }).notNull().references(() => shippingEngineOrders.id, { onDelete: "restrict" }),
+  provider: varchar("provider", { length: 40 }).notNull(),
+  providerOrderId: varchar("provider_order_id", { length: 200 }).notNull(),
+  source: varchar("source", { length: 50 }).notNull(),
+  firstObservedAt: timestamp("first_observed_at", { withTimezone: true }).notNull(),
+  lastObservedAt: timestamp("last_observed_at", { withTimezone: true }).notNull(),
+  metadata: jsonb("metadata").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("uq_shipping_engine_order_provider_refs_identity")
+    .on(table.provider, table.providerOrderId),
+  index("idx_shipping_engine_order_provider_refs_order")
+    .on(table.shippingEngineOrderId, table.id),
+]);
+
 export const shippingEngineOrderRequests = wmsSchema.table("shipping_engine_order_requests", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   shippingEngineOrderId: bigint("shipping_engine_order_id", { mode: "number" }).notNull().references(() => shippingEngineOrders.id, { onDelete: "restrict" }),
@@ -856,6 +874,7 @@ export const insertFulfillmentPlanLineSchema = createInsertSchema(fulfillmentPla
 export const insertShipmentRequestSchema = createInsertSchema(shipmentRequests).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShipmentRequestItemSchema = createInsertSchema(shipmentRequestItems).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingEngineOrderSchema = createInsertSchema(shippingEngineOrders).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertShippingEngineOrderProviderRefSchema = createInsertSchema(shippingEngineOrderProviderRefs).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertShippingEngineOrderRequestSchema = createInsertSchema(shippingEngineOrderRequests).omit({ id: true, createdAt: true });
 export const insertPhysicalShipmentSchema = createInsertSchema(physicalShipments).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertPhysicalShipmentItemSchema = createInsertSchema(physicalShipmentItems).omit({ id: true, createdAt: true });
@@ -891,6 +910,8 @@ export type InsertShipmentRequestItem = z.infer<typeof insertShipmentRequestItem
 export type ShipmentRequestItem = typeof shipmentRequestItems.$inferSelect;
 export type InsertShippingEngineOrder = z.infer<typeof insertShippingEngineOrderSchema>;
 export type ShippingEngineOrder = typeof shippingEngineOrders.$inferSelect;
+export type InsertShippingEngineOrderProviderRef = z.infer<typeof insertShippingEngineOrderProviderRefSchema>;
+export type ShippingEngineOrderProviderRef = typeof shippingEngineOrderProviderRefs.$inferSelect;
 export type InsertShippingEngineOrderRequest = z.infer<typeof insertShippingEngineOrderRequestSchema>;
 export type ShippingEngineOrderRequest = typeof shippingEngineOrderRequests.$inferSelect;
 export type InsertPhysicalShipment = z.infer<typeof insertPhysicalShipmentSchema>;

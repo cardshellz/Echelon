@@ -15,6 +15,7 @@ import {
 import {
   evaluateChannelFulfillmentWritebackPolicy,
 } from "./channel-fulfillment-authority.policy";
+import { resolveProviderOrderId } from "./shipping-engine-order-identity";
 
 const positiveIntegerSchema = z.number().int().positive();
 const optionalIdentifier = (maxLength: number) =>
@@ -871,16 +872,38 @@ async function findOrCreateShippingEngineOrder(
     providerOrderId: input.providerOrderId,
     providerOrderKey: input.providerOrderKey,
   });
-  const existingRows = rowsOf<{ id: number; provider_order_id: string | null; provider_order_key: string | null }>(await tx.execute(sql`
-    SELECT id, provider_order_id, provider_order_key
-    FROM wms.shipping_engine_orders
-    WHERE provider = ${input.shippingProvider}
+  const existingRows = rowsOf<{
+    id: number;
+    provider_order_id: string | null;
+    provider_order_key: string | null;
+    incoming_provider_order_id_already_aliased: boolean;
+  }>(await tx.execute(sql`
+    SELECT
+      engine.id,
+      engine.provider_order_id,
+      engine.provider_order_key,
+      EXISTS (
+        SELECT 1
+        FROM wms.shipping_engine_order_provider_refs AS provider_ref
+        WHERE provider_ref.shipping_engine_order_id = engine.id
+          AND provider_ref.provider = ${input.shippingProvider}
+          AND provider_ref.provider_order_id = ${input.providerOrderId}
+      ) AS incoming_provider_order_id_already_aliased
+    FROM wms.shipping_engine_orders AS engine
+    WHERE engine.provider = ${input.shippingProvider}
       AND (
-        (${input.providerOrderId}::text IS NOT NULL AND provider_order_id = ${input.providerOrderId})
-        OR (${input.providerOrderKey}::text IS NOT NULL AND provider_order_key = ${input.providerOrderKey})
-        OR command_key = ${commandKey}
+        (${input.providerOrderId}::text IS NOT NULL AND engine.provider_order_id = ${input.providerOrderId})
+        OR (${input.providerOrderKey}::text IS NOT NULL AND engine.provider_order_key = ${input.providerOrderKey})
+        OR engine.command_key = ${commandKey}
+        OR EXISTS (
+          SELECT 1
+          FROM wms.shipping_engine_order_provider_refs AS provider_ref
+          WHERE provider_ref.shipping_engine_order_id = engine.id
+            AND provider_ref.provider = ${input.shippingProvider}
+            AND provider_ref.provider_order_id = ${input.providerOrderId}
+        )
       )
-    FOR UPDATE
+    FOR UPDATE OF engine
   `));
   if (existingRows.length > 1) {
     throw new FulfillmentAuthorityError(
@@ -891,8 +914,30 @@ async function findOrCreateShippingEngineOrder(
   }
   const existing = existingRows[0];
   if (existing) {
-    assertCompatibleIdentity("providerOrderId", existing.provider_order_id, input.providerOrderId, input.legacyWmsShipmentIds[0]);
     assertCompatibleIdentity("providerOrderKey", existing.provider_order_key, input.providerOrderKey, input.legacyWmsShipmentIds[0]);
+    const providerOrderIdResolution = resolveProviderOrderId({
+      legacyHeaderPolicy: input.legacyHeaderPolicy,
+      persistedProviderOrderId: normalizedNullable(existing.provider_order_id),
+      persistedProviderOrderKey: normalizedNullable(existing.provider_order_key),
+      incomingProviderOrderId: input.providerOrderId,
+      incomingProviderOrderKey: input.providerOrderKey,
+      incomingProviderOrderIdAlreadyAliased:
+        existing.incoming_provider_order_id_already_aliased === true,
+    });
+    if (providerOrderIdResolution === "conflict") {
+      assertCompatibleIdentity(
+        "providerOrderId",
+        existing.provider_order_id,
+        input.providerOrderId,
+        input.legacyWmsShipmentIds[0],
+      );
+    }
+    await recordShippingEngineOrderProviderRef(
+      tx,
+      Number(existing.id),
+      input,
+      providerOrderIdResolution,
+    );
     await tx.execute(sql`
       UPDATE wms.shipping_engine_orders
       SET provider_status = 'shipped', last_sync_at = NOW(), updated_at = NOW()
@@ -930,7 +975,71 @@ async function findOrCreateShippingEngineOrder(
   if (!inserted) {
     throw new FulfillmentAuthorityError("CANONICAL_STATE_CONFLICT", "Failed to create shipping-engine order");
   }
-  return Number(inserted.id);
+  const shippingEngineOrderId = Number(inserted.id);
+  await recordShippingEngineOrderProviderRef(
+    tx,
+    shippingEngineOrderId,
+    input,
+    "compatible",
+  );
+  return shippingEngineOrderId;
+}
+
+async function recordShippingEngineOrderProviderRef(
+  tx: any,
+  shippingEngineOrderId: number,
+  input: ReturnType<typeof canonicalizeInput>,
+  resolution: ReturnType<typeof resolveProviderOrderId>,
+): Promise<void> {
+  if (!input.providerOrderId) return;
+
+  const stored = firstRow<{ shipping_engine_order_id: number }>(await tx.execute(sql`
+    INSERT INTO wms.shipping_engine_order_provider_refs AS provider_ref (
+      shipping_engine_order_id,
+      provider,
+      provider_order_id,
+      source,
+      first_observed_at,
+      last_observed_at,
+      metadata,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${shippingEngineOrderId},
+      ${input.shippingProvider},
+      ${input.providerOrderId},
+      'canonical_materialization',
+      NOW(),
+      NOW(),
+      ${JSON.stringify({
+        contractVersion: 1,
+        inputSource: input.source,
+        resolution,
+      })}::jsonb,
+      NOW(),
+      NOW()
+    )
+    ON CONFLICT (provider, provider_order_id) DO UPDATE
+    SET
+      last_observed_at = GREATEST(
+        provider_ref.last_observed_at,
+        EXCLUDED.last_observed_at
+      ),
+      updated_at = NOW()
+    WHERE provider_ref.shipping_engine_order_id = EXCLUDED.shipping_engine_order_id
+    RETURNING shipping_engine_order_id
+  `));
+  if (!stored || Number(stored.shipping_engine_order_id) !== shippingEngineOrderId) {
+    throw new FulfillmentAuthorityError(
+      "CANONICAL_STATE_CONFLICT",
+      "Provider order id is already assigned to another canonical shipping-engine order",
+      {
+        provider: input.shippingProvider,
+        providerOrderId: input.providerOrderId,
+        shippingEngineOrderId,
+      },
+    );
+  }
 }
 
 async function linkShippingEngineRequests(

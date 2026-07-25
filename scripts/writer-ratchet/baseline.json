@@ -787,6 +787,9 @@
   "wms.shipment_tracking_history": [
     "modules/orders"
   ],
+  "wms.shipping_engine_order_provider_refs": [
+    "modules/oms"
+  ],
   "wms.shipping_engine_order_requests": [
     "modules/oms"
   ],
