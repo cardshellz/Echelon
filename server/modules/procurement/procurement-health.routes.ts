@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { requirePermission } from "../../routes/middleware";
+import { loadPurchaseRecommendationPipelineHealth } from "./purchase-recommendation-pipeline-health.service";
 import { sendProcurementHealthCriticalEscalation } from "./procurement-health-escalation.service";
 import { loadProcurementHealthSummary } from "./procurement-health-summary.service";
 
@@ -21,6 +22,19 @@ function parseBoolean(value: unknown): boolean {
 }
 
 export function registerProcurementHealthRoutes(app: Express) {
+  app.get(
+    "/api/procurement/health/recommendation-pipeline",
+    requirePermission("purchasing", "view"),
+    async (_req, res) => {
+      try {
+        res.json(await loadPurchaseRecommendationPipelineHealth());
+      } catch (error: any) {
+        console.error("Error fetching recommendation pipeline health:", error);
+        res.status(500).json({ error: "Failed to fetch recommendation pipeline health" });
+      }
+    },
+  );
+
   app.get("/api/procurement/health", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const limit = parseHealthLimit(req.query.limit);
