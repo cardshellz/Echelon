@@ -133,6 +133,13 @@ Each step is independently reversible; only allowlisted test carts can receive E
 4. **NEXT — Verify active US rates:** activate one reviewed rate-table revision, open its Pricing Program detail, and use `Test live US rates` with representative warehouses, states, ZIPs, and weights. This calls the production assignment selector and active tables, persists a `manual` quote snapshot, and reports if a different program owns the route. Drafts are never included.
 5. **NEXT — Weight-only shadow comparison:** replay representative Shopify carts through the same runtime quote service, compare offers against Parcelify, and review missing-weight/zone/band failures. Do not use cartonization readiness as the pass criterion.
 6. **Controlled Shopify checkout validation:**
+   - Before enabling test rates, verify the canonical delivery-group benefit
+     contract end to end: Echelon product `shipping_group_id` resolves to the
+     exact `catalog.shipping_groups.code`; the matching Shopify product has
+     `cardshellz.shipping_group=<code>`; the Shellz Club shop
+     `cardshellz.shipping_thresholds` JSON keys use that same code; and the
+     metafield outbox has no failed rows for either key. Do not activate checkout
+     on an ID/code mismatch or a stale projection.
    - Set Heroku config `SHIPPING_CALLBACK_TOKEN` (random secret),
      `SHOPIFY_CHECKOUT_RATE_MODE=off`, and, if origin != warehouse 1,
      `SHIPPING_CALLBACK_ORIGIN_WAREHOUSE_ID`.
@@ -181,6 +188,14 @@ Each step is independently reversible; only allowlisted test carts can receive E
 - **Zone resolution:** longest postal-prefix wins, then priority, then lowest id; region-scoped rules (`destination_region` set) are skipped by design in v1 — *never seed region labels on prefix rules* (that was the HIPRAK bug, fixed in mig 124).
 - **One table, one customer-facing option:** carrier and service codes cannot identify a checkout price. Parcel tables rate total shipment weight once; freight tables require pallet count and may enforce a total-weight ceiling.
 - **US-only free shipping:** the engine has no international rates (US-only zone rules, no $0 rows). The member free-shipping Shopify Function (repo `shellz-club-functions`, extension `cardshellz-shipping-discount`) is gated to explicit `US` delivery addresses (PR #15, deployed Jul 9) after two international leaks (#59782 CA, #60039 DE). Keep both invariants when touching either system.
+- **One shipping-group wire key:** database references use
+  `catalog.shipping_groups.id`; Shopify product and shop metafields use the
+  exact canonical `catalog.shipping_groups.code`. Never substitute a display
+  name, provider label, product type, or channel-specific alias.
+- **Source and projection intent are atomic:** Echelon product-group changes and
+  Shellz Club group-threshold changes must commit with their durable metafield
+  outbox commands. A projection error rolls back the source change and preserves
+  the last known-good Shopify policy.
 - **Every quote is snapshotted** (`quote_snapshots`, sources: checkout / shadow / manual) — that dataset drives calibration; don't turn it off.
 
 ## 8 · Ops, guardrails & gotchas

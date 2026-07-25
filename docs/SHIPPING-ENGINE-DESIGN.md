@@ -161,6 +161,30 @@ Implementation status on 2026-07-24:
   CarrierService assignment, or delivery-group benefit cutover is part of the
   runtime-wiring PR.
 
+#### Canonical Shopify delivery-group benefit contract
+
+- `catalog.shipping_groups.id` is the internal relational identity used by
+  Echelon products and Shellz Club plan-benefit assignments.
+- `catalog.shipping_groups.code` is the immutable wire identity. Echelon writes
+  that exact code to the product metafield `cardshellz.shipping_group`; Shellz
+  Club resolves plan threshold rows from group ID to that same code before
+  writing `cardshellz.shipping_thresholds`; the Shopify Function joins the two
+  values without provider-specific translation.
+- An Echelon catalog shipping-group change and its Shopify metafield outbox
+  command commit in one transaction. Missing products, invalid canonical codes,
+  malformed Shopify product identities, or outbox failures abort the catalog
+  change. Products not yet mapped to Shopify are explicitly counted as skipped
+  and remain eligible for reconciliation after a mapping exists.
+- A Shellz Club per-group threshold change and both shop-metafield outbox
+  commands commit in one transaction. New thresholds may target only active
+  catalog groups; an inactive or deleted group may still be cleared. Catalog
+  lookup or projection failure aborts the write so Shopify keeps the last
+  known-good policy instead of silently falling back to a whole-cart threshold.
+- These guarantees harden persistence and projection only. Production outbox
+  drain, exact Shopify product/shop metafield values, delivery-profile
+  separation, and Function behavior still require controlled verification
+  before checkout activation.
+
 Initial capability declarations:
 
 | Provider | Accepts Echelon quotes | Manages channel rates | Enforces channel destination eligibility |
