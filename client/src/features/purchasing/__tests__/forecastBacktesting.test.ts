@@ -239,6 +239,48 @@ describe("forecast backtesting client contract", () => {
         recommendationLineCount: 32,
         observationCount: 278,
       },
+      jobs: {
+        recommendationSnapshot: {
+          id: 101,
+          jobType: "recommendation_snapshot",
+          status: "succeeded",
+          asOf: "2026-07-26T05:00:00.000Z",
+          startedAt: "2026-07-26T05:00:00.000Z",
+          heartbeatAt: "2026-07-26T05:03:00.000Z",
+          leaseExpiresAt: null,
+          finishedAt: "2026-07-26T05:03:00.000Z",
+          ageHours: 6,
+          leaseExpired: false,
+          recommendationRunId: 41,
+          recommendationLineCount: 32,
+          forecastObservationCount: 278,
+          evaluationInsertedCount: null,
+          evaluationBatchCount: null,
+          evaluationBacklogMayRemain: null,
+          errorCode: null,
+          errorMessage: null,
+        },
+        forecastEvaluation: {
+          id: 102,
+          jobType: "forecast_evaluation",
+          status: "succeeded",
+          asOf: "2026-07-26T05:30:00.000Z",
+          startedAt: "2026-07-26T05:30:00.000Z",
+          heartbeatAt: "2026-07-26T05:32:00.000Z",
+          leaseExpiresAt: null,
+          finishedAt: "2026-07-26T05:32:00.000Z",
+          ageHours: 6,
+          leaseExpired: false,
+          recommendationRunId: null,
+          recommendationLineCount: null,
+          forecastObservationCount: null,
+          evaluationInsertedCount: 17,
+          evaluationBatchCount: 1,
+          evaluationBacklogMayRemain: false,
+          errorCode: null,
+          errorMessage: null,
+        },
+      },
       latestEvaluationAt: "2026-07-26T05:31:00.000Z",
       maturedEvaluationBacklog: 0,
       thresholds: {
@@ -260,5 +302,15 @@ describe("forecast backtesting client contract", () => {
         criticalAgeHours: 30,
       },
     })).toThrow("thresholds are invalid");
+    expect(() => purchaseRecommendationPipelineHealthSchema.parse({
+      ...health,
+      jobs: {
+        ...health.jobs,
+        forecastEvaluation: {
+          ...health.jobs.forecastEvaluation,
+          evaluationInsertedCount: null,
+        },
+      },
+    })).toThrow("success evidence is inconsistent");
   });
 });
