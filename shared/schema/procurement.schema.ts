@@ -901,7 +901,7 @@ export const purchaseRecommendationRuns = procurementSchema.table("purchase_reco
     .where(sql`${table.sourceRunKey} IS NOT NULL`),
   index("purchase_recommendation_runs_latest_idx").on(table.generatedAt, table.id),
   check("purchase_recommendation_runs_status_chk", sql`${table.status} IN ('completed', 'failed')`),
-  check("purchase_recommendation_runs_source_chk", sql`${table.source} IN ('manual', 'auto_draft', 'api')`),
+  check("purchase_recommendation_runs_source_chk", sql`${table.source} IN ('manual', 'auto_draft', 'api', 'scheduled')`),
   check("purchase_recommendation_runs_lookback_chk", sql`${table.lookbackDays} > 0`),
 ]);
 

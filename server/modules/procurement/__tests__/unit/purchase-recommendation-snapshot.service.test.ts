@@ -270,17 +270,20 @@ describe("purchase recommendation snapshot service", () => {
     })).toThrow("Forecast observation coverage is incomplete: expected 2, captured 1");
   });
 
-  it("requires a durable source key for automated runs", async () => {
-    const service = createPurchaseRecommendationSnapshotService({ select: vi.fn(), transaction: vi.fn() });
-    await expect(service.createRun({
-      calculationVersion: "v2",
-      source: "auto_draft",
-      asOf: new Date(),
-      lookbackDays: 30,
-      policySnapshot: {},
-      lines: [],
-    })).rejects.toThrow("sourceRunKey is required");
-  });
+  it.each(["auto_draft", "scheduled"] as const)(
+    "requires a durable source key for %s runs",
+    async (source) => {
+      const service = createPurchaseRecommendationSnapshotService({ select: vi.fn(), transaction: vi.fn() });
+      await expect(service.createRun({
+        calculationVersion: "v2",
+        source,
+        asOf: new Date(),
+        lookbackDays: 30,
+        policySnapshot: {},
+        lines: [],
+      })).rejects.toThrow("sourceRunKey is required");
+    },
+  );
 
   it("writes a run and all recommendation lines in one transaction", async () => {
     const run = { id: 91, source: "manual", sourceRunKey: null };

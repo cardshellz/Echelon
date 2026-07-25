@@ -29,6 +29,7 @@ import {
   type ForecastInputGapAction,
   type ForecastInputGapActionCode,
 } from "./forecast-input-gap-diagnostics.service";
+import { loadPurchaseRecommendationSnapshotAnalysis } from "./purchase-recommendation-analysis.service";
 import { loadPurchasingRecommendationContext } from "./purchasing-recommendation-context.service";
 import { resolveRecommendationPoQuantity } from "./recommendation-po-quantity";
 import { buildSupplierSetupGaps } from "./supplier-setup-gaps.service";
@@ -780,24 +781,16 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
 }
 
 async function loadRecommendationReviewQueueData() {
-  const configuredLookback = await storage.getVelocityLookbackDays();
-  const rawRows = await storage.getReorderAnalysisData(configuredLookback);
-  const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
-  const context = await loadPurchasingRecommendationContext();
-  const recommendationResult = generatePurchasingRecommendations({
-    rows: rawRows as PurchasingRecommendationRawRow[],
-    lookbackDays: configuredLookback,
-    autoDraftSettings: settings,
-    requireVendor: Boolean(settings.skipNoVendor),
-    ...context,
+  const analysis = await loadPurchaseRecommendationSnapshotAnalysis({
+    storage,
   });
 
   return {
-    configuredLookback,
-    evaluatedCount: rawRows.length,
-    settings,
-    recommendationResult,
-    queue: buildRecommendationReviewQueue(recommendationResult, settings),
+    configuredLookback: analysis.lookbackDays,
+    evaluatedCount: analysis.evaluatedCount,
+    settings: analysis.settings,
+    recommendationResult: analysis.recommendationResult,
+    queue: buildRecommendationReviewQueue(analysis.recommendationResult, analysis.settings),
   };
 }
 
