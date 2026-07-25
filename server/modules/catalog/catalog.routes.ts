@@ -26,6 +26,9 @@ import {
   ShopifyProductMappingError,
 } from "./shopify-product-mapping.service";
 import {
+  registerShopifyProductMappingReconciliationRoutes,
+} from "./shopify-product-mapping-reconciliation.routes";
+import {
   coercePackageAttributesOnVariantPayload,
   parsePackageAttributeBulkRows,
 } from "./package-attributes";
@@ -263,6 +266,7 @@ async function resolveProductCategory(input: { categoryId?: number | string | nu
 
 export async function registerProductRoutes(app: Express) {
   const shopifyProductMapping = createShopifyProductMappingService();
+  registerShopifyProductMappingReconciliationRoutes(app);
   // ============================================================================
   // Products API (Master Catalog)
   // ============================================================================

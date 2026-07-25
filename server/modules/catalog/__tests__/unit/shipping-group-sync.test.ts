@@ -15,11 +15,33 @@ function createClient(
     shippingGroupId: number | null;
     code: string | null;
   }>,
+  mappedProducts: Array<{
+    productId: number;
+    shopifyProductId: string | null;
+    shippingGroupId: number | null;
+    shippingGroupCode: string | null;
+  }> = rows.map((row) => ({
+    productId: row.productId,
+    shopifyProductId: row.shopifyProductId,
+    shippingGroupId: row.shippingGroupId,
+    shippingGroupCode: row.code,
+  })),
 ) {
-  const where = vi.fn().mockResolvedValue(rows);
-  const leftJoin = vi.fn(() => ({ where }));
-  const from = vi.fn(() => ({ leftJoin }));
-  const select = vi.fn(() => ({ from }));
+  const select = vi.fn()
+    .mockImplementationOnce(() => ({
+      from: () => ({
+        leftJoin: () => ({
+          where: vi.fn().mockResolvedValue(rows),
+        }),
+      }),
+    }))
+    .mockImplementationOnce(() => ({
+      from: () => ({
+        leftJoin: () => ({
+          where: vi.fn().mockResolvedValue(mappedProducts),
+        }),
+      }),
+    }));
   const execute = vi.fn().mockResolvedValue({ rows: [] });
 
   return {
@@ -171,6 +193,88 @@ describe("shipping-group Shopify metafield synchronization", () => {
     await expect(enqueueShippingGroupMetafields(client, [11, 12])).rejects.toMatchObject({
       code: "PRODUCT_SET_INCOMPLETE",
       context: { missingProductIds: [12] },
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when two local products own the same Shopify product", async () => {
+    const { client, execute } = createClient(
+      [
+        {
+          productId: 11,
+          shopifyProductId: "12345",
+          shippingGroupId: 1,
+          code: "protection",
+        },
+      ],
+      [
+        {
+          productId: 11,
+          shopifyProductId: "12345",
+          shippingGroupId: 1,
+          shippingGroupCode: "protection",
+        },
+        {
+          productId: 12,
+          shopifyProductId: "gid://shopify/Product/12345",
+          shippingGroupId: 1,
+          shippingGroupCode: "protection",
+        },
+      ],
+    );
+
+    await expect(enqueueShippingGroupMetafields(client, [11])).rejects.toMatchObject({
+      code: "SHOPIFY_PRODUCT_MAPPING_DUPLICATE",
+      context: {
+        shopifyProductId: "gid://shopify/Product/12345",
+        owners: [
+          {
+            productId: 11,
+            shippingGroupId: 1,
+            shippingGroupCode: "protection",
+          },
+          {
+            productId: 12,
+            shippingGroupId: 1,
+            shippingGroupCode: "protection",
+          },
+        ],
+      },
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when duplicate owners disagree on the shipping group", async () => {
+    const { client, execute } = createClient(
+      [
+        {
+          productId: 11,
+          shopifyProductId: "12345",
+          shippingGroupId: 1,
+          code: "protection",
+        },
+      ],
+      [
+        {
+          productId: 11,
+          shopifyProductId: "12345",
+          shippingGroupId: 1,
+          shippingGroupCode: "protection",
+        },
+        {
+          productId: 12,
+          shopifyProductId: "12345",
+          shippingGroupId: 2,
+          shippingGroupCode: "storage_boxes",
+        },
+      ],
+    );
+
+    await expect(enqueueShippingGroupMetafields(client, [11])).rejects.toMatchObject({
+      code: "SHOPIFY_PRODUCT_MAPPING_CONFLICT",
+      context: {
+        shopifyProductId: "gid://shopify/Product/12345",
+      },
     });
     expect(execute).not.toHaveBeenCalled();
   });
