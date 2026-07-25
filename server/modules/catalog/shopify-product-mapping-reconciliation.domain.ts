@@ -15,6 +15,21 @@ export const SHOPIFY_MAPPING_ISSUE_CODES = [
 export type ShopifyMappingIssueCode =
   (typeof SHOPIFY_MAPPING_ISSUE_CODES)[number];
 
+export const SHOPIFY_OWNERSHIP_DECISION_REASONS = [
+  "single_active_owner_with_matching_evidence",
+  "remote_product_missing",
+  "owner_count_exceeds_two",
+  "shipping_group_conflict",
+  "owner_mapping_conflict",
+  "multiple_active_owners",
+  "no_active_owner",
+  "active_owner_catalog_id_mismatch",
+  "active_owner_missing_channel_evidence",
+] as const;
+
+export type ShopifyOwnershipDecisionReason =
+  (typeof SHOPIFY_OWNERSHIP_DECISION_REASONS)[number];
+
 export interface ShopifyMappingLocalProduct {
   productId: number;
   productName: string;
@@ -48,6 +63,31 @@ export interface ShopifyMappingReconciliationItem
   canRetireDeadMapping: boolean;
 }
 
+export interface ShopifyDuplicateOwnershipOwner {
+  productId: number;
+  productName: string;
+  productSku: string | null;
+  shopifyProductId: string | null;
+  shippingGroupCode: string | null;
+  mappingStatus: ShopifyProductMappingStatus;
+  activeVariantCount: number;
+  activeVariantIssueCount: number;
+  hasChannelEvidence: boolean;
+}
+
+export interface ShopifyDuplicateOwnershipGroup {
+  shopifyProductId: string;
+  remoteTitle: string | null;
+  remoteStatus: string | null;
+  shippingGroupCode: string | null;
+  ownerProductIds: number[];
+  owners: ShopifyDuplicateOwnershipOwner[];
+  decision: "canonical_owner_recommended" | "manual_review";
+  reason: ShopifyOwnershipDecisionReason;
+  recommendedProductId: number | null;
+  nonCanonicalProductIds: number[];
+}
+
 export interface ShopifyMappingReconciliationReport {
   generatedAt: string;
   channel: {
@@ -61,8 +101,12 @@ export interface ShopifyMappingReconciliationReport {
     healthyProductCount: number;
     issueProductCount: number;
     issueCounts: Record<ShopifyMappingIssueCode, number>;
+    duplicateOwnershipGroupCount: number;
+    canonicalOwnerRecommendationCount: number;
+    manualReviewOwnershipGroupCount: number;
   };
   items: ShopifyMappingReconciliationItem[];
+  ownershipGroups: ShopifyDuplicateOwnershipGroup[];
 }
 
 function distinctValues<T>(values: T[]): T[] {
@@ -80,6 +124,89 @@ function emptyIssueCounts(): Record<ShopifyMappingIssueCode, number> {
   return Object.fromEntries(
     SHOPIFY_MAPPING_ISSUE_CODES.map((code) => [code, 0]),
   ) as Record<ShopifyMappingIssueCode, number>;
+}
+
+function uniqueOwners(
+  owners: ShopifyMappingLocalProduct[],
+): ShopifyMappingLocalProduct[] {
+  return [...new Map(
+    owners.map((owner) => [owner.productId, owner]),
+  ).values()]
+    .sort((left, right) => left.productId - right.productId);
+}
+
+function buildDuplicateOwnershipGroup(input: {
+  shopifyProductId: string;
+  owners: ShopifyMappingLocalProduct[];
+  remote: ShopifyRemoteProductSnapshot | undefined;
+}): ShopifyDuplicateOwnershipGroup {
+  const owners = uniqueOwners(input.owners);
+  const activeOwners = owners.filter((owner) => owner.activeVariantCount > 0);
+  const shippingGroups = distinctValues(
+    owners.map((owner) => owner.shippingGroupCode),
+  );
+
+  let decision: ShopifyDuplicateOwnershipGroup["decision"] = "manual_review";
+  let reason: ShopifyOwnershipDecisionReason;
+  let recommendedProductId: number | null = null;
+
+  if (!input.remote?.exists) {
+    reason = "remote_product_missing";
+  } else if (owners.length > 2) {
+    reason = "owner_count_exceeds_two";
+  } else if (shippingGroups.length > 1) {
+    reason = "shipping_group_conflict";
+  } else if (owners.some((owner) => owner.mappingStatus === "conflict")) {
+    reason = "owner_mapping_conflict";
+  } else if (activeOwners.length > 1) {
+    reason = "multiple_active_owners";
+  } else if (activeOwners.length === 0) {
+    reason = "no_active_owner";
+  } else if (
+    activeOwners[0].shopifyProductId !== input.shopifyProductId
+  ) {
+    reason = "active_owner_catalog_id_mismatch";
+  } else if (
+    !activeOwners[0].evidenceProductIds.includes(input.shopifyProductId)
+  ) {
+    reason = "active_owner_missing_channel_evidence";
+  } else {
+    decision = "canonical_owner_recommended";
+    reason = "single_active_owner_with_matching_evidence";
+    recommendedProductId = activeOwners[0].productId;
+  }
+
+  const ownerProductIds = owners.map((owner) => owner.productId);
+  return {
+    shopifyProductId: input.shopifyProductId,
+    remoteTitle: input.remote?.title ?? null,
+    remoteStatus: input.remote?.status ?? null,
+    shippingGroupCode: shippingGroups.length === 1
+      ? shippingGroups[0]
+      : null,
+    ownerProductIds,
+    owners: owners.map((owner) => ({
+      productId: owner.productId,
+      productName: owner.productName,
+      productSku: owner.productSku,
+      shopifyProductId: owner.shopifyProductId,
+      shippingGroupCode: owner.shippingGroupCode,
+      mappingStatus: owner.mappingStatus,
+      activeVariantCount: owner.activeVariantCount,
+      activeVariantIssueCount: owner.activeVariantIssueIds.length,
+      hasChannelEvidence: owner.evidenceProductIds.includes(
+        input.shopifyProductId,
+      ),
+    })),
+    decision,
+    reason,
+    recommendedProductId,
+    nonCanonicalProductIds: recommendedProductId === null
+      ? []
+      : ownerProductIds.filter(
+        (productId) => productId !== recommendedProductId,
+      ),
+  };
 }
 
 export function normalizeShopifyProductReference(
@@ -136,6 +263,30 @@ export function buildShopifyMappingReconciliationReport(input: {
       ownersByShopifyProductId.set(ownedProductId, owners);
     }
   }
+
+  const ownershipGroups = [...ownersByShopifyProductId.entries()]
+    .filter(([, owners]) => uniqueOwners(owners).length > 1)
+    .map(([shopifyProductId, owners]) => buildDuplicateOwnershipGroup({
+      shopifyProductId,
+      owners,
+      remote: input.remoteProducts.get(shopifyProductId),
+    }))
+    .sort((left, right) => {
+      const decisionOrder = Number(
+        left.decision === "canonical_owner_recommended",
+      ) - Number(right.decision === "canonical_owner_recommended");
+      if (decisionOrder !== 0) return decisionOrder;
+      const titleOrder = (left.remoteTitle ?? "").localeCompare(
+        right.remoteTitle ?? "",
+      );
+      return titleOrder !== 0
+        ? titleOrder
+        : left.shopifyProductId.localeCompare(
+          right.shopifyProductId,
+          "en",
+          { numeric: true },
+        );
+    });
 
   const items = input.localProducts.map((product) => {
     const ownedProductIds = distinctValues([
@@ -234,8 +385,16 @@ export function buildShopifyMappingReconciliationReport(input: {
       issueProductCount: items.filter((item) => item.issueCodes.length > 0)
         .length,
       issueCounts,
+      duplicateOwnershipGroupCount: ownershipGroups.length,
+      canonicalOwnerRecommendationCount: ownershipGroups.filter(
+        (group) => group.decision === "canonical_owner_recommended",
+      ).length,
+      manualReviewOwnershipGroupCount: ownershipGroups.filter(
+        (group) => group.decision === "manual_review",
+      ).length,
     },
     items,
+    ownershipGroups,
   };
 }
 
