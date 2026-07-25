@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type PurchasingForecastMethod = "recent_order_velocity_v1" | "weighted_blend_v1";
 
 export interface PurchasingForecastPolicy {
@@ -38,6 +40,19 @@ export const DEFAULT_PURCHASING_FORECAST_POLICY: PurchasingForecastPolicy = {
   automationMinimumOrderCount: 2,
   automationMinimumActiveDays: 2,
 };
+
+export const PURCHASING_FORECAST_POLICY_CAPTURE_VERSION = 1;
+
+export type PurchasingForecastPolicyCohortSnapshot = Omit<
+  PurchasingForecastPolicy,
+  "automationMinimumOrderCount" | "automationMinimumActiveDays"
+>;
+
+export interface PurchasingForecastPolicyCohort {
+  captureVersion: typeof PURCHASING_FORECAST_POLICY_CAPTURE_VERSION;
+  fingerprint: string;
+  snapshot: PurchasingForecastPolicyCohortSnapshot;
+}
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = Number(value);
@@ -106,5 +121,41 @@ export function normalizePurchasingForecastPolicy(
       1,
       100,
     ),
+  };
+}
+
+export function buildPurchasingForecastPolicyCohort(
+  value?: Partial<PurchasingForecastPolicy> | null,
+): PurchasingForecastPolicyCohort {
+  const normalized = normalizePurchasingForecastPolicy(value);
+  // Field order is part of the persisted fingerprint contract. Change it only with a capture-version migration.
+  const snapshot: PurchasingForecastPolicyCohortSnapshot = {
+    method: normalized.method,
+    shortWindowDays: normalized.shortWindowDays,
+    standardWindowDays: normalized.standardWindowDays,
+    longWindowDays: normalized.longWindowDays,
+    seasonalEnabled: normalized.seasonalEnabled,
+    seasonalWindowDays: normalized.seasonalWindowDays,
+    weights: {
+      short: normalized.weights.short,
+      standard: normalized.weights.standard,
+      long: normalized.weights.long,
+      seasonal: normalized.weights.seasonal,
+    },
+    forwardDemandEnabled: normalized.forwardDemandEnabled,
+    forwardDemandHorizonDays: normalized.forwardDemandHorizonDays,
+    forwardDemandConfidenceWeights: {
+      high: normalized.forwardDemandConfidenceWeights.high,
+      medium: normalized.forwardDemandConfidenceWeights.medium,
+      low: normalized.forwardDemandConfidenceWeights.low,
+    },
+  };
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify(snapshot), "utf8")
+    .digest("hex");
+  return {
+    captureVersion: PURCHASING_FORECAST_POLICY_CAPTURE_VERSION,
+    fingerprint,
+    snapshot,
   };
 }
