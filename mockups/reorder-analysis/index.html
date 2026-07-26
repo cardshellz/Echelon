@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Echelon — Reorder Analysis Redesign (Design Mockups)</title>
+<style>
+  :root { --border:#e4e4e7; --text:#09090b; --muted:#71717a; --accent:#f4f4f5; --primary:#18181b; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:#fafafa; color:var(--text); padding:48px 24px; }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  h1 { font-size: 26px; letter-spacing:-.02em; }
+  .sub { color: var(--muted); margin: 10px 0 6px; font-size: 14.5px; line-height:1.6; }
+  .meta { color: var(--muted); font-size: 12.5px; margin-bottom: 28px; }
+  .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  a.card { display:block; background:#fff; border:1px solid var(--border); border-radius:12px; padding:18px; text-decoration:none; color:inherit; box-shadow: 0 1px 2px rgb(0 0 0 / .05); transition: box-shadow .15s, transform .15s; }
+  a.card:hover { box-shadow: 0 8px 24px rgb(0 0 0 / .10); transform: translateY(-1px); }
+  .num { display:inline-grid; place-items:center; width:26px; height:26px; border-radius:8px; background:var(--primary); color:#fff; font-size:13px; font-weight:700; margin-bottom:10px; }
+  .card h2 { font-size: 15.5px; margin-bottom: 6px; }
+  .card p { font-size: 13px; color: var(--muted); line-height: 1.55; }
+  .note { margin-top: 26px; border:1px solid var(--border); background:var(--accent); border-radius:10px; padding:13px 16px; font-size:13px; color:var(--muted); line-height:1.6; }
+  .note b { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Reorder Analysis — Redesign Mockups</h1>
+  <p class="sub">Six interactive surfaces for Echelon's Procurement suite: a SKU-driven reorder cockpit with category/product-line rollups and a step-by-step math drawer, growth adjustments and category demand events, a five-stage automation ladder to full autopilot, run reports with an email digest, the complete RFQ lifecycle, and planning policy.</p>
+  <div class="meta">Design handoff · Jul 26, 2026 · sample data generated with the real engine formulas · see REORDER-ANALYSIS-DESIGN-SPEC.md</div>
+  <div class="grid">
+    <a class="card" href="01-reorder-analysis.html"><span class="num">1</span><h2>Reorder Analysis (cockpit)</h2><p>Grouped SKU table with rollups, status KPIs, and the "Explain" drawer that walks every number from demand windows to the suggested order.</p></a>
+    <a class="card" href="02-forecast-adjustments.html"><span class="num">2</span><h2>Forecast Adjustments</h2><p>Growth adjustments (% lifts by scope and date range), demand events including category-level allocation, and a before/after impact preview.</p></a>
+    <a class="card" href="03-automation.html"><span class="num">3</span><h2>Automation Control Center</h2><p>The five-stage ladder per vendor, category caps, anomaly guardrails, kill switch, and the gate audit log.</p></a>
+    <a class="card" href="04-run-report.html"><span class="num">4</span><h2>Run Report</h2><p>What last night's run analyzed, drafted, held, and warned about — plus run history and the email digest preview.</p></a>
+    <a class="card" href="05-rfq-workbench.html"><span class="num">5</span><h2>RFQ Workbench</h2><p>Send RFQs, capture vendor quotes, compare landed costs side by side, award (with splits), and convert to POs.</p></a>
+    <a class="card" href="06-exclusions-policy.html"><span class="num">6</span><h2>Planning Policy</h2><p>Exclusion rules with live impact preview, per-product exclusions, and the forecast policy with cohort-reset warning.</p></a>
+  </div>
+  <div class="note"><b>How to read these:</b> every number is computed from one shared dataset using the same formulas as the production recommendation engine (blend weights, reorder points, MOQ rounding, 90-day event horizon), so the pages agree with each other. Buttons that would mutate data show a toast describing what they would do.</div>
+</div>
+</body>
+</html>
