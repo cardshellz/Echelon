@@ -48,6 +48,13 @@ export const SHIPPING_SERVICE_LEVEL_CODES = [
 ] as const;
 export type ShippingServiceLevelCode = (typeof SHIPPING_SERVICE_LEVEL_CODES)[number];
 
+export const SHIPPING_RATE_COVERAGE_AVAILABILITIES = [
+  "offered",
+  "not_offered",
+] as const;
+export type ShippingRateCoverageAvailability =
+  (typeof SHIPPING_RATE_COVERAGE_AVAILABILITIES)[number];
+
 export const SHIPPING_CARTON_ORIENTATIONS = [
   "LWH",
   "WLH",
@@ -267,6 +274,96 @@ export const shippingDestinationScopeMembers = shippingSchema.table("destination
     )
   `),
 ]);
+
+// ---------------------------------------------------------------------------
+// Pricing-program destination groups
+//
+// A destination scope is reusable channel-routing input. A pricing-program
+// group gives that geography stable identity inside one rate book. Rate-table
+// revisions snapshot the group and its members below so later group edits
+// cannot silently change an active price revision.
+// ---------------------------------------------------------------------------
+
+export const shippingRateBookDestinationGroups = shippingSchema.table(
+  "rate_book_destination_groups",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    rateBookId: integer("rate_book_id")
+      .notNull()
+      .references(() => shippingRateBooks.id, { onDelete: "cascade" }),
+    sourceDestinationScopeId: integer("source_destination_scope_id")
+      .references(() => shippingDestinationScopes.id, { onDelete: "restrict" }),
+    name: varchar("name", { length: 160 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull().default("active"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    lockVersion: integer("lock_version").notNull().default(1),
+    createdBy: varchar("created_by", { length: 200 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("shipping_rate_book_destination_group_name_idx")
+      .on(table.rateBookId, sql`lower(${table.name})`)
+      .where(sql`${table.status} = 'active'`),
+    index("shipping_rate_book_destination_group_book_idx")
+      .on(table.rateBookId, table.status, table.sortOrder, table.id),
+    check("shipping_rate_book_destination_group_name_chk", sql`
+      ${table.name} = btrim(${table.name}) AND ${table.name} <> ''
+    `),
+    check("shipping_rate_book_destination_group_status_chk", sql`
+      ${table.status} IN ('active', 'retired')
+    `),
+    check("shipping_rate_book_destination_group_sort_chk", sql`${table.sortOrder} >= 0`),
+    check("shipping_rate_book_destination_group_lock_chk", sql`${table.lockVersion} > 0`),
+    check("shipping_rate_book_destination_group_actor_chk", sql`
+      ${table.createdBy} = btrim(${table.createdBy}) AND ${table.createdBy} <> ''
+    `),
+  ],
+);
+
+export const shippingRateBookDestinationGroupMembers = shippingSchema.table(
+  "rate_book_destination_group_members",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    destinationGroupId: integer("destination_group_id")
+      .notNull()
+      .references(() => shippingRateBookDestinationGroups.id, { onDelete: "cascade" }),
+    destinationCountry: varchar("destination_country", { length: 2 }).notNull(),
+    destinationRegion: varchar("destination_region", { length: 10 }),
+    postalPrefix: varchar("postal_prefix", { length: 20 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("shipping_rate_book_destination_group_member_idx").on(
+      table.destinationGroupId,
+      table.destinationCountry,
+      sql`COALESCE(${table.destinationRegion}, '')`,
+      sql`COALESCE(${table.postalPrefix}, '')`,
+    ),
+    index("shipping_rate_book_destination_group_member_lookup_idx").on(
+      table.destinationCountry,
+      table.destinationRegion,
+      table.postalPrefix,
+      table.destinationGroupId,
+    ),
+    check("shipping_rate_book_destination_group_member_country_chk", sql`
+      ${table.destinationCountry} ~ '^[A-Z]{2}$'
+    `),
+    check("shipping_rate_book_destination_group_member_region_chk", sql`
+      ${table.destinationRegion} IS NULL
+      OR ${table.destinationRegion} ~ '^[A-Z0-9][A-Z0-9-]{0,9}$'
+    `),
+    check("shipping_rate_book_destination_group_member_postal_chk", sql`
+      ${table.postalPrefix} IS NULL
+      OR (
+        ${table.destinationRegion} IS NOT NULL
+        AND
+        ${table.postalPrefix} = btrim(${table.postalPrefix})
+        AND ${table.postalPrefix} ~ '^[A-Z0-9][A-Z0-9 -]{0,19}$'
+      )
+    `),
+  ],
+);
 
 export const shippingChannelPolicies = shippingSchema.table("channel_policies", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -541,6 +638,95 @@ export const shippingRateTableRows = shippingSchema.table("rate_table_rows", {
     )
   `),
 ]);
+
+// Frozen destination/service coverage intent for one rate-table revision.
+// Runtime amount selection continues to use rate_table_rows; these records
+// make omitted rates distinguishable from an explicit not-offered decision.
+export const shippingRateTableCoverages = shippingSchema.table(
+  "rate_table_coverages",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    rateTableId: integer("rate_table_id")
+      .notNull()
+      .references(() => shippingRateTables.id, { onDelete: "cascade" }),
+    destinationGroupId: integer("destination_group_id")
+      .notNull()
+      .references(() => shippingRateBookDestinationGroups.id, { onDelete: "restrict" }),
+    originWarehouseId: integer("origin_warehouse_id")
+      .references(() => warehouses.id, { onDelete: "restrict" }),
+    availability: varchar("availability", { length: 20 })
+      .$type<ShippingRateCoverageAvailability>()
+      .notNull(),
+    destinationGroupLockVersion: integer("destination_group_lock_version").notNull(),
+    destinationGroupName: varchar("destination_group_name", { length: 160 }).notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("shipping_rate_table_coverage_group_idx").on(
+      table.rateTableId,
+      table.destinationGroupId,
+      sql`COALESCE(${table.originWarehouseId}, 0)`,
+    ),
+    index("shipping_rate_table_coverage_table_idx")
+      .on(table.rateTableId, table.sortOrder, table.id),
+    check("shipping_rate_table_coverage_availability_chk", sql`
+      ${table.availability} IN ('offered', 'not_offered')
+    `),
+    check("shipping_rate_table_coverage_group_version_chk", sql`
+      ${table.destinationGroupLockVersion} > 0
+    `),
+    check("shipping_rate_table_coverage_name_chk", sql`
+      ${table.destinationGroupName} = btrim(${table.destinationGroupName})
+      AND ${table.destinationGroupName} <> ''
+    `),
+    check("shipping_rate_table_coverage_sort_chk", sql`${table.sortOrder} >= 0`),
+  ],
+);
+
+export const shippingRateTableCoverageDestinations = shippingSchema.table(
+  "rate_table_coverage_destinations",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    rateTableCoverageId: integer("rate_table_coverage_id")
+      .notNull()
+      .references(() => shippingRateTableCoverages.id, { onDelete: "cascade" }),
+    destinationCountry: varchar("destination_country", { length: 2 }).notNull(),
+    destinationRegion: varchar("destination_region", { length: 10 }),
+    postalPrefix: varchar("postal_prefix", { length: 20 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("shipping_rate_table_coverage_destination_idx").on(
+      table.rateTableCoverageId,
+      table.destinationCountry,
+      sql`COALESCE(${table.destinationRegion}, '')`,
+      sql`COALESCE(${table.postalPrefix}, '')`,
+    ),
+    index("shipping_rate_table_coverage_destination_lookup_idx").on(
+      table.destinationCountry,
+      table.destinationRegion,
+      table.postalPrefix,
+      table.rateTableCoverageId,
+    ),
+    check("shipping_rate_table_coverage_destination_country_chk", sql`
+      ${table.destinationCountry} ~ '^[A-Z]{2}$'
+    `),
+    check("shipping_rate_table_coverage_destination_region_chk", sql`
+      ${table.destinationRegion} IS NULL
+      OR ${table.destinationRegion} ~ '^[A-Z0-9][A-Z0-9-]{0,9}$'
+    `),
+    check("shipping_rate_table_coverage_destination_postal_chk", sql`
+      ${table.postalPrefix} IS NULL
+      OR (
+        ${table.destinationRegion} IS NOT NULL
+        AND
+        ${table.postalPrefix} = btrim(${table.postalPrefix})
+        AND ${table.postalPrefix} ~ '^[A-Z0-9][A-Z0-9 -]{0,19}$'
+      )
+    `),
+  ],
+);
 
 // ---------------------------------------------------------------------------
 // Product-aware pricing policies

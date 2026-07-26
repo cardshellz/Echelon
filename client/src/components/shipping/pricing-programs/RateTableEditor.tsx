@@ -58,6 +58,7 @@ import {
   invalidateShippingAdmin,
   saveDraft,
   type RateBookSummary,
+  type ProgramDestinationGroup,
   type RateTableAnalysis,
   type RateTableSummary,
   type ServiceLevelOption,
@@ -75,6 +76,8 @@ export interface EditorLaunch {
   groups: RateGroup[] | null;
   /** Launched from a program context: the program select stays fixed. */
   lockProgram: boolean;
+  /** Existing program groups that can be added to this option's manifest. */
+  availableDestinationGroups: ProgramDestinationGroup[];
 }
 interface RateTableEditorProps {
   launch: EditorLaunch;
@@ -185,6 +188,21 @@ export function RateTableEditor({
     }),
     onSuccess: (result) => {
       setDraftId(result.rateTable.id);
+      if (result.draftLayout !== null) {
+        setGroups((current) => current.map((group, index) => {
+          const saved = result.draftLayout?.groups[index];
+          return saved === undefined
+            ? group
+            : {
+                ...group,
+                destinationGroupId: saved.destinationGroupId ?? null,
+                destinationGroupLockVersion:
+                  saved.destinationGroupLockVersion ?? null,
+                name: saved.name,
+                availability: saved.availability ?? "offered",
+              };
+        }));
+      }
       setDirty(false);
       setLastSavedAt(new Date());
       setServerAnalysis(result.analysis);
@@ -348,6 +366,7 @@ export function RateTableEditor({
           draftId={draftId}
           onSaveDraft={handleSaveDraft}
           savingDraft={saveMutation.isPending}
+          availableDestinationGroups={launch.availableDestinationGroups}
         />
       )}
 
