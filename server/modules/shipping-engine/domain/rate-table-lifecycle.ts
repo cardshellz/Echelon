@@ -5,6 +5,10 @@ import {
 } from "./rate-table-import";
 import type { ShippingPricingBasis } from "./rate-selection";
 import { US_POSTAL_REGIONS } from "./us-geography";
+import {
+  analyzeRateCoverage,
+  type RateCoverageCandidate,
+} from "./rate-coverage";
 
 export type RateTableStatus = "draft" | "active" | "superseded" | "retired";
 
@@ -27,11 +31,15 @@ export interface RateTableLifecycleAnalysis {
 export function analyzeRateTable(
   rows: readonly RateTableImportRow[],
   pricingBasis: ShippingPricingBasis,
+  coverages: readonly RateCoverageCandidate[] | null = null,
 ): RateTableLifecycleAnalysis {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  if (rows.length === 0) {
+  const explicitlyOffersNoDestinations = coverages !== null
+    && coverages.length > 0
+    && coverages.every((coverage) => coverage.availability === "not_offered");
+  if (rows.length === 0 && !explicitlyOffersNoDestinations) {
     errors.push("The table has no rate rows.");
   }
 
@@ -46,8 +54,11 @@ export function analyzeRateTable(
       .map((row) => row.destinationRegion),
   );
   const missingRegions = US_POSTAL_REGIONS.filter((region) => !regionWideRegions.has(region));
-  if (missingRegions.length > 0) {
+  if (coverages === null && missingRegions.length > 0) {
     warnings.push(`No region-wide rates are configured for: ${missingRegions.join(", ")}.`);
+  }
+  if (coverages !== null) {
+    errors.push(...analyzeRateCoverage(coverages, rows).errors);
   }
 
   const regionCount = regionWideRegions.size;

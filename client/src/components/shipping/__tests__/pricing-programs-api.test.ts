@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   PRICING_FLOW_CHOICES,
   assignmentLabel,
+  buildProgramOverviews,
+  effectiveRateTableCoverages,
   pricingFlowKey,
   pricingFlowLabel,
   productRuleRevisionStatus,
   rateTableRegionCount,
   type RateBookAssignment,
+  type RateTableSummary,
+  type RateTablesResponse,
 } from "../pricing-programs/api";
 
 function assignment(overrides: Partial<RateBookAssignment> = {}): RateBookAssignment {
@@ -72,5 +76,120 @@ describe("rateTableRegionCount", () => {
   it("prefers the corrected region count and supports the legacy state count", () => {
     expect(rateTableRegionCount({ regionCount: 52, stateCount: 50 })).toBe(52);
     expect(rateTableRegionCount({ stateCount: 52 })).toBe(52);
+  });
+});
+
+describe("pricing program coverage aggregation", () => {
+  it("keeps every warehouse scope while showing one reusable destination group", () => {
+    const rateTable: RateTableSummary = {
+      id: 301,
+      rateBookId: 21,
+      serviceLevelId: 8,
+      pricingBasis: "shipment_weight",
+      currency: "USD",
+      status: "active",
+      effectiveFrom: "2026-07-01T00:00:00.000Z",
+      effectiveTo: null,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      metadata: null,
+      rateBook: null,
+      serviceLevel: null,
+      coverages: [
+        {
+          id: 401,
+          rateTableId: 301,
+          destinationGroupId: 51,
+          originWarehouseId: null,
+          availability: "offered",
+          destinationGroupLockVersion: 3,
+          destinationGroupName: "Lower 48",
+          name: "Lower 48",
+          sortOrder: 0,
+          rateRowCount: 4,
+          destinations: [
+            {
+              destinationCountry: "US",
+              destinationRegion: "PA",
+              postalPrefix: null,
+            },
+          ],
+        },
+        {
+          id: 402,
+          rateTableId: 301,
+          destinationGroupId: 51,
+          originWarehouseId: 2,
+          availability: "offered",
+          destinationGroupLockVersion: 3,
+          destinationGroupName: "Lower 48",
+          name: "Lower 48",
+          sortOrder: 0,
+          rateRowCount: 5,
+          destinations: [
+            {
+              destinationCountry: "US",
+              destinationRegion: "PA",
+              postalPrefix: null,
+            },
+          ],
+        },
+      ],
+      rowCount: 9,
+      regionCount: 1,
+      stateCount: 1,
+      zipOverrideCount: 0,
+      productRuleCount: 0,
+      minMeasure: 0,
+      maxMeasure: 10,
+    };
+    const response: RateTablesResponse = {
+      rateBooks: [{
+        id: 21,
+        code: "retail",
+        name: "Retail shipping",
+        status: "active",
+        zoneSetId: null,
+        metadata: null,
+        assignments: [],
+      }],
+      serviceLevels: [{
+        id: 8,
+        code: "standard",
+        displayName: "Standard shipping",
+        description: null,
+        fulfillmentMode: "parcel",
+        promiseMinBusinessDays: 3,
+        promiseMaxBusinessDays: 7,
+        sortOrder: 0,
+        isActive: true,
+      }],
+      destinationGroups: [{
+        id: 51,
+        rateBookId: 21,
+        name: "Lower 48",
+        status: "active",
+        sortOrder: 0,
+        lockVersion: 3,
+        destinations: [
+          {
+            destinationCountry: "US",
+            destinationRegion: "PA",
+            postalPrefix: null,
+          },
+        ],
+      }],
+      rateTables: [rateTable],
+    };
+
+    expect(
+      effectiveRateTableCoverages(rateTable).map((coverage) => ({
+        warehouseId: coverage.originWarehouseId,
+        rateRows: coverage.rateRowCount,
+      })),
+    ).toEqual([
+      { warehouseId: null, rateRows: 4 },
+      { warehouseId: 2, rateRows: 5 },
+    ]);
+    expect(buildProgramOverviews(response)[0]?.destinationGroups).toHaveLength(1);
   });
 });

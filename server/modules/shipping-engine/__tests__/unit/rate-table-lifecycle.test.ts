@@ -6,6 +6,7 @@ import {
   canRetireRateTable,
 } from "../../domain/rate-table-lifecycle";
 import type { RateTableImportRow } from "../../domain/rate-table-import";
+import type { RateCoverageCandidate } from "../../domain/rate-coverage";
 import { US_POSTAL_REGIONS } from "../../domain/us-geography";
 
 function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
@@ -24,11 +25,55 @@ function row(overrides: Partial<RateTableImportRow> = {}): RateTableImportRow {
   };
 }
 
+function coverage(
+  overrides: Partial<RateCoverageCandidate> = {},
+): RateCoverageCandidate {
+  return {
+    destinationGroupId: 1,
+    destinationGroupLockVersion: 1,
+    name: "Pennsylvania",
+    originWarehouseId: null,
+    availability: "offered",
+    destinations: [{
+      destinationCountry: "US",
+      destinationRegion: "PA",
+      postalPrefix: null,
+    }],
+    ...overrides,
+  };
+}
+
 describe("rate table lifecycle analysis", () => {
   it("blocks an empty table", () => {
     const result = analyzeRateTable([], "shipment_weight");
     expect(result.canActivate).toBe(false);
     expect(result.errors).toContain("The table has no rate rows.");
+  });
+
+  it("permits an explicitly not-offered option with no rate rows", () => {
+    const result = analyzeRateTable(
+      [],
+      "shipment_weight",
+      [coverage({ availability: "not_offered" })],
+    );
+
+    expect(result.canActivate).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("blocks an explicitly offered option with no rate rows", () => {
+    const result = analyzeRateTable(
+      [],
+      "shipment_weight",
+      [coverage()],
+    );
+
+    expect(result.canActivate).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      "The table has no rate rows.",
+      "Pennsylvania is offered but has no rates for US PA.",
+    ]));
   });
 
   it("blocks missing, overlapping, and discontinuous parcel coverage", () => {

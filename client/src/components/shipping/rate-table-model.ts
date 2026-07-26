@@ -158,6 +158,7 @@ export interface BuilderBand {
 }
 
 export type RateGroupPricingModel = "weight_bands" | "base_plus_per_started_pound";
+export type RateGroupAvailability = "offered" | "not_offered";
 
 export interface ZipEntry {
   id: string;
@@ -167,11 +168,15 @@ export interface ZipEntry {
 
 export interface RateGroup {
   id: string;
+  /** Stable program-level identity once the group has been saved. */
+  destinationGroupId: number | null;
+  destinationGroupLockVersion: number | null;
   /** Operator-facing label, e.g. "Contiguous US" or "Alaska and Hawaii". */
   name: string;
   originWarehouseId: number | null;
   regions: string[];
   zipEntries: ZipEntry[];
+  availability: RateGroupAvailability;
   pricingModel: RateGroupPricingModel;
   baseChargeUsd: string;
   perStartedPoundUsd: string;
@@ -217,10 +222,13 @@ export function newGroup(
 ): RateGroup {
   return {
     id: newId(),
+    destinationGroupId: null,
+    destinationGroupLockVersion: null,
     name,
     originWarehouseId: null,
     regions,
     zipEntries: [],
+    availability: "offered",
     pricingModel: "weight_bands",
     baseChargeUsd: "",
     perStartedPoundUsd: "",
@@ -229,11 +237,50 @@ export function newGroup(
 }
 
 /**
+ * Applies one editor row update while keeping reusable geography fields
+ * identical across every warehouse scope sharing its persisted identity.
+ * Rates, availability, and warehouse scope remain row-specific.
+ */
+export function replaceRateGroupAndPropagateIdentity(
+  groups: readonly RateGroup[],
+  groupId: string,
+  next: RateGroup,
+): RateGroup[] {
+  const current = groups.find((group) => group.id === groupId);
+  if (current === undefined) return [...groups];
+  const sharedIdentityChanged = current.destinationGroupId !== null
+    && destinationGroupIdentitySignature(current)
+      !== destinationGroupIdentitySignature(next);
+  return groups.map((group) => {
+    if (group.id === groupId) return next;
+    if (
+      !sharedIdentityChanged
+      || group.destinationGroupId !== current.destinationGroupId
+    ) {
+      return group;
+    }
+    return {
+      ...group,
+      destinationGroupId: next.destinationGroupId,
+      destinationGroupLockVersion: next.destinationGroupLockVersion,
+      name: next.name,
+      regions: [...next.regions],
+      zipEntries: next.zipEntries.map((entry) => ({
+        ...entry,
+        prefixes: [...entry.prefixes],
+      })),
+    };
+  });
+}
+
+/**
  * Display name for a group: the operator's label, else a description derived
  * from its destination membership so unnamed groups stay tellable-apart.
  */
 export function groupDisplayName(group: RateGroup, index: number): string {
   if (group.name.trim() !== "") return group.name.trim();
+  const matchingTemplate = findDestinationGroupTemplate(group.regions);
+  if (matchingTemplate !== null) return matchingTemplate.name;
   const regions = new Set(group.regions);
   const sameSet = (expected: readonly string[]) =>
     regions.size === expected.length && expected.every((code) => regions.has(code));
@@ -249,12 +296,33 @@ export function groupDisplayName(group: RateGroup, index: number): string {
     const states = [...new Set(group.zipEntries.map((entry) => entry.state))];
     return `${states.join(", ")} ZIP overrides`;
   }
-  if (regions.size > 0) return formatUsRegionCount(regions.size);
+  if (regions.size > 0) {
+    const ordered = [...regions].sort();
+    return ordered.length <= 3
+      ? ordered.join(", ")
+      : `${ordered.slice(0, 3).join(", ")} + ${ordered.length - 3} more`;
+  }
   return `Rate group ${index + 1}`;
 }
 
 export function formatUsRegionCount(count: number): string {
   return `${count} US region${count === 1 ? "" : "s"}`;
+}
+
+function destinationGroupIdentitySignature(group: RateGroup): string {
+  return JSON.stringify({
+    destinationGroupId: group.destinationGroupId,
+    destinationGroupLockVersion: group.destinationGroupLockVersion,
+    name: group.name,
+    regions: [...new Set(group.regions)].sort(),
+    zipEntries: group.zipEntries
+      .flatMap((entry) =>
+        [...new Set(entry.prefixes)].map((prefix) => [
+          entry.state,
+          prefix,
+        ].join("|")))
+      .sort(),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +435,8 @@ export function validateRateGroups(
         zipOwner.set(key, groupIndex);
       }
     }
+
+    if (group.availability === "not_offered") return;
 
     if (group.pricingModel === "base_plus_per_started_pound") {
       if (pricingBasis !== "shipment_weight") {
@@ -500,6 +570,8 @@ export function emitDraftRows(
 ): DraftRow[] {
   const rows: DraftRow[] = [];
   for (const group of groups) {
+    if (group.availability === "not_offered") continue;
+
     if (group.pricingModel === "base_plus_per_started_pound") {
       if (pricingBasis !== "shipment_weight") continue;
       const baseCharge = Number(group.baseChargeUsd);
@@ -692,7 +764,10 @@ export function groupsFromRows(
 
   return [...bySchedule.values()].map((group) => ({
     id: newId(),
+    destinationGroupId: null,
+    destinationGroupLockVersion: null,
     name: "",
+    availability: "offered" as const,
     ...group,
   }));
 }
@@ -702,12 +777,15 @@ export function groupsFromRows(
 // ---------------------------------------------------------------------------
 
 export interface DraftLayout {
-  version: 1;
+  version: 2;
   groups: Array<{
+    destinationGroupId: number | null;
+    destinationGroupLockVersion: number | null;
     name: string;
     originWarehouseId: number | null;
     regions: string[];
     zipEntries: Array<{ state: string; prefixes: string[] }>;
+    availability: RateGroupAvailability;
     pricingModel?: RateGroupPricingModel;
     baseChargeUsd?: string;
     perStartedPoundUsd?: string;
@@ -722,15 +800,18 @@ export interface DraftLayout {
 
 export function layoutFromGroups(groups: RateGroup[]): DraftLayout {
   return {
-    version: 1,
-    groups: groups.map((group) => ({
-      name: group.name.trim().slice(0, 120),
+    version: 2,
+    groups: groups.map((group, index) => ({
+      destinationGroupId: group.destinationGroupId,
+      destinationGroupLockVersion: group.destinationGroupLockVersion,
+      name: groupDisplayName(group, index).slice(0, 120),
       originWarehouseId: group.originWarehouseId,
       regions: [...group.regions],
       zipEntries: group.zipEntries.map((entry) => ({
         state: entry.state,
         prefixes: [...entry.prefixes],
       })),
+      availability: group.availability,
       pricingModel: group.pricingModel,
       baseChargeUsd: group.baseChargeUsd.slice(0, 20),
       perStartedPoundUsd: group.perStartedPoundUsd.slice(0, 20),
@@ -749,11 +830,21 @@ export function groupsFromLayout(metadata: unknown): RateGroup[] | null {
   if (!metadata || typeof metadata !== "object") return null;
   const layout = (metadata as { draftLayout?: unknown }).draftLayout;
   if (!layout || typeof layout !== "object") return null;
-  const typed = layout as Partial<DraftLayout>;
-  if (typed.version !== 1 || !Array.isArray(typed.groups)) return null;
+  const typed = layout as {
+    version?: unknown;
+    groups?: Array<Partial<DraftLayout["groups"][number]>>;
+  };
+  if (typed.version !== 1 && typed.version !== 2) return null;
+  if (!Array.isArray(typed.groups)) return null;
   try {
     return typed.groups.map((group) => ({
       id: newId(),
+      destinationGroupId: typeof group.destinationGroupId === "number"
+        ? group.destinationGroupId
+        : null,
+      destinationGroupLockVersion: typeof group.destinationGroupLockVersion === "number"
+        ? group.destinationGroupLockVersion
+        : null,
       name: typeof group.name === "string" ? group.name : "",
       originWarehouseId: typeof group.originWarehouseId === "number" ? group.originWarehouseId : null,
       regions: Array.isArray(group.regions)
@@ -766,6 +857,7 @@ export function groupsFromLayout(metadata: unknown): RateGroup[] | null {
             prefixes: Array.isArray(entry.prefixes) ? entry.prefixes.map(String) : [],
           }))
         : [],
+      availability: group.availability === "not_offered" ? "not_offered" : "offered",
       pricingModel: group.pricingModel === "base_plus_per_started_pound"
         ? "base_plus_per_started_pound"
         : "weight_bands",

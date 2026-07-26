@@ -11,6 +11,7 @@ import {
   groupsFromRows,
   layoutFromGroups,
   poundsFromGrams,
+  replaceRateGroupAndPropagateIdentity,
   serializeRowsToCsv,
   validateRateGroups,
   ALL_REGION_CODES,
@@ -75,10 +76,13 @@ describe("destination group templates", () => {
 function group(overrides: Partial<RateGroup> = {}): RateGroup {
   return {
     id: "group-1",
+    destinationGroupId: null,
+    destinationGroupLockVersion: null,
     name: "",
     originWarehouseId: null,
     regions: ["PA"],
     zipEntries: [],
+    availability: "offered",
     pricingModel: "weight_bands",
     baseChargeUsd: "",
     perStartedPoundUsd: "",
@@ -109,6 +113,82 @@ function draftRow(overrides: Partial<DraftRow> = {}): DraftRow {
     ...overrides,
   };
 }
+
+describe("shared destination-group identity", () => {
+  it("propagates geography edits across warehouse scopes only", () => {
+    const base = group({
+      id: "default",
+      destinationGroupId: 17,
+      destinationGroupLockVersion: 2,
+      name: "Pennsylvania",
+    });
+    const override = group({
+      id: "override",
+      destinationGroupId: 17,
+      destinationGroupLockVersion: 2,
+      name: "Pennsylvania",
+      originWarehouseId: 7,
+      bands: [{
+        id: "override-band",
+        maxMeasure: "1",
+        rateUsd: "10.99",
+        maxShipmentWeightLb: "",
+      }],
+    });
+    const unrelated = group({
+      id: "unrelated",
+      destinationGroupId: 18,
+      destinationGroupLockVersion: 1,
+      name: "Ohio",
+      regions: ["OH"],
+    });
+
+    const result = replaceRateGroupAndPropagateIdentity(
+      [base, override, unrelated],
+      base.id,
+      {
+        ...base,
+        name: "PA and Delaware",
+        regions: ["PA", "DE"],
+        destinationGroupLockVersion: 3,
+      },
+    );
+
+    expect(result[1]).toMatchObject({
+      name: "PA and Delaware",
+      regions: ["PA", "DE"],
+      destinationGroupLockVersion: 3,
+      originWarehouseId: 7,
+    });
+    expect(result[1].bands[0].rateUsd).toBe("10.99");
+    expect(result[2]).toEqual(unrelated);
+  });
+
+  it("does not propagate scope-specific availability edits", () => {
+    const base = group({
+      id: "default",
+      destinationGroupId: 17,
+      destinationGroupLockVersion: 2,
+      name: "Pennsylvania",
+    });
+    const override = group({
+      id: "override",
+      destinationGroupId: 17,
+      destinationGroupLockVersion: 2,
+      name: "Pennsylvania",
+      originWarehouseId: 7,
+    });
+
+    const result = replaceRateGroupAndPropagateIdentity(
+      [base, override],
+      base.id,
+      { ...base, availability: "not_offered" },
+    );
+
+    expect(result[0].availability).toBe("not_offered");
+    expect(result[1].availability).toBe("offered");
+  });
+});
 
 describe("validateRateGroups", () => {
   it("expands shared parcel bands across selected states", () => {
@@ -312,6 +392,24 @@ describe("emitDraftRows (incomplete-draft persistence)", () => {
     const rows = emitDraftRows([group({ regions: [], zipEntries: [] })], "shipment_weight");
     expect(rows).toEqual([]);
   });
+
+  it("emits no price rows for an explicitly not-offered destination group", () => {
+    const notOffered = group({
+      availability: "not_offered",
+      bands: [{
+        id: "band-1",
+        maxMeasure: "",
+        rateUsd: "",
+        maxShipmentWeightLb: "",
+      }],
+    });
+
+    expect(validateRateGroups([notOffered], "shipment_weight")).toMatchObject({
+      errors: [],
+      rows: [],
+    });
+    expect(emitDraftRows([notOffered], "shipment_weight")).toEqual([]);
+  });
 });
 
 describe("draft layout round-trip", () => {
@@ -400,8 +498,30 @@ describe("groupDisplayName", () => {
     expect(groupDisplayName(group({ name: "Local PA rates" }), 0)).toBe("Local PA rates");
   });
 
+  it("round-trips destination-group identity and explicit availability", () => {
+    const restored = groupsFromLayout({
+      draftLayout: layoutFromGroups([
+        group({
+          destinationGroupId: 42,
+          destinationGroupLockVersion: 7,
+          name: "Alaska",
+          regions: ["AK"],
+          availability: "not_offered",
+        }),
+      ]),
+    });
+
+    expect(restored?.[0]).toMatchObject({
+      destinationGroupId: 42,
+      destinationGroupLockVersion: 7,
+      name: "Alaska",
+      regions: ["AK"],
+      availability: "not_offered",
+    });
+  });
+
   it("labels mixed postal-region groups without calling them states", () => {
-    expect(groupDisplayName(group({ regions: ["AE", "AP"] }), 0)).toBe("2 US regions");
+    expect(groupDisplayName(group({ regions: ["AE", "AP"] }), 0)).toBe("AE, AP");
     expect(formatUsRegionCount(1)).toBe("1 US region");
     expect(formatUsRegionCount(52)).toBe("52 US regions");
   });
