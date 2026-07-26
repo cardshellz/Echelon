@@ -28,6 +28,9 @@ import {
   quoteDropshipShippingInputSchema,
   type QuoteDropshipShippingInput,
 } from "./dropship-use-case-dtos";
+import type {
+  DropshipShippingShadowComparator,
+} from "./dropship-shipping-shadow-comparison";
 
 export interface DropshipShippingStoreContext {
   vendorId: number;
@@ -120,6 +123,7 @@ export interface DropshipShippingQuoteServiceDependencies {
   repository: DropshipShippingQuoteRepository;
   cartonization: DropshipCartonizationProvider;
   rateProvider: DropshipShippingRateProvider;
+  shadowComparison?: DropshipShippingShadowComparator;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -190,6 +194,7 @@ export class DropshipShippingQuoteService {
           { vendorId: parsed.vendorId },
         );
       }
+      await this.observeSharedShippingShadow(existingSnapshot);
       return mapSnapshotToQuoteResult(existingSnapshot, true);
     }
 
@@ -298,6 +303,7 @@ export class DropshipShippingQuoteService {
       },
     });
 
+    await this.observeSharedShippingShadow(snapshot);
     return mapSnapshotToQuoteResult(snapshot, false);
   }
 
@@ -316,6 +322,27 @@ export class DropshipShippingQuoteService {
 
     assertVendorCanQuoteShipping(context);
     assertStoreCanQuoteShipping(context);
+  }
+
+  private async observeSharedShippingShadow(
+    snapshot: DropshipShippingQuoteSnapshotRecord,
+  ): Promise<void> {
+    if (!this.deps.shadowComparison) return;
+    try {
+      await this.deps.shadowComparison.compare(snapshot);
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_SHIPPING_SHADOW_COMPARISON_FAILED",
+        message:
+          "Shared shipping shadow comparison failed without changing the legacy quote.",
+        context: {
+          legacyQuoteSnapshotId: snapshot.quoteSnapshotId,
+          vendorId: snapshot.vendorId,
+          storeConnectionId: snapshot.storeConnectionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
   }
 }
 

@@ -30,6 +30,9 @@ import type {
   DropshipShippingZoneMatch,
 } from "../../application/dropship-shipping-rate-provider";
 import type {
+  DropshipShippingShadowComparator,
+} from "../../application/dropship-shipping-shadow-comparison";
+import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipProvisionedVendorProfile,
   DropshipVendorProvisioningService,
@@ -271,6 +274,7 @@ describe("DropshipShippingQuoteService", () => {
   let repository: FakeShippingQuoteRepository;
   let cartonization: FakeCartonizationProvider;
   let rateProvider: FakeRateProvider;
+  let shadowComparison: FakeShadowComparison;
   let logs: DropshipLogEvent[];
   let service: DropshipShippingQuoteService;
 
@@ -278,12 +282,14 @@ describe("DropshipShippingQuoteService", () => {
     repository = new FakeShippingQuoteRepository();
     cartonization = new FakeCartonizationProvider();
     rateProvider = new FakeRateProvider();
+    shadowComparison = new FakeShadowComparison();
     logs = [];
     service = new DropshipShippingQuoteService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
       cartonization,
       rateProvider,
+      shadowComparison,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -334,6 +340,7 @@ describe("DropshipShippingQuoteService", () => {
     });
     expect(repository.lastCreateInput?.actor).toEqual({ actorType: "vendor", actorId: "member-1" });
     expect(logs[0]).toMatchObject({ code: "DROPSHIP_SHIPPING_QUOTE_CREATED" });
+    expect(shadowComparison.snapshots).toHaveLength(1);
   });
 
   it("replays the same idempotency key only when the request hash matches", async () => {
@@ -350,11 +357,34 @@ describe("DropshipShippingQuoteService", () => {
 
     expect(second.quoteSnapshotId).toBe(first.quoteSnapshotId);
     expect(second.idempotentReplay).toBe(true);
+    expect(shadowComparison.snapshots).toHaveLength(2);
 
     await expect(service.quoteForMember("member-1", {
       ...input,
       warehouseId: 4,
     })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("returns the legacy quote when the shared shadow comparison fails", async () => {
+    shadowComparison.error = new Error("shared rate book unavailable");
+
+    const result = await service.quoteForMember("member-1", {
+      storeConnectionId: 22,
+      warehouseId: 3,
+      destination: { country: "US", postalCode: "10001" },
+      items: [{ productVariantId: 101, quantity: 1 }],
+      idempotencyKey: "quote-shadow-failure",
+    });
+
+    expect(result.totalShippingCents).toBe(1122);
+    expect(repository.snapshots).toHaveLength(1);
+    expect(logs).toContainEqual(expect.objectContaining({
+      code: "DROPSHIP_SHIPPING_SHADOW_COMPARISON_FAILED",
+      context: expect.objectContaining({
+        legacyQuoteSnapshotId: result.quoteSnapshotId,
+        error: "shared rate book unavailable",
+      }),
+    }));
   });
 
   it("blocks quotes when the store is not connected", async () => {
@@ -530,6 +560,16 @@ class FakeRateProvider implements DropshipShippingRateProvider {
         version: "test",
       },
     };
+  }
+}
+
+class FakeShadowComparison implements DropshipShippingShadowComparator {
+  snapshots: DropshipShippingQuoteSnapshotRecord[] = [];
+  error: Error | null = null;
+
+  async compare(snapshot: DropshipShippingQuoteSnapshotRecord): Promise<void> {
+    this.snapshots.push(snapshot);
+    if (this.error) throw this.error;
   }
 }
 
