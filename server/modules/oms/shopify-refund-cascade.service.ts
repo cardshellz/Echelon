@@ -12,6 +12,7 @@ import {
   markShipmentCancelled,
   recomputeOrderStatusFromShipments,
 } from "../orders/shipment-rollup";
+import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 
@@ -882,6 +883,10 @@ async function applyInternalRefundState(
       adjustments: args.adjustments,
       authorityLines: authorityResult.lines,
       now: args.now,
+    });
+    await refreshOmsLineMaterializedQuantities(tx, {
+      omsOrderId: args.omsOrderId,
+      updatedAt: args.now,
     });
     const shipmentPlans = await reconcileActiveShipmentItems(tx, {
       wmsOrderId: args.wmsOrderId,

@@ -193,6 +193,14 @@ describe("applyShopifyRefundCascade", () => {
     expect(mock.calls.filter((text) => text.includes("DELETE FROM wms.outbound_shipment_items"))).toHaveLength(2);
     expect(mock.calls.some((text) => text.includes("SET qty = 0"))).toBe(false);
     expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns"))).toBe(false);
+    const counterRefreshIndex = mock.calls.findIndex(
+      (text) => text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)"),
+    );
+    const shipmentReconciliationIndex = mock.calls.findIndex(
+      (text) => text.includes("FROM wms.outbound_shipment_items si"),
+    );
+    expect(counterRefreshIndex).toBeGreaterThanOrEqual(0);
+    expect(shipmentReconciliationIndex).toBeGreaterThan(counterRefreshIndex);
     expect(recordAuthorityEvent).toHaveBeenCalledWith(expect.objectContaining({
       orderId: 242960,
       orderLineId: 110466,
@@ -288,6 +296,9 @@ describe("applyShopifyRefundCascade", () => {
           requires_shipping: true,
         }] };
       }
+      if (text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)")) {
+        return { rows: [{ id: 110466 }] };
+      }
       if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) return { rows: [] };
       if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) return { rows: [] };
       throw new Error(`Unexpected SQL in replay test: ${text}`);
@@ -305,6 +316,59 @@ describe("applyShopifyRefundCascade", () => {
 
     expect(result.outcome).toBe("idempotent_skip");
     expect(result.releasedReservationQuantity).toBe(0);
+    expect(markShipmentCancelled).not.toHaveBeenCalled();
+    expect(mock.calls.some(
+      (text) => text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)"),
+    )).toBe(true);
+  });
+
+  it("fails closed before shipment reconciliation when the counter refresh fails", async () => {
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) return { rows: [{ id: 42 }] };
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) {
+        return { rows: [omsLine()] };
+      }
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) return { rows: [{ id: 1 }] };
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) {
+        return { rows: [omsLine({ refund_other_quantity: 25 })] };
+      }
+      if (
+        text.includes("UPDATE oms.oms_order_lines") &&
+        !text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)")
+      ) {
+        return { rows: [] };
+      }
+      if (text.includes("FROM wms.order_items wi") && text.includes("FOR UPDATE OF wi")) {
+        return { rows: [{
+          id: 501,
+          oms_order_line_id: 110466,
+          external_line_item_id: "441680952",
+          quantity: 25,
+          picked_quantity: 0,
+          fulfilled_quantity: 0,
+          status: "pending",
+          requires_shipping: true,
+        }] };
+      }
+      if (text.includes("UPDATE wms.order_items")) return { rows: [] };
+      if (text.includes("UPDATE wms.orders o")) return { rows: [] };
+      if (text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)")) {
+        throw new Error("counter refresh failed");
+      }
+      throw new Error(`Unexpected SQL in counter failure test: ${text}`);
+    });
+
+    await expect(applyShopifyRefundCascade(
+      mock.db,
+      refundPayload(),
+      helpers(),
+      { channelId: 36, now: NOW },
+    )).rejects.toThrow("counter refresh failed");
+
+    expect(mock.calls.some(
+      (text) => text.includes("FROM wms.outbound_shipment_items si"),
+    )).toBe(false);
     expect(markShipmentCancelled).not.toHaveBeenCalled();
   });
 
